@@ -6,7 +6,6 @@ members = [
     "crates/tiangong-anthropic",
     "crates/tiangong-deepseek",
     "crates/tiangong-llm",
-    "crates/tiangong-memory",
     "crates/tiangong-app-state",
     "crates/tiangong-core",
     "crates/tiangong-core-manager",
@@ -55,6 +54,7 @@ members = [
     "plugins/screenshot-input/protocol",
     "plugins/screenshot-input/sidecar",
     "plugins/screenshot-input/wasm",
+    "plugins/tiangong-plugin-memory/core",
     "plugins/tiangong-plugin-memory/protocol",
     "plugins/tiangong-plugin-memory/wasm",
     "plugins/tiangong-plugin-memory/sidecar",
@@ -97,7 +97,7 @@ tiangong-entry = { path = "crates/tiangong-entry" }
 tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
 tiangong-media-archive = { path = "crates/tiangong-media-archive" }
-tiangong-memory = { path = "crates/tiangong-memory" }
+tiangong-memory = { path = "plugins/tiangong-plugin-memory/core" }
 tiangong-plugin-memory-sidecar = { path = "plugins/tiangong-plugin-memory/sidecar" }
 tiangong-plugin-memory-protocol = { path = "plugins/tiangong-plugin-memory/protocol" }
 tiangong-plugin-coding-protocol = { path = "plugins/tiangong-plugin-coding/protocol" }
@@ -179,7 +179,7 @@ dirs = "6"
 dunce = "1"
 eventsource-stream = "0.2"
 # 本地 Embedding / Rerank 推理（ONNX Runtime）；仅 Memory 使用。
-# 链接方式按平台在 crates/tiangong-memory/Cargo.toml 中选择（Linux 动态加载）。
+# 链接方式按平台在 plugins/tiangong-plugin-memory/core/Cargo.toml 中选择（Linux 动态加载）。
 fastembed = { version = "7.1", default-features = false }
 futures-util = "0.3"
 fs2 = "0.4"

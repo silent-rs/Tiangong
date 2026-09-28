@@ -41,7 +41,7 @@ runs:
         components: ${{ inputs.components }}
 
     - name: Install Linux system dependencies
-      # tiangong-core / tiangong-memory 间接引入 tantivy/lancedb/rusqlite/scraper，
+      # tiangong-core 间接引入 tantivy/lancedb/rusqlite/scraper，
       # tiangong-plugin-* 与 tiangong-app 引入 tauri，均需下列系统库。
       shell: bash
       run: |
