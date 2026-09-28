@@ -565,7 +565,7 @@ const DEFAULT_PROVIDERS: Record<string, ProviderConfigView> = {
 };
 
 /** 连接信息固定（URL / 协议不可改）的预设供应商。 */
-const LOCKED_PROVIDERS = new Set(['DeepSeek', CODEX_PROVIDER_NAME]);
+const LOCKED_PROVIDERS = new Set(['DeepSeek']);
 
 /** 以账号登录鉴权、无需 API Key 的协议。 */
 const isOAuthProtocol = (protocol?: string) => protocol === 'codex';
@@ -585,6 +585,11 @@ const DEFAULT_PROVIDER_URL_PRESETS: Record<string, UrlPreset[]> = {
     { label: 'OpenAI 兼容（通用）', url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_chatcompletions' },
     { label: 'OpenAI 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocol: 'openai_chatcompletions' },
     { label: 'Anthropic 兼容（Coding 套餐）', url: 'https://open.bigmodel.cn/api/anthropic', protocol: 'anthropic' },
+  ],
+  // ChatGPT：账号登录（OAuth）或 API Key 两种接入方式；自定义 URL 可接中转服务。
+  [CODEX_PROVIDER_NAME]: [
+    { label: 'ChatGPT 账号登录（OAuth）', url: CODEX_PROVIDER_CONFIG.base_url, protocol: 'codex' },
+    { label: 'OpenAI API Key（Responses）', url: 'https://api.openai.com/v1', protocol: 'openai' },
   ],
 };
 
@@ -1039,7 +1044,17 @@ function ProviderModelsView({
                             value={isCustom ? '__custom__' : String(matchIdx)}
                             onValueChange={(v) => {
                               if (v === '__custom__') {
-                                updateProviderField('base_url', '');
+                                // 自定义地址走 API Key：从账号登录模式切出时改用 Responses 协议。
+                                const next = { ...config };
+                                next.providers = {
+                                  ...next.providers,
+                                  [activeProvider]: {
+                                    ...selectedConfig,
+                                    base_url: '',
+                                    protocol: isOAuthProtocol(selectedConfig.protocol) ? 'openai' : selectedConfig.protocol,
+                                  },
+                                };
+                                onChange(next);
                               } else {
                                 const preset = urlPresets[parseInt(v)];
                                 const next = { ...config };
@@ -1082,7 +1097,7 @@ function ProviderModelsView({
                 </div>
                 )}
                 <div className="flex gap-3">
-                  {!LOCKED_PROVIDERS.has(activeProvider) && (
+                  {!LOCKED_PROVIDERS.has(activeProvider) && !isOAuthProtocol(selectedConfig.protocol) && (
                   <div className="flex-1">
                     <Label className="text-xs">协议</Label>
                     <Select

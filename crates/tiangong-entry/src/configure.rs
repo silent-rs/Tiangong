@@ -49,10 +49,19 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
         "OpenAI Responses",
         "OpenAI Chat Completions（兼容）",
         "Anthropic",
-        "ChatGPT 账号（Codex 登录，无需 API Key）",
+        "ChatGPT",
     ];
     let idx = ui::select("选择模型协议", &protocols)?;
-    if idx == 4 {
+    // ChatGPT：账号登录（OAuth，无需 API Key）或 OpenAI API Key（Responses，可填中转地址）。
+    let chatgpt_api_key = idx == 4
+        && ui::select(
+            "选择 ChatGPT 接入方式",
+            &[
+                "ChatGPT 账号登录（Codex OAuth，无需 API Key）",
+                "OpenAI API Key（Responses，可自定义 URL）",
+            ],
+        )? == 1;
+    if idx == 4 && !chatgpt_api_key {
         crate::model::codex_login_interactive()?;
         return Ok((
             ProviderProtocol::Codex,
@@ -81,6 +90,11 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
             "anthropic".parse::<ProviderProtocol>().unwrap(),
             "anthropic",
             "https://api.anthropic.com",
+        ),
+        4 => (
+            ProviderProtocol::OpenAi,
+            CODEX_PROVIDER_NAME,
+            "https://api.openai.com/v1",
         ),
         _ => unreachable!(),
     };

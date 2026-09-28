@@ -36,7 +36,14 @@ const PROTOCOL_DEFAULT_URLS: Record<string, string> = {
 };
 
 /** 连接信息固定的预设供应商：Base URL 与协议不可修改。 */
-const LOCKED_PRESET_PROVIDERS = new Set(['DeepSeek', CODEX_PROVIDER_NAME]);
+const LOCKED_PRESET_PROVIDERS = new Set(['DeepSeek']);
+/** ChatGPT 的 API Key 接入方式（OpenAI Responses，Base URL 可改为中转地址）。 */
+const CHATGPT_API_KEY_CONFIG: ProviderConfigView = {
+  base_url: PROTOCOL_DEFAULT_URLS.openai,
+  api_key: '',
+  timeout_ms: CODEX_PROVIDER_CONFIG.timeout_ms,
+  protocol: 'openai',
+};
 
 const PROTOCOL_OPTIONS = [
   { value: 'openai', label: 'OpenAI Responses' },
@@ -105,6 +112,16 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setModelName('');
   };
 
+  // ChatGPT 预设：在账号登录（OAuth）与 API Key 两种接入方式间切换，并清空已拉取的模型。
+  const selectChatgptMode = (mode: 'oauth' | 'api_key') => {
+    setError(null);
+    fetchSeqRef.current += 1;
+    setFetchingModels(false);
+    setDraft(mode === 'oauth' ? { ...CODEX_PROVIDER_CONFIG } : { ...CHATGPT_API_KEY_CONFIG });
+    setAvailableModels([]);
+    setModelWindows({});
+    setModelName('');
+  };
   const selectCustom = () => {
     setError(null);
     fetchSeqRef.current += 1;
@@ -167,7 +184,6 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
       setError({ title: '无法获取模型列表', detail: String(err) });
       setAvailableModels([]);
       setModelWindows({});
-    setModelWindows({});
     } finally {
       if (seq === fetchSeqRef.current) setFetchingModels(false);
     }
@@ -285,6 +301,34 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
                 className="text-sm h-8 mt-1"
                 placeholder="例如 OpenAI、Moonshot"
               />
+            </div>
+          )}
+
+          {!isCustomProvider && providerKey === CODEX_PROVIDER_NAME && (
+            <div>
+              <Label className="text-xs">接入方式</Label>
+              <div className="flex gap-1.5 mt-1">
+                {([
+                  ['oauth', 'ChatGPT 账号登录'],
+                  ['api_key', 'OpenAI API Key'],
+                ] as const).map(([mode, label]) => {
+                  const active = (mode === 'oauth') === isOAuth;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                        active
+                          ? 'bg-primary/20 text-primary border-primary/40'
+                          : 'bg-secondary text-muted-foreground border-border hover:text-foreground'
+                      }`}
+                      onClick={() => selectChatgptMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
 

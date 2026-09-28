@@ -248,10 +248,19 @@ fn print_codex_usage(usage: &tiangong_llm::providers::codex::CodexUsage) {
     }
 }
 
-/// 确保存在固定供应商 ChatGPT（Codex 协议，无 api_key）。
+/// 确保固定供应商 ChatGPT 为账号登录模式（Codex 协议，无 api_key）。
+///
+/// 已存在（如之前用 API Key 模式配置过）时切换为账号登录，保留超时与自定义请求头。
 pub(crate) fn ensure_codex_provider(config: &mut ModelsConfig) {
+    let name = super::configure::CODEX_PROVIDER_NAME;
+    if let Some(provider) = config.providers.get_mut(name) {
+        provider.protocol = tiangong_llm::ProviderProtocol::Codex;
+        provider.base_url = tiangong_llm::providers::codex::CODEX_BASE_URL.to_string();
+        provider.api_key.clear();
+        return;
+    }
     config.upsert_provider(
-        super::configure::CODEX_PROVIDER_NAME,
+        name,
         tiangong_llm::providers::codex::CODEX_BASE_URL,
         "",
         tiangong_llm::ProviderProtocol::Codex,
@@ -518,4 +527,34 @@ fn parse_slot(raw: &str) -> Result<RoutingSlot> {
     RoutingSlot::from_key(raw).ok_or_else(|| {
         anyhow!("无效的路由槽位 {raw}（可用 chat/lite/multimodal/image_generation/video_generation/stt/tts）")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_codex_provider_switches_api_key_mode_back_to_oauth() {
+        let name = super::super::configure::CODEX_PROVIDER_NAME;
+        let mut config = ModelsConfig::default();
+        config.upsert_provider(
+            name,
+            "https://relay.example.com/v1",
+            "${OPENAI_API_KEY}",
+            tiangong_llm::ProviderProtocol::OpenAi,
+            120_000,
+        );
+
+        ensure_codex_provider(&mut config);
+
+        let provider = &config.providers[name];
+        assert_eq!(provider.protocol, tiangong_llm::ProviderProtocol::Codex);
+        assert_eq!(
+            provider.base_url,
+            tiangong_llm::providers::codex::CODEX_BASE_URL
+        );
+        assert!(provider.api_key.is_empty());
+        // 保留用户调整过的超时
+        assert_eq!(provider.timeout_ms, 120_000);
+    }
 }
