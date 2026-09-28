@@ -1,7 +1,7 @@
 # RFC 0018：天工虚拟指针（Agent 桌面操作可视化）
 
 - 状态：已实施（Phase 1，macOS）
-- 关联：RFC 0017（主动截图与图片注入）、`docs/computer-use-exception-analysis.md`
+- 关联：RFC 0017（主动截图与图片注入）、`docs/computer-use/exception-analysis.md`
 - 归属：`plugins/tiangong-plugin-computer-use`（实现完全位于插件内）
 
 ## 1. 动机

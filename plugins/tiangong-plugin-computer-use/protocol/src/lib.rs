@@ -308,6 +308,72 @@ mod tests {
     use crate::ops::*;
 
     #[test]
+    fn split_layout_places_host_left_and_target_right() {
+        let work = Bounds {
+            x: 0.0,
+            y: 25.0,
+            width: 1512.0,
+            height: 920.0,
+        };
+        let (host, target) = split_layout(work, SPLIT_HOST_WIDTH).unwrap();
+        assert_eq!(
+            host,
+            Bounds {
+                x: 0.0,
+                y: 25.0,
+                width: 400.0,
+                height: 920.0
+            }
+        );
+        assert_eq!(
+            target,
+            Bounds {
+                x: 400.0,
+                y: 25.0,
+                width: 1112.0,
+                height: 920.0
+            }
+        );
+    }
+
+    #[test]
+    fn split_layout_respects_secondary_screen_origin() {
+        let work = Bounds {
+            x: -1920.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1040.0,
+        };
+        let (host, target) = split_layout(work, 400.0).unwrap();
+        assert_eq!(host.x, -1920.0);
+        assert_eq!(target.x, -1520.0);
+        assert_eq!(target.width, 1520.0);
+    }
+
+    #[test]
+    fn split_layout_skips_narrow_or_invalid_work_area() {
+        let narrow = Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 799.0,
+            height: 600.0,
+        };
+        assert!(split_layout(narrow, 400.0).is_none());
+        let empty = Bounds::default();
+        assert!(split_layout(empty, 400.0).is_none());
+        assert!(split_layout(narrow, 0.0).is_none());
+    }
+
+    #[test]
+    fn open_app_response_without_split_stays_compatible() {
+        let json = r#"{"app_name":"微信","pid":1,"launched":false,"summary":"ok"}"#;
+        let resp: OpenAppResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.split.is_none());
+        let back = serde_json::to_value(&resp).unwrap();
+        assert!(back.get("split").is_none());
+    }
+
+    #[test]
     fn platform_current_matches_target() {
         #[cfg(target_os = "macos")]
         assert_eq!(Platform::CURRENT, Platform::Macos);

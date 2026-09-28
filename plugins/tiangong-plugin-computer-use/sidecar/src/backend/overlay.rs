@@ -79,6 +79,59 @@ enum Command {
     ClickPulse { x: f64, y: f64 },
     /// 按键 HUD：在主屏中下部短暂显示键帽序列（key/combo，不含文本输入）。
     KeyCast(Vec<String>),
+    /// 查询包含某点（AX 坐标）的屏幕可用区域（扣除菜单栏与 Dock），经
+    /// 回执 channel 同步返回 AX 坐标系下的 (x, y, width, height)。
+    /// NSScreen 只能在主线程访问，故由 overlay 主循环代答。
+    ScreenWorkArea {
+        x: f64,
+        y: f64,
+        reply: Sender<Option<(f64, f64, f64, f64)>>,
+    },
+}
+
+/// 查询包含 AX 坐标点的屏幕可用区域（AX 坐标，points）。
+///
+/// 未命中任何屏幕时退回主屏。主循环未运行（测试进程）或超时返回 None。
+pub fn screen_work_area_at(x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    let sender = SENDER.get()?;
+    let (reply, rx) = mpsc::channel();
+    sender.send(Command::ScreenWorkArea { x, y, reply }).ok()?;
+    rx.recv_timeout(Duration::from_millis(1000)).ok().flatten()
+}
+
+/// AppKit 屏幕 frame（左下原点）→ AX 坐标（主屏左上原点）。
+fn appkit_rect_to_ax(rect: NSRect, main_top: f64) -> (f64, f64, f64, f64) {
+    (
+        rect.origin.x,
+        main_top - (rect.origin.y + rect.size.height),
+        rect.size.width,
+        rect.size.height,
+    )
+}
+
+fn contains(rect: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
+    x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
+}
+
+fn work_area_at(mtm: MainThreadMarker, x: f64, y: f64) -> Option<(f64, f64, f64, f64)> {
+    // AX 全局坐标以「主屏」（screens[0]，菜单栏所在屏）左上为原点；
+    // mainScreen 是键盘焦点所在屏，多显示器时可能不同，不能用于换算。
+    let screens = NSScreen::screens(mtm);
+    let primary = screens.iter().next()?;
+    let primary_frame = primary.frame();
+    let main_top = primary_frame.origin.y + primary_frame.size.height;
+    let mut fallback = None;
+    for screen in screens.iter() {
+        let frame = appkit_rect_to_ax(screen.frame(), main_top);
+        let visible = appkit_rect_to_ax(screen.visibleFrame(), main_top);
+        if fallback.is_none() {
+            fallback = Some(visible);
+        }
+        if contains(frame, x, y) {
+            return Some(visible);
+        }
+    }
+    fallback
 }
 
 /// 显示按键 HUD（键帽符号序列；非阻塞投递，overlay 未运行时丢弃）。
@@ -265,6 +318,9 @@ pub fn run_main_loop() {
                         if let Some(hud) = keycast.as_mut() {
                             hud.show(&keys, mtm);
                         }
+                    }
+                    Command::ScreenWorkArea { x, y, reply } => {
+                        let _ = reply.send(work_area_at(mtm, x, y));
                     }
                     Command::ClickPulse { x, y } => {
                         if enabled {

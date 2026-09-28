@@ -723,6 +723,7 @@ fn open_response(window: &TopWindow, launched: bool, summary: String) -> OpenApp
         launched,
         window: Some(window.bounds),
         summary,
+        split: None,
     }
 }
 
@@ -802,6 +803,7 @@ pub(crate) async fn open_app(req: &OpenAppRequest) -> DesktopResult<OpenAppRespo
                             "已启动「{name}」，但 {} 秒内未检测到其窗口（可能在托盘或仍在加载）",
                             WINDOW_WAIT.as_secs()
                         ),
+                        split: None,
                     }),
                 };
             }

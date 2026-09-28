@@ -2,7 +2,7 @@
 
 - 状态：已实施 Phase 1（v3：注入声明改为 stdout 约定字段协议）
 - 起因：`analyze/computer-use-exception` 分支的现场分析（微信总结五连失败）
-- 关联：`docs/computer-use-exception-analysis.md`
+- 关联：`docs/computer-use/exception-analysis.md`
 
 ## 1. 动机与设计判据
 

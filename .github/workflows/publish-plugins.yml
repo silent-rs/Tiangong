@@ -61,7 +61,15 @@ jobs:
               if os.path.isfile(f"{root}/plugin.json"):
                   manifest = json.load(open(f"{root}/plugin.json"))
                   has_wasm = "true" if manifest.get("wasm") else "false"
-                  has_ui = "true" if manifest.get("ui", {}).get("contributions") else "false"
+                  # has_ui 只表示「需要前端构建链的 UI」：手写自包含单文件
+                  # UI（无 package.json，如 coding/computer-use）由 xtask 直接
+                  # 从源码复制，不走共享 UI 构建。
+                  has_ui = (
+                      "true"
+                      if manifest.get("ui", {}).get("contributions")
+                      and os.path.isfile(f"{root}/package.json")
+                      else "false"
+                  )
                   runtime = manifest.get("sidecar", {}).get("runtime")
                   release_kind = (
                       "interpreter-sidecar"

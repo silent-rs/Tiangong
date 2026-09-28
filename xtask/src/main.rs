@@ -396,6 +396,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         | "subagent" => &["dist/index.html"],
         // 手写自包含单文件 UI（无前端构建链）。
         "coding" => &["app/index.html"],
+        "computer-use" => &["app/restore-window.html"],
         _ => &[],
     }
 }

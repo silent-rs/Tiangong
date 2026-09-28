@@ -820,7 +820,24 @@ impl Backend for WindowsBackend {
     }
 
     async fn open_app(&self, req: &OpenAppRequest) -> DesktopResult<OpenAppResponse> {
-        super::win_desktop::open_app(req).await
+        let mut result = super::win_desktop::open_app(req).await;
+        // 应用窗口出现后自动分屏：天工靠左、目标占右侧。
+        if let DesktopResult::Ok(resp) = &mut result
+            && resp.window.is_some()
+            && let Some(window) = super::win_desktop::find_app_window(Some(resp.pid), None)
+        {
+            let outcome = super::win_split::split_with_host(window.hwnd, resp.pid);
+            if let Some(target) = outcome.target {
+                resp.window = Some(target);
+            }
+            resp.summary = format!("{}。{}", resp.summary, outcome.detail);
+            resp.split = Some(outcome);
+        }
+        result
+    }
+
+    async fn restore_host_window(&self, saved: crate::split::SavedHostFrame) -> Result<(), String> {
+        super::win_split::restore_host(saved)
     }
 }
 

@@ -94,6 +94,12 @@ unsafe extern "C" {
     ) -> i32;
     fn AXValueGetType(value: AXValueRef) -> u32;
     fn AXValueGetValue(value: AXValueRef, the_type: u32, value_ptr: *mut c_void) -> u8;
+    fn AXValueCreate(the_type: u32, value_ptr: *const c_void) -> AXValueRef;
+    fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut u8,
+    ) -> i32;
 }
 
 /// AXValue 类型常量（与 HIServices AXValue.h 对齐）。
@@ -361,6 +367,67 @@ impl AxElement {
                 cf_attr.as_concrete_TypeRef(),
                 cf_value.as_concrete_TypeRef() as CFTypeRef,
             )
+        }) {
+            Some(code) => {
+                let err = AxError::from_raw(code);
+                if err.is_success() { Ok(()) } else { Err(err) }
+            }
+            None => Err(AxError::Failure),
+        }
+    }
+
+    /// 读取单个元素属性（如 AXMainWindow / AXFocusedWindow）。
+    pub fn element_attribute(&self, name: &str) -> Option<AxElement> {
+        let value = self.copy_attribute_value(name)?;
+        // SAFETY：Copy API 返回 caller-owned 引用，直接接管。
+        Self::from_retained(value as AXUIElementRef)
+    }
+
+    /// 属性是否可写（窗口 AXPosition/AXSize 不可写时表示不可移动/缩放）。
+    pub fn is_attribute_settable(&self, name: &str) -> bool {
+        let raw = self.raw;
+        let cf_attr = CFString::new(name);
+        ax_catch(|| {
+            let mut settable: u8 = 0;
+            let code = unsafe {
+                AXUIElementIsAttributeSettable(raw, cf_attr.as_concrete_TypeRef(), &mut settable)
+            };
+            code == 0 && settable != 0
+        })
+        .unwrap_or(false)
+    }
+
+    /// 设置窗口左上角位置（AX 全局坐标，主屏左上原点，points）。
+    pub fn set_position(&self, x: f64, y: f64) -> Result<(), AxError> {
+        let point = CGPoint { x, y };
+        self.set_ax_value(
+            "AXPosition",
+            AX_VALUE_TYPE_CG_POINT,
+            &point as *const CGPoint as *const c_void,
+        )
+    }
+
+    /// 设置窗口尺寸（points）。
+    pub fn set_size(&self, width: f64, height: f64) -> Result<(), AxError> {
+        let size = CGSize { width, height };
+        self.set_ax_value(
+            "AXSize",
+            AX_VALUE_TYPE_CG_SIZE,
+            &size as *const CGSize as *const c_void,
+        )
+    }
+
+    fn set_ax_value(&self, name: &str, the_type: u32, value: *const c_void) -> Result<(), AxError> {
+        let raw = self.raw;
+        let cf_attr = CFString::new(name);
+        match ax_catch(|| unsafe {
+            let ax_value = AXValueCreate(the_type, value);
+            if ax_value.is_null() {
+                return AxError::Failure as i32;
+            }
+            let code = AXUIElementSetAttributeValue(raw, cf_attr.as_concrete_TypeRef(), ax_value);
+            CFRelease(ax_value);
+            code
         }) {
             Some(code) => {
                 let err = AxError::from_raw(code);
