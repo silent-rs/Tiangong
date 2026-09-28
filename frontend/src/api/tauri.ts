@@ -156,6 +156,30 @@ export interface CodexAuthStatus {
   login_pending: boolean;
 }
 
+/** ChatGPT 额度窗口（如 5 小时 / 每周）。 */
+export interface CodexUsageWindow {
+  used_percent: number;
+  window_seconds?: number;
+  reset_at?: number;
+}
+
+export interface CodexNamedLimit {
+  name: string;
+  windows: CodexUsageWindow[];
+  limit_reached: boolean;
+}
+
+/** ChatGPT 账号用量额度。 */
+export interface CodexUsage {
+  plan_type?: string;
+  allowed: boolean;
+  limit_reached: boolean;
+  windows: CodexUsageWindow[];
+  extra_limits: CodexNamedLimit[];
+  credits_balance?: string;
+  credits_unlimited: boolean;
+}
+
 export interface CodexLoginStart {
   url: string;
   user_code?: string;
@@ -877,6 +901,9 @@ export const api = {
   /** 手动刷新 ChatGPT 登录令牌（工具侧令牌过期时使用）。 */
   codexAuthRefresh: (): Promise<CodexAuthStatus> =>
     invoke('codex_auth_refresh'),
+  /** 查询 ChatGPT 账号用量额度（只读，不消耗额度）。 */
+  codexAuthUsage: (): Promise<CodexUsage> =>
+    invoke('codex_auth_usage'),
 
   newSessionId: (): Promise<string> =>
     invoke('new_session_id'),

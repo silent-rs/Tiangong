@@ -149,6 +149,12 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
             ChatgptSubcommand::Status => {
                 let status = block_on(tiangong_llm::codex_auth::status())?;
                 print_codex_status(&status);
+                if status.logged_in {
+                    match block_on(tiangong_llm::codex_auth::usage())? {
+                        Ok(usage) => print_codex_usage(&usage),
+                        Err(err) => eprintln!("查询用量额度失败：{err}"),
+                    }
+                }
             }
         },
     }
@@ -177,6 +183,69 @@ fn print_codex_status(status: &tiangong_llm::codex_auth::CodexAuthStatus) {
             .map(|plan| format!("（{plan}）"))
             .unwrap_or_default()
     );
+}
+
+/// 窗口时长的中文描述：5 小时 / 7 天 等。
+fn window_label(seconds: Option<u64>) -> String {
+    match seconds {
+        Some(s) if s > 0 && s % 86_400 == 0 => format!("{} 天", s / 86_400),
+        Some(s) if s > 0 && s % 3_600 == 0 => format!("{} 小时", s / 3_600),
+        Some(s) if s > 0 => format!("{} 分钟", s.div_ceil(60)),
+        _ => "额度".to_string(),
+    }
+}
+
+fn format_usage_window(window: &tiangong_llm::codex_auth::CodexUsageWindow) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let reset = window
+        .reset_at
+        .map(|ts| (ts - now).max(0))
+        .map(|secs| {
+            let (days, hours, mins) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
+            if days > 0 {
+                format!("，{days} 天 {hours} 小时后重置")
+            } else if hours > 0 {
+                format!("，{hours} 小时 {mins} 分钟后重置")
+            } else {
+                format!("，{} 分钟后重置", mins.max(1))
+            }
+        })
+        .unwrap_or_default();
+    format!(
+        "{}窗口：已用 {:.0}%{reset}",
+        window_label(window.window_seconds),
+        window.used_percent
+    )
+}
+
+fn print_codex_usage(usage: &tiangong_llm::codex_auth::CodexUsage) {
+    if usage.limit_reached || !usage.allowed {
+        println!("用量额度：已达上限");
+    } else {
+        println!("用量额度：");
+    }
+    if usage.windows.is_empty() {
+        println!("  （服务端未返回额度窗口）");
+    }
+    for window in &usage.windows {
+        println!("  {}", format_usage_window(window));
+    }
+    for limit in &usage.extra_limits {
+        for window in &limit.windows {
+            println!("  {} · {}", limit.name, format_usage_window(window));
+        }
+        if limit.windows.is_empty() && limit.limit_reached {
+            println!("  {}：已达上限", limit.name);
+        }
+    }
+    if usage.credits_unlimited {
+        println!("  点数：不限量");
+    } else if let Some(balance) = usage.credits_balance.as_deref() {
+        println!("  点数余额：{balance}");
+    }
 }
 
 /// 确保存在固定供应商 ChatGPT（Codex 协议，无 api_key）。

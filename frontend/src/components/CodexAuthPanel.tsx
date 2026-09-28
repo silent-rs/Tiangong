@@ -4,6 +4,7 @@ import { api } from '@/api/tauri';
 import type { CodexAuthStatus, CodexLoginStart } from '@/api/tauri';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
+import { CodexUsagePanel } from './CodexUsagePanel';
 
 /** ChatGPT（Codex 登录）固定供应商名，与 CLI 保持一致。 */
 export const CODEX_PROVIDER_NAME = 'ChatGPT';
@@ -185,6 +186,7 @@ export function CodexAuthPanel({ onStatusChange }: Props) {
       <p className="text-xs text-muted-foreground">
         使用 ChatGPT Plus / Pro 等订阅额度调用 GPT 模型，无需 API Key。
       </p>
+      {status?.logged_in && !pending && <CodexUsagePanel key={status.expires_at ?? 0} />}
       {error && <p className="text-xs text-destructive break-all">{error}</p>}
     </div>
   );

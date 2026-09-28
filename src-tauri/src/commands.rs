@@ -5452,3 +5452,10 @@ pub async fn codex_auth_refresh() -> Result<tiangong_llm::codex_auth::CodexAuthS
         .await
         .map_err(|err| format!("{err:#}"))
 }
+/// 查询 ChatGPT 账号的用量额度（模型管理中展示）。
+#[tauri::command]
+pub async fn codex_auth_usage() -> Result<tiangong_llm::codex_auth::CodexUsage, String> {
+    tiangong_llm::codex_auth::usage()
+        .await
+        .map_err(|err| err.to_string())
+}

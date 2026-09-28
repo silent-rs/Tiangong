@@ -903,6 +903,7 @@ fn run_gui() {
             tiangong_app::commands::codex_auth_cancel,
             tiangong_app::commands::codex_auth_logout,
             tiangong_app::commands::codex_auth_refresh,
+            tiangong_app::commands::codex_auth_usage,
             tiangong_app::commands::list_workers,
             tiangong_app::commands::has_model_capability,
             tiangong_app::commands::has_tts_capability,
