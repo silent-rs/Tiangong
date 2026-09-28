@@ -12,6 +12,9 @@ use tiangong_llm::models_config::{ModelCapability, ModelsConfig, RoutingSlot};
 
 use crate::interactive as ui;
 
+/// ChatGPT（Codex 登录）固定供应商名，与桌面端预设一致。
+pub(crate) const CODEX_PROVIDER_NAME: &str = "ChatGPT";
+
 /// 模型配置向导：引导完成 provider → model → route 三步。
 pub fn run_model_configure(config: &mut ModelsConfig) -> Result<()> {
     ui::ensure_terminal()?;
@@ -46,8 +49,27 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
         "OpenAI Responses",
         "OpenAI Chat Completions（兼容）",
         "Anthropic",
+        "ChatGPT",
     ];
     let idx = ui::select("选择模型协议", &protocols)?;
+    // ChatGPT：账号登录（OAuth，无需 API Key）或 OpenAI API Key（Responses，可填中转地址）。
+    let chatgpt_api_key = idx == 4
+        && ui::select(
+            "选择 ChatGPT 接入方式",
+            &[
+                "ChatGPT 账号登录（Codex OAuth，无需 API Key）",
+                "OpenAI API Key（Responses，可自定义 URL）",
+            ],
+        )? == 1;
+    if idx == 4 && !chatgpt_api_key {
+        crate::model::codex_login_interactive()?;
+        return Ok((
+            ProviderProtocol::Codex,
+            CODEX_PROVIDER_NAME.to_string(),
+            tiangong_llm::providers::codex::CODEX_BASE_URL.to_string(),
+            String::new(),
+        ));
+    }
     let (protocol, default_name, default_url) = match idx {
         0 => (
             "deepseek".parse::<ProviderProtocol>().unwrap(),
@@ -68,6 +90,11 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
             "anthropic".parse::<ProviderProtocol>().unwrap(),
             "anthropic",
             "https://api.anthropic.com",
+        ),
+        4 => (
+            ProviderProtocol::OpenAi,
+            CODEX_PROVIDER_NAME,
+            "https://api.openai.com/v1",
         ),
         _ => unreachable!(),
     };
@@ -116,6 +143,7 @@ fn prompt_model(
         ProviderProtocol::OpenAi => "gpt-5.6-sol",
         ProviderProtocol::OpenAiChatCompletions => "gpt-4.1-mini",
         ProviderProtocol::Anthropic => "claude-sonnet-4-20250514",
+        ProviderProtocol::Codex => "gpt-5.5",
     };
 
     let default_alias = format!("{provider_name}-chat");
@@ -143,19 +171,34 @@ fn prompt_model(
         ("tts", ModelCapability::Tts),
     ];
     let cap_labels: Vec<&str> = caps.iter().map(|(k, _)| *k).collect();
-    // 默认勾选 chat（caps[0]），降低误操作概率
+    // 默认勾选 chat（caps[0]），降低误操作概率；ChatGPT（Codex）全系原生多模态，
+    // 额外默认勾选 multimodal（caps[1]）。
+    let defaults: &[usize] = if protocol == ProviderProtocol::Codex {
+        &[0, 1]
+    } else {
+        &[0]
+    };
     let selected =
-        ui::multiselect_with_defaults("选择模型能力（空格切换，回车确认）", &cap_labels, &[0])?;
+        ui::multiselect_with_defaults("选择模型能力（空格切换，回车确认）", &cap_labels, defaults)?;
     let capabilities: Vec<ModelCapability> = selected.iter().map(|&i| caps[i].1).collect();
 
     // 至少要有 chat（最常见的对话场景）
     let capabilities = if capabilities.is_empty() {
-        vec![ModelCapability::Chat]
+        default_capabilities(protocol)
     } else {
         capabilities
     };
 
     Ok((model_name, model_id, capabilities))
+}
+
+/// 协议对应的默认模型能力：ChatGPT（Codex）全系同时具备对话与多模态。
+pub(crate) fn default_capabilities(protocol: ProviderProtocol) -> Vec<ModelCapability> {
+    if protocol == ProviderProtocol::Codex {
+        vec![ModelCapability::Chat, ModelCapability::Multimodal]
+    } else {
+        vec![ModelCapability::Chat]
+    }
 }
 
 /// 收集路由槽位并设置（利用已有 capability 校验）。

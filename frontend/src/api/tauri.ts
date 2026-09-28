@@ -146,6 +146,45 @@ export interface ProviderBalance {
   balance_infos: BalanceInfo[];
 }
 
+/** ChatGPT（Codex）账号登录状态（不含令牌）。 */
+export interface CodexAuthStatus {
+  logged_in: boolean;
+  email?: string;
+  plan_type?: string;
+  account_id?: string;
+  expires_at?: number;
+  login_pending: boolean;
+}
+
+/** ChatGPT 额度窗口（如 5 小时 / 每周）。 */
+export interface CodexUsageWindow {
+  used_percent: number;
+  window_seconds?: number;
+  reset_at?: number;
+}
+
+export interface CodexNamedLimit {
+  name: string;
+  windows: CodexUsageWindow[];
+  limit_reached: boolean;
+}
+
+/** ChatGPT 账号用量额度。 */
+export interface CodexUsage {
+  plan_type?: string;
+  allowed: boolean;
+  limit_reached: boolean;
+  windows: CodexUsageWindow[];
+  extra_limits: CodexNamedLimit[];
+  credits_balance?: string;
+  credits_unlimited: boolean;
+}
+
+export interface CodexLoginStart {
+  url: string;
+  user_code?: string;
+}
+
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
 
 export interface StoredAsset {
@@ -609,6 +648,13 @@ export interface ModelEntryView {
   context_window?: number;
 }
 
+/** 供应商模型目录项；context_window 为服务端声明的上下文窗口（目前仅 ChatGPT 提供）。 */
+export interface ProviderModelInfo {
+  id: string;
+  display_name?: string | null;
+  context_window?: number | null;
+}
+
 export interface ModelsConfigView {
   providers: Record<string, ProviderConfigView>;
   models: Record<string, ModelEntryView>;
@@ -836,6 +882,29 @@ export const api = {
   getProviderBalance: (providerName: string): Promise<ProviderBalance> =>
     invoke('get_provider_balance', { providerName }),
 
+  codexAuthStatus: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_status'),
+
+  /** 发起 ChatGPT 账号登录（后端会自动打开浏览器）；method: browser | device */
+  codexAuthStart: (method: 'browser' | 'device' = 'browser'): Promise<CodexLoginStart> =>
+    invoke('codex_auth_start', { method }),
+
+  codexAuthWait: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_wait'),
+
+  codexAuthCancel: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_cancel'),
+
+  codexAuthLogout: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_logout'),
+
+  /** 手动刷新 ChatGPT 登录令牌（工具侧令牌过期时使用）。 */
+  codexAuthRefresh: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_refresh'),
+  /** 查询 ChatGPT 账号用量额度（只读，不消耗额度）。 */
+  codexAuthUsage: (): Promise<CodexUsage> =>
+    invoke('codex_auth_usage'),
+
   newSessionId: (): Promise<string> =>
     invoke('new_session_id'),
 
@@ -961,6 +1030,10 @@ export const api = {
   onPluginsChanged: (callback: () => void) =>
     listen('plugins_changed', () => callback()),
 
+  /** 模型配置保存后广播（会话区刷新可选模型）。 */
+  onModelsConfigChanged: (callback: () => void) =>
+    listen('models_config_changed', () => callback()),
+
   botStart: (id: string): Promise<string> =>
     invoke('bot_start', { id }),
 
@@ -1022,6 +1095,15 @@ export const api = {
     headers?: Record<string, string>,
   ): Promise<string[]> =>
     invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol, headers }),
+  /** 拉取模型目录并保留服务端元信息（ChatGPT 返回上下文窗口）。 */
+  fetchProviderModelInfos: (
+    baseUrl: string,
+    apiKey: string,
+    timeoutMs?: number,
+    protocol?: string,
+    headers?: Record<string, string>,
+  ): Promise<ProviderModelInfo[]> =>
+    invoke('fetch_provider_model_infos', { baseUrl, apiKey, timeoutMs, protocol, headers }),
 
   resolveModelContextWindow: (model: string): Promise<number> =>
     invoke('resolve_model_context_window', { model }),

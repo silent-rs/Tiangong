@@ -70,6 +70,7 @@ body {
 }
 
 .hint { color: var(--muted); font-size: 12px; }
+.hint.error { color: hsl(0 84% 60%); }
 
 .actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 

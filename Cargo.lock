@@ -11179,19 +11179,23 @@ dependencies = [
  "backoff",
  "base64 0.23.1",
  "bytes",
+ "chrono",
  "eventsource-stream",
  "futures-util",
+ "getrandom 0.3.4",
  "jsonschema",
  "reqwest 0.13.4",
  "scru128",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
  "tiangong-anthropic",
  "tiangong-deepseek",
  "tiangong-types",
  "tokio",
  "tracing",
+ "url",
  "wiremock",
 ]
 
@@ -11498,7 +11502,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-openai-protocol"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -11506,7 +11510,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-openai-sidecar"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",

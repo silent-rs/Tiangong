@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-generate-image-openai-sidecar"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 license = "Apache-2.0"
 description = "Generate-Image-OpenAI 独立 sidecar（Chat Completions 生图、配置持久化、归档落盘）"

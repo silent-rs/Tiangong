@@ -215,6 +215,24 @@ pub(crate) enum ModelSubcommand {
         #[arg(help = "测试目标：capability（chat/lite/...）或模型名；默认 chat")]
         target: Option<String>,
     },
+    #[command(about = "ChatGPT 账号（Codex 登录）：登录 / 登出 / 查看状态")]
+    Chatgpt {
+        #[command(subcommand)]
+        command: ChatgptSubcommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ChatgptSubcommand {
+    #[command(about = "登录 ChatGPT 账号，并添加固定供应商 ChatGPT")]
+    Login {
+        #[arg(long, help = "使用设备码登录（适合远程 / 无法接收本地回调的环境）")]
+        device: bool,
+    },
+    #[command(about = "退出 ChatGPT 账号并删除本地凭据")]
+    Logout,
+    #[command(about = "查看 ChatGPT 账号登录状态")]
+    Status,
 }
 
 #[derive(Debug, Subcommand)]

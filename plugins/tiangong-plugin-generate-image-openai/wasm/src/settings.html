@@ -10,7 +10,7 @@
   <main class="page">
     <div class="header">
       <h2>OpenAI 生图</h2>
-      <p class="desc">通过 OpenAI Responses API 的 image_generation 工具生成图片。可以选择模型配置中的模型，或手动输入端点。</p>
+      <p class="desc">通过 OpenAI Responses API 的 image_generation 工具生成图片。可以选择模型配置中的模型、使用已登录的 ChatGPT 账号，或手动输入端点。</p>
     </div>
 
     <section class="card">
@@ -19,6 +19,10 @@
         <label class="radio">
           <input type="radio" name="source" value="global" id="source-global" checked />
           <span>选择模型配置</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="source" value="chatgpt" id="source-chatgpt" />
+          <span>ChatGPT 账号</span>
         </label>
         <label class="radio">
           <input type="radio" name="source" value="manual" id="source-manual" />
@@ -37,8 +41,26 @@
         </label>
       </div>
 
+      <!-- ChatGPT 账号 -->
+      <div id="chatgpt-section" class="sub-section" hidden>
+        <p class="hint" id="chatgpt-status"></p>
+        <label class="field">
+          <span class="label">模型</span>
+          <input id="chatgpt-model" class="input" type="text" list="chatgpt-model-list" placeholder="gpt-5.5" autocomplete="off" />
+          <datalist id="chatgpt-model-list"></datalist>
+          <span class="hint">使用天工中登录的 ChatGPT 账号额度生图，无需 API Key。令牌过期时需在「设置 → 模型配置 → ChatGPT」手动刷新。</span>
+        </label>
+      </div>
+
       <!-- 手动输入 -->
       <div id="manual-section" class="sub-section" hidden>
+        <label class="field">
+          <span class="label">请求协议</span>
+          <select id="manual-protocol" class="input">
+            <option value="responses">OpenAI Responses（image_generation 工具）</option>
+            <option value="chat_completions">Chat Completions（兼容生图接口）</option>
+          </select>
+        </label>
         <label class="field">
           <span class="label">Base URL</span>
           <input id="manual-base-url" class="input" type="text" placeholder="https://api.openai.com/v1" autocomplete="off" />

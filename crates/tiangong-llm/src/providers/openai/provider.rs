@@ -88,50 +88,54 @@ impl LlmProvider for OpenAiResponsesProvider {
             }
             super::client::ResponsesStreamResponse::Sse(stream) => stream,
         };
-
-        // 维护流式状态：记录是否收到过 reasoning delta 增量。
-        // 流式增量一律保留；仅在全程无 delta 时，从 completed 兜底补发 reasoning。
-        let mut received_reasoning_delta = false;
-        let mut parser = ResponsesStreamParser::default();
-        let mapped = stream.flat_map(move |item| {
-            let raw_payload = match item {
-                Ok(payload) => payload,
-                Err(err) => {
-                    return stream::iter(vec![Err(map_responses_error(&err))]);
-                }
-            };
-
-            // 记录本条事件是否产生 reasoning delta（用于 completed 兜底判断）。
-            let is_completed = raw_payload
-                .get("type")
-                .and_then(Value::as_str)
-                .map(|t| t == "response.completed")
-                .unwrap_or(false);
-
-            let mut events = parser.parse_event(&raw_payload);
-
-            if is_completed {
-                // 仅当流式过程未收到任何 reasoning delta 时，兜底补发最终 reasoning。
-                if let Some(fallback) =
-                    maybe_completed_reasoning(&raw_payload, received_reasoning_delta)
-                {
-                    events.insert(0, Ok(fallback));
-                }
-            } else if events
-                .iter()
-                .any(|e| matches!(e, Ok(ProviderStreamEvent::ReasoningDelta(_))))
-            {
-                received_reasoning_delta = true;
-            }
-
-            stream::iter(events)
-        });
-        Ok(Box::pin(mapped))
+        Ok(map_responses_stream(stream))
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
     }
+}
+
+/// 把 Responses SSE 原始事件流映射为统一流事件（OpenAI 与 Codex 共用）。
+pub(crate) fn map_responses_stream(stream: super::client::ResponsesByotStream) -> ProviderStream {
+    // 维护流式状态：记录是否收到过 reasoning delta 增量。
+    // 流式增量一律保留；仅在全程无 delta 时，从 completed 兜底补发 reasoning。
+    let mut received_reasoning_delta = false;
+    let mut parser = ResponsesStreamParser::default();
+    let mapped = stream.flat_map(move |item| {
+        let raw_payload = match item {
+            Ok(payload) => payload,
+            Err(err) => {
+                return stream::iter(vec![Err(map_responses_error(&err))]);
+            }
+        };
+
+        // 记录本条事件是否产生 reasoning delta（用于 completed 兜底判断）。
+        let is_completed = raw_payload
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|t| t == "response.completed")
+            .unwrap_or(false);
+
+        let mut events = parser.parse_event(&raw_payload);
+
+        if is_completed {
+            // 仅当流式过程未收到任何 reasoning delta 时，兜底补发最终 reasoning。
+            if let Some(fallback) =
+                maybe_completed_reasoning(&raw_payload, received_reasoning_delta)
+            {
+                events.insert(0, Ok(fallback));
+            }
+        } else if events
+            .iter()
+            .any(|e| matches!(e, Ok(ProviderStreamEvent::ReasoningDelta(_))))
+        {
+            received_reasoning_delta = true;
+        }
+
+        stream::iter(events)
+    });
+    Box::pin(mapped)
 }
 
 #[cfg(test)]

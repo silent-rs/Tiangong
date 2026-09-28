@@ -26,6 +26,7 @@ use crate::message::{
 use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::providers::codex::{CodexConfig, CodexProvider};
 use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
 use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
@@ -168,7 +169,9 @@ fn filter_invalid_openai_tool_calls(
 ) -> Result<ModelResponse> {
     if !matches!(
         protocol,
-        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+        ProviderProtocol::OpenAi
+            | ProviderProtocol::OpenAiChatCompletions
+            | ProviderProtocol::Codex
     ) || response.tool_calls.is_empty()
     {
         return Ok(response);
@@ -356,7 +359,9 @@ impl SingleProviderClient {
         let (provider, request) = self.prepare_request(&req)?;
         let preserve_tool_call_order = matches!(
             self.protocol(),
-            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+            ProviderProtocol::OpenAi
+                | ProviderProtocol::OpenAiChatCompletions
+                | ProviderProtocol::Codex
         );
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         let response = consume_provider_stream_events_async(
@@ -384,9 +389,48 @@ impl SingleProviderClient {
         self
     }
 
+    /// 拉取模型目录并保留服务端元信息（目前仅 Codex 返回上下文窗口）。
+    ///
+    /// Codex 按服务端顺序（新模型在前）去重返回；其他协议退化为
+    /// [`Self::list_models_async`] 的结果，`context_window` 为空。
+    pub async fn list_model_infos_async(
+        cfg: &ModelEndpoint,
+    ) -> Result<Vec<crate::model::ProviderModelInfo>> {
+        if cfg.protocol != ProviderProtocol::Codex {
+            return Ok(Self::list_models_async(cfg)
+                .await?
+                .into_iter()
+                .map(|id| crate::model::ProviderModelInfo {
+                    id,
+                    ..Default::default()
+                })
+                .collect());
+        }
+        Self::list_codex_model_infos(cfg).await
+    }
+    /// Codex 模型目录：按服务端顺序（新模型在前），保留上下文窗口。
+    async fn list_codex_model_infos(
+        cfg: &ModelEndpoint,
+    ) -> Result<Vec<crate::model::ProviderModelInfo>> {
+        let provider = build_codex_provider_from_config(
+            cfg,
+            cfg.timeout_ms,
+            None,
+            &scru128::new().to_string(),
+            MAX_RETRIES,
+        )?;
+        provider.list_models().await.map_err(map_llm_error)
+    }
+    /// [`Self::list_model_infos_async`] 的同步版本（CLI 使用）。
+    pub fn list_model_infos(cfg: &ModelEndpoint) -> Result<Vec<crate::model::ProviderModelInfo>> {
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+        runtime.block_on(Self::list_model_infos_async(cfg))
+    }
     pub async fn list_models_async(cfg: &ModelEndpoint) -> Result<Vec<String>> {
-        let token = cfg.api_key.trim();
-        if token.is_empty() {
+        if cfg.api_key.trim().is_empty() && !cfg.protocol.uses_oauth() {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法更新模型列表"));
         }
 
@@ -417,6 +461,12 @@ impl SingleProviderClient {
                 .await
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
+        } else if cfg.protocol == ProviderProtocol::Codex {
+            return Ok(Self::list_codex_model_infos(cfg)
+                .await?
+                .into_iter()
+                .map(|item| item.id)
+                .collect());
         } else {
             let provider = build_openai_provider_from_config(
                 cfg,
@@ -437,12 +487,18 @@ impl SingleProviderClient {
     }
 
     pub fn list_models(cfg: &ModelEndpoint) -> Result<Vec<String>> {
-        let token = cfg.api_key.trim();
-        if token.is_empty() {
+        if cfg.api_key.trim().is_empty() && !cfg.protocol.uses_oauth() {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法更新模型列表"));
         }
 
         let timeout_ms = cfg.timeout_ms;
+        if cfg.protocol == ProviderProtocol::Codex {
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化异步运行时失败")?;
+            return runtime.block_on(Self::list_models_async(cfg));
+        }
         if cfg.protocol == ProviderProtocol::Anthropic {
             let provider = build_anthropic_provider_from_config(
                 cfg,
@@ -526,6 +582,15 @@ impl SingleProviderClient {
             ))),
             ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
                 build_openai_responses_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                    session_id,
+                    max_retries,
+                )?,
+            ))),
+            ProviderProtocol::Codex => Ok(ProviderDispatch::Codex(Box::new(
+                build_codex_provider_from_config(
                     &self.cfg,
                     timeout_ms,
                     self.on_retry.clone(),
@@ -698,6 +763,22 @@ fn build_openai_responses_provider_from_config(
     config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(OpenAiResponsesProvider::new(config))
+}
+
+/// Codex（ChatGPT 账号）：鉴权来自 OAuth 登录态，无需 api_key。
+fn build_codex_provider_from_config(
+    cfg: &ModelEndpoint,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+    session_id: &str,
+    max_retries: u32,
+) -> Result<CodexProvider> {
+    let mut config = CodexConfig::new(cfg.base_url.clone());
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = max_retries;
+    config.retry_notifier = on_retry;
+    config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
+    Ok(CodexProvider::new(config))
 }
 
 fn build_openai_provider_from_config(
@@ -1308,6 +1389,7 @@ pub(crate) enum ProviderDispatch {
     OpenAiResponses(Box<OpenAiResponsesProvider>),
     OpenAiChat(Box<OpenAiChatCompletionsProvider>),
     DeepSeek(Box<DeepSeekProvider>),
+    Codex(Box<CodexProvider>),
 }
 
 impl ProviderDispatch {
@@ -1320,6 +1402,7 @@ impl ProviderDispatch {
             ProviderDispatch::OpenAiResponses(provider) => provider.complete(request).await,
             ProviderDispatch::OpenAiChat(provider) => provider.complete(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.complete(request).await,
+            ProviderDispatch::Codex(provider) => provider.complete(request).await,
         }
     }
 
@@ -1332,6 +1415,7 @@ impl ProviderDispatch {
             ProviderDispatch::OpenAiResponses(provider) => provider.stream(request).await,
             ProviderDispatch::OpenAiChat(provider) => provider.stream(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
+            ProviderDispatch::Codex(provider) => provider.stream(request).await,
         }
     }
 }
@@ -1348,7 +1432,9 @@ fn block_on_provider_stream(
     ) -> Result<ModelResponse> {
         let preserve_tool_call_order = matches!(
             &provider,
-            ProviderDispatch::OpenAiResponses(_) | ProviderDispatch::OpenAiChat(_)
+            ProviderDispatch::OpenAiResponses(_)
+                | ProviderDispatch::OpenAiChat(_)
+                | ProviderDispatch::Codex(_)
         );
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         Ok(consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await)

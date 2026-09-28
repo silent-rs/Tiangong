@@ -164,7 +164,7 @@ impl CoreManager {
                 })?;
                 let api_key =
                     tiangong_llm::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
-                if api_key.trim().is_empty() {
+                if api_key.trim().is_empty() && !provider.protocol.uses_oauth() {
                     return Err(format!(
                         "会话模型 {key} 的凭据未配置（服务提供方 {} 的 api_key 为空或其环境变量未设置）",
                         entry.provider

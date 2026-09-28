@@ -610,6 +610,73 @@ impl ModelsConfig {
         );
     }
 
+    /// 批量注册供应商模型，并按服务端元信息同步已有条目。
+    ///
+    /// - 未注册的模型以 `capabilities` 新建（key 默认为模型 id，冲突时加供应商前缀）；
+    /// - 该供应商已注册的模型补齐缺失能力，不移除用户手动增减的其他能力；
+    /// - 服务端声明了上下文窗口时，覆盖模型条目及引用它的路由条目的
+    ///   `context_window`，使其随服务端变化自动更新。
+    ///
+    /// 返回是否有变更。
+    pub fn register_provider_models(
+        &mut self,
+        provider: &str,
+        models: &[crate::model::ProviderModelInfo],
+        capabilities: &[ModelCapability],
+    ) -> bool {
+        let mut changed = false;
+        for info in models {
+            let exists = self
+                .models
+                .values()
+                .any(|entry| entry.provider == provider && entry.model == info.id);
+            if exists {
+                continue;
+            }
+            let key = if self.models.contains_key(&info.id) {
+                format!("{provider}-{}", info.id)
+            } else {
+                info.id.clone()
+            };
+            self.upsert_model(&key, provider, &info.id, capabilities.to_vec());
+            changed = true;
+        }
+        let windows: HashMap<&str, usize> = models
+            .iter()
+            .filter_map(|info| Some((info.id.as_str(), info.context_window?)))
+            .collect();
+        for entry in self.models.values_mut() {
+            if entry.provider != provider {
+                continue;
+            }
+            for capability in capabilities {
+                if !entry.capabilities.contains(capability) {
+                    entry.capabilities.push(*capability);
+                    changed = true;
+                }
+            }
+            if let Some(window) = windows.get(entry.model.as_str())
+                && entry.context_window != Some(*window)
+            {
+                entry.context_window = Some(*window);
+                changed = true;
+            }
+        }
+        // 路由条目是模型条目的副本，同步窗口，避免本进程内继续按旧窗口判断压缩。
+        for entry in self.routing.values_mut() {
+            if entry.provider != provider {
+                continue;
+            }
+            if let Some(window) = windows.get(entry.model.as_str())
+                && entry.context_window != Some(*window)
+            {
+                entry.context_window = Some(*window);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// 删除模型注册项。
     ///
     /// 返回 (是否删除成功, 删除后变为悬空的路由槽位 key 列表)。
@@ -770,6 +837,48 @@ mod tests {
             json.contains(r#""chat":"my-chat""#),
             "routing 值应为字符串引用，实际输出：{json}"
         );
+    }
+
+    #[test]
+    fn register_provider_models_adds_and_fills_capabilities() {
+        use crate::model::ProviderModelInfo;
+        let info = |id: &str, window: Option<usize>| ProviderModelInfo {
+            id: id.to_string(),
+            display_name: None,
+            context_window: window,
+        };
+        let mut config = ModelsConfig::default();
+        config.upsert_model("gpt-5.5", "other", "gpt-5.5", vec![ModelCapability::Chat]);
+        config.upsert_model("old", "ChatGPT", "gpt-5.6-sol", vec![ModelCapability::Chat]);
+        config
+            .routing
+            .insert(RoutingSlot::Chat, config.models["old"].clone());
+        let caps = [ModelCapability::Chat, ModelCapability::Multimodal];
+        let models = vec![info("gpt-5.6-sol", Some(872_000)), info("gpt-5.5", None)];
+
+        assert!(config.register_provider_models("ChatGPT", &models, &caps));
+        // 已有同供应商模型补齐多模态能力并同步窗口，不重复注册
+        assert_eq!(config.models["old"].capabilities, caps.to_vec());
+        assert_eq!(config.models["old"].context_window, Some(872_000));
+        assert!(!config.models.contains_key("gpt-5.6-sol"));
+        // 路由副本同步窗口
+        assert_eq!(
+            config.routing[&RoutingSlot::Chat].context_window,
+            Some(872_000)
+        );
+        // key 冲突时加供应商前缀；服务端未给窗口时保持空；其他供应商不受影响
+        assert_eq!(config.models["ChatGPT-gpt-5.5"].capabilities, caps.to_vec());
+        assert_eq!(config.models["ChatGPT-gpt-5.5"].context_window, None);
+        assert_eq!(
+            config.models["gpt-5.5"].capabilities,
+            vec![ModelCapability::Chat]
+        );
+        // 再次同步无变化
+        assert!(!config.register_provider_models("ChatGPT", &models, &caps));
+        // 服务端窗口变化时随之更新
+        let models = vec![info("gpt-5.6-sol", Some(1_000_000))];
+        assert!(config.register_provider_models("ChatGPT", &models, &caps));
+        assert_eq!(config.models["old"].context_window, Some(1_000_000));
     }
 
     #[test]

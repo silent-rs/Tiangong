@@ -4193,6 +4193,7 @@ pub async fn get_models_config(state: State<'_, TiangongApp>) -> Result<ModelsCo
 #[tauri::command]
 pub async fn set_models_config(
     config: ModelsConfigView,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let current = state
@@ -4207,6 +4208,8 @@ pub async fn set_models_config(
         })
         .await?;
     state.sync_core_config_from_state().await?;
+    // 通知会话区等订阅方刷新模型列表（设置页保存后立即可选）。
+    let _ = app.emit("models_config_changed", &());
     Ok(())
 }
 
@@ -4288,6 +4291,38 @@ pub async fn fetch_provider_models(
         context_window: None,
     };
     SingleProviderClient::list_models_async(&endpoint)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 拉取供应商模型目录并保留服务端元信息（如 ChatGPT 返回的上下文窗口）。
+///
+/// 供前端自动注册模型使用；其他协议的 `context_window` 为空。
+#[tauri::command]
+pub async fn fetch_provider_model_infos(
+    base_url: String,
+    api_key: String,
+    timeout_ms: Option<u64>,
+    protocol: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+) -> Result<Vec<tiangong_llm::ProviderModelInfo>, String> {
+    use tiangong_llm::models_config::ModelsConfig;
+    use tiangong_llm::{ModelEndpoint, ProviderProtocol, SingleProviderClient};
+
+    let endpoint = ModelEndpoint {
+        headers: headers.unwrap_or_default(),
+        base_url,
+        api_key: ModelsConfig::resolve_api_key(&api_key),
+        model: String::new(),
+        protocol: protocol
+            .as_deref()
+            .and_then(|value| value.parse::<ProviderProtocol>().ok())
+            .unwrap_or_default(),
+        timeout_ms: timeout_ms.unwrap_or(60_000),
+        options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
+    };
+    SingleProviderClient::list_model_infos_async(&endpoint)
         .await
         .map_err(|e| e.to_string())
 }
@@ -5350,4 +5385,81 @@ pub struct PluginContributionEntry {
     pub icon: String,
     pub group: String,
     pub has_view: bool,
+}
+
+// ---------------------------------------------------------------------------
+// ChatGPT（Codex）账号登录
+// ---------------------------------------------------------------------------
+
+/// 查询 ChatGPT 账号登录状态（不含令牌）。
+#[tauri::command]
+pub async fn codex_auth_status() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    Ok(tiangong_llm::providers::codex::status().await)
+}
+
+/// 发起 ChatGPT 账号登录并在系统浏览器打开授权页。
+///
+/// `method`：`browser`（默认，本地回调）或 `device`（设备码）。返回授权地址与
+/// 设备验证码，前端随后调用 [`codex_auth_wait`] 等待完成。
+#[tauri::command]
+pub async fn codex_auth_start(
+    app: AppHandle,
+    method: Option<String>,
+) -> Result<tiangong_llm::providers::codex::CodexLoginStart, String> {
+    let start = match method.as_deref().unwrap_or("browser") {
+        "device" => tiangong_llm::providers::codex::start_device_login().await,
+        _ => tiangong_llm::providers::codex::start_browser_login().await,
+    }
+    .map_err(|err| format!("{err:#}"))?;
+    #[allow(deprecated)]
+    {
+        use tauri_plugin_shell::ShellExt;
+        if let Err(err) = app.shell().open(start.url.clone(), None) {
+            // 打不开浏览器时仍返回地址，由前端提示用户手动打开。
+            warn!(error = %err, "打开 ChatGPT 授权页失败");
+        }
+    }
+    Ok(start)
+}
+
+/// 等待进行中的 ChatGPT 账号登录完成。
+#[tauri::command]
+pub async fn codex_auth_wait() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String> {
+    tiangong_llm::providers::codex::wait_login()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+/// 取消进行中的 ChatGPT 账号登录。
+#[tauri::command]
+pub async fn codex_auth_cancel() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    tiangong_llm::providers::codex::cancel_login().await;
+    Ok(tiangong_llm::providers::codex::status().await)
+}
+
+/// 退出 ChatGPT 账号登录并删除本地凭据。
+#[tauri::command]
+pub async fn codex_auth_logout() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    tiangong_llm::providers::codex::logout()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+/// 手动刷新 ChatGPT 登录令牌（工具侧令牌过期时由用户在模型管理中触发）。
+#[tauri::command]
+pub async fn codex_auth_refresh() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    tiangong_llm::providers::codex::refresh_now()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+/// 查询 ChatGPT 账号的用量额度（模型管理中展示）。
+#[tauri::command]
+pub async fn codex_auth_usage() -> Result<tiangong_llm::providers::codex::CodexUsage, String> {
+    tiangong_llm::providers::codex::usage()
+        .await
+        .map_err(|err| err.to_string())
 }

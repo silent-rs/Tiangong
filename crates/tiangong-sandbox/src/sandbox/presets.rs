@@ -38,6 +38,7 @@ pub fn apply_tiangong(policy: &mut SandboxPolicy, storage_root: &Path) {
             "trust.db",
             "mcp.json",
             "models.json",
+            "auth",
             "server.json",
             "app.json",
             "sandbox",
@@ -72,6 +73,8 @@ mod tests {
         assert!(policy.denied_read_paths.is_empty());
         apply_tiangong(&mut policy, root.path());
         assert!(policy.denied_read_paths.contains(&root.path().join("keys")));
+        // 账号登录凭据（如 ChatGPT OAuth 令牌）默认禁读。
+        assert!(policy.denied_read_paths.contains(&root.path().join("auth")));
         assert!(
             policy
                 .denied_read_paths

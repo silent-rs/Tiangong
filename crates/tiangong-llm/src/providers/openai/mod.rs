@@ -6,9 +6,12 @@
 mod client;
 mod config;
 mod error;
-mod mapping;
+pub(crate) mod mapping;
 mod provider;
 mod stream;
 
+pub(crate) use client::{ResponsesClient, ResponsesStreamResponse};
 pub use config::OpenAiResponsesConfig;
+pub(crate) use config::RetryNotifier;
 pub use provider::OpenAiResponsesProvider;
+pub(crate) use provider::map_responses_stream;

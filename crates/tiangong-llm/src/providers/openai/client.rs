@@ -11,7 +11,7 @@ use super::config::OpenAiResponsesConfig;
 use super::error::{is_retryable_responses_error, map_responses_error};
 use super::mapping::normalize_api_base;
 
-type ResponsesByotStream =
+pub(crate) type ResponsesByotStream =
     std::pin::Pin<Box<dyn Stream<Item = Result<Value, async_openai::error::OpenAIError>> + Send>>;
 
 /// 流式请求的响应形态：正常 SSE 流，或服务端忽略 stream 参数返回的一次性 JSON。

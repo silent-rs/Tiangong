@@ -183,6 +183,7 @@ eventsource-stream = "0.2"
 fastembed = { version = "7.1", default-features = false }
 futures-util = "0.3"
 fs2 = "0.4"
+getrandom = "0.3"
 hex = "0.4"
 hmac = "0.13"
 http = "1"

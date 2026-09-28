@@ -1,7 +1,7 @@
 //! Generate-Image-OpenAI 插件私有业务协议。
 //!
-//! 通过 OpenAI Responses API 的 image_generation 工具生成图片。
-//! 支持两种模型来源：全局模型配置（models.json）或手动输入端点。
+//! 通过 OpenAI Responses API 的 image_generation 工具（或 Chat Completions 兼容生图）生成图片。
+//! 支持三种模型来源：全局模型配置（models.json）、ChatGPT 账号（Codex 登录）或手动输入端点。
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,8 @@ pub enum ModelSource {
     Global,
     /// 手动输入端点。
     Manual,
+    /// ChatGPT 账号（Codex 登录）：鉴权来自天工登录态，无需 API Key。
+    Chatgpt,
 }
 
 impl ModelSource {
@@ -75,8 +77,22 @@ impl ModelSource {
         match self {
             Self::Global => "global",
             Self::Manual => "manual",
+            Self::Chatgpt => "chatgpt",
         }
     }
+}
+
+/// 生图请求协议。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageApiProtocol {
+    /// OpenAI Responses API（`POST /responses` + `image_generation` 工具）。
+    #[default]
+    Responses,
+    /// Chat Completions 兼容接口（`POST /chat/completions`，从回复中提取图片）。
+    ChatCompletions,
+    /// ChatGPT 账号（Codex 后端，Responses 流式 + OAuth 鉴权）。
+    Codex,
 }
 
 /// 手动输入的端点信息。
@@ -88,6 +104,9 @@ pub struct ManualEndpoint {
     pub api_key: String,
     /// 主模型 id（支持 image_generation 工具的模型），如 `gpt-5.3-codex`。
     pub model: String,
+    /// 请求协议：Responses（默认）或 Chat Completions。
+    #[serde(default)]
+    pub protocol: ImageApiProtocol,
 }
 
 /// 已解析的模型端点（保存配置时从 models.json 解析并缓存，运行时不再依赖 models.json）。
@@ -99,6 +118,9 @@ pub struct ResolvedEndpoint {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// 请求协议（旧配置缺省为 Responses）。
+    #[serde(default)]
+    pub protocol: ImageApiProtocol,
 }
 
 impl From<&ManualEndpoint> for ResolvedEndpoint {
@@ -107,6 +129,7 @@ impl From<&ManualEndpoint> for ResolvedEndpoint {
             base_url: endpoint.base_url.clone(),
             api_key: endpoint.api_key.clone(),
             model: endpoint.model.clone(),
+            protocol: endpoint.protocol,
         }
     }
 }
@@ -120,6 +143,9 @@ pub struct ImageGenConfig {
     /// 选择全局模型时对应的 models.json key。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_model_key: Option<String>,
+    /// 选择 ChatGPT 账号时使用的模型 id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_model: Option<String>,
     /// 手动输入端点。
     #[serde(default)]
     pub manual_endpoint: ManualEndpoint,
@@ -136,6 +162,7 @@ impl Default for ImageGenConfig {
         Self {
             source: ModelSource::Global,
             global_model_key: None,
+            chatgpt_model: None,
             manual_endpoint: ManualEndpoint::default(),
             resolved: ResolvedEndpoint::default(),
             extra_prompt: None,
@@ -150,6 +177,8 @@ pub struct ConfigSelection {
     pub source: ModelSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_model_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_model: Option<String>,
     #[serde(default)]
     pub manual_endpoint: ManualEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,6 +190,7 @@ impl From<&ImageGenConfig> for ConfigSelection {
         Self {
             source: config.source.clone(),
             global_model_key: config.global_model_key.clone(),
+            chatgpt_model: config.chatgpt_model.clone(),
             manual_endpoint: config.manual_endpoint.clone(),
             extra_prompt: config.extra_prompt.clone(),
         }
@@ -174,8 +204,20 @@ pub struct ModelInfo {
     pub key: String,
     pub provider: String,
     pub model: String,
-    /// 是否已完成配置（provider 存在且 api_key 非空）。
+    /// 是否已完成配置（provider 存在且凭据可用）。
     pub configured: bool,
+}
+
+/// ChatGPT 账号状态（设置页展示用，不含令牌）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatgptAccountInfo {
+    /// 天工是否已登录 ChatGPT 账号。
+    pub logged_in: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// models.json 中 ChatGPT 供应商下已注册的模型 id（供下拉选择）。
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 /// 设置页加载时一次性返回当前配置 + 可选模型列表。
@@ -185,6 +227,9 @@ pub struct ConfigBootstrap {
     pub config: ImageGenConfig,
     /// 全局 chat 能力模型列表（脱敏）。
     pub models: Vec<ModelInfo>,
+    /// ChatGPT 账号状态。
+    #[serde(default)]
+    pub chatgpt: ChatgptAccountInfo,
 }
 
 /// 生成请求。

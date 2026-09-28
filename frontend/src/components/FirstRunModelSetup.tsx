@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { ModelEntryView, ModelsConfigView, ProviderConfigView } from '@/api/tauri';
+import { CODEX_PROVIDER_CONFIG, CODEX_PROVIDER_NAME, CodexAuthPanel } from './CodexAuthPanel';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -25,6 +26,7 @@ import {
 const PRESET_PROVIDERS: Record<string, ProviderConfigView> = {
   DeepSeek: { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'deepseek' },
   智谱: { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai_chatcompletions' },
+  [CODEX_PROVIDER_NAME]: { ...CODEX_PROVIDER_CONFIG },
 };
 
 const PROTOCOL_DEFAULT_URLS: Record<string, string> = {
@@ -35,6 +37,13 @@ const PROTOCOL_DEFAULT_URLS: Record<string, string> = {
 
 /** 连接信息固定的预设供应商：Base URL 与协议不可修改。 */
 const LOCKED_PRESET_PROVIDERS = new Set(['DeepSeek']);
+/** ChatGPT 的 API Key 接入方式（OpenAI Responses，Base URL 可改为中转地址）。 */
+const CHATGPT_API_KEY_CONFIG: ProviderConfigView = {
+  base_url: PROTOCOL_DEFAULT_URLS.openai,
+  api_key: '',
+  timeout_ms: CODEX_PROVIDER_CONFIG.timeout_ms,
+  protocol: 'openai',
+};
 
 const PROTOCOL_OPTIONS = [
   { value: 'openai', label: 'OpenAI Responses' },
@@ -61,9 +70,12 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
   const [customName, setCustomName] = useState('');
   const [draft, setDraft] = useState<ProviderConfigView>({ ...PRESET_PROVIDERS.DeepSeek });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  // ChatGPT 模型目录声明的上下文窗口（模型 id → token 数），保存时优先使用。
+  const [modelWindows, setModelWindows] = useState<Record<string, number>>({});
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelName, setModelName] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
+  const [codexLoggedIn, setCodexLoggedIn] = useState(false);
   // 表单内联错误提示：不依赖全局 Toast Provider，首次运行场景自包含。
   const [error, setError] = useState<{ title: string; detail?: string } | null>(null);
   // 模型列表请求代号：切换供应商或重新打开弹窗时递增，旧请求返回后直接丢弃，
@@ -80,6 +92,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setCustomName('');
     setDraft({ ...PRESET_PROVIDERS.DeepSeek });
     setAvailableModels([]);
+    setModelWindows({});
     setFetchingModels(false);
     setModelName('');
     setShowApiKey(false);
@@ -95,9 +108,20 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setCustomName('');
     setDraft({ ...(PRESET_PROVIDERS[key] ?? PRESET_PROVIDERS.DeepSeek) });
     setAvailableModels([]);
+    setModelWindows({});
     setModelName('');
   };
 
+  // ChatGPT 预设：在账号登录（OAuth）与 API Key 两种接入方式间切换，并清空已拉取的模型。
+  const selectChatgptMode = (mode: 'oauth' | 'api_key') => {
+    setError(null);
+    fetchSeqRef.current += 1;
+    setFetchingModels(false);
+    setDraft(mode === 'oauth' ? { ...CODEX_PROVIDER_CONFIG } : { ...CHATGPT_API_KEY_CONFIG });
+    setAvailableModels([]);
+    setModelWindows({});
+    setModelName('');
+  };
   const selectCustom = () => {
     setError(null);
     fetchSeqRef.current += 1;
@@ -106,11 +130,14 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setProviderKey('');
     setDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_chatcompletions' });
     setAvailableModels([]);
+    setModelWindows({});
     setModelName('');
   };
 
   // 锁定供应商（如 DeepSeek）：Base URL 与协议固定为官方值。
   const urlLocked = !isCustomProvider && LOCKED_PRESET_PROVIDERS.has(providerKey);
+  // 账号登录鉴权的供应商（ChatGPT）：无需 API Key / Base URL。
+  const isOAuth = draft.protocol === 'codex';
 
   const handleProtocolChange = (protocol: string) => {
     setDraft((prev) => {
@@ -122,15 +149,23 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     });
   };
 
-  const fetchModels = async () => {
-    if (!draft.base_url.trim() || !draft.api_key.trim()) {
+  // loggedIn：登录回调中传入最新状态，避免读到尚未刷新的 codexLoggedIn。
+  const fetchModels = async (loggedIn: boolean = codexLoggedIn) => {
+    if (isOAuth && !loggedIn) {
+      setError({ title: '请先登录 ChatGPT 账号' });
+      return;
+    }
+    if (!draft.base_url.trim() || (!isOAuth && !draft.api_key.trim())) {
       setError({ title: '请先填写 Base URL 和 API Key' });
       return;
     }
     const seq = ++fetchSeqRef.current;
     setFetchingModels(true);
     try {
-      const models = await api.fetchProviderModels(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol);
+      const infos = isOAuth
+        ? await api.fetchProviderModelInfos(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol)
+        : (await api.fetchProviderModels(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol)).map((id) => ({ id, context_window: undefined as number | null | undefined }));
+      const models = infos.map((info) => info.id);
       // 请求期间已切换供应商或重开弹窗：结果已过期，丢弃且不改状态。
       if (seq !== fetchSeqRef.current) return;
       if (models.length === 0) {
@@ -141,10 +176,14 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
         setModelName((prev) => (prev.trim() !== '' && !models.includes(prev.trim()) ? '' : prev));
       }
       setAvailableModels(models);
+      setModelWindows(Object.fromEntries(
+        infos.filter((info) => (info.context_window ?? 0) > 0).map((info) => [info.id, info.context_window as number]),
+      ));
     } catch (err) {
       if (seq !== fetchSeqRef.current) return;
       setError({ title: '无法获取模型列表', detail: String(err) });
       setAvailableModels([]);
+      setModelWindows({});
     } finally {
       if (seq === fetchSeqRef.current) setFetchingModels(false);
     }
@@ -160,7 +199,11 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
       setError({ title: '请填写服务商接口地址（Base URL）' });
       return;
     }
-    if (!draft.api_key.trim()) {
+    if (isOAuth && !codexLoggedIn) {
+      setError({ title: '请先登录 ChatGPT 账号' });
+      return;
+    }
+    if (!isOAuth && !draft.api_key.trim()) {
       setError({ title: '请填写 API Key' });
       return;
     }
@@ -179,12 +222,19 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
       };
       let key = modelName.trim();
       if (cfg.models[key]) key = `${name}-${key}`;
-      const entry: ModelEntryView = { provider: name, model: modelName.trim(), capabilities: ['chat'], options: {} };
-      // 补全上下文窗口默认值；失败不阻塞保存。
-      try {
-        const ctx = await api.resolveModelContextWindow(modelName.trim());
-        if (ctx > 0) entry.context_window = ctx;
-      } catch { /* ignore */ }
+      // ChatGPT（Codex）全系原生支持图片理解：同时注册多模态能力。
+      const capabilities = isOAuth ? ['chat', 'multimodal'] : ['chat'];
+      const entry: ModelEntryView = { provider: name, model: modelName.trim(), capabilities, options: {} };
+      // 上下文窗口：ChatGPT 以模型目录声明为准；否则按映射表补默认值，失败不阻塞保存。
+      const serverWindow = isOAuth ? modelWindows[modelName.trim()] : undefined;
+      if (serverWindow) {
+        entry.context_window = serverWindow;
+      } else {
+        try {
+          const ctx = await api.resolveModelContextWindow(modelName.trim());
+          if (ctx > 0) entry.context_window = ctx;
+        } catch { /* ignore */ }
+      }
       cfg.models = { ...cfg.models, [key]: { ...entry } };
       // 自动配置主对话路由。
       cfg.routing = { ...cfg.routing, chat: { ...entry } };
@@ -254,6 +304,43 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
             </div>
           )}
 
+          {!isCustomProvider && providerKey === CODEX_PROVIDER_NAME && (
+            <div>
+              <Label className="text-xs">接入方式</Label>
+              <div className="flex gap-1.5 mt-1">
+                {([
+                  ['oauth', 'ChatGPT 账号登录'],
+                  ['api_key', 'OpenAI API Key'],
+                ] as const).map(([mode, label]) => {
+                  const active = (mode === 'oauth') === isOAuth;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                        active
+                          ? 'bg-primary/20 text-primary border-primary/40'
+                          : 'bg-secondary text-muted-foreground border-border hover:text-foreground'
+                      }`}
+                      onClick={() => selectChatgptMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {isOAuth ? (
+            <CodexAuthPanel
+              onStatusChange={(status) => {
+                setCodexLoggedIn(status.logged_in);
+                if (status.logged_in) void fetchModels(true);
+              }}
+            />
+          ) : (
+          <>
           <div>
             <Label className="text-xs">Base URL</Label>
             <Input
@@ -304,11 +391,13 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
               </Select>
             )}
           </div>
+          </>
+          )}
 
           <div>
             <div className="flex items-center justify-between">
               <Label className="text-xs">模型</Label>
-              <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={fetchModels} disabled={fetchingModels}>
+              <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={() => fetchModels()} disabled={fetchingModels}>
                 {fetchingModels
                   ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />获取中...</>
                   : <><RefreshCw className="w-3 h-3 mr-1" />获取模型列表</>}
@@ -326,7 +415,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
                 value={modelName}
                 onChange={(e) => setModelName(e.target.value)}
                 className="text-sm h-8 mt-1"
-                placeholder="例如 deepseek-chat、glm-4.6"
+                placeholder={isOAuth ? '例如 gpt-5.5' : '例如 deepseek-chat、glm-4.6'}
               />
             )}
           </div>

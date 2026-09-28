@@ -16,6 +16,9 @@ pub enum ProviderProtocol {
     OpenAiChatCompletions,
     Anthropic,
     DeepSeek,
+    /// ChatGPT 账号（Codex 登录）鉴权的 Responses 后端：凭据来自 OAuth 登录，
+    /// 不使用 provider 配置里的 api_key。
+    Codex,
 }
 
 impl Serialize for ProviderProtocol {
@@ -38,7 +41,13 @@ impl ProviderProtocol {
             ProviderProtocol::OpenAiChatCompletions => "openai_chatcompletions",
             ProviderProtocol::Anthropic => "anthropic",
             ProviderProtocol::DeepSeek => "deepseek",
+            ProviderProtocol::Codex => "codex",
         }
+    }
+
+    /// 是否通过 OAuth 登录态鉴权（无需配置 api_key）。
+    pub fn uses_oauth(&self) -> bool {
+        matches!(self, ProviderProtocol::Codex)
     }
 }
 
@@ -61,16 +70,23 @@ impl FromStr for ProviderProtocol {
             }
             "anthropic" => Ok(ProviderProtocol::Anthropic),
             "deepseek" | "deep_seek" => Ok(ProviderProtocol::DeepSeek),
+            "codex" | "chatgpt" | "chatgpt_codex" | "openai_codex" => Ok(ProviderProtocol::Codex),
             other => Err(anyhow!("不支持的 provider 协议：{other}")),
         }
     }
 }
 
 /// Provider 暴露的模型信息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 可选元信息（如 `context_window`）由各协议按需填写，其余用 `..Default::default()` 补齐，
+/// 新增字段时无需改动未使用该字段的 provider。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderModelInfo {
     pub id: String,
     pub display_name: Option<String>,
+    /// 服务端声明的上下文窗口（token 数）；未提供时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 #[cfg(test)]
