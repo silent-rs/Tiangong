@@ -10,6 +10,7 @@
 pub(crate) mod catalog;
 pub(crate) mod download;
 pub(crate) mod provider;
+pub(crate) mod runtime;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -96,6 +97,22 @@ async fn prepare(
     spec: &'static LocalModelSpec,
     cancel: &download::CancelToken,
 ) -> Result<std::path::PathBuf> {
+    if !runtime::platform_supported() {
+        let message = format!(
+            "当前平台（{}-{}）不支持内置本地模型，请改用在线端点",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        set_state(spec, RuntimeState::Failed(message.clone()));
+        anyhow::bail!(message);
+    }
+    // Linux 需要先就绪 ONNX Runtime 动态库（其他平台为空操作）。
+    if let Err(error) = runtime::ensure_loaded(cancel).await {
+        if !is_transient(&error) {
+            set_state(spec, RuntimeState::Failed(format!("{error:#}")));
+        }
+        return Err(error);
+    }
     let root = download::models_dir();
     if !download::is_installed(&root, spec) {
         set_state(spec, RuntimeState::Downloading);
@@ -222,6 +239,7 @@ fn status_of(root: &Path, tier: MemoryLocalTier, spec: &LocalModelSpec) -> Local
         download::partial_bytes(root, spec)
     };
     let (state, error) = match runtime_state(spec) {
+        _ if !runtime::platform_supported() => ("unsupported", None),
         Some(RuntimeState::Ready) => ("ready", None),
         Some(RuntimeState::Loading) => ("loading", None),
         Some(RuntimeState::Failed(message)) => ("failed", Some(message)),

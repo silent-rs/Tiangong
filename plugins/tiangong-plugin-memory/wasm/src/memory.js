@@ -1054,6 +1054,8 @@
       }
       case 'failed':
         return { text: `${name} · ${model.error || '不可用'}`, warning: true };
+      case 'unsupported':
+        return { text: `${name} · 当前平台不支持内置模型，请改用在线端点`, warning: true };
       default:
         return { text: `${name} · 保存后自动下载约 ${size}`, warning: false };
     }
@@ -1163,7 +1165,7 @@
       if (state.config[kind]?.source !== 'builtin') return false;
       const model = (state.localModels || []).find((item) => item.tier === tier && item.kind === kind);
       // ready/failed 是终态；interrupted 表示当前无人下载，等用户保存后再动。
-      return !model || !['ready', 'failed', 'interrupted'].includes(model.state);
+      return !model || !['ready', 'failed', 'interrupted', 'unsupported'].includes(model.state);
     });
     if (!pending) return;
     localModelPollTimer = window.setTimeout(async () => {

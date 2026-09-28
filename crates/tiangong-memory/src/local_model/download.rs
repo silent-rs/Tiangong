@@ -313,6 +313,33 @@ async fn download_file(
     retry_base: Duration,
     cancel: &CancelToken,
 ) -> Result<()> {
+    fetch_verified(
+        client,
+        sources,
+        spec.id,
+        file,
+        partial,
+        retry_base,
+        cancel,
+        |source| file_url(source, spec, file),
+    )
+    .await
+}
+
+/// 从多个来源下载单个文件到 `partial/<local_name>`：断点续传、换源、sha256 校验。
+///
+/// `url_for` 把下载源映射为具体地址；模型与运行库的路径布局不同，其余流程共用。
+#[allow(clippy::too_many_arguments)]
+async fn fetch_verified(
+    client: &reqwest::Client,
+    sources: &[String],
+    label: &str,
+    file: &ModelFile,
+    partial: &Path,
+    retry_base: Duration,
+    cancel: &CancelToken,
+    url_for: impl Fn(&str) -> String,
+) -> Result<()> {
     let target = partial.join(file.local_name());
     if std::fs::metadata(&target)
         .map(|meta| meta.len() == file.size)
@@ -328,7 +355,7 @@ async fn download_file(
             if cancel.is_cancelled() {
                 bail!("下载已取消");
             }
-            let url = file_url(source, spec, file);
+            let url = url_for(source);
             match fetch_resume(client, &url, &part, file.size).await {
                 Ok(()) => {
                     let actual = sha256_file(&part)?;
@@ -348,7 +375,7 @@ async fn download_file(
                 }
                 Err(error) => {
                     tracing::debug!(
-                        model = spec.id,
+                        model = label,
                         file = file.path,
                         source = %source,
                         round,
@@ -363,7 +390,115 @@ async fn download_file(
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("没有可用的下载源")))
-        .with_context(|| format!("下载 {} 的 {} 失败", spec.id, file.path))
+        .with_context(|| format!("下载 {label} 的 {} 失败", file.path))
+}
+
+/// 运行库只托管在天工 OSS（及自定义镜像）上：ModelScope / HuggingFace 按模型
+/// 仓库布局寻址，没有这些文件，跳过以免无效请求。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn runtime_sources() -> Vec<String> {
+    sources()
+        .into_iter()
+        .filter(|source| !source.contains("{repo}") && !is_model_hub(source))
+        .collect()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_model_hub(source: &str) -> bool {
+    source.contains("huggingface.co") || source.contains("hf-mirror.com")
+}
+
+/// 确保当前平台的 ONNX Runtime 动态库已下载，返回库文件绝对路径。
+///
+/// 目录：`<root>/onnxruntime/<version>/<platform>/`，与模型共用下载锁与校验流程。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) async fn ensure_runtime_library(
+    root: &Path,
+    library: &super::runtime::RuntimeLibrary,
+    cancel: &CancelToken,
+) -> std::result::Result<PathBuf, DownloadError> {
+    ensure_runtime_library_from(
+        root,
+        library,
+        &runtime_sources(),
+        Duration::from_secs(1),
+        cancel,
+    )
+    .await
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+async fn ensure_runtime_library_from(
+    root: &Path,
+    library: &super::runtime::RuntimeLibrary,
+    sources: &[String],
+    retry_base: Duration,
+    cancel: &CancelToken,
+) -> std::result::Result<PathBuf, DownloadError> {
+    let dir = super::runtime::library_dir(root, library);
+    let target = dir.join(library.file.local_name());
+    let installed = |target: &Path| {
+        std::fs::metadata(target)
+            .map(|meta| meta.len() == library.file.size)
+            .unwrap_or(false)
+    };
+    if installed(&target) {
+        return Ok(target);
+    }
+    if cancel.is_cancelled() {
+        return Err(DownloadError::Cancelled);
+    }
+    let Some(_lock) = DownloadLock::acquire(root).map_err(DownloadError::Failed)? else {
+        return Err(DownloadError::Busy);
+    };
+    if installed(&target) {
+        return Ok(target);
+    }
+    let result = async {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("创建运行库目录失败: {}", dir.display()))?;
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .with_context(|| "创建运行库下载客户端失败")?;
+        let url_path = super::runtime::library_url_path(library);
+        // fetch_verified 仅在 sha256 一致后才把 .part 改名为目标文件，
+        // 因此目标文件存在即代表已校验。
+        fetch_verified(
+            &client,
+            sources,
+            "onnxruntime",
+            &library.file,
+            &dir,
+            retry_base,
+            cancel,
+            |source| format!("{source}/{url_path}"),
+        )
+        .await?;
+        tracing::info!(path = %target.display(), "Memory ONNX Runtime 运行库下载完成");
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(target),
+        Err(_) if cancel.is_cancelled() => Err(DownloadError::Cancelled),
+        Err(error) => Err(DownloadError::Failed(error)),
+    }
+}
+
+/// 运行库已下载的字节数（含 `.part`），供页面展示进度。
+#[cfg(test)]
+pub(crate) fn runtime_partial_bytes(root: &Path, library: &super::runtime::RuntimeLibrary) -> u64 {
+    let dir = super::runtime::library_dir(root, library);
+    let name = library.file.local_name();
+    let done = std::fs::metadata(dir.join(name))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let part = std::fs::metadata(dir.join(format!("{name}.part")))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    done.max(part).min(library.file.size)
 }
 
 /// 从 `part` 当前长度续传到 `expected` 字节。
@@ -624,6 +759,92 @@ mod tests {
         assert!(format!("{error:#}").contains("校验失败"), "{error:#}");
         assert!(!root.path().join("model_quantized.onnx").exists());
         assert!(!is_installed(root.path(), &spec));
+    }
+
+    #[tokio::test]
+    async fn runtime_library_downloads_and_verifies() {
+        let bytes = b"fake-onnxruntime-shared-object".repeat(1000);
+        let digest = sha(&bytes);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let served = bytes.clone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let ok = request
+                    .starts_with("GET /onnxruntime/1.24.1/linux-test/libonnxruntime.so.1.24.1 ");
+                let response = if ok {
+                    let mut head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        served.len()
+                    )
+                    .into_bytes();
+                    head.extend_from_slice(&served);
+                    head
+                } else {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec()
+                };
+                let _ = std::io::Write::write_all(&mut stream, &response);
+            }
+        });
+        let library = super::super::runtime::RuntimeLibrary {
+            platform: "linux-test",
+            file: ModelFile {
+                path: "libonnxruntime.so.1.24.1",
+                size: bytes.len() as u64,
+                sha256: leak(digest),
+            },
+        };
+        let root = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::default();
+        let path = ensure_runtime_library_from(
+            root.path(),
+            &library,
+            std::slice::from_ref(&base),
+            FAST_RETRY,
+            &cancel,
+        )
+        .await
+        .expect("运行库下载应成功");
+        assert_eq!(
+            path,
+            root.path()
+                .join("onnxruntime/1.24.1/linux-test/libonnxruntime.so.1.24.1")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            runtime_partial_bytes(root.path(), &library),
+            library.file.size
+        );
+
+        // 已存在时不再请求。
+        let before = hits.load(Ordering::SeqCst);
+        ensure_runtime_library_from(root.path(), &library, &[base], FAST_RETRY, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn runtime_sources_skip_model_hubs() {
+        unsafe { std::env::set_var(MODEL_MIRROR_ENV, "https://mirror.example") };
+        let list = runtime_sources();
+        unsafe { std::env::remove_var(MODEL_MIRROR_ENV) };
+        assert_eq!(
+            list,
+            [
+                "https://mirror.example",
+                "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/memory-models",
+            ]
+        );
     }
 
     #[test]
