@@ -239,8 +239,6 @@ pub struct ModelsConfigView {
 
 impl ModelsConfigView {
     pub fn from_core(config: &tiangong_llm::models_config::ModelsConfig) -> Self {
-        use tiangong_llm::models_config::RoutingSlot;
-
         let providers = config
             .providers
             .iter()
@@ -283,7 +281,6 @@ impl ModelsConfigView {
         let routing = config
             .routing
             .iter()
-            .filter(|(k, _)| !matches!(k, RoutingSlot::Embedding | RoutingSlot::Rerank))
             .map(|(k, v)| {
                 let key = serde_json::to_value(k).unwrap_or_default();
                 (
@@ -364,9 +361,6 @@ impl ModelsConfigView {
             .filter_map(|(k, v)| {
                 let json_str = format!("\"{}\"", k);
                 let slot: RoutingSlot = serde_json::from_str(&json_str).ok()?;
-                if matches!(slot, RoutingSlot::Embedding | RoutingSlot::Rerank) {
-                    return None;
-                }
                 let capabilities: Vec<ModelCapability> = v
                     .capabilities
                     .iter()

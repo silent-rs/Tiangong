@@ -16,9 +16,11 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{DistanceType, Table, connect};
 
 use crate::search::vector::VectorIndex;
+use crate::search::vector_meta::{
+    LEGACY_TABLE_NAME, LEGACY_UNKNOWN_MODEL, VectorIdentity, VectorIndexMeta, VectorTableMeta,
+    meta_path,
+};
 use crate::types::{MemoryKind, RecallHit, VectorPoint};
-
-const TABLE_NAME: &str = "memory_vectors";
 
 pub(crate) struct LanceDbIndex {
     table: Table,
@@ -26,8 +28,28 @@ pub(crate) struct LanceDbIndex {
     schema: SchemaRef,
 }
 
+/// 打开后的索引状态。
+#[derive(Debug, Clone)]
+pub(crate) struct VectorTableState {
+    pub(crate) fingerprint: String,
+    /// 回填已完成，可用于语义召回。
+    pub(crate) complete: bool,
+    /// 回填续传游标。
+    pub(crate) cursor: Option<String>,
+    pub(crate) meta_path: std::path::PathBuf,
+}
+
 impl LanceDbIndex {
-    pub(crate) async fn open(base_dir: &Path, dimension: usize) -> Result<Self> {
+    /// 按模型身份打开（或创建）对应的向量表。
+    ///
+    /// - 旧版无元数据的 `memory_vectors` 表：维度与当前模型一致时直接接管为当前指纹
+    ///   （不重算）；不一致时登记为未知模型的上一代表保留。
+    /// - 新指纹：建表并标记未完成，由调用方后台回填。
+    /// - 只保留当前与上一代两张表，更早的表被删除。
+    pub(crate) async fn open(
+        base_dir: &Path,
+        identity: &VectorIdentity,
+    ) -> Result<(Self, VectorTableState)> {
         let lancedb_path = base_dir.join("lancedb");
         std::fs::create_dir_all(&lancedb_path)
             .with_context(|| format!("创建 LanceDB 目录失败: {}", lancedb_path.display()))?;
@@ -47,7 +69,14 @@ impl LanceDbIndex {
             .await
             .with_context(|| "连接 LanceDB 失败")?;
 
+        let dimension = identity.dimension;
         let schema = build_schema(dimension);
+        let fingerprint = identity.fingerprint();
+        let meta_file = meta_path(&lancedb_path);
+        let mut meta = VectorIndexMeta::load(&meta_file).unwrap_or_else(|err| {
+            tracing::warn!("Memory 向量索引元数据损坏，按空元数据重建: {err}");
+            VectorIndexMeta::default()
+        });
 
         let table_names = db
             .table_names()
@@ -55,23 +84,89 @@ impl LanceDbIndex {
             .await
             .with_context(|| "获取 LanceDB 表列表失败")?;
 
-        let table = if table_names.iter().any(|n| n == TABLE_NAME) {
-            db.open_table(TABLE_NAME)
+        // 旧版单表（无元数据）无法确认生成它的模型：维度相同也可能来自不同
+        // 模型，语义空间不通用，直接当成当前模型的索引会让查询向量与存量向量
+        // 不匹配，且不会再触发回填。因此一律登记为来源未知的上一代，当前指纹
+        // 另建新表并回填；旧表保留（不删），回填完成前语义召回降级。
+        let legacy_registered = meta
+            .tables
+            .values()
+            .any(|entry| entry.table == LEGACY_TABLE_NAME);
+        if !legacy_registered && table_names.iter().any(|name| name == LEGACY_TABLE_NAME) {
+            let legacy = db
+                .open_table(LEGACY_TABLE_NAME)
                 .execute()
                 .await
-                .with_context(|| "打开 LanceDB 表失败")?
+                .with_context(|| "打开旧版 LanceDB 表失败")?;
+            let legacy_dimension = vector_dimension(&legacy).await;
+            let legacy_identity =
+                VectorIdentity::new(LEGACY_UNKNOWN_MODEL, legacy_dimension.unwrap_or(0));
+            tracing::info!(
+                legacy_dimension = ?legacy_dimension,
+                dimension,
+                fingerprint = %fingerprint,
+                "Memory 发现旧版向量表但无法确认来源模型，保留为上一代并为当前模型新建索引"
+            );
+            meta.tables
+                .entry(legacy_identity.fingerprint())
+                .or_insert_with(|| {
+                    VectorTableMeta::new(LEGACY_TABLE_NAME.to_string(), &legacy_identity, true)
+                });
+            meta.activate(&legacy_identity.fingerprint());
+        }
+
+        let entry = meta
+            .tables
+            .entry(fingerprint.clone())
+            .or_insert_with(|| VectorTableMeta::new(identity.table_name(), identity, false))
+            .clone();
+
+        let table = if table_names.contains(&entry.table) {
+            db.open_table(&entry.table)
+                .execute()
+                .await
+                .with_context(|| format!("打开 LanceDB 表失败: {}", entry.table))?
         } else {
-            db.create_empty_table(TABLE_NAME, schema.clone())
+            db.create_empty_table(&entry.table, schema.clone())
                 .execute()
                 .await
-                .with_context(|| "创建 LanceDB 表失败")?
+                .with_context(|| format!("创建 LanceDB 表失败: {}", entry.table))?
         };
 
-        Ok(Self {
-            table,
-            dimension,
-            schema,
-        })
+        for stale in meta.activate(&fingerprint) {
+            match db.drop_table(&stale, &[]).await {
+                Ok(()) => {
+                    meta.mark_dropped(&stale);
+                    tracing::info!(table = %stale, "Memory 已清理过期向量表");
+                }
+                // 删除失败保留在 pending_drop 中，下次打开时继续重试。
+                Err(err) => tracing::warn!(table = %stale, "Memory 清理过期向量表失败: {err}"),
+            }
+        }
+        meta.save(&meta_file)?;
+
+        Ok((
+            Self {
+                table,
+                dimension,
+                schema,
+            },
+            VectorTableState {
+                fingerprint,
+                complete: entry.complete,
+                cursor: entry.cursor,
+                meta_path: meta_file,
+            },
+        ))
+    }
+}
+
+/// 读取表中 vector 列的维度。
+async fn vector_dimension(table: &Table) -> Option<usize> {
+    let schema = table.schema().await.ok()?;
+    match schema.field_with_name("vector").ok()?.data_type() {
+        DataType::FixedSizeList(_, size) => usize::try_from(*size).ok(),
+        _ => None,
     }
 }
 

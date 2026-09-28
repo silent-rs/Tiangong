@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use plugin_ui::{CONFIG_GET_OPERATION, CONFIG_SET_OPERATION};
+use plugin_ui::{CONFIG_GET_OPERATION, CONFIG_PROBE_OPERATION, CONFIG_SET_OPERATION};
 use protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse, MemoryIpcRequestPayload,
     MemoryIpcResponsePayload,
@@ -321,6 +321,7 @@ async fn handle_plugin_request_with_connection(
                 | TEST_OPERATION
                 | CONFIG_GET_OPERATION
                 | CONFIG_SET_OPERATION
+                | CONFIG_PROBE_OPERATION
                 | tiangong_plugin_memory_protocol::control::RECONFIGURE_OPERATION
         )
     {
@@ -469,8 +470,11 @@ async fn dispatch_plugin_request(
             let selection: plugin_ui::MemorySelection = serde_json::from_value(request.payload)
                 .with_context(|| "解析 Memory 页面配置失败")?;
             let selection: crate::MemoryConfigSelection = transcode(selection)?;
-            let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
-            let config = selection.to_memory(&models)?;
+            // 保存路径必须读到真实旧配置：回退默认值会让"密钥留空=保留原值"
+            // 语义失效，把已保存的密钥清空。读取失败时拒绝写入。
+            let previous = crate::MemoryConfig::load()
+                .with_context(|| "读取现有 Memory 配置失败，为避免覆盖已保存内容已取消保存")?;
+            let config = selection.to_memory(&previous)?;
             config.save()?;
             handle.reconfigure(config.to_options()).await?;
             serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())
@@ -494,6 +498,12 @@ async fn dispatch_plugin_request(
         }
         STATUS_OPERATION => memory_status(),
         TEST_OPERATION => memory_config_test(),
+        CONFIG_PROBE_OPERATION => {
+            let probe: plugin_ui::ProbeRequest = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory 探测请求失败")?;
+            let response = memory_config_probe(probe).await;
+            serde_json::to_value(response).with_context(|| "序列化 Memory 探测响应失败")
+        }
         operation => {
             let memory_request = decode_plugin_memory_request(operation, &request.payload)?
                 .ok_or_else(|| anyhow!("不支持的 Memory 操作: {operation}"))?;
@@ -504,12 +514,30 @@ async fn dispatch_plugin_request(
 }
 
 fn memory_ui_bootstrap() -> Result<serde_json::Value> {
+    use tiangong_llm::models_config::{ModelCapability, RoutingSlot};
+
     let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
     let config = crate::MemoryConfig::load_or_default();
-    let selection = crate::MemoryConfigSelection::from_memory(&config, &models);
-    let mut model_entries = models
+    let selection = crate::MemoryConfigSelection::from_memory(&config);
+
+    // LLM 快速选择候选：先 lite/chat 路由，再具备 chat 能力的注册模型。
+    let mut model_entries = [RoutingSlot::Lite, RoutingSlot::Chat]
+        .into_iter()
+        .filter_map(|slot| {
+            let resolved = models.resolve_slot(slot)?;
+            Some(plugin_ui::MemoryUiModel {
+                key: slot.key().to_string(),
+                provider: resolved.provider,
+                model: resolved.model,
+                capabilities: vec!["chat".to_string()],
+                kind: "route".to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut registered = models
         .models
         .iter()
+        .filter(|(_, entry)| entry.capabilities.contains(&ModelCapability::Chat))
         .map(|(key, entry)| plugin_ui::MemoryUiModel {
             key: key.clone(),
             provider: entry.provider.clone(),
@@ -519,18 +547,27 @@ fn memory_ui_bootstrap() -> Result<serde_json::Value> {
                 .iter()
                 .map(|capability| capability.key().to_string())
                 .collect(),
-            dimension: entry
-                .options
-                .get("dimension")
-                .and_then(|value| value.as_u64())
-                .and_then(|value| usize::try_from(value).ok()),
+            kind: "model".to_string(),
         })
         .collect::<Vec<_>>();
-    model_entries.sort_by(|left, right| left.key.cmp(&right.key));
+    registered.sort_by(|left, right| left.key.cmp(&right.key));
+    model_entries.extend(registered);
+
+    let default_llm = models
+        .resolve_slot(RoutingSlot::Lite)
+        .map(|resolved| format!("lite · {}", resolved.model))
+        .or_else(|| {
+            models
+                .resolve_slot(RoutingSlot::Chat)
+                .map(|resolved| format!("chat · {}", resolved.model))
+        });
+
     serde_json::to_value(plugin_ui::MemoryBootstrap {
         config: transcode(selection)?,
         models: model_entries,
+        default_llm,
         disabled: crate::is_memory_disabled(),
+        local_models: transcode(crate::local_model::local_model_statuses())?,
     })
     .with_context(|| "序列化 Memory 页面配置失败")
 }
@@ -709,56 +746,133 @@ where
 
 fn memory_status() -> Result<serde_json::Value> {
     let config = crate::MemoryConfig::load_or_default();
+    let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
+    let llm = match config.resolve_llm(&models) {
+        Ok(Some(model)) => serde_json::json!({
+            "source": llm_source_label(&config),
+            "model": model.model,
+            "base_url": model.base_url,
+            "configured": true,
+        }),
+        Ok(None) => serde_json::json!({ "source": llm_source_label(&config), "configured": false }),
+        Err(error) => serde_json::json!({
+            "source": llm_source_label(&config),
+            "configured": false,
+            "error": error.to_string(),
+        }),
+    };
     Ok(serde_json::json!({
         "disabled": crate::is_memory_disabled(),
         "vector_mode": format!("{:?}", config.vector_mode),
-        "llm": config.model.as_ref().map(|model| serde_json::json!({
-            "model": model.model,
-            "base_url": model.base_url,
-            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
-        })),
-        "embedding": config.embedding.as_ref().map(|model| serde_json::json!({
-            "model": model.model,
-            "base_url": model.base_url,
-            "dimension": model.dimension,
-            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
-        })),
-        "rerank": config.rerank.as_ref().map(|model| serde_json::json!({
-            "model": model.model,
-            "base_url": model.base_url,
-            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
-        })),
+        "local_tier": config.local_tier.key(),
+        "llm": llm,
+        "embedding": config.embedding.as_ref().map(|source| match source {
+            crate::MemoryEmbeddingSource::Builtin => builtin_status(&config, true),
+            crate::MemoryEmbeddingSource::Remote { endpoint, dimension } => serde_json::json!({
+                "source": "remote",
+                "model": endpoint.model,
+                "base_url": endpoint.base_url,
+                "dimension": dimension,
+                "configured": remote_configured(endpoint) && *dimension > 0,
+            }),
+        }),
+        "rerank": config.rerank.as_ref().map(|source| match source {
+            crate::MemoryRerankSource::Builtin => builtin_status(&config, false),
+            crate::MemoryRerankSource::Remote(endpoint) => serde_json::json!({
+                "source": "remote",
+                "model": endpoint.model,
+                "base_url": endpoint.base_url,
+                "configured": remote_configured(endpoint),
+            }),
+        }),
     }))
+}
+
+/// 内置组件状态：模型、下载/加载进度（下载状态跨进程可见）。
+fn builtin_status(config: &crate::MemoryConfig, embedding: bool) -> serde_json::Value {
+    let status = crate::local_model::local_model_status(config.local_tier, embedding);
+    serde_json::json!({
+        "source": "builtin",
+        "tier": config.local_tier.key(),
+        "model": status.model,
+        "dimension": status.dimension,
+        "state": status.state,
+        "size": status.size,
+        "downloaded": status.downloaded,
+        "error": status.error,
+        "configured": true,
+    })
+}
+
+fn llm_source_label(config: &crate::MemoryConfig) -> &'static str {
+    match &config.model {
+        Some(crate::MemoryLlmSource::Remote(_)) => "remote",
+        Some(crate::MemoryLlmSource::ModelsRef { key: Some(key) }) if !key.trim().is_empty() => {
+            "models_ref"
+        }
+        _ => "follow_lite_chat",
+    }
 }
 
 fn memory_config_test() -> Result<serde_json::Value> {
     let config = crate::MemoryConfig::load_or_default();
+    let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
     let mut issues = Vec::new();
-    match &config.model {
-        Some(model) if endpoint_configured(&model.base_url, &model.api_key, &model.model) => {
-            push_secret_issue(&mut issues, "LLM", &model.api_key);
+    match config.resolve_llm(&models) {
+        Ok(Some(_)) => {
+            if let Some(crate::MemoryLlmSource::Remote(endpoint)) = &config.model {
+                push_secret_issue(&mut issues, "LLM", &endpoint.api_key);
+            }
         }
-        Some(_) => issues.push("LLM 端点配置不完整".to_string()),
-        None => issues.push("未配置 LLM 端点".to_string()),
+        Ok(None) => issues.push("未配置 LLM（lite / chat 路由均缺失）".to_string()),
+        Err(error) => issues.push(format!("LLM 配置不可用：{error}")),
     }
-    if let Some(model) = &config.embedding {
-        if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
-            issues.push("Embedding 端点配置不完整".to_string());
-        } else {
-            push_secret_issue(&mut issues, "Embedding", &model.api_key);
+    match &config.embedding {
+        Some(crate::MemoryEmbeddingSource::Remote {
+            endpoint,
+            dimension,
+        }) => {
+            if !remote_configured(endpoint) || *dimension == 0 {
+                issues.push("Embedding 在线端点配置不完整（地址/模型/维度）".to_string());
+            } else {
+                push_secret_issue(&mut issues, "Embedding", &endpoint.api_key);
+            }
         }
+        Some(crate::MemoryEmbeddingSource::Builtin) => {
+            push_builtin_issue(&mut issues, "Embedding", &config, true);
+        }
+        None => {}
     }
-    if let Some(model) = &config.rerank {
-        if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
-            issues.push("Rerank 端点配置不完整".to_string());
-        } else {
-            push_secret_issue(&mut issues, "Rerank", &model.api_key);
+    match &config.rerank {
+        Some(crate::MemoryRerankSource::Remote(endpoint)) => {
+            if !remote_configured(endpoint) {
+                issues.push("Rerank 在线端点配置不完整（地址/模型）".to_string());
+            } else {
+                push_secret_issue(&mut issues, "Rerank", &endpoint.api_key);
+            }
         }
+        Some(crate::MemoryRerankSource::Builtin) => {
+            push_builtin_issue(&mut issues, "Rerank", &config, false);
+        }
+        None => {}
     }
     Ok(serde_json::json!({
         "ok": issues.is_empty(),
         "issues": issues,
     }))
+}
+
+/// 内置模型只有下载失败才算问题；未下载/下载中会在后台自动完成。
+fn push_builtin_issue(
+    issues: &mut Vec<String>,
+    label: &str,
+    config: &crate::MemoryConfig,
+    embedding: bool,
+) {
+    let status = crate::local_model::local_model_status(config.local_tier, embedding);
+    if let Some(error) = status.error {
+        issues.push(format!("内置 {label}（{}）不可用：{error}", status.model));
+    }
 }
 
 fn push_secret_issue(issues: &mut Vec<String>, label: &str, value: &str) {
@@ -777,8 +891,125 @@ fn push_secret_issue(issues: &mut Vec<String>, label: &str, value: &str) {
     }
 }
 
-fn endpoint_configured(base_url: &str, api_key: &str, model: &str) -> bool {
-    !base_url.trim().is_empty() && !api_key.trim().is_empty() && !model.trim().is_empty()
+fn remote_configured(endpoint: &crate::MemoryRemoteEndpoint) -> bool {
+    !endpoint.base_url.trim().is_empty() && !endpoint.model.trim().is_empty()
+}
+
+/// 真实请求在线端点：Embedding 发送一条样本并返回向量维度，Rerank 做一次两文档精排。
+async fn memory_config_probe(probe: plugin_ui::ProbeRequest) -> plugin_ui::ProbeResponse {
+    match run_config_probe(probe).await {
+        Ok(response) => response,
+        Err(error) => plugin_ui::ProbeResponse {
+            ok: false,
+            dimension: None,
+            message: error.to_string(),
+        },
+    }
+}
+
+async fn run_config_probe(probe: plugin_ui::ProbeRequest) -> Result<plugin_ui::ProbeResponse> {
+    // 同保存路径：读不到真实配置时不能用默认值当 previous，否则密钥继承语义错乱。
+    let saved = crate::MemoryConfig::load().with_context(|| "读取现有 Memory 配置失败")?;
+    let previous = match probe.component.as_str() {
+        "llm" => match &saved.model {
+            Some(crate::MemoryLlmSource::Remote(endpoint)) => Some(endpoint.clone()),
+            _ => None,
+        },
+        "embedding" => match &saved.embedding {
+            Some(crate::MemoryEmbeddingSource::Remote { endpoint, .. }) => Some(endpoint.clone()),
+            _ => None,
+        },
+        "rerank" => match &saved.rerank {
+            Some(crate::MemoryRerankSource::Remote(endpoint)) => Some(endpoint.clone()),
+            _ => None,
+        },
+        other => bail!("不支持探测的组件：{other}"),
+    };
+    let remote: crate::MemoryRemoteSelection = transcode(probe.remote)?;
+    let endpoint = remote.endpoint_for_probe(previous.as_ref())?;
+    let api_key = tiangong_llm::models_config::ModelsConfig::resolve_api_key(&endpoint.api_key);
+    let timeout = Duration::from_millis(endpoint.timeout_ms.min(30_000));
+
+    if probe.component == "llm" {
+        // 发一次极短的文本补全，确认地址、协议、密钥与模型名可用。
+        let config = tiangong_llm::LlmEndpointConfig {
+            source_provider: None,
+            base_url: endpoint.base_url.clone(),
+            api_key,
+            model: endpoint.model.clone(),
+            protocol: endpoint.protocol,
+            timeout,
+            max_retries: 0,
+        };
+        let reply = tiangong_llm::complete_text(
+            &config,
+            "You are a connectivity probe. Reply with the single word: ok",
+            "ping",
+            16,
+        )
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+        let preview = reply.trim().chars().take(24).collect::<String>();
+        return Ok(plugin_ui::ProbeResponse {
+            ok: true,
+            dimension: None,
+            message: if preview.is_empty() {
+                "连接成功".to_string()
+            } else {
+                format!("连接成功，模型回复：{preview}")
+            },
+        });
+    }
+
+    if probe.component == "embedding" {
+        // 维度未知：先用占位维度构造 provider，按实际返回向量长度确定维度。
+        let provider = tiangong_llm::OpenAiEmbeddingProvider::from_config(
+            &tiangong_llm::EmbeddingEndpointConfig {
+                base_url: endpoint.base_url.clone(),
+                api_key,
+                model: endpoint.model.clone(),
+                protocol: endpoint.protocol,
+                timeout,
+                dimension: 1,
+            },
+        )?;
+        use tiangong_llm::EmbeddingProvider;
+        let vectors = provider.embed(vec!["dimension probe".to_string()]).await?;
+        let dimension = vectors
+            .first()
+            .map(Vec::len)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow!("Embedding 接口返回空向量"))?;
+        return Ok(plugin_ui::ProbeResponse {
+            ok: true,
+            dimension: Some(dimension),
+            message: format!("连接成功，向量维度 {dimension}"),
+        });
+    }
+
+    let provider =
+        tiangong_llm::rerank_provider_from_config(&tiangong_llm::RerankEndpointConfig {
+            base_url: endpoint.base_url.clone(),
+            api_key,
+            model: endpoint.model.clone(),
+            protocol: endpoint.protocol,
+            timeout,
+        })?;
+    let response = provider
+        .rerank(tiangong_llm::RerankRequest {
+            query: "memory probe".to_string(),
+            documents: vec!["memory probe".to_string(), "unrelated".to_string()],
+            top_n: 2,
+        })
+        .await?;
+    if response.results.is_empty() {
+        bail!("Rerank 接口未返回结果");
+    }
+    Ok(plugin_ui::ProbeResponse {
+        ok: true,
+        dimension: None,
+        message: "连接成功".to_string(),
+    })
 }
 
 pub async fn handle_memory_request(
@@ -995,21 +1226,9 @@ fn persist_endpoint(path: &PathBuf, endpoint: &IpcEndpoint) -> Result<()> {
 }
 
 fn runtime_dir() -> Result<PathBuf> {
-    Ok(home_dir()
-        .ok_or_else(|| anyhow!("无法确定 HOME/USERPROFILE"))?
-        .join(".tiangong")
-        .join("memory")
-        .join("runtime"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
+    // 与 leader.json 同在存储根下：不同存储根（TIANGONG_STORAGE_ROOT）的实例
+    // 各自选举，endpoint 文件也必须随之隔离，否则会互相覆盖/误连。
+    Ok(crate::paths::memory_data_dir().join("runtime"))
 }
 
 #[cfg(test)]
@@ -1051,6 +1270,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn endpoint_follows_storage_root() {
+        let home = TempDir::new().expect("创建 fake home 失败");
+        let root = TempDir::new().expect("创建存储根失败");
+        let _env = EnvGuard::enter(home.path());
+        let previous = std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV);
+        unsafe {
+            std::env::remove_var("TIANGONG_PLUGIN_ENDPOINT");
+            std::env::set_var(
+                tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
+                root.path(),
+            );
+        }
+        let path = endpoint_path("memory").expect("endpoint 路径");
+        unsafe {
+            match previous {
+                Some(value) => {
+                    std::env::set_var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV, value)
+                }
+                None => std::env::remove_var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV),
+            }
+        }
+        // 与 leader.json 同在存储根下，不同存储根的实例互不干扰。
+        assert_eq!(path, root.path().join("memory/runtime/memory.json"));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -192,7 +192,7 @@ pub(crate) enum ModelSubcommand {
         model_id: String,
         #[arg(
             long = "capability",
-            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
+            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts（embedding/rerank 已迁至 `tiangong memory config` 配置页）"
         )]
         capability: Vec<String>,
     },
@@ -223,9 +223,7 @@ pub(crate) enum RouteSubcommand {
     List,
     #[command(about = "设置 capability 路由指向某个已注册模型")]
     Set {
-        #[arg(
-            help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
-        )]
+        #[arg(help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts")]
         capability: String,
         #[arg(help = "模型名称（本地别名）")]
         model: String,
@@ -240,13 +238,8 @@ pub(crate) struct MemoryArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MemorySubcommand {
-    #[command(about = "管理 Memory 配置")]
-    Config {
-        #[command(subcommand)]
-        command: MemoryConfigSubcommand,
-    },
-    #[command(about = "交互式配置向导（引导选择 Memory 端点模型）")]
-    Configure,
+    #[command(about = "打开 Memory 配置页（模型、检索与数据管理）；配合 --host 可远程配置")]
+    Config(MemoryConfigArgs),
     #[command(about = "启用 Memory")]
     Enable,
     #[command(about = "禁用 Memory")]
@@ -257,19 +250,17 @@ pub(crate) enum MemorySubcommand {
     Test,
 }
 
-#[derive(Debug, Subcommand)]
-pub(crate) enum MemoryConfigSubcommand {
-    #[command(about = "查看 Memory 配置")]
-    Show,
-    #[command(about = "从 models.json 引用模型填充 Memory 端点")]
-    Set {
-        #[arg(long, help = "Memory LLM 模型名（models.json 中的别名）")]
-        llm: Option<String>,
-        #[arg(long, help = "Embedding 模型名")]
-        embedding: Option<String>,
-        #[arg(long, help = "Rerank 模型名")]
-        rerank: Option<String>,
-    },
+#[derive(Debug, Args)]
+pub(crate) struct MemoryConfigArgs {
+    /// 监听地址（缺省 127.0.0.1；远程配置可设为 0.0.0.0 或本机网卡地址）
+    #[arg(long)]
+    pub(crate) host: Option<String>,
+    /// 监听端口（缺省随机）
+    #[arg(long)]
+    pub(crate) port: Option<u16>,
+    /// 不自动打开浏览器，仅打印访问地址（远程/无图形环境使用）
+    #[arg(long)]
+    pub(crate) no_open: bool,
 }
 
 /// 解析 ProviderProtocol 字符串

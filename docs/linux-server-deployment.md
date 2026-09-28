@@ -153,8 +153,9 @@ tiangong server token generate
 # 7. （可选）配置自定义 Prompt
 tiangong prompt set "总是使用简体中文回答，回复要简洁直接。"
 
-# 8. （可选）配置 Memory
-tiangong memory config set --llm deepseek-chat
+# 8. （可选）配置 Memory：打印配置页链接，经 SSH 隧道在本地浏览器打开
+#    本地执行：ssh -L 8800:127.0.0.1:8800 <服务器>
+tiangong memory config --port 8800 --no-open
 tiangong memory enable
 
 # 9. 完整环境诊断

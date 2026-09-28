@@ -26,11 +26,13 @@ pub enum ModelCapability {
     VideoGeneration,
     Stt,
     Tts,
-    /// 向量嵌入模型（Memory / 语义检索）
-    Embedding,
-    /// 重排模型（Memory / 召回精排）
-    Rerank,
 }
+
+/// 已迁出全局模型配置的旧能力 / 路由键。
+///
+/// Embedding 与 Rerank 归 Memory 插件独立管理（`~/.tiangong/memory/config.json`）。
+/// 旧版 models.json 中残留的这些键在读取时静默忽略，保证旧文件仍可解析。
+pub const RETIRED_MODEL_KEYS: &[&str] = &["embedding", "rerank"];
 
 /// 路由槽位枚举 — 描述哪个模型负责什么任务
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -43,8 +45,6 @@ pub enum RoutingSlot {
     VideoGeneration,
     Stt,
     Tts,
-    Embedding,
-    Rerank,
 }
 
 impl RoutingSlot {
@@ -57,8 +57,6 @@ impl RoutingSlot {
             RoutingSlot::VideoGeneration => "video_generation",
             RoutingSlot::Stt => "stt",
             RoutingSlot::Tts => "tts",
-            RoutingSlot::Embedding => "embedding",
-            RoutingSlot::Rerank => "rerank",
         }
     }
 
@@ -71,8 +69,6 @@ impl RoutingSlot {
             "video_generation" => Some(RoutingSlot::VideoGeneration),
             "stt" => Some(RoutingSlot::Stt),
             "tts" => Some(RoutingSlot::Tts),
-            "embedding" => Some(RoutingSlot::Embedding),
-            "rerank" => Some(RoutingSlot::Rerank),
             _ => None,
         }
     }
@@ -86,8 +82,6 @@ impl RoutingSlot {
             RoutingSlot::VideoGeneration,
             RoutingSlot::Stt,
             RoutingSlot::Tts,
-            RoutingSlot::Embedding,
-            RoutingSlot::Rerank,
         ]
     }
 
@@ -100,8 +94,6 @@ impl RoutingSlot {
             RoutingSlot::VideoGeneration => "视频生成",
             RoutingSlot::Stt => "语音识别",
             RoutingSlot::Tts => "语音合成",
-            RoutingSlot::Embedding => "向量嵌入",
-            RoutingSlot::Rerank => "结果重排",
         }
     }
 
@@ -115,8 +107,6 @@ impl RoutingSlot {
             RoutingSlot::VideoGeneration => Some(ModelCapability::VideoGeneration),
             RoutingSlot::Stt => Some(ModelCapability::Stt),
             RoutingSlot::Tts => Some(ModelCapability::Tts),
-            RoutingSlot::Embedding => Some(ModelCapability::Embedding),
-            RoutingSlot::Rerank => Some(ModelCapability::Rerank),
         }
     }
 
@@ -129,8 +119,6 @@ impl RoutingSlot {
             ModelCapability::VideoGeneration => RoutingSlot::VideoGeneration,
             ModelCapability::Stt => RoutingSlot::Stt,
             ModelCapability::Tts => RoutingSlot::Tts,
-            ModelCapability::Embedding => RoutingSlot::Embedding,
-            ModelCapability::Rerank => RoutingSlot::Rerank,
         }
     }
 }
@@ -145,8 +133,6 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "video_generation",
             ModelCapability::Stt => "stt",
             ModelCapability::Tts => "tts",
-            ModelCapability::Embedding => "embedding",
-            ModelCapability::Rerank => "rerank",
         }
     }
 
@@ -159,8 +145,6 @@ impl ModelCapability {
             "video_generation" => Some(ModelCapability::VideoGeneration),
             "stt" => Some(ModelCapability::Stt),
             "tts" => Some(ModelCapability::Tts),
-            "embedding" => Some(ModelCapability::Embedding),
-            "rerank" => Some(ModelCapability::Rerank),
             _ => None,
         }
     }
@@ -174,8 +158,6 @@ impl ModelCapability {
             ModelCapability::VideoGeneration,
             ModelCapability::Stt,
             ModelCapability::Tts,
-            ModelCapability::Embedding,
-            ModelCapability::Rerank,
         ]
     }
 
@@ -188,8 +170,6 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "视频生成",
             ModelCapability::Stt => "语音识别",
             ModelCapability::Tts => "语音合成",
-            ModelCapability::Embedding => "向量嵌入",
-            ModelCapability::Rerank => "结果重排",
         }
     }
 
@@ -202,8 +182,6 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "VIDEO",
             ModelCapability::Stt => "STT",
             ModelCapability::Tts => "TTS",
-            ModelCapability::Embedding => "EMBEDDING",
-            ModelCapability::Rerank => "RERANK",
         }
     }
 
@@ -218,10 +196,6 @@ impl ModelCapability {
             ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",
             ModelCapability::Stt => "语音识别请求（用户要求将语音/音频转为文字）",
             ModelCapability::Tts => "语音合成请求（用户要求将文字转为语音/朗读）",
-            ModelCapability::Embedding => {
-                "向量嵌入模型（Memory 语义检索、向量索引等内部任务，不参与意图路由）"
-            }
-            ModelCapability::Rerank => "结果重排模型（Memory 召回精排等内部任务，不参与意图路由）",
         }
     }
 
@@ -259,7 +233,7 @@ fn default_timeout_ms() -> u64 {
 pub struct ModelEntry {
     pub provider: String,
     pub model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_capabilities_lenient")]
     pub capabilities: Vec<ModelCapability>,
     #[serde(default = "default_options")]
     pub options: Value,
@@ -283,6 +257,27 @@ impl Default for ModelEntry {
 
 fn default_options() -> Value {
     Value::Object(serde_json::Map::new())
+}
+
+/// 宽松解析能力列表：跳过已迁出（embedding/rerank）或未知的能力键，
+/// 保证旧版 models.json 仍可读取。
+fn deserialize_capabilities_lenient<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<ModelCapability>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<String>::deserialize(deserializer)?;
+    Ok(raw
+        .iter()
+        .filter_map(|key| {
+            let capability = ModelCapability::from_key(key);
+            if capability.is_none() && !RETIRED_MODEL_KEYS.contains(&key.as_str()) {
+                tracing::warn!("忽略未知模型能力：{key}");
+            }
+            capability
+        })
+        .collect())
 }
 
 /// 两层模型配置：Provider + Routing
@@ -348,7 +343,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
             #[serde(default)]
             models: HashMap<String, ModelEntry>,
             #[serde(default)]
-            routing: HashMap<RoutingSlot, RawRoutingValue>,
+            routing: HashMap<String, RawRoutingValue>,
         }
 
         #[derive(Deserialize)]
@@ -363,7 +358,15 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
         let routing: HashMap<RoutingSlot, ModelEntry> = raw
             .routing
             .into_iter()
-            .map(|(slot, val)| {
+            .filter_map(|(slot_key, val)| {
+                let Some(slot) = RoutingSlot::from_key(&slot_key) else {
+                    // embedding/rerank 已迁出到 Memory 独立配置，静默忽略；
+                    // 其它未知槽位记录告警后忽略，不阻断整个文件解析。
+                    if !RETIRED_MODEL_KEYS.contains(&slot_key.as_str()) {
+                        tracing::warn!("忽略未知路由槽位：{slot_key}");
+                    }
+                    return None;
+                };
                 let entry = match val {
                     RawRoutingValue::Key(key) => {
                         raw.models.get(&key).cloned().unwrap_or_else(|| {
@@ -379,7 +382,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
                     }
                     RawRoutingValue::Entry(entry) => entry,
                 };
-                (slot, entry)
+                Some((slot, entry))
             })
             .collect();
 
@@ -984,22 +987,14 @@ mod tests {
     fn set_route_by_name_rejects_capability_mismatch() {
         // P1 回归：route 设置必须校验模型 capability
         let mut config = ModelsConfig::default();
-        // chat 模型不应能设置到 embedding 路由
+        // chat 模型不应能设置到 tts 路由
         config.upsert_model("chat-only", "p", "gpt", vec![ModelCapability::Chat]);
-        let err = config.set_route_by_name(RoutingSlot::Embedding, "chat-only");
+        let err = config.set_route_by_name(RoutingSlot::Tts, "chat-only");
         assert!(err.is_err());
-        assert!(
-            err.unwrap_err().contains("embedding"),
-            "应报告缺少 embedding 能力"
-        );
-        // embedding 模型不应能设置到 chat 路由
-        config.upsert_model(
-            "embed-only",
-            "p",
-            "text-embed",
-            vec![ModelCapability::Embedding],
-        );
-        let err = config.set_route_by_name(RoutingSlot::Chat, "embed-only");
+        assert!(err.unwrap_err().contains("tts"), "应报告缺少 tts 能力");
+        // tts 模型不应能设置到 chat 路由
+        config.upsert_model("tts-only", "p", "tts-1", vec![ModelCapability::Tts]);
+        let err = config.set_route_by_name(RoutingSlot::Chat, "tts-only");
         assert!(err.is_err());
     }
 
@@ -1022,11 +1017,45 @@ mod tests {
 
     #[test]
     fn set_route_lite_rejects_non_chat() {
-        // Lite 槽位要求 chat 能力，embedding 模型不能设为 lite
+        // Lite 槽位要求 chat 能力，tts 模型不能设为 lite
         let mut config = ModelsConfig::default();
-        config.upsert_model("embed", "p", "text-embed", vec![ModelCapability::Embedding]);
-        let err = config.set_route_by_name(RoutingSlot::Lite, "embed");
+        config.upsert_model("speech", "p", "tts-1", vec![ModelCapability::Tts]);
+        let err = config.set_route_by_name(RoutingSlot::Lite, "speech");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn legacy_embedding_rerank_entries_are_ignored_on_load() {
+        // embedding/rerank 已迁出到 Memory 独立配置：旧 models.json 仍应可解析，
+        // 旧能力与旧路由被忽略，其余配置保持不变。
+        let json = r#"{
+            "providers": {
+                "p": { "base_url": "https://api.test.com", "api_key": "key" }
+            },
+            "models": {
+                "chat": { "provider": "p", "model": "gpt", "capabilities": ["chat"] },
+                "bge": {
+                    "provider": "p",
+                    "model": "bge-m3",
+                    "capabilities": ["embedding"],
+                    "options": { "dimension": 1024 }
+                },
+                "mixed": { "provider": "p", "model": "m", "capabilities": ["chat", "rerank"] }
+            },
+            "routing": { "chat": "chat", "embedding": "bge", "rerank": "mixed" }
+        }"#;
+
+        let config: ModelsConfig = serde_json::from_str(json).expect("旧配置应可解析");
+        assert_eq!(config.routing.len(), 1, "仅保留 chat 路由");
+        assert!(config.routing.contains_key(&RoutingSlot::Chat));
+        assert!(config.models["bge"].capabilities.is_empty());
+        assert_eq!(
+            config.models["mixed"].capabilities,
+            vec![ModelCapability::Chat]
+        );
+
+        let saved = serde_json::to_string(&config).unwrap();
+        assert!(!saved.contains("\"embedding\""), "保存后不再写出旧路由");
     }
 
     #[test]

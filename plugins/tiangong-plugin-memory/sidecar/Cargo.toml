@@ -1,9 +1,9 @@
 [package]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 license = "Apache-2.0"
-description = "Memory System 独立 sidecar 进程（承载 SQLite/tantivy/lancedb 原生运行）"
+description = "Memory System 独立 sidecar 进程（承载 SQLite/tantivy/lancedb 原生运行；支持 --mcp / --daemon / --config / --update 通用模式）"
 publish = false
 
 [[bin]]
@@ -15,8 +15,39 @@ tiangong-memory = { workspace = true }
 tiangong-plugin-memory-protocol = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
+# 进程创建不弹窗（Windows）
+tiangong-toolkit = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time"] }
+# 命令行模式解析（--mcp / --daemon / --stop / --config / --update）
+clap = { workspace = true, features = ["derive", "env"] }
+# --mcp：stdio MCP Server
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+# --daemon / --config：HTTP 服务
+silent = { workspace = true }
+# --config：调用系统默认浏览器打开配置页
+open = "5"
+# --update：下载官方目录与制品
+reqwest = { workspace = true, features = ["stream", "rustls"] }
+futures-util = { workspace = true }
+# --update：官方签名、校验和与版本比较
+minisign-verify = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+semver = { workspace = true }
+# --update：同目录更新互斥锁
+fs2 = { workspace = true }
+# --daemon / --stop：后台进程脱离会话与信号
+libc = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+scru128 = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "net", "sync"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+# 自更新测试：生成临时签名密钥与安装目录
+minisign = "0.9"
+tempfile = { workspace = true }

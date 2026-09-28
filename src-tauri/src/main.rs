@@ -852,7 +852,6 @@ fn run_gui() {
             tiangong_app::commands::get_model_capabilities,
             tiangong_app::commands::get_model_list,
             tiangong_app::commands::fetch_provider_models,
-            tiangong_app::commands::probe_embedding_dimension,
             tiangong_app::commands::append_message,
             tiangong_app::commands::edit_and_resend,
             tiangong_app::commands::list_plugin_contributions,

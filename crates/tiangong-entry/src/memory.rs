@@ -1,38 +1,18 @@
+//! `tiangong memory`：Memory 插件的命令行入口。
+//!
+//! 模型与检索配置统一在网页配置页完成（与天工设置页同一份页面），
+//! `tiangong memory config` 只负责拉起已安装 sidecar 的 `--config` 模式；
+//! 这里只保留启停、状态与连通性检查等运维命令。
+
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, anyhow, bail};
-use serde::{Deserialize, Serialize};
 
-use crate::args::{MemoryArgs, MemoryConfigSubcommand, MemorySubcommand};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct MemorySelection {
-    pub model_key: Option<String>,
-    pub embedding_key: Option<String>,
-    pub rerank_key: Option<String>,
-    #[serde(default = "default_vector_mode")]
-    pub vector_mode: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct MemoryUiModel {
-    pub key: String,
-    pub provider: String,
-    pub model: String,
-    pub capabilities: Vec<String>,
-    pub dimension: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct MemoryBootstrap {
-    pub config: MemorySelection,
-    pub models: Vec<MemoryUiModel>,
-    #[serde(default)]
-    pub disabled: bool,
-}
+use crate::args::{MemoryArgs, MemoryConfigArgs, MemorySubcommand};
 
 pub(crate) fn run_memory_command(args: MemoryArgs) -> Result<()> {
     match args.command {
-        MemorySubcommand::Config { command } => run_config(command),
-        MemorySubcommand::Configure => super::configure::run_memory_configure(),
+        MemorySubcommand::Config(args) => open_config_page(args),
         MemorySubcommand::Enable => {
             set_enabled(true)?;
             println!("Memory 已启用");
@@ -51,45 +31,67 @@ pub(crate) fn run_memory_command(args: MemoryArgs) -> Result<()> {
     }
 }
 
-fn run_config(command: MemoryConfigSubcommand) -> Result<()> {
-    match command {
-        MemoryConfigSubcommand::Show => print_selection(&load_bootstrap()?),
-        MemoryConfigSubcommand::Set {
-            llm,
-            embedding,
-            rerank,
-        } => {
-            if llm.is_none() && embedding.is_none() && rerank.is_none() {
-                return Err(anyhow!("请至少指定 --llm / --embedding / --rerank 之一"));
-            }
-            let mut bootstrap = load_bootstrap()?;
-            if let Some(key) = llm {
-                validate_model_key(&bootstrap, &key, "chat")?;
-                bootstrap.config.model_key = Some(key);
-            }
-            if let Some(key) = embedding {
-                validate_model_key(&bootstrap, &key, "embedding")?;
-                bootstrap.config.embedding_key = Some(key);
-            }
-            if let Some(key) = rerank {
-                validate_model_key(&bootstrap, &key, "rerank")?;
-                bootstrap.config.rerank_key = Some(key);
-            }
-            save_selection(&bootstrap.config)?;
-            println!("Memory 配置已更新");
-        }
+/// 以已安装的 memory sidecar 运行 `--config`，阻塞到页面点击"完成并关闭"。
+fn open_config_page(args: MemoryConfigArgs) -> Result<()> {
+    let binary = installed_sidecar_binary()?;
+    let mut command = std::process::Command::new(&binary);
+    command.arg("--config");
+    if let Some(host) = args.host {
+        command.args(["--host", &host]);
+    }
+    if let Some(port) = args.port {
+        command.args(["--port", &port.to_string()]);
+    }
+    if args.no_open {
+        command.arg("--no-open");
+    }
+    // 与宿主使用同一存储根；清除插件宿主传输变量，确保进入独立配置模式。
+    command
+        .env(
+            tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
+            tiangong_config::io::storage_root(),
+        )
+        .env_remove("TIANGONG_PLUGIN_TRANSPORT");
+    let status = command
+        .status()
+        .with_context(|| format!("启动 Memory 配置页失败：{}", binary.display()))?;
+    if !status.success() {
+        bail!("Memory 配置页异常退出：{status}");
     }
     Ok(())
 }
 
-pub(crate) fn load_bootstrap() -> Result<MemoryBootstrap> {
-    serde_json::from_value(invoke("ui.memory.config.get", serde_json::json!({}))?)
-        .with_context(|| "解析 Memory 配置响应失败")
-}
-
-pub(crate) fn save_selection(selection: &MemorySelection) -> Result<()> {
-    invoke("ui.memory.config.set", serde_json::to_value(selection)?)?;
-    Ok(())
+/// 已安装 memory 插件的 sidecar 可执行文件路径。
+fn installed_sidecar_binary() -> Result<PathBuf> {
+    let directory = tiangong_config::io::storage_root()
+        .join("plugins")
+        .join("memory");
+    let manifest_path = directory.join("plugin.json");
+    if !manifest_path.is_file() {
+        bail!(
+            "未安装 Memory 插件（{}），请先在天工中安装，或直接运行 tiangong-memory-sidecar --config",
+            directory.display()
+        );
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .with_context(|| format!("读取 {} 失败", manifest_path.display()))?,
+    )
+    .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+    let name = manifest
+        .pointer("/sidecar/binary")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
+        .ok_or_else(|| anyhow!("Memory 插件清单缺少 sidecar 声明"))?;
+    let mut binary = directory.join(name);
+    let suffix = std::env::consts::EXE_SUFFIX;
+    if !suffix.is_empty() && !name.ends_with(suffix) {
+        binary.set_file_name(format!("{name}{suffix}"));
+    }
+    if !binary.is_file() {
+        bail!("Memory sidecar 不存在：{}", binary.display());
+    }
+    Ok(binary)
 }
 
 pub(crate) fn set_enabled(enabled: bool) -> Result<()> {
@@ -115,47 +117,6 @@ fn invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json::Val
     )
 }
 
-fn validate_model_key(bootstrap: &MemoryBootstrap, key: &str, capability: &str) -> Result<()> {
-    let model = bootstrap
-        .models
-        .iter()
-        .find(|model| model.key == key)
-        .ok_or_else(|| anyhow!("模型 {key} 不存在于 models.json"))?;
-    if !model.capabilities.iter().any(|item| item == capability) {
-        bail!("模型 {key} 不具备 {capability} 能力");
-    }
-    Ok(())
-}
-
-fn print_selection(bootstrap: &MemoryBootstrap) {
-    println!("== Memory 配置 ==");
-    println!(
-        "启用状态：{}",
-        if bootstrap.disabled {
-            "已禁用"
-        } else {
-            "已启用"
-        }
-    );
-    println!("vector_mode: {}", bootstrap.config.vector_mode);
-    println!(
-        "LLM 模型：{}",
-        bootstrap.config.model_key.as_deref().unwrap_or("未配置")
-    );
-    println!(
-        "Embedding 模型：{}",
-        bootstrap
-            .config
-            .embedding_key
-            .as_deref()
-            .unwrap_or("未配置")
-    );
-    println!(
-        "Rerank 模型：{}",
-        bootstrap.config.rerank_key.as_deref().unwrap_or("未配置")
-    );
-}
-
 fn print_status(status: &serde_json::Value) {
     let disabled = status
         .get("disabled")
@@ -174,13 +135,27 @@ fn print_status(status: &serde_json::Value) {
         ("embedding", "Embedding"),
         ("rerank", "Rerank"),
     ] {
-        let model = status
-            .get(key)
+        let entry = status.get(key);
+        let source = entry
+            .and_then(|value| value.get("source"))
+            .and_then(serde_json::Value::as_str);
+        let model = entry
             .and_then(|value| value.get("model"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("未配置");
-        println!("{label}：{model}");
+            .and_then(serde_json::Value::as_str);
+        let text = match (source, model) {
+            (Some("builtin"), _) => format!(
+                "内置（档位 {}）",
+                entry
+                    .and_then(|value| value.get("tier"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("mid")
+            ),
+            (_, Some(model)) => model.to_string(),
+            _ => "未配置".to_string(),
+        };
+        println!("{label}：{text}");
     }
+    println!("\n修改配置：tiangong memory config");
 }
 
 fn test_memory() -> Result<()> {
@@ -202,8 +177,4 @@ fn test_memory() -> Result<()> {
         eprintln!("- {}", issue.as_str().unwrap_or("未知问题"));
     }
     Err(anyhow!("Memory 配置测试未通过（{} 个问题）", issues.len()))
-}
-
-fn default_vector_mode() -> String {
-    "auto".to_string()
 }

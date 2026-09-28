@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "memory",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "wasm": {
     "binary": "tiangong_plugin_memory_wasm.wasm"
   },

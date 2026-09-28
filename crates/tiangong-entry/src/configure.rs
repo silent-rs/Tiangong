@@ -1,6 +1,6 @@
 //! 交互式配置向导实现。
 //!
-//! 为 model / server / memory 三个模块提供可选的交互式引导，
+//! 为 model / server 两个模块提供可选的交互式引导（Memory 改由网页配置页完成），
 //! 收集用户输入后调用现有配置方法落盘。非 TTY 环境由调用前的
 //! `ensure_terminal()` 拦截，不会卡住脚本/CI。
 
@@ -141,8 +141,6 @@ fn prompt_model(
         ("video_generation", ModelCapability::VideoGeneration),
         ("stt", ModelCapability::Stt),
         ("tts", ModelCapability::Tts),
-        ("embedding", ModelCapability::Embedding),
-        ("rerank", ModelCapability::Rerank),
     ];
     let cap_labels: Vec<&str> = caps.iter().map(|(k, _)| *k).collect();
     // 默认勾选 chat（caps[0]），降低误操作概率
@@ -180,8 +178,6 @@ fn prompt_route(
         ("video_generation", RoutingSlot::VideoGeneration),
         ("stt", RoutingSlot::Stt),
         ("tts", RoutingSlot::Tts),
-        ("embedding", RoutingSlot::Embedding),
-        ("rerank", RoutingSlot::Rerank),
     ];
     // 默认推荐 chat
     let default_slot = if capabilities.contains(&ModelCapability::Chat) {
@@ -264,105 +260,4 @@ pub fn run_server_configure() -> Result<()> {
     println!("✅ Server 配置已保存：{}:{}", config.host, config.port);
     println!("提示：可用 `tiangong server status` 检查运行状态");
     Ok(())
-}
-
-// ── Memory 配置向导 ──
-
-/// Memory 配置向导：引导选择 Memory 端点模型。
-pub fn run_memory_configure() -> Result<()> {
-    ui::ensure_terminal()?;
-    println!("=== Memory 配置向导 ===\n");
-
-    let mut bootstrap = crate::memory::load_bootstrap()?;
-    if bootstrap.disabled {
-        if ui::confirm("Memory 当前已禁用，是否启用？", true)? {
-            crate::memory::set_enabled(true)?;
-            println!("Memory 已启用");
-        } else {
-            println!("已保持禁用状态，向导结束");
-            return Ok(());
-        }
-    } else if !ui::confirm("Memory 当前已启用，继续配置端点？", true)? {
-        println!("已跳过，向导结束");
-        return Ok(());
-    }
-
-    if bootstrap.models.is_empty() {
-        println!("⚠️  models.json 中没有已注册模型，请先运行 `tiangong model configure`");
-        println!("（Memory 端点引用 models.json 中的模型）");
-        return Ok(());
-    }
-
-    bootstrap.config.model_key = Some(pick_memory_model(&bootstrap.models, "chat", "Memory LLM")?);
-    println!();
-
-    if ui::confirm("是否配置 Embedding 端点？", false)? {
-        bootstrap.config.embedding_key =
-            pick_optional_memory_model(&bootstrap.models, "embedding", "Embedding")?;
-    }
-    println!();
-
-    if ui::confirm("是否配置 Rerank 端点？", false)? {
-        bootstrap.config.rerank_key =
-            pick_optional_memory_model(&bootstrap.models, "rerank", "Rerank")?;
-    }
-
-    crate::memory::save_selection(&bootstrap.config)?;
-    println!();
-    println!("✅ Memory 配置已保存");
-    println!("提示：可用 `tiangong memory test` 检查端点有效性");
-    Ok(())
-}
-
-fn pick_memory_model(
-    models: &[crate::memory::MemoryUiModel],
-    capability: &str,
-    label: &str,
-) -> Result<String> {
-    let mut candidates = models
-        .iter()
-        .filter(|model| {
-            model
-                .capabilities
-                .iter()
-                .any(|current| current == capability)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.key.cmp(&right.key));
-    if candidates.is_empty() {
-        return Err(anyhow!("没有具备 {capability} 能力的已注册模型"));
-    }
-    let labels = candidates
-        .iter()
-        .map(|model| {
-            let dimension = model
-                .dimension
-                .map(|value| format!(" / dim={value}"))
-                .unwrap_or_default();
-            format!(
-                "{} ({} / {}{})",
-                model.key, model.provider, model.model, dimension
-            )
-        })
-        .collect::<Vec<_>>();
-    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
-    Ok(candidates[idx].key.clone())
-}
-
-fn pick_optional_memory_model(
-    models: &[crate::memory::MemoryUiModel],
-    capability: &str,
-    label: &str,
-) -> Result<Option<String>> {
-    if !models.iter().any(|model| {
-        model
-            .capabilities
-            .iter()
-            .any(|current| current == capability)
-    }) {
-        println!("⚠️  没有具备 {label} 能力的已注册模型，已跳过");
-        return Ok(None);
-    }
-    pick_memory_model(models, capability, label).map(Some)
 }

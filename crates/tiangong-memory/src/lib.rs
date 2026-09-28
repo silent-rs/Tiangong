@@ -3,7 +3,8 @@
 //! 提供分层记忆管理、三级 Injection 注入、Episode 写入与渐进式召回。
 //!
 //! 本 crate 只在 Memory sidecar 进程内启动 Actor、存储与 IPC 服务。
-//! App、CLI、Server 通过 WASM 插件运行时访问 sidecar，不直接依赖本 crate。
+//! App、CLI、Server 通过 WASM 插件运行时访问 sidecar，不直接依赖本 crate；
+//! 第三方 Agent 通过 sidecar 的 `--mcp` / `--daemon` 模式访问（见 [`external`]）。
 //!
 //! ```no_run
 //! let handle = tiangong_memory::start().expect("Memory 系统启动失败");
@@ -13,6 +14,7 @@
 pub(crate) mod command;
 pub mod config;
 pub mod election;
+pub mod external;
 pub mod handle;
 pub mod ipc;
 pub mod types;
@@ -21,6 +23,7 @@ mod actor;
 mod db;
 mod injection;
 mod llm_metrics;
+pub mod local_model;
 mod options;
 mod paths;
 mod recall;
@@ -34,9 +37,11 @@ mod writer;
 
 pub use actor::{start_memory as start, start_memory_with_options as start_with_options};
 pub use config::{
-    MemoryConfig, MemoryConfigSelection, MemoryEmbeddingConfig, MemoryLlmConfig,
-    MemoryRerankConfig, default_memory_config_path, disable_memory, disable_memory_at,
-    enable_memory, enable_memory_at, is_memory_disabled, memory_disabled_marker_path,
+    MEMORY_CONFIG_VERSION, MemoryComponentSelection, MemoryConfig, MemoryConfigSelection,
+    MemoryEmbeddingSource, MemoryLlmSelection, MemoryLlmSource, MemoryLocalTier,
+    MemoryRemoteEndpoint, MemoryRemoteSelection, MemoryRerankSource, default_memory_config_path,
+    disable_memory, disable_memory_at, enable_memory, enable_memory_at, is_memory_disabled,
+    legacy_models_handoff_path, memory_disabled_marker_path,
 };
 pub use election::{
     LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,

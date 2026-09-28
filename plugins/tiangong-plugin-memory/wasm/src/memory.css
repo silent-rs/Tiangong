@@ -82,6 +82,26 @@ select:disabled {
   display: none !important;
 }
 
+/* 独立配置页（--config）的"完成并关闭"按钮由脚本仅在独立模式下创建。 */
+.standalone-closed {
+  display: grid;
+  min-height: 100vh;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--text);
+}
+
+.standalone-closed h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.standalone-closed p {
+  margin: 0;
+  color: var(--muted);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -887,6 +907,23 @@ input[type="range"] {
 
 .config-row > div span.warning {
   color: var(--danger);
+}
+
+.config-remote {
+  display: grid;
+  gap: 8px;
+  padding: 0 18px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-remote.hidden {
+  display: none;
+}
+
+.config-remote-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .config-footer {

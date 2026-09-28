@@ -8,6 +8,7 @@ pub(crate) mod lancedb_search;
 pub(crate) mod reranker;
 pub(crate) mod tantivy_search;
 pub(crate) mod vector;
+pub(crate) mod vector_meta;
 
 #[allow(unused_imports)]
 pub(crate) use embedding::MemoryEmbeddingClient;

@@ -20,6 +20,9 @@ pub(crate) struct RecallEngine {
     vector_index: Option<Box<dyn VectorIndex>>,
     embedding: Option<Arc<dyn EmbeddingProvider>>,
     rerank: Option<Arc<dyn RerankProvider>>,
+    /// 向量表回填是否完成：未完成时新节点照常写入，但召回不走语义检索，
+    /// 避免半量索引拉低结果质量。
+    semantic_ready: bool,
 }
 
 impl RecallEngine {
@@ -29,6 +32,7 @@ impl RecallEngine {
             vector_index: None,
             embedding: None,
             rerank: None,
+            semantic_ready: false,
         }
     }
 
@@ -38,6 +42,7 @@ impl RecallEngine {
             vector_index: None,
             embedding: None,
             rerank: Some(rerank),
+            semantic_ready: false,
         }
     }
 
@@ -46,12 +51,74 @@ impl RecallEngine {
         vector_index: Box<dyn VectorIndex>,
         embedding: Arc<dyn EmbeddingProvider>,
         rerank: Option<Arc<dyn RerankProvider>>,
+        semantic_ready: bool,
     ) -> Self {
         Self {
             vector_index: Some(vector_index),
             embedding: Some(embedding),
             rerank,
+            semantic_ready,
         }
+    }
+
+    pub(crate) fn set_semantic_ready(&mut self, ready: bool) {
+        self.semantic_ready = ready;
+    }
+
+    /// 当前 embedding provider（回填在后台线程复用它计算向量）。
+    pub(crate) fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding.clone()
+    }
+
+    /// 把节点的回填文本取出来，交给后台计算 embedding。
+    pub(crate) fn backfill_texts(nodes: &[MemoryNode]) -> Vec<String> {
+        nodes.iter().map(node_embedding_text).collect()
+    }
+
+    /// 写入已在后台算好的回填向量。
+    ///
+    /// 返回 (成功条数, 失败条数)：单条失败不该让整批回滚，但也不能被忽略，
+    /// 否则游标继续推进后这些节点会永久缺索引。
+    pub(crate) async fn upsert_nodes_batch(
+        &self,
+        nodes: &[MemoryNode],
+        vectors: Vec<Vec<f32>>,
+    ) -> anyhow::Result<(usize, usize)> {
+        let Some(vector_index) = self.vector_index.as_ref() else {
+            return Ok((0, 0));
+        };
+        if nodes.is_empty() {
+            return Ok((0, 0));
+        }
+        if vectors.len() != nodes.len() {
+            anyhow::bail!(
+                "Memory 回填 embedding 数量不一致: expected={} actual={}",
+                nodes.len(),
+                vectors.len()
+            );
+        }
+        let mut written = 0;
+        let mut failed = 0;
+        for (node, vector) in nodes.iter().zip(vectors) {
+            match vector_index
+                .upsert(VectorPoint {
+                    node_id: node.id.clone(),
+                    title: node.title.clone(),
+                    summary: node.summary.clone(),
+                    kind: node.kind.clone(),
+                    importance: f64::from(node.importance),
+                    vector,
+                })
+                .await
+            {
+                Ok(()) => written += 1,
+                Err(err) => {
+                    failed += 1;
+                    tracing::warn!(node_id = %node.id, "Memory 回填写入向量失败: {err}");
+                }
+            }
+        }
+        Ok((written, failed))
     }
 
     /// 将节点写入可选语义索引。未启用向量索引时直接跳过。
@@ -121,9 +188,9 @@ impl RecallEngine {
             }
         };
 
-        // 若没有向量索引，退化为纯 BM25
+        // 若没有向量索引或回填未完成，退化为纯 BM25
         let (vector_index, emb_ref) = match (self.vector_index.as_ref(), self.embedding.as_ref()) {
-            (Some(q), Some(e)) => (q, e),
+            (Some(q), Some(e)) if self.semantic_ready => (q, e),
             _ => {
                 tracing::debug!(
                     query = %query,

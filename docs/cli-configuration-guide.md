@@ -136,42 +136,39 @@ tiangong server configure
 
 ## 3. Memory 配置 `tiangong memory`
 
-Memory 端点引用 `models.json` 中已注册的模型，避免重复填写连接信息。
-
-### 参数式配置
+Memory 的模型与检索配置统一在网页配置页完成（与天工桌面端设置页是同一份页面），命令行不再提供逐项参数。
 
 ```bash
-# 查看 Memory 配置
-tiangong memory config show
+# 打开配置页（本机浏览器），配置完成后点击"完成并关闭"
+tiangong memory config
 
-# 从 models.json 引用模型填充端点（模型需具备对应能力）
-tiangong memory config set --llm deepseek-chat
-tiangong memory config set --llm deepseek-chat --embedding bge-embedding --rerank bge-reranker
+# 服务器 / 无图形环境：监听指定地址并只打印访问链接，在其他机器的浏览器中打开
+tiangong memory config --host 0.0.0.0 --port 8800 --no-open
 
-# 启用 / 禁用（标记文件，不丢失端点配置）
+# 启用 / 禁用（标记文件，不丢失配置）
 tiangong memory enable
 tiangong memory disable
 
 # 状态与测试
-tiangong memory status    # 启用状态 + 端点有效性
-tiangong memory test      # 端点完整性校验 + ENV 可解析性检查
+tiangong memory status    # 启用状态 + 当前模型
+tiangong memory test      # 配置完整性与 ENV 可解析性检查
 ```
 
-**能力要求**：
+配置页可设置：
+- **记忆文本模型**：跟随默认（lite → chat）、从 `models.json` 选择，或"自定义在线端点"（地址 / 模型名 / 协议 / API Key）。
+- **嵌入模型 / 重排模型**：不启用、内置（按档位本地运行）或在线端点，支持探测维度与连通性。
+- **向量模式**与**数据预览**（查看、编辑、归档记忆，召回测试）。
 
-- `--llm`：模型需具备 `chat` 能力（用于记忆反刍/总结）。
-- `--embedding`：模型需具备 `embedding` 能力。
-- `--rerank`：模型需具备 `rerank` 能力。
-
-**禁用语义**：`disable` 创建标记文件 `~/.tiangong/memory/.disabled`，运行时（CLI / Server / Desktop）会跳过 Memory 启动；`enable` 删除标记。端点配置不丢失。
-
-### 交互式向导
+**远程配置安全提示**：配置页使用明文 HTTP，链接中带一次性令牌；`--host` 指向非回环地址时，页面中填写的 API Key 会在网络上传输。请只在可信内网使用，或保持缺省的 `127.0.0.1` 并通过 SSH 隧道访问：
 
 ```bash
-tiangong memory configure
+# 在本地电脑执行，再在本地浏览器打开服务器打印的链接
+ssh -L 8800:127.0.0.1:8800 <服务器>
+# 服务器上执行
+tiangong memory config --port 8800 --no-open
 ```
 
-引导确认启用状态，从已注册模型中选择 Memory LLM / Embedding / Rerank（按能力过滤，可跳过可选端点）。
+**禁用语义**：`disable` 创建标记文件 `~/.tiangong/memory/.disabled`，运行时（CLI / Server / Desktop）会跳过 Memory 启动；`enable` 删除标记。配置不丢失。
 
 ---
 
@@ -255,8 +252,8 @@ tiangong model route set chat deepseek-chat
 tiangong server config set --host 127.0.0.1 --port 8080
 tiangong server token generate
 
-# 3. 配置 Memory（可选）
-tiangong memory config set --llm deepseek-chat
+# 3. 配置 Memory（可选，服务器上用 --no-open 后在浏览器打开打印的链接）
+tiangong memory config --no-open
 
 # 4. 配置自定义 Prompt（可选）
 tiangong prompt set "总是使用简体中文回答，回复要简洁直接。"
@@ -273,7 +270,7 @@ tiangong server -d
 ```bash
 tiangong model configure    # 三步引导配模型
 tiangong server configure   # 引导配 Server
-tiangong memory configure   # 引导配 Memory
+tiangong memory config --no-open   # 网页配置 Memory
 tiangong prompt edit        # 编辑器编辑 Prompt
 tiangong doctor             # 检查环境
 ```

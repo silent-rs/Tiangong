@@ -178,6 +178,9 @@ diffy = "0.5"
 dirs = "6"
 dunce = "1"
 eventsource-stream = "0.2"
+# 本地 Embedding / Rerank 推理（ONNX Runtime）；仅 Memory 使用。
+# 链接方式按平台在 crates/tiangong-memory/Cargo.toml 中选择（Linux 动态加载）。
+fastembed = { version = "7.1", default-features = false }
 futures-util = "0.3"
 fs2 = "0.4"
 hex = "0.4"

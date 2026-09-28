@@ -1023,15 +1023,6 @@ export const api = {
   ): Promise<string[]> =>
     invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol, headers }),
 
-  probeEmbeddingDimension: (
-    baseUrl: string,
-    apiKey: string,
-    model: string,
-    timeoutMs?: number,
-    protocol?: string,
-  ): Promise<number> =>
-    invoke('probe_embedding_dimension', { baseUrl, apiKey, model, timeoutMs, protocol }),
-
   resolveModelContextWindow: (model: string): Promise<number> =>
     invoke('resolve_model_context_window', { model }),
 

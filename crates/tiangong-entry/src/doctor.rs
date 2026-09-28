@@ -197,7 +197,7 @@ fn check_memory(report: &mut DoctorReport) {
                 report.ok("Memory 配置", format!("已启用，LLM={model_name}"));
             } else {
                 report.warn("Memory 配置", "已启用但 LLM 端点未配置");
-                report.hint("可执行：tiangong memory config set --llm <模型名>");
+                report.hint("可执行：tiangong memory config（打开配置页选择记忆文本模型）");
             }
         }
         Err(error) => report.err("Memory sidecar", error.to_string()),

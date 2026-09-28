@@ -57,26 +57,10 @@ impl Drop for EnvGuard {
 }
 
 fn embedding_config_from_tiangong_config() -> Option<EmbeddingEndpointConfig> {
-    use tiangong_llm::models_config::ModelCapability;
-    let config = tiangong_config::load_tiangong_config();
-    // embedding 端点从 ModelsConfig 路由解析（不再经 LlmConfig 中转）。
-    let resolved = config
-        .models
-        .resolve_for_capability(ModelCapability::Embedding)?;
-    let dimension = resolved
-        .options
-        .get("dimension")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| usize::try_from(value).ok())?;
-
-    Some(EmbeddingEndpointConfig {
-        base_url: resolved.base_url,
-        api_key: resolved.api_key,
-        model: resolved.model,
-        protocol: resolved.protocol,
-        timeout: Duration::from_millis(resolved.timeout_ms),
-        dimension,
-    })
+    // Embedding 已归 Memory 独立配置（~/.tiangong/memory/config.json）管理。
+    tiangong_memory::MemoryConfig::load_or_default()
+        .to_options()
+        .embedding
 }
 
 struct DeterministicEmbeddingServer {
@@ -148,10 +132,14 @@ impl DeterministicEmbeddingServer {
     }
 
     fn config(&self) -> EmbeddingEndpointConfig {
+        self.config_with_model("deterministic-memory-embedding")
+    }
+
+    fn config_with_model(&self, model: &str) -> EmbeddingEndpointConfig {
         EmbeddingEndpointConfig {
             base_url: self.base_url.clone(),
             api_key: "deterministic-test-key".to_string(),
-            model: "deterministic-memory-embedding".to_string(),
+            model: model.to_string(),
             protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout: Duration::from_secs(5),
             dimension: 4,
@@ -223,6 +211,28 @@ fn deterministic_embedding(text: &str) -> Vec<f32> {
     } else {
         vec![0.0, 0.0, 0.0, 1.0]
     }
+}
+
+/// 轮询向量索引元数据，直到满足条件（actor 异步打开索引并在后台回填）。
+async fn wait_for_meta(
+    lancedb_dir: &Path,
+    predicate: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let path = lancedb_dir.join("index_meta.json");
+    let mut last = serde_json::Value::Null;
+    for _ in 0..100 {
+        if let Some(meta) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        {
+            if predicate(&meta) {
+                return meta;
+            }
+            last = meta;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("等待向量索引元数据超时，最后状态：{last}");
 }
 
 async fn wait_for_expected_hit(
@@ -398,6 +408,157 @@ async fn archived_node_is_removed_from_embedded_vector_index_and_can_be_restored
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn vector_index_is_bound_to_model_fingerprint_and_rebuilt_on_switch() {
+    let embedding_server = DeterministicEmbeddingServer::start();
+    let home = TempDir::new().expect("创建 fake home 失败");
+    let workspace = TempDir::new().expect("创建 workspace 失败");
+    let workspace_path = workspace.path().to_path_buf();
+    let workspace_id = workspace_id_from_path(&workspace_path);
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+    let lancedb_dir = home.path().join(".tiangong/memory/lancedb");
+    let start = |model: &str| {
+        start_with_options(
+            MemoryOptions::new()
+                .with_embedding(embedding_server.config_with_model(model))
+                .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
+        )
+        .expect("启动 memory 失败")
+    };
+
+    // 1. 首次使用模型 A 写入并召回。
+    let handle = start("text-embedding-bge-m3");
+    let episode = Episode::new(
+        "fingerprint-session".to_string(),
+        "settings vector probe workflow".to_string(),
+        "Count the returned vector length from the inference server response and fill the settings form automatically."
+            .to_string(),
+        EpisodeOutcome::Success,
+        vec!["settings".to_string()],
+        vec!["noop".to_string()],
+        0.9,
+    );
+    let node_id = episode.id.clone();
+    handle.write_episode(episode, Some(workspace_id));
+    let hits = wait_for_expected_hit(&handle, "automatic form dimension discovery", &node_id).await;
+    assert!(hits.iter().any(|hit| hit.node_id == node_id));
+    // 新建表需后台回填完成后才标记可用（中途关闭会在下次启动时续传）。
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["tables"]["bge-m3@4"]["complete"] == true
+    })
+    .await;
+    handle.shutdown().await;
+    let fingerprint_a = meta["active"].as_str().unwrap().to_string();
+    assert_eq!(fingerprint_a, "bge-m3@4", "模型名应规范化");
+
+    // 2. 同维度但不同模型：新建表并后台回填，回填完成后语义召回恢复。
+    let handle = start("bge-large-zh-v1.5");
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["tables"]["bge-large-zh-v1.5@4"]["complete"] == true
+    })
+    .await;
+    assert_eq!(meta["active"], "bge-large-zh-v1.5@4");
+    assert_eq!(
+        meta["previous"].as_str(),
+        Some(fingerprint_a.as_str()),
+        "保留上一代"
+    );
+    let hits = wait_for_expected_hit(&handle, "automatic form dimension discovery", &node_id).await;
+    assert!(
+        hits.first().is_some_and(|hit| hit.node_id == node_id),
+        "回填完成后应能通过新模型的向量表召回"
+    );
+    handle.shutdown().await;
+
+    // 3. 名称写法不同的同一模型切回：直接复用上一代表，无需回填。
+    let handle = start("BAAI/bge-m3");
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["active"].as_str() == Some(fingerprint_a.as_str())
+    })
+    .await;
+    assert_eq!(meta["tables"][&fingerprint_a]["complete"], true);
+    assert_eq!(meta["previous"], "bge-large-zh-v1.5@4");
+    let hits = wait_for_expected_hit(&handle, "automatic form dimension discovery", &node_id).await;
+    handle.shutdown().await;
+    assert!(hits.iter().any(|hit| hit.node_id == node_id));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn legacy_single_table_is_not_claimed_by_current_model() {
+    let embedding_server = DeterministicEmbeddingServer::start();
+    let home = TempDir::new().expect("创建 fake home 失败");
+    let workspace = TempDir::new().expect("创建 workspace 失败");
+    let workspace_path = workspace.path().to_path_buf();
+    let workspace_id = workspace_id_from_path(&workspace_path);
+    let _env = EnvGuard::enter(home.path(), &workspace_path);
+    let lancedb_dir = home.path().join(".tiangong/memory/lancedb");
+    let options = || {
+        MemoryOptions::new()
+            .with_embedding(embedding_server.config_with_model("text-embedding-bge-m3"))
+            .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb)
+    };
+
+    // 构造旧版布局：写入一次后删除元数据、把表改回旧的固定表名。
+    let handle = start_with_options(options()).expect("启动 memory 失败");
+    let episode = Episode::new(
+        "legacy-session".to_string(),
+        "settings vector probe workflow".to_string(),
+        "Count the returned vector length from the inference server response and fill the settings form automatically."
+            .to_string(),
+        EpisodeOutcome::Success,
+        vec!["settings".to_string()],
+        vec!["noop".to_string()],
+        0.9,
+    );
+    let node_id = episode.id.clone();
+    handle.write_episode(episode, Some(workspace_id));
+    let hits = wait_for_expected_hit(&handle, "automatic form dimension discovery", &node_id).await;
+    assert!(hits.iter().any(|hit| hit.node_id == node_id));
+    handle.shutdown().await;
+    std::fs::remove_file(lancedb_dir.join("index_meta.json")).unwrap();
+    let _ = std::fs::remove_dir_all(lancedb_dir.join("__manifest"));
+    std::fs::rename(
+        lancedb_dir.join("memory_vectors_bge_m3_4.lance"),
+        lancedb_dir.join("memory_vectors.lance"),
+    )
+    .expect("重命名为旧表名");
+
+    // 重启：旧表来源模型未知，只能登记为上一代；当前模型另建新表并回填。
+    // 维度相同不代表语义空间相同，直接认领会让查询向量与存量向量不匹配。
+    let handle = start_with_options(options()).expect("重启 memory 失败");
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["active"].as_str() == Some("bge-m3@4")
+    })
+    .await;
+    assert_eq!(
+        meta["previous"], "legacy-unknown@4",
+        "旧表登记为来源未知的上一代：{meta}"
+    );
+    assert_eq!(
+        meta["tables"]["legacy-unknown@4"]["table"], "memory_vectors",
+        "旧表保留不删：{meta}"
+    );
+    assert_ne!(
+        meta["tables"]["bge-m3@4"]["table"], "memory_vectors",
+        "当前模型应使用独立的新表：{meta}"
+    );
+
+    // 回填完成后仍可召回（数据来自新表，不是直接复用旧向量）。
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["tables"]["bge-m3@4"]["complete"] == true
+    })
+    .await;
+    assert_eq!(meta["tables"]["bge-m3@4"]["complete"], true);
+    let hits = wait_for_expected_hit(&handle, "automatic form dimension discovery", &node_id).await;
+    handle.shutdown().await;
+    assert!(
+        hits.iter().any(|hit| hit.node_id == node_id),
+        "回填完成后应能召回"
+    );
+}
+
 async fn benchmark_recall(hybrid: bool, embedding: Option<EmbeddingEndpointConfig>) -> usize {
     let home = TempDir::new().expect("创建 benchmark fake home 失败");
     let workspace = TempDir::new().expect("创建 benchmark workspace 失败");
@@ -473,7 +634,7 @@ async fn benchmark_recall(hybrid: bool, embedding: Option<EmbeddingEndpointConfi
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-#[ignore = "需要真实 ~/.tiangong/models.json embedding 配置；使用 --ignored --nocapture 运行"]
+#[ignore = "需要真实 ~/.tiangong/memory/config.json 在线 embedding 配置；使用 --ignored --nocapture 运行"]
 async fn embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episode() {
     let Some(embedding) = embedding_config_from_tiangong_config() else {
         println!("[skip] 未在配置文件中找到 embedding 路由或 options.dimension");

@@ -198,23 +198,75 @@
           <div class="config-row">
             <div>
               <label for="config-model">记忆文本模型</label>
-              <span>片段提取、回忆规划、结果整理</span>
+              <span id="llm-meta">片段提取、回忆规划、结果整理</span>
             </div>
             <select id="config-model"></select>
           </div>
-          <div class="config-row">
-            <div>
-              <label for="config-embedding">记忆嵌入模型</label>
-              <span id="embedding-meta">语义检索和向量索引</span>
+          <div id="llm-remote" class="config-remote hidden">
+            <input id="llm-url" type="url" placeholder="地址，如 https://api.openai.com/v1" autocomplete="off">
+            <div class="config-remote-inline">
+              <input id="llm-model" type="text" placeholder="模型名，如 gpt-4o-mini" autocomplete="off">
+              <select id="llm-protocol" aria-label="接口协议">
+                <option value="openai_chatcompletions">OpenAI 兼容</option>
+                <option value="openai">OpenAI Responses</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="deepseek">DeepSeek</option>
+              </select>
             </div>
-            <select id="config-embedding"></select>
+            <div class="config-remote-inline">
+              <input id="llm-key" type="password" placeholder="API Key（支持 ${ENV}）" autocomplete="new-password">
+              <button id="llm-probe" class="secondary-button" type="button">探测</button>
+            </div>
           </div>
           <div class="config-row">
             <div>
-              <label for="config-rerank">记忆重排模型</label>
-              <span>召回结果精排</span>
+              <label for="config-tier">本地模型档位</label>
+              <span>选择"内置"时使用，同时决定嵌入与重排模型</span>
             </div>
-            <select id="config-rerank"></select>
+            <select id="config-tier">
+              <option value="low">低（能效优先）</option>
+              <option value="mid">中（推荐）</option>
+              <option value="high">高（效果优先）</option>
+            </select>
+          </div>
+          <div class="config-row">
+            <div>
+              <label for="config-embedding-source">记忆嵌入模型</label>
+              <span id="embedding-meta">语义检索和向量索引</span>
+            </div>
+            <select id="config-embedding-source">
+              <option value="disabled">不启用</option>
+              <option value="builtin">内置</option>
+              <option value="remote">在线端点</option>
+            </select>
+          </div>
+          <div id="embedding-remote" class="config-remote hidden">
+            <input id="embedding-url" type="url" placeholder="地址，如 http://127.0.0.1:1234/v1" autocomplete="off">
+            <input id="embedding-model" type="text" placeholder="模型名，如 bge-m3" autocomplete="off">
+            <div class="config-remote-inline">
+              <input id="embedding-dimension" type="number" min="1" placeholder="向量维度">
+              <button id="embedding-probe" class="secondary-button" type="button">探测</button>
+            </div>
+            <input id="embedding-key" type="password" placeholder="API Key（留空保留原值，支持 ${ENV}）" autocomplete="new-password">
+          </div>
+          <div class="config-row">
+            <div>
+              <label for="config-rerank-source">记忆重排模型</label>
+              <span id="rerank-meta">召回结果精排</span>
+            </div>
+            <select id="config-rerank-source">
+              <option value="disabled">不启用</option>
+              <option value="builtin">内置</option>
+              <option value="remote">在线端点</option>
+            </select>
+          </div>
+          <div id="rerank-remote" class="config-remote hidden">
+            <input id="rerank-url" type="url" placeholder="地址，如 http://127.0.0.1:1234/v1" autocomplete="off">
+            <div class="config-remote-inline">
+              <input id="rerank-model" type="text" placeholder="模型名，如 bge-reranker-v2-m3" autocomplete="off">
+              <button id="rerank-probe" class="secondary-button" type="button">探测</button>
+            </div>
+            <input id="rerank-key" type="password" placeholder="API Key（留空保留原值，支持 ${ENV}）" autocomplete="new-password">
           </div>
           <div class="config-row">
             <div>

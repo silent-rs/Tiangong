@@ -397,6 +397,12 @@ impl UiGuest for Component {
                     })?;
                 invoke_for_ui::<ui::SetConfig>(&selection)
             }
+            "probe_config" => {
+                let probe = serde_json::from_str::<ui::ProbeRequest>(&request.payload).map_err(
+                    |error| PluginError::Message(format!("解析 Memory 探测请求失败: {error}")),
+                )?;
+                invoke_for_ui::<ui::ProbeConfig>(&probe)
+            }
             "memory_request" => forward_memory_ui_request(&request.payload),
             other => Err(PluginError::Message(format!("未知消息: {other}"))),
         }?;

@@ -131,6 +131,21 @@ pub enum MemoryCommand {
         options: Box<MemoryOptions>,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
+    /// 向量回填批次的 embedding 已在后台算完（内部命令）；`generation` 过期时丢弃。
+    ///
+    /// embedding 可能是远程端点，单次请求可达数十秒；放在 Actor 主循环里同步
+    /// 等待会让召回、写入和重配置一起排队，所以只把向量写入留在 Actor。
+    BackfillVectorsReady {
+        generation: u64,
+        nodes: Vec<crate::types::MemoryNode>,
+        vectors: Result<Vec<Vec<f32>>, String>,
+    },
+    /// 内置本地模型后台加载完成（内部命令）；`generation` 过期时丢弃。
+    LocalModelsReady {
+        generation: u64,
+        embedding: Option<std::sync::Arc<dyn tiangong_llm::EmbeddingProvider>>,
+        rerank: Option<std::sync::Arc<dyn tiangong_llm::RerankProvider>>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },

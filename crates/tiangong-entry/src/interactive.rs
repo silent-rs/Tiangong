@@ -1,7 +1,7 @@
 //! 交互式配置向导的基础原语。
 //!
 //! 基于 `dialoguer` 封装 select/input/confirm/password 等提示，
-//! 供 `tiangong model/server/memory configure` 使用。
+//! 供 `tiangong model/server configure` 使用。
 //!
 //! 设计原则：
 //! - 非 TTY 环境（脚本/CI/Docker）调用 `ensure_terminal()` 会报错退出，

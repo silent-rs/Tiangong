@@ -680,8 +680,7 @@ function ProviderModelsView({
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [ttsVoices, setTtsVoices] = useState<{ id: string; name: string; gender?: string }[]>([]);
   const [isFetchingVoices, setIsFetchingVoices] = useState(false);
-  const [isProbingEmbeddingDimension, setIsProbingEmbeddingDimension] = useState(false);
-  const { showSuccess, showError } = useToast();
+  const { showError } = useToast();
 
   // Effective selected provider
   const activeProvider = (selectedProvider && config.providers[selectedProvider])
@@ -880,24 +879,6 @@ function ProviderModelsView({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProvider, selectedConfig?.api_key]);
-
-  const probeEmbeddingDimension = async () => {
-    const provider = config.providers[modelDraft.provider];
-    if (!provider?.base_url || !modelDraft.model.trim()) {
-      showError('配置不完整', '请先选择供应商并填写嵌入模型名称');
-      return;
-    }
-    setIsProbingEmbeddingDimension(true);
-    try {
-      const dimension = await api.probeEmbeddingDimension(provider.base_url, provider.api_key, modelDraft.model.trim(), provider.timeout_ms, provider.protocol);
-      setModelDraft((c) => ({ ...c, options: { ...c.options, dimension } }));
-      showSuccess('获取成功', `Embedding 维度：${dimension}`);
-    } catch (error) {
-      showError('获取失败', `无法获取 Embedding 维度：${error}`);
-    } finally {
-      setIsProbingEmbeddingDimension(false);
-    }
-  };
 
   return (
     <div className="flex h-full">
@@ -1207,21 +1188,6 @@ function ProviderModelsView({
                 )}
               </div>
             )}
-            {modelDraft.capabilities.includes('embedding') && (
-              <div>
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs">Embedding 维度</Label>
-                  <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={probeEmbeddingDimension} disabled={isProbingEmbeddingDimension || !modelDraft.model.trim()}>
-                    {isProbingEmbeddingDimension ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />获取中...</> : '获取维度'}
-                  </Button>
-                </div>
-                <Input type="number" min={1} value={(modelDraft.options?.dimension as number | undefined) || ''} onChange={(e) => setModelDraft({ ...modelDraft, options: { ...modelDraft.options, dimension: e.target.value ? Number(e.target.value) : undefined } })} className="text-sm h-8" placeholder="例如 1536、1024、768" />
-                <p className="text-xs text-muted-foreground mt-1">不同 embedding 模型需要填写对应维度。</p>
-              </div>
-            )}
-            {modelDraft.capabilities.includes('rerank') && (
-              <div className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">Rerank 模型用于通用召回结果精排。</div>
-            )}
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="ghost" size="sm" onClick={() => { setModelModalMode(null); setAvailableModels([]); }}>取消</Button>
               <Button size="sm" onClick={modelModalMode === 'add' ? addModel : saveModelEdit} disabled={!modelDraft.model}>{modelModalMode === 'add' ? '添加' : '保存'}</Button>
@@ -1391,7 +1357,7 @@ function RoutingSection({
       <div className="mb-3 shrink-0">
         <h4 className="text-sm font-medium text-muted-foreground">能力路由</h4>
         <p className="text-xs text-muted-foreground mt-1">
-          为对话和多媒体能力选择默认模型；Embedding 和 Rerank 在 Memory 子页中选择。
+          为对话和多媒体能力选择默认模型；嵌入与重排模型在 Memory 插件页中配置。
         </p>
       </div>
 

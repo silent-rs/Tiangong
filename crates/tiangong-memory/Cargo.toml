@@ -43,6 +43,23 @@ tiangong-types = { workspace = true }
 lancedb = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+# 下载内置模型文件
+reqwest = { workspace = true, features = ["stream", "rustls"] }
+fs2 = { workspace = true }
+
+# 内置本地推理（builtin 档位）。
+#
+# macOS / Windows：静态链接 pyke 预编译 ONNX Runtime。
+# Linux：pyke 的 Linux 静态库依赖 glibc 2.38+（__isoc23_* 符号），在 Ubuntu
+# 22.04 等发行版上无法链接；改为运行时 dlopen 微软官方 libonnxruntime.so
+# （glibc 2.27 基线），该库与模型一样按需下载并校验（见 local_model::runtime）。
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+fastembed = { workspace = true, features = ["ort-download-binaries-rustls-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fastembed = { workspace = true, features = ["ort-load-dynamic"] }
+# 与 fastembed 7.1 锁定的版本一致；仅用于在创建会话前 `ort::init_from` 指定库路径。
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "std"] }
 
 [dev-dependencies]
 serial_test = { workspace = true }

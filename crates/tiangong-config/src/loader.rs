@@ -147,7 +147,13 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
 }
 
 /// 加载模型配置（仅从 `models.json` 读取；环境变量回退已移除）
+///
+/// 加载前先把 models.json 中残留的 embedding / rerank 配置迁出到
+/// `memory/legacy-models.json`，由 Memory 插件接管；迁出失败不影响加载。
 fn load_models_config(dir: &Path) -> ModelsConfig {
+    if let Err(error) = io::extract_legacy_memory_models_at(dir) {
+        tracing::warn!("迁出 models.json 中的 Memory 旧模型配置失败，下次启动重试：{error}");
+    }
     io::load_models_config_at(dir)
 }
 

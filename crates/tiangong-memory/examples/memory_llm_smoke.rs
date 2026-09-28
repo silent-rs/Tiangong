@@ -4,7 +4,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use tiangong_llm::{ProviderProtocol, complete_text_with_usage};
-use tiangong_memory::{MemoryConfig, MemoryLlmConfig, default_memory_config_path};
+use tiangong_memory::{
+    MemoryConfig, MemoryLlmSource, MemoryRemoteEndpoint, default_memory_config_path,
+};
 
 const SYSTEM_PROMPT: &str = "\
 你是天工 Memory LLM smoke test。
@@ -160,14 +162,14 @@ fn parse_json_response(response: &str) -> Result<Value> {
 
 fn print_sample_config() -> Result<()> {
     let sample = MemoryConfig {
-        model: Some(MemoryLlmConfig {
+        model: Some(MemoryLlmSource::Remote(MemoryRemoteEndpoint {
             provider_key: None,
             base_url: "https://api.example.com/v1".to_string(),
             api_key: "${MEMORY_LLM_API_KEY}".to_string(),
             model: "memory-model-name".to_string(),
             protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: 60_000,
-        }),
+        })),
         ..Default::default()
     };
     println!("{}", serde_json::to_string_pretty(&sample)?);
