@@ -73,6 +73,14 @@ pub trait Backend: Send + Sync {
             supported: vec![],
         })
     }
+    /// 把天工窗口还原到自动分屏前的位置（只动天工窗口）。默认不支持
+    /// （Linux 不做自动分屏）。
+    async fn restore_host_window(
+        &self,
+        _saved: crate::split::SavedHostFrame,
+    ) -> Result<(), String> {
+        Err("当前平台不支持自动分屏".to_string())
+    }
 }
 
 /// `desktop_status` 返回信息。
@@ -208,6 +216,10 @@ pub mod keycast_stack;
 pub mod keys;
 #[cfg(target_os = "linux")]
 pub mod linux;
+/// 自动分屏（AX 摆放窗口，仅 macOS）。公开仅供 `examples/split_demo` 真机验证。
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub mod mac_split;
 #[cfg(target_os = "macos")]
 pub mod macos;
 /// 坐标级鼠标手势（CGEvent 合成，RFC 0018 §2.3，仅 macOS）。
@@ -231,6 +243,9 @@ pub mod win_keycast;
 /// Windows 天工虚拟指针 overlay。
 #[cfg(target_os = "windows")]
 pub mod win_overlay;
+/// Windows 自动分屏（SetWindowPos）。
+#[cfg(target_os = "windows")]
+pub mod win_split;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

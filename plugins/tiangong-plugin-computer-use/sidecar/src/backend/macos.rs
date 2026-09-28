@@ -807,7 +807,23 @@ impl Backend for MacosBackend {
         &self,
         req: &tiangong_plugin_computer_use_protocol::ops::OpenAppRequest,
     ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ops::OpenAppResponse> {
-        super::app_launch::open_app(req).await
+        let mut result = super::app_launch::open_app(req).await;
+        // 应用窗口出现后自动分屏：天工靠左、目标占右侧。
+        if let DesktopResult::Ok(resp) = &mut result
+            && resp.window.is_some()
+            && let Ok(pid) = i32::try_from(resp.pid)
+        {
+            let outcome = super::mac_split::split_with_host(pid).await;
+            if let Some(target) = outcome.target {
+                resp.window = Some(target);
+            }
+            resp.summary = format!("{}。{}", resp.summary, outcome.detail);
+            resp.split = Some(outcome);
+        }
+        result
+    }
+    async fn restore_host_window(&self, saved: crate::split::SavedHostFrame) -> Result<(), String> {
+        super::mac_split::restore_host(saved).await
     }
 }
 

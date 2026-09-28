@@ -4,5 +4,6 @@
 
 pub mod backend;
 pub mod service;
+pub mod split;
 
 pub use service::ComputerUseService;

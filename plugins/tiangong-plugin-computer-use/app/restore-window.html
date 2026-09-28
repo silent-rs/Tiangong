@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    .rw-button {
+      display: inline-flex;
+      box-sizing: border-box;
+      width: 32px;
+      height: 32px;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      border-radius: calc(var(--radius, 0.5rem) - 2px);
+      padding: 0;
+      background: transparent;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+    }
+    .rw-button[hidden] { display: none; }
+    .rw-button:hover:not(:disabled) {
+      background: hsl(var(--accent, 210 40% 96.1%));
+      color: hsl(var(--accent-foreground, 222.2 47.4% 11.2%));
+    }
+    .rw-button:focus-visible {
+      outline: none;
+      box-shadow: inset 0 0 0 2px hsl(var(--ring, 222.2 47.4% 11.2%));
+    }
+    .rw-button:disabled { cursor: wait; opacity: 0.55; }
+    .rw-button svg { width: 16px; height: 16px; flex: 0 0 auto; }
+  </style>
+</head>
+<body>
+  <!--
+    Computer Use · 恢复窗口按钮（session.input-action 挂载点，位于发送按钮左侧的按钮区）。
+    打开应用时 sidecar 自动把天工窗口放到屏幕左侧、目标应用放右侧；本按钮
+    只在「当前会话用过自动分屏且对话已完成」时显示，点击只还原天工窗口，
+    不调整其他应用；恢复后隐藏。
+    状态来源：bridge.call('plugin.splitState') 拉取 + sidecar.event
+    （channel=computer_use.split）推送。
+  -->
+  <button class="rw-button" id="rw-button" type="button" title="恢复天工窗口" aria-label="恢复天工窗口" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M15 3h6v6" />
+      <path d="M9 21H3v-6" />
+      <path d="M21 3l-7 7" />
+      <path d="M3 21l7-7" />
+    </svg>
+  </button>
+
+  <script>
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const button = uiRoot.getElementById('rw-button');
+    // 按钮隐藏时连宿主容器一起收起，避免按钮区出现 32px 空位。
+    const hostEl = uiRoot.host || null;
+    const state = { sessionId: null, split: null, busy: false };
+
+    function render() {
+      const visible = Boolean(
+        state.split && state.split.active && state.sessionId
+          && state.split.restorable_session === state.sessionId,
+      );
+      button.hidden = !visible;
+      button.disabled = state.busy;
+      if (hostEl) hostEl.style.display = visible ? '' : 'none';
+    }
+
+    async function call(method) {
+      const raw = await bridge.call(method, '{}');
+      return JSON.parse(raw);
+    }
+
+    async function refresh() {
+      try {
+        state.split = await call('plugin.splitState');
+      } catch (error) {
+        state.split = null;
+        console.warn('[computer-use] 读取分屏状态失败', error);
+      }
+      render();
+    }
+
+    button.addEventListener('click', async () => {
+      if (state.busy) return;
+      state.busy = true;
+      render();
+      try {
+        const result = await call('plugin.restoreHostWindow');
+        state.split = result.state;
+        if (!result.restored) window.alert(result.detail);
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : String(error));
+      } finally {
+        state.busy = false;
+        render();
+      }
+    });
+
+    const onContext = (context) => {
+      const next = (context && context.session && context.session.id) || null;
+      if (next === state.sessionId) return;
+      state.sessionId = next;
+      void refresh();
+    };
+
+    const initial = typeof hostContext === 'function' ? hostContext() : hostContext;
+    render();
+    if (initial) onContext(initial);
+    if (typeof onHostContextChange === 'function') onHostContextChange(onContext);
+    if (!initial) void refresh();
+
+    // sidecar 状态变化推送：{ channel, payload } 包装。
+    const stop = bridge.on('sidecar.event', (payload) => {
+      try {
+        const event = JSON.parse(payload);
+        if (event.channel !== 'computer_use.split') return;
+        state.split = JSON.parse(event.payload);
+        render();
+      } catch {
+        // 非本插件通知或格式异常：忽略。
+      }
+    });
+    if (typeof registerCleanup === 'function') registerCleanup(stop);
+  </script>
+</body>
+</html>

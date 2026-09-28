@@ -591,6 +591,7 @@ pub(super) async fn open_app(req: &OpenAppRequest) -> DesktopResult<OpenAppRespo
         launched,
         window,
         summary,
+        split: None,
     })
 }
 

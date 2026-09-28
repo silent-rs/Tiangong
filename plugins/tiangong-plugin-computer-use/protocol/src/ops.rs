@@ -481,9 +481,114 @@ pub struct OpenAppResponse {
     /// 本次是否新启动了应用（false 表示应用已在运行、仅唤起到前台）。
     pub launched: bool,
     /// 前台屏幕窗口的逻辑坐标；None 表示超时内未检测到屏幕窗口。
+    /// 自动分屏成功时为分屏后的实际窗口位置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<crate::Bounds>,
     pub summary: String,
+    /// 自动分屏结果（天工窗口靠左、目标窗口占右侧）；平台不支持时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<SplitOutcome>,
+}
+
+// ── 自动分屏：天工窗口靠左固定宽度，被操作应用占右侧剩余区域 ─────────
+
+/// 分屏时天工窗口的宽度（逻辑单位：macOS points，Windows 按显示器 DPI 换算）。
+pub const SPLIT_HOST_WIDTH: f64 = 400.0;
+
+/// 一次自动分屏的结果。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SplitOutcome {
+    /// 是否已把两个窗口摆到目标位置（读回核对后）。
+    pub applied: bool,
+    /// 天工窗口分屏后的实际位置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<crate::Bounds>,
+    /// 目标窗口分屏后的实际位置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::Bounds>,
+    /// 人读说明（成功摘要或未分屏原因）。
+    pub detail: String,
+}
+
+/// sidecar 推送分屏状态变化的通知 channel（经宿主 `sidecar.event` 送达插件 UI）。
+pub const SPLIT_NOTIFICATION_CHANNEL: &str = "computer_use.split";
+
+/// 分屏状态：`active` 表示天工窗口处于分屏布局且已保存原位置；
+/// `restorable_session` 为已完成对话、可显示「恢复窗口」按钮的会话。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitState {
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restorable_session: Option<String>,
+}
+
+/// 查询分屏状态（插件 UI 挂载/切换会话时拉取）。
+pub const SPLIT_STATE_OPERATION: &str = "computer_use.split_state";
+pub struct SplitStateQuery;
+impl ComputerUseOperation for SplitStateQuery {
+    const NAME: &'static str = SPLIT_STATE_OPERATION;
+    type Request = Ack;
+    type Response = SplitState;
+}
+
+/// 轮次开始/结束通知：开始时隐藏该会话的恢复按钮；结束时若本轮触发过
+/// 自动分屏，标记该会话为分屏发起方并显示恢复按钮。
+pub const SPLIT_TURN_OPERATION: &str = "computer_use.split_turn";
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SplitTurnRequest {
+    pub session_id: String,
+    /// false：轮次开始；true：轮次结束。
+    pub finished: bool,
+    /// 本轮是否触发过自动分屏（仅轮次结束时有意义）。
+    #[serde(default)]
+    pub used_split: bool,
+}
+pub struct SplitTurn;
+impl ComputerUseOperation for SplitTurn {
+    const NAME: &'static str = SPLIT_TURN_OPERATION;
+    type Request = SplitTurnRequest;
+    type Response = SplitState;
+}
+
+/// 用户点击「恢复窗口」：只还原天工窗口的原位置，不调整其他应用。
+pub const RESTORE_HOST_WINDOW_OPERATION: &str = "computer_use.restore_host_window";
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RestoreHostWindowResponse {
+    pub restored: bool,
+    pub detail: String,
+    pub state: SplitState,
+}
+pub struct RestoreHostWindow;
+impl ComputerUseOperation for RestoreHostWindow {
+    const NAME: &'static str = RESTORE_HOST_WINDOW_OPERATION;
+    type Request = Ack;
+    type Response = RestoreHostWindowResponse;
+}
+
+/// 按工作区与宿主窗口宽度计算分屏布局：返回（天工窗口, 目标窗口）。
+///
+/// 工作区宽度不足以同时容纳天工窗口与可用的右侧区域（至少与天工等宽）
+/// 时返回 None，调用方跳过分屏。
+pub fn split_layout(
+    work_area: crate::Bounds,
+    host_width: f64,
+) -> Option<(crate::Bounds, crate::Bounds)> {
+    if host_width <= 0.0 || work_area.height <= 0.0 || work_area.width < host_width * 2.0 {
+        return None;
+    }
+    let host = crate::Bounds {
+        x: work_area.x,
+        y: work_area.y,
+        width: host_width,
+        height: work_area.height,
+    };
+    let target = crate::Bounds {
+        x: work_area.x + host_width,
+        y: work_area.y,
+        width: work_area.width - host_width,
+        height: work_area.height,
+    };
+    Some((host, target))
 }
 
 pub struct OpenApp;
