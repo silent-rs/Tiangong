@@ -6,8 +6,8 @@
 //! - 凭据落盘：`~/.tiangong/auth/codex.json`（Unix 下权限 0600）；
 //! - 自动续期：access token 过期（或服务端返回 401）时用 refresh token 刷新并回写。
 //!
-//! 请求侧见 `providers/openai`：`ProviderProtocol::Codex` 复用 Responses 映射，
-//! 发请求前通过 [`access`] 取得有效 access token、账号 ID 与数据驻留区域。
+//! 请求侧见 `providers/codex`：发请求前通过 [`access`] 取得有效 access token、
+//! 账号 ID 与数据驻留区域。
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -1094,32 +1094,6 @@ async fn poll_device_login(
     }
 }
 
-// ── 请求适配 ───────────────────────────────────────────────
-
-/// 按 Codex 推理后端约束改写 Responses 请求体（对齐 Codex CLI / opencode）：
-/// - 必须 `stream=true`、`store=false`；
-/// - 不支持 `max_output_tokens` / `temperature` / `top_p`；
-/// - 函数工具统一 `strict=false`，兼容不满足结构化输出约束的动态 schema。
-pub(crate) fn adapt_payload(payload: &mut Value) {
-    let Some(object) = payload.as_object_mut() else {
-        return;
-    };
-    for key in ["max_output_tokens", "temperature", "top_p"] {
-        object.remove(key);
-    }
-    object.insert("store".to_string(), Value::Bool(false));
-    object.insert("stream".to_string(), Value::Bool(true));
-    if let Some(tools) = object.get_mut("tools").and_then(Value::as_array_mut) {
-        for tool in tools {
-            if tool.get("type").and_then(Value::as_str) == Some("function")
-                && let Some(tool) = tool.as_object_mut()
-            {
-                tool.insert("strict".to_string(), Value::Bool(false));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,29 +1252,6 @@ mod tests {
         assert!(!needs_refresh(&creds));
         creds.expires_at = now_unix() + 10;
         assert!(needs_refresh(&creds));
-    }
-
-    #[test]
-    fn adapt_payload_strips_unsupported_fields_and_relaxes_tools() {
-        let mut payload = serde_json::json!({
-            "model": "gpt-5.5",
-            "max_output_tokens": 100,
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "prompt_cache_key": "s1",
-            "tools": [{ "type": "function", "name": "t", "parameters": {} }]
-        });
-        adapt_payload(&mut payload);
-        assert_eq!(
-            payload,
-            serde_json::json!({
-                "model": "gpt-5.5",
-                "prompt_cache_key": "s1",
-                "store": false,
-                "stream": true,
-                "tools": [{ "type": "function", "name": "t", "parameters": {}, "strict": false }]
-            })
-        );
     }
 
     #[test]

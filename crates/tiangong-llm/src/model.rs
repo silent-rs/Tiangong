@@ -49,16 +49,6 @@ impl ProviderProtocol {
     pub fn uses_oauth(&self) -> bool {
         matches!(self, ProviderProtocol::Codex)
     }
-
-    /// 是否为 OpenAI 系协议（工具调用顺序与 schema 校验走 OpenAI 规则）。
-    pub fn is_openai_family(&self) -> bool {
-        matches!(
-            self,
-            ProviderProtocol::OpenAi
-                | ProviderProtocol::OpenAiChatCompletions
-                | ProviderProtocol::Codex
-        )
-    }
 }
 
 impl FromStr for ProviderProtocol {

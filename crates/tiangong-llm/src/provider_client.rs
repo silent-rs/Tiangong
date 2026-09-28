@@ -26,6 +26,7 @@ use crate::message::{
 use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::providers::codex::{CodexConfig, CodexProvider};
 use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
 use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
@@ -166,7 +167,13 @@ fn filter_invalid_openai_tool_calls(
     functions: &[ToolSpec],
     mut response: ModelResponse,
 ) -> Result<ModelResponse> {
-    if !protocol.is_openai_family() || response.tool_calls.is_empty() {
+    if !matches!(
+        protocol,
+        ProviderProtocol::OpenAi
+            | ProviderProtocol::OpenAiChatCompletions
+            | ProviderProtocol::Codex
+    ) || response.tool_calls.is_empty()
+    {
         return Ok(response);
     }
 
@@ -350,7 +357,12 @@ impl SingleProviderClient {
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelResponse> {
         let (provider, request) = self.prepare_request(&req)?;
-        let preserve_tool_call_order = self.protocol().is_openai_family();
+        let preserve_tool_call_order = matches!(
+            self.protocol(),
+            ProviderProtocol::OpenAi
+                | ProviderProtocol::OpenAiChatCompletions
+                | ProviderProtocol::Codex
+        );
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         let response = consume_provider_stream_events_async(
             stream,
@@ -397,21 +409,18 @@ impl SingleProviderClient {
         }
         Self::list_codex_model_infos(cfg).await
     }
-    /// Codex 模型目录：按服务端顺序（新模型在前）去重，保留上下文窗口。
+    /// Codex 模型目录：按服务端顺序（新模型在前），保留上下文窗口。
     async fn list_codex_model_infos(
         cfg: &ModelEndpoint,
     ) -> Result<Vec<crate::model::ProviderModelInfo>> {
-        let provider = build_openai_responses_provider_from_config(
+        let provider = build_codex_provider_from_config(
             cfg,
             cfg.timeout_ms,
             None,
             &scru128::new().to_string(),
             MAX_RETRIES,
         )?;
-        let mut models = provider.list_models().await.map_err(map_llm_error)?;
-        let mut seen = std::collections::HashSet::new();
-        models.retain(|model| seen.insert(model.id.clone()));
-        Ok(models)
+        provider.list_models().await.map_err(map_llm_error)
     }
     /// [`Self::list_model_infos_async`] 的同步版本（CLI 使用）。
     pub fn list_model_infos(cfg: &ModelEndpoint) -> Result<Vec<crate::model::ProviderModelInfo>> {
@@ -572,17 +581,24 @@ impl SingleProviderClient {
                     max_retries,
                 )?,
             ))),
-            ProviderProtocol::OpenAi | ProviderProtocol::Codex => {
-                Ok(ProviderDispatch::OpenAiResponses(Box::new(
-                    build_openai_responses_provider_from_config(
-                        &self.cfg,
-                        timeout_ms,
-                        self.on_retry.clone(),
-                        session_id,
-                        max_retries,
-                    )?,
-                )))
-            }
+            ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
+                build_openai_responses_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                    session_id,
+                    max_retries,
+                )?,
+            ))),
+            ProviderProtocol::Codex => Ok(ProviderDispatch::Codex(Box::new(
+                build_codex_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                    session_id,
+                    max_retries,
+                )?,
+            ))),
             ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
                 build_openai_provider_from_config(
                     &self.cfg,
@@ -736,26 +752,34 @@ fn build_openai_responses_provider_from_config(
     session_id: &str,
     max_retries: u32,
 ) -> Result<OpenAiResponsesProvider> {
-    let codex = cfg.protocol == ProviderProtocol::Codex;
     let token = cfg.api_key.trim();
-    if token.is_empty() && !codex {
+    if token.is_empty() {
         return Err(anyhow!(
             "API_AUTH_TOKEN 不能为空，无法发起 OpenAI Responses 请求"
         ));
     }
-    // Codex：鉴权来自 ChatGPT 登录态（请求时取令牌），地址固定为 Codex 后端。
-    let base_url = if codex && cfg.base_url.trim().is_empty() {
-        crate::codex_auth::CODEX_BASE_URL.to_string()
-    } else {
-        cfg.base_url.clone()
-    };
-    let mut config = OpenAiResponsesConfig::new(token.to_string(), base_url);
-    config.codex = codex;
+    let mut config = OpenAiResponsesConfig::new(token.to_string(), cfg.base_url.clone());
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = max_retries;
     config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(OpenAiResponsesProvider::new(config))
+}
+
+/// Codex（ChatGPT 账号）：鉴权来自 OAuth 登录态，无需 api_key。
+fn build_codex_provider_from_config(
+    cfg: &ModelEndpoint,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+    session_id: &str,
+    max_retries: u32,
+) -> Result<CodexProvider> {
+    let mut config = CodexConfig::new(cfg.base_url.clone());
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = max_retries;
+    config.retry_notifier = on_retry;
+    config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
+    Ok(CodexProvider::new(config))
 }
 
 fn build_openai_provider_from_config(
@@ -1366,6 +1390,7 @@ pub(crate) enum ProviderDispatch {
     OpenAiResponses(Box<OpenAiResponsesProvider>),
     OpenAiChat(Box<OpenAiChatCompletionsProvider>),
     DeepSeek(Box<DeepSeekProvider>),
+    Codex(Box<CodexProvider>),
 }
 
 impl ProviderDispatch {
@@ -1378,6 +1403,7 @@ impl ProviderDispatch {
             ProviderDispatch::OpenAiResponses(provider) => provider.complete(request).await,
             ProviderDispatch::OpenAiChat(provider) => provider.complete(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.complete(request).await,
+            ProviderDispatch::Codex(provider) => provider.complete(request).await,
         }
     }
 
@@ -1390,6 +1416,7 @@ impl ProviderDispatch {
             ProviderDispatch::OpenAiResponses(provider) => provider.stream(request).await,
             ProviderDispatch::OpenAiChat(provider) => provider.stream(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
+            ProviderDispatch::Codex(provider) => provider.stream(request).await,
         }
     }
 }
@@ -1406,7 +1433,9 @@ fn block_on_provider_stream(
     ) -> Result<ModelResponse> {
         let preserve_tool_call_order = matches!(
             &provider,
-            ProviderDispatch::OpenAiResponses(_) | ProviderDispatch::OpenAiChat(_)
+            ProviderDispatch::OpenAiResponses(_)
+                | ProviderDispatch::OpenAiChat(_)
+                | ProviderDispatch::Codex(_)
         );
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         Ok(consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await)
