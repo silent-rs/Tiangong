@@ -570,6 +570,10 @@ const LOCKED_PROVIDERS = new Set(['DeepSeek', CODEX_PROVIDER_NAME]);
 /** 以账号登录鉴权、无需 API Key 的协议。 */
 const isOAuthProtocol = (protocol?: string) => protocol === 'codex';
 
+/** 新注册模型的默认能力：ChatGPT（Codex）全系原生支持图片理解，同时具备对话与多模态能力。 */
+const defaultCapabilitiesFor = (protocol?: string): string[] =>
+  protocol === 'codex' ? ['chat', 'multimodal'] : ['chat'];
+
 interface UrlPreset {
   label: string;
   url: string;
@@ -866,12 +870,25 @@ function ProviderModelsView({
       const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers);
       if (isCancelled() || models.length === 0) return;
       const next = { ...config };
+      const capabilities = defaultCapabilitiesFor(provider.protocol);
+      let changed = false;
       for (const modelId of models) {
         if (!next.models[modelId]) {
-          next.models = { ...next.models, [modelId]: { provider: providerKey, model: modelId, capabilities: ['chat'], options: {} } };
+          next.models = { ...next.models, [modelId]: { provider: providerKey, model: modelId, capabilities: [...capabilities], options: {} } };
+          changed = true;
         }
       }
-      onChange(next);
+      // 已注册的 ChatGPT（OAuth）模型补齐默认能力（如先前只注册了 chat 的补上 multimodal）；
+      // 其他供应商的模型能力由用户维护（如 embedding 模型不应被补 chat），不做改动。
+      for (const [key, entry] of Object.entries(next.models)) {
+        if (!isOAuthProtocol(provider.protocol) || entry.provider !== providerKey) continue;
+        const missing = capabilities.filter((cap) => !entry.capabilities.includes(cap));
+        if (missing.length > 0) {
+          next.models = { ...next.models, [key]: { ...entry, capabilities: [...entry.capabilities, ...missing] } };
+          changed = true;
+        }
+      }
+      if (changed) onChange(next);
     } catch {
       // 静默失败，不影响 UI
     } finally {
@@ -951,8 +968,9 @@ function ProviderModelsView({
                 {isOAuthProtocol(selectedConfig.protocol) ? (
                   <CodexAuthPanel
                     onStatusChange={(status) => {
-                      // 登录成功且尚无该供应商模型时，自动拉取模型列表。
-                      if (status.logged_in && providerModels.length === 0) autoRegisterModels(activeProvider);
+                      // 已登录时同步模型列表：新模型注册为 chat + multimodal，
+                      // 已有模型补齐缺失能力（无变化时不触发保存）。
+                      if (status.logged_in) autoRegisterModels(activeProvider);
                     }}
                   />
                 ) : (

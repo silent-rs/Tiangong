@@ -193,7 +193,9 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
       };
       let key = modelName.trim();
       if (cfg.models[key]) key = `${name}-${key}`;
-      const entry: ModelEntryView = { provider: name, model: modelName.trim(), capabilities: ['chat'], options: {} };
+      // ChatGPT（Codex）全系原生支持图片理解：同时注册多模态能力。
+      const capabilities = isOAuth ? ['chat', 'multimodal'] : ['chat'];
+      const entry: ModelEntryView = { provider: name, model: modelName.trim(), capabilities, options: {} };
       // 补全上下文窗口默认值；失败不阻塞保存。
       try {
         const ctx = await api.resolveModelContextWindow(modelName.trim());

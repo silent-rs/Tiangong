@@ -157,19 +157,34 @@ fn prompt_model(
         ("tts", ModelCapability::Tts),
     ];
     let cap_labels: Vec<&str> = caps.iter().map(|(k, _)| *k).collect();
-    // 默认勾选 chat（caps[0]），降低误操作概率
+    // 默认勾选 chat（caps[0]），降低误操作概率；ChatGPT（Codex）全系原生多模态，
+    // 额外默认勾选 multimodal（caps[1]）。
+    let defaults: &[usize] = if protocol == ProviderProtocol::Codex {
+        &[0, 1]
+    } else {
+        &[0]
+    };
     let selected =
-        ui::multiselect_with_defaults("选择模型能力（空格切换，回车确认）", &cap_labels, &[0])?;
+        ui::multiselect_with_defaults("选择模型能力（空格切换，回车确认）", &cap_labels, defaults)?;
     let capabilities: Vec<ModelCapability> = selected.iter().map(|&i| caps[i].1).collect();
 
     // 至少要有 chat（最常见的对话场景）
     let capabilities = if capabilities.is_empty() {
-        vec![ModelCapability::Chat]
+        default_capabilities(protocol)
     } else {
         capabilities
     };
 
     Ok((model_name, model_id, capabilities))
+}
+
+/// 协议对应的默认模型能力：ChatGPT（Codex）全系同时具备对话与多模态。
+pub(crate) fn default_capabilities(protocol: ProviderProtocol) -> Vec<ModelCapability> {
+    if protocol == ProviderProtocol::Codex {
+        vec![ModelCapability::Chat, ModelCapability::Multimodal]
+    } else {
+        vec![ModelCapability::Chat]
+    }
 }
 
 /// 收集路由槽位并设置（利用已有 capability 校验）。

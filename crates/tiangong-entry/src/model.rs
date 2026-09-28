@@ -126,9 +126,19 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
             ChatgptSubcommand::Login { device } => {
                 codex_login(device)?;
                 ensure_codex_provider(&mut config);
+                match sync_codex_models(&mut config) {
+                    Ok(models) => println!(
+                        "已同步 {} 个 ChatGPT 模型（chat + multimodal）：{}",
+                        models.len(),
+                        models.join(", ")
+                    ),
+                    Err(err) => eprintln!(
+                        "拉取 ChatGPT 模型列表失败（{err:#}），可稍后用 `tiangong model add-model` 手动添加"
+                    ),
+                }
                 tiangong_config::io::save_models_config_at(&dir, &config)?;
                 println!(
-                    "已添加供应商 {}，可用 `tiangong model configure` 或 `tiangong model add-model` 选择模型",
+                    "已添加供应商 {}，可用 `tiangong model route set chat <模型>` 设为默认对话模型",
                     super::configure::CODEX_PROVIDER_NAME
                 );
             }
@@ -178,6 +188,24 @@ pub(crate) fn ensure_codex_provider(config: &mut ModelsConfig) {
         tiangong_llm::ProviderProtocol::Codex,
         300_000,
     );
+}
+
+/// 拉取 ChatGPT 可用模型并注册（chat + multimodal），返回模型 id 列表。
+fn sync_codex_models(config: &mut ModelsConfig) -> Result<Vec<String>> {
+    let provider_name = super::configure::CODEX_PROVIDER_NAME;
+    let endpoint = ModelEndpoint {
+        base_url: tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+        protocol: tiangong_llm::ProviderProtocol::Codex,
+        timeout_ms: 60_000,
+        ..Default::default()
+    };
+    let models = SingleProviderClient::list_models(&endpoint)?;
+    config.register_provider_models(
+        provider_name,
+        &models,
+        &super::configure::default_capabilities(tiangong_llm::ProviderProtocol::Codex),
+    );
+    Ok(models)
 }
 
 /// 终端内完成 ChatGPT 账号登录：浏览器回调或设备码。
