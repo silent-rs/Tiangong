@@ -24,6 +24,6 @@ semver = { workspace = true }
 dialoguer = "0.12"
 minisign-verify = "0.2"
 base64 = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time", "sync"] }
+tokio = { workspace = true, features = ["rt", "time", "sync", "net"] }
 libc = { workspace = true }
 qrcode = { workspace = true }

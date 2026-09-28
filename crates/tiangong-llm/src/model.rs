@@ -16,6 +16,9 @@ pub enum ProviderProtocol {
     OpenAiChatCompletions,
     Anthropic,
     DeepSeek,
+    /// ChatGPT 账号（Codex 登录）鉴权的 Responses 后端：凭据来自 OAuth 登录，
+    /// 不使用 provider 配置里的 api_key。
+    Codex,
 }
 
 impl Serialize for ProviderProtocol {
@@ -38,7 +41,23 @@ impl ProviderProtocol {
             ProviderProtocol::OpenAiChatCompletions => "openai_chatcompletions",
             ProviderProtocol::Anthropic => "anthropic",
             ProviderProtocol::DeepSeek => "deepseek",
+            ProviderProtocol::Codex => "codex",
         }
+    }
+
+    /// 是否通过 OAuth 登录态鉴权（无需配置 api_key）。
+    pub fn uses_oauth(&self) -> bool {
+        matches!(self, ProviderProtocol::Codex)
+    }
+
+    /// 是否为 OpenAI 系协议（工具调用顺序与 schema 校验走 OpenAI 规则）。
+    pub fn is_openai_family(&self) -> bool {
+        matches!(
+            self,
+            ProviderProtocol::OpenAi
+                | ProviderProtocol::OpenAiChatCompletions
+                | ProviderProtocol::Codex
+        )
     }
 }
 
@@ -61,6 +80,7 @@ impl FromStr for ProviderProtocol {
             }
             "anthropic" => Ok(ProviderProtocol::Anthropic),
             "deepseek" | "deep_seek" => Ok(ProviderProtocol::DeepSeek),
+            "codex" | "chatgpt" | "chatgpt_codex" | "openai_codex" => Ok(ProviderProtocol::Codex),
             other => Err(anyhow!("不支持的 provider 协议：{other}")),
         }
     }

@@ -18,14 +18,99 @@ use super::stream::{ResponsesStreamParser, extract_completed_reasoning};
 #[derive(Clone)]
 pub struct OpenAiResponsesProvider {
     client: ResponsesClient,
+    codex: bool,
 }
 
 impl OpenAiResponsesProvider {
     pub fn new(config: OpenAiResponsesConfig) -> Self {
+        let codex = config.codex;
         Self {
             client: ResponsesClient::new(config),
+            codex,
         }
     }
+}
+
+/// 把统一流事件聚合为完整响应（供只支持流式的 Codex 后端实现 `complete`）。
+async fn collect_stream_response(mut stream: ProviderStream) -> Result<ProviderResponse, LlmError> {
+    use crate::message::{ChatMessage, MessageContent, MessageRole, ThinkingContent};
+
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut calls: Vec<(String, String, String)> = Vec::new();
+    let mut usage = None;
+    let mut stop_reason = None;
+    while let Some(event) = stream.next().await {
+        match event? {
+            ProviderStreamEvent::TextDelta(delta) => text.push_str(&delta),
+            ProviderStreamEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+            ProviderStreamEvent::ToolCallStart(call) => {
+                let args = if call.arguments.is_null() || call.arguments == serde_json::json!({}) {
+                    String::new()
+                } else {
+                    call.arguments.to_string()
+                };
+                calls.push((call.id, call.name, args));
+            }
+            ProviderStreamEvent::ToolCallDelta {
+                call_id,
+                partial_json,
+            } => {
+                if let Some(entry) = calls.iter_mut().find(|(id, _, _)| *id == call_id) {
+                    entry.2.push_str(&partial_json);
+                }
+            }
+            ProviderStreamEvent::Usage(value) => usage = Some(value),
+            ProviderStreamEvent::MessageEnd {
+                stop_reason: reason,
+            } => {
+                if reason.is_some() {
+                    stop_reason = reason;
+                }
+            }
+            ProviderStreamEvent::Error(message) => {
+                return Err(LlmError::Provider {
+                    provider: "codex",
+                    message,
+                });
+            }
+            _ => {}
+        }
+    }
+    let mut content = Vec::new();
+    if !reasoning.trim().is_empty() {
+        content.push(MessageContent::Thinking(ThinkingContent {
+            thinking: reasoning.clone(),
+            signature: None,
+        }));
+    }
+    if !text.trim().is_empty() {
+        content.push(MessageContent::Text(text.trim().to_string()));
+    }
+    for (id, name, args) in calls {
+        let arguments = if args.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}))
+        };
+        content.push(MessageContent::ToolCall(crate::tool::ToolCall {
+            id,
+            name,
+            arguments,
+        }));
+    }
+    Ok(ProviderResponse {
+        id: None,
+        model: None,
+        assistant_message: ChatMessage {
+            role: MessageRole::Assistant,
+            content,
+        },
+        reasoning_content: (!reasoning.trim().is_empty()).then_some(reasoning),
+        stop_reason,
+        usage,
+        raw: None,
+    })
 }
 
 /// 对 completed 事件的 reasoning 兜底做条件去重。
@@ -59,6 +144,10 @@ impl LlmProvider for OpenAiResponsesProvider {
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError> {
+        if self.codex {
+            // Codex 后端只接受流式请求：走流式并聚合为完整响应。
+            return collect_stream_response(self.stream(req).await?).await;
+        }
         let model = req.model.clone();
         let payload = build_request_json(&req, false)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
@@ -71,8 +160,11 @@ impl LlmProvider for OpenAiResponsesProvider {
 
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
         let model = req.model.clone();
-        let payload = build_request_json(&req, true)
+        let mut payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
+        if self.codex {
+            crate::codex_auth::adapt_payload(&mut payload);
+        }
         let stream = match self.client.stream(&model, payload).await? {
             // 服务端忽略 stream 参数返回一次性 JSON：复用非流式解析，
             // 合成等价的流事件序列，消费方无需感知差异。

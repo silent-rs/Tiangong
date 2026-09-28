@@ -5351,3 +5351,61 @@ pub struct PluginContributionEntry {
     pub group: String,
     pub has_view: bool,
 }
+
+// ---------------------------------------------------------------------------
+// ChatGPT（Codex）账号登录
+// ---------------------------------------------------------------------------
+
+/// 查询 ChatGPT 账号登录状态（不含令牌）。
+#[tauri::command]
+pub async fn codex_auth_status() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
+    Ok(tiangong_llm::codex_auth::status().await)
+}
+
+/// 发起 ChatGPT 账号登录并在系统浏览器打开授权页。
+///
+/// `method`：`browser`（默认，本地回调）或 `device`（设备码）。返回授权地址与
+/// 设备验证码，前端随后调用 [`codex_auth_wait`] 等待完成。
+#[tauri::command]
+pub async fn codex_auth_start(
+    app: AppHandle,
+    method: Option<String>,
+) -> Result<tiangong_llm::codex_auth::CodexLoginStart, String> {
+    let start = match method.as_deref().unwrap_or("browser") {
+        "device" => tiangong_llm::codex_auth::start_device_login().await,
+        _ => tiangong_llm::codex_auth::start_browser_login().await,
+    }
+    .map_err(|err| format!("{err:#}"))?;
+    #[allow(deprecated)]
+    {
+        use tauri_plugin_shell::ShellExt;
+        if let Err(err) = app.shell().open(start.url.clone(), None) {
+            // 打不开浏览器时仍返回地址，由前端提示用户手动打开。
+            warn!(error = %err, "打开 ChatGPT 授权页失败");
+        }
+    }
+    Ok(start)
+}
+
+/// 等待进行中的 ChatGPT 账号登录完成。
+#[tauri::command]
+pub async fn codex_auth_wait() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
+    tiangong_llm::codex_auth::wait_login()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+/// 取消进行中的 ChatGPT 账号登录。
+#[tauri::command]
+pub async fn codex_auth_cancel() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
+    tiangong_llm::codex_auth::cancel_login().await;
+    Ok(tiangong_llm::codex_auth::status().await)
+}
+
+/// 退出 ChatGPT 账号登录并删除本地凭据。
+#[tauri::command]
+pub async fn codex_auth_logout() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
+    tiangong_llm::codex_auth::logout()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}

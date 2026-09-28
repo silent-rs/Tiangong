@@ -22,6 +22,7 @@ import { BotPanel } from './bots/BotPanel';
 import { PluginIframe } from './PluginIframe';
 import { PluginSandbox } from './PluginSandbox';
 import { PluginManagerSettings } from './PluginManagerSettings';
+import { CODEX_PROVIDER_CONFIG, CODEX_PROVIDER_NAME, CodexAuthPanel } from './CodexAuthPanel';
 import { type SlotContributionEntry } from '../api/tauri';
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -560,7 +561,14 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
 const DEFAULT_PROVIDERS: Record<string, ProviderConfigView> = {
   'DeepSeek': { base_url: 'https://api.deepseek.com', api_key: '', timeout_ms: 300000, protocol: 'deepseek' },
   '智谱': { base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key: '', timeout_ms: 300000, protocol: 'openai_chatcompletions' },
+  [CODEX_PROVIDER_NAME]: { ...CODEX_PROVIDER_CONFIG },
 };
+
+/** 连接信息固定（URL / 协议不可改）的预设供应商。 */
+const LOCKED_PROVIDERS = new Set(['DeepSeek', CODEX_PROVIDER_NAME]);
+
+/** 以账号登录鉴权、无需 API Key 的协议。 */
+const isOAuthProtocol = (protocol?: string) => protocol === 'codex';
 
 interface UrlPreset {
   label: string;
@@ -827,7 +835,7 @@ function ProviderModelsView({
 
   const fetchModelsForProvider = async (providerKey: string) => {
     const provider = config.providers[providerKey];
-    if (!provider?.base_url || !provider?.api_key) {
+    if (!provider?.base_url || (!provider?.api_key && !isOAuthProtocol(provider?.protocol))) {
       showError('配置不完整', '请先配置 Base URL 和 API Key');
       return;
     }
@@ -849,33 +857,35 @@ function ProviderModelsView({
     try { setTtsVoices(await api.listTtsVoices()); } catch { setTtsVoices([]); } finally { setIsFetchingVoices(false); }
   };
 
+  // 拉取供应商模型并自动注册为 chat 模型（DeepSeek 填 key 后 / ChatGPT 登录后）。
+  const autoRegisterModels = async (providerKey: string, isCancelled: () => boolean = () => false) => {
+    const provider = config.providers[providerKey];
+    if (!provider?.base_url || (!provider?.api_key && !isOAuthProtocol(provider?.protocol))) return;
+    setIsFetchingModels(true);
+    try {
+      const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers);
+      if (isCancelled() || models.length === 0) return;
+      const next = { ...config };
+      for (const modelId of models) {
+        if (!next.models[modelId]) {
+          next.models = { ...next.models, [modelId]: { provider: providerKey, model: modelId, capabilities: ['chat'], options: {} } };
+        }
+      }
+      onChange(next);
+    } catch {
+      // 静默失败，不影响 UI
+    } finally {
+      if (!isCancelled()) setIsFetchingModels(false);
+    }
+  };
+
   // DeepSeek 自动获取模型：选中 DeepSeek 且有 api-key 时自动拉取并填充
   useEffect(() => {
     if (activeProvider !== 'DeepSeek' || !selectedConfig?.api_key?.trim()) return;
     if (isFetchingModels) return;
 
     let cancelled = false;
-    const autoFetch = async () => {
-      const provider = config.providers[activeProvider];
-      if (!provider?.base_url || !provider?.api_key) return;
-      setIsFetchingModels(true);
-      try {
-        const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers);
-        if (cancelled || models.length === 0) return;
-        const next = { ...config };
-        for (const modelId of models) {
-          if (!next.models[modelId]) {
-            next.models = { ...next.models, [modelId]: { provider: activeProvider, model: modelId, capabilities: ['chat'], options: {} } };
-          }
-        }
-        onChange(next);
-      } catch {
-        // 静默失败，不影响 UI
-      } finally {
-        if (!cancelled) setIsFetchingModels(false);
-      }
-    };
-    autoFetch();
+    autoRegisterModels(activeProvider, () => cancelled);
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProvider, selectedConfig?.api_key]);
@@ -938,6 +948,14 @@ function ProviderModelsView({
                 )}
               </div>
               <div className="space-y-3">
+                {isOAuthProtocol(selectedConfig.protocol) ? (
+                  <CodexAuthPanel
+                    onStatusChange={(status) => {
+                      // 登录成功且尚无该供应商模型时，自动拉取模型列表。
+                      if (status.logged_in && providerModels.length === 0) autoRegisterModels(activeProvider);
+                    }}
+                  />
+                ) : (
                 <div>
                   <Label className="text-xs">API Key</Label>
                   <div className="relative">
@@ -954,7 +972,8 @@ function ProviderModelsView({
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">支持 {'${ENV_VAR}'} 引用环境变量</p>
                 </div>
-                {activeProvider !== 'DeepSeek' && (
+                )}
+                {!LOCKED_PROVIDERS.has(activeProvider) && (
                 <div>
                   <Label className="text-xs">Base URL</Label>
                   {(() => {
@@ -1011,7 +1030,7 @@ function ProviderModelsView({
                 </div>
                 )}
                 <div className="flex gap-3">
-                  {activeProvider !== 'DeepSeek' && (
+                  {!LOCKED_PROVIDERS.has(activeProvider) && (
                   <div className="flex-1">
                     <Label className="text-xs">协议</Label>
                     <Select

@@ -13,6 +13,9 @@ pub struct OpenAiResponsesConfig {
     pub timeout: Duration,
     pub max_retries: u32,
     pub retry_notifier: Option<RetryNotifier>,
+    /// Codex（ChatGPT 账号）模式：鉴权来自 OAuth 登录态，忽略 `api_key`，
+    /// 请求体按 Codex 后端约束改写，模型列表走 `/models?client_version=`。
+    pub codex: bool,
 }
 
 impl OpenAiResponsesConfig {
@@ -24,6 +27,7 @@ impl OpenAiResponsesConfig {
             timeout: Duration::from_secs(60),
             max_retries: 3,
             retry_notifier: None,
+            codex: false,
         }
     }
 }
@@ -36,6 +40,7 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("timeout", &self.timeout)
             .field("max_retries", &self.max_retries)
             .field("retry_notifier", &self.retry_notifier.is_some())
+            .field("codex", &self.codex)
             .finish()
     }
 }

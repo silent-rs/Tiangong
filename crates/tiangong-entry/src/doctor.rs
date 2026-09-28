@@ -110,7 +110,7 @@ fn check_models(report: &mut DoctorReport, deep: bool) {
     if deep {
         if let Some(resolved) = chat {
             // 请求前检查 API Key：resolve_slot 已解析 ${ENV}，未设置则返回空串
-            if resolved.api_key.trim().is_empty() {
+            if resolved.api_key.trim().is_empty() && !resolved.protocol.uses_oauth() {
                 report.err(
                     "模型连通性",
                     "API Key 为空（${ENV} 环境变量可能未设置），跳过请求",

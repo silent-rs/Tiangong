@@ -146,6 +146,21 @@ export interface ProviderBalance {
   balance_infos: BalanceInfo[];
 }
 
+/** ChatGPT（Codex）账号登录状态（不含令牌）。 */
+export interface CodexAuthStatus {
+  logged_in: boolean;
+  email?: string;
+  plan_type?: string;
+  account_id?: string;
+  expires_at?: number;
+  login_pending: boolean;
+}
+
+export interface CodexLoginStart {
+  url: string;
+  user_code?: string;
+}
+
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
 
 export interface StoredAsset {
@@ -835,6 +850,22 @@ export const api = {
 
   getProviderBalance: (providerName: string): Promise<ProviderBalance> =>
     invoke('get_provider_balance', { providerName }),
+
+  codexAuthStatus: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_status'),
+
+  /** 发起 ChatGPT 账号登录（后端会自动打开浏览器）；method: browser | device */
+  codexAuthStart: (method: 'browser' | 'device' = 'browser'): Promise<CodexLoginStart> =>
+    invoke('codex_auth_start', { method }),
+
+  codexAuthWait: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_wait'),
+
+  codexAuthCancel: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_cancel'),
+
+  codexAuthLogout: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_logout'),
 
   newSessionId: (): Promise<string> =>
     invoke('new_session_id'),

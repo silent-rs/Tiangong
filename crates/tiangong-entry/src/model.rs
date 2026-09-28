@@ -4,7 +4,7 @@ use tiangong_llm::ModelEndpoint;
 use tiangong_llm::SingleProviderClient;
 use tiangong_llm::models_config::{ModelCapability, ModelEntry, ModelsConfig, RoutingSlot};
 
-use crate::args::{ModelArgs, ModelSubcommand, RouteSubcommand};
+use crate::args::{ChatgptSubcommand, ModelArgs, ModelSubcommand, RouteSubcommand};
 
 pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
     let dir = tiangong_config::io::storage_root();
@@ -122,8 +122,117 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
         ModelSubcommand::Test { target } => {
             test_model(&config, target.as_deref())?;
         }
+        ModelSubcommand::Chatgpt { command } => match command {
+            ChatgptSubcommand::Login { device } => {
+                codex_login(device)?;
+                ensure_codex_provider(&mut config);
+                tiangong_config::io::save_models_config_at(&dir, &config)?;
+                println!(
+                    "已添加供应商 {}，可用 `tiangong model configure` 或 `tiangong model add-model` 选择模型",
+                    super::configure::CODEX_PROVIDER_NAME
+                );
+            }
+            ChatgptSubcommand::Logout => {
+                block_on(tiangong_llm::codex_auth::logout())??;
+                println!("已退出 ChatGPT 账号");
+            }
+            ChatgptSubcommand::Status => {
+                let status = block_on(tiangong_llm::codex_auth::status())?;
+                print_codex_status(&status);
+            }
+        },
     }
     Ok(())
+}
+
+fn block_on<F: std::future::Future>(future: F) -> Result<F::Output> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("初始化异步运行时失败")?;
+    Ok(runtime.block_on(future))
+}
+
+fn print_codex_status(status: &tiangong_llm::codex_auth::CodexAuthStatus) {
+    if !status.logged_in {
+        println!("未登录 ChatGPT 账号（运行 `tiangong model chatgpt login` 登录）");
+        return;
+    }
+    println!(
+        "已登录 ChatGPT 账号：{}{}",
+        status.email.as_deref().unwrap_or("（未知邮箱）"),
+        status
+            .plan_type
+            .as_deref()
+            .map(|plan| format!("（{plan}）"))
+            .unwrap_or_default()
+    );
+}
+
+/// 确保存在固定供应商 ChatGPT（Codex 协议，无 api_key）。
+pub(crate) fn ensure_codex_provider(config: &mut ModelsConfig) {
+    config.upsert_provider(
+        super::configure::CODEX_PROVIDER_NAME,
+        tiangong_llm::codex_auth::CODEX_BASE_URL,
+        "",
+        tiangong_llm::ProviderProtocol::Codex,
+        300_000,
+    );
+}
+
+/// 终端内完成 ChatGPT 账号登录：浏览器回调或设备码。
+pub(crate) fn codex_login(device: bool) -> Result<()> {
+    block_on(async move {
+        let start = if device {
+            tiangong_llm::codex_auth::start_device_login().await?
+        } else {
+            tiangong_llm::codex_auth::start_browser_login().await?
+        };
+        match start.user_code.as_deref() {
+            Some(code) => {
+                println!("请在浏览器打开：{}", start.url);
+                println!("并输入验证码：{code}（15 分钟内有效）");
+            }
+            None => {
+                println!("请在浏览器中完成 ChatGPT 账号授权：");
+                println!("{}", start.url);
+                open_browser(&start.url);
+            }
+        }
+        println!("等待授权完成...");
+        let status = tiangong_llm::codex_auth::wait_login().await?;
+        print_codex_status(&status);
+        anyhow::Ok(())
+    })?
+}
+
+/// 交互式向导内的登录：让用户选择登录方式。
+pub(crate) fn codex_login_interactive() -> Result<()> {
+    if let Ok(status) = block_on(tiangong_llm::codex_auth::status())
+        && status.logged_in
+    {
+        print_codex_status(&status);
+        if !crate::interactive::confirm("是否重新登录？", false)? {
+            return Ok(());
+        }
+    }
+    let methods = ["浏览器登录（本机）", "设备码登录（远程 / 无浏览器）"];
+    let idx = crate::interactive::select("选择登录方式", &methods)?;
+    codex_login(idx == 1)
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(err) = result {
+        eprintln!("自动打开浏览器失败（{err}），请手动复制上面的链接");
+    }
 }
 
 fn print_list(config: &ModelsConfig, scope: Option<&str>) {
@@ -273,7 +382,7 @@ fn test_model(config: &ModelsConfig, target: Option<&str>) -> Result<()> {
 
     println!("正在测试 {target} 连通性...");
     // 请求前检查 API Key 非空（${ENV} 未设置会解析为空串，避免无效请求）
-    if endpoint.api_key.trim().is_empty() {
+    if endpoint.api_key.trim().is_empty() && !endpoint.protocol.uses_oauth() {
         return Err(anyhow!(
             "API Key 为空，可能是环境变量未设置。请检查 models.json 中的 api_key 或设置对应环境变量"
         ));

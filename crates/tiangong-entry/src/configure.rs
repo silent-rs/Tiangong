@@ -12,6 +12,9 @@ use tiangong_llm::models_config::{ModelCapability, ModelsConfig, RoutingSlot};
 
 use crate::interactive as ui;
 
+/// ChatGPT（Codex 登录）固定供应商名，与桌面端预设一致。
+pub(crate) const CODEX_PROVIDER_NAME: &str = "ChatGPT";
+
 /// 模型配置向导：引导完成 provider → model → route 三步。
 pub fn run_model_configure(config: &mut ModelsConfig) -> Result<()> {
     ui::ensure_terminal()?;
@@ -46,8 +49,18 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
         "OpenAI Responses",
         "OpenAI Chat Completions（兼容）",
         "Anthropic",
+        "ChatGPT 账号（Codex 登录，无需 API Key）",
     ];
     let idx = ui::select("选择模型协议", &protocols)?;
+    if idx == 4 {
+        crate::model::codex_login_interactive()?;
+        return Ok((
+            ProviderProtocol::Codex,
+            CODEX_PROVIDER_NAME.to_string(),
+            tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+            String::new(),
+        ));
+    }
     let (protocol, default_name, default_url) = match idx {
         0 => (
             "deepseek".parse::<ProviderProtocol>().unwrap(),
@@ -116,6 +129,7 @@ fn prompt_model(
         ProviderProtocol::OpenAi => "gpt-5.6-sol",
         ProviderProtocol::OpenAiChatCompletions => "gpt-4.1-mini",
         ProviderProtocol::Anthropic => "claude-sonnet-4-20250514",
+        ProviderProtocol::Codex => "gpt-5.5",
     };
 
     let default_alias = format!("{provider_name}-chat");

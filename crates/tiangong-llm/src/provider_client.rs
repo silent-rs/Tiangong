@@ -166,11 +166,7 @@ fn filter_invalid_openai_tool_calls(
     functions: &[ToolSpec],
     mut response: ModelResponse,
 ) -> Result<ModelResponse> {
-    if !matches!(
-        protocol,
-        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
-    ) || response.tool_calls.is_empty()
-    {
+    if !protocol.is_openai_family() || response.tool_calls.is_empty() {
         return Ok(response);
     }
 
@@ -354,10 +350,7 @@ impl SingleProviderClient {
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelResponse> {
         let (provider, request) = self.prepare_request(&req)?;
-        let preserve_tool_call_order = matches!(
-            self.protocol(),
-            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
-        );
+        let preserve_tool_call_order = self.protocol().is_openai_family();
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         let response = consume_provider_stream_events_async(
             stream,
@@ -385,8 +378,7 @@ impl SingleProviderClient {
     }
 
     pub async fn list_models_async(cfg: &ModelEndpoint) -> Result<Vec<String>> {
-        let token = cfg.api_key.trim();
-        if token.is_empty() {
+        if cfg.api_key.trim().is_empty() && !cfg.protocol.uses_oauth() {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法更新模型列表"));
         }
 
@@ -417,6 +409,19 @@ impl SingleProviderClient {
                 .await
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
+        } else if cfg.protocol == ProviderProtocol::Codex {
+            let provider = build_openai_responses_provider_from_config(
+                cfg,
+                timeout_ms,
+                None,
+                &scru128::new().to_string(),
+                MAX_RETRIES,
+            )?;
+            provider
+                .list_models()
+                .await
+                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
+                .map_err(map_llm_error)?
         } else {
             let provider = build_openai_provider_from_config(
                 cfg,
@@ -431,18 +436,30 @@ impl SingleProviderClient {
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
         };
+        // Codex 模型目录按服务端顺序（新模型在前）展示，不做字母排序。
+        if cfg.protocol == ProviderProtocol::Codex {
+            let mut seen = std::collections::HashSet::new();
+            models.retain(|model| seen.insert(model.clone()));
+            return Ok(models);
+        }
         models.sort();
         models.dedup();
         Ok(models)
     }
 
     pub fn list_models(cfg: &ModelEndpoint) -> Result<Vec<String>> {
-        let token = cfg.api_key.trim();
-        if token.is_empty() {
+        if cfg.api_key.trim().is_empty() && !cfg.protocol.uses_oauth() {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法更新模型列表"));
         }
 
         let timeout_ms = cfg.timeout_ms;
+        if cfg.protocol == ProviderProtocol::Codex {
+            let runtime = TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("初始化异步运行时失败")?;
+            return runtime.block_on(Self::list_models_async(cfg));
+        }
         if cfg.protocol == ProviderProtocol::Anthropic {
             let provider = build_anthropic_provider_from_config(
                 cfg,
@@ -524,15 +541,17 @@ impl SingleProviderClient {
                     max_retries,
                 )?,
             ))),
-            ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
-                build_openai_responses_provider_from_config(
-                    &self.cfg,
-                    timeout_ms,
-                    self.on_retry.clone(),
-                    session_id,
-                    max_retries,
-                )?,
-            ))),
+            ProviderProtocol::OpenAi | ProviderProtocol::Codex => {
+                Ok(ProviderDispatch::OpenAiResponses(Box::new(
+                    build_openai_responses_provider_from_config(
+                        &self.cfg,
+                        timeout_ms,
+                        self.on_retry.clone(),
+                        session_id,
+                        max_retries,
+                    )?,
+                )))
+            }
             ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
                 build_openai_provider_from_config(
                     &self.cfg,
@@ -686,13 +705,21 @@ fn build_openai_responses_provider_from_config(
     session_id: &str,
     max_retries: u32,
 ) -> Result<OpenAiResponsesProvider> {
+    let codex = cfg.protocol == ProviderProtocol::Codex;
     let token = cfg.api_key.trim();
-    if token.is_empty() {
+    if token.is_empty() && !codex {
         return Err(anyhow!(
             "API_AUTH_TOKEN 不能为空，无法发起 OpenAI Responses 请求"
         ));
     }
-    let mut config = OpenAiResponsesConfig::new(token.to_string(), cfg.base_url.clone());
+    // Codex：鉴权来自 ChatGPT 登录态（请求时取令牌），地址固定为 Codex 后端。
+    let base_url = if codex && cfg.base_url.trim().is_empty() {
+        crate::codex_auth::CODEX_BASE_URL.to_string()
+    } else {
+        cfg.base_url.clone()
+    };
+    let mut config = OpenAiResponsesConfig::new(token.to_string(), base_url);
+    config.codex = codex;
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = max_retries;
     config.retry_notifier = on_retry;
