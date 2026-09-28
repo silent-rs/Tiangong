@@ -401,9 +401,8 @@ impl SingleProviderClient {
                 .await?
                 .into_iter()
                 .map(|id| crate::model::ProviderModelInfo {
-                    display_name: None,
-                    context_window: None,
                     id,
+                    ..Default::default()
                 })
                 .collect());
         }

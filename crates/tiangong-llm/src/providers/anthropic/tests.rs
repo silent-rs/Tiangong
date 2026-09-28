@@ -55,7 +55,7 @@ impl AnthropicTransport for MockAnthropicTransport {
         Ok(vec![crate::model::ProviderModelInfo {
             id: "claude-3-7-sonnet".to_string(),
             display_name: Some("Claude 3.7 Sonnet".to_string()),
-            context_window: None,
+            ..Default::default()
         }])
     }
 }

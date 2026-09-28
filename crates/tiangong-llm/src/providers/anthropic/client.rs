@@ -75,7 +75,7 @@ impl AnthropicTransport for NativeAnthropicTransport {
             .map(|item| ProviderModelInfo {
                 id: item.id.clone(),
                 display_name: item.display_name.or(Some(item.id)),
-                context_window: None,
+                ..Default::default()
             })
             .collect())
     }

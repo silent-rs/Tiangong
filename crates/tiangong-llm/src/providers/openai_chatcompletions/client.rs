@@ -543,7 +543,7 @@ pub(crate) async fn list_models_via_config(
         .map(|entry| ProviderModelInfo {
             id: entry.id,
             display_name: None,
-            context_window: None,
+            ..Default::default()
         })
         .collect())
 }

@@ -77,7 +77,10 @@ impl FromStr for ProviderProtocol {
 }
 
 /// Provider 暴露的模型信息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 可选元信息（如 `context_window`）由各协议按需填写，其余用 `..Default::default()` 补齐，
+/// 新增字段时无需改动未使用该字段的 provider。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderModelInfo {
     pub id: String,
     pub display_name: Option<String>,
