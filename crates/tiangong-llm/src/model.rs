@@ -91,6 +91,9 @@ impl FromStr for ProviderProtocol {
 pub struct ProviderModelInfo {
     pub id: String,
     pub display_name: Option<String>,
+    /// 服务端声明的上下文窗口（token 数）；未提供时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 #[cfg(test)]

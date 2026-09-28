@@ -78,6 +78,7 @@ impl DeepSeekTransport for NativeDeepSeekTransport {
             .map(|item| ProviderModelInfo {
                 id: item.id.clone(),
                 display_name: Some(item.id),
+                context_window: None,
             })
             .collect())
     }

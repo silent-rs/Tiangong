@@ -190,7 +190,7 @@ pub(crate) fn ensure_codex_provider(config: &mut ModelsConfig) {
     );
 }
 
-/// 拉取 ChatGPT 可用模型并注册（chat + multimodal），返回模型 id 列表。
+/// 拉取 ChatGPT 可用模型并注册（chat + multimodal，上下文窗口取服务端声明），返回模型 id 列表。
 fn sync_codex_models(config: &mut ModelsConfig) -> Result<Vec<String>> {
     let provider_name = super::configure::CODEX_PROVIDER_NAME;
     let endpoint = ModelEndpoint {
@@ -199,13 +199,13 @@ fn sync_codex_models(config: &mut ModelsConfig) -> Result<Vec<String>> {
         timeout_ms: 60_000,
         ..Default::default()
     };
-    let models = SingleProviderClient::list_models(&endpoint)?;
+    let models = SingleProviderClient::list_model_infos(&endpoint)?;
     config.register_provider_models(
         provider_name,
         &models,
         &super::configure::default_capabilities(tiangong_llm::ProviderProtocol::Codex),
     );
-    Ok(models)
+    Ok(models.into_iter().map(|info| info.id).collect())
 }
 
 /// 终端内完成 ChatGPT 账号登录：浏览器回调或设备码。

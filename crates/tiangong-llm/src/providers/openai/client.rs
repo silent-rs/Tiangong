@@ -45,6 +45,12 @@ fn parse_codex_models(body: &str) -> Result<Vec<ProviderModelInfo>, LlmError> {
                             .get("display_name")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        // 优先取可用上限 max_context_window（如 872k），缺省回落 context_window。
+                        context_window: ["max_context_window", "context_window"]
+                            .iter()
+                            .find_map(|key| item.get(*key).and_then(Value::as_u64))
+                            .filter(|window| *window > 0)
+                            .map(|window| window as usize),
                     })
                 })
                 .collect()
@@ -322,5 +328,33 @@ impl ResponsesClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_models_tests {
+    use super::parse_codex_models;
+
+    #[test]
+    fn parses_listed_models_with_context_window() {
+        let body = r#"{"models":[
+            {"slug":"gpt-5.6-sol","visibility":"list","context_window":272000,"max_context_window":872000},
+            {"slug":"gpt-5.5","visibility":"list","context_window":272000},
+            {"slug":"gpt-hidden","visibility":"hide","max_context_window":872000},
+            {"slug":"gpt-x","visibility":"list"}
+        ]}"#;
+        let models = parse_codex_models(body).unwrap();
+        let got: Vec<_> = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.context_window))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("gpt-5.6-sol", Some(872_000)),
+                ("gpt-5.5", Some(272_000)),
+                ("gpt-x", None),
+            ]
+        );
     }
 }

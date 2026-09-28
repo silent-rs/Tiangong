@@ -63,6 +63,8 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
   const [customName, setCustomName] = useState('');
   const [draft, setDraft] = useState<ProviderConfigView>({ ...PRESET_PROVIDERS.DeepSeek });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  // ChatGPT 模型目录声明的上下文窗口（模型 id → token 数），保存时优先使用。
+  const [modelWindows, setModelWindows] = useState<Record<string, number>>({});
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelName, setModelName] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -83,6 +85,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setCustomName('');
     setDraft({ ...PRESET_PROVIDERS.DeepSeek });
     setAvailableModels([]);
+    setModelWindows({});
     setFetchingModels(false);
     setModelName('');
     setShowApiKey(false);
@@ -98,6 +101,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setCustomName('');
     setDraft({ ...(PRESET_PROVIDERS[key] ?? PRESET_PROVIDERS.DeepSeek) });
     setAvailableModels([]);
+    setModelWindows({});
     setModelName('');
   };
 
@@ -109,6 +113,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setProviderKey('');
     setDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_chatcompletions' });
     setAvailableModels([]);
+    setModelWindows({});
     setModelName('');
   };
 
@@ -140,7 +145,10 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     const seq = ++fetchSeqRef.current;
     setFetchingModels(true);
     try {
-      const models = await api.fetchProviderModels(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol);
+      const infos = isOAuth
+        ? await api.fetchProviderModelInfos(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol)
+        : (await api.fetchProviderModels(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol)).map((id) => ({ id, context_window: undefined as number | null | undefined }));
+      const models = infos.map((info) => info.id);
       // 请求期间已切换供应商或重开弹窗：结果已过期，丢弃且不改状态。
       if (seq !== fetchSeqRef.current) return;
       if (models.length === 0) {
@@ -151,10 +159,15 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
         setModelName((prev) => (prev.trim() !== '' && !models.includes(prev.trim()) ? '' : prev));
       }
       setAvailableModels(models);
+      setModelWindows(Object.fromEntries(
+        infos.filter((info) => (info.context_window ?? 0) > 0).map((info) => [info.id, info.context_window as number]),
+      ));
     } catch (err) {
       if (seq !== fetchSeqRef.current) return;
       setError({ title: '无法获取模型列表', detail: String(err) });
       setAvailableModels([]);
+      setModelWindows({});
+    setModelWindows({});
     } finally {
       if (seq === fetchSeqRef.current) setFetchingModels(false);
     }
@@ -196,11 +209,16 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
       // ChatGPT（Codex）全系原生支持图片理解：同时注册多模态能力。
       const capabilities = isOAuth ? ['chat', 'multimodal'] : ['chat'];
       const entry: ModelEntryView = { provider: name, model: modelName.trim(), capabilities, options: {} };
-      // 补全上下文窗口默认值；失败不阻塞保存。
-      try {
-        const ctx = await api.resolveModelContextWindow(modelName.trim());
-        if (ctx > 0) entry.context_window = ctx;
-      } catch { /* ignore */ }
+      // 上下文窗口：ChatGPT 以模型目录声明为准；否则按映射表补默认值，失败不阻塞保存。
+      const serverWindow = isOAuth ? modelWindows[modelName.trim()] : undefined;
+      if (serverWindow) {
+        entry.context_window = serverWindow;
+      } else {
+        try {
+          const ctx = await api.resolveModelContextWindow(modelName.trim());
+          if (ctx > 0) entry.context_window = ctx;
+        } catch { /* ignore */ }
+      }
       cfg.models = { ...cfg.models, [key]: { ...entry } };
       // 自动配置主对话路由。
       cfg.routing = { ...cfg.routing, chat: { ...entry } };

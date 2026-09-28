@@ -377,6 +377,50 @@ impl SingleProviderClient {
         self
     }
 
+    /// 拉取模型目录并保留服务端元信息（目前仅 Codex 返回上下文窗口）。
+    ///
+    /// Codex 按服务端顺序（新模型在前）去重返回；其他协议退化为
+    /// [`Self::list_models_async`] 的结果，`context_window` 为空。
+    pub async fn list_model_infos_async(
+        cfg: &ModelEndpoint,
+    ) -> Result<Vec<crate::model::ProviderModelInfo>> {
+        if cfg.protocol != ProviderProtocol::Codex {
+            return Ok(Self::list_models_async(cfg)
+                .await?
+                .into_iter()
+                .map(|id| crate::model::ProviderModelInfo {
+                    display_name: None,
+                    context_window: None,
+                    id,
+                })
+                .collect());
+        }
+        Self::list_codex_model_infos(cfg).await
+    }
+    /// Codex 模型目录：按服务端顺序（新模型在前）去重，保留上下文窗口。
+    async fn list_codex_model_infos(
+        cfg: &ModelEndpoint,
+    ) -> Result<Vec<crate::model::ProviderModelInfo>> {
+        let provider = build_openai_responses_provider_from_config(
+            cfg,
+            cfg.timeout_ms,
+            None,
+            &scru128::new().to_string(),
+            MAX_RETRIES,
+        )?;
+        let mut models = provider.list_models().await.map_err(map_llm_error)?;
+        let mut seen = std::collections::HashSet::new();
+        models.retain(|model| seen.insert(model.id.clone()));
+        Ok(models)
+    }
+    /// [`Self::list_model_infos_async`] 的同步版本（CLI 使用）。
+    pub fn list_model_infos(cfg: &ModelEndpoint) -> Result<Vec<crate::model::ProviderModelInfo>> {
+        let runtime = TokioRuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("初始化异步运行时失败")?;
+        runtime.block_on(Self::list_model_infos_async(cfg))
+    }
     pub async fn list_models_async(cfg: &ModelEndpoint) -> Result<Vec<String>> {
         if cfg.api_key.trim().is_empty() && !cfg.protocol.uses_oauth() {
             return Err(anyhow!("API_AUTH_TOKEN 不能为空，无法更新模型列表"));
@@ -410,18 +454,11 @@ impl SingleProviderClient {
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
         } else if cfg.protocol == ProviderProtocol::Codex {
-            let provider = build_openai_responses_provider_from_config(
-                cfg,
-                timeout_ms,
-                None,
-                &scru128::new().to_string(),
-                MAX_RETRIES,
-            )?;
-            provider
-                .list_models()
-                .await
-                .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
-                .map_err(map_llm_error)?
+            return Ok(Self::list_codex_model_infos(cfg)
+                .await?
+                .into_iter()
+                .map(|item| item.id)
+                .collect());
         } else {
             let provider = build_openai_provider_from_config(
                 cfg,
@@ -436,12 +473,6 @@ impl SingleProviderClient {
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
         };
-        // Codex 模型目录按服务端顺序（新模型在前）展示，不做字母排序。
-        if cfg.protocol == ProviderProtocol::Codex {
-            let mut seen = std::collections::HashSet::new();
-            models.retain(|model| seen.insert(model.clone()));
-            return Ok(models);
-        }
         models.sort();
         models.dedup();
         Ok(models)

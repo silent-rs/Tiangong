@@ -4295,6 +4295,38 @@ pub async fn fetch_provider_models(
         .map_err(|e| e.to_string())
 }
 
+/// 拉取供应商模型目录并保留服务端元信息（如 ChatGPT 返回的上下文窗口）。
+///
+/// 供前端自动注册模型使用；其他协议的 `context_window` 为空。
+#[tauri::command]
+pub async fn fetch_provider_model_infos(
+    base_url: String,
+    api_key: String,
+    timeout_ms: Option<u64>,
+    protocol: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+) -> Result<Vec<tiangong_llm::ProviderModelInfo>, String> {
+    use tiangong_llm::models_config::ModelsConfig;
+    use tiangong_llm::{ModelEndpoint, ProviderProtocol, SingleProviderClient};
+
+    let endpoint = ModelEndpoint {
+        headers: headers.unwrap_or_default(),
+        base_url,
+        api_key: ModelsConfig::resolve_api_key(&api_key),
+        model: String::new(),
+        protocol: protocol
+            .as_deref()
+            .and_then(|value| value.parse::<ProviderProtocol>().ok())
+            .unwrap_or_default(),
+        timeout_ms: timeout_ms.unwrap_or(60_000),
+        options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
+    };
+    SingleProviderClient::list_model_infos_async(&endpoint)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Webhook 管理 ─────────────────────────────────────────────
 
 #[tauri::command]

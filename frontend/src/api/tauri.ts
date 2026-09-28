@@ -624,6 +624,13 @@ export interface ModelEntryView {
   context_window?: number;
 }
 
+/** 供应商模型目录项；context_window 为服务端声明的上下文窗口（目前仅 ChatGPT 提供）。 */
+export interface ProviderModelInfo {
+  id: string;
+  display_name?: string | null;
+  context_window?: number | null;
+}
+
 export interface ModelsConfigView {
   providers: Record<string, ProviderConfigView>;
   models: Record<string, ModelEntryView>;
@@ -1061,6 +1068,15 @@ export const api = {
     headers?: Record<string, string>,
   ): Promise<string[]> =>
     invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol, headers }),
+  /** 拉取模型目录并保留服务端元信息（ChatGPT 返回上下文窗口）。 */
+  fetchProviderModelInfos: (
+    baseUrl: string,
+    apiKey: string,
+    timeoutMs?: number,
+    protocol?: string,
+    headers?: Record<string, string>,
+  ): Promise<ProviderModelInfo[]> =>
+    invoke('fetch_provider_model_infos', { baseUrl, apiKey, timeoutMs, protocol, headers }),
 
   resolveModelContextWindow: (model: string): Promise<number> =>
     invoke('resolve_model_context_window', { model }),

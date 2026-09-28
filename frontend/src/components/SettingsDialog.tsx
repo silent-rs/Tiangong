@@ -14,7 +14,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
 import { startWindowDrag } from '@/lib/windowDrag';
-import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession, SandboxPolicyView } from '@/api/tauri';
+import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, ProviderModelInfo, TrashedSession, SandboxPolicyView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { WebhookPanel } from './automation/WebhookPanel';
@@ -861,31 +861,65 @@ function ProviderModelsView({
     try { setTtsVoices(await api.listTtsVoices()); } catch { setTtsVoices([]); } finally { setIsFetchingVoices(false); }
   };
 
-  // 拉取供应商模型并自动注册为 chat 模型（DeepSeek 填 key 后 / ChatGPT 登录后）。
+  // 拉取供应商模型并自动注册（DeepSeek 填 key 后 / ChatGPT 登录后；ChatGPT 同步能力与上下文窗口）。
   const autoRegisterModels = async (providerKey: string, isCancelled: () => boolean = () => false) => {
     const provider = config.providers[providerKey];
     if (!provider?.base_url || (!provider?.api_key && !isOAuthProtocol(provider?.protocol))) return;
     setIsFetchingModels(true);
     try {
-      const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers);
-      if (isCancelled() || models.length === 0) return;
+      const oauth = isOAuthProtocol(provider.protocol);
+      const infos: ProviderModelInfo[] = oauth
+        ? await api.fetchProviderModelInfos(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers)
+        : (await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers))
+          .map((id) => ({ id }));
+      if (isCancelled() || infos.length === 0) return;
       const next = { ...config };
       const capabilities = defaultCapabilitiesFor(provider.protocol);
       let changed = false;
-      for (const modelId of models) {
-        if (!next.models[modelId]) {
-          next.models = { ...next.models, [modelId]: { provider: providerKey, model: modelId, capabilities: [...capabilities], options: {} } };
-          changed = true;
+      for (const { id: modelId } of infos) {
+        if (!oauth) {
+          if (!next.models[modelId]) {
+            next.models = { ...next.models, [modelId]: { provider: providerKey, model: modelId, capabilities: [...capabilities], options: {} } };
+            changed = true;
+          }
+          continue;
         }
+        // ChatGPT：按 供应商+模型 判重，key 与其他供应商冲突时加供应商前缀。
+        const exists = Object.values(next.models).some((e) => e.provider === providerKey && e.model === modelId);
+        if (exists) continue;
+        const key = next.models[modelId] ? `${providerKey}-${modelId}` : modelId;
+        next.models = { ...next.models, [key]: { provider: providerKey, model: modelId, capabilities: [...capabilities], options: {} } };
+        changed = true;
       }
-      // 已注册的 ChatGPT（OAuth）模型补齐默认能力（如先前只注册了 chat 的补上 multimodal）；
-      // 其他供应商的模型能力由用户维护（如 embedding 模型不应被补 chat），不做改动。
-      for (const [key, entry] of Object.entries(next.models)) {
-        if (!isOAuthProtocol(provider.protocol) || entry.provider !== providerKey) continue;
-        const missing = capabilities.filter((cap) => !entry.capabilities.includes(cap));
-        if (missing.length > 0) {
-          next.models = { ...next.models, [key]: { ...entry, capabilities: [...entry.capabilities, ...missing] } };
-          changed = true;
+      if (oauth) {
+        // ChatGPT 模型补齐默认能力（chat + multimodal），上下文窗口以服务端声明为准并随之更新；
+        // 其他供应商的模型能力/窗口由用户维护（如 embedding 模型不应被补 chat），不做改动。
+        const windows = new Map(infos.filter((i) => (i.context_window ?? 0) > 0).map((i) => [i.id, i.context_window as number]));
+        for (const [key, entry] of Object.entries(next.models)) {
+          if (entry.provider !== providerKey) continue;
+          const missing = capabilities.filter((cap) => !entry.capabilities.includes(cap));
+          const window = windows.get(entry.model);
+          const windowChanged = window !== undefined && entry.context_window !== window;
+          if (missing.length > 0 || windowChanged) {
+            next.models = {
+              ...next.models,
+              [key]: {
+                ...entry,
+                capabilities: [...entry.capabilities, ...missing],
+                ...(windowChanged ? { context_window: window } : {}),
+              },
+            };
+            changed = true;
+          }
+        }
+        // 路由条目是模型条目的副本，同步窗口。
+        for (const [slot, entry] of Object.entries(next.routing ?? {})) {
+          if (entry.provider !== providerKey) continue;
+          const window = windows.get(entry.model);
+          if (window !== undefined && entry.context_window !== window) {
+            next.routing = { ...next.routing, [slot]: { ...entry, context_window: window } };
+            changed = true;
+          }
         }
       }
       if (changed) onChange(next);
