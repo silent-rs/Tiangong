@@ -33,6 +33,8 @@ pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const CODEX_MODELS_CLIENT_VERSION: &str = "99.0.0";
 /// 请求头 `originator`：标识调用方客户端。
 pub const CODEX_ORIGINATOR: &str = "tiangong";
+/// 凭据目录名（位于存储根下），沙箱对插件读写双禁、仅按 `model-config.read` 放开读取。
+pub const CREDENTIALS_DIR: &str = "auth";
 
 const ISSUER: &str = "https://auth.openai.com";
 const OAUTH_SCOPE: &str = "openid profile email offline_access";
@@ -141,7 +143,7 @@ fn storage_root() -> PathBuf {
 
 /// 天工保存 Codex 凭据的文件路径。
 pub fn credentials_path() -> PathBuf {
-    storage_root().join("auth").join("codex.json")
+    storage_root().join(CREDENTIALS_DIR).join("codex.json")
 }
 
 /// 读取已保存的凭据；未登录返回 `Ok(None)`。
@@ -283,7 +285,12 @@ fn apply_tokens(previous: Option<CodexCredentials>, tokens: TokenResponse) -> Co
             non_empty_str(auth_claims(claims).and_then(|a| a.get("chatgpt_plan_type")))
         })
         .or(previous.plan_type);
-    let expires_at = now_unix() + tokens.expires_in.unwrap_or(DEFAULT_EXPIRES_IN_SECS);
+    // 以 access token 自身的 exp 为准；缺失时退回 expires_in，再退回默认有效期。
+    let expires_at = access_claims
+        .as_ref()
+        .and_then(|claims| claims.get("exp"))
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| now_unix() + tokens.expires_in.unwrap_or(DEFAULT_EXPIRES_IN_SECS));
     CodexCredentials {
         access_token: tokens.access_token,
         refresh_token: tokens
@@ -352,6 +359,10 @@ pub async fn logout() -> Result<CodexAuthStatus> {
 // ── 访问令牌 / 刷新 ────────────────────────────────────────
 
 /// 串行化刷新与写盘，避免并发请求重复刷新导致 refresh token 轮换冲突。
+///
+/// 刷新分工：主 agent（宿主进程内的对话请求）经 [`access`] 自动续期；
+/// 插件 / 工具 sidecar 只经 [`access_readonly`] 只读取用、从不刷新——
+/// refresh token 会被服务端轮换，多进程各自刷新会互相作废。
 static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn http_client() -> Result<reqwest::Client, LlmError> {
@@ -362,13 +373,27 @@ fn http_client() -> Result<reqwest::Client, LlmError> {
         .map_err(|err| LlmError::Transport(format!("创建 HTTP 客户端失败：{err}")))
 }
 
+/// 工具侧令牌过期提示。
+fn token_expired_for_tool() -> LlmError {
+    LlmError::Authentication(
+        "ChatGPT 登录令牌已过期：请在「设置 → 模型配置 → ChatGPT」点击「刷新令牌」后重试"
+            .to_string(),
+    )
+}
+
+/// 手动刷新令牌（模型管理中的「刷新令牌」按钮）。
+pub async fn refresh_now() -> Result<CodexAuthStatus> {
+    access(true).await.map_err(|err| anyhow!("{err}"))?;
+    Ok(status().await)
+}
+
 fn not_logged_in() -> LlmError {
     LlmError::Authentication(
         "尚未登录 ChatGPT 账号，请在「设置 → 模型配置 → ChatGPT」中登录".to_string(),
     )
 }
 
-/// 获取可用的访问凭据；过期或 `force_refresh` 时先刷新。
+/// 主 agent 取用访问凭据：临近过期或 `force_refresh`（请求返回 401）时自动续期。
 pub async fn access(force_refresh: bool) -> Result<CodexAccess, LlmError> {
     let _guard = REFRESH_LOCK.lock().await;
     let mut creds = load_credentials()
@@ -376,6 +401,23 @@ pub async fn access(force_refresh: bool) -> Result<CodexAccess, LlmError> {
         .ok_or_else(not_logged_in)?;
     if force_refresh || needs_refresh(&creds) {
         creds = refresh_credentials(creds).await?;
+    }
+    Ok(CodexAccess {
+        residency: residency_from_token(&creds.access_token),
+        access_token: creds.access_token,
+        account_id: creds.account_id,
+    })
+}
+
+/// 工具侧（插件 sidecar）只读取用访问凭据：不刷新、不写盘。
+///
+/// 令牌过期时直接报错，由用户到模型管理中手动刷新（见 [`refresh_now`]）。
+pub fn access_readonly() -> Result<CodexAccess, LlmError> {
+    let creds = load_credentials()
+        .map_err(|err| LlmError::Configuration(err.to_string()))?
+        .ok_or_else(not_logged_in)?;
+    if creds.expires_at <= now_unix() {
+        return Err(token_expired_for_tool());
     }
     Ok(CodexAccess {
         residency: residency_from_token(&creds.access_token),
@@ -960,6 +1002,26 @@ mod tests {
             "https://api.openai.com/auth": { "chatgpt_compute_residency": "no_constraint" }
         }));
         assert_eq!(residency_from_token(&token), None);
+    }
+
+    #[test]
+    fn expiry_prefers_access_token_exp() {
+        let creds = apply_tokens(
+            None,
+            TokenResponse {
+                access_token: jwt(serde_json::json!({ "exp": 1_900_000_000 })),
+                refresh_token: None,
+                id_token: None,
+                expires_in: Some(60),
+            },
+        );
+        assert_eq!(creds.expires_at, 1_900_000_000);
+    }
+
+    #[test]
+    fn readonly_access_rejects_expired_token_without_refresh() {
+        let err = token_expired_for_tool().to_string();
+        assert!(err.contains("刷新令牌"), "{err}");
     }
 
     #[test]

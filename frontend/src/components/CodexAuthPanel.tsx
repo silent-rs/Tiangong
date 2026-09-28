@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Copy, Loader2, LogIn, LogOut } from 'lucide-react';
+import { Copy, Loader2, LogIn, LogOut, RefreshCw } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { CodexAuthStatus, CodexLoginStart } from '@/api/tauri';
 import { Button } from './ui/button';
@@ -89,6 +89,22 @@ export function CodexAuthPanel({ onStatusChange }: Props) {
     }
   };
 
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshToken = async () => {
+    setError(null);
+    setRefreshing(true);
+    try {
+      updateStatus(await api.codexAuthRefresh());
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const expiresAt = status?.expires_at ? new Date(status.expires_at * 1000) : null;
+  const expired = expiresAt ? expiresAt.getTime() <= Date.now() : false;
+
   const copyUrl = async () => {
     if (!pending) return;
     try {
@@ -109,13 +125,33 @@ export function CodexAuthPanel({ onStatusChange }: Props) {
         <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
           <div className="min-w-0">
             <div className="text-sm truncate">{status.email || '已登录'}</div>
-            {status.plan_type && (
-              <div className="text-xs text-muted-foreground">套餐：{status.plan_type}</div>
-            )}
+            <div className="text-xs text-muted-foreground">
+              {status.plan_type && <span className="mr-2">套餐：{status.plan_type}</span>}
+              {expiresAt && (
+                <span className={expired ? 'text-destructive' : undefined}>
+                  令牌{expired ? '已过期' : '有效至'}：{expiresAt.toLocaleString()}
+                </span>
+              )}
+            </div>
           </div>
-          <Button variant="ghost" size="sm" className="h-7 shrink-0" onClick={logout}>
-            <LogOut className="w-3 h-3 mr-1" />退出
-          </Button>
+          <div className="flex shrink-0 items-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7"
+              onClick={refreshToken}
+              disabled={refreshing}
+              title="对话会自动续期；生图等工具不会自动续期，令牌过期时在此手动刷新"
+            >
+              {refreshing
+                ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                : <RefreshCw className="w-3 h-3 mr-1" />}
+              刷新令牌
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7" onClick={logout}>
+              <LogOut className="w-3 h-3 mr-1" />退出
+            </Button>
+          </div>
         </div>
       ) : pending ? (
         <div className="rounded-md border px-3 py-2 space-y-2">

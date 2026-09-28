@@ -4193,6 +4193,7 @@ pub async fn get_models_config(state: State<'_, TiangongApp>) -> Result<ModelsCo
 #[tauri::command]
 pub async fn set_models_config(
     config: ModelsConfigView,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let current = state
@@ -4207,6 +4208,8 @@ pub async fn set_models_config(
         })
         .await?;
     state.sync_core_config_from_state().await?;
+    // 通知会话区等订阅方刷新模型列表（设置页保存后立即可选）。
+    let _ = app.emit("models_config_changed", &());
     Ok(())
 }
 
@@ -5406,6 +5409,14 @@ pub async fn codex_auth_cancel() -> Result<tiangong_llm::codex_auth::CodexAuthSt
 #[tauri::command]
 pub async fn codex_auth_logout() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
     tiangong_llm::codex_auth::logout()
+        .await
+        .map_err(|err| format!("{err:#}"))
+}
+
+/// 手动刷新 ChatGPT 登录令牌（工具侧令牌过期时由用户在模型管理中触发）。
+#[tauri::command]
+pub async fn codex_auth_refresh() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
+    tiangong_llm::codex_auth::refresh_now()
         .await
         .map_err(|err| format!("{err:#}"))
 }

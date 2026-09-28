@@ -53,11 +53,17 @@ async function callHost(method, payload = "") {
 // ── DOM ──
 
 const sourceGlobal = document.getElementById("source-global");
+const sourceChatgpt = document.getElementById("source-chatgpt");
 const sourceManual = document.getElementById("source-manual");
 const globalSection = document.getElementById("global-section");
+const chatgptSection = document.getElementById("chatgpt-section");
 const manualSection = document.getElementById("manual-section");
 const globalModel = document.getElementById("global-model");
 const globalHint = document.getElementById("global-hint");
+const chatgptStatus = document.getElementById("chatgpt-status");
+const chatgptModel = document.getElementById("chatgpt-model");
+const chatgptModelList = document.getElementById("chatgpt-model-list");
+const manualProtocol = document.getElementById("manual-protocol");
 const manualBaseUrl = document.getElementById("manual-base-url");
 const manualApiKey = document.getElementById("manual-api-key");
 const manualModel = document.getElementById("manual-model");
@@ -65,13 +71,21 @@ const extraPrompt = document.getElementById("extra-prompt");
 const saveBtn = document.getElementById("save-btn");
 const statusEl = document.getElementById("status");
 
+function currentSource() {
+  if (sourceManual.checked) return "manual";
+  if (sourceChatgpt.checked) return "chatgpt";
+  return "global";
+}
+
 function toggleSource() {
-  const manual = sourceManual.checked;
-  globalSection.hidden = manual;
-  manualSection.hidden = !manual;
+  const source = currentSource();
+  globalSection.hidden = source !== "global";
+  chatgptSection.hidden = source !== "chatgpt";
+  manualSection.hidden = source !== "manual";
 }
 
 sourceGlobal.addEventListener("change", toggleSource);
+sourceChatgpt.addEventListener("change", toggleSource);
 sourceManual.addEventListener("change", toggleSource);
 
 function setStatus(message, type) {
@@ -106,14 +120,29 @@ async function loadConfig() {
       });
     }
 
+    // ChatGPT 账号状态与可选模型
+    const chatgpt = data.chatgpt || {};
+    chatgptStatus.textContent = chatgpt.logged_in
+      ? `已登录 ChatGPT 账号${chatgpt.email ? `：${chatgpt.email}` : ""}`
+      : "尚未登录 ChatGPT 账号，请先在「设置 → 模型配置 → ChatGPT」中登录";
+    chatgptStatus.className = chatgpt.logged_in ? "hint" : "hint error";
+    chatgptModelList.innerHTML = "";
+    (chatgpt.models || []).forEach((model) => {
+      const opt = document.createElement("option");
+      opt.value = model;
+      chatgptModelList.appendChild(opt);
+    });
+
     // 回显配置
-    const isManual = config.source === "manual";
-    sourceManual.checked = isManual;
-    sourceGlobal.checked = !isManual;
+    sourceManual.checked = config.source === "manual";
+    sourceChatgpt.checked = config.source === "chatgpt";
+    sourceGlobal.checked = !sourceManual.checked && !sourceChatgpt.checked;
     toggleSource();
 
     if (config.global_model_key) globalModel.value = config.global_model_key;
+    chatgptModel.value = config.chatgpt_model || "";
     if (config.manual_endpoint) {
+      manualProtocol.value = config.manual_endpoint.protocol === "chat_completions" ? "chat_completions" : "responses";
       manualBaseUrl.value = config.manual_endpoint.base_url || "";
       manualApiKey.value = config.manual_endpoint.api_key || "";
       manualModel.value = config.manual_endpoint.model || "";
@@ -134,10 +163,13 @@ async function saveConfig() {
   saveBtn.disabled = true;
   setStatus("保存中...", "");
   try {
+    const source = currentSource();
     const payload = {
-      source: sourceManual.checked ? "manual" : "global",
-      global_model_key: sourceGlobal.checked ? (globalModel.value || null) : null,
+      source,
+      global_model_key: source === "global" ? (globalModel.value || null) : null,
+      chatgpt_model: chatgptModel.value.trim() || null,
       manual_endpoint: {
+        protocol: manualProtocol.value,
         base_url: manualBaseUrl.value.trim(),
         api_key: manualApiKey.value,
         model: manualModel.value.trim(),

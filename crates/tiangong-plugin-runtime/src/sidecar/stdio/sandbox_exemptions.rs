@@ -11,6 +11,8 @@ pub(super) fn exempt_authorized_reads(
     let mut exemptions: Vec<std::path::PathBuf> = Vec::new();
     if access.model_config {
         exemptions.push(storage_root.join("models.json"));
+        // 模型配置中的 OAuth 供应商（ChatGPT）凭据存于 auth/，随模型配置读取授权开放。
+        exemptions.push(storage_root.join("auth"));
     }
     if access.mcp_config {
         exemptions.push(storage_root.join("mcp.json"));
@@ -56,6 +58,8 @@ pub(super) fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<st
         "trust.db",
         "mcp.json",
         "models.json",
+        // 账号登录凭据（ChatGPT OAuth 令牌）：只由宿主写入与续期。
+        "auth",
         "server.json",
         "app.json",
         "sandbox",
@@ -140,6 +144,7 @@ mod sensitive_access_tests {
                 .contains(&storage.join("models.json"))
         );
         assert!(policy.protected_paths.contains(&storage.join("app.json")));
+        assert!(policy.protected_paths.contains(&storage.join("auth")));
         // 宿主验证记录目录读写双禁：能力快照由宿主维护，插件不得伪造。
         assert!(
             policy
@@ -176,6 +181,8 @@ mod sensitive_access_tests {
                 .denied_read_paths
                 .contains(&storage.join("models.json"))
         );
+        // 模型配置授权同时开放 OAuth 凭据读取，但写保护保持。
+        assert!(!policy.denied_read_paths.contains(&storage.join("auth")));
         assert!(!policy.denied_read_paths.contains(&storage.join("mcp.json")));
         assert!(policy.denied_read_paths.contains(&storage.join("keys")));
         assert!(policy.denied_read_paths.contains(&storage.join("trust.db")));
@@ -189,6 +196,7 @@ mod sensitive_access_tests {
         // 无授权：禁读清单原样保留。
         let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
         tiangong_sandbox::sandbox::presets::apply_tiangong(&mut strict, storage);
+        assert!(strict.denied_read_paths.contains(&storage.join("auth")));
         let strict_before = strict.denied_read_paths.clone();
         exempt_authorized_reads(
             &mut strict,

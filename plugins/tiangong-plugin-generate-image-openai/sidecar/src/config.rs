@@ -65,6 +65,7 @@ pub fn save_selection(
     let config = ImageGenConfig {
         source: selection.source.clone(),
         global_model_key: selection.global_model_key.clone(),
+        chatgpt_model: selection.chatgpt_model.clone(),
         manual_endpoint: selection.manual_endpoint.clone(),
         resolved,
         extra_prompt: selection.extra_prompt.clone(),

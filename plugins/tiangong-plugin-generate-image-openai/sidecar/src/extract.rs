@@ -23,7 +23,17 @@ pub fn extract_images(payload: &Value) -> Result<Vec<String>> {
             .get("result")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
-        let Some(b64) = result else { continue };
+        let Some(b64) = result else {
+            // Chat Completions 兼容接口可能返回远程图片地址。
+            if let Some(url) = item
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                images.push(url.to_string());
+            }
+            continue;
+        };
         let format = item
             .get("output_format")
             .and_then(Value::as_str)

@@ -3,6 +3,7 @@
 mod config;
 mod extract;
 mod service;
+mod transport;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -199,6 +199,26 @@ export function MessageInput({
   const [modelOptions, setModelOptions] = useState<{ key: string; label: string; provider: string }[]>([]);
   const [defaultModelLabel, setDefaultModelLabel] = useState<string>('默认');
   const [modelSwitching, setModelSwitching] = useState(false);
+  // 拉取可选模型；设置页保存、下拉展开时都会重新拉取，保证与 models.json 同步。
+  const refreshModelOptions = useCallback(async (isCancelled: () => boolean = () => false) => {
+    try {
+      const result = await api.listSessionChatModels();
+      if (isCancelled()) return;
+      setModelOptions(result.models.map((item) => ({
+        key: item.key,
+        label: item.label || item.key,
+        provider: item.provider,
+      })));
+      // 跟随默认时显示路由配置的实际模型名。
+      setDefaultModelLabel(
+        result.default_ref
+          ? (result.models.find((item) => item.key === result.default_ref)?.label ?? '默认')
+          : '默认',
+      );
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
   useEffect(() => {
     let cancelled = false;
     if (activeSessionId) {
@@ -209,24 +229,21 @@ export function MessageInput({
       // 新建对话不沿用上一会话的模型选择，回到跟随路由默认。
       setSessionModelRef(null);
     }
-    api.listSessionChatModels()
-      .then((result) => {
-        if (cancelled) return;
-        setModelOptions(result.models.map((item) => ({
-          key: item.key,
-          label: item.label || item.key,
-          provider: item.provider,
-        })));
-        // 跟随默认时显示路由配置的实际模型名。
-        setDefaultModelLabel(
-          result.default_ref
-            ? (result.models.find((item) => item.key === result.default_ref)?.label ?? '默认')
-            : '默认',
-        );
-      })
-      .catch(console.error);
+    void refreshModelOptions(() => cancelled);
     return () => { cancelled = true; };
-  }, [activeSessionId]);
+  }, [activeSessionId, refreshModelOptions]);
+  // 模型配置变更（设置页保存、登录后自动拉取模型等）后刷新列表。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    api.onModelsConfigChanged(() => { void refreshModelOptions(() => disposed); })
+      .then((fn) => { if (disposed) fn(); else unlisten = fn; })
+      .catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refreshModelOptions]);
   const modelUnavailable = sessionModelRef != null
     && !modelOptions.some((option) => option.key === sessionModelRef);
   const modelDisplay = modelUnavailable
@@ -1205,6 +1222,7 @@ export function MessageInput({
                 <Select
                   value={sessionModelRef ?? MODEL_DEFAULT_VALUE}
                   onValueChange={(value) => { void handleSessionModelChange(value); }}
+                  onOpenChange={(open) => { if (open) void refreshModelOptions(); }}
                   disabled={modelSelectorDisabled}
                 >
                   <SelectTrigger

@@ -1,19 +1,18 @@
 //! Generate-Image-OpenAI sidecar 业务服务。
 //!
-//! 通过 OpenAI Responses API 的 image_generation 工具生成图片，解析响应并归档落盘。
-//! 支持两种模型来源：全局模型配置（models.json）或手动输入端点。
-
-use std::time::Duration;
+//! 通过 OpenAI Responses API 的 image_generation 工具（或 Chat Completions 兼容生图）
+//! 生成图片，解析响应并归档落盘。支持三种模型来源：全局模型配置（models.json）、
+//! ChatGPT 账号（Codex 登录）或手动输入端点。
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use serde_json::{Value, json};
-use tiangong_llm::{ModelCapability, ModelsConfig, ResolvedModel};
+use tiangong_llm::{ModelCapability, ModelsConfig, ProviderProtocol};
 use tiangong_plugin_generate_image_openai_protocol::{
-    Ack, ConfigBootstrap, ConfigSelection, Empty, GENERATE_OPERATION, GET_CONFIG_OPERATION,
-    GenerateRequest, GenerateResponse, GeneratedImage, IMAGE_PROTOCOL_VERSION, ImageGenConfig,
-    ModelInfo, ModelSource, PLUGIN_ID, PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint,
-    SET_CONFIG_OPERATION,
+    Ack, ChatgptAccountInfo, ConfigBootstrap, ConfigSelection, Empty, GENERATE_OPERATION,
+    GET_CONFIG_OPERATION, GenerateRequest, GenerateResponse, GeneratedImage,
+    IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, ModelInfo, ModelSource, PLUGIN_ID,
+    PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint, SET_CONFIG_OPERATION,
 };
 use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -22,6 +21,10 @@ use tiangong_plugin_runtime::protocol::{
 
 use crate::config;
 use crate::extract;
+use crate::transport;
+
+/// ChatGPT 账号生图的默认模型。
+const DEFAULT_CHATGPT_MODEL: &str = "gpt-5.5";
 
 pub struct ImageService;
 
@@ -115,9 +118,20 @@ async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
 
     let config = config::load_or_default();
     let resolved = resolve_endpoint(&config)?;
-    let payload = build_responses_request(&req.prompt, &resolved.model, &config, &req.images)?;
+    let payload = match resolved.protocol {
+        ImageApiProtocol::ChatCompletions => {
+            build_chat_request(&req.prompt, &resolved.model, &config, &req.images)?
+        }
+        ImageApiProtocol::Responses => {
+            build_responses_request(&req.prompt, &resolved.model, &config, &req.images)?
+        }
+        ImageApiProtocol::Codex => {
+            build_codex_request(&req.prompt, &resolved.model, &config, &req.images)?
+        }
+    };
 
-    let response = call_responses_api(&resolved, payload).await?;
+    tracing::debug!(model = %resolved.model, protocol = ?resolved.protocol, "生图请求");
+    let response = send_request(&resolved, payload).await?;
     let raw_images = extract::extract_images(&response)?;
     let model = response
         .get("model")
@@ -143,7 +157,8 @@ async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
 /// 运行时解析模型端点：只读 config.json 里缓存的 resolved，不再依赖 models.json。
 ///
 /// resolved 在保存配置时（SET_CONFIG_OPERATION）或 on_config_updated 触发时已写入。
-fn resolve_endpoint(config: &ImageGenConfig) -> Result<ResolvedModel> {
+/// Codex 协议不缓存令牌：发请求时从宿主维护的登录凭据只读取用。
+fn resolve_endpoint(config: &ImageGenConfig) -> Result<ResolvedEndpoint> {
     let resolved = &config.resolved;
     if resolved.base_url.trim().is_empty() {
         anyhow::bail!("未配置有效端点，请在设置页选择模型或手动输入端点后保存");
@@ -151,22 +166,51 @@ fn resolve_endpoint(config: &ImageGenConfig) -> Result<ResolvedModel> {
     if resolved.model.trim().is_empty() {
         anyhow::bail!("已缓存端点缺少 model");
     }
+    if resolved.protocol == ImageApiProtocol::Codex {
+        return Ok(resolved.clone());
+    }
     // api_key 支持 ${ENV_VAR}，在保存配置时已解析；这里兜底再解析一次（兼容旧配置）。
     let api_key = ModelsConfig::resolve_api_key(&resolved.api_key);
     if api_key.trim().is_empty() {
         anyhow::bail!("已缓存端点缺少 api_key");
     }
-    Ok(ResolvedModel {
-        headers: Default::default(),
-        provider: config.source.key().to_string(),
-        base_url: resolved.base_url.clone(),
+    Ok(ResolvedEndpoint {
         api_key,
-        timeout_ms: 120_000,
-        protocol: tiangong_llm::ProviderProtocol::OpenAiChatCompletions,
-        model: resolved.model.clone(),
-        options: Value::Null,
-        context_window: None,
+        ..resolved.clone()
     })
+}
+
+/// 按协议发送请求；Codex 协议此时读取登录凭据。
+async fn send_request(resolved: &ResolvedEndpoint, payload: Value) -> Result<Value> {
+    if resolved.protocol == ImageApiProtocol::Codex {
+        let access = tiangong_llm::codex_auth::access_readonly().map_err(|err| anyhow!("{err}"))?;
+        let target = transport::Target {
+            protocol: ImageApiProtocol::Codex,
+            base_url: &resolved.base_url,
+            api_key: &access.access_token,
+            account_id: access.account_id.as_deref(),
+            residency: access.residency.as_deref(),
+        };
+        return transport::send(&target, payload).await;
+    }
+    let target = transport::Target {
+        protocol: resolved.protocol,
+        base_url: &resolved.base_url,
+        api_key: &resolved.api_key,
+        account_id: None,
+        residency: None,
+    };
+    transport::send(&target, payload).await
+}
+
+/// 全局模型所属供应商协议 → 生图协议。
+fn image_protocol_for(protocol: ProviderProtocol) -> ImageApiProtocol {
+    match protocol {
+        ProviderProtocol::Codex => ImageApiProtocol::Codex,
+        ProviderProtocol::OpenAiChatCompletions => ImageApiProtocol::ChatCompletions,
+        // Responses 为 image_generation 工具的原生协议；其余协议沿用旧行为按 Responses 调用。
+        _ => ImageApiProtocol::Responses,
+    }
 }
 
 /// 保存配置时解析选择对应的端点，写入 config.resolved 缓存。
@@ -183,10 +227,35 @@ fn resolve_selection_endpoint(selection: &ConfigSelection) -> Result<ResolvedEnd
             } else {
                 tiangong_plugin_sidecar::model::resolve_for_capability(ModelCapability::Chat)
             }?;
+            let protocol = image_protocol_for(resolved.protocol);
             Ok(ResolvedEndpoint {
-                base_url: resolved.base_url,
-                api_key: resolved.api_key,
+                base_url: if protocol == ImageApiProtocol::Codex {
+                    tiangong_llm::codex_auth::CODEX_BASE_URL.to_string()
+                } else {
+                    resolved.base_url
+                },
+                // Codex 鉴权来自登录态，不缓存任何令牌。
+                api_key: if protocol == ImageApiProtocol::Codex {
+                    String::new()
+                } else {
+                    resolved.api_key
+                },
                 model: resolved.model,
+                protocol,
+            })
+        }
+        ModelSource::Chatgpt => {
+            let model = selection
+                .chatgpt_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .unwrap_or(DEFAULT_CHATGPT_MODEL);
+            Ok(ResolvedEndpoint {
+                base_url: tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+                api_key: String::new(),
+                model: model.to_string(),
+                protocol: ImageApiProtocol::Codex,
             })
         }
         ModelSource::Manual => {
@@ -201,10 +270,14 @@ fn resolve_selection_endpoint(selection: &ConfigSelection) -> Result<ResolvedEnd
             if api_key.trim().is_empty() {
                 anyhow::bail!("手动端点缺少 api_key");
             }
+            if endpoint.protocol == ImageApiProtocol::Codex {
+                anyhow::bail!("手动端点仅支持 Responses 或 Chat Completions 协议");
+            }
             Ok(ResolvedEndpoint {
                 base_url: endpoint.base_url.clone(),
                 api_key,
                 model: endpoint.model.clone(),
+                protocol: endpoint.protocol,
             })
         }
     }
@@ -303,67 +376,75 @@ fn infer_image_mime(path: &str) -> &'static str {
     }
 }
 
-/// 调用 Responses API（`POST {base_url}/responses`），返回原始响应 JSON。
-async fn call_responses_api(resolved: &ResolvedModel, payload: Value) -> Result<Value> {
-    let base = resolved.base_url.trim_end_matches('/');
-    // 兼容用户填的 base_url 末尾是否带 /responses。
-    let url = if base.ends_with("/responses") {
-        base.to_string()
-    } else {
-        format!("{base}/responses")
-    };
-
-    // reqwest 0.13 的默认 Rustls 验证器仍依赖系统凭据服务；沙箱内使用
-    // Mozilla 公共根证书完成证书链和域名校验，无需开放 Keychain 权限。
-    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
-        .iter()
-        .map(|cert| reqwest::Certificate::from_der(cert.as_ref()))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("加载 HTTPS 根证书失败")?;
-    let client = reqwest::Client::builder()
-        .tls_backend_rustls()
-        .tls_certs_only(roots)
-        .timeout(Duration::from_secs(120))
-        .build()
-        .context("构造 HTTP 客户端失败")?;
-
-    tracing::debug!(url = %url, model = %resolved.model, "Responses API 生图请求");
-
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", resolved.api_key))
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .context("请求 Responses API 失败")?;
-
-    let status = resp.status();
-    let resp_text = resp.text().await.context("读取响应体失败")?;
-
-    if !status.is_success() {
-        let err_msg = extract_error_message(&resp_text).unwrap_or(resp_text.clone());
-        anyhow::bail!("Responses API 调用失败 ({status}): {err_msg}");
+/// 构造 Codex（ChatGPT 账号）生图请求。
+///
+/// Codex 后端约束：`input` 必须是消息数组、强制 `stream=true` / `store=false`，
+/// `instructions` 必须存在（可为空串）。
+fn build_codex_request(
+    prompt: &str,
+    model: &str,
+    config: &ImageGenConfig,
+    images: &[String],
+) -> Result<Value> {
+    let mut content = vec![json!({ "type": "input_text", "text": prompt })];
+    for path in images {
+        let data_uri = read_image_as_data_uri(path)?;
+        content.push(json!({ "type": "input_image", "image_url": data_uri }));
     }
-
-    serde_json::from_str::<Value>(&resp_text)
-        .with_context(|| format!("解析 Responses API 响应失败：{resp_text}"))
+    let tool = if images.is_empty() {
+        json!({ "type": "image_generation" })
+    } else {
+        json!({ "type": "image_generation", "action": "edit" })
+    };
+    let instructions = config
+        .extra_prompt
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    Ok(json!({
+        "model": model,
+        "instructions": instructions,
+        "input": [{ "type": "message", "role": "user", "content": content }],
+        "tools": [tool],
+        "store": false,
+        "stream": true,
+    }))
 }
 
-/// 从错误响应里提取可读的 message 字段。
-fn extract_error_message(body: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    value
-        .get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+/// 构造 Chat Completions 生图请求：提示词与原图作为多模态 user 消息。
+fn build_chat_request(
+    prompt: &str,
+    model: &str,
+    config: &ImageGenConfig,
+    images: &[String],
+) -> Result<Value> {
+    let mut messages = Vec::new();
+    if let Some(extra) = config
+        .extra_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|extra| !extra.is_empty())
+    {
+        messages.push(json!({ "role": "system", "content": extra }));
+    }
+    let user_content = if images.is_empty() {
+        json!(prompt)
+    } else {
+        let mut parts = vec![json!({ "type": "text", "text": prompt })];
+        for path in images {
+            let data_uri = read_image_as_data_uri(path)?;
+            parts.push(json!({ "type": "image_url", "image_url": { "url": data_uri } }));
+        }
+        Value::Array(parts)
+    };
+    messages.push(json!({ "role": "user", "content": user_content }));
+    Ok(json!({
+        "model": model,
+        "messages": messages,
+        // OpenRouter 等兼容网关以 modalities 声明需要图片输出，其他服务会忽略该字段。
+        "modalities": ["image", "text"],
+        "stream": false,
+    }))
 }
 
 /// 构造设置页 bootstrap：当前配置 + 全局可选模型列表。
@@ -382,5 +463,157 @@ fn build_bootstrap() -> Result<ConfigBootstrap> {
     Ok(ConfigBootstrap {
         config,
         models: model_infos,
+        chatgpt: chatgpt_account_info(),
     })
+}
+
+/// ChatGPT 账号状态：只读登录凭据元信息，不返回令牌。
+fn chatgpt_account_info() -> ChatgptAccountInfo {
+    let credentials = tiangong_llm::codex_auth::load_credentials().ok().flatten();
+    let models = tiangong_plugin_sidecar::model::load_models_config()
+        .map(|config| {
+            let codex_providers: Vec<&String> = config
+                .providers
+                .iter()
+                .filter(|(_, provider)| provider.protocol == ProviderProtocol::Codex)
+                .map(|(name, _)| name)
+                .collect();
+            let mut models: Vec<String> = config
+                .models
+                .values()
+                .filter(|entry| codex_providers.contains(&&entry.provider))
+                .map(|entry| entry.model.clone())
+                .collect();
+            models.sort();
+            models.dedup();
+            models
+        })
+        .unwrap_or_default();
+    ChatgptAccountInfo {
+        logged_in: credentials.is_some(),
+        email: credentials.and_then(|creds| creds.email),
+        models,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_protocol_mapping() {
+        assert_eq!(
+            image_protocol_for(ProviderProtocol::Codex),
+            ImageApiProtocol::Codex
+        );
+        assert_eq!(
+            image_protocol_for(ProviderProtocol::OpenAiChatCompletions),
+            ImageApiProtocol::ChatCompletions
+        );
+        assert_eq!(
+            image_protocol_for(ProviderProtocol::OpenAi),
+            ImageApiProtocol::Responses
+        );
+    }
+
+    #[test]
+    fn chatgpt_selection_resolves_without_secret() {
+        let selection = ConfigSelection {
+            source: ModelSource::Chatgpt,
+            chatgpt_model: Some("gpt-6-sol".to_string()),
+            ..Default::default()
+        };
+        let resolved = resolve_selection_endpoint(&selection).unwrap();
+        assert_eq!(resolved.protocol, ImageApiProtocol::Codex);
+        assert_eq!(resolved.model, "gpt-6-sol");
+        assert!(resolved.api_key.is_empty());
+        assert_eq!(resolved.base_url, tiangong_llm::codex_auth::CODEX_BASE_URL);
+
+        let default_model = resolve_selection_endpoint(&ConfigSelection {
+            source: ModelSource::Chatgpt,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(default_model.model, DEFAULT_CHATGPT_MODEL);
+    }
+
+    #[test]
+    fn manual_selection_keeps_protocol_and_rejects_codex() {
+        let mut selection = ConfigSelection {
+            source: ModelSource::Manual,
+            manual_endpoint: tiangong_plugin_generate_image_openai_protocol::ManualEndpoint {
+                base_url: "https://example.com/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "img".to_string(),
+                protocol: ImageApiProtocol::ChatCompletions,
+            },
+            ..Default::default()
+        };
+        let resolved = resolve_selection_endpoint(&selection).unwrap();
+        assert_eq!(resolved.protocol, ImageApiProtocol::ChatCompletions);
+        selection.manual_endpoint.protocol = ImageApiProtocol::Codex;
+        assert!(resolve_selection_endpoint(&selection).is_err());
+    }
+
+    #[test]
+    fn legacy_config_defaults_to_responses() {
+        let legacy: ImageGenConfig = serde_json::from_value(json!({
+            "source": "manual",
+            "manual_endpoint": { "base_url": "https://x/v1", "api_key": "k", "model": "m" },
+            "resolved": { "base_url": "https://x/v1", "api_key": "k", "model": "m" }
+        }))
+        .unwrap();
+        assert_eq!(legacy.resolved.protocol, ImageApiProtocol::Responses);
+        assert_eq!(legacy.manual_endpoint.protocol, ImageApiProtocol::Responses);
+    }
+
+    #[test]
+    fn codex_request_uses_message_list_and_stream() {
+        let body =
+            build_codex_request("一只猫", "gpt-5.5", &ImageGenConfig::default(), &[]).unwrap();
+        assert!(body["input"].is_array(), "Codex 要求 input 为数组");
+        assert_eq!(body["input"][0]["content"][0]["text"], "一只猫");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["instructions"], "");
+        assert_eq!(body["tools"][0]["type"], "image_generation");
+    }
+
+    #[test]
+    fn chat_request_carries_prompt_and_extra_instructions() {
+        let config = ImageGenConfig {
+            extra_prompt: Some("写实风格".to_string()),
+            ..Default::default()
+        };
+        let body = build_chat_request("一只猫", "img", &config, &[]).unwrap();
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "一只猫");
+        assert_eq!(body["stream"], false);
+    }
+
+    /// 真实 ChatGPT 生图：需设置 `TIANGONG_CODEX_IMAGE_E2E=1`，并以
+    /// `TIANGONG_STORAGE_ROOT` 指向含 `auth/codex.json` 与 `generate-image-openai/config.json` 的目录。
+    #[tokio::test]
+    async fn chatgpt_image_generation_e2e() {
+        if std::env::var("TIANGONG_CODEX_IMAGE_E2E").is_err() {
+            return;
+        }
+        let response = generate(GenerateRequest {
+            prompt: "a simple red circle on white background".to_string(),
+            images: Vec::new(),
+        })
+        .await
+        .expect("ChatGPT 生图失败");
+        assert_eq!(response.images.len(), 1);
+        let path = &response.images[0].reference;
+        assert!(std::path::Path::new(path).is_file(), "图片未归档：{path}");
+        let edited = generate(GenerateRequest {
+            prompt: "make the circle blue".to_string(),
+            images: vec![path.clone()],
+        })
+        .await
+        .expect("ChatGPT 改图失败");
+        assert_eq!(edited.images.len(), 1);
+        eprintln!("generated={path} edited={}", edited.images[0].reference);
+    }
 }

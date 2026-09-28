@@ -867,6 +867,10 @@ export const api = {
   codexAuthLogout: (): Promise<CodexAuthStatus> =>
     invoke('codex_auth_logout'),
 
+  /** 手动刷新 ChatGPT 登录令牌（工具侧令牌过期时使用）。 */
+  codexAuthRefresh: (): Promise<CodexAuthStatus> =>
+    invoke('codex_auth_refresh'),
+
   newSessionId: (): Promise<string> =>
     invoke('new_session_id'),
 
@@ -991,6 +995,10 @@ export const api = {
   /** 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播（拓展区刷新数据源）。 */
   onPluginsChanged: (callback: () => void) =>
     listen('plugins_changed', () => callback()),
+
+  /** 模型配置保存后广播（会话区刷新可选模型）。 */
+  onModelsConfigChanged: (callback: () => void) =>
+    listen('models_config_changed', () => callback()),
 
   botStart: (id: string): Promise<string> =>
     invoke('bot_start', { id }),
