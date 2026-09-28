@@ -236,6 +236,12 @@ jobs:
           chmod 600 "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
+      # tauri-action 默认安装最新 @tauri-apps/cli（2.12.0 起 NSIS 打包存在上游回归：
+      # installer.nsi 引用的 RestartManager 宏在 nsis_tauri_utils-v0.5.3 中缺失），
+      # 固定到最后一个验证可用的版本，并通过 tauriScript 让 action 使用该版本。
+      - name: Install pinned Tauri CLI
+        run: npm install -g @tauri-apps/cli@2.11.5
+
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0.6.2
         env:
@@ -259,6 +265,7 @@ jobs:
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           assetNamePattern: "Tiangong_[version]_[platform]_[arch][setup][ext]"
+          tauriScript: tauri
           args: ${{ matrix.args }}
 
       - name: Verify macOS signature and notarization
