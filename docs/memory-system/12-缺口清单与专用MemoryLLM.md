@@ -113,7 +113,7 @@ Memory 内部文本生成任务只允许读取独立 Memory LLM 配置：
 ### P1：真实模型路径验证（已完成固定链路）
 
 1. EpisodeWriter、Deep Recall、Recall synthesis、Meso LLM 提炼已有代码路径。
-2. 已增加 `crates/tiangong-memory/examples/memory_llm_smoke.rs`，可手动读取 `~/.tiangong/memory/config.json` 调用专用 Memory LLM，并校验 JSON 标记、打印 token 用量和耗时。
+2. 已增加 `plugins/tiangong-plugin-memory/core/examples/memory_llm_smoke.rs`，可手动读取 `~/.tiangong/memory/config.json` 调用专用 Memory LLM，并校验 JSON 标记、打印 token 用量和耗时。
 3. 已补 6 个历史指代固定样例，覆盖导出产物、迁移文件、图片、配置、性能排查和技能模板，验证 Tool 化回忆只输出当前上下文之外的增量引用。
 4. Memory LLM 调用点已统一记录任务名、模型、协议、耗时和 token 用量，覆盖 EpisodeWriter、Recall anchor、Deep Recall 裁决、Recall synthesis 和 Meso 提炼。
 5. 已增加本地 OpenAI-compatible mock Memory LLM 固定评测，覆盖跨会话产物、Meso Entity、Meso Decision、图关系和 Deep Recall 结果整理。

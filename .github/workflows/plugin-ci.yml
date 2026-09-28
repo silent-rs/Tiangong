@@ -147,15 +147,20 @@ jobs:
             protocol_manifest="$root/protocol/Cargo.toml"
             wasm_manifest="$root/wasm/Cargo.toml"
             sidecar_manifest="$root/sidecar/Cargo.toml"
+            # 插件内部的业务库（如 memory 的 core/）：只被本插件的 sidecar 使用，
+            # 不在 App CI 的包矩阵里（App CI 排除 plugins/ 下的包），由这里负责测试。
+            core_manifest="$root/core/Cargo.toml"
             package_json="$root/package.json"
 
             has_protocol=false
             has_wasm=false
             has_sidecar=false
+            has_core=false
             has_ui=false
             [[ -f "$protocol_manifest" ]] && has_protocol=true
             [[ -f "$wasm_manifest" ]] && has_wasm=true
             [[ -f "$sidecar_manifest" ]] && has_sidecar=true
+            [[ -f "$core_manifest" ]] && has_core=true
             [[ -f "$package_json" ]] && has_ui=true
 
             uses_sdk=false
@@ -211,6 +216,7 @@ jobs:
             protocol=''
             wasm=''
             sidecar=''
+            core=''
             ui_test=false
             if [[ "$has_protocol" == "true" ]]; then
               protocol="$(package_name "$protocol_manifest")"
@@ -218,6 +224,9 @@ jobs:
             fi
             if [[ "$has_sidecar" == "true" ]]; then
               sidecar="$(package_name "$sidecar_manifest")"
+            fi
+            if [[ "$has_core" == "true" ]]; then
+              core="$(package_name "$core_manifest")"
             fi
             if [[ "$has_ui" == "true" ]]; then
               if jq -e '.scripts.test // empty' "$package_json" >/dev/null; then
@@ -232,10 +241,11 @@ jobs:
               --arg protocol "$protocol" \
               --arg wasm "$wasm" \
               --arg sidecar "$sidecar" \
+              --arg core "$core" \
               --argjson rust "$has_protocol" \
               --argjson ui "$has_ui" \
               --argjson ui_test "$ui_test" \
-              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
+              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,core:$core,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
             if [[ "$plugin_selected" == "true" ]]; then
               append_plugin "$item"
             fi
@@ -259,7 +269,7 @@ jobs:
               --arg id "$id" \
               --arg root "$root" \
               --arg package "$package" \
-              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",rust:false,ui:false,ui_test:false,native:true,native_package:$package}')"
+              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",core:"",rust:false,ui:false,ui_test:false,native:true,native_package:$package}')"
             append_plugin "$item"
           done
 
@@ -310,10 +320,17 @@ jobs:
             patchelf
 
       - name: Cache Rust artifacts
-        if: matrix.plugin.rust || matrix.plugin.native
+        if: matrix.plugin.rust || matrix.plugin.native || matrix.plugin.core != ''
         uses: Swatinem/rust-cache@v2
         with:
           key: plugin-${{ matrix.plugin.id }}
+
+      - name: Install plugin core system dependencies
+        if: matrix.plugin.core != ''
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler pkg-config
 
       - name: Validate plugin manifest
         if: matrix.plugin.manifest != ''
@@ -358,6 +375,32 @@ jobs:
         env:
           PROTOCOL: ${{ matrix.plugin.protocol }}
         run: cargo clippy --locked -p "$PROTOCOL" --all-targets -- -D warnings
+
+      - name: Check plugin core formatting
+        if: matrix.plugin.core != ''
+        env:
+          CORE: ${{ matrix.plugin.core }}
+        run: cargo fmt -p "$CORE" -- --check
+
+      - name: Lint plugin core
+        if: matrix.plugin.core != ''
+        env:
+          CORE: ${{ matrix.plugin.core }}
+        run: cargo clippy --locked -p "$CORE" --all-targets --tests --benches -- -D warnings
+
+      - name: Install cargo-nextest for plugin core
+        if: matrix.plugin.core != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Test plugin core
+        if: matrix.plugin.core != ''
+        env:
+          CORE: ${{ matrix.plugin.core }}
+        # 与 App CI 一致用 nextest（每个测试独立进程）：core 的部分测试修改进程级
+        # 环境变量与全局状态，同进程多线程运行会互相干扰。
+        run: cargo nextest run --locked -p "$CORE" --no-tests pass
 
       - name: Check native plugin formatting
         if: matrix.plugin.native
