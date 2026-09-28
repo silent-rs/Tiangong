@@ -57,7 +57,7 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
         return Ok((
             ProviderProtocol::Codex,
             CODEX_PROVIDER_NAME.to_string(),
-            tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+            tiangong_llm::providers::codex::CODEX_BASE_URL.to_string(),
             String::new(),
         ));
     }

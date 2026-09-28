@@ -5393,8 +5393,9 @@ pub struct PluginContributionEntry {
 
 /// 查询 ChatGPT 账号登录状态（不含令牌）。
 #[tauri::command]
-pub async fn codex_auth_status() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
-    Ok(tiangong_llm::codex_auth::status().await)
+pub async fn codex_auth_status() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    Ok(tiangong_llm::providers::codex::status().await)
 }
 
 /// 发起 ChatGPT 账号登录并在系统浏览器打开授权页。
@@ -5405,10 +5406,10 @@ pub async fn codex_auth_status() -> Result<tiangong_llm::codex_auth::CodexAuthSt
 pub async fn codex_auth_start(
     app: AppHandle,
     method: Option<String>,
-) -> Result<tiangong_llm::codex_auth::CodexLoginStart, String> {
+) -> Result<tiangong_llm::providers::codex::CodexLoginStart, String> {
     let start = match method.as_deref().unwrap_or("browser") {
-        "device" => tiangong_llm::codex_auth::start_device_login().await,
-        _ => tiangong_llm::codex_auth::start_browser_login().await,
+        "device" => tiangong_llm::providers::codex::start_device_login().await,
+        _ => tiangong_llm::providers::codex::start_browser_login().await,
     }
     .map_err(|err| format!("{err:#}"))?;
     #[allow(deprecated)]
@@ -5424,38 +5425,41 @@ pub async fn codex_auth_start(
 
 /// 等待进行中的 ChatGPT 账号登录完成。
 #[tauri::command]
-pub async fn codex_auth_wait() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
-    tiangong_llm::codex_auth::wait_login()
+pub async fn codex_auth_wait() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String> {
+    tiangong_llm::providers::codex::wait_login()
         .await
         .map_err(|err| format!("{err:#}"))
 }
 
 /// 取消进行中的 ChatGPT 账号登录。
 #[tauri::command]
-pub async fn codex_auth_cancel() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
-    tiangong_llm::codex_auth::cancel_login().await;
-    Ok(tiangong_llm::codex_auth::status().await)
+pub async fn codex_auth_cancel() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    tiangong_llm::providers::codex::cancel_login().await;
+    Ok(tiangong_llm::providers::codex::status().await)
 }
 
 /// 退出 ChatGPT 账号登录并删除本地凭据。
 #[tauri::command]
-pub async fn codex_auth_logout() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
-    tiangong_llm::codex_auth::logout()
+pub async fn codex_auth_logout() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    tiangong_llm::providers::codex::logout()
         .await
         .map_err(|err| format!("{err:#}"))
 }
 
 /// 手动刷新 ChatGPT 登录令牌（工具侧令牌过期时由用户在模型管理中触发）。
 #[tauri::command]
-pub async fn codex_auth_refresh() -> Result<tiangong_llm::codex_auth::CodexAuthStatus, String> {
-    tiangong_llm::codex_auth::refresh_now()
+pub async fn codex_auth_refresh() -> Result<tiangong_llm::providers::codex::CodexAuthStatus, String>
+{
+    tiangong_llm::providers::codex::refresh_now()
         .await
         .map_err(|err| format!("{err:#}"))
 }
 /// 查询 ChatGPT 账号的用量额度（模型管理中展示）。
 #[tauri::command]
-pub async fn codex_auth_usage() -> Result<tiangong_llm::codex_auth::CodexUsage, String> {
-    tiangong_llm::codex_auth::usage()
+pub async fn codex_auth_usage() -> Result<tiangong_llm::providers::codex::CodexUsage, String> {
+    tiangong_llm::providers::codex::usage()
         .await
         .map_err(|err| err.to_string())
 }

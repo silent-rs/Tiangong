@@ -1,5 +1,4 @@
 pub mod client;
-pub mod codex_auth;
 pub mod embedding;
 pub mod endpoint;
 pub mod error;

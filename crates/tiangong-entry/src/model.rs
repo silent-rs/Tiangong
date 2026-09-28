@@ -143,14 +143,14 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
                 );
             }
             ChatgptSubcommand::Logout => {
-                block_on(tiangong_llm::codex_auth::logout())??;
+                block_on(tiangong_llm::providers::codex::logout())??;
                 println!("已退出 ChatGPT 账号");
             }
             ChatgptSubcommand::Status => {
-                let status = block_on(tiangong_llm::codex_auth::status())?;
+                let status = block_on(tiangong_llm::providers::codex::status())?;
                 print_codex_status(&status);
                 if status.logged_in {
-                    match block_on(tiangong_llm::codex_auth::usage())? {
+                    match block_on(tiangong_llm::providers::codex::usage())? {
                         Ok(usage) => print_codex_usage(&usage),
                         Err(err) => eprintln!("查询用量额度失败：{err}"),
                     }
@@ -169,7 +169,7 @@ fn block_on<F: std::future::Future>(future: F) -> Result<F::Output> {
     Ok(runtime.block_on(future))
 }
 
-fn print_codex_status(status: &tiangong_llm::codex_auth::CodexAuthStatus) {
+fn print_codex_status(status: &tiangong_llm::providers::codex::CodexAuthStatus) {
     if !status.logged_in {
         println!("未登录 ChatGPT 账号（运行 `tiangong model chatgpt login` 登录）");
         return;
@@ -195,7 +195,7 @@ fn window_label(seconds: Option<u64>) -> String {
     }
 }
 
-fn format_usage_window(window: &tiangong_llm::codex_auth::CodexUsageWindow) -> String {
+fn format_usage_window(window: &tiangong_llm::providers::codex::CodexUsageWindow) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -221,7 +221,7 @@ fn format_usage_window(window: &tiangong_llm::codex_auth::CodexUsageWindow) -> S
     )
 }
 
-fn print_codex_usage(usage: &tiangong_llm::codex_auth::CodexUsage) {
+fn print_codex_usage(usage: &tiangong_llm::providers::codex::CodexUsage) {
     if usage.limit_reached || !usage.allowed {
         println!("用量额度：已达上限");
     } else {
@@ -252,7 +252,7 @@ fn print_codex_usage(usage: &tiangong_llm::codex_auth::CodexUsage) {
 pub(crate) fn ensure_codex_provider(config: &mut ModelsConfig) {
     config.upsert_provider(
         super::configure::CODEX_PROVIDER_NAME,
-        tiangong_llm::codex_auth::CODEX_BASE_URL,
+        tiangong_llm::providers::codex::CODEX_BASE_URL,
         "",
         tiangong_llm::ProviderProtocol::Codex,
         300_000,
@@ -263,7 +263,7 @@ pub(crate) fn ensure_codex_provider(config: &mut ModelsConfig) {
 fn sync_codex_models(config: &mut ModelsConfig) -> Result<Vec<String>> {
     let provider_name = super::configure::CODEX_PROVIDER_NAME;
     let endpoint = ModelEndpoint {
-        base_url: tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+        base_url: tiangong_llm::providers::codex::CODEX_BASE_URL.to_string(),
         protocol: tiangong_llm::ProviderProtocol::Codex,
         timeout_ms: 60_000,
         ..Default::default()
@@ -281,9 +281,9 @@ fn sync_codex_models(config: &mut ModelsConfig) -> Result<Vec<String>> {
 pub(crate) fn codex_login(device: bool) -> Result<()> {
     block_on(async move {
         let start = if device {
-            tiangong_llm::codex_auth::start_device_login().await?
+            tiangong_llm::providers::codex::start_device_login().await?
         } else {
-            tiangong_llm::codex_auth::start_browser_login().await?
+            tiangong_llm::providers::codex::start_browser_login().await?
         };
         match start.user_code.as_deref() {
             Some(code) => {
@@ -297,7 +297,7 @@ pub(crate) fn codex_login(device: bool) -> Result<()> {
             }
         }
         println!("等待授权完成...");
-        let status = tiangong_llm::codex_auth::wait_login().await?;
+        let status = tiangong_llm::providers::codex::wait_login().await?;
         print_codex_status(&status);
         anyhow::Ok(())
     })?
@@ -305,7 +305,7 @@ pub(crate) fn codex_login(device: bool) -> Result<()> {
 
 /// 交互式向导内的登录：让用户选择登录方式。
 pub(crate) fn codex_login_interactive() -> Result<()> {
-    if let Ok(status) = block_on(tiangong_llm::codex_auth::status())
+    if let Ok(status) = block_on(tiangong_llm::providers::codex::status())
         && status.logged_in
     {
         print_codex_status(&status);

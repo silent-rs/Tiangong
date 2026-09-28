@@ -1,7 +1,7 @@
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use crate::codex_auth::{CODEX_MODELS_CLIENT_VERSION, CODEX_ORIGINATOR};
+use super::auth::{CODEX_MODELS_CLIENT_VERSION, CODEX_ORIGINATOR};
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::providers::openai::mapping::normalize_api_base;
@@ -22,7 +22,7 @@ impl CodexClient {
 
     /// 取访问令牌并补齐 Codex 请求头（originator / 账号 ID / 数据驻留）。
     async fn auth(&self, force_refresh: bool) -> Result<(String, HeaderMap), LlmError> {
-        let access = crate::codex_auth::access(force_refresh).await?;
+        let access = super::auth::access(force_refresh).await?;
         let mut headers = self.config.headers.clone();
         headers.insert("originator", HeaderValue::from_static(CODEX_ORIGINATOR));
         if let Some(account_id) = access.account_id.as_deref()

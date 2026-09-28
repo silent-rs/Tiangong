@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     unsafe { std::env::set_var("TIANGONG_STORAGE_ROOT", &root) };
 
     let endpoint = ModelEndpoint {
-        base_url: tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+        base_url: tiangong_llm::providers::codex::CODEX_BASE_URL.to_string(),
         model: "gpt-5.5".to_string(),
         protocol: ProviderProtocol::Codex,
         timeout_ms: 120_000,
@@ -38,6 +38,21 @@ fn main() -> anyhow::Result<()> {
 
     let models = SingleProviderClient::list_models(&endpoint)?;
     println!("models: {models:?}");
+
+    let usage = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(tiangong_llm::providers::codex::usage())?;
+    println!(
+        "usage: plan={:?} allowed={} windows={:?}",
+        usage.plan_type,
+        usage.allowed,
+        usage
+            .windows
+            .iter()
+            .map(|w| (w.used_percent, w.window_seconds))
+            .collect::<Vec<_>>()
+    );
 
     let client = SingleProviderClient::new(endpoint.clone());
     let lite = client.complete_lite_with_system("简短回答", "只回复两个字：你好")?;

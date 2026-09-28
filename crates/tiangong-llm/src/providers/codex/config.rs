@@ -21,7 +21,7 @@ impl CodexConfig {
         let base_url = base_url.into();
         Self {
             base_url: if base_url.trim().is_empty() {
-                crate::codex_auth::CODEX_BASE_URL.to_string()
+                super::auth::CODEX_BASE_URL.to_string()
             } else {
                 base_url
             },

@@ -183,7 +183,8 @@ fn resolve_endpoint(config: &ImageGenConfig) -> Result<ResolvedEndpoint> {
 /// 按协议发送请求；Codex 协议此时读取登录凭据。
 async fn send_request(resolved: &ResolvedEndpoint, payload: Value) -> Result<Value> {
     if resolved.protocol == ImageApiProtocol::Codex {
-        let access = tiangong_llm::codex_auth::access_readonly().map_err(|err| anyhow!("{err}"))?;
+        let access =
+            tiangong_llm::providers::codex::access_readonly().map_err(|err| anyhow!("{err}"))?;
         let target = transport::Target {
             protocol: ImageApiProtocol::Codex,
             base_url: &resolved.base_url,
@@ -230,7 +231,7 @@ fn resolve_selection_endpoint(selection: &ConfigSelection) -> Result<ResolvedEnd
             let protocol = image_protocol_for(resolved.protocol);
             Ok(ResolvedEndpoint {
                 base_url: if protocol == ImageApiProtocol::Codex {
-                    tiangong_llm::codex_auth::CODEX_BASE_URL.to_string()
+                    tiangong_llm::providers::codex::CODEX_BASE_URL.to_string()
                 } else {
                     resolved.base_url
                 },
@@ -252,7 +253,7 @@ fn resolve_selection_endpoint(selection: &ConfigSelection) -> Result<ResolvedEnd
                 .filter(|model| !model.is_empty())
                 .unwrap_or(DEFAULT_CHATGPT_MODEL);
             Ok(ResolvedEndpoint {
-                base_url: tiangong_llm::codex_auth::CODEX_BASE_URL.to_string(),
+                base_url: tiangong_llm::providers::codex::CODEX_BASE_URL.to_string(),
                 api_key: String::new(),
                 model: model.to_string(),
                 protocol: ImageApiProtocol::Codex,
@@ -469,7 +470,9 @@ fn build_bootstrap() -> Result<ConfigBootstrap> {
 
 /// ChatGPT 账号状态：只读登录凭据元信息，不返回令牌。
 fn chatgpt_account_info() -> ChatgptAccountInfo {
-    let credentials = tiangong_llm::codex_auth::load_credentials().ok().flatten();
+    let credentials = tiangong_llm::providers::codex::load_credentials()
+        .ok()
+        .flatten();
     let models = tiangong_plugin_sidecar::model::load_models_config()
         .map(|config| {
             let codex_providers: Vec<&String> = config
@@ -527,7 +530,10 @@ mod tests {
         assert_eq!(resolved.protocol, ImageApiProtocol::Codex);
         assert_eq!(resolved.model, "gpt-6-sol");
         assert!(resolved.api_key.is_empty());
-        assert_eq!(resolved.base_url, tiangong_llm::codex_auth::CODEX_BASE_URL);
+        assert_eq!(
+            resolved.base_url,
+            tiangong_llm::providers::codex::CODEX_BASE_URL
+        );
 
         let default_model = resolve_selection_endpoint(&ConfigSelection {
             source: ModelSource::Chatgpt,
