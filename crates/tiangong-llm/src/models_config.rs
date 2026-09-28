@@ -461,19 +461,7 @@ impl ModelsConfig {
             raw.to_string()
         }
     }
-}
 
-impl ProviderConfig {
-    /// 凭据是否已配置：OAuth 协议（如 Codex）以登录态鉴权，不要求 api_key。
-    pub fn has_credentials(&self) -> bool {
-        self.protocol.uses_oauth()
-            || !ModelsConfig::resolve_api_key(&self.api_key)
-                .trim()
-                .is_empty()
-    }
-}
-
-impl ModelsConfig {
     /// 获取指定路由槽位的模型名称
     pub fn routed_model(&self, capability: ModelCapability) -> Option<&str> {
         let slot = RoutingSlot::from_capability(capability);

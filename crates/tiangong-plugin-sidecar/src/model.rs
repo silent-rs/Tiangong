@@ -107,7 +107,7 @@ pub fn list_models_for_capability(capability: ModelCapability) -> Result<Vec<Mod
             let configured = models
                 .providers
                 .get(&entry.provider)
-                .is_some_and(|p| p.has_credentials());
+                .is_some_and(|p| !p.api_key.trim().is_empty());
             ModelInfo {
                 key: key.clone(),
                 provider: entry.provider.clone(),
