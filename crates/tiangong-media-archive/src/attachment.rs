@@ -375,16 +375,19 @@ fn file_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
     )
 }
 
+/// 音视频附件只陈述事实（类型与本地路径），不附带处理方式：宿主不感知
+/// 音视频处理能力，是否及如何处理由提供该能力的插件在其提示词中说明；
+/// 未安装相应插件时模型即不具备该能力。
 fn audio_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息包含音频引用，音频内容不会直接发送给模型。需要获取内容时，使用已注册的音频处理能力按下列本地 path 处理；没有可用能力时保留附件引用并告知用户。\n- {}",
+        "本条用户消息附带音频：\n- {}",
         asset_notice_item(index, asset)
     )
 }
 
 fn video_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息包含视频引用，视频内容不会直接发送给模型。需要获取内容时，使用已注册的视频处理能力按下列本地 path 处理；没有可用能力时保留附件引用并告知用户。\n- {}",
+        "本条用户消息附带视频：\n- {}",
         asset_notice_item(index, asset)
     )
 }
@@ -1041,12 +1044,12 @@ mod tests {
         assert!(matches!(
             &message[4],
             ContentBlock::ModelInstruction { text }
-                if text.contains("index=1") && text.contains("音频引用") && text.contains("path=")
+                if text.starts_with("本条用户消息附带音频") && text.contains("index=1") && text.contains("path=")
         ));
         assert!(matches!(
             &message[6],
             ContentBlock::ModelInstruction { text }
-                if text.contains("index=2") && text.contains("视频引用") && text.contains("path=")
+                if text.starts_with("本条用户消息附带视频") && text.contains("index=2") && text.contains("path=")
         ));
     }
 
