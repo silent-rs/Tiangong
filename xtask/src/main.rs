@@ -222,34 +222,6 @@ const COMPUTER_USE: PluginConfig = PluginConfig {
     protocol_manifest: Some("plugins/tiangong-plugin-computer-use/protocol/Cargo.toml"),
 };
 
-const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
-    id: "text-to-speech",
-    name: "Text To Speech",
-    description: "Text to Speech",
-    protocol_crate: Some("tiangong-plugin-text-to-speech-protocol"),
-    wasm_crate: Some("tiangong-plugin-text-to-speech-wasm"),
-    wasm_artifact: Some("tiangong_plugin_text_to_speech_wasm.wasm"),
-    sidecar_crate: Some("tiangong-plugin-text-to-speech-sidecar"),
-    sidecar_artifact: Some("tiangong-text-to-speech-sidecar"),
-    plugin_root: "plugins/tiangong-plugin-text-to-speech",
-    plugin_manifest: "plugins/tiangong-plugin-text-to-speech/plugin.json",
-    protocol_manifest: Some("plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml"),
-};
-
-const GENERATE_IMAGE: PluginConfig = PluginConfig {
-    id: "generate-image",
-    name: "Generate Image",
-    description: "Generate Image",
-    protocol_crate: Some("tiangong-plugin-generate-image-protocol"),
-    wasm_crate: Some("tiangong-plugin-generate-image-wasm"),
-    wasm_artifact: Some("tiangong_plugin_generate_image_wasm.wasm"),
-    sidecar_crate: Some("tiangong-plugin-generate-image-sidecar"),
-    sidecar_artifact: Some("tiangong-generate-image-sidecar"),
-    plugin_root: "plugins/tiangong-plugin-generate-image",
-    plugin_manifest: "plugins/tiangong-plugin-generate-image/plugin.json",
-    protocol_manifest: Some("plugins/tiangong-plugin-generate-image/protocol/Cargo.toml"),
-};
-
 const GENERATE_IMAGE_OPENAI: PluginConfig = PluginConfig {
     id: "generate-image-openai",
     name: "Generate Image OpenAI",
@@ -276,34 +248,6 @@ const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
     plugin_root: "plugins/tiangong-plugin-analyze-attachment",
     plugin_manifest: "plugins/tiangong-plugin-analyze-attachment/plugin.json",
     protocol_manifest: Some("plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml"),
-};
-
-const SPEECH_TO_TEXT: PluginConfig = PluginConfig {
-    id: "speech-to-text",
-    name: "Speech To Text",
-    description: "Speech To Text",
-    protocol_crate: Some("tiangong-plugin-speech-to-text-protocol"),
-    wasm_crate: Some("tiangong-plugin-speech-to-text-wasm"),
-    wasm_artifact: Some("tiangong_plugin_speech_to_text_wasm.wasm"),
-    sidecar_crate: Some("tiangong-plugin-speech-to-text-sidecar"),
-    sidecar_artifact: Some("tiangong-speech-to-text-sidecar"),
-    plugin_root: "plugins/tiangong-plugin-speech-to-text",
-    plugin_manifest: "plugins/tiangong-plugin-speech-to-text/plugin.json",
-    protocol_manifest: Some("plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml"),
-};
-
-const GENERATE_VIDEO: PluginConfig = PluginConfig {
-    id: "generate-video",
-    name: "Generate Video",
-    description: "Generate Video",
-    protocol_crate: Some("tiangong-plugin-generate-video-protocol"),
-    wasm_crate: Some("tiangong-plugin-generate-video-wasm"),
-    wasm_artifact: Some("tiangong_plugin_generate_video_wasm.wasm"),
-    sidecar_crate: Some("tiangong-plugin-generate-video-sidecar"),
-    sidecar_artifact: Some("tiangong-generate-video-sidecar"),
-    plugin_root: "plugins/tiangong-plugin-generate-video",
-    plugin_manifest: "plugins/tiangong-plugin-generate-video/plugin.json",
-    protocol_manifest: Some("plugins/tiangong-plugin-generate-video/protocol/Cargo.toml"),
 };
 
 const SCREENSHOT_INPUT: PluginConfig = PluginConfig {
@@ -411,12 +355,8 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "skill" => Ok(&SKILL),
         "coding" => Ok(&CODING),
         "prompt" => Ok(&PROMPT),
-        "text-to-speech" => Ok(&TEXT_TO_SPEECH),
-        "generate-image" => Ok(&GENERATE_IMAGE),
         "generate-image-openai" => Ok(&GENERATE_IMAGE_OPENAI),
         "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
-        "speech-to-text" => Ok(&SPEECH_TO_TEXT),
-        "generate-video" => Ok(&GENERATE_VIDEO),
         "fs" => Ok(&FS),
         "command" => Ok(&COMMAND),
         "computer-use" => Ok(&COMPUTER_USE),

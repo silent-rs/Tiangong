@@ -21,22 +21,13 @@ use crate::model::ProviderProtocol;
 /// 模型配置仅支持对话与多模态（图片理解）。多模态不再有独立路由，
 /// 由 chat 路由指向的模型是否声明该能力决定。
 ///
-/// `ImageGeneration` / `VideoGeneration` / `Stt` / `Tts` 已从模型配置中移除，
-/// 仅为兼容仍引用它们的插件代码而保留：配置读取时不解析、不列入 [`Self::all`]，
-/// 也不会解析出任何模型端点。
+/// 图片/视频生成、语音合成与语音识别已移出模型配置，由厂商插件自行配置与请求
+/// （如火山引擎插件）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
     Chat,
     Multimodal,
-    /// 已移除，仅保留代码兼容
-    ImageGeneration,
-    /// 已移除，仅保留代码兼容
-    VideoGeneration,
-    /// 已移除，仅保留代码兼容
-    Stt,
-    /// 已移除，仅保留代码兼容
-    Tts,
 }
 
 /// 已迁出全局模型配置的旧能力 / 路由键。
@@ -111,10 +102,6 @@ impl ModelCapability {
         match self {
             ModelCapability::Chat => "chat",
             ModelCapability::Multimodal => "multimodal",
-            ModelCapability::ImageGeneration => "image_generation",
-            ModelCapability::VideoGeneration => "video_generation",
-            ModelCapability::Stt => "stt",
-            ModelCapability::Tts => "tts",
         }
     }
 
@@ -137,10 +124,6 @@ impl ModelCapability {
         match self {
             ModelCapability::Chat => "对话",
             ModelCapability::Multimodal => "多模态",
-            ModelCapability::ImageGeneration => "图片生成",
-            ModelCapability::VideoGeneration => "视频生成",
-            ModelCapability::Stt => "语音识别",
-            ModelCapability::Tts => "语音合成",
         }
     }
 }
@@ -403,11 +386,6 @@ impl ModelsConfig {
                 .contains_key(&RoutingSlot::Chat)
                 .then_some(RoutingSlot::Chat),
             ModelCapability::Multimodal => self.chat_is_multimodal().then_some(RoutingSlot::Chat),
-            // 已移除的能力没有路由
-            ModelCapability::ImageGeneration
-            | ModelCapability::VideoGeneration
-            | ModelCapability::Stt
-            | ModelCapability::Tts => None,
         }
     }
 

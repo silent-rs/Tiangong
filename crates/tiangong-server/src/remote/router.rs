@@ -3,8 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::session::MessageRole;
-use tiangong_media::agent::MediaAgent;
-use tiangong_media::stt::TranscribeRequest;
 use tiangong_types::event::{EventSource, RuntimeEvent, RuntimeEventType};
 use tiangong_types::{IncomingMessage, MediaAsset, MediaKind, MessageContent, OutgoingMessage};
 use tokio::sync::Mutex;
@@ -16,7 +14,6 @@ pub struct MessageRouter {
     state: Arc<Mutex<TiangongState>>,
     event_bus: Arc<EventBus>,
     core_backend: Arc<dyn ServerCoreBackend>,
-    media_agent: Option<Arc<MediaAgent>>,
 }
 
 impl MessageRouter {
@@ -29,13 +26,7 @@ impl MessageRouter {
             state,
             event_bus,
             core_backend,
-            media_agent: None,
         }
-    }
-
-    pub fn with_media_agent(mut self, agent: Arc<MediaAgent>) -> Self {
-        self.media_agent = Some(agent);
-        self
     }
 
     pub async fn handle_incoming(&self, msg: IncomingMessage) -> Result<OutgoingMessage> {
@@ -65,7 +56,7 @@ impl MessageRouter {
         self.event_bus
             .publish(TiangongEvent::MessageReceived(msg.clone()));
 
-        let text = self.extract_text(&msg).await;
+        let text = extract_text(&msg);
         let media = extract_media(&msg);
         let channel_id = if msg.channel_id.trim().is_empty() {
             let state = self.state.lock().await;
@@ -134,72 +125,6 @@ impl MessageRouter {
             serde_json::Value::Object(envelope),
         );
         self.handle_runtime_event(event).await
-    }
-
-    async fn extract_text(&self, msg: &IncomingMessage) -> String {
-        match &msg.content {
-            MessageContent::Text(text) => text.clone(),
-            MessageContent::Audio { url, .. } => self.try_transcribe_audio(url).await,
-            MessageContent::Image { caption, .. } => {
-                caption.clone().unwrap_or_else(|| "[图片消息]".to_string())
-            }
-            MessageContent::Video { caption, .. } => {
-                caption.clone().unwrap_or_else(|| "[视频消息]".to_string())
-            }
-            MessageContent::File { name, .. } => format!("[文件: {name}]"),
-        }
-    }
-
-    async fn try_transcribe_audio(&self, url: &str) -> String {
-        let Some(media_agent) = &self.media_agent else {
-            tracing::warn!("收到音频消息但未配置 MediaAgent，无法转文字");
-            return "[语音消息，未配置语音识别]".to_string();
-        };
-
-        if !media_agent.has_speech_recognizer() {
-            tracing::warn!("收到音频消息但未配置 SpeechRecognizer");
-            return "[语音消息，未配置语音识别]".to_string();
-        }
-
-        let audio_data = match download_url(url).await {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::error!(url = %url, error = %err, "下载音频失败");
-                return "[语音消息，下载失败]".to_string();
-            }
-        };
-
-        let mime_type = if url.ends_with(".ogg") || url.ends_with(".oga") {
-            "audio/ogg"
-        } else if url.ends_with(".mp3") {
-            "audio/mp3"
-        } else if url.ends_with(".wav") {
-            "audio/wav"
-        } else {
-            "audio/ogg"
-        };
-
-        let request = TranscribeRequest {
-            audio: audio_data,
-            mime_type: mime_type.to_string(),
-            language: None,
-            model: None,
-        };
-
-        match media_agent.transcribe(request).await {
-            Ok(response) => {
-                tracing::info!(
-                    text_len = response.text.len(),
-                    language = ?response.language,
-                    "语音转文字成功"
-                );
-                response.text
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "语音转文字失败");
-                "[语音消息，识别失败]".to_string()
-            }
-        }
     }
 
     async fn handle_runtime_event_with_reply(
@@ -328,10 +253,22 @@ fn summarize_runtime_event(event: &RuntimeEvent) -> Option<String> {
     }
 }
 
-async fn download_url(url: &str) -> Result<Vec<u8>> {
-    let response = reqwest::get(url).await?;
-    let bytes = response.bytes().await?;
-    Ok(bytes.to_vec())
+/// 提取消息文本。
+///
+/// 语音消息不在此处转写：音频随 `extract_media` 作为附件进入归档流水线，
+/// 语音识别插件可用时由模型调用 `speech_to_text` 处理。
+fn extract_text(msg: &IncomingMessage) -> String {
+    match &msg.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Audio { .. } => "[语音消息]".to_string(),
+        MessageContent::Image { caption, .. } => {
+            caption.clone().unwrap_or_else(|| "[图片消息]".to_string())
+        }
+        MessageContent::Video { caption, .. } => {
+            caption.clone().unwrap_or_else(|| "[视频消息]".to_string())
+        }
+        MessageContent::File { name, .. } => format!("[文件: {name}]"),
+    }
 }
 
 fn extract_media(msg: &IncomingMessage) -> Vec<MediaAsset> {
