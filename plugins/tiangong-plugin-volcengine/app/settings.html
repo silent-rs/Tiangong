@@ -14,16 +14,14 @@
   --border: hsl(var(--host-border, 214 18% 88%));
   --primary: hsl(var(--host-primary, 222 47% 11%));
   --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
-  --accent: hsl(var(--host-accent, 210 40% 96%));
 }
-
 :root[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
+html, body { margin: 0; min-height: 100%; }
 body {
-  margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, sans-serif);
@@ -31,36 +29,49 @@ body {
   line-height: 1.5;
 }
 
-.page { padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+.page {
+  width: 100%;
+  max-width: 960px;
+  padding: 24px 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
 
-.header h2 { margin: 0 0 4px; font-size: 18px; }
+.header h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
 .header .desc { margin: 0; color: var(--muted); font-size: 13px; }
 
 .card {
-  padding: 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+}
+.card-head {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.card-title { margin: 0; font-size: 14px; font-weight: 600; }
+.card-desc { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.card-body {
+  padding: 16px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  align-items: start;
+}
+.span-2 { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .card-body { grid-template-columns: minmax(0, 1fr); }
 }
 
-.card-title { margin: 0; font-size: 14px; font-weight: 600; }
-
-.radio-group { display: flex; gap: 20px; }
-.radio { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.radio input { margin: 0; }
-
-.sub-section { display: flex; flex-direction: column; gap: 12px; }
-
-.field { display: flex; flex-direction: column; gap: 4px; }
-.field .label { font-size: 13px; font-weight: 500; }
-.label-inline { font-size: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.label { font-size: 13px; font-weight: 500; }
+.hint { color: var(--muted); font-size: 12px; }
 
 .input {
   width: 100%;
-  padding: 8px 10px;
+  height: 36px;
+  padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
@@ -68,134 +79,169 @@ body {
   font: inherit;
 }
 .input:focus { outline: none; border-color: var(--primary); }
-.textarea { resize: vertical; min-height: 60px; }
 
-.checkbox-field {
-  flex-direction: row;
+.check {
+  display: flex;
   align-items: center;
   gap: 8px;
+  height: 36px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.check input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
+
+details.legacy { border-top: 1px dashed var(--border); padding-top: 12px; }
+details.legacy summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  user-select: none;
+}
+details.legacy[open] summary { margin-bottom: 12px; }
+.legacy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+}
+@media (max-width: 640px) {
+  .legacy-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
-.hint { color: var(--muted); font-size: 12px; }
-.hint.error { color: hsl(0 84% 60%); }
-
-.actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
-
+.actions {
+  position: sticky;
+  bottom: 0;
+  margin: 0 -24px;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
 .status { color: var(--muted); font-size: 13px; flex: 1; }
 .status.error { color: hsl(0 84% 60%); }
-.status.success { color: hsl(142 71% 35%); }
+.status.success { color: hsl(142 71% 40%); }
 
 .btn {
-  padding: 8px 20px;
+  height: 34px;
+  padding: 0 20px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
+  font: inherit;
   font-weight: 500;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
-</style>
+  </style>
 </head>
 <body>
   <main class="page">
     <div class="header">
       <h2>火山引擎</h2>
-      <p class="desc">通过火山方舟（Ark）提供图片生成（Seedream）与视频生成（Seedance），通过豆包语音提供语音合成与语音识别。连接与模型在此单独配置，不使用全局模型配置。</p>
+      <p class="desc">火山方舟（Ark）提供图片生成（Seedream）与视频生成（Seedance），豆包语音提供语音合成与语音识别。连接与模型在此单独配置，不使用全局模型配置。</p>
     </div>
 
     <section class="card">
-      <h3 class="card-title">火山方舟连接</h3>
-      <label class="field">
-        <span class="label">API Key</span>
-        <input id="api-key" class="input" type="password" placeholder="火山方舟 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
-      </label>
-      <label class="field">
-        <span class="label">Base URL</span>
-        <input id="base-url" class="input" type="text" placeholder="https://ark.cn-beijing.volces.com/api/v3" autocomplete="off" />
-        <span class="hint">留空使用默认地址（华北 2 北京）。</span>
-      </label>
+      <div class="card-head">
+        <h3 class="card-title">火山方舟</h3>
+        <p class="card-desc">图片与视频生成。模型留空则不提供对应工具。</p>
+      </div>
+      <div class="card-body">
+        <label class="field">
+          <span class="label">API Key</span>
+          <input id="api-key" class="input" type="password" placeholder="火山方舟 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="label">Base URL</span>
+          <input id="base-url" class="input" type="text" placeholder="https://ark.cn-beijing.volces.com/api/v3" autocomplete="off" />
+          <span class="hint">留空使用默认地址（华北 2 北京）。</span>
+        </label>
+        <label class="field">
+          <span class="label">图片生成模型</span>
+          <input id="image-model" class="input" type="text" list="image-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
+          <datalist id="image-model-list">
+            <option value="doubao-seedream-5-0-pro-260628"></option>
+            <option value="doubao-seedream-4-5-251128"></option>
+            <option value="doubao-seedream-4-0-250828"></option>
+          </datalist>
+        </label>
+        <label class="field">
+          <span class="label">视频生成模型</span>
+          <input id="video-model" class="input" type="text" list="video-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
+          <datalist id="video-model-list">
+            <option value="doubao-seedance-2-5-260628"></option>
+            <option value="doubao-seedance-2-0-260128"></option>
+            <option value="doubao-seedance-1-0-pro-250528"></option>
+          </datalist>
+        </label>
+        <label class="field">
+          <span class="label">视频等待上限（秒）</span>
+          <input id="video-timeout" class="input" type="number" min="30" step="10" placeholder="300" />
+          <span class="hint">超时后返回任务 ID，任务在服务端继续执行。</span>
+        </label>
+        <div class="field">
+          <span class="label">水印</span>
+          <label class="check">
+            <input id="watermark" type="checkbox" />
+            <span>生成结果添加 AI 生成水印</span>
+          </label>
+        </div>
+      </div>
     </section>
 
     <section class="card">
-      <h3 class="card-title">模型</h3>
-      <label class="field">
-        <span class="label">图片生成模型</span>
-        <input id="image-model" class="input" type="text" list="image-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
-        <datalist id="image-model-list">
-          <option value="doubao-seedream-5-0-pro-260628"></option>
-          <option value="doubao-seedream-4-5-251128"></option>
-          <option value="doubao-seedream-4-0-250828"></option>
-        </datalist>
-        <span class="hint">留空则不提供图片生成。</span>
-      </label>
-      <label class="field">
-        <span class="label">视频生成模型</span>
-        <input id="video-model" class="input" type="text" list="video-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
-        <datalist id="video-model-list">
-          <option value="doubao-seedance-2-5-260628"></option>
-          <option value="doubao-seedance-2-0-260128"></option>
-          <option value="doubao-seedance-1-0-pro-250528"></option>
-        </datalist>
-        <span class="hint">留空则不提供视频生成。</span>
-      </label>
-    </section>
-
-    <section class="card">
-      <h3 class="card-title">生成选项</h3>
-      <label class="field">
-        <span class="label">视频等待上限（秒）</span>
-        <input id="video-timeout" class="input" type="number" min="30" step="10" placeholder="300" />
-        <span class="hint">超过上限仍未完成时返回任务 ID，任务在服务端继续执行。</span>
-      </label>
-      <label class="radio">
-        <input id="watermark" type="checkbox" />
-        <span>添加 AI 生成水印</span>
-      </label>
-    </section>
-
-    <section class="card">
-      <h3 class="card-title">语音（豆包语音）</h3>
-      <p class="hint">豆包语音与火山方舟鉴权独立：API Key 在豆包语音控制台「API Key 管理」中获取；旧版控制台可改填 App ID 与 Access Token。需开通对应的语音合成 / 录音文件识别极速版资源。</p>
-      <label class="field">
-        <span class="label">API Key</span>
-        <input id="speech-api-key" class="input" type="password" placeholder="豆包语音 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
-      </label>
-      <label class="field">
-        <span class="label">App ID（旧版控制台，可选）</span>
-        <input id="speech-app-id" class="input" type="text" placeholder="填写 API Key 后无需填写" autocomplete="off" />
-      </label>
-      <label class="field">
-        <span class="label">Access Token（旧版控制台，可选）</span>
-        <input id="speech-access-token" class="input" type="password" placeholder="填写 API Key 后无需填写" autocomplete="off" />
-      </label>
-      <label class="field">
-        <span class="label">语音合成资源 ID</span>
-        <input id="tts-resource-id" class="input" type="text" list="tts-resource-list" placeholder="seed-tts-2.0" autocomplete="off" />
-        <datalist id="tts-resource-list">
-          <option value="seed-tts-2.0"></option>
-          <option value="seed-tts-1.0"></option>
-          <option value="seed-icl-2.0"></option>
-          <option value="seed-icl-1.0"></option>
-        </datalist>
-        <span class="hint">音色需与资源版本对应（*_uranus_bigtts 为 2.0 音色）。</span>
-      </label>
-      <label class="field">
-        <span class="label">默认音色</span>
-        <input id="tts-speaker" class="input" type="text" list="tts-speaker-list" placeholder="zh_female_vv_uranus_bigtts" autocomplete="off" />
-        <datalist id="tts-speaker-list"></datalist>
-      </label>
-      <label class="field">
-        <span class="label">语音识别资源 ID</span>
-        <input id="asr-resource-id" class="input" type="text" placeholder="volc.bigasr.auc_turbo" autocomplete="off" />
-        <span class="hint">录音文件识别极速版，支持 wav / mp3 / ogg。</span>
-      </label>
-      <label class="field">
-        <span class="label">Base URL</span>
-        <input id="speech-base-url" class="input" type="text" placeholder="https://openspeech.bytedance.com" autocomplete="off" />
-        <span class="hint">留空使用默认地址。</span>
-      </label>
+      <div class="card-head">
+        <h3 class="card-title">豆包语音</h3>
+        <p class="card-desc">语音合成与录音文件识别。鉴权独立于火山方舟，API Key 在豆包语音控制台「API Key 管理」中获取。</p>
+      </div>
+      <div class="card-body">
+        <label class="field">
+          <span class="label">API Key</span>
+          <input id="speech-api-key" class="input" type="password" placeholder="豆包语音 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="label">Base URL</span>
+          <input id="speech-base-url" class="input" type="text" placeholder="https://openspeech.bytedance.com" autocomplete="off" />
+          <span class="hint">留空使用默认地址。</span>
+        </label>
+        <label class="field">
+          <span class="label">语音合成资源 ID</span>
+          <input id="tts-resource-id" class="input" type="text" list="tts-resource-list" placeholder="seed-tts-2.0" autocomplete="off" />
+          <datalist id="tts-resource-list">
+            <option value="seed-tts-2.0"></option>
+            <option value="seed-tts-1.0"></option>
+            <option value="seed-icl-2.0"></option>
+            <option value="seed-icl-1.0"></option>
+          </datalist>
+          <span class="hint">音色需与资源版本对应（*_uranus_bigtts 为 2.0 音色）。</span>
+        </label>
+        <label class="field">
+          <span class="label">默认音色</span>
+          <input id="tts-speaker" class="input" type="text" list="tts-speaker-list" placeholder="zh_female_vv_uranus_bigtts" autocomplete="off" />
+          <datalist id="tts-speaker-list"></datalist>
+        </label>
+        <label class="field">
+          <span class="label">语音识别资源 ID</span>
+          <input id="asr-resource-id" class="input" type="text" placeholder="volc.bigasr.auc_turbo" autocomplete="off" />
+          <span class="hint">录音文件识别极速版，支持 wav / mp3 / ogg。</span>
+        </label>
+        <details class="legacy span-2">
+          <summary>旧版控制台鉴权（App ID + Access Token，填写 API Key 后无需填写）</summary>
+          <div class="legacy-grid">
+            <label class="field">
+              <span class="label">App ID</span>
+              <input id="speech-app-id" class="input" type="text" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span class="label">Access Token</span>
+              <input id="speech-access-token" class="input" type="password" autocomplete="off" />
+            </label>
+          </div>
+        </details>
+      </div>
     </section>
 
     <div class="actions">
@@ -304,6 +350,7 @@ async function loadConfig() {
     speechApiKey.value = speech.api_key || "";
     speechAppId.value = speech.app_id || "";
     speechAccessToken.value = speech.access_token || "";
+    if (speechAppId.value || speechAccessToken.value) document.querySelector("details.legacy").open = true;
     ttsResourceId.value = speech.tts_resource_id || DEFAULT_SPEECH.tts_resource_id;
     ttsSpeaker.value = speech.tts_speaker || DEFAULT_SPEECH.tts_speaker;
     asrResourceId.value = speech.asr_resource_id || DEFAULT_SPEECH.asr_resource_id;
@@ -380,6 +427,6 @@ async function saveConfig() {
 saveBtn.addEventListener("click", saveConfig);
 loadConfig();
 loadVoices();
-</script>
+  </script>
 </body>
 </html>
