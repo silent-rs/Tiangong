@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "id": "volcengine",
+  "version": "0.1.0",
+  "wasm": {
+    "binary": "tiangong_plugin_volcengine_wasm.wasm"
+  },
+  "sidecar": {
+    "binary": "tiangong-volcengine-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 600000
+  },
+  "permissions": [
+    "sidecar.invoke",
+    "bridge.call"
+  ],
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ],
+  "mention": {
+    "hint": "火山引擎：生成图片或视频、语音合成与语音识别",
+    "mark": "火山"
+  }
+}
