@@ -173,7 +173,10 @@ impl ServerCoreManager {
             .await
             .core_manager
             .session_exists(&requested_session_id);
-        let (session_id, capabilities) = self.ensure_core_locked(&requested_session_id).await?;
+        let (session_id, _core_capabilities) =
+            self.ensure_core_locked(&requested_session_id).await?;
+        // 能力按每条消息实时判定：插件启停后无需重建 Core 即生效。
+        let capabilities = attachment_capability_snapshot();
 
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
         // 附件准备成功后才登记 waiter，准备失败不会污染 tracker。
@@ -848,9 +851,11 @@ fn prepare_user_message_blocking(
 
 fn attachment_capability_snapshot() -> AttachmentCapabilitySnapshot {
     // 图片只归档并以路径注入，按模型能力的处理在 CoreManager 投递时完成。
-    // 语音识别能力已从模型配置中移除，当前没有音频处理器。
+    // 音频是否可处理取决于是否有已启用插件提供 speech_to_text 工具。
     AttachmentCapabilitySnapshot {
-        audio_processor: false,
+        audio_processor: tiangong_plugin_runtime::registry::tool_available(
+            tiangong_media_archive::SPEECH_TO_TEXT_TOOL,
+        ),
         video_processor: false,
     }
 }

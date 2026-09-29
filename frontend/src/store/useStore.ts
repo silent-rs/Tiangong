@@ -70,11 +70,11 @@ function newQueuedMessageId(): string {
 
 /** 直接由文本构造一条队列消息（不触碰草稿——用于外部文本在发送事务
  *  或执行中投递：草稿可能属于进行中的提交，不得被再次入队或覆盖）。 */
-function queuedTextMessage(text: string): QueuedInputMessage {
+function queuedTextMessage(text: string, attachments: RawAttachment[] = []): QueuedInputMessage {
   return {
     id: newQueuedMessageId(),
     text,
-    attachments: [],
+    attachments: attachments.map((attachment) => ({ ...attachment })),
     queuedAt: Date.now(),
   };
 }
@@ -869,17 +869,18 @@ export interface AppState {
    * 里决定）→ 空闲立即发送；信任模式用调用方传入的界面当前选择。
    * 不走 appendMessage（立即引导是用户的决定权，插件不得代行）。
    */
-  submitExternalText: (cacheKey: string, content: string, trustMode: string) => void;
+  submitExternalText: (
+    cacheKey: string,
+    content: string,
+    trustMode: string,
+    attachments?: RawAttachment[],
+  ) => void;
 
   // 流式消息状态
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string; // 流式思考过程内容
 
-  // 语音消息映射 (消息内容 hash → 音频信息)
-  voiceMessages: Record<string, { audioPath: string; duration?: number; showText: boolean }>;
-  addVoiceMessage: (msgKey: string, audioPath: string, duration?: number) => void;
-  toggleVoiceText: (msgKey: string) => void;
 
   // Agent 团队
   agents: AgentInfo[];
@@ -1020,33 +1021,6 @@ export const useStore = create<AppState>((set, get) => ({
   streamingMessageId: null,
   streamingContent: '',
   streamingReasoningContent: '',
-  voiceMessages: (() => {
-    try {
-      return JSON.parse(localStorage.getItem('tiangong-voice-messages') || '{}');
-    } catch { return {}; }
-  })(),
-  addVoiceMessage: (msgKey, audioPath, duration) => {
-    set((state) => {
-      const next = {
-        ...state.voiceMessages,
-        [msgKey]: { audioPath, duration, showText: false },
-      };
-      localStorage.setItem('tiangong-voice-messages', JSON.stringify(next));
-      return { voiceMessages: next };
-    });
-  },
-  toggleVoiceText: (msgKey) => {
-    set((state) => {
-      const vm = state.voiceMessages[msgKey];
-      if (!vm) return {};
-      const next = {
-        ...state.voiceMessages,
-        [msgKey]: { ...vm, showText: !vm.showText },
-      };
-      localStorage.setItem('tiangong-voice-messages', JSON.stringify(next));
-      return { voiceMessages: next };
-    });
-  },
   isLoadingSessions: false,
   agents: [],
 
@@ -1686,7 +1660,7 @@ export const useStore = create<AppState>((set, get) => ({
     get().setInputCacheAttachments(cacheKey, []);
   },
 
-  submitExternalText: (cacheKey, content, trustMode) => {
+  submitExternalText: (cacheKey, content, trustMode, attachments = []) => {
     const text = content.trim();
     if (!text) return;
     const state = get();
@@ -1696,7 +1670,7 @@ export const useStore = create<AppState>((set, get) => ({
       set((current) => ({
         inputQueues: {
           ...current.inputQueues,
-          [cacheKey]: [...(current.inputQueues[cacheKey] ?? []), queuedTextMessage(text)],
+          [cacheKey]: [...(current.inputQueues[cacheKey] ?? []), queuedTextMessage(text, attachments)],
         },
       }));
     };
@@ -1721,7 +1695,7 @@ export const useStore = create<AppState>((set, get) => ({
     get().setInputCacheText(cacheKey, text);
     const fresh = get().inputCaches[cacheKey];
     if (!fresh) return;
-    void get().sendMessage(cacheKey, text, [], fresh.revision, trustMode);
+    void get().sendMessage(cacheKey, text, attachments, fresh.revision, trustMode);
   },
 
   removeQueuedInputMessage: (cacheKey, messageId) => {

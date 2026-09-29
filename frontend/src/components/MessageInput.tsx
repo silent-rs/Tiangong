@@ -3,14 +3,13 @@ import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu } from 'lucide-react';
+import { Send, Square, FolderOpen, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
-import { api, textContent, type MentionTarget } from '@/api/tauri';
+import { api, type MentionTarget, type RawAttachment } from '@/api/tauri';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { useMentionGroups } from '@/hooks/useMentionGroups';
-import { useAudioRecording } from '@/hooks/useAudioRecording';
 import {
   type Attachment,
   MAX_ATTACHMENT_BASE64_BYTES,
@@ -130,7 +129,6 @@ export function MessageInput({
   ));
   const sessionCwd = useStore((state) => state.sessionCwd);
   const setSessionCwd = useStore((state) => state.setSessionCwd);
-  const addVoiceMessage = useStore((state) => state.addVoiceMessage);
   const lastUsage = useStore((state) => state.lastUsage);
   const tokenStats = useStore((state) => state.tokenStats);
   const reasoningEffort = useStore((state) => state.reasoningEffort);
@@ -342,38 +340,6 @@ export function MessageInput({
     }
   };
 
-  // STT 录音
-  const [hasStt, setHasStt] = useState(false);
-  const [voiceMode, setVoiceMode] = useState(false);
-  const [voiceCancelled, setVoiceCancelled] = useState(false);
-  const [voiceTooShort, setVoiceTooShort] = useState(false);
-  const recording = useAudioRecording();
-  const isRecordingRef = useRef(false);
-
-  useEffect(() => {
-    const refresh = () =>
-      api
-        .hasSttCapability()
-        .then((available) => {
-          setHasStt(available);
-          // STT 插件被禁用/卸载时终止进行中的录音，麦克风不再被占用。
-          if (!available && isRecordingRef.current) cancelVoiceRecordingRef.current();
-        })
-        .catch(() => setHasStt(false));
-    refresh();
-    // 插件安装/启用/禁用后录音入口即时刷新，而不是只在挂载时检查一次。
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    api.onPluginsChanged(refresh).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   // 当前会话是否空闲
   const currentSessionStatus = isNewConversation
     ? 'idle'
@@ -383,7 +349,7 @@ export function MessageInput({
     && !isSending
     && !!cacheKey
     && (inputContent.trim().length > 0 || attachments.length > 0);
-  const isTextDropTargetActive = !interactionVisible && !voiceMode && !!cacheKey;
+  const isTextDropTargetActive = !interactionVisible && !!cacheKey;
 
   // 运行中实时计时：维护单调递增的显示基准（baseMs@baseAt），事件到达与本地
   // tick 都只向前推进——事件值与外推值取大，杜绝显示回跳；TurnElapsed 事件
@@ -616,14 +582,30 @@ export function MessageInput({
     let unlisten: (() => void) | undefined;
     void api.onSessionInputAttachment(({ attachment }) => {
       if (disposed || !cacheKey) return;
-      // 文本输入项（如创作页「开始创建」）：写入草稿并直接发送给当前
-      // 会话的 Agent。经 store 层读写（事件回调里组件闭包可能是旧快照）。
+      // 文本输入项：mode=insert 写入草稿不发送（如语音转写后编辑）；否则
+      // 直接发送给当前会话的 Agent（如创作页「开始创建」、语音输入，可携带
+      // 音频附件）。经 store 层读写（事件回调里组件闭包可能是旧快照）。
       if (attachment.kind === 'text') {
         const content = (attachment.text ?? '').trim();
         if (!content) return;
+        if (attachment.mode === 'insert') {
+          const current = useStore.getState().inputCaches[cacheKey]?.text ?? '';
+          const separator = current && !current.endsWith('\n') ? ' ' : '';
+          setInputCacheText(cacheKey, `${current}${separator}${content}`);
+          editorRef.current?.focus();
+          return;
+        }
+        const extra: RawAttachment[] = (attachment.attachments ?? []).filter(
+          (item) => item.kind === 'audio',
+        );
         // 「用户普通 Enter」语义：保护草稿、运行中入队、空闲发送、
         // 信任模式用界面当前选择——是否立即引导由用户决定。
-        useStore.getState().submitExternalText(cacheKey, content, trustModeRef.current);
+        useStore.getState().submitExternalText(cacheKey, content, trustModeRef.current, extra);
+        editorRef.current?.focus();
+        return;
+      }
+      if (attachment.kind === 'audio') {
+        addAttachments([attachment as Attachment]);
         editorRef.current?.focus();
         return;
       }
@@ -638,7 +620,7 @@ export function MessageInput({
       disposed = true;
       unlisten?.();
     };
-  }, [addAttachments, cacheKey]);
+  }, [addAttachments, cacheKey, setInputCacheText]);
 
 
 
@@ -961,129 +943,6 @@ export function MessageInput({
     } catch (error) { console.error('选择目录失败:', error); }
   };
 
-  // ===== 语音模式相关 =====
-  const startVoiceRecording = useCallback(async () => {
-    if (interactionVisible || isRecordingRef.current || !isIdle) return;
-    isRecordingRef.current = true;
-    setVoiceCancelled(false);
-    setVoiceTooShort(false);
-    try {
-      await recording.startRecording();
-    } catch (e: any) {
-      isRecordingRef.current = false;
-      alert(e.message || "录音启动失败");
-    }
-  }, [interactionVisible, recording, isIdle]);
-
-  const stopVoiceAndSend = useCallback(async () => {
-    if (!isRecordingRef.current) return;
-    isRecordingRef.current = false;
-    const targetCacheKey = cacheKey;
-    if (!targetCacheKey) {
-      recording.cancelRecording();
-      return;
-    }
-    const targetCache = useStore.getState().inputCaches[targetCacheKey];
-    if (!targetCache) {
-      recording.cancelRecording();
-      return;
-    }
-
-    // 误触保护：录音不足 1 秒则丢弃
-    const elapsedMs = recording.getElapsedMs();
-    if (elapsedMs < 1000) {
-      recording.cancelRecording();
-      setVoiceTooShort(true);
-      setTimeout(() => setVoiceTooShort(false), 1500);
-      return;
-    }
-
-    const voiceDuration = Math.round(elapsedMs / 1000); // 录音时长（秒）
-    recording.setState("transcribing");
-    try {
-      const { filePath } = await recording.stopRecording();
-
-      const result = await api.transcribeSpeech(filePath);
-      const text = result.text.trim();
-      if (text) {
-        const audioPath = result.audio_path;
-        // 优先用 API 返回的时长，否则用前端录音计时
-        const audioDuration = result.duration || voiceDuration;
-
-        await sendMessage(targetCacheKey, text, [], targetCache.revision, trustMode);
-
-        // 轮询等待消息出现后，通过内容匹配关联语音
-        const tryAssociate = (retries: number) => {
-          const msgs = useStore.getState().messages;
-          // 从后往前找内容匹配的 user 消息
-          const matched = [...msgs].reverse().find(
-            m => m.role === 'user' && textContent(m) === text
-          );
-          if (matched && !useStore.getState().voiceMessages[matched.id]) {
-            console.log("关联语音消息:", matched.id, "->", audioPath);
-            addVoiceMessage(matched.id, audioPath, audioDuration);
-            return;
-          }
-          if (retries > 0) {
-            setTimeout(() => tryAssociate(retries - 1), 500);
-          }
-        };
-        setTimeout(() => tryAssociate(20), 300);
-      }
-    } catch (e: any) {
-      console.error("语音识别失败:", e);
-      alert(`语音识别失败：${e?.message || e}`);
-    } finally {
-      recording.setState("idle");
-    }
-  }, [cacheKey, recording, sendMessage, trustMode]);
-
-  const cancelVoiceRecording = useCallback(() => {
-    if (!isRecordingRef.current) return;
-    isRecordingRef.current = false;
-    recording.cancelRecording();
-    setVoiceCancelled(true);
-    setTimeout(() => setVoiceCancelled(false), 1500);
-  }, [recording]);
-
-  // 能力检测 effect 定义在本函数之前，经 ref 桥接取用最新实现。
-  const cancelVoiceRecordingRef = useRef(cancelVoiceRecording);
-  cancelVoiceRecordingRef.current = cancelVoiceRecording;
-
-  useEffect(() => {
-    if (interactionVisible && isRecordingRef.current) cancelVoiceRecording();
-  }, [cancelVoiceRecording, interactionVisible]);
-
-  // 语音模式全局键盘事件（空格键录音）
-  useEffect(() => {
-    if (interactionVisible || !voiceMode || !hasStt) return;
-
-    const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && !isRecordingRef.current && isIdle) {
-        e.preventDefault();
-        startVoiceRecording();
-      }
-      if (e.key === 'Escape' && isRecordingRef.current) {
-        e.preventDefault();
-        cancelVoiceRecording();
-      }
-    };
-
-    const handleGlobalKeyUp = (e: globalThis.KeyboardEvent) => {
-      if (e.code === 'Space' && isRecordingRef.current) {
-        e.preventDefault();
-        stopVoiceAndSend();
-      }
-    };
-
-    window.addEventListener('keydown', handleGlobalKeyDown);
-    window.addEventListener('keyup', handleGlobalKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleGlobalKeyDown);
-      window.removeEventListener('keyup', handleGlobalKeyUp);
-    };
-  }, [interactionVisible, voiceMode, hasStt, isIdle, startVoiceRecording, stopVoiceAndSend, cancelVoiceRecording]);
-
   const displayCwd = sessionCwd
     ? sessionCwd.split('/').filter(Boolean).slice(-2).join('/')
     : '';
@@ -1115,86 +974,7 @@ export function MessageInput({
         aria-hidden={interactionVisible}
         className="max-w-3xl mx-auto"
       >
-        {voiceMode && hasStt ? (
-          // ===== 语音模式 =====
-          <div>
-            <div className="relative">
-              {recording.state === "transcribing" ? (
-                <div className="flex items-center justify-center h-[60px] rounded-md bg-muted/50">
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  <span className="text-sm text-muted-foreground">识别中...</span>
-                </div>
-              ) : recording.state === "recording" ? (
-                <div
-                  className="flex flex-col items-center justify-center h-[60px] rounded-md bg-red-500/10 border border-red-500/30"
-                  onMouseLeave={cancelVoiceRecording}
-                >
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
-                    <span className="text-sm font-medium">录音中 {recording.duration}s</span>
-                  </div>
-                  <span className="text-xs text-muted-foreground mt-0.5">松开发送，移出取消</span>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-[60px] w-10 shrink-0 text-muted-foreground hover:text-foreground"
-                    onClick={() => setVoiceMode(false)}
-                    title="切换到文字模式"
-                  >
-                    <Keyboard className="w-5 h-5" />
-                  </Button>
-                  {!isIdle ? (
-                    <Button
-                      onClick={handleCancel}
-                      className="flex-1 h-[60px] rounded-md bg-destructive hover:bg-destructive/90 text-destructive-foreground"
-                    >
-                      <Square className="w-4 h-4 mr-2" />
-                      停止
-                    </Button>
-                  ) : (
-                    <button
-                      className="flex-1 h-[60px] rounded-md bg-muted/50 hover:bg-muted border border-border flex items-center justify-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors select-none"
-                      onMouseDown={(e) => { e.preventDefault(); startVoiceRecording(); }}
-                      onMouseUp={stopVoiceAndSend}
-                      onContextMenu={(e) => e.preventDefault()}
-                    >
-                      <Mic className="w-4 h-4" />
-                      按住说话 / 按空格说话
-                    </button>
-                  )}
-                </div>
-              )}
-              {/* 提示信息 */}
-              {voiceCancelled && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/90 rounded-md">
-                  <span className="text-sm text-muted-foreground">已取消</span>
-                </div>
-              )}
-              {voiceTooShort && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/90 rounded-md">
-                  <span className="text-sm text-muted-foreground">说话时间太短</span>
-                </div>
-              )}
-            </div>
-            <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-              <button
-                onClick={handleChangeCwd}
-                disabled={!isIdle}
-                className="flex items-center gap-1 hover:text-foreground transition-colors truncate max-w-[300px] disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground"
-                title={sessionCwd || '点击设置对话目录'}
-              >
-                <FolderOpen className="w-3 h-3 shrink-0" />
-                <span className="truncate">{displayCwd || '设置对话目录'}</span>
-              </button>
-              <span>空格键 录音</span>
-            </div>
-          </div>
-        ) : (
-          // ===== 文字模式 =====
-          <div>
+        <div>
             {/* 输入框上方：运行状态 + 思考强度 */}
             <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
               <div className="flex items-center gap-2 min-w-0">
@@ -1518,17 +1298,6 @@ export function MessageInput({
                 >
                   <Paperclip className="w-4 h-4" />
                 </Button>
-                {hasStt && isIdle && (
-                  <Button
-                    onClick={() => setVoiceMode(true)}
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground"
-                    title="切换到语音模式"
-                  >
-                    <Mic className="w-4 h-4" />
-                  </Button>
-                )}
                 {!isIdle && (
                   <Button
                     onClick={handleCancel}
@@ -1653,7 +1422,6 @@ export function MessageInput({
               </div>
             </div>
           </div>
-        )}
       </div>
     </div>
   );

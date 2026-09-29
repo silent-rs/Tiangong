@@ -108,6 +108,12 @@ pub const BUILTIN_SLOTS: &[SlotDescriptor] = &[
         description: "审批、确认、选择和输入请求的交互处理器界面",
     },
     SlotDescriptor {
+        id: "session.input-overlay",
+        instances: SlotInstances::Singleton,
+        context: &[SlotContextKey::Session],
+        description: "按需覆盖输入区的输入模式界面（如按住说话），由插件申请显示与归还",
+    },
+    SlotDescriptor {
         id: "session.empty-state",
         instances: SlotInstances::Multiple,
         context: &[SlotContextKey::Session, SlotContextKey::Workspace],
@@ -352,6 +358,7 @@ mod tests {
                 "session.before-input",
                 "session.empty-state",
                 "session.input-action",
+                "session.input-overlay",
                 "session.input-status",
                 "session.interaction",
                 "session.message-action",

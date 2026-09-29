@@ -846,8 +846,10 @@ pub(crate) async fn attachment_capability_snapshot(
         .with_state_read(|_core_state| {
             // 图片只归档并以路径注入，按模型能力的处理在 CoreManager 投递时完成。
             Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
-                // 语音识别能力已从模型配置中移除。
-                audio_processor: false,
+                // 音频是否可处理取决于是否有已启用插件提供 speech_to_text 工具。
+                audio_processor: tiangong_plugin_runtime::registry::tool_available(
+                    tiangong_media_archive::SPEECH_TO_TEXT_TOOL,
+                ),
                 // 当前没有“视频内容分析”插件；视频生成能力不能冒充输入处理能力。
                 video_processor: false,
             })
@@ -867,6 +869,42 @@ fn emit_session_stream_event(
             event: event.clone(),
         },
     );
+    forward_session_event_to_plugins(session_id, event);
+}
+
+/// 把回复正文与轮次终态转发给订阅了 `session.*` 的插件（如自动朗读）。
+///
+/// 只转发面向用户的最终回复文本（delta / summary_text）与轮次结束，
+/// 不含思考过程、工具过程文本与内部状态；无订阅者时 `bridge_emit` 直接返回。
+fn forward_session_event_to_plugins(session_id: &str, event: &tiangong_types::StreamEvent) {
+    use tiangong_types::StreamEvent;
+    let (channel, payload) = match event {
+        StreamEvent::Delta {
+            message_id,
+            content,
+        }
+        | StreamEvent::SummaryText {
+            message_id,
+            content,
+        } => (
+            "session.stream.text",
+            serde_json::json!({
+                "session_id": session_id,
+                "message_id": message_id,
+                "content": content,
+            }),
+        ),
+        StreamEvent::Done { .. } => (
+            "session.turn.completed",
+            serde_json::json!({ "session_id": session_id, "status": "done" }),
+        ),
+        StreamEvent::Error { .. } => (
+            "session.turn.completed",
+            serde_json::json!({ "session_id": session_id, "status": "error" }),
+        ),
+        _ => return,
+    };
+    tiangong_plugin_runtime::bridge::bridge_emit(channel, &payload.to_string());
 }
 
 /// 消费 StreamEvent：按会话转发给前端，并维护消息投递边界。

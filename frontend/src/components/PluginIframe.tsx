@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, useMemo } from 'react';
 import { api } from '../api/tauri';
 import { useResolvedTheme } from '../hooks/useTheme';
 import { usePluginMask } from '../hooks/usePluginMask';
-import { hostContext } from './pluginHostContext';
+import { hostContext, type HostMessageContext } from './pluginHostContext';
 
 const pluginCallQueues = new Map<string, Promise<void>>();
 
@@ -31,6 +31,7 @@ export function PluginIframe({
   workspace,
   instanceId,
   visible,
+  message,
 }: {
   pluginId: string;
   html: string;
@@ -38,6 +39,7 @@ export function PluginIframe({
   workspace?: string | null;
   instanceId?: string;
   visible?: boolean;
+  message?: HostMessageContext;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const theme = useResolvedTheme();
@@ -53,10 +55,11 @@ export function PluginIframe({
         instanceId && typeof visible === 'boolean'
           ? { instance_id: instanceId, visible }
           : undefined,
+        message,
       ),
       '*',
     );
-  }, [channel, instanceId, sessionId, theme, visible, workspace]);
+  }, [channel, instanceId, message, sessionId, theme, visible, workspace]);
 
   useEffect(() => {
     sendHostContext();

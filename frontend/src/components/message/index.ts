@@ -4,7 +4,6 @@ export * from "./useExpansionState";
 export * from "./ContentMedia";
 export * from "./MessageActions";
 export * from "./UserMessageActions";
-export * from "./VoiceBubble";
 export * from "./StreamingMessage";
 export * from "./ToolGroup";
 export * from "./UserMessageGroup";

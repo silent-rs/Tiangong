@@ -39,7 +39,6 @@ interface AgentTurnProps {
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string;
-  hasTts: boolean;
   isActive?: boolean;
   /** 本轮执行总时长（毫秒）：来自本轮用户消息的 elapsed_ms。 */
   turnElapsedMs?: number;
@@ -52,7 +51,6 @@ function AgentTurnView({
   streamingMessageId,
   streamingContent,
   streamingReasoningContent,
-  hasTts,
   isActive = false,
   turnElapsedMs,
   turnStatus,
@@ -435,8 +433,8 @@ function AgentTurnView({
               {!isStreaming && msg.content && visibleText && (
                 <div className="mt-1 border-t border-border/50 pt-1">
                   <MessageActions
+                    messageId={msg.id}
                     text={visibleText}
-                    showTts={hasTts}
                     durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
                     usageMessages={msg.id === usageAnchorId ? messages : undefined}
                   />
@@ -573,7 +571,7 @@ function AgentTurnView({
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
-  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
+  if (!sameMessageRefs(prev.messages, next.messages) || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
   const touchesStreamingMessage = hasMessage(prev.messages, prev.streamingMessageId) || hasMessage(prev.messages, next.streamingMessageId);
   if (!touchesStreamingMessage) return true;
   return prev.streamingMessageId === next.streamingMessageId && prev.streamingContent === next.streamingContent && prev.streamingReasoningContent === next.streamingReasoningContent;

@@ -5,6 +5,41 @@
 
 use super::*;
 
+/// 是否有已启用且加载成功的插件提供指定工具。
+///
+/// 宿主据此判断「某项能力当前是否可由模型调用」（如音频附件是否提示
+/// 模型调用 `speech_to_text`），不感知具体由哪个插件提供。WASM 插件的
+/// 工具声明在组件内，读取的是运行时声明冻结值；TS 插件读 manifest 声明。
+pub fn tool_available(tool_name: &str) -> bool {
+    let candidates: Vec<(Option<Arc<Mutex<WasmPlugin>>>, bool)> = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return false;
+        };
+        plugins
+            .values()
+            .filter(|loaded| loaded.enabled && loaded.load_error.is_none())
+            .map(|loaded| {
+                let declared = loaded
+                    .manifest
+                    .tools
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|tool| tool.name == tool_name);
+                (loaded.ui_plugin.clone(), declared)
+            })
+            .collect()
+    };
+    candidates.into_iter().any(|(wasm, declared)| {
+        declared
+            || wasm.is_some_and(|plugin| {
+                crate::adapter::call_wasm_off_runtime(plugin, WasmPlugin::tool_specs)
+                    .map(|specs| specs.iter().any(|spec| spec.name == tool_name))
+                    .unwrap_or(false)
+            })
+    })
+}
+
 pub fn is_local_plugin(plugin_id: &str) -> bool {
     loaded_plugins()
         .lock()

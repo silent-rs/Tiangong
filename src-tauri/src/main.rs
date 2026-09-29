@@ -178,9 +178,9 @@ fn run_gui() {
             // 桥接原语驱动；须在任何原语接线之前完成。
             tiangong_app::webview_host::init(app.handle());
 
-            // 媒体生成/转换插件（generate_image / generate_video / text_to_speech /
-            // speech_to_text）在 app.rs 的 create_core_if_absent 中统一组装（与其他
-            // 进程内插件一致），此处不再单独注册。
+            // 媒体生成/转换插件（volcengine 提供 generate_image / generate_video，
+            // 以及 text_to_speech / speech_to_text）在 app.rs 的 create_core_if_absent
+            // 中统一组装（与其他进程内插件一致），此处不再单独注册。
 
             // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
             // （内嵌浏览器渲染），run_command / run_shell 由 terminal 插件提供（PTY 执行）。
@@ -676,88 +676,31 @@ fn run_gui() {
                 ));
             }
 
-            // 输入草稿桥接：插件提交图片 data URL；宿主验证格式和大小后，
-            // 通过定向事件交给当前输入框加入草稿，不自动发送。
+            // 输入桥接（session.input.*）：校验负载后经定向事件交给当前输入框 /
+            // 输入覆盖层宿主，宿主不解析业务含义（见 session_input 模块）。
             {
                 let app_handle = app.handle().clone();
+                let media_root = tiangong_config::io::storage_root().join("media");
                 tiangong_plugin_runtime::set_session_input_handler(Arc::new(
                     move |plugin_id: &str, method: &str, payload: &str| {
-                        // 文本发送：插件页面在明确用户手势后把一段指令交给
-                        // 当前会话的 Agent 处理（如创作页「开始创建」）。
-                        if method == "session.input.sendText" {
-                            #[derive(serde::Deserialize)]
-                            struct TextInput {
-                                text: String,
-                            }
-                            let input: TextInput = serde_json::from_str(payload)
-                                .map_err(|error| anyhow::anyhow!("输入文本格式无效：{error}"))?;
-                            if input.text.trim().is_empty() {
-                                anyhow::bail!("输入文本不能为空");
-                            }
-                            if input.text.len() > 10_000 {
-                                anyhow::bail!("输入文本超过 10KB 上限");
-                            }
-                            // 复用截图插件的输入事件通道（同一事件、同一前端
-                            // 监听），文本作为 kind="text" 的输入项分流处理。
-                            app_handle
-                                .emit(
-                                    "session_input_attachment",
-                                    serde_json::json!({
-                                        "plugin_id": plugin_id,
-                                        "attachment": {
-                                            "kind": "text",
-                                            "text": input.text,
-                                        },
-                                    }),
-                                )
-                                .map_err(|error| anyhow::anyhow!("推送输入消息失败：{error}"))?;
-                            return Ok("true".to_string());
-                        }
-                        if method != "session.input.addAttachment" {
-                            anyhow::bail!("未知输入草稿方法 {method}");
-                        }
-                        #[derive(serde::Deserialize)]
-                        struct InputAttachment {
-                            source: String,
-                            #[serde(default)]
-                            original_name: String,
-                            #[serde(default)]
-                            mime_type: String,
-                        }
-                        let attachment: InputAttachment = serde_json::from_str(payload)
-                            .map_err(|error| anyhow::anyhow!("输入附件格式无效：{error}"))?;
-                        if attachment.mime_type != "image/png"
-                            || !attachment.source.starts_with("data:image/png;base64,")
-                        {
-                            anyhow::bail!("输入草稿附件仅支持 PNG 图片");
-                        }
-                        let base64 = attachment
-                            .source
-                            .split_once(',')
-                            .map(|(_, value)| value)
-                            .unwrap_or_default();
-                        if base64.is_empty() || base64.len() as u64 > 50 * 1024 * 1024 {
-                            anyhow::bail!("图片内容为空或超过 50MB 限制");
-                        }
-                        let title = if attachment.original_name.trim().is_empty() {
-                            "screenshot.png".to_string()
-                        } else {
-                            attachment.original_name
-                        };
+                        let event = tiangong_app::session_input::handle(
+                            plugin_id,
+                            method,
+                            payload,
+                            &media_root,
+                            |plugin_id| {
+                                tiangong_plugin_runtime::registry::plugin_manifest(plugin_id)
+                                    .is_some_and(|manifest| {
+                                        manifest.ui_contributions().iter().any(|item| {
+                                            item.slot
+                                                == tiangong_app::session_input::OVERLAY_SLOT
+                                        })
+                                    })
+                            },
+                        )?;
                         app_handle
-                            .emit(
-                                "session_input_attachment",
-                                serde_json::json!({
-                                    "plugin_id": plugin_id,
-                                    "attachment": {
-                                        "kind": "image",
-                                        "source": attachment.source,
-                                        "original_name": title,
-                                        "mime_type": "image/png"
-                                    }
-                                }),
-                            )
-                            .map_err(|error| anyhow::anyhow!("推送输入附件失败：{error}"))?;
+                            .emit(event.name, event.payload)
+                            .map_err(|error| anyhow::anyhow!("推送输入事件失败：{error}"))?;
                         Ok("true".to_string())
                     },
                 ));

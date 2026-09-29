@@ -20,6 +20,9 @@ pub struct RawAttachment {
     pub original_name: Option<String>,
 }
 
+/// 处理音频附件的工具名：插件提供该工具即视为具备音频处理能力。
+pub const SPEECH_TO_TEXT_TOOL: &str = "speech_to_text";
+
 /// 生成本轮附件处理方案时使用的能力快照。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

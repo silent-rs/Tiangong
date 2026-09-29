@@ -40,7 +40,6 @@ function renderGroup(root: Root, text: string) {
         group={group(text)}
         runStatus="idle"
         nonEditableIds={new Set()}
-        voiceMessages={{}}
         editingMessageId={null}
         editingContent=""
         editingAttachments={[]}
