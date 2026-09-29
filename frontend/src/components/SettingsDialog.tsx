@@ -690,8 +690,6 @@ function ProviderModelsView({
   });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
-  const [ttsVoices, setTtsVoices] = useState<{ id: string; name: string; gender?: string }[]>([]);
-  const [isFetchingVoices, setIsFetchingVoices] = useState(false);
   const { showError } = useToast();
 
   // Effective selected provider
@@ -754,7 +752,6 @@ function ProviderModelsView({
     setModelModalMode('add');
     setModelDraft({ provider: activeProvider, model: '', capabilities: [], options: {}, context_window: undefined });
     setAvailableModels([]);
-    setTtsVoices([]);
   };
 
   const openEditModel = (key: string) => {
@@ -854,11 +851,6 @@ function ProviderModelsView({
     } finally {
       setIsFetchingModels(false);
     }
-  };
-
-  const fetchTtsVoices = async () => {
-    setIsFetchingVoices(true);
-    try { setTtsVoices(await api.listTtsVoices()); } catch { setTtsVoices([]); } finally { setIsFetchingVoices(false); }
   };
 
   // 拉取供应商模型并自动注册（DeepSeek 填 key 后 / ChatGPT 登录后；ChatGPT 同步能力与上下文窗口）。
@@ -1244,29 +1236,6 @@ function ProviderModelsView({
                   }}
                 />
                 <p className="text-xs text-muted-foreground mt-0.5">单位：token。留空时从 context_windows.json 映射表取默认值。</p>
-              </div>
-            )}
-            {modelDraft.capabilities.includes('tts') && (
-              <div>
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs">TTS 音色 (voice)</Label>
-                  {ttsVoices.length === 0 && (
-                    <Button variant="ghost" size="sm" className="h-5 text-xs px-2" onClick={fetchTtsVoices} disabled={isFetchingVoices}>
-                      {isFetchingVoices ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" />获取中...</> : '获取可用音色'}
-                    </Button>
-                  )}
-                </div>
-                {ttsVoices.length > 0 ? (
-                  <Select value={(modelDraft.options?.voice as string) || '__default__'} onValueChange={(v) => setModelDraft({ ...modelDraft, options: { ...modelDraft.options, voice: v === '__default__' ? undefined : v } })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="-- 使用默认音色 --" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__default__">-- 使用默认音色 --</SelectItem>
-                      {ttsVoices.map((v) => <SelectItem key={v.id} value={v.id}>{v.name}{v.gender ? ` (${v.gender})` : ''}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <Input value={(modelDraft.options?.voice as string) || ''} onChange={(e) => setModelDraft({ ...modelDraft, options: { ...modelDraft.options, voice: e.target.value || undefined } })} className="text-sm h-8" placeholder="输入音色名称" />
-                )}
               </div>
             )}
             <div className="flex justify-end gap-2 pt-1">
