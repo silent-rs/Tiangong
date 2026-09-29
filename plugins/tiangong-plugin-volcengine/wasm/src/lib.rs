@@ -79,7 +79,13 @@ impl Guest for Component {
     }
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
-        Ok(Vec::new())
+        // 宿主只告诉模型音频附件的本地路径，如何处理由提供能力的插件说明。
+        Ok(vec![
+            "音频附件处理：用户消息包含音频引用且需要了解内容时，调用 speech_to_text，\
+            以附件的本地 path 作为 file_path。用户经语音输入发送的消息，正文已是识别结果，\
+            其录音附件（名称为「语音消息」）无需再次识别。"
+                .to_string(),
+        ])
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {

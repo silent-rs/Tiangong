@@ -18,6 +18,8 @@
     "session.write"
   ],
   "capabilities": {
+    "tools": true,
+    "prompt": true,
     "events": [
       "session.*"
     ]
