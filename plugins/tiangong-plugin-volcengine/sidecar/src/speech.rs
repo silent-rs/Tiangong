@@ -1,42 +1,59 @@
-//! 豆包语音（openspeech）HTTP 调用：语音合成与录音文件识别。
+//! 豆包语音（Agent Plan）调用：语音合成与流式语音识别。
 //!
-//! - 语音合成：`POST {base}/api/v3/tts/unidirectional`（HTTP Chunked 单向流式 V3），
+//! - 语音合成：`POST {base}/api/v3/plan/tts/unidirectional`（HTTP Chunked 单向流式），
 //!   响应为逐行 JSON：`{"code":0,"data":"<base64 音频>"}` 若干帧，
 //!   `{"code":20000000,"message":"ok"}` 为结束帧，其余 code 为错误。
-//! - 语音识别：`POST {base}/api/v3/auc/bigmodel/recognize/flash`（录音文件识别极速版），
-//!   一次请求同步返回结果；状态码在响应头 `X-Api-Status-Code`。
+//! - 语音识别：`wss://{host}/api/v3/plan/sauc/bigmodel_nostream`（流式输入模式），
+//!   二进制帧协议：full client request（gzip JSON）→ 分包 audio only request
+//!   （gzip 音频，末包置负包标志）→ full server response（gzip JSON）。
 //!
-//! 鉴权：新版控制台只需 `X-Api-Key`；旧版控制台使用 App ID + Access Token。
+//! 鉴权：Agent Plan 专属 API Key 放在 `X-Api-Key`；`X-Api-Resource-Id` 按模型映射。
 //!
-//! 参考：<https://www.volcengine.com/docs/6561/1598757>（HTTP Chunked 语音合成）、
-//! <https://www.volcengine.com/docs/6561/1631584>（录音文件识别极速版）。
+//! 参考：<https://www.volcengine.com/docs/82379/2516286>（Agent Plan 接入语音模型）、
+//! <https://www.volcengine.com/docs/6561/1354869>（大模型流式语音识别 API）。
 
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::ark::{http_client, preview};
 
 /// 合成成功结束帧 / 识别成功状态码。
 const SUCCESS_CODE: i64 = 20_000_000;
-/// 识别：静音音频（视为识别出空文本）。
-const SILENT_AUDIO_CODE: &str = "20000003";
+/// 识别：单包音频时长（毫秒），文档建议 100～200ms。
+const ASR_CHUNK_MS: usize = 200;
+/// 识别：整体超时。
+const ASR_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// 已解析的豆包语音凭据。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpeechAuth {
-    /// 新版控制台 API Key。
-    ApiKey(String),
-    /// 旧版控制台 App ID + Access Token。
-    AppToken { app_id: String, token: String },
+/// 模型 → `X-Api-Resource-Id`。未知模型原样透传（便于直接填写资源 ID）。
+pub fn tts_resource_id(model: &str) -> &str {
+    match model.trim() {
+        "doubao-seed-tts-2.0" => "seed-tts-2.0",
+        "doubao-seed-tts-1.0" => "seed-tts-1.0",
+        other => other,
+    }
+}
+
+/// 模型 → `X-Api-Resource-Id`（Agent Plan 流式识别为小时版资源）。
+pub fn asr_resource_id(model: &str) -> &str {
+    match model.trim() {
+        "doubao-seed-asr-2.0" => "volc.seedasr.sauc.duration",
+        "doubao-seed-asr-1.0" => "volc.bigasr.sauc.duration",
+        other => other,
+    }
 }
 
 /// 已解析的豆包语音端点。
 pub struct SpeechEndpoint {
+    /// `https://openspeech.bytedance.com`；识别时换成对应的 `wss://`。
     pub base_url: String,
-    pub auth: SpeechAuth,
+    pub api_key: String,
 }
 
 impl SpeechEndpoint {
@@ -44,28 +61,14 @@ impl SpeechEndpoint {
         format!("{}{path}", self.base_url.trim().trim_end_matches('/'))
     }
 
-    /// 附加鉴权与资源头。旧版控制台 TTS 用 `X-Api-App-Id`，ASR 用 `X-Api-App-Key`。
-    fn authorize(
-        &self,
-        request: reqwest::RequestBuilder,
-        resource_id: &str,
-        app_header: &str,
-    ) -> reqwest::RequestBuilder {
-        let request = request
-            .header("X-Api-Resource-Id", resource_id)
-            .header("X-Api-Request-Id", request_id());
-        match &self.auth {
-            SpeechAuth::ApiKey(key) => request.header("X-Api-Key", key),
-            SpeechAuth::AppToken { app_id, token } => request
-                .header(app_header, app_id)
-                .header("X-Api-Access-Key", token),
-        }
-    }
-
-    fn uid(&self) -> String {
-        match &self.auth {
-            SpeechAuth::ApiKey(_) => "tiangong".to_string(),
-            SpeechAuth::AppToken { app_id, .. } => app_id.clone(),
+    fn ws_url(&self, path: &str) -> String {
+        let url = self.url(path);
+        if let Some(rest) = url.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            url
         }
     }
 }
@@ -79,7 +82,8 @@ fn request_id() -> String {
 
 /// 合成参数。
 pub struct TtsOptions<'a> {
-    pub resource_id: &'a str,
+    /// 语音合成模型（如 `doubao-seed-tts-2.0`）。
+    pub model: &'a str,
     pub speaker: &'a str,
     /// 语速倍率（1.0 正常），换算为服务端 `speech_rate` [-50, 100]。
     pub speed: Option<f64>,
@@ -169,13 +173,12 @@ pub async fn synthesize(
     text: &str,
     options: &TtsOptions<'_>,
 ) -> Result<TtsAudio> {
-    let request = endpoint
-        .authorize(
-            http_client()?.post(endpoint.url("/api/v3/tts/unidirectional")),
-            options.resource_id,
-            "X-Api-App-Id",
-        )
-        .json(&tts_body(&endpoint.uid(), text, options));
+    let request = http_client()?
+        .post(endpoint.url("/api/v3/plan/tts/unidirectional"))
+        .header("X-Api-Key", &endpoint.api_key)
+        .header("X-Api-Resource-Id", tts_resource_id(options.model))
+        .header("X-Api-Request-Id", request_id())
+        .json(&tts_body("tiangong", text, options));
     let response = request.send().await.context("请求豆包语音合成接口失败")?;
     let status = response.status();
     let body = response.text().await.context("读取语音合成响应失败")?;
@@ -203,33 +206,61 @@ pub struct AsrResult {
     pub duration: Option<f64>,
 }
 
-/// 按扩展名推断识别接口的 `audio.format`（极速版支持 wav / mp3 / ogg opus）。
-pub fn asr_format(file_path: &str) -> Result<&'static str> {
+/// 识别输入音频的容器格式（流式识别支持 pcm / wav / ogg(opus) / mp3，采样率 16k）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrFormat {
+    Wav,
+    Mp3,
+    Ogg,
+}
+
+impl AsrFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Mp3 => "mp3",
+            Self::Ogg => "ogg",
+        }
+    }
+
+    fn codec(self) -> &'static str {
+        match self {
+            Self::Ogg => "opus",
+            Self::Wav | Self::Mp3 => "raw",
+        }
+    }
+}
+
+/// 按扩展名推断识别格式。
+pub fn asr_format(file_path: &str) -> Result<AsrFormat> {
     let extension = std::path::Path::new(file_path)
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     Ok(match extension.as_str() {
-        "wav" => "wav",
-        "mp3" => "mp3",
-        "ogg" | "oga" | "opus" => "ogg",
+        "wav" => AsrFormat::Wav,
+        "mp3" => AsrFormat::Mp3,
+        "ogg" | "oga" | "opus" => AsrFormat::Ogg,
         _ => bail!("不支持的音频格式（火山引擎语音识别仅支持 wav / mp3 / ogg）"),
     })
 }
 
-/// 组装录音文件识别请求体（音频以 base64 直传）。
-pub fn asr_body(uid: &str, audio: &[u8], format: &str, language: Option<&str>) -> Value {
-    let mut audio_json = json!({
-        "data": base64::engine::general_purpose::STANDARD.encode(audio),
-        "format": format,
+/// 组装 full client request 的 JSON 参数。
+pub fn asr_request_json(format: AsrFormat, language: Option<&str>) -> Value {
+    let mut audio = json!({
+        "format": format.as_str(),
+        "codec": format.codec(),
+        "rate": 16000,
+        "bits": 16,
+        "channel": 1,
     });
     if let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) {
-        audio_json["language"] = json!(language);
+        audio["language"] = json!(language);
     }
     json!({
-        "user": { "uid": uid },
-        "audio": audio_json,
+        "user": { "uid": "tiangong" },
+        "audio": audio,
         "request": {
             "model_name": "bigmodel",
             "enable_itn": true,
@@ -238,10 +269,156 @@ pub fn asr_body(uid: &str, audio: &[u8], format: &str, language: Option<&str>) -
     })
 }
 
-/// 从识别响应体中提取文本与时长（毫秒 → 秒）。
+// 二进制帧协议（整数大端）：4 字节头 + [sequence] + payload size + payload。
+const PROTOCOL_VERSION_HEADER: u8 = 0x11; // version=1, header size=1(×4 字节)
+const MSG_FULL_CLIENT_REQUEST: u8 = 0b0001;
+const MSG_AUDIO_ONLY_REQUEST: u8 = 0b0010;
+const MSG_FULL_SERVER_RESPONSE: u8 = 0b1001;
+const MSG_SERVER_ERROR: u8 = 0b1111;
+const FLAG_NONE: u8 = 0b0000;
+const FLAG_LAST_PACKET: u8 = 0b0010;
+const SERIALIZATION_NONE: u8 = 0b0000;
+const SERIALIZATION_JSON: u8 = 0b0001;
+const COMPRESSION_GZIP: u8 = 0b0001;
+
+fn gzip(data: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).context("gzip 压缩失败")?;
+    encoder.finish().context("gzip 压缩失败")
+}
+
+fn gunzip(data: &[u8]) -> Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .read_to_end(&mut decoded)
+        .context("gzip 解压失败")?;
+    Ok(decoded)
+}
+
+/// 编码客户端帧（无 sequence 字段，payload 使用 gzip）。
+pub fn encode_client_frame(
+    message_type: u8,
+    flags: u8,
+    serialization: u8,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    let compressed = gzip(payload)?;
+    let size = u32::try_from(compressed.len()).context("音频分包过大")?;
+    let mut frame = Vec::with_capacity(8 + compressed.len());
+    frame.push(PROTOCOL_VERSION_HEADER);
+    frame.push((message_type << 4) | flags);
+    frame.push((serialization << 4) | COMPRESSION_GZIP);
+    frame.push(0);
+    frame.extend_from_slice(&size.to_be_bytes());
+    frame.extend_from_slice(&compressed);
+    Ok(frame)
+}
+
+/// 解码后的服务端帧。
+#[derive(Debug, PartialEq)]
+pub enum ServerFrame {
+    /// 识别结果；`last` 表示最后一包的结果。
+    Response {
+        last: bool,
+        payload: Value,
+    },
+    Error {
+        code: u32,
+        message: String,
+    },
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Result<u32> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| anyhow!("服务端帧长度不足"))?;
+    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn decode_payload(bytes: &[u8], compression: u8, serialization: u8) -> Result<Value> {
+    let raw = if compression == COMPRESSION_GZIP {
+        gunzip(bytes)?
+    } else {
+        bytes.to_vec()
+    };
+    if raw.is_empty() {
+        return Ok(Value::Null);
+    }
+    if serialization == SERIALIZATION_JSON {
+        serde_json::from_slice(&raw).map_err(|_| {
+            anyhow!(
+                "解析识别结果失败：{}",
+                preview(&String::from_utf8_lossy(&raw))
+            )
+        })
+    } else {
+        Ok(Value::String(String::from_utf8_lossy(&raw).to_string()))
+    }
+}
+
+/// 解码服务端帧。
+pub fn decode_server_frame(data: &[u8]) -> Result<ServerFrame> {
+    if data.len() < 4 {
+        bail!("服务端帧长度不足");
+    }
+    let header_len = usize::from(data[0] & 0x0f) * 4;
+    let message_type = data[1] >> 4;
+    let flags = data[1] & 0x0f;
+    let serialization = data[2] >> 4;
+    let compression = data[2] & 0x0f;
+    let body = data
+        .get(header_len..)
+        .ok_or_else(|| anyhow!("服务端帧头长度无效"))?;
+    match message_type {
+        MSG_FULL_SERVER_RESPONSE => {
+            // flags bit0 表示携带 sequence（负数为最后一包）。
+            let (sequence, rest) = if flags & 0b0001 != 0 {
+                (Some(read_u32(body, 0)? as i32), &body[4..])
+            } else {
+                (None, body)
+            };
+            let size = read_u32(rest, 0)? as usize;
+            let payload = rest
+                .get(4..4 + size)
+                .ok_or_else(|| anyhow!("服务端帧载荷长度无效"))?;
+            let last = flags & 0b0010 != 0 || sequence.is_some_and(|value| value < 0);
+            Ok(ServerFrame::Response {
+                last,
+                payload: decode_payload(payload, compression, serialization)?,
+            })
+        }
+        MSG_SERVER_ERROR => {
+            let code = read_u32(body, 0)?;
+            let size = read_u32(body, 4)? as usize;
+            let raw = body
+                .get(8..8 + size)
+                .ok_or_else(|| anyhow!("服务端错误帧长度无效"))?;
+            let message = match decode_payload(raw, compression, serialization) {
+                Ok(Value::String(text)) => text,
+                Ok(value) => ["/message", "/error", "/header/message"]
+                    .iter()
+                    .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string()),
+                Err(_) => String::from_utf8_lossy(raw).to_string(),
+            };
+            Ok(ServerFrame::Error { code, message })
+        }
+        other => bail!("未知的服务端消息类型：{other}"),
+    }
+}
+
+/// 从识别结果中提取文本与时长（毫秒 → 秒）。
+///
+/// `result` 可能是对象或数组（文档写作 list），两种形态都兼容。
 pub fn parse_asr_body(body: &Value) -> AsrResult {
-    let text = body
-        .pointer("/result/text")
+    let result = match body.get("result") {
+        Some(Value::Array(items)) => items.first().cloned().unwrap_or(Value::Null),
+        Some(other) => other.clone(),
+        None => Value::Null,
+    };
+    let text = result
+        .get("text")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
@@ -253,62 +430,137 @@ pub fn parse_asr_body(body: &Value) -> AsrResult {
     AsrResult { text, duration }
 }
 
-/// 调用录音文件识别（极速版）。
-pub async fn recognize(
-    endpoint: &SpeechEndpoint,
-    resource_id: &str,
-    audio: &[u8],
-    format: &str,
-    language: Option<&str>,
-) -> Result<AsrResult> {
-    let request = endpoint
-        .authorize(
-            http_client()?
-                .post(endpoint.url("/api/v3/auc/bigmodel/recognize/flash"))
-                .timeout(Duration::from_secs(300)),
-            resource_id,
-            "X-Api-App-Key",
-        )
-        .header("X-Api-Sequence", "-1")
-        .json(&asr_body(&endpoint.uid(), audio, format, language));
-    let response = request.send().await.context("请求豆包语音识别接口失败")?;
-    let status = response.status();
-    let api_status = header_value(&response, "X-Api-Status-Code");
-    let api_message = header_value(&response, "X-Api-Message");
-    let body = response.text().await.context("读取语音识别响应失败")?;
-
-    if let Some(code) = api_status.as_deref() {
-        if code == SILENT_AUDIO_CODE {
-            return Ok(AsrResult {
-                text: String::new(),
-                duration: None,
-            });
-        }
-        if code != SUCCESS_CODE.to_string() {
-            let message = api_message
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| error_message(&body))
-                .unwrap_or_else(|| preview(&body));
-            bail!("豆包语音识别失败（{code}）：{message}");
-        }
-    } else if !status.is_success() {
-        bail!(
-            "豆包语音识别调用失败 ({status})：{}",
-            error_message(&body).unwrap_or_else(|| preview(&body))
-        );
+/// 音频分包大小：wav 按 16k/16bit/单声道的 200ms 计，压缩格式按 200ms 近似码率。
+fn chunk_size(format: AsrFormat) -> usize {
+    match format {
+        AsrFormat::Wav => 16_000 * 2 * ASR_CHUNK_MS / 1000,
+        // mp3/ogg 为压缩流，按约 128kbps 估算 200ms 分包。
+        AsrFormat::Mp3 | AsrFormat::Ogg => 128_000 / 8 * ASR_CHUNK_MS / 1000,
     }
-
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|_| anyhow!("解析豆包语音识别响应失败：{}", preview(&body)))?;
-    Ok(parse_asr_body(&value))
 }
 
-fn header_value(response: &reqwest::Response, name: &str) -> Option<String> {
-    response
-        .headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
+/// 调用流式语音识别（流式输入模式），整段音频分包发送后取最终结果。
+pub async fn recognize(
+    endpoint: &SpeechEndpoint,
+    model: &str,
+    audio: &[u8],
+    format: AsrFormat,
+    language: Option<&str>,
+) -> Result<AsrResult> {
+    tokio::time::timeout(
+        ASR_TIMEOUT,
+        recognize_inner(endpoint, model, audio, format, language),
+    )
+    .await
+    .map_err(|_| anyhow!("豆包语音识别超时"))?
+}
+
+async fn recognize_inner(
+    endpoint: &SpeechEndpoint,
+    model: &str,
+    audio: &[u8],
+    format: AsrFormat,
+    language: Option<&str>,
+) -> Result<AsrResult> {
+    let mut request = endpoint
+        .ws_url("/api/v3/plan/sauc/bigmodel_nostream")
+        .into_client_request()
+        .context("构造语音识别请求失败")?;
+    let headers = request.headers_mut();
+    let header = |value: &str| value.parse().map_err(|_| anyhow!("请求头包含非法字符"));
+    headers.insert("X-Api-Key", header(&endpoint.api_key)?);
+    headers.insert("X-Api-Resource-Id", header(asr_resource_id(model))?);
+    headers.insert("X-Api-Connect-Id", header(&request_id())?);
+    headers.insert("X-Api-Request-Id", header(&request_id())?);
+    headers.insert("X-Api-Sequence", header("-1")?);
+
+    let (mut socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::ark::rustls_config()?,
+        )),
+    )
+    .await
+    .map_err(|error| anyhow!("连接豆包语音识别服务失败：{error}"))?;
+
+    let params = serde_json::to_vec(&asr_request_json(format, language)).context("序列化失败")?;
+    socket
+        .send(Message::binary(encode_client_frame(
+            MSG_FULL_CLIENT_REQUEST,
+            FLAG_NONE,
+            SERIALIZATION_JSON,
+            &params,
+        )?))
+        .await
+        .context("发送识别参数失败")?;
+
+    // 读端与写端并行：服务端每收到一包就回一包结果，不读会阻塞发送。
+    let (mut sink, mut stream) = socket.split();
+    let chunks: Vec<Vec<u8>> = if audio.is_empty() {
+        vec![Vec::new()]
+    } else {
+        audio
+            .chunks(chunk_size(format))
+            .map(<[u8]>::to_vec)
+            .collect()
+    };
+    let writer = async move {
+        let total = chunks.len();
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let flags = if index + 1 == total {
+                FLAG_LAST_PACKET
+            } else {
+                FLAG_NONE
+            };
+            let frame =
+                encode_client_frame(MSG_AUDIO_ONLY_REQUEST, flags, SERIALIZATION_NONE, &chunk)?;
+            sink.send(Message::binary(frame))
+                .await
+                .context("发送音频分包失败")?;
+        }
+        anyhow::Ok(sink)
+    };
+    let reader = async {
+        let mut latest = Value::Null;
+        while let Some(message) = stream.next().await {
+            let message = message.map_err(|error| anyhow!("读取识别结果失败：{error}"))?;
+            let data = match message {
+                Message::Binary(data) => data,
+                Message::Close(frame) => {
+                    let reason = frame
+                        .map(|frame| frame.reason.to_string())
+                        .unwrap_or_default();
+                    if latest.is_null() {
+                        bail!("豆包语音识别连接被关闭：{reason}");
+                    }
+                    break;
+                }
+                _ => continue,
+            };
+            match decode_server_frame(&data)? {
+                ServerFrame::Response { last, payload } => {
+                    if !payload.is_null() {
+                        latest = payload;
+                    }
+                    if last {
+                        break;
+                    }
+                }
+                ServerFrame::Error { code, message } => {
+                    bail!("豆包语音识别失败（{code}）：{message}")
+                }
+            }
+        }
+        Ok(latest)
+    };
+    let (sink, latest) = tokio::try_join!(writer, reader)?;
+    let mut socket = sink
+        .reunite(stream)
+        .map_err(|_| anyhow!("识别连接状态异常"))?;
+    let _ = socket.close(None).await;
+    Ok(parse_asr_body(&latest))
 }
 
 /// 从错误响应体提取信息（兼容 `{message}`、`{header:{message}}` 等形态）。
@@ -321,10 +573,10 @@ fn error_message(body: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 常用音色预设（豆包语音合成模型 2.0，`seed-tts-2.0` 资源）。
+/// 常用音色预设（豆包语音合成模型 2.0）。
 ///
-/// 豆包语音没有面向 API Key 的音色列表接口（音色列表属控制台 OpenAPI，需 AK/SK 签名），
-/// 这里提供静态预设供前端选择；其他音色可在设置页直接填写音色 ID。
+/// 豆包语音没有面向 API Key 的音色列表接口，这里提供静态预设供前端选择；
+/// 其他音色可在设置页直接填写音色 ID。
 pub const VOICE_PRESETS: &[(&str, &str, &str)] = &[
     ("zh_female_vv_uranus_bigtts", "Vivi（通用女声）", "female"),
     (
@@ -377,9 +629,20 @@ mod tests {
     }
 
     #[test]
+    fn model_maps_to_plan_resource_id() {
+        assert_eq!(tts_resource_id("doubao-seed-tts-2.0"), "seed-tts-2.0");
+        assert_eq!(tts_resource_id(" seed-icl-2.0 "), "seed-icl-2.0");
+        assert_eq!(
+            asr_resource_id("doubao-seed-asr-2.0"),
+            "volc.seedasr.sauc.duration"
+        );
+        assert_eq!(asr_resource_id("custom"), "custom");
+    }
+
+    #[test]
     fn tts_body_carries_speaker_and_optional_rate() {
         let options = TtsOptions {
-            resource_id: "seed-tts-2.0",
+            model: "doubao-seed-tts-2.0",
             speaker: "zh_female_vv_uranus_bigtts",
             speed: Some(1.5),
         };
@@ -433,134 +696,164 @@ mod tests {
     }
 
     #[test]
-    fn asr_format_and_body() {
-        assert_eq!(asr_format("/a/b.WAV").unwrap(), "wav");
-        assert_eq!(asr_format("/a/b.mp3").unwrap(), "mp3");
-        assert_eq!(asr_format("/a/b.ogg").unwrap(), "ogg");
+    fn asr_format_and_request_json() {
+        assert_eq!(asr_format("/a/b.WAV").unwrap(), AsrFormat::Wav);
+        assert_eq!(asr_format("/a/b.mp3").unwrap(), AsrFormat::Mp3);
+        assert_eq!(asr_format("/a/b.ogg").unwrap(), AsrFormat::Ogg);
         assert!(asr_format("/a/b.m4a").is_err());
 
-        let body = asr_body("u", b"ABC", "wav", Some(" zh-CN "));
-        assert_eq!(body["audio"]["data"], "QUJD");
-        assert_eq!(body["audio"]["format"], "wav");
+        let body = asr_request_json(AsrFormat::Ogg, Some(" zh-CN "));
+        assert_eq!(body["audio"]["format"], "ogg");
+        assert_eq!(body["audio"]["codec"], "opus");
+        assert_eq!(body["audio"]["rate"], 16000);
         assert_eq!(body["audio"]["language"], "zh-CN");
         assert_eq!(body["request"]["model_name"], "bigmodel");
         assert!(
-            asr_body("u", b"", "mp3", None)["audio"]
+            asr_request_json(AsrFormat::Mp3, None)["audio"]
                 .get("language")
                 .is_none()
         );
     }
 
+    /// 构造服务端响应帧（带 sequence）。
+    fn server_frame(sequence: i32, last: bool, payload: &Value) -> Vec<u8> {
+        let compressed = gzip(&serde_json::to_vec(payload).unwrap()).unwrap();
+        let flags = if last { 0b0011 } else { 0b0001 };
+        let mut frame = vec![
+            PROTOCOL_VERSION_HEADER,
+            (MSG_FULL_SERVER_RESPONSE << 4) | flags,
+            (SERIALIZATION_JSON << 4) | COMPRESSION_GZIP,
+            0,
+        ];
+        frame.extend_from_slice(&sequence.to_be_bytes());
+        frame.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&compressed);
+        frame
+    }
+
+    fn error_frame(code: u32, message: &str) -> Vec<u8> {
+        let mut frame = vec![
+            PROTOCOL_VERSION_HEADER,
+            MSG_SERVER_ERROR << 4,
+            SERIALIZATION_JSON << 4,
+            0,
+        ];
+        frame.extend_from_slice(&code.to_be_bytes());
+        frame.extend_from_slice(&(message.len() as u32).to_be_bytes());
+        frame.extend_from_slice(message.as_bytes());
+        frame
+    }
+
     #[test]
-    fn parse_asr_body_reads_text_and_duration() {
-        let value = json!({
+    fn client_frame_layout_and_server_frame_decoding() {
+        let frame = encode_client_frame(
+            MSG_AUDIO_ONLY_REQUEST,
+            FLAG_LAST_PACKET,
+            SERIALIZATION_NONE,
+            b"PCM",
+        )
+        .unwrap();
+        assert_eq!(&frame[..4], &[0x11, 0x22, 0x01, 0x00]);
+        let size = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]) as usize;
+        assert_eq!(size, frame.len() - 8);
+        assert_eq!(gunzip(&frame[8..]).unwrap(), b"PCM");
+
+        let payload = json!({ "result": { "text": "你好" } });
+        assert_eq!(
+            decode_server_frame(&server_frame(1, false, &payload)).unwrap(),
+            ServerFrame::Response {
+                last: false,
+                payload: payload.clone()
+            }
+        );
+        assert_eq!(
+            decode_server_frame(&server_frame(-3, true, &payload)).unwrap(),
+            ServerFrame::Response {
+                last: true,
+                payload
+            }
+        );
+        assert_eq!(
+            decode_server_frame(&error_frame(45000001, "{\"error\":\"invalid audio\"}")).unwrap(),
+            ServerFrame::Error {
+                code: 45000001,
+                message: "invalid audio".to_string()
+            }
+        );
+        assert!(decode_server_frame(&[0x11]).is_err());
+    }
+
+    #[test]
+    fn parse_asr_body_reads_object_or_list_result() {
+        let object = json!({
             "audio_info": { "duration": 2499 },
             "result": { "text": " 关闭透传。 ", "utterances": [] }
         });
         assert_eq!(
-            parse_asr_body(&value),
+            parse_asr_body(&object),
             AsrResult {
                 text: "关闭透传。".to_string(),
                 duration: Some(2.499)
             }
         );
+        let list = json!({ "result": [{ "text": "你好" }] });
+        assert_eq!(parse_asr_body(&list).text, "你好");
         assert_eq!(parse_asr_body(&json!({})).text, "");
     }
 
-    /// 本地 HTTP 桩：验证路径、鉴权头与响应解析。
-    async fn stub(
-        responses: Vec<(&'static str, String)>,
-    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    /// 本地 HTTP 桩：验证合成路径、鉴权头与响应解析。
+    async fn http_stub(raw_response: String) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
-            let mut seen = Vec::new();
-            for (expected_path, raw_response) in responses {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buffer = vec![0u8; 64 * 1024];
-                // 读到请求头结束且 body 长度满足 content-length 为止。
-                loop {
-                    let read = socket.read(&mut buffer).await.unwrap();
-                    if read == 0 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(split) = text.find("\r\n\r\n") {
+                    let length = text[..split]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= split + 4 + length {
                         break;
                     }
-                    request.extend_from_slice(&buffer[..read]);
-                    let text = String::from_utf8_lossy(&request).to_string();
-                    if let Some(split) = text.find("\r\n\r\n") {
-                        let length = text[..split]
-                            .lines()
-                            .find_map(|line| {
-                                line.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|value| value.trim().parse::<usize>().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        if request.len() >= split + 4 + length {
-                            break;
-                        }
-                    }
                 }
-                let request = String::from_utf8_lossy(&request).to_string();
-                assert!(
-                    request
-                        .lines()
-                        .next()
-                        .unwrap_or_default()
-                        .contains(expected_path),
-                    "请求路径不符：{request}"
-                );
-                seen.push(request);
-                socket.write_all(raw_response.as_bytes()).await.unwrap();
             }
-            seen
+            socket.write_all(raw_response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
         });
-        (format!("http://{address}/"), handle)
-    }
-
-    fn http_response(headers: &str, body: &str) -> String {
-        format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        )
+        (format!("http://{address}"), handle)
     }
 
     #[tokio::test]
-    async fn synthesize_and_recognize_round_trip_against_stub() {
-        let tts_body = "{\"code\":0,\"data\":\"QUJD\"}\n{\"code\":20000000,\"message\":\"ok\"}\n";
-        let asr_ok = r#"{"audio_info":{"duration":1500},"result":{"text":"你好"}}"#;
-        let (base_url, server) = stub(vec![
-            (
-                "POST /api/v3/tts/unidirectional",
-                http_response("", tts_body),
-            ),
-            (
-                "POST /api/v3/auc/bigmodel/recognize/flash",
-                http_response(
-                    "x-api-status-code: 20000000\r\nx-api-message: OK\r\n",
-                    asr_ok,
-                ),
-            ),
-            (
-                "POST /api/v3/auc/bigmodel/recognize/flash",
-                http_response(
-                    "x-api-status-code: 45000151\r\nx-api-message: invalid audio format\r\n",
-                    "{}",
-                ),
-            ),
-        ])
+    async fn synthesize_uses_plan_path_and_api_key() {
+        let body = "{\"code\":0,\"data\":\"QUJD\"}\n{\"code\":20000000,\"message\":\"ok\"}\n";
+        let (base_url, server) = http_stub(format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ))
         .await;
-
-        let api_key = SpeechEndpoint {
-            base_url: base_url.clone(),
-            auth: SpeechAuth::ApiKey("speech-key".to_string()),
+        let endpoint = SpeechEndpoint {
+            base_url,
+            api_key: "plan-key".to_string(),
         };
         let audio = synthesize(
-            &api_key,
+            &endpoint,
             "你好",
             &TtsOptions {
-                resource_id: "seed-tts-2.0",
+                model: "doubao-seed-tts-2.0",
                 speaker: "zh_female_vv_uranus_bigtts",
                 speed: None,
             },
@@ -568,39 +861,149 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audio.audio, b"ABC".to_vec());
-        assert_eq!(audio.extension, "mp3");
+        let request = server.await.unwrap();
+        assert!(request.starts_with("post /api/v3/plan/tts/unidirectional "));
+        assert!(request.contains("x-api-key: plan-key"));
+        assert!(request.contains("x-api-resource-id: seed-tts-2.0"));
+        assert!(request.contains("x-api-request-id:"));
+    }
 
-        let legacy = SpeechEndpoint {
+    /// 本地 WebSocket 桩：校验握手头与帧序列，按协议回包。
+    async fn ws_stub(
+        fail_with: Option<(u32, &'static str)>,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<(Vec<(String, String)>, usize, Value)>,
+    ) {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut seen_headers = Vec::new();
+            let mut path = String::new();
+            #[allow(clippy::result_large_err)] // 签名由 tungstenite 的 Callback 约定决定
+            let callback = |request: &Request, response: Response| {
+                path = request.uri().path().to_string();
+                for name in ["x-api-key", "x-api-resource-id", "x-api-sequence"] {
+                    let value = request
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    seen_headers.push((name.to_string(), value));
+                }
+                Ok(response)
+            };
+            let mut socket = tokio_tungstenite::accept_hdr_async(tcp, callback)
+                .await
+                .unwrap();
+            seen_headers.push(("path".to_string(), path));
+
+            // 第一帧：参数。
+            let first = match socket.next().await.unwrap().unwrap() {
+                Message::Binary(data) => data,
+                other => panic!("unexpected {other:?}"),
+            };
+            assert_eq!(first[1] >> 4, MSG_FULL_CLIENT_REQUEST);
+            let params: Value = serde_json::from_slice(&gunzip(&first[8..]).unwrap()).unwrap();
+            socket
+                .send(Message::binary(server_frame(1, false, &json!({}))))
+                .await
+                .unwrap();
+            if let Some((code, message)) = fail_with {
+                socket
+                    .send(Message::binary(error_frame(code, message)))
+                    .await
+                    .unwrap();
+                return (seen_headers, 0, params);
+            }
+
+            let mut audio_packets = 0;
+            let mut sequence = 1;
+            loop {
+                let frame = match socket.next().await.unwrap().unwrap() {
+                    Message::Binary(data) => data,
+                    _ => continue,
+                };
+                assert_eq!(frame[1] >> 4, MSG_AUDIO_ONLY_REQUEST);
+                audio_packets += 1;
+                sequence += 1;
+                let last = frame[1] & 0x0f == FLAG_LAST_PACKET;
+                let payload = if last {
+                    json!({ "audio_info": { "duration": 1500 }, "result": { "text": "你好世界" } })
+                } else {
+                    json!({ "result": { "text": "你好" } })
+                };
+                let seq = if last { -sequence } else { sequence };
+                socket
+                    .send(Message::binary(server_frame(seq, last, &payload)))
+                    .await
+                    .unwrap();
+                if last {
+                    break;
+                }
+            }
+            (seen_headers, audio_packets, params)
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[tokio::test]
+    async fn recognize_streams_chunks_and_returns_final_text() {
+        let (base_url, server) = ws_stub(None).await;
+        let endpoint = SpeechEndpoint {
             base_url,
-            auth: SpeechAuth::AppToken {
-                app_id: "app-1".to_string(),
-                token: "tok".to_string(),
-            },
+            api_key: "plan-key".to_string(),
         };
-        let result = recognize(&legacy, "volc.bigasr.auc_turbo", b"RIFF", "wav", None)
-            .await
-            .unwrap();
-        assert_eq!(result.text, "你好");
+        // 3 个 wav 分包（200ms = 6400 字节）。
+        let audio = vec![0u8; 6400 * 2 + 10];
+        let result = recognize(
+            &endpoint,
+            "doubao-seed-asr-2.0",
+            &audio,
+            AsrFormat::Wav,
+            Some("zh-CN"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "你好世界");
         assert_eq!(result.duration, Some(1.5));
 
-        let error = recognize(&api_key, "volc.bigasr.auc_turbo", b"x", "mp3", None)
+        let (headers, packets, params) = server.await.unwrap();
+        assert_eq!(packets, 3);
+        assert_eq!(params["audio"]["format"], "wav");
+        assert_eq!(params["audio"]["language"], "zh-CN");
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(get("path"), "/api/v3/plan/sauc/bigmodel_nostream");
+        assert_eq!(get("x-api-key"), "plan-key");
+        assert_eq!(get("x-api-resource-id"), "volc.seedasr.sauc.duration");
+        assert_eq!(get("x-api-sequence"), "-1");
+    }
+
+    #[tokio::test]
+    async fn recognize_surfaces_server_error_frame() {
+        let (base_url, server) =
+            ws_stub(Some((45000151, "{\"error\":\"invalid audio format\"}"))).await;
+        let endpoint = SpeechEndpoint {
+            base_url,
+            api_key: "k".to_string(),
+        };
+        let error = recognize(&endpoint, "doubao-seed-asr-2.0", b"x", AsrFormat::Mp3, None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("45000151") && error.contains("invalid audio format"));
-
-        let requests: Vec<String> = server
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|request| request.to_ascii_lowercase())
-            .collect();
-        assert!(requests[0].contains("x-api-key: speech-key"));
-        assert!(requests[0].contains("x-api-resource-id: seed-tts-2.0"));
-        assert!(requests[0].contains("x-api-request-id:"));
-        assert!(requests[1].contains("x-api-app-key: app-1"));
-        assert!(requests[1].contains("x-api-access-key: tok"));
-        assert!(requests[1].contains("x-api-sequence: -1"));
-        assert!(requests[1].contains("\"data\":\"uklgrg==\""));
+        assert!(
+            error.contains("45000151") && error.contains("invalid audio format"),
+            "{error}"
+        );
+        server.await.unwrap();
     }
 }

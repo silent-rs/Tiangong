@@ -14,6 +14,7 @@
   --border: hsl(var(--host-border, 214 18% 88%));
   --primary: hsl(var(--host-primary, 222 47% 11%));
   --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+  --accent: hsl(var(--host-accent, 210 40% 96%));
 }
 :root[data-theme="dark"] { color-scheme: dark; }
 
@@ -40,6 +41,7 @@ body {
 
 .header h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
 .header .desc { margin: 0; color: var(--muted); font-size: 13px; }
+.header a, .hint a { color: inherit; }
 
 .card {
   border: 1px solid var(--border);
@@ -49,6 +51,10 @@ body {
 .card-head {
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 .card-title { margin: 0; font-size: 14px; font-weight: 600; }
 .card-desc { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
@@ -67,6 +73,7 @@ body {
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .label { font-size: 13px; font-weight: 500; }
 .hint { color: var(--muted); font-size: 12px; }
+.hint.error { color: hsl(0 84% 60%); }
 
 .input {
   width: 100%;
@@ -79,6 +86,7 @@ body {
   font: inherit;
 }
 .input:focus { outline: none; border-color: var(--primary); }
+select.input { padding-right: 28px; }
 
 .check {
   display: flex;
@@ -90,21 +98,14 @@ body {
 }
 .check input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
 
-details.legacy { border-top: 1px dashed var(--border); padding-top: 12px; }
-details.legacy summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 13px;
-  user-select: none;
-}
-details.legacy[open] summary { margin-bottom: 12px; }
-.legacy-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 16px;
-}
-@media (max-width: 640px) {
-  .legacy-grid { grid-template-columns: minmax(0, 1fr); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--accent);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .actions {
@@ -124,7 +125,7 @@ details.legacy[open] summary { margin-bottom: 12px; }
 
 .btn {
   height: 34px;
-  padding: 0 20px;
+  padding: 0 16px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
@@ -132,51 +133,96 @@ details.legacy[open] summary { margin-bottom: 12px; }
   cursor: pointer;
   font: inherit;
   font-weight: 500;
+  white-space: nowrap;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); padding: 0 20px; }
   </style>
 </head>
 <body>
   <main class="page">
     <div class="header">
-      <h2>火山引擎</h2>
-      <p class="desc">火山方舟（Ark）提供图片生成（Seedream）与视频生成（Seedance），豆包语音提供语音合成与语音识别。连接与模型在此单独配置，不使用全局模型配置。</p>
+      <h2>火山引擎 · Agent Plan</h2>
+      <p class="desc">使用火山方舟 Agent Plan 订阅套餐的专属 API Key 提供图片生成、视频生成、语音合成与语音识别。可用模型通过 Access Key 查询套餐模型列表获取。</p>
     </div>
 
     <section class="card">
       <div class="card-head">
-        <h3 class="card-title">火山方舟</h3>
-        <p class="card-desc">图片与视频生成。模型留空则不提供对应工具。</p>
+        <div>
+          <h3 class="card-title">凭据</h3>
+          <p class="card-desc">API Key 用于调用模型；Access Key 仅用于查询套餐支持的模型列表。均支持 ${ENV_VAR} 引用环境变量。</p>
+        </div>
+      </div>
+      <div class="card-body">
+        <label class="field span-2">
+          <span class="label">Agent Plan API Key</span>
+          <input id="api-key" class="input" type="password" placeholder="Agent Plan 专属 API Key（其他方舟 Key 不可用）" autocomplete="off" />
+          <span class="hint">在方舟控制台「开通管理 → Agent Plan」中获取。</span>
+        </label>
+        <label class="field">
+          <span class="label">Access Key ID</span>
+          <input id="access-key-id" class="input" type="text" placeholder="AKLT..." autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="label">Secret Access Key</span>
+          <input id="secret-access-key" class="input" type="password" placeholder="用于签名查询模型列表" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="label">套餐版本</span>
+          <select id="edition" class="input">
+            <option value="personal">个人版</option>
+            <option value="enterprise">企业版</option>
+          </select>
+        </label>
+        <div class="field">
+          <span class="label">Access Key 获取</span>
+          <span class="hint" style="line-height:36px">火山引擎控制台「访问控制 → 密钥管理」，建议使用仅授予方舟只读权限的 IAM 用户密钥。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h3 class="card-title">模型</h3>
+          <p id="models-meta" class="card-desc">尚未获取模型列表。</p>
+        </div>
+        <button id="refresh-btn" class="btn" type="button">刷新模型列表</button>
       </div>
       <div class="card-body">
         <label class="field">
-          <span class="label">API Key</span>
-          <input id="api-key" class="input" type="password" placeholder="火山方舟 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
+          <span class="label">图片生成</span>
+          <select id="image-model" class="input" data-kind="image"></select>
         </label>
         <label class="field">
-          <span class="label">Base URL</span>
-          <input id="base-url" class="input" type="text" placeholder="https://ark.cn-beijing.volces.com/api/v3" autocomplete="off" />
-          <span class="hint">留空使用默认地址（华北 2 北京）。</span>
+          <span class="label">视频生成</span>
+          <select id="video-model" class="input" data-kind="video"></select>
+          <span class="hint">Small / Medium 套餐不含视频生成。</span>
         </label>
         <label class="field">
-          <span class="label">图片生成模型</span>
-          <input id="image-model" class="input" type="text" list="image-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
-          <datalist id="image-model-list">
-            <option value="doubao-seedream-5-0-pro-260628"></option>
-            <option value="doubao-seedream-4-5-251128"></option>
-            <option value="doubao-seedream-4-0-250828"></option>
-          </datalist>
+          <span class="label">语音合成</span>
+          <select id="tts-model" class="input" data-kind="tts"></select>
         </label>
         <label class="field">
-          <span class="label">视频生成模型</span>
-          <input id="video-model" class="input" type="text" list="video-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
-          <datalist id="video-model-list">
-            <option value="doubao-seedance-2-5-260628"></option>
-            <option value="doubao-seedance-2-0-260128"></option>
-            <option value="doubao-seedance-1-0-pro-250528"></option>
-          </datalist>
+          <span class="label">语音识别</span>
+          <select id="asr-model" class="input" data-kind="asr"></select>
+          <span class="hint">流式识别，支持 wav / mp3 / ogg（16k 采样率）。</span>
         </label>
+        <div id="text-models-field" class="field span-2" hidden>
+          <span class="label">文本模型（在「模型配置」中使用）</span>
+          <div id="text-models" class="chips"></div>
+          <span class="hint">Base URL：<code>https://ark.cn-beijing.volces.com/api/plan</code>（Anthropic 兼容），API Key 同上。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h3 class="card-title">生成与语音选项</h3>
+        </div>
+      </div>
+      <div class="card-body">
         <label class="field">
           <span class="label">视频等待上限（秒）</span>
           <input id="video-timeout" class="input" type="number" min="30" step="10" placeholder="300" />
@@ -189,58 +235,12 @@ details.legacy[open] summary { margin-bottom: 12px; }
             <span>生成结果添加 AI 生成水印</span>
           </label>
         </div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <h3 class="card-title">豆包语音</h3>
-        <p class="card-desc">语音合成与录音文件识别。鉴权独立于火山方舟，API Key 在豆包语音控制台「API Key 管理」中获取。</p>
-      </div>
-      <div class="card-body">
-        <label class="field">
-          <span class="label">API Key</span>
-          <input id="speech-api-key" class="input" type="password" placeholder="豆包语音 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
-        </label>
-        <label class="field">
-          <span class="label">Base URL</span>
-          <input id="speech-base-url" class="input" type="text" placeholder="https://openspeech.bytedance.com" autocomplete="off" />
-          <span class="hint">留空使用默认地址。</span>
-        </label>
-        <label class="field">
-          <span class="label">语音合成资源 ID</span>
-          <input id="tts-resource-id" class="input" type="text" list="tts-resource-list" placeholder="seed-tts-2.0" autocomplete="off" />
-          <datalist id="tts-resource-list">
-            <option value="seed-tts-2.0"></option>
-            <option value="seed-tts-1.0"></option>
-            <option value="seed-icl-2.0"></option>
-            <option value="seed-icl-1.0"></option>
-          </datalist>
-          <span class="hint">音色需与资源版本对应（*_uranus_bigtts 为 2.0 音色）。</span>
-        </label>
         <label class="field">
           <span class="label">默认音色</span>
           <input id="tts-speaker" class="input" type="text" list="tts-speaker-list" placeholder="zh_female_vv_uranus_bigtts" autocomplete="off" />
           <datalist id="tts-speaker-list"></datalist>
+          <span class="hint">音色需与语音合成模型版本对应（*_uranus_bigtts 为 2.0 音色）。</span>
         </label>
-        <label class="field">
-          <span class="label">语音识别资源 ID</span>
-          <input id="asr-resource-id" class="input" type="text" placeholder="volc.bigasr.auc_turbo" autocomplete="off" />
-          <span class="hint">录音文件识别极速版，支持 wav / mp3 / ogg。</span>
-        </label>
-        <details class="legacy span-2">
-          <summary>旧版控制台鉴权（App ID + Access Token，填写 API Key 后无需填写）</summary>
-          <div class="legacy-grid">
-            <label class="field">
-              <span class="label">App ID</span>
-              <input id="speech-app-id" class="input" type="text" autocomplete="off" />
-            </label>
-            <label class="field">
-              <span class="label">Access Token</span>
-              <input id="speech-access-token" class="input" type="password" autocomplete="off" />
-            </label>
-          </div>
-        </details>
       </div>
     </section>
 
@@ -250,17 +250,11 @@ details.legacy[open] summary { margin-bottom: 12px; }
     </div>
   </main>
   <script>
-// 火山引擎设置页脚本（与其他插件设置页同构的 postMessage 桥接框架）。
+// 火山引擎（Agent Plan）设置页脚本（postMessage 桥接到插件 WASM → sidecar）。
 
 const HOST_TIMEOUT_MS = 60000;
-const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const DEFAULT_VIDEO_TIMEOUT = 300;
-const DEFAULT_SPEECH = {
-  base_url: "https://openspeech.bytedance.com",
-  tts_resource_id: "seed-tts-2.0",
-  tts_speaker: "zh_female_vv_uranus_bigtts",
-  asr_resource_id: "volc.bigasr.auc_turbo",
-};
+const DEFAULT_TTS_SPEAKER = "zh_female_vv_uranus_bigtts";
 let hostChannel = null;
 let hostReadyResolve = null;
 const hostReady = new Promise((resolve) => { hostReadyResolve = resolve; });
@@ -312,52 +306,154 @@ async function callHost(method, payload = "") {
 
 // ── DOM ──
 
-const apiKey = document.getElementById("api-key");
-const baseUrl = document.getElementById("base-url");
-const imageModel = document.getElementById("image-model");
-const videoModel = document.getElementById("video-model");
-const videoTimeout = document.getElementById("video-timeout");
-const watermark = document.getElementById("watermark");
-const speechApiKey = document.getElementById("speech-api-key");
-const speechAppId = document.getElementById("speech-app-id");
-const speechAccessToken = document.getElementById("speech-access-token");
-const ttsResourceId = document.getElementById("tts-resource-id");
-const ttsSpeaker = document.getElementById("tts-speaker");
-const ttsSpeakerList = document.getElementById("tts-speaker-list");
-const asrResourceId = document.getElementById("asr-resource-id");
-const speechBaseUrl = document.getElementById("speech-base-url");
-const saveBtn = document.getElementById("save-btn");
-const statusEl = document.getElementById("status");
+const $ = (id) => document.getElementById(id);
+const apiKey = $("api-key");
+const accessKeyId = $("access-key-id");
+const secretAccessKey = $("secret-access-key");
+const edition = $("edition");
+const videoTimeout = $("video-timeout");
+const watermark = $("watermark");
+const ttsSpeaker = $("tts-speaker");
+const ttsSpeakerList = $("tts-speaker-list");
+const modelSelects = {
+  image: $("image-model"),
+  video: $("video-model"),
+  tts: $("tts-model"),
+  asr: $("asr-model"),
+};
+const modelsMeta = $("models-meta");
+const textModelsField = $("text-models-field");
+const textModels = $("text-models");
+const refreshBtn = $("refresh-btn");
+const saveBtn = $("save-btn");
+const statusEl = $("status");
 
 function setStatus(message, type) {
   statusEl.textContent = message;
   statusEl.className = `status${type ? ` ${type}` : ""}`;
 }
 
+function errorText(error) {
+  return (error && error.message) || String(error);
+}
+
+// ── 模型下拉 ──
+
+/** 用模型列表填充下拉；已保存但不在列表中的模型保留并标注，避免被静默清空。 */
+function fillSelect(select, models, selected) {
+  const options = [];
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = models.length ? "不使用" : "（无可用模型，请先刷新模型列表）";
+  options.push(empty);
+  models.forEach((id) => {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id;
+    options.push(option);
+  });
+  if (selected && !models.includes(selected)) {
+    const option = document.createElement("option");
+    option.value = selected;
+    option.textContent = `${selected}（不在当前套餐列表中）`;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  select.value = selected || "";
+}
+
+function currentSelection() {
+  return Object.fromEntries(Object.entries(modelSelects).map(([kind, select]) => [kind, select.value]));
+}
+
+function renderModels(models, selection) {
+  const list = models || {};
+  Object.entries(modelSelects).forEach(([kind, select]) => {
+    const available = Array.isArray(list[kind]) ? list[kind] : [];
+    let selected = selection[kind];
+    // 未选择时默认选中该类第一个模型（仅在有列表时）。
+    if (!selected && available.length && (kind === "tts" || kind === "asr")) selected = available[0];
+    fillSelect(select, available, selected);
+  });
+  const texts = Array.isArray(list.text) ? list.text : [];
+  textModels.replaceChildren(...texts.map((id) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = id;
+    return chip;
+  }));
+  textModelsField.hidden = texts.length === 0;
+  if (models && models.fetched_at) {
+    const editionName = models.edition === "enterprise" ? "企业版" : "个人版";
+    const total = ["image", "video", "tts", "asr", "text", "embedding"]
+      .reduce((sum, kind) => sum + (Array.isArray(list[kind]) ? list[kind].length : 0), 0);
+    modelsMeta.textContent = `${editionName} · 共 ${total} 个模型 · 获取于 ${models.fetched_at}`;
+    modelsMeta.classList.remove("error");
+  }
+}
+
+async function loadModels(refresh) {
+  const payload = { refresh };
+  if (refresh) {
+    payload.access_key_id = accessKeyId.value.trim();
+    payload.secret_access_key = secretAccessKey.value.trim();
+    payload.edition = edition.value;
+  }
+  const raw = await callHost("list_models", JSON.stringify(payload));
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function refreshModels() {
+  if (!accessKeyId.value.trim() || !secretAccessKey.value.trim()) {
+    setStatus("请先填写 Access Key ID 与 Secret Access Key", "error");
+    return;
+  }
+  const selection = currentSelection();
+  refreshBtn.disabled = true;
+  setStatus("正在获取模型列表...", "");
+  try {
+    renderModels(await loadModels(true), selection);
+    setStatus("模型列表已更新，确认选择后请保存", "success");
+  } catch (error) {
+    setStatus(`获取模型列表失败：${errorText(error)}`, "error");
+  } finally {
+    refreshBtn.disabled = false;
+  }
+}
+
 // ── 加载 ──
 
 async function loadConfig() {
+  let config = {};
   try {
     const raw = await callHost("bootstrap", "{}");
-    const config = raw ? JSON.parse(raw) : {};
-    apiKey.value = config.api_key || "";
-    baseUrl.value = config.base_url && config.base_url !== DEFAULT_BASE_URL ? config.base_url : "";
-    imageModel.value = config.image_model || "";
-    videoModel.value = config.video_model || "";
-    videoTimeout.value = String(config.video_poll_timeout_secs || DEFAULT_VIDEO_TIMEOUT);
-    watermark.checked = Boolean(config.watermark);
-    const speech = config.speech || {};
-    speechApiKey.value = speech.api_key || "";
-    speechAppId.value = speech.app_id || "";
-    speechAccessToken.value = speech.access_token || "";
-    if (speechAppId.value || speechAccessToken.value) document.querySelector("details.legacy").open = true;
-    ttsResourceId.value = speech.tts_resource_id || DEFAULT_SPEECH.tts_resource_id;
-    ttsSpeaker.value = speech.tts_speaker || DEFAULT_SPEECH.tts_speaker;
-    asrResourceId.value = speech.asr_resource_id || DEFAULT_SPEECH.asr_resource_id;
-    speechBaseUrl.value = speech.base_url && speech.base_url !== DEFAULT_SPEECH.base_url ? speech.base_url : "";
+    config = raw ? JSON.parse(raw) : {};
   } catch (error) {
-    setStatus(`加载失败：${error.message || error}`, "error");
+    setStatus(`加载失败：${errorText(error)}`, "error");
   }
+  apiKey.value = config.api_key || "";
+  accessKeyId.value = config.access_key_id || "";
+  secretAccessKey.value = config.secret_access_key || "";
+  edition.value = config.edition === "enterprise" ? "enterprise" : "personal";
+  videoTimeout.value = String(config.video_poll_timeout_secs || DEFAULT_VIDEO_TIMEOUT);
+  watermark.checked = Boolean(config.watermark);
+  ttsSpeaker.value = config.tts_speaker || DEFAULT_TTS_SPEAKER;
+  const selection = {
+    image: config.image_model || "",
+    video: config.video_model || "",
+    tts: config.tts_model || "",
+    asr: config.asr_model || "",
+  };
+  let models = null;
+  try {
+    models = await loadModels(false);
+  } catch (error) {
+    // 无缓存且未配置 AK/SK 属正常初始状态，不作为错误提示。
+    if (accessKeyId.value && secretAccessKey.value) {
+      modelsMeta.textContent = `获取模型列表失败：${errorText(error)}`;
+    }
+  }
+  renderModels(models, selection);
 }
 
 async function loadVoices() {
@@ -378,52 +474,39 @@ async function loadVoices() {
 // ── 保存 ──
 
 async function saveConfig() {
+  if (!apiKey.value.trim()) {
+    setStatus("请填写 Agent Plan API Key", "error");
+    return;
+  }
   const timeoutValue = Number.parseInt(videoTimeout.value, 10);
-  const hasArk = Boolean(apiKey.value.trim());
-  const hasSpeech = Boolean(speechApiKey.value.trim())
-    || Boolean(speechAppId.value.trim() && speechAccessToken.value.trim());
-  if (!hasArk && !hasSpeech) {
-    setStatus("请填写火山方舟 API Key 或豆包语音凭据", "error");
-    return;
-  }
-  if (hasArk && !imageModel.value.trim() && !videoModel.value.trim()) {
-    setStatus("请至少填写一个图片或视频生成模型", "error");
-    return;
-  }
-  if (!speechApiKey.value.trim() && Boolean(speechAppId.value.trim()) !== Boolean(speechAccessToken.value.trim())) {
-    setStatus("旧版控制台需同时填写 App ID 与 Access Token", "error");
-    return;
-  }
+  const selection = currentSelection();
   saveBtn.disabled = true;
   setStatus("保存中...", "");
   try {
     const payload = {
       api_key: apiKey.value.trim(),
-      base_url: baseUrl.value.trim() || DEFAULT_BASE_URL,
-      image_model: imageModel.value.trim(),
-      video_model: videoModel.value.trim(),
+      access_key_id: accessKeyId.value.trim(),
+      secret_access_key: secretAccessKey.value.trim(),
+      edition: edition.value,
+      image_model: selection.image,
+      video_model: selection.video,
+      tts_model: selection.tts,
+      asr_model: selection.asr,
       watermark: watermark.checked,
       video_poll_timeout_secs: Number.isFinite(timeoutValue) ? Math.max(30, timeoutValue) : DEFAULT_VIDEO_TIMEOUT,
-      speech: {
-        base_url: speechBaseUrl.value.trim() || DEFAULT_SPEECH.base_url,
-        api_key: speechApiKey.value.trim(),
-        app_id: speechAppId.value.trim(),
-        access_token: speechAccessToken.value.trim(),
-        tts_resource_id: ttsResourceId.value.trim() || DEFAULT_SPEECH.tts_resource_id,
-        tts_speaker: ttsSpeaker.value.trim() || DEFAULT_SPEECH.tts_speaker,
-        asr_resource_id: asrResourceId.value.trim() || DEFAULT_SPEECH.asr_resource_id,
-      },
+      tts_speaker: ttsSpeaker.value.trim() || DEFAULT_TTS_SPEAKER,
     };
     await callHost("save_config", JSON.stringify(payload));
     setStatus("已保存", "success");
     setTimeout(() => setStatus("", ""), 3000);
   } catch (error) {
-    setStatus(`保存失败：${error.message || error}`, "error");
+    setStatus(`保存失败：${errorText(error)}`, "error");
   } finally {
     saveBtn.disabled = false;
   }
 }
 
+refreshBtn.addEventListener("click", refreshModels);
 saveBtn.addEventListener("click", saveConfig);
 loadConfig();
 loadVoices();

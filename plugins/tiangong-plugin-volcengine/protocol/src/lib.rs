@@ -1,10 +1,12 @@
 //! Volcengine（火山引擎）插件私有业务协议。
 //!
-//! 一个插件同时提供：
-//! - 火山方舟 Ark：图片生成（Seedream）与视频生成（Seedance）；
-//! - 豆包语音：语音合成（TTS，HTTP Chunked 单向流式 V3）与
-//!   语音识别（ASR，录音文件识别极速版），以及本机录音与播放。
+//! 当前仅对接火山方舟 **Agent Plan** 订阅套餐：同一个专属 API Key 覆盖
+//! - 图片生成（Seedream）与视频生成（Seedance），走 `/api/plan/v3`；
+//! - 语音合成（TTS，HTTP Chunked 单向流式）与语音识别（ASR，WebSocket 流式输入），
+//!   走豆包语音的 `/api/v3/plan/...` 路径；以及本机录音与播放。
 //!
+//! 可用模型由管控面 `ListArkAgentPlanModel` 获取（仅支持 Access Key 签名），
+//! 按图片 / 视频 / 语音合成 / 语音识别 / 文本 / 向量分类供设置页选择。
 //! 连接信息与模型由插件设置页独立配置，不依赖全局模型配置（models.json）。
 
 use serde::de::DeserializeOwned;
@@ -32,19 +34,26 @@ pub const TRANSCRIBE_OPERATION: &str = "transcribe";
 pub const RECORD_START_OPERATION: &str = "record_start";
 pub const RECORD_STOP_OPERATION: &str = "record_stop";
 pub const RECORD_CANCEL_OPERATION: &str = "record_cancel";
+pub const LIST_MODELS_OPERATION: &str = "list_models";
 
-/// 火山方舟默认地址（华北 2 北京）。
-pub const DEFAULT_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/v3";
+/// Agent Plan 数据面地址（图片 / 视频生成）。
+pub const PLAN_ARK_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan/v3";
+/// Agent Plan 文本模型地址（Anthropic 兼容），在天工「模型配置」中使用。
+pub const PLAN_TEXT_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan";
+/// 豆包语音地址（Agent Plan 路径为 `/api/v3/plan/...`）。
+pub const PLAN_SPEECH_BASE_URL: &str = "https://openspeech.bytedance.com";
+/// 方舟管控面地址（模型列表等 OpenAPI，Access Key 签名）。
+pub const ARK_OPENAPI_BASE_URL: &str = "https://ark.cn-beijing.volcengineapi.com";
 /// 视频任务默认轮询上限（秒）。
 pub const DEFAULT_VIDEO_POLL_TIMEOUT_SECS: u64 = 300;
-/// 豆包语音默认地址。
-pub const DEFAULT_SPEECH_BASE_URL: &str = "https://openspeech.bytedance.com";
-/// 语音合成默认资源 ID（豆包语音合成模型 2.0）。
-pub const DEFAULT_TTS_RESOURCE_ID: &str = "seed-tts-2.0";
+/// 默认套餐版本（个人版）。
+pub const DEFAULT_EDITION: &str = "personal";
+/// 默认语音合成模型（豆包语音合成模型 2.0）。
+pub const DEFAULT_TTS_MODEL: &str = "doubao-seed-tts-2.0";
+/// 默认语音识别模型（豆包流式语音识别模型 2.0）。
+pub const DEFAULT_ASR_MODEL: &str = "doubao-seed-asr-2.0";
 /// 语音合成默认音色（豆包 2.0 通用女声 Vivi）。
 pub const DEFAULT_TTS_SPEAKER: &str = "zh_female_vv_uranus_bigtts";
-/// 语音识别默认资源 ID（录音文件识别极速版）。
-pub const DEFAULT_ASR_RESOURCE_ID: &str = "volc.bigasr.auc_turbo";
 
 /// 一个类型化的业务操作。
 pub trait VolcengineOperation {
@@ -91,6 +100,7 @@ pub struct Transcribe;
 pub struct RecordStart;
 pub struct RecordStop;
 pub struct RecordCancel;
+pub struct ListModels;
 
 impl VolcengineOperation for Synthesize {
     const NAME: &'static str = SYNTHESIZE_OPERATION;
@@ -146,6 +156,12 @@ impl VolcengineOperation for RecordCancel {
     type Response = Empty;
 }
 
+impl VolcengineOperation for ListModels {
+    const NAME: &'static str = LIST_MODELS_OPERATION;
+    type Request = ListModelsRequest;
+    type Response = AgentPlanModels;
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Empty {}
 
@@ -153,18 +169,27 @@ pub struct Empty {}
 pub struct Ack {}
 
 /// 插件持久化配置（存于插件 data 目录下 `config.json`）。
+///
+/// 仅对接 Agent Plan：接口地址固定为 Agent Plan 专属地址，不再单独配置。
+/// 凭据字段均支持 `${ENV_VAR}` 形式的环境变量引用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolcengineConfig {
-    /// Ark API 地址，默认 [`DEFAULT_BASE_URL`]。
-    #[serde(default = "default_base_url")]
-    pub base_url: String,
-    /// API Key，支持 `${ENV_VAR}` 形式的环境变量引用。
+    /// Agent Plan 专属 API Key（图片 / 视频 / 语音共用）。
     #[serde(default)]
     pub api_key: String,
-    /// 图片生成模型 ID 或推理接入点（`ep-xxx`），留空则不提供生图。
+    /// Access Key ID（仅用于查询 Agent Plan 模型列表）。
+    #[serde(default)]
+    pub access_key_id: String,
+    /// Secret Access Key（仅用于查询 Agent Plan 模型列表）。
+    #[serde(default)]
+    pub secret_access_key: String,
+    /// 套餐版本：`personal`（个人版）/ `enterprise`（企业版）。
+    #[serde(default = "default_edition")]
+    pub edition: String,
+    /// 图片生成模型，留空则不提供生图。
     #[serde(default)]
     pub image_model: String,
-    /// 视频生成模型 ID 或推理接入点（`ep-xxx`），留空则不提供生视频。
+    /// 视频生成模型，留空则不提供生视频。
     #[serde(default)]
     pub video_model: String,
     /// 是否添加 AI 生成水印。
@@ -173,90 +198,100 @@ pub struct VolcengineConfig {
     /// 视频任务轮询上限（秒）。
     #[serde(default = "default_video_poll_timeout_secs")]
     pub video_poll_timeout_secs: u64,
-    /// 豆包语音配置（语音合成 / 语音识别）。
-    #[serde(default)]
-    pub speech: SpeechConfig,
-}
-
-/// 豆包语音配置。
-///
-/// 豆包语音与火山方舟是两套独立鉴权：这里的 API Key 取自豆包语音控制台
-/// 「API Key 管理」（新版控制台）；旧版控制台可改填 App ID + Access Token。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpeechConfig {
-    /// 豆包语音地址，默认 [`DEFAULT_SPEECH_BASE_URL`]。
-    #[serde(default = "default_speech_base_url")]
-    pub base_url: String,
-    /// 新版控制台 API Key（`X-Api-Key`），支持 `${ENV_VAR}`。
-    #[serde(default)]
-    pub api_key: String,
-    /// 旧版控制台 App ID（`X-Api-App-Id` / `X-Api-App-Key`），与 access_token 成对使用。
-    #[serde(default)]
-    pub app_id: String,
-    /// 旧版控制台 Access Token（`X-Api-Access-Key`），支持 `${ENV_VAR}`。
-    #[serde(default)]
-    pub access_token: String,
-    /// 语音合成资源 ID（如 `seed-tts-2.0` / `seed-tts-1.0`）。
-    #[serde(default = "default_tts_resource_id")]
-    pub tts_resource_id: String,
+    /// 语音合成模型（如 `doubao-seed-tts-2.0`）。
+    #[serde(default = "default_tts_model")]
+    pub tts_model: String,
     /// 默认音色（发音人 ID）。
     #[serde(default = "default_tts_speaker")]
     pub tts_speaker: String,
-    /// 语音识别资源 ID（默认录音文件识别极速版）。
-    #[serde(default = "default_asr_resource_id")]
-    pub asr_resource_id: String,
+    /// 语音识别模型（如 `doubao-seed-asr-2.0`）。
+    #[serde(default = "default_asr_model")]
+    pub asr_model: String,
 }
 
-fn default_speech_base_url() -> String {
-    DEFAULT_SPEECH_BASE_URL.to_string()
-}
-
-fn default_tts_resource_id() -> String {
-    DEFAULT_TTS_RESOURCE_ID.to_string()
-}
-
-fn default_tts_speaker() -> String {
-    DEFAULT_TTS_SPEAKER.to_string()
-}
-
-fn default_asr_resource_id() -> String {
-    DEFAULT_ASR_RESOURCE_ID.to_string()
-}
-
-impl Default for SpeechConfig {
-    fn default() -> Self {
-        Self {
-            base_url: default_speech_base_url(),
-            api_key: String::new(),
-            app_id: String::new(),
-            access_token: String::new(),
-            tts_resource_id: default_tts_resource_id(),
-            tts_speaker: default_tts_speaker(),
-            asr_resource_id: default_asr_resource_id(),
-        }
-    }
-}
-
-fn default_base_url() -> String {
-    DEFAULT_BASE_URL.to_string()
+fn default_edition() -> String {
+    DEFAULT_EDITION.to_string()
 }
 
 fn default_video_poll_timeout_secs() -> u64 {
     DEFAULT_VIDEO_POLL_TIMEOUT_SECS
 }
 
+fn default_tts_model() -> String {
+    DEFAULT_TTS_MODEL.to_string()
+}
+
+fn default_tts_speaker() -> String {
+    DEFAULT_TTS_SPEAKER.to_string()
+}
+
+fn default_asr_model() -> String {
+    DEFAULT_ASR_MODEL.to_string()
+}
+
 impl Default for VolcengineConfig {
     fn default() -> Self {
         Self {
-            base_url: default_base_url(),
             api_key: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            edition: default_edition(),
             image_model: String::new(),
             video_model: String::new(),
             watermark: false,
             video_poll_timeout_secs: DEFAULT_VIDEO_POLL_TIMEOUT_SECS,
-            speech: SpeechConfig::default(),
+            tts_model: default_tts_model(),
+            tts_speaker: default_tts_speaker(),
+            asr_model: default_asr_model(),
         }
     }
+}
+
+// ── Agent Plan 模型列表 ──
+
+/// 查询 Agent Plan 模型列表。
+///
+/// `refresh=false` 时优先返回本地缓存；AK/SK 与套餐版本缺省取已保存配置，
+/// 设置页可直接携带表单中尚未保存的值刷新。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListModelsRequest {
+    #[serde(default)]
+    pub refresh: bool,
+    #[serde(default)]
+    pub access_key_id: Option<String>,
+    #[serde(default)]
+    pub secret_access_key: Option<String>,
+    #[serde(default)]
+    pub edition: Option<String>,
+}
+
+/// 按能力分类的 Agent Plan 可用模型。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPlanModels {
+    /// 文本生成（在天工「模型配置」中使用）。
+    #[serde(default)]
+    pub text: Vec<String>,
+    /// 图片生成（Seedream）。
+    #[serde(default)]
+    pub image: Vec<String>,
+    /// 视频生成（Seedance）。
+    #[serde(default)]
+    pub video: Vec<String>,
+    /// 语音合成。
+    #[serde(default)]
+    pub tts: Vec<String>,
+    /// 语音识别。
+    #[serde(default)]
+    pub asr: Vec<String>,
+    /// 向量化。
+    #[serde(default)]
+    pub embedding: Vec<String>,
+    /// 套餐版本。
+    #[serde(default)]
+    pub edition: String,
+    /// 获取时间（本地时间，`YYYY-MM-DD HH:MM:SS`）。
+    #[serde(default)]
+    pub fetched_at: String,
 }
 
 /// 图片生成请求。
@@ -447,25 +482,28 @@ mod tests {
     #[test]
     fn config_defaults_fill_missing_fields() {
         let config: VolcengineConfig = serde_json::from_str(r#"{"api_key":"k"}"#).unwrap();
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.api_key, "k");
+        assert_eq!(config.edition, DEFAULT_EDITION);
         assert_eq!(
             config.video_poll_timeout_secs,
             DEFAULT_VIDEO_POLL_TIMEOUT_SECS
         );
         assert!(!config.watermark);
-        assert_eq!(config.speech, SpeechConfig::default());
+        assert_eq!(config.tts_model, DEFAULT_TTS_MODEL);
+        assert_eq!(config.tts_speaker, DEFAULT_TTS_SPEAKER);
+        assert_eq!(config.asr_model, DEFAULT_ASR_MODEL);
+        assert!(config.image_model.is_empty() && config.video_model.is_empty());
     }
 
     #[test]
-    fn speech_config_defaults_fill_missing_fields() {
-        let config: VolcengineConfig =
-            serde_json::from_str(r#"{"speech":{"api_key":"s","tts_speaker":"x"}}"#).unwrap();
-        assert_eq!(config.speech.api_key, "s");
-        assert_eq!(config.speech.tts_speaker, "x");
-        assert_eq!(config.speech.base_url, DEFAULT_SPEECH_BASE_URL);
-        assert_eq!(config.speech.tts_resource_id, DEFAULT_TTS_RESOURCE_ID);
-        assert_eq!(config.speech.asr_resource_id, DEFAULT_ASR_RESOURCE_ID);
+    fn legacy_config_fields_are_ignored() {
+        // 旧版（按量付费）配置中的 base_url / speech 字段不影响解析。
+        let config: VolcengineConfig = serde_json::from_str(
+            r#"{"base_url":"https://x","api_key":"k","speech":{"api_key":"s"}}"#,
+        )
+        .unwrap();
+        assert_eq!(config.api_key, "k");
+        assert_eq!(config.tts_model, DEFAULT_TTS_MODEL);
     }
 
     #[test]

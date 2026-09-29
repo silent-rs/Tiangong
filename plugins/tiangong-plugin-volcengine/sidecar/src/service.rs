@@ -1,7 +1,8 @@
-//! Volcengine sidecar 业务服务。
+//! Volcengine sidecar 业务服务（Agent Plan）。
 //!
 //! 读取插件自有配置 → 组织火山方舟请求（见 [`crate::ark`]）或豆包语音请求
-//!（见 [`crate::speech`]）→ 归档 / 落盘 → 返回结果。本机录音与播放见 [`crate::audio`]。
+//!（见 [`crate::speech`]）→ 归档 / 落盘 → 返回结果。本机录音与播放见 [`crate::audio`]，
+//! 模型列表见 [`crate::openapi`]（结果缓存于插件 data 目录）。
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -11,18 +12,20 @@ use tiangong_plugin_runtime::protocol::{
     ServiceStatus,
 };
 use tiangong_plugin_volcengine_protocol::{
-    Ack, Empty, GENERATE_IMAGE_OPERATION, GENERATE_VIDEO_OPERATION, GET_CONFIG_OPERATION,
-    GeneratedImage, ImageRequest, ImageResponse, LIST_VOICES_OPERATION, ListVoicesResponse,
-    PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID, PLUGIN_VERSION, PlayRequest,
-    PlayStatusResponse, RECORD_CANCEL_OPERATION, RECORD_START_OPERATION, RECORD_STOP_OPERATION,
-    RecordControlRequest, RecordStartRequest, SET_CONFIG_OPERATION, STOP_OPERATION,
-    SYNTHESIZE_OPERATION, SpeechConfig, SynthesizeRequest, SynthesizeResponse,
-    TRANSCRIBE_OPERATION, TranscribeRequest, TranscribeResponse, VOLCENGINE_PROTOCOL_VERSION,
-    VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
+    ARK_OPENAPI_BASE_URL, Ack, AgentPlanModels, DEFAULT_EDITION, Empty, GENERATE_IMAGE_OPERATION,
+    GENERATE_VIDEO_OPERATION, GET_CONFIG_OPERATION, GeneratedImage, ImageRequest, ImageResponse,
+    LIST_MODELS_OPERATION, LIST_VOICES_OPERATION, ListModelsRequest, ListVoicesResponse,
+    PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL, PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID,
+    PLUGIN_VERSION, PlayRequest, PlayStatusResponse, RECORD_CANCEL_OPERATION,
+    RECORD_START_OPERATION, RECORD_STOP_OPERATION, RecordControlRequest, RecordStartRequest,
+    SET_CONFIG_OPERATION, STOP_OPERATION, SYNTHESIZE_OPERATION, SynthesizeRequest,
+    SynthesizeResponse, TRANSCRIBE_OPERATION, TranscribeRequest, TranscribeResponse,
+    VOLCENGINE_PROTOCOL_VERSION, VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
 };
 
 use crate::ark::{self, Endpoint, VideoOptions};
-use crate::speech::{self, SpeechAuth, SpeechEndpoint, TtsOptions};
+use crate::openapi::{self, AccessKey};
+use crate::speech::{self, SpeechEndpoint, TtsOptions};
 use crate::{audio, config};
 
 pub struct VolcengineService;
@@ -67,6 +70,7 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
                 "video_generation".to_string(),
                 "text_to_speech".to_string(),
                 "speech_to_text".to_string(),
+                "list_models".to_string(),
             ],
             instance_id: format!("volcengine-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
@@ -157,60 +161,64 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             serde_json::to_value(Empty {}).context("序列化 record_cancel 响应失败")
         }
 
+        LIST_MODELS_OPERATION => {
+            let request: ListModelsRequest = serde_json::from_value(payload).unwrap_or_default();
+            serde_json::to_value(list_models(request).await?).context("序列化 list_models 响应失败")
+        }
+
         other => bail!("未知的 Volcengine 操作: {other}"),
     }
 }
 
-/// 保存前规范化：去除首尾空白，空地址回落默认值，轮询上限至少 30 秒。
+/// 保存前规范化：去除首尾空白，空值回落默认值，轮询上限至少 30 秒。
 fn normalize_config(mut config: VolcengineConfig) -> VolcengineConfig {
-    config.base_url = config.base_url.trim().to_string();
-    if config.base_url.is_empty() {
-        config.base_url = VolcengineConfig::default().base_url;
-    }
-    config.api_key = config.api_key.trim().to_string();
-    config.image_model = config.image_model.trim().to_string();
-    config.video_model = config.video_model.trim().to_string();
-    config.video_poll_timeout_secs = config.video_poll_timeout_secs.max(30);
-    config.speech = normalize_speech(config.speech);
-    config
-}
-
-fn normalize_speech(mut speech: SpeechConfig) -> SpeechConfig {
-    let defaults = SpeechConfig::default();
-    let or_default = |value: String, fallback: &str| {
-        let value = value.trim().to_string();
+    let defaults = VolcengineConfig::default();
+    let or_default = |value: &str, fallback: &str| {
+        let value = value.trim();
         if value.is_empty() {
             fallback.to_string()
         } else {
-            value
+            value.to_string()
         }
     };
-    speech.base_url = or_default(speech.base_url, &defaults.base_url);
-    speech.api_key = speech.api_key.trim().to_string();
-    speech.app_id = speech.app_id.trim().to_string();
-    speech.access_token = speech.access_token.trim().to_string();
-    speech.tts_resource_id = or_default(speech.tts_resource_id, &defaults.tts_resource_id);
-    speech.tts_speaker = or_default(speech.tts_speaker, &defaults.tts_speaker);
-    speech.asr_resource_id = or_default(speech.asr_resource_id, &defaults.asr_resource_id);
-    speech
+    config.api_key = config.api_key.trim().to_string();
+    config.access_key_id = config.access_key_id.trim().to_string();
+    config.secret_access_key = config.secret_access_key.trim().to_string();
+    config.edition = match config.edition.trim() {
+        "enterprise" => "enterprise".to_string(),
+        _ => DEFAULT_EDITION.to_string(),
+    };
+    config.image_model = config.image_model.trim().to_string();
+    config.video_model = config.video_model.trim().to_string();
+    config.video_poll_timeout_secs = config.video_poll_timeout_secs.max(30);
+    config.tts_model = or_default(&config.tts_model, &defaults.tts_model);
+    config.tts_speaker = or_default(&config.tts_speaker, &defaults.tts_speaker);
+    config.asr_model = or_default(&config.asr_model, &defaults.asr_model);
+    config
 }
 
-/// 读取配置并解析出端点与目标模型；未配置时给出指向设置页的提示。
+/// 解析 Agent Plan 专属 API Key；未配置时给出指向设置页的提示。
+fn plan_api_key(config: &VolcengineConfig) -> Result<String> {
+    let api_key = config::resolve_api_key(&config.api_key);
+    if api_key.is_empty() {
+        bail!("未配置 Agent Plan API Key，请在「设置 → 火山引擎」中填写后保存");
+    }
+    Ok(api_key)
+}
+
+/// 读取配置并解析出端点与目标模型。
 fn prepare(
     pick_model: fn(&VolcengineConfig) -> &str,
     label: &str,
 ) -> Result<(VolcengineConfig, Endpoint, String)> {
     let config = config::load()?;
-    let api_key = config::resolve_api_key(&config.api_key);
-    if api_key.is_empty() {
-        bail!("未配置火山方舟 API Key，请在「设置 → 火山引擎」中填写后保存");
-    }
+    let api_key = plan_api_key(&config)?;
     let model = pick_model(&config).trim().to_string();
     if model.is_empty() {
-        bail!("未配置{label}模型，请在「设置 → 火山引擎」中填写模型 ID 或接入点后保存");
+        bail!("未选择{label}模型，请在「设置 → 火山引擎」中刷新模型列表并选择后保存");
     }
     let endpoint = Endpoint {
-        base_url: config.base_url.clone(),
+        base_url: PLAN_ARK_BASE_URL.to_string(),
         api_key,
     };
     Ok((config, endpoint, model))
@@ -282,30 +290,10 @@ async fn generate_video(request: VideoRequest) -> Result<VideoResponse> {
 
 // ── 语音 ──
 
-/// 读取配置并解析豆包语音端点；API Key 优先，其次旧版 App ID + Access Token。
-fn prepare_speech() -> Result<(SpeechConfig, SpeechEndpoint)> {
-    let speech = config::load()?.speech;
-    let endpoint = speech_endpoint(&speech)?;
-    Ok((speech, endpoint))
-}
-
-fn speech_endpoint(speech: &SpeechConfig) -> Result<SpeechEndpoint> {
-    let api_key = config::resolve_api_key(&speech.api_key);
-    let auth = if !api_key.is_empty() {
-        SpeechAuth::ApiKey(api_key)
-    } else {
-        let app_id = speech.app_id.trim().to_string();
-        let token = config::resolve_api_key(&speech.access_token);
-        if app_id.is_empty() || token.is_empty() {
-            bail!(
-                "未配置豆包语音凭据，请在「设置 → 火山引擎 → 语音」中填写 API Key（或旧版控制台的 App ID + Access Token）后保存"
-            );
-        }
-        SpeechAuth::AppToken { app_id, token }
-    };
+fn speech_endpoint(config: &VolcengineConfig) -> Result<SpeechEndpoint> {
     Ok(SpeechEndpoint {
-        base_url: speech.base_url.clone(),
-        auth,
+        base_url: PLAN_SPEECH_BASE_URL.to_string(),
+        api_key: plan_api_key(config)?,
     })
 }
 
@@ -314,16 +302,17 @@ async fn synthesize(request: SynthesizeRequest) -> Result<SynthesizeResponse> {
     if text.is_empty() {
         bail!("text 不能为空");
     }
-    let (speech, endpoint) = prepare_speech()?;
+    let config = config::load()?;
+    let endpoint = speech_endpoint(&config)?;
     let speaker = request
         .voice
         .as_deref()
         .map(str::trim)
         .filter(|voice| !voice.is_empty())
-        .unwrap_or(&speech.tts_speaker)
+        .unwrap_or(&config.tts_speaker)
         .to_string();
     let options = TtsOptions {
-        resource_id: &speech.tts_resource_id,
+        model: &config.tts_model,
         speaker: &speaker,
         speed: request.speed,
     };
@@ -335,13 +324,13 @@ async fn synthesize(request: SynthesizeRequest) -> Result<SynthesizeResponse> {
         file_path: file_path.display().to_string(),
         mime_type: output.mime_type.to_string(),
         duration: None,
-        model: format!("{} / {speaker}", speech.tts_resource_id),
+        model: format!("{} / {speaker}", config.tts_model),
     })
 }
 
 /// 音色列表：已配置的默认音色置顶，其后为常用预设。
 fn list_voices() -> Result<ListVoicesResponse> {
-    let speaker = config::load()?.speech.tts_speaker;
+    let speaker = config::load()?.tts_speaker;
     let mut voices: Vec<VoiceInfo> = speech::VOICE_PRESETS
         .iter()
         .map(|(id, name, gender)| VoiceInfo {
@@ -368,10 +357,11 @@ async fn transcribe(request: TranscribeRequest) -> Result<TranscribeResponse> {
     let format = speech::asr_format(&request.file_path)?;
     let path = audio::resolve_media_audio(&request.file_path)?;
     let audio_data = std::fs::read(&path).context("读取音频文件失败")?;
-    let (speech_config, endpoint) = prepare_speech()?;
+    let config = config::load()?;
+    let endpoint = speech_endpoint(&config)?;
     let result = speech::recognize(
         &endpoint,
-        &speech_config.asr_resource_id,
+        &config.asr_model,
         &audio_data,
         format,
         request.language.as_deref(),
@@ -381,9 +371,39 @@ async fn transcribe(request: TranscribeRequest) -> Result<TranscribeResponse> {
         text: result.text,
         language: request.language,
         duration: result.duration,
-        model: speech_config.asr_resource_id,
+        model: config.asr_model,
         audio_path: request.file_path,
     })
+}
+
+// ── 模型列表 ──
+
+/// 查询 Agent Plan 模型列表：非强制刷新且缓存匹配当前套餐版本时直接返回缓存。
+async fn list_models(request: ListModelsRequest) -> Result<AgentPlanModels> {
+    let saved = config::load()?;
+    let pick = |value: Option<String>, fallback: &str| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let edition = pick(request.edition, &saved.edition);
+    if !request.refresh
+        && let Some(cached) = config::load_models()?
+        && cached.edition == edition
+    {
+        return Ok(cached);
+    }
+    let key = AccessKey {
+        id: config::resolve_api_key(&pick(request.access_key_id, &saved.access_key_id)),
+        secret: config::resolve_api_key(&pick(request.secret_access_key, &saved.secret_access_key)),
+    };
+    if key.id.is_empty() || key.secret.is_empty() {
+        bail!("查询模型列表需要 Access Key ID 与 Secret Access Key，请在「设置 → 火山引擎」中填写");
+    }
+    let models = openapi::list_agent_plan_models(ARK_OPENAPI_BASE_URL, &key, &edition).await?;
+    config::save_models(&models)?;
+    Ok(models)
 }
 
 /// 参考图输入：http(s) / data URL 原样传递，本地文件读成 base64 data URL。
@@ -410,58 +430,52 @@ mod tests {
     #[test]
     fn normalize_config_trims_and_defaults() {
         let config = normalize_config(VolcengineConfig {
-            base_url: "  ".to_string(),
             api_key: " key ".to_string(),
-            image_model: " seedream ".to_string(),
+            access_key_id: " ak ".to_string(),
+            secret_access_key: " sk ".to_string(),
+            edition: "unknown".to_string(),
+            image_model: " doubao-seedream-5-0-pro ".to_string(),
             video_model: String::new(),
             watermark: true,
             video_poll_timeout_secs: 1,
-            speech: SpeechConfig {
-                base_url: " ".to_string(),
-                api_key: " sk ".to_string(),
-                app_id: String::new(),
-                access_token: String::new(),
-                tts_resource_id: String::new(),
-                tts_speaker: " my_voice ".to_string(),
-                asr_resource_id: " ".to_string(),
-            },
+            tts_model: " ".to_string(),
+            tts_speaker: " my_voice ".to_string(),
+            asr_model: String::new(),
         });
-        assert_eq!(config.base_url, VolcengineConfig::default().base_url);
+        let defaults = VolcengineConfig::default();
         assert_eq!(config.api_key, "key");
-        assert_eq!(config.image_model, "seedream");
+        assert_eq!(config.access_key_id, "ak");
+        assert_eq!(config.secret_access_key, "sk");
+        assert_eq!(config.edition, DEFAULT_EDITION);
+        assert_eq!(config.image_model, "doubao-seedream-5-0-pro");
         assert_eq!(config.video_poll_timeout_secs, 30);
         assert!(config.watermark);
-        let defaults = SpeechConfig::default();
-        assert_eq!(config.speech.base_url, defaults.base_url);
-        assert_eq!(config.speech.api_key, "sk");
-        assert_eq!(config.speech.tts_resource_id, defaults.tts_resource_id);
-        assert_eq!(config.speech.tts_speaker, "my_voice");
-        assert_eq!(config.speech.asr_resource_id, defaults.asr_resource_id);
+        assert_eq!(config.tts_model, defaults.tts_model);
+        assert_eq!(config.tts_speaker, "my_voice");
+        assert_eq!(config.asr_model, defaults.asr_model);
+        assert_eq!(
+            normalize_config(VolcengineConfig {
+                edition: " enterprise ".to_string(),
+                ..VolcengineConfig::default()
+            })
+            .edition,
+            "enterprise"
+        );
     }
 
     #[test]
-    fn speech_endpoint_prefers_api_key_then_legacy_credentials() {
-        let mut speech = SpeechConfig {
+    fn plan_api_key_is_required() {
+        let error = plan_api_key(&VolcengineConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Agent Plan API Key"), "{error}");
+        let endpoint = speech_endpoint(&VolcengineConfig {
             api_key: "k".to_string(),
-            app_id: "app".to_string(),
-            access_token: "tok".to_string(),
-            ..SpeechConfig::default()
-        };
-        assert_eq!(
-            speech_endpoint(&speech).unwrap().auth,
-            SpeechAuth::ApiKey("k".to_string())
-        );
-        speech.api_key.clear();
-        assert_eq!(
-            speech_endpoint(&speech).unwrap().auth,
-            SpeechAuth::AppToken {
-                app_id: "app".to_string(),
-                token: "tok".to_string()
-            }
-        );
-        speech.access_token.clear();
-        let error = speech_endpoint(&speech).err().unwrap().to_string();
-        assert!(error.contains("设置 → 火山引擎"), "{error}");
+            ..VolcengineConfig::default()
+        })
+        .unwrap();
+        assert_eq!(endpoint.api_key, "k");
+        assert_eq!(endpoint.base_url, PLAN_SPEECH_BASE_URL);
     }
 
     #[test]

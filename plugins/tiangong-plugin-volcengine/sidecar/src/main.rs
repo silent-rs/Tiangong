@@ -3,6 +3,7 @@
 mod ark;
 mod audio;
 mod config;
+mod openapi;
 mod record_session;
 mod service;
 mod speech;

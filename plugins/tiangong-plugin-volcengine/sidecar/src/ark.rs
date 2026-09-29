@@ -1,5 +1,7 @@
 //! 火山方舟（Ark）HTTP 调用：直接组织请求，不经 llm / media crate 转接。
 //!
+//! Agent Plan 下 `{base}` 为专属地址 `https://ark.cn-beijing.volces.com/api/plan/v3`。
+//!
 //! - 图片生成：`POST {base}/images/generations`（Seedream），同步返回图片 URL；
 //! - 视频生成：`POST {base}/contents/generations/tasks`（Seedance）提交任务，
 //!   `GET {base}/contents/generations/tasks/{id}` 轮询到终态或超时。
@@ -44,6 +46,23 @@ pub(crate) fn http_client() -> Result<reqwest::Client> {
         .user_agent(concat!("tiangong-volcengine/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("构造 HTTP 客户端失败")
+}
+
+/// WebSocket（语音识别）使用的 rustls 配置：与 HTTP 客户端同一套 Mozilla 根证书。
+pub(crate) fn rustls_config() -> Result<std::sync::Arc<rustls::ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    let (added, _) =
+        roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
+    if added == 0 {
+        bail!("加载 WSS 根证书失败");
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("初始化 TLS 配置失败")?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(std::sync::Arc::new(config))
 }
 
 async fn send(request: reqwest::RequestBuilder, label: &str) -> Result<Value> {
@@ -458,29 +477,29 @@ mod tests {
             }
             seen
         });
-        (format!("http://{address}/api/v3/"), handle)
+        (format!("http://{address}/api/plan/v3/"), handle)
     }
 
     #[tokio::test]
     async fn image_and_video_round_trip_against_stub() {
         let (base_url, server) = stub_server(vec![
             (
-                "POST /api/v3/images/generations",
+                "POST /api/plan/v3/images/generations",
                 200,
                 r#"{"model":"seedream","data":[{"url":"https://img/1.jpeg"}]}"#,
             ),
             (
-                "POST /api/v3/contents/generations/tasks",
+                "POST /api/plan/v3/contents/generations/tasks",
                 200,
                 r#"{"id":"cgt-42"}"#,
             ),
             (
-                "GET /api/v3/contents/generations/tasks/cgt-42",
+                "GET /api/plan/v3/contents/generations/tasks/cgt-42",
                 200,
                 r#"{"id":"cgt-42","status":"succeeded","content":{"video_url":"https://v/42.mp4"}}"#,
             ),
             (
-                "POST /api/v3/images/generations",
+                "POST /api/plan/v3/images/generations",
                 401,
                 r#"{"error":{"code":"AuthenticationError","message":"bad key"}}"#,
             ),

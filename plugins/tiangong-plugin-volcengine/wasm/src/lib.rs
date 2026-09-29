@@ -14,10 +14,11 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_volcengine_protocol::{
-    Empty, GenerateImage, GenerateVideo, GetConfig, ImageRequest, ListVoices, Play, PlayStatus,
-    RecordCancel, RecordStart, RecordStop, SetConfig, Stop, Synthesize, SynthesizeRequest,
-    TOOL_GENERATE_IMAGE, TOOL_GENERATE_VIDEO, TOOL_SPEECH_TO_TEXT, TOOL_TEXT_TO_SPEECH, Transcribe,
-    TranscribeRequest, VideoRequest, VideoStatus, VolcengineOperation,
+    Empty, GenerateImage, GenerateVideo, GetConfig, ImageRequest, ListModels, ListVoices, Play,
+    PlayStatus, RecordCancel, RecordStart, RecordStop, SetConfig, Stop, Synthesize,
+    SynthesizeRequest, TOOL_GENERATE_IMAGE, TOOL_GENERATE_VIDEO, TOOL_SPEECH_TO_TEXT,
+    TOOL_TEXT_TO_SPEECH, Transcribe, TranscribeRequest, VideoRequest, VideoStatus,
+    VolcengineOperation,
 };
 
 mod descriptor {
@@ -45,7 +46,7 @@ impl Guest for Component {
         Ok(vec![
             ToolSpec {
                 name: TOOL_GENERATE_IMAGE.to_string(),
-                description: "使用火山引擎 Seedream 根据文字描述生成图片；传入 images 时基于参考图生成。\
+                description: "使用火山方舟 Agent Plan 的 Seedream 根据文字描述生成图片；传入 images 时基于参考图生成。\
                 每次调用等待完成后返回图片路径。\
                 注意：同一轮次中不要重复调用相同 prompt 的 generate_image，\
                 拿到图片结果后应直接继续后续任务（如编写 HTML、组合排版等）。"
@@ -55,7 +56,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_GENERATE_VIDEO.to_string(),
-                description: "使用火山引擎 Seedance 根据文字描述生成视频；传入 image 时以该图为首帧。\
+                description: "使用火山方舟 Agent Plan 的 Seedance 根据文字描述生成视频；传入 image 时以该图为首帧。\
                 提交后等待生成完成并返回视频地址，超时则返回任务 ID。"
                     .to_string(),
                 input_schema: r#"{"type":"object","properties":{"prompt":{"type":"string","description":"视频描述"},"duration":{"type":"integer","description":"视频时长，单位秒（可选）"},"resolution":{"type":"string","description":"分辨率（可选）：480p / 720p / 1080p"},"ratio":{"type":"string","description":"宽高比（可选）：16:9 / 9:16 / 1:1 等"},"image":{"type":"string","description":"首帧图本地路径或 URL（可选）"}},"required":["prompt"]}"#
@@ -63,14 +64,14 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_TEXT_TO_SPEECH.to_string(),
-                description: "使用火山引擎豆包语音将文本合成为语音音频文件（mp3），返回本地文件路径。"
+                description: "使用火山方舟 Agent Plan 的豆包语音合成将文本合成为语音音频文件（mp3），返回本地文件路径。"
                     .to_string(),
                 input_schema: r#"{"type":"object","properties":{"text":{"type":"string","description":"待合成文本"},"voice":{"type":"string","description":"音色 ID（可选，如 zh_female_vv_uranus_bigtts；留空使用设置中的默认音色）"},"speed":{"type":"number","description":"语速倍率（可选，1.0 为正常，范围 0.5～2.0）"}},"required":["text"]}"#
                     .to_string(),
             },
             ToolSpec {
                 name: TOOL_SPEECH_TO_TEXT.to_string(),
-                description: "使用火山引擎豆包语音将音频文件转录为文本".to_string(),
+                description: "使用火山方舟 Agent Plan 的豆包流式语音识别将音频文件转录为文本".to_string(),
                 input_schema: r#"{"type":"object","properties":{"file_path":{"type":"string","description":"音频文件路径（仅允许 ~/.tiangong/media 目录下的 wav / mp3 / ogg 文件）"},"language":{"type":"string","description":"语种（可选，如 zh-CN / en-US；留空自动识别）"}},"required":["file_path"]}"#
                     .to_string(),
             },
@@ -325,6 +326,7 @@ impl UiGuest for Component {
             "record_start" => forward::<RecordStart>(payload)?,
             "record_stop" => forward::<RecordStop>(payload)?,
             "record_cancel" => forward::<RecordCancel>(payload)?,
+            "list_models" => forward::<ListModels>(payload)?,
             other => return Err(plugin_err(format!("未知的消息: {other}"))),
         };
         Ok(ViewMessageResponse { payload })

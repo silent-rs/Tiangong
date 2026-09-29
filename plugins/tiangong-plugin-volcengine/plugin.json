@@ -22,7 +22,7 @@
         "slot": "settings.plugin-page",
         "id": "volcengine-settings",
         "title": "火山引擎",
-        "description": "火山方舟图片/视频生成与豆包语音合成/识别的连接与模型配置",
+        "description": "火山方舟 Agent Plan：API Key、套餐模型列表与图片/视频/语音模型选择",
         "icon": "image",
         "entry": "app/settings.html",
         "sandbox": "iframe"
