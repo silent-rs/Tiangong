@@ -48,7 +48,6 @@ describe('通知在消息列表中的可见性', () => {
           streamingMessageId={null}
           streamingContent=""
           streamingReasoningContent=""
-          hasTts={false}
           isActive={isActive}
         />,
       );

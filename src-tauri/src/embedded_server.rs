@@ -392,7 +392,6 @@ async fn send_message_and_wait(
     };
     state.sync_core_config_from_state().await?;
 
-    let capabilities = crate::commands::attachment_capability_snapshot(state).await?;
     let raw = media
         .into_iter()
         .map(|asset| tiangong_media_archive::RawAttachment {
@@ -406,8 +405,7 @@ async fn send_message_and_wait(
     let prepared_batch = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(raw)?;
-        let prepared =
-            transaction.prepare_message(&message_id_for_prepare, content, capabilities)?;
+        let prepared = transaction.prepare_message(&message_id_for_prepare, content)?;
         Ok::<_, String>((transaction, prepared))
     })
     .await

@@ -14,7 +14,6 @@ members = [
     "crates/tiangong-server",
     "crates/tiangong-toolkit",
     "crates/tiangong-sandbox",
-    "crates/tiangong-media",
     "crates/tiangong-media-archive",
     "crates/tiangong-config",
     "crates/tiangong-scheduler",
@@ -36,21 +35,9 @@ members = [
     "plugins/tiangong-plugin-index/protocol",
     "plugins/tiangong-plugin-index/sidecar",
     "plugins/tiangong-plugin-index/wasm",
-    "plugins/tiangong-plugin-generate-image/protocol",
-    "plugins/tiangong-plugin-generate-image/sidecar",
-    "plugins/tiangong-plugin-generate-image/wasm",
     "plugins/tiangong-plugin-generate-image-openai/protocol",
     "plugins/tiangong-plugin-generate-image-openai/sidecar",
     "plugins/tiangong-plugin-generate-image-openai/wasm",
-    "plugins/tiangong-plugin-generate-video/protocol",
-    "plugins/tiangong-plugin-generate-video/sidecar",
-    "plugins/tiangong-plugin-generate-video/wasm",
-    "plugins/tiangong-plugin-text-to-speech/protocol",
-    "plugins/tiangong-plugin-text-to-speech/sidecar",
-    "plugins/tiangong-plugin-text-to-speech/wasm",
-    "plugins/tiangong-plugin-speech-to-text/protocol",
-    "plugins/tiangong-plugin-speech-to-text/sidecar",
-    "plugins/tiangong-plugin-speech-to-text/wasm",
     "plugins/screenshot-input/protocol",
     "plugins/screenshot-input/sidecar",
     "plugins/screenshot-input/wasm",
@@ -95,7 +82,6 @@ tiangong-core = { path = "crates/tiangong-core" }
 tiangong-core-manager = { path = "crates/tiangong-core-manager" }
 tiangong-entry = { path = "crates/tiangong-entry" }
 tiangong-llm = { path = "crates/tiangong-llm" }
-tiangong-media = { path = "crates/tiangong-media" }
 tiangong-media-archive = { path = "crates/tiangong-media-archive" }
 tiangong-memory = { path = "plugins/tiangong-plugin-memory/core" }
 tiangong-plugin-memory-sidecar = { path = "plugins/tiangong-plugin-memory/sidecar" }
@@ -118,21 +104,9 @@ tiangong-plugin-fs-wasm = { path = "plugins/tiangong-plugin-fs/wasm" }
 tiangong-plugin-index-protocol = { path = "plugins/tiangong-plugin-index/protocol" }
 tiangong-plugin-index-wasm = { path = "plugins/tiangong-plugin-index/wasm" }
 tiangong-plugin-index-sidecar = { path = "plugins/tiangong-plugin-index/sidecar" }
-tiangong-plugin-generate-image-protocol = { path = "plugins/tiangong-plugin-generate-image/protocol" }
-tiangong-plugin-generate-image-sidecar = { path = "plugins/tiangong-plugin-generate-image/sidecar" }
-tiangong-plugin-generate-image-wasm = { path = "plugins/tiangong-plugin-generate-image/wasm" }
 tiangong-plugin-generate-image-openai-protocol = { path = "plugins/tiangong-plugin-generate-image-openai/protocol" }
 tiangong-plugin-generate-image-openai-sidecar = { path = "plugins/tiangong-plugin-generate-image-openai/sidecar" }
 tiangong-plugin-generate-image-openai-wasm = { path = "plugins/tiangong-plugin-generate-image-openai/wasm" }
-tiangong-plugin-generate-video-protocol = { path = "plugins/tiangong-plugin-generate-video/protocol" }
-tiangong-plugin-generate-video-sidecar = { path = "plugins/tiangong-plugin-generate-video/sidecar" }
-tiangong-plugin-generate-video-wasm = { path = "plugins/tiangong-plugin-generate-video/wasm" }
-tiangong-plugin-text-to-speech-protocol = { path = "plugins/tiangong-plugin-text-to-speech/protocol" }
-tiangong-plugin-text-to-speech-sidecar = { path = "plugins/tiangong-plugin-text-to-speech/sidecar" }
-tiangong-plugin-text-to-speech-wasm = { path = "plugins/tiangong-plugin-text-to-speech/wasm" }
-tiangong-plugin-speech-to-text-protocol = { path = "plugins/tiangong-plugin-speech-to-text/protocol" }
-tiangong-plugin-speech-to-text-sidecar = { path = "plugins/tiangong-plugin-speech-to-text/sidecar" }
-tiangong-plugin-speech-to-text-wasm = { path = "plugins/tiangong-plugin-speech-to-text/wasm" }
 tiangong-plugin-screenshot-input-protocol = { path = "plugins/screenshot-input/protocol" }
 tiangong-plugin-screenshot-input-sidecar = { path = "plugins/screenshot-input/sidecar" }
 tiangong-plugin-screenshot-input-wasm = { path = "plugins/screenshot-input/wasm" }

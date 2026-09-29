@@ -15,8 +15,8 @@ use tiangong_types::{MediaAsset, MediaKind};
 mod attachment;
 
 pub use attachment::{
-    AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
-    StoredAttachment, canonical_archived_media_path, extension_for_mime,
+    AttachmentStore, AttachmentTransaction, RawAttachment, StoredAttachment,
+    canonical_archived_media_path, extension_for_mime,
 };
 
 /// 把输入附件归档到本地（图片/文件）。

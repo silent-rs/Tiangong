@@ -192,7 +192,7 @@ pub(crate) enum ModelSubcommand {
         model_id: String,
         #[arg(
             long = "capability",
-            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts（embedding/rerank 已迁至 `tiangong memory config` 配置页）"
+            help = "模型能力（可重复）：chat/multimodal（embedding/rerank 已迁至 `tiangong memory config` 配置页）"
         )]
         capability: Vec<String>,
     },
@@ -241,7 +241,7 @@ pub(crate) enum RouteSubcommand {
     List,
     #[command(about = "设置 capability 路由指向某个已注册模型")]
     Set {
-        #[arg(help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts")]
+        #[arg(help = "能力槽位：chat/lite")]
         capability: String,
         #[arg(help = "模型名称（本地别名）")]
         model: String,

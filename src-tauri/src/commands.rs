@@ -654,24 +654,13 @@ async fn send_message_inner(
         return Err(error);
     }
 
-    let capabilities = match attachment_capability_snapshot(state).await {
-        Ok(value) => value,
-        Err(error) => {
-            abort_session_send(state, &session_id, revision, true).await;
-            return Err(error);
-        }
-    };
     let user_message_id = scru128::new().to_string();
     let message_id_for_prepare = user_message_id.clone();
     let content_for_prepare = content.clone();
     let prepared_batch = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
-        let prepared = transaction.prepare_message(
-            &message_id_for_prepare,
-            content_for_prepare,
-            capabilities,
-        )?;
+        let prepared = transaction.prepare_message(&message_id_for_prepare, content_for_prepare)?;
         Ok::<_, String>((transaction, prepared))
     })
     .await
@@ -839,30 +828,6 @@ pub(crate) async fn restore_failed_user_message_state(
         .await
 }
 
-pub(crate) async fn attachment_capability_snapshot(
-    state: &TiangongApp,
-) -> Result<tiangong_media_archive::AttachmentCapabilitySnapshot, String> {
-    state
-        .with_state_read(|core_state| {
-            use tiangong_llm::ModelCapability;
-            let models = &core_state.config.models;
-            let chat_multimodal = models.chat_is_multimodal();
-            Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
-                chat_multimodal,
-                analyze_attachment: !chat_multimodal
-                    && models
-                        .resolve_for_capability(ModelCapability::Multimodal)
-                        .is_some(),
-                audio_processor: models
-                    .resolve_for_capability(ModelCapability::Stt)
-                    .is_some(),
-                // 当前没有“视频内容分析”插件；视频生成能力不能冒充输入处理能力。
-                video_processor: false,
-            })
-        })
-        .await
-}
-
 fn emit_session_stream_event(
     app: &AppHandle,
     session_id: &str,
@@ -875,6 +840,42 @@ fn emit_session_stream_event(
             event: event.clone(),
         },
     );
+    forward_session_event_to_plugins(session_id, event);
+}
+
+/// 把回复正文与轮次终态转发给订阅了 `session.*` 的插件（如自动朗读）。
+///
+/// 只转发面向用户的最终回复文本（delta / summary_text）与轮次结束，
+/// 不含思考过程、工具过程文本与内部状态；无订阅者时 `bridge_emit` 直接返回。
+fn forward_session_event_to_plugins(session_id: &str, event: &tiangong_types::StreamEvent) {
+    use tiangong_types::StreamEvent;
+    let (channel, payload) = match event {
+        StreamEvent::Delta {
+            message_id,
+            content,
+        }
+        | StreamEvent::SummaryText {
+            message_id,
+            content,
+        } => (
+            "session.stream.text",
+            serde_json::json!({
+                "session_id": session_id,
+                "message_id": message_id,
+                "content": content,
+            }),
+        ),
+        StreamEvent::Done { .. } => (
+            "session.turn.completed",
+            serde_json::json!({ "session_id": session_id, "status": "done" }),
+        ),
+        StreamEvent::Error { .. } => (
+            "session.turn.completed",
+            serde_json::json!({ "session_id": session_id, "status": "error" }),
+        ),
+        _ => return,
+    };
+    tiangong_plugin_runtime::bridge::bridge_emit(channel, &payload.to_string());
 }
 
 /// 消费 StreamEvent：按会话转发给前端，并维护消息投递边界。
@@ -1080,17 +1081,12 @@ pub async fn edit_and_resend(
     validate_editable_message(&session_for_validation, &message_id, &base_content)
         .map_err(|error| error.to_string())?;
 
-    let capabilities = attachment_capability_snapshot(state.inner()).await?;
     let content_for_prepare = new_content.clone();
     let message_id_for_prepare = message_id.clone();
     let (transaction, prepared) = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
-        let prepared = transaction.prepare_message(
-            &message_id_for_prepare,
-            content_for_prepare,
-            capabilities,
-        )?;
+        let prepared = transaction.prepare_message(&message_id_for_prepare, content_for_prepare)?;
         Ok::<_, String>((transaction, prepared))
     })
     .await
@@ -2180,24 +2176,17 @@ pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_jso
     state.with_state_read(|_core_state| Ok(Vec::new())).await
 }
 
-/// 检查 TTS 能力是否已配置
-#[tauri::command]
-pub async fn has_tts_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
-    has_model_capability("tts".to_string(), state).await
-}
-
-/// 检查 STT 能力是否已配置
-#[tauri::command]
-pub async fn has_stt_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
-    has_model_capability("stt".to_string(), state).await
-}
-
 /// 统一的能力可用性查询（基于配置快速检测）
+///
+/// 已移除的旧能力键（图片/视频/语音）按未配置处理，不报错，兼容旧版调用方。
 #[tauri::command]
 pub async fn has_model_capability(
     capability: String,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
+    if tiangong_llm::models_config::REMOVED_CAPABILITY_KEYS.contains(&capability.as_str()) {
+        return Ok(false);
+    }
     let capability = parse_model_capability(&capability)?;
     state
         .with_state_read(|core_state| Ok(has_capability_in_state(core_state, capability)))

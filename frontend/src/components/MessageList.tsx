@@ -14,7 +14,7 @@ import {
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import { api, hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
+import { hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
 import {
   type Attachment,
   attachmentKindFromMime,
@@ -66,7 +66,6 @@ export function MessageList() {
   const streamingMessageId = useStore(s => s.streamingMessageId);
   const streamingContent = useStore(s => s.streamingContent);
   const streamingReasoningContent = useStore(s => s.streamingReasoningContent);
-  const voiceMessages = useStore(s => s.voiceMessages);
   const editAndResend = useStore(s => s.editAndResend);
   const activeSessionId = useStore(s => s.activeSessionId);
 
@@ -90,7 +89,6 @@ export function MessageList() {
   const prevRunStatusRef = useRef('idle');
   // undefined 表示尚未跑过首次定位（挂载时走新消息路径），此后记录上次会话 id
   const prevActiveSessionRef = useRef<string | null | undefined>(undefined);
-  const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
@@ -156,22 +154,6 @@ export function MessageList() {
     return () => {
       void unlisten.then((fn) => fn());
       window.removeEventListener('focus', handleWindowFocus);
-    };
-  }, []);
-
-  // 检查 TTS 能力（插件启停后即时刷新）
-  useEffect(() => {
-    const refresh = () => api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
-    refresh();
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    api.onPluginsChanged(refresh).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
     };
   }, []);
 
@@ -916,7 +898,6 @@ export function MessageList() {
                           group={group}
                           runStatus={runStatus}
                           nonEditableIds={nonEditableIds}
-                          voiceMessages={voiceMessages}
                           editingMessageId={editingMessageId}
                           editingContent={editingContent}
                           editingAttachments={editingAttachments}
@@ -953,7 +934,6 @@ export function MessageList() {
                           streamingMessageId={null}
                           streamingContent=""
                           streamingReasoningContent=""
-                          hasTts={hasTts}
                         />
                       </div>
                     );
@@ -986,7 +966,6 @@ export function MessageList() {
                         streamingMessageId={null}
                         streamingContent=""
                         streamingReasoningContent=""
-                        hasTts={hasTts}
                         isActive={isLiveTurn}
                         turnElapsedMs={turnResultByGroupKey.get(group.key)?.elapsedMs}
                         turnStatus={turnResultByGroupKey.get(group.key)?.status}
@@ -1005,7 +984,6 @@ export function MessageList() {
                     streamingMessageId={streamingMessageId}
                     streamingContent={streamingContent}
                     streamingReasoningContent={streamingReasoningContent}
-                    hasTts={hasTts}
                     isActive={isThinking}
                     turnElapsedMs={streamingTurnResult?.elapsedMs}
                     turnStatus={streamingTurnResult?.status}

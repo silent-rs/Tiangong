@@ -10,9 +10,7 @@ use anyhow::{Result, anyhow};
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
-use tiangong_media_archive::{
-    AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
-};
+use tiangong_media_archive::{AttachmentStore, AttachmentTransaction, RawAttachment};
 use tiangong_types::{
     ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, StreamEvent,
 };
@@ -30,7 +28,6 @@ pub struct ServerCoreManager {
     session_wait_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     /// 串行全局配置刷新与新 Core 安装，避免新实例错过刚完成的配置更新。
     config_update_lock: Arc<AsyncMutex<()>>,
-    core_attachment_capabilities: Arc<Mutex<HashMap<String, AttachmentCapabilitySnapshot>>>,
     trackers: Arc<Mutex<HashMap<String, Arc<ExecutionTracker>>>>,
     remote_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -48,7 +45,6 @@ impl ServerCoreManager {
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
-            core_attachment_capabilities: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
             remote_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -173,12 +169,12 @@ impl ServerCoreManager {
             .await
             .core_manager
             .session_exists(&requested_session_id);
-        let (session_id, capabilities) = self.ensure_core_locked(&requested_session_id).await?;
+        let session_id = self.ensure_core_locked(&requested_session_id).await?;
 
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
         // 附件准备成功后才登记 waiter，准备失败不会污染 tracker。
         let (transaction, prepared) = self
-            .prepare_user_message(msg_id.clone(), content, media, capabilities)
+            .prepare_user_message(msg_id.clone(), content, media)
             .await?;
         let tracker = self.tracker_for(&session_id);
         let turn_id = tracker.start_turn(msg_id.clone());
@@ -242,10 +238,6 @@ impl ServerCoreManager {
             .await
             .map_err(anyhow::Error::msg)?;
 
-        self.core_attachment_capabilities
-            .lock()
-            .map_err(|error| anyhow!("附件能力快照锁已损坏：{error}"))?
-            .remove(&session_id);
         self.trackers
             .lock()
             .map_err(|error| anyhow!("执行跟踪锁已损坏：{error}"))?
@@ -267,12 +259,11 @@ impl ServerCoreManager {
         message_id: String,
         content: String,
         media: Vec<MediaAsset>,
-        capabilities: AttachmentCapabilitySnapshot,
     ) -> Result<(AttachmentTransaction, Vec<ContentBlock>)> {
         let raw = media.into_iter().map(raw_attachment_from_media).collect();
         let media_root = self.state.lock().await.config.storage_root.join("media");
         tokio::task::spawn_blocking(move || {
-            prepare_user_message_blocking(media_root, raw, message_id, content, capabilities)
+            prepare_user_message_blocking(media_root, raw, message_id, content)
         })
         .await
         .map_err(|error| anyhow!("附件准备任务失败：{error}"))?
@@ -295,21 +286,11 @@ impl ServerCoreManager {
     }
 
     /// 调用方必须持有目标 session 的 `session_operation_lock`。
-    async fn ensure_core_locked(
-        &self,
-        requested_session_id: &str,
-    ) -> Result<(String, AttachmentCapabilitySnapshot)> {
+    async fn ensure_core_locked(&self, requested_session_id: &str) -> Result<String> {
         let session_id = normalize_session_id(requested_session_id)?;
 
         if self.core_manager.has_live_core(&session_id) {
-            let capabilities = self
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .get(&session_id)
-                .copied()
-                .ok_or_else(|| anyhow!("会话 Core 缺少附件能力快照：{session_id}"))?;
-            return Ok((session_id, capabilities));
+            return Ok(session_id);
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
@@ -319,17 +300,10 @@ impl ServerCoreManager {
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
         // 这里同时防御未来新增的未加锁入口。
         if self.core_manager.has_live_core(&session_id) {
-            let capabilities = self
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .get(&session_id)
-                .copied()
-                .ok_or_else(|| anyhow!("会话 Core 缺少附件能力快照：{session_id}"))?;
-            return Ok((session_id, capabilities));
+            return Ok(session_id);
         }
 
-        let (mut session_config, models, storage_root, workspace_dir) = {
+        let (mut session_config, storage_root, workspace_dir) = {
             let state = self.state.lock().await;
             let workspace_dir = state
                 .core_manager
@@ -341,18 +315,14 @@ impl ServerCoreManager {
                 .unwrap_or_else(|| state.workspace_dir.clone());
             (
                 state.config.to_core_config(),
-                state.config.models.clone(),
                 state.config.storage_root.clone(),
                 workspace_dir,
             )
         };
         session_config.trust_mode = TrustMode::FullTrust;
 
-        let attachment_capabilities = attachment_capability_snapshot(&models);
         let plugins = {
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-            // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
-            // 看到的能力与该 Core 实际注册插件一致。
             // prompt 等 WASM 插件由 load_installed_plugins 自动加载。
             let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
@@ -378,25 +348,13 @@ impl ServerCoreManager {
         let actual_session_id = ensured.session_id;
 
         if !ensured.is_new {
-            let capabilities = self
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .get(&actual_session_id)
-                .copied()
-                .ok_or_else(|| anyhow!("会话 Core 缺少附件能力快照：{actual_session_id}"))?;
-            return Ok((actual_session_id, capabilities));
+            return Ok(actual_session_id);
         }
-
-        self.core_attachment_capabilities
-            .lock()
-            .map_err(|error| anyhow!("附件能力快照锁已损坏：{error}"))?
-            .insert(actual_session_id.clone(), attachment_capabilities);
 
         let tracker = self.tracker_for(&actual_session_id);
         self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
 
-        Ok((actual_session_id, attachment_capabilities))
+        Ok(actual_session_id)
     }
 
     async fn resolve_connector_session_id(
@@ -842,35 +800,10 @@ fn prepare_user_message_blocking(
     raw: Vec<RawAttachment>,
     message_id: String,
     content: String,
-    capabilities: AttachmentCapabilitySnapshot,
 ) -> std::result::Result<(AttachmentTransaction, Vec<ContentBlock>), String> {
     let mut transaction = AttachmentStore::new(media_root).store_batch(raw)?;
-    let prepared = transaction.prepare_message(&message_id, content, capabilities)?;
+    let prepared = transaction.prepare_message(&message_id, content)?;
     Ok((transaction, prepared))
-}
-
-fn attachment_capability_snapshot(
-    models: &tiangong_llm::ModelsConfig,
-) -> AttachmentCapabilitySnapshot {
-    use tiangong_llm::ModelCapability;
-
-    let chat_multimodal = models.chat_is_multimodal();
-    let analyze_attachment = !chat_multimodal
-        && models.has_capability(ModelCapability::Multimodal)
-        && models
-            .resolve_for_capability(ModelCapability::Multimodal)
-            .is_some();
-    let audio_processor = models.has_capability(ModelCapability::Stt)
-        && models
-            .resolve_for_capability(ModelCapability::Stt)
-            .is_some();
-
-    AttachmentCapabilitySnapshot {
-        chat_multimodal,
-        analyze_attachment,
-        audio_processor,
-        video_processor: false,
-    }
 }
 
 fn remote_session_key(connector: &str, channel_id: &str) -> String {
@@ -1344,45 +1277,10 @@ mod tests {
             raw,
             "message-broken".to_string(),
             "broken".to_string(),
-            AttachmentCapabilitySnapshot {
-                chat_multimodal: true,
-                ..AttachmentCapabilitySnapshot::default()
-            },
         );
 
         assert!(result.is_err());
         assert_eq!(tracker.registered_turn_count(), 0);
-    }
-
-    #[test]
-    fn attachment_preparation_uses_the_server_message_id_in_model_guidance() {
-        let root = tempfile::tempdir().unwrap();
-        let raw = vec![RawAttachment {
-            kind: MediaKind::Image,
-            source: "data:image/png;base64,aW1hZ2U=".to_string(),
-            mime_type: Some("image/png".to_string()),
-            original_name: Some("server.png".to_string()),
-        }];
-
-        let (_transaction, prepared) = prepare_user_message_blocking(
-            root.path().join("media"),
-            raw,
-            "message-from-server".to_string(),
-            "analyze".to_string(),
-            AttachmentCapabilitySnapshot {
-                analyze_attachment: true,
-                ..AttachmentCapabilitySnapshot::default()
-            },
-        )
-        .unwrap();
-
-        assert!(prepared.iter().any(|block| matches!(
-            block,
-            ContentBlock::ModelInstruction { text }
-                if text.contains("message_id=message-from-server")
-                    && text.contains("attachment_index=0")
-                    && text.contains("analyze_attachment")
-        )));
     }
 
     #[test]

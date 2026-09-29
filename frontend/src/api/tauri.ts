@@ -496,6 +496,7 @@ export const SLOT_IDS = [
   'session.after-input',
   'session.input-status',
   'session.interaction',
+  'session.input-overlay',
   'session.empty-state',
   'extension.tab',
   'extension.side',
@@ -599,8 +600,24 @@ export interface SlotContributionEntry {
 
 export interface SessionInputAttachmentPayload {
   plugin_id: string;
-  /** kind="text" 为插件指令文本（session.input.sendText），其余同附件。 */
-  attachment: Omit<RawAttachment, 'kind'> & { kind: RawAttachment['kind'] | 'text'; text?: string };
+  /**
+   * kind="text" 为插件文本（session.input.sendText / insertText）：
+   * mode="insert" 只写入草稿，否则发送，attachments 为随文本发送的音频附件。
+   * 其余 kind 同草稿附件（PNG 图片 / 媒体目录内音频）。
+   */
+  attachment: Omit<RawAttachment, 'kind'> & {
+    kind: RawAttachment['kind'] | 'text';
+    text?: string;
+    mode?: 'send' | 'insert';
+    attachments?: RawAttachment[];
+  };
+}
+
+/** 输入覆盖层显隐请求（session.input.showOverlay / hideOverlay）。 */
+export interface SessionInputOverlayPayload {
+  plugin_id: string;
+  visible: boolean;
+  session_id?: string | null;
 }
 
 /** 插件入口资源响应（字节数组 + MIME）。 */
@@ -1132,66 +1149,6 @@ export const api = {
     invoke('reset_context'),
 
   // ----------------------------------------------------------------
-  // 语音合成（经 tts 插件，前端经 bridge.call 调用插件 handle_view_message）
-  // ----------------------------------------------------------------
-  synthesizeSpeech: (text: string): Promise<{ file_path: string; mime_type: string }> =>
-    api.bridgeCall('text-to-speech', 'plugin.synthesize', JSON.stringify({ text }))
-      .then((raw) => JSON.parse(raw)),
-
-  /** 播放音频并等待播放完成（轮询 sidecar 播放状态；stopAudio 可中断等待）。 */
-  playAudioFile: async (filePath: string): Promise<void> => {
-    await api.bridgeCall('text-to-speech', 'plugin.play', JSON.stringify({ file_path: filePath }));
-    // 播放在 sidecar 后台执行（阻塞式播放会让 stop 请求永远排队），
-    // 这里轮询播放状态直到自然结束或被 stop 终止。
-    for (;;) {
-      const raw = await api.bridgeCall('text-to-speech', 'plugin.play_status', '{}');
-      if (!JSON.parse(raw).playing) return;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-  },
-
-  stopAudio: (): Promise<void> =>
-    api.bridgeCall('text-to-speech', 'plugin.stop', '{}')
-      .then(() => undefined),
-
-  hasTtsCapability: (): Promise<boolean> =>
-    api.listPlugins().then((plugins) =>
-      plugins.some((p) => p.id === 'text-to-speech' && p.enabled),
-    ),
-
-  listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
-    api.bridgeCall('text-to-speech', 'plugin.list_voices', '{}')
-      .then((raw) => JSON.parse(raw).voices ?? []),
-
-  // ----------------------------------------------------------------
-  // 语音识别（经 stt 插件，前端经 bridge.call 调用插件 handle_view_message）
-  // ----------------------------------------------------------------
-  hasSttCapability: (): Promise<boolean> =>
-    api.listPlugins().then((plugins) =>
-      plugins.some((p) => p.id === 'speech-to-text' && p.enabled),
-    ),
-
-  /** 转录音频文件（经 stt 插件）。filePath 为 ~/.tiangong/media 下的音频文件路径。 */
-  transcribeSpeech: (filePath: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
-    api.bridgeCall('speech-to-text', 'plugin.transcribe', JSON.stringify({ file_path: filePath }))
-      .then((raw) => JSON.parse(raw)),
-
-  /** 开始录音（经 stt 插件）。session_id 由调用方生成传入，后续停止/取消携带同一编号。 */
-  startRecording: (sessionId: string): Promise<{ session_id: string }> =>
-    api.bridgeCall('speech-to-text', 'plugin.record_start', JSON.stringify({ session_id: sessionId }))
-      .then((raw) => JSON.parse(raw)),
-
-  /** 停止录音（经 stt 插件）。返回音频文件路径。session_id 为开始录音返回的会话 ID。 */
-  stopRecording: (sessionId: string): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
-    api.bridgeCall('speech-to-text', 'plugin.record_stop', JSON.stringify({ session_id: sessionId }))
-      .then((raw) => JSON.parse(raw)),
-
-  /** 取消录音（经 stt 插件）：终止录音进程并丢弃录音文件（带会话 ID 校验）。 */
-  cancelRecording: (sessionId: string): Promise<void> =>
-    api.bridgeCall('speech-to-text', 'plugin.record_cancel', JSON.stringify({ session_id: sessionId }))
-      .then(() => undefined),
-
-  // ----------------------------------------------------------------
   // 事件监听
   // ----------------------------------------------------------------
   onStreamEvent: (callback: (event: SessionStreamEvent) => void) =>
@@ -1338,6 +1295,9 @@ export const api = {
 
   onSessionInputAttachment: (callback: (event: SessionInputAttachmentPayload) => void) =>
     listen<SessionInputAttachmentPayload>('session_input_attachment', (event) => callback(event.payload)),
+
+  onSessionInputOverlay: (callback: (event: SessionInputOverlayPayload) => void) =>
+    listen<SessionInputOverlayPayload>('session_input_overlay', (event) => callback(event.payload)),
 
 
   onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>

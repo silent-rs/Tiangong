@@ -41,7 +41,6 @@ const mocks = vi.hoisted(() => {
       },
     ])),
     onStreamEvent: vi.fn(() => Promise.resolve(() => {})),
-    hasTtsCapability: vi.fn(() => Promise.resolve(false)),
   };
   const listen = vi.fn(() => Promise.resolve(() => {}));
   return {

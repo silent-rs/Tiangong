@@ -161,14 +161,10 @@ fn prompt_model(
         model_id.trim().to_string()
     };
 
-    // capability 多选
+    // capability 多选（仅对话与多模态）
     let caps = [
         ("chat", ModelCapability::Chat),
         ("multimodal", ModelCapability::Multimodal),
-        ("image_generation", ModelCapability::ImageGeneration),
-        ("video_generation", ModelCapability::VideoGeneration),
-        ("stt", ModelCapability::Stt),
-        ("tts", ModelCapability::Tts),
     ];
     let cap_labels: Vec<&str> = caps.iter().map(|(k, _)| *k).collect();
     // 默认勾选 chat（caps[0]），降低误操作概率；ChatGPT（Codex）全系原生多模态，
@@ -212,25 +208,14 @@ fn prompt_route(
         return Ok(());
     }
 
-    // 根据模型能力推荐槽位
-    let slots: Vec<(&str, RoutingSlot)> = vec![
-        ("chat", RoutingSlot::Chat),
-        ("lite", RoutingSlot::Lite),
-        ("multimodal", RoutingSlot::Multimodal),
-        ("image_generation", RoutingSlot::ImageGeneration),
-        ("video_generation", RoutingSlot::VideoGeneration),
-        ("stt", RoutingSlot::Stt),
-        ("tts", RoutingSlot::Tts),
-    ];
-    // 默认推荐 chat
-    let default_slot = if capabilities.contains(&ModelCapability::Chat) {
-        0
-    } else {
-        capabilities
-            .first()
-            .and_then(|c| slots.iter().position(|(_, s)| s.capability() == Some(*c)))
-            .unwrap_or(0)
-    };
+    // 路由槽位：chat / lite 均要求对话能力
+    if !capabilities.contains(&ModelCapability::Chat) {
+        println!("该模型不具备 chat 能力，不能设置为路由（可稍后调整能力后再配置）");
+        return Ok(());
+    }
+    let slots: Vec<(&str, RoutingSlot)> =
+        vec![("chat", RoutingSlot::Chat), ("lite", RoutingSlot::Lite)];
+    let default_slot = 0;
 
     let slot_labels: Vec<&str> = slots.iter().map(|(k, _)| *k).collect();
     let idx = ui::select_with_default("选择路由槽位", &slot_labels, default_slot)?;

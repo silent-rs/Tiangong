@@ -11,10 +11,11 @@ import { parseWebhookMessage } from "@/utils/webhookMessage";
 import { textContent } from "@/api/tauri";
 import { hasMention, parseBlocks } from "@/utils/mentionBlocks";
 import { formatMessageTime } from "./utils";
-import type { MessageGroup } from "./types";
-import { VoiceBubble } from "./VoiceBubble";
+import type { MessageGroup, MessageItem } from "./types";
 import { UserMessageActions } from "./UserMessageActions";
 import { ContentMedia } from "./ContentMedia";
+import { MessagePluginHost } from "../MessagePluginHost";
+import type { HostMessageContext } from "../pluginHostContext";
 import { CollapsibleMarkdownText, CollapsibleUserText } from "./CollapsibleUserText";
 
 
@@ -222,11 +223,10 @@ function SubagentReportCard({ agentName, status, content, contentOffset, time, o
   );
 }
 
-export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
+export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
   runStatus: string;
   nonEditableIds: Set<string>;
-  voiceMessages: Record<string, { audioPath: string; duration?: number; showText: boolean }>;
   editingMessageId: string | null;
   editingContent: string;
   editingAttachments: Attachment[];
@@ -250,8 +250,8 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   const subagentTaskMatch = messageText.match(/^【Subagent (消息|任务)】来自(.+?)：\n?([\s\S]*)$/);
   // Subagent 回报（纯消息投递路径）：接收方收到的成员回报。
   const subagentReportMessageMatch = messageText.match(/^【Subagent 回报】来自(.+?)：\n?([\s\S]*)$/);
-  const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
+  const pluginMessage = userMessageContext(message, messageText);
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
   const currentMatchStart = useSearchStore((s) => s.currentMatchStart);
@@ -451,10 +451,9 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
             })()
           ) : (
             <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-foreground">
-              {voiceInfo ? (
-                <VoiceBubble messageId={message.id} audioPath={voiceInfo.audioPath} duration={voiceInfo.duration} showText={voiceInfo.showText} content={messageText} />
-              ) : (
                 <div>
+                  {/* 插件消息附加区（如语音消息播放）：由插件经 session.message-item 注入 */}
+                  <MessagePluginHost slot="session.message-item" message={pluginMessage} />
                   <ContentMedia message={message} />
                   {messageText && (
                     // 换行与 Markdown 走 Markdown 预览渲染（md-editor-rt 默认
@@ -470,7 +469,6 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
                     )
                   )}
                 </div>
-              )}
             </div>
           )}
         </div>
@@ -482,4 +480,20 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
       )}
     </div>
   );
+}
+
+/** 用户消息的插件上下文：文本与引用的本地媒体附件。 */
+function userMessageContext(message: MessageItem, text: string): HostMessageContext {
+  const content = Array.isArray(message.content) ? message.content : [];
+  const attachments = content.flatMap((block) =>
+    block.type === "asset_reference" || block.type === "image"
+      ? [{
+          kind: block.asset.kind,
+          path: block.asset.local_path,
+          mime_type: block.asset.mime_type,
+          name: block.asset.original_name,
+        }]
+      : [],
+  );
+  return { id: message.id, role: "user", text, attachments };
 }

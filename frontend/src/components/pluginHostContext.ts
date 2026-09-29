@@ -39,6 +39,16 @@ export function collectHostTokens(): Record<string, string> {
   );
 }
 
+/** 消息级 Slot（session.message-action / session.message-item）的消息上下文。 */
+export interface HostMessageContext {
+  id: string;
+  role: string;
+  /** 面向用户的可见文本（助手消息为最终回复正文）。 */
+  text: string;
+  /** 消息引用的媒体附件（本地路径）。 */
+  attachments: Array<{ kind: string; path: string; mime_type?: string; name?: string }>;
+}
+
 /**
  * iframe 容器的 hostContext 消息体（沿用既有协议，保持 v1 插件兼容）。
  * workspace 为当前会话工作目录（无活跃会话时为全局工作区），供终端等
@@ -50,6 +60,7 @@ export function hostContext(
   sessionId?: string | null,
   workspace?: string | null,
   app?: { instance_id: string; visible: boolean },
+  message?: HostMessageContext,
 ) {
   const session: { id?: string; workspace?: string } = {};
   if (sessionId) session.id = sessionId;
@@ -62,6 +73,7 @@ export function hostContext(
     fontFamily: getComputedStyle(document.body).fontFamily,
     ...(sessionId || workspace ? { session } : {}),
     ...(app ? { app } : {}),
+    ...(message ? { message } : {}),
   };
 }
 

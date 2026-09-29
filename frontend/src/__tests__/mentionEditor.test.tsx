@@ -207,7 +207,6 @@ describe('MentionEditor 轻量交互', () => {
           group={group}
           runStatus="idle"
           nonEditableIds={new Set()}
-          voiceMessages={{}}
           editingMessageId="message-1"
           editingContent="请 @dev 处理"
           editingAttachments={[]}

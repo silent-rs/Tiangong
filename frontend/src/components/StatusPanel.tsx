@@ -2,11 +2,11 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { startWindowDrag } from '@/lib/windowDrag';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useSearchStore } from '@/store/useSearchStore';
-import { useStreamingTts } from '@/hooks/useStreamingTts';
 import { Separator } from './ui/separator';
+import { GlobalStatusPluginHost } from './GlobalStatusPluginHost';
 import { useSidebar } from './ui/sidebar';
 import { Button } from './ui/button';
 import {
@@ -55,25 +55,6 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
 
   const { theme, setTheme } = useTheme();
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
-  const streamingTts = useStreamingTts();
-  const [hasTts, setHasTts] = useState(false);
-
-  useEffect(() => {
-    const refresh = () => api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
-    refresh();
-    // 插件安装/启用/禁用后按钮状态即时刷新，而不是只在挂载时检查一次。
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    api.onPluginsChanged(refresh).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   const activeSession = isNewConversation ? null : sessions.find((s) => s.id === activeSessionId);
   const currentTitle = isNewConversation ? '新对话' : (activeSession?.title || '新对话');
 
@@ -198,26 +179,10 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
       </div>
 
       <div className="ml-auto flex items-center gap-3">
-        {hasTts && (
-          <button
-            data-no-drag
-            onClick={() => streamingTts.enabled ? streamingTts.stop() : streamingTts.setEnabled(true)}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs transition-colors ${
-              streamingTts.enabled
-                ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-            title={streamingTts.enabled ? '关闭自动朗读' : '开启自动朗读'}
-          >
-            {streamingTts.enabled ? (
-              streamingTts.isPlaying
-                ? <AudioLines className="w-3.5 h-3.5 animate-pulse" />
-                : <Volume2 className="w-3.5 h-3.5" />
-            ) : (
-              <VolumeX className="w-3.5 h-3.5" />
-            )}
-          </button>
-        )}
+        {/* 全局状态项（如自动朗读开关）：由插件经 global.status-item 注入 */}
+        <span data-no-drag className="contents">
+          <GlobalStatusPluginHost />
+        </span>
         {updateAvailable && (
           <button
             data-no-drag

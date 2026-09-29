@@ -19,6 +19,7 @@ import {
 } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
 import { InteractionPluginHost } from '@/components/InteractionPluginHost';
+import { InputOverlayPluginHost } from '@/components/InputOverlayPluginHost';
 import { useToast } from '@/components/Toast';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
@@ -91,6 +92,7 @@ export function MainApp() {
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [interactionVisible, setInteractionVisible] = useState(false);
+  const [inputOverlayVisible, setInputOverlayVisible] = useState(false);
   const [messageInputHeight, setMessageInputHeight] = useState(0);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
@@ -710,8 +712,13 @@ export function MainApp() {
                 </div>
 
                 <LazyMessageInput
-                  interactionVisible={interactionVisible}
+                  interactionVisible={interactionVisible || inputOverlayVisible}
                   onHeightChange={setMessageInputHeight}
+                />
+                <InputOverlayPluginHost
+                  suppressed={interactionVisible}
+                  inputHeight={messageInputHeight}
+                  onVisibilityChange={setInputOverlayVisible}
                 />
                 <InteractionPluginHost
                   inputHeight={messageInputHeight}

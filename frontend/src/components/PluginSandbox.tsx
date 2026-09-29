@@ -3,6 +3,7 @@ import { api, type SandboxKind } from '../api/tauri';
 import { PluginIframe } from './PluginIframe';
 import {
   hostContext,
+  type HostMessageContext,
   type PluginHostContext,
 } from './pluginHostContext';
 
@@ -29,6 +30,8 @@ export interface PluginSandboxProps {
   instanceId?: string;
   /** 当前实例是否是拓展区正在显示的标签。 */
   visible?: boolean;
+  /** 消息级 Slot 的消息上下文。 */
+  message?: HostMessageContext;
 }
 
 export function PluginSandbox({
@@ -41,6 +44,7 @@ export function PluginSandbox({
   workspace,
   instanceId,
   visible,
+  message,
 }: PluginSandboxProps) {
   // webview 贡献（如浏览器插件）：管理界面（地址栏/工具栏）跑 shadow 容器——
   // 页面本体是宿主原生 webview 实例，管理界面需要主文档坐标同步其位置，
@@ -56,6 +60,7 @@ export function PluginSandbox({
         workspace={workspace}
         instanceId={instanceId}
         visible={visible}
+        message={message}
       />
     );
   }
@@ -74,6 +79,7 @@ export function PluginSandbox({
       workspace={workspace}
       instanceId={instanceId}
       visible={visible}
+      message={message}
     />
   );
 }
@@ -219,6 +225,7 @@ function ShadowContainer({
   workspace,
   instanceId,
   visible,
+  message,
 }: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ShadowRuntimeState | null>(null);
@@ -236,6 +243,7 @@ function ShadowContainer({
       instanceId && typeof visible === 'boolean'
         ? { instance_id: instanceId, visible }
         : undefined,
+      message,
     );
     const bridge = createHostBridge(pluginId, () => currentContext);
     let cancelled = false;
@@ -276,7 +284,9 @@ function ShadowContainer({
         const contextChanged = currentContext.session?.id !== context.session?.id
           || currentContext.session?.workspace !== context.session?.workspace
           || currentContext.app?.instance_id !== context.app?.instance_id
-          || currentContext.app?.visible !== context.app?.visible;
+          || currentContext.app?.visible !== context.app?.visible
+          || currentContext.message?.id !== context.message?.id
+          || currentContext.message?.text !== context.message?.text;
         currentContext = context;
         if (!contextChanged) return;
         contextHandlers.forEach((handler) => handler(context));
@@ -324,9 +334,10 @@ function ShadowContainer({
         instanceId && typeof visible === 'boolean'
           ? { instance_id: instanceId, visible }
           : undefined,
+        message,
       ),
     );
-  }, [contributionId, instanceId, pluginId, sessionId, visible, workspace]);
+  }, [contributionId, instanceId, message, pluginId, sessionId, visible, workspace]);
 
   return (
     <div

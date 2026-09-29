@@ -510,7 +510,13 @@ fn parse_capabilities(raw: &[String]) -> Result<Vec<ModelCapability>> {
                 "{item} 能力已由 Memory 插件独立管理，请使用 `tiangong memory config` 打开配置页设置"
             ));
         }
-        let cap = ModelCapability::from_key(item).ok_or_else(|| anyhow!("无效的能力 {item}"))?;
+        if tiangong_llm::models_config::REMOVED_CAPABILITY_KEYS.contains(&item.as_str()) {
+            return Err(anyhow!(
+                "{item} 能力已从模型配置中移除（可用 chat/multimodal）"
+            ));
+        }
+        let cap = ModelCapability::from_key(item)
+            .ok_or_else(|| anyhow!("无效的能力 {item}（可用 chat/multimodal）"))?;
         if !result.contains(&cap) {
             result.push(cap);
         }
@@ -524,9 +530,15 @@ fn parse_slot(raw: &str) -> Result<RoutingSlot> {
             "{raw} 已由 Memory 插件独立管理，请使用 `tiangong memory config` 打开配置页设置"
         ));
     }
-    RoutingSlot::from_key(raw).ok_or_else(|| {
-        anyhow!("无效的路由槽位 {raw}（可用 chat/lite/multimodal/image_generation/video_generation/stt/tts）")
-    })
+    if raw == "multimodal" {
+        return Err(anyhow!(
+            "multimodal 路由已移除：请为 chat 路由的模型声明 multimodal 能力"
+        ));
+    }
+    if tiangong_llm::models_config::REMOVED_ROUTING_KEYS.contains(&raw) {
+        return Err(anyhow!("{raw} 路由已从模型配置中移除（可用 chat/lite）"));
+    }
+    RoutingSlot::from_key(raw).ok_or_else(|| anyhow!("无效的路由槽位 {raw}（可用 chat/lite）"))
 }
 
 #[cfg(test)]
