@@ -843,13 +843,9 @@ pub(crate) async fn attachment_capability_snapshot(
     state: &TiangongApp,
 ) -> Result<tiangong_media_archive::AttachmentCapabilitySnapshot, String> {
     state
-        .with_state_read(|core_state| {
-            let models = &core_state.config.models;
-            let chat_multimodal = models.chat_is_multimodal();
+        .with_state_read(|_core_state| {
+            // 图片只归档并以路径注入，按模型能力的处理在 CoreManager 投递时完成。
             Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
-                chat_multimodal,
-                // 多模态已无独立路由：chat 模型不支持图片时没有可用的看图模型。
-                analyze_attachment: false,
                 // 语音识别能力已从模型配置中移除。
                 audio_processor: false,
                 // 当前没有“视频内容分析”插件；视频生成能力不能冒充输入处理能力。

@@ -24,8 +24,6 @@ pub struct RawAttachment {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AttachmentCapabilitySnapshot {
-    pub chat_multimodal: bool,
-    pub analyze_attachment: bool,
     pub audio_processor: bool,
     pub video_processor: bool,
 }
@@ -306,31 +304,15 @@ impl AttachmentTransaction {
                         text: file_attachment_instruction(index, &asset),
                     });
                 }
-                MediaKind::Image if capabilities.chat_multimodal => {
-                    let bytes = fs::read(&stored.local_path)
-                        .map_err(|error| format!("读取内联图片失败：{error}"))?;
-                    ensure_size(bytes.len() as u64, "图片")?;
-                    content.push(ContentBlock::Image {
-                        asset: asset.clone(),
-                        data: Some(general_purpose::STANDARD.encode(bytes)),
-                    });
-                    content.push(ContentBlock::ModelInstruction {
-                        text: inline_image_instruction(index, &asset),
-                    });
-                }
-                MediaKind::Image if capabilities.analyze_attachment => {
+                // 图片归档后以本地路径引用注入；以原生图片（base64）还是路径
+                // 发送给模型，由 CoreManager 投递时按会话模型能力决定。
+                MediaKind::Image => {
                     content.push(ContentBlock::AssetReference {
                         asset: asset.clone(),
                     });
                     content.push(ContentBlock::ModelInstruction {
-                        text: analyze_attachment_instruction(message_id, index, &asset),
+                        text: inline_image_instruction(index, &asset),
                     });
-                }
-                MediaKind::Image => {
-                    return Err(format!(
-                        "图片附件无法处理：对话模型和附件分析能力均不可用（{}）",
-                        stored.original_name
-                    ));
                 }
                 MediaKind::Audio => {
                     content.push(ContentBlock::AssetReference {
@@ -391,14 +373,6 @@ fn asset_notice_item(index: usize, asset: &StoredAsset) -> String {
         asset.mime_type,
         asset.size,
         asset.local_path,
-    )
-}
-
-fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
-    format!(
-        "本条用户消息包含需要附件分析插件处理的图片。需要查看内容时，请调用 analyze_attachment 工具，将本地图片路径原样传入 images={}，并用 instruction 说明分析要求。消息编号仅用于标识来源，不作为图片参数。\n来源：message_id={message_id} attachment_index={index}\n- {}",
-        serde_json::json!([asset.local_path]),
-        asset_notice_item(index, asset)
     )
 }
 
@@ -962,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_image_keeps_runtime_data_and_exposes_archived_path_to_tools() {
+    fn image_is_archived_and_injected_as_path_reference() {
         let root = TestRoot::new();
         let mut transaction = root
             .store()
@@ -977,10 +951,7 @@ mod tests {
             .prepare_message(
                 "message-inline",
                 "look",
-                AttachmentCapabilitySnapshot {
-                    chat_multimodal: true,
-                    ..Default::default()
-                },
+                AttachmentCapabilitySnapshot::default(),
             )
             .unwrap();
 
@@ -988,16 +959,11 @@ mod tests {
         assert!(!transaction.assets()[0].local_path.starts_with("data:"));
         assert_eq!(message.len(), 3);
         match &message[1] {
-            ContentBlock::Image { asset, data } => {
+            ContentBlock::AssetReference { asset } => {
                 assert_eq!(asset, &transaction.assets()[0]);
-                assert_eq!(
-                    general_purpose::STANDARD
-                        .decode(data.as_ref().unwrap())
-                        .unwrap(),
-                    b"png bytes"
-                );
+                assert_eq!(fs::read(&asset.local_path).unwrap(), b"png bytes");
             }
-            other => panic!("应生成最终 Image block，实际：{other:?}"),
+            other => panic!("图片应以路径引用注入，实际：{other:?}"),
         }
         let expected_instruction = format!(
             "本条消息中的图片已归档，本地工具需要读取时直接使用：index=0 path={}",
@@ -1007,16 +973,10 @@ mod tests {
             &message[2],
             ContentBlock::ModelInstruction { text } if text == &expected_instruction
         ));
-        let stable = tiangong_types::stable_content_blocks(&message);
-        assert!(matches!(&stable[1], ContentBlock::Image { data: None, .. }));
-        assert!(matches!(
-            &stable[2],
-            ContentBlock::ModelInstruction { text } if text.contains("path=")
-        ));
     }
 
     #[test]
-    fn svg_image_uses_file_reference_even_with_multimodal() {
+    fn svg_image_uses_file_reference() {
         let root = TestRoot::new();
         let mut transaction = root
             .store()
@@ -1031,10 +991,7 @@ mod tests {
             .prepare_message(
                 "message-svg",
                 "look",
-                AttachmentCapabilitySnapshot {
-                    chat_multimodal: true,
-                    ..Default::default()
-                },
+                AttachmentCapabilitySnapshot::default(),
             )
             .unwrap();
 
@@ -1072,17 +1029,14 @@ mod tests {
             .prepare_message(
                 "message-two-images",
                 "try on",
-                AttachmentCapabilitySnapshot {
-                    chat_multimodal: true,
-                    ..Default::default()
-                },
+                AttachmentCapabilitySnapshot::default(),
             )
             .unwrap();
 
         assert_eq!(message.len(), 5);
         assert!(matches!(
             &message[1],
-            ContentBlock::Image { asset, .. } if asset.original_name == "person.png"
+            ContentBlock::AssetReference { asset } if asset.original_name == "person.png"
         ));
         assert!(matches!(
             &message[2],
@@ -1094,7 +1048,7 @@ mod tests {
         ));
         assert!(matches!(
             &message[3],
-            ContentBlock::Image { asset, .. } if asset.original_name == "dress.png"
+            ContentBlock::AssetReference { asset } if asset.original_name == "dress.png"
         ));
         assert!(matches!(
             &message[4],
@@ -1104,70 +1058,6 @@ mod tests {
                     transaction.assets()[1].local_path
                 )
         ));
-    }
-
-    #[test]
-    fn planner_builds_analyzer_reference_with_explicit_image_paths() {
-        let root = TestRoot::new();
-        let mut analyze = root
-            .store()
-            .store_batch(vec![
-                data_attachment(MediaKind::File, "context.txt", "text/plain", b"context"),
-                data_attachment(MediaKind::Image, "analyze.png", "image/png", b"image"),
-            ])
-            .unwrap();
-        let message = analyze
-            .prepare_message(
-                "message-analyze",
-                "analyze",
-                AttachmentCapabilitySnapshot {
-                    analyze_attachment: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-
-        assert_eq!(analyze.assets().len(), 2);
-        assert!(matches!(
-            &message[3],
-            ContentBlock::AssetReference { asset }
-                if asset.original_name == "analyze.png"
-        ));
-        assert!(matches!(
-            &message[4],
-            ContentBlock::ModelInstruction { text }
-                if text.contains("analyze_attachment")
-                    && text.contains("message_id=message-analyze")
-                    && text.contains("attachment_index=1")
-                    && text.contains(&format!("images={}", serde_json::json!([analyze.assets()[1].local_path])))
-                    && !text.contains("必须使用 message_id")
-                    && text.contains("name=analyze.png")
-                    && text.contains("path=")
-        ));
-    }
-
-    #[test]
-    fn unavailable_image_rejects_and_rolls_back_the_batch() {
-        let root = TestRoot::new();
-        let mut unavailable = root
-            .store()
-            .store_batch(vec![data_attachment(
-                MediaKind::Image,
-                "unavailable.png",
-                "image/png",
-                b"image",
-            )])
-            .unwrap();
-        assert!(
-            unavailable
-                .prepare_message(
-                    "message-unavailable",
-                    "fail",
-                    AttachmentCapabilitySnapshot::default()
-                )
-                .is_err()
-        );
-        assert_eq!(file_count(&root.0), 0);
     }
 
     #[test]
@@ -1188,7 +1078,6 @@ mod tests {
                 AttachmentCapabilitySnapshot {
                     audio_processor: true,
                     video_processor: false,
-                    ..AttachmentCapabilitySnapshot::default()
                 },
             )
             .unwrap();

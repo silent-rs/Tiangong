@@ -329,7 +329,7 @@ impl ServerCoreManager {
             return Ok((session_id, capabilities));
         }
 
-        let (mut session_config, models, storage_root, workspace_dir) = {
+        let (mut session_config, storage_root, workspace_dir) = {
             let state = self.state.lock().await;
             let workspace_dir = state
                 .core_manager
@@ -341,18 +341,15 @@ impl ServerCoreManager {
                 .unwrap_or_else(|| state.workspace_dir.clone());
             (
                 state.config.to_core_config(),
-                state.config.models.clone(),
                 state.config.storage_root.clone(),
                 workspace_dir,
             )
         };
         session_config.trust_mode = TrustMode::FullTrust;
 
-        let attachment_capabilities = attachment_capability_snapshot(&models);
+        let attachment_capabilities = attachment_capability_snapshot();
         let plugins = {
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-            // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
-            // 看到的能力与该 Core 实际注册插件一致。
             // prompt 等 WASM 插件由 load_installed_plugins 自动加载。
             let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
@@ -849,14 +846,10 @@ fn prepare_user_message_blocking(
     Ok((transaction, prepared))
 }
 
-fn attachment_capability_snapshot(
-    models: &tiangong_llm::ModelsConfig,
-) -> AttachmentCapabilitySnapshot {
-    // 多模态已无独立路由、语音识别能力已移除：
-    // 图片只能由支持多模态的 chat 模型直接处理，音频没有处理器。
+fn attachment_capability_snapshot() -> AttachmentCapabilitySnapshot {
+    // 图片只归档并以路径注入，按模型能力的处理在 CoreManager 投递时完成。
+    // 语音识别能力已从模型配置中移除，当前没有音频处理器。
     AttachmentCapabilitySnapshot {
-        chat_multimodal: models.chat_is_multimodal(),
-        analyze_attachment: false,
         audio_processor: false,
         video_processor: false,
     }
@@ -1333,45 +1326,11 @@ mod tests {
             raw,
             "message-broken".to_string(),
             "broken".to_string(),
-            AttachmentCapabilitySnapshot {
-                chat_multimodal: true,
-                ..AttachmentCapabilitySnapshot::default()
-            },
+            AttachmentCapabilitySnapshot::default(),
         );
 
         assert!(result.is_err());
         assert_eq!(tracker.registered_turn_count(), 0);
-    }
-
-    #[test]
-    fn attachment_preparation_uses_the_server_message_id_in_model_guidance() {
-        let root = tempfile::tempdir().unwrap();
-        let raw = vec![RawAttachment {
-            kind: MediaKind::Image,
-            source: "data:image/png;base64,aW1hZ2U=".to_string(),
-            mime_type: Some("image/png".to_string()),
-            original_name: Some("server.png".to_string()),
-        }];
-
-        let (_transaction, prepared) = prepare_user_message_blocking(
-            root.path().join("media"),
-            raw,
-            "message-from-server".to_string(),
-            "analyze".to_string(),
-            AttachmentCapabilitySnapshot {
-                analyze_attachment: true,
-                ..AttachmentCapabilitySnapshot::default()
-            },
-        )
-        .unwrap();
-
-        assert!(prepared.iter().any(|block| matches!(
-            block,
-            ContentBlock::ModelInstruction { text }
-                if text.contains("message_id=message-from-server")
-                    && text.contains("attachment_index=0")
-                    && text.contains("analyze_attachment")
-        )));
     }
 
     #[test]

@@ -365,6 +365,7 @@ impl CoreManager {
     /// 投递成功且输入为用户消息时顺带触发标题自动生成（见 [`title`] 模块）；
     /// 标题生成在后台进行，不影响投递返回。
     pub fn deliver_to_core_if_live(&self, session_id: &str, input: AgentInputKind) -> bool {
+        let input = self.prepare_images_for_model(session_id, input);
         let user_text = match &input {
             AgentInputKind::Message(MessageInput::UserMessage { prepared, .. }) => prepared
                 .iter()
@@ -379,6 +380,54 @@ impl CoreManager {
             self.spawn_title_generation_if_needed(session_id, &text);
         }
         delivered
+    }
+
+    /// 按会话模型决定用户消息中图片发送给 Core 的形式。
+    ///
+    /// 宿主只把附件归档到存储目录并以路径引用（`AssetReference`）注入；
+    /// 会话模型（`Session.model_ref`，未选择时为 Chat 默认模型）支持多模态时，
+    /// 这里把图片读出并转为 base64 原生图片，否则原样保留路径引用——是否调用
+    /// 图片分析工具由 Agent 自行决定。
+    pub(crate) fn prepare_images_for_model(
+        &self,
+        session_id: &str,
+        input: AgentInputKind,
+    ) -> AgentInputKind {
+        let AgentInputKind::Message(MessageInput::UserMessage {
+            prepared,
+            message_id,
+            model_ref,
+        }) = input
+        else {
+            return input;
+        };
+        let prepared = if prepared.iter().any(is_image_reference)
+            && self.session_model_is_multimodal(session_id)
+        {
+            prepared.into_iter().map(inline_image).collect()
+        } else {
+            prepared
+        };
+        AgentInputKind::Message(MessageInput::UserMessage {
+            prepared,
+            message_id,
+            model_ref,
+        })
+    }
+
+    /// 会话当前模型是否支持多模态（按 `Session.model_ref` 查模型注册表）。
+    fn session_model_is_multimodal(&self, session_id: &str) -> bool {
+        let models = tiangong_config::io::load_models_config_at(&self.storage_root);
+        let model_ref = self
+            .load_session(session_id)
+            .ok()
+            .and_then(|session| session.model_ref);
+        match model_ref.as_deref().and_then(|key| models.models.get(key)) {
+            Some(entry) => entry
+                .capabilities
+                .contains(&tiangong_llm::ModelCapability::Multimodal),
+            None => models.chat_is_multimodal(),
+        }
     }
 
     /// 手动整理会话上下文，并等待压缩进入终态。
@@ -470,5 +519,158 @@ impl CoreManager {
         };
         core.set_title(title, only_if_default)
             .map_err(|_| "更新会话标题失败".to_string())
+    }
+}
+
+/// 可发送给多模态模型的图片引用（SVG 等模型不接受的格式按普通文件处理）。
+fn is_image_reference(block: &tiangong_types::ContentBlock) -> bool {
+    matches!(
+        block,
+        tiangong_types::ContentBlock::AssetReference { asset }
+            if asset.kind == tiangong_types::MediaKind::Image
+                && asset.mime_type != "image/svg+xml"
+    )
+}
+
+/// 把图片路径引用读出并转为 base64 原生图片；读取失败时保留路径引用。
+fn inline_image(block: tiangong_types::ContentBlock) -> tiangong_types::ContentBlock {
+    use base64::Engine as _;
+    use tiangong_types::ContentBlock;
+
+    if !is_image_reference(&block) {
+        return block;
+    }
+    let ContentBlock::AssetReference { asset } = block else {
+        unreachable!("is_image_reference 已确认是图片引用");
+    };
+    match std::fs::read(&asset.local_path) {
+        Ok(bytes) => ContentBlock::Image {
+            asset,
+            data: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        },
+        // 读取失败时保留路径引用，不让整条消息投递失败。
+        Err(error) => {
+            tracing::warn!(path = %asset.local_path, %error, "读取图片附件失败，保留路径引用");
+            ContentBlock::AssetReference { asset }
+        }
+    }
+}
+
+#[cfg(test)]
+mod image_injection_tests {
+    use super::*;
+    use tiangong_types::{ContentBlock, MediaKind, StoredAsset};
+
+    fn image_reference(path: &std::path::Path) -> ContentBlock {
+        ContentBlock::AssetReference {
+            asset: StoredAsset {
+                asset_id: "a1".to_string(),
+                local_path: path.to_string_lossy().into_owned(),
+                original_name: "shot.png".to_string(),
+                mime_type: "image/png".to_string(),
+                size: 3,
+                kind: MediaKind::Image,
+            },
+        }
+    }
+
+    fn write_models(root: &std::path::Path, chat: &str) {
+        std::fs::write(
+            root.join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {
+                    "text": {"provider": "p", "model": "text-model", "capabilities": ["chat"]},
+                    "vision": {"provider": "p", "model": "vision-model", "capabilities": ["chat", "multimodal"]}
+                },
+                "routing": {"chat": chat}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn manager_with_session(
+        model_ref: Option<&str>,
+        default_chat: &str,
+    ) -> (tempfile::TempDir, CoreManager, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        write_models(dir.path(), default_chat);
+        let image = dir.path().join("shot.png");
+        std::fs::write(&image, b"img").unwrap();
+        let manager = CoreManager::new(
+            CoreConfigProvider::new(CoreConfig::default()),
+            dir.path().to_path_buf(),
+        );
+        let mut session = tiangong_core::session::Session::new("图片注入");
+        session.id = "s1".to_string();
+        session.model_ref = model_ref.map(str::to_string);
+        session.bind_storage_root(dir.path());
+        session.try_persist_to_disk().unwrap();
+        (dir, manager, image)
+    }
+
+    fn deliver(manager: &CoreManager, image: &std::path::Path) -> Vec<ContentBlock> {
+        let input = AgentInputKind::prepared_with_id(
+            "m1",
+            vec![ContentBlock::text("看图"), image_reference(image)],
+        );
+        let AgentInputKind::Message(MessageInput::UserMessage { prepared, .. }) =
+            manager.prepare_images_for_model("s1", input)
+        else {
+            panic!("应为用户消息");
+        };
+        prepared
+    }
+
+    #[test]
+    fn 多模态会话模型改为_base64_原生图片() {
+        // 默认 chat 不支持多模态，但会话选了多模态模型：以会话模型为准。
+        let (_dir, manager, image) = manager_with_session(Some("vision"), "text");
+        let prepared = deliver(&manager, &image);
+        assert_eq!(prepared.len(), 2);
+        assert!(matches!(
+            &prepared[1],
+            ContentBlock::Image { data: Some(data), .. } if data == "aW1n"
+        ));
+    }
+
+    #[test]
+    fn 非多模态会话模型原样保留路径引用() {
+        let (_dir, manager, image) = manager_with_session(Some("text"), "vision");
+        let prepared = deliver(&manager, &image);
+        assert_eq!(
+            prepared,
+            vec![ContentBlock::text("看图"), image_reference(&image)]
+        );
+    }
+
+    #[test]
+    fn 未选择模型时跟随默认_chat_模型() {
+        let (_dir, manager, image) = manager_with_session(None, "vision");
+        assert!(matches!(
+            deliver(&manager, &image)[1],
+            ContentBlock::Image { .. }
+        ));
+        let (_dir, manager, image) = manager_with_session(None, "text");
+        assert!(matches!(
+            deliver(&manager, &image)[1],
+            ContentBlock::AssetReference { .. }
+        ));
+    }
+
+    #[test]
+    fn 非图片与_svg_引用保持不变() {
+        let svg = ContentBlock::AssetReference {
+            asset: StoredAsset {
+                asset_id: "s".to_string(),
+                local_path: "/media/a.svg".to_string(),
+                original_name: "a.svg".to_string(),
+                mime_type: "image/svg+xml".to_string(),
+                size: 1,
+                kind: MediaKind::Image,
+            },
+        };
+        assert_eq!(inline_image(svg.clone()), svg);
     }
 }
