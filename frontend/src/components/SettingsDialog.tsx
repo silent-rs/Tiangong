@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload } from 'lucide-react';
+import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload, Route } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
@@ -438,9 +438,8 @@ function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: 
   </div>;
 }
 
-type LLMSubTab = 'providers' | 'routing';
 function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
-  const [subTab, setSubTab] = useState<LLMSubTab>('providers');
+  const [showRouting, setShowRouting] = useState(false);
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
     providers: {},
     models: {},
@@ -524,32 +523,25 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
 
   return (
     <div className="flex flex-col h-full">
-      {/* 子标签栏 — 固定不动 */}
-      <div className="flex gap-1 shrink-0 p-4 pb-0">
-        {(['providers', 'routing'] as const).map((tab) => (
-          <button
-            key={tab}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-              subTab === tab
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted text-muted-foreground hover:text-foreground'
-            }`}
-            onClick={() => setSubTab(tab)}
-          >
-            {tab === 'providers' ? '模型' : '路由'}
-          </button>
-        ))}
+      {/* 顶部操作栏：路由配置按钮靠右 */}
+      <div className="flex justify-end shrink-0 p-4 pb-0">
+        <Button size="sm" variant="outline" onClick={() => setShowRouting(true)}>
+          <Route className="w-3 h-3 mr-1" />模型路由
+        </Button>
       </div>
 
       {/* 内容区域 */}
-      <div className={`flex-1 min-h-0 ${subTab === 'providers' ? 'overflow-hidden' : 'overflow-y-auto p-4'}`}>
-        {subTab === 'providers' && (
-          <ProviderModelsView config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
-        )}
-        {subTab === 'routing' && (
-          <RoutingSection config={modelsConfig} onChange={handleChange} />
-        )}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <ProviderModelsView config={modelsConfig} onChange={handleChange} capabilities={capabilities} />
       </div>
+
+      {/* 模型路由 Modal */}
+      <Dialog open={showRouting} onOpenChange={setShowRouting}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader><DialogTitle>模型路由</DialogTitle></DialogHeader>
+          <RoutingSection config={modelsConfig} onChange={handleChange} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -661,6 +653,9 @@ function ProviderBalanceSection({ providerName }: { providerName: string }) {
 
 // 原生支持图片理解、配置时默认自动勾选多模态能力的模型名前缀（用户可手动取消勾选）
 const VISION_DEFAULT_MODEL_PREFIXES = ['deepseek-flash', 'glm-5.3-flash'];
+
+// 模型编辑时可勾选的能力：仅对话与多模态
+const EDITABLE_CAPABILITIES = ['chat', 'multimodal'];
 
 function ProviderModelsView({
   config,
@@ -1224,7 +1219,7 @@ function ProviderModelsView({
             <div>
               <Label className="text-xs">能力</Label>
               <div className="flex flex-wrap gap-1.5 mt-1">
-                {capabilities.filter((cap) => cap.key !== 'lite').map((cap) => (
+                {capabilities.filter((cap) => EDITABLE_CAPABILITIES.includes(cap.key)).map((cap) => (
                   <button
                     key={cap.key}
                     className={`px-2 py-0.5 text-xs rounded border transition-colors ${modelDraft.capabilities.includes(cap.key) ? 'bg-primary/20 text-primary border-primary/40' : 'bg-secondary text-muted-foreground border-border hover:text-foreground'}`}
@@ -1405,11 +1400,6 @@ function RoutingSection({
   const routingSlots = [
     { key: 'chat', display_name: '对话' },
     { key: 'lite', display_name: '轻量文本' },
-    { key: 'multimodal', display_name: '多模态' },
-    { key: 'image_generation', display_name: '图片生成' },
-    { key: 'video_generation', display_name: '视频生成' },
-    { key: 'stt', display_name: '语音识别' },
-    { key: 'tts', display_name: '语音合成' },
   ];
 
   // 根据 routing entry 找到对应的 models key
@@ -1439,15 +1429,12 @@ function RoutingSection({
   };
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="mb-3 shrink-0">
-        <h4 className="text-sm font-medium text-muted-foreground">能力路由</h4>
-        <p className="text-xs text-muted-foreground mt-1">
-          为对话和多媒体能力选择默认模型；嵌入与重排模型在 Memory 插件页中配置。
-        </p>
-      </div>
+    <div className="flex flex-col">
+      <p className="mb-3 text-xs text-muted-foreground">
+        为对话和轻量文本任务选择默认模型；嵌入与重排模型在 Memory 插件页中配置。
+      </p>
 
-      <div className="space-y-2 flex-1 min-h-0 overflow-y-auto">
+      <div className="space-y-2">
         {routingSlots.map((slot) => {
           const currentModelKey = findModelKeyForRoute(slot.key);
           const search = routeSearch[slot.key] || '';
@@ -1507,7 +1494,7 @@ function RoutingSection({
 
       {modelKeys.length === 0 && (
         <p className="text-xs text-muted-foreground mt-3">
-          请先在模型页中添加模型定义，然后回来配置路由
+          请先在左侧供应商中添加模型，然后再配置路由
         </p>
       )}
     </div>
