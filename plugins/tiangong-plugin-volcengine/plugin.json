@@ -14,9 +14,16 @@
   },
   "permissions": [
     "sidecar.invoke",
-    "bridge.call"
+    "bridge.call",
+    "session.write"
   ],
+  "capabilities": {
+    "events": [
+      "session.*"
+    ]
+  },
   "ui": {
+    "sandbox": "shadow",
     "contributions": [
       {
         "slot": "settings.plugin-page",
@@ -26,6 +33,51 @@
         "icon": "image",
         "entry": "app/settings.html",
         "sandbox": "iframe"
+      },
+      {
+        "slot": "session.input-action",
+        "id": "voice-input",
+        "title": "语音输入",
+        "description": "切换到按住说话的语音输入模式",
+        "icon": "mic",
+        "entry": "app/voice-input.html",
+        "context": ["session"]
+      },
+      {
+        "slot": "session.input-overlay",
+        "id": "voice-overlay",
+        "title": "按住说话",
+        "description": "按住说话录音，识别后连同录音一起发送",
+        "icon": "mic",
+        "entry": "app/voice-overlay.html",
+        "context": ["session"]
+      },
+      {
+        "slot": "session.message-action",
+        "id": "message-read",
+        "title": "朗读",
+        "description": "朗读助手回复",
+        "icon": "volume-2",
+        "entry": "app/message-read.html",
+        "context": ["session", "message"]
+      },
+      {
+        "slot": "session.message-item",
+        "id": "voice-bubble",
+        "title": "语音消息",
+        "description": "语音输入消息的录音播放气泡",
+        "icon": "audio-lines",
+        "entry": "app/voice-bubble.html",
+        "context": ["session", "message"]
+      },
+      {
+        "slot": "global.status-item",
+        "id": "auto-read",
+        "title": "自动朗读",
+        "description": "边生成边朗读当前会话的助手回复",
+        "icon": "volume-2",
+        "entry": "app/auto-read.html",
+        "context": ["workspace"]
       }
     ]
   },

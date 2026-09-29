@@ -1,0 +1,242 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>按住说话</title>
+  <style>
+    :host, .vo-root { all: initial; }
+    .vo-root {
+      display: flex; flex-direction: column; box-sizing: border-box; width: 100%; height: 100%;
+      justify-content: center; gap: 6px;
+      font-family: var(--host-font-family, inherit); font-size: 14px;
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    .vo-row { display: flex; align-items: stretch; gap: 8px; height: 60px; position: relative; }
+    .vo-icon-btn {
+      display: inline-flex; align-items: center; justify-content: center; width: 40px; flex: none;
+      border: 0; border-radius: calc(var(--radius, 0.5rem) - 2px); background: transparent;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); cursor: pointer;
+    }
+    .vo-icon-btn:hover { background: hsl(var(--accent, 210 40% 96.1%)); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .vo-talk {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: calc(var(--radius, 0.5rem) - 2px);
+      background: hsl(var(--muted, 210 40% 96.1%) / .5); color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+      font: inherit; font-size: 14px; cursor: pointer; user-select: none; -webkit-user-select: none;
+    }
+    .vo-talk:hover { background: hsl(var(--muted, 210 40% 96.1%)); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .vo-talk.is-recording { background: rgb(239 68 68 / .1); border-color: rgb(239 68 68 / .3); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .vo-talk.is-busy { cursor: wait; }
+    .vo-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: rgb(239 68 68); margin-right: 6px; animation: vo-pulse 1s ease-in-out infinite; }
+    .vo-sub { font-size: 12px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+    .vo-toast {
+      position: absolute; inset: 0 0 0 48px; display: flex; align-items: center; justify-content: center;
+      border-radius: calc(var(--radius, 0.5rem) - 2px); background: hsl(var(--background, 0 0% 100%) / .92);
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 13px;
+    }
+    .vo-toast.is-error { color: hsl(var(--destructive, 0 84.2% 60.2%)); }
+    .vo-foot { display: flex; justify-content: flex-end; font-size: 12px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+    @keyframes vo-pulse { 50% { opacity: .35; } }
+    svg { width: 20px; height: 20px; }
+  </style>
+</head>
+<body>
+  <div class="vo-root" id="vo-root" tabindex="0">
+    <div class="vo-row">
+      <button class="vo-icon-btn" id="vo-keyboard" type="button" title="切换到文字模式" aria-label="切换到文字模式">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 8h.01M12 12h.01M14 8h.01M16 12h.01M18 8h.01M6 8h.01M7 16h10M8 12h.01" />
+          <rect width="20" height="16" x="2" y="4" rx="2" />
+        </svg>
+      </button>
+      <button class="vo-talk" id="vo-talk" type="button">
+        <span id="vo-label">按住说话 / 按住空格说话</span>
+        <span class="vo-sub" id="vo-sub" hidden></span>
+      </button>
+      <div class="vo-toast" id="vo-toast" hidden></div>
+    </div>
+    <div class="vo-foot"><span>空格 录音 · Esc 取消</span></div>
+  </div>
+  <script>
+    // 按住说话覆盖层（session.input-overlay）：录音 → 识别 → 以文本 + 录音附件发送。
+    // 宿主只负责显隐与发送；录音、识别均在本插件 sidecar 完成。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const $ = (id) => uiRoot.getElementById(id);
+    const MIN_DURATION_MS = 1000;
+    const state = { phase: 'idle', recordId: null, startedAt: 0, timer: null, sessionId: null };
+
+    if (typeof hostContext !== 'undefined' && hostContext && hostContext.session) {
+      state.sessionId = hostContext.session.id || null;
+    }
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange((context) => {
+        const next = (context && context.session && context.session.id) || null;
+        if (next !== state.sessionId && state.phase === 'recording') cancel();
+        state.sessionId = next;
+      });
+    }
+
+    async function call(method, payload) {
+      const raw = await bridge.call(method, JSON.stringify(payload || {}));
+      return raw ? JSON.parse(raw) : null;
+    }
+
+    function newRecordId() {
+      return `rec-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function render() {
+      const talk = $('vo-talk');
+      const sub = $('vo-sub');
+      talk.classList.toggle('is-recording', state.phase === 'recording');
+      talk.classList.toggle('is-busy', state.phase === 'transcribing' || state.phase === 'starting');
+      if (state.phase === 'recording') {
+        const seconds = Math.floor((Date.now() - state.startedAt) / 1000);
+        $('vo-label').innerHTML = '';
+        const dot = document.createElement('span');
+        dot.className = 'vo-dot';
+        $('vo-label').append(dot, `录音中 ${seconds}s`);
+        sub.textContent = '松开发送，移出取消';
+        sub.hidden = false;
+      } else if (state.phase === 'transcribing') {
+        $('vo-label').textContent = '识别中…';
+        sub.hidden = true;
+      } else {
+        $('vo-label').textContent = '按住说话 / 按住空格说话';
+        sub.hidden = true;
+      }
+    }
+
+    let toastTimer = null;
+    function toast(message, isError) {
+      const node = $('vo-toast');
+      node.textContent = message;
+      node.classList.toggle('is-error', Boolean(isError));
+      node.hidden = false;
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { node.hidden = true; }, isError ? 3000 : 1500);
+    }
+
+    async function start() {
+      if (state.phase !== 'idle') return;
+      state.phase = 'starting';
+      state.recordId = newRecordId();
+      render();
+      try {
+        await call('plugin.record_start', { session_id: state.recordId });
+        if (state.phase !== 'starting') {
+          // 启动期间已松开/取消：立即丢弃这次录音。
+          await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+          return;
+        }
+        state.phase = 'recording';
+        state.startedAt = Date.now();
+        state.timer = setInterval(render, 500);
+      } catch (error) {
+        state.phase = 'idle';
+        toast(`录音启动失败：${(error && error.message) || error}`, true);
+      }
+      render();
+    }
+
+    function stopTimer() {
+      if (state.timer) clearInterval(state.timer);
+      state.timer = null;
+    }
+
+    async function cancel(silent) {
+      if (state.phase === 'starting') { state.phase = 'idle'; render(); return; }
+      if (state.phase !== 'recording') return;
+      stopTimer();
+      state.phase = 'idle';
+      render();
+      await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+      if (!silent) toast('已取消');
+    }
+
+    async function finish() {
+      if (state.phase === 'starting') { state.phase = 'idle'; render(); return; }
+      if (state.phase !== 'recording') return;
+      stopTimer();
+      const elapsed = Date.now() - state.startedAt;
+      if (elapsed < MIN_DURATION_MS) {
+        state.phase = 'idle';
+        render();
+        await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+        toast('说话时间太短');
+        return;
+      }
+      state.phase = 'transcribing';
+      render();
+      try {
+        const recorded = await call('plugin.record_stop', { session_id: state.recordId });
+        const result = await call('plugin.transcribe', { file_path: recorded.file_path });
+        const text = ((result && result.text) || '').trim();
+        if (!text) {
+          toast('没有识别到语音内容', true);
+          return;
+        }
+        // 文本与录音一并发送：录音作为音频附件保留，宿主在消息中渲染语音气泡。
+        await call('session.input.sendText', {
+          text,
+          attachments: [{
+            source: recorded.file_path,
+            mime_type: recorded.mime_type || 'audio/wav',
+            original_name: '语音消息.wav',
+          }],
+        });
+      } catch (error) {
+        toast(`语音识别失败：${(error && error.message) || error}`, true);
+      } finally {
+        state.phase = 'idle';
+        render();
+      }
+    }
+
+    async function leave() {
+      await cancel(true);
+      await call('session.input.hideOverlay', { session_id: state.sessionId }).catch(() => {});
+    }
+
+    const talk = $('vo-talk');
+    let talkPressed = false;
+    talk.addEventListener('mousedown', (event) => { event.preventDefault(); talkPressed = true; start(); });
+    talk.addEventListener('mouseup', () => { talkPressed = false; finish(); });
+    talk.addEventListener('mouseleave', () => { if (talkPressed) { talkPressed = false; cancel(); } });
+    talk.addEventListener('contextmenu', (event) => event.preventDefault());
+    $('vo-keyboard').addEventListener('click', () => leave());
+
+    // 空格按住说话、Esc 取消：覆盖层显示时宿主把焦点交给本容器根节点
+    // （vo-root 带 tabindex，是 Shadow 内首个可聚焦元素）。
+    const onKeyDown = (event) => {
+      if (event.code === 'Space' && !event.repeat) { event.preventDefault(); start(); }
+      else if (event.code === 'Space') { event.preventDefault(); }
+      else if (event.key === 'Escape') {
+        event.preventDefault();
+        if (state.phase === 'recording' || state.phase === 'starting') cancel();
+        else leave();
+      }
+    };
+    const onKeyUp = (event) => {
+      if (event.code === 'Space') { event.preventDefault(); finish(); }
+    };
+    const root = $('vo-root');
+    root.addEventListener('keydown', onKeyDown);
+    root.addEventListener('keyup', onKeyUp);
+    // 录音中失焦（切到别的窗口等）收不到 keyup：视为取消，避免麦克风常开。
+    root.addEventListener('focusout', (event) => {
+      if (!root.contains(event.relatedTarget) && state.phase === 'recording' && !talkPressed) cancel();
+    });
+
+    if (typeof registerCleanup === 'function') {
+      registerCleanup(() => {
+        stopTimer();
+        if (state.phase === 'recording' || state.phase === 'starting') {
+          call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+        }
+      });
+    }
+    render();
+  </script>
+</body>
+</html>
