@@ -20,17 +20,6 @@ pub struct RawAttachment {
     pub original_name: Option<String>,
 }
 
-/// 处理音频附件的工具名：插件提供该工具即视为具备音频处理能力。
-pub const SPEECH_TO_TEXT_TOOL: &str = "speech_to_text";
-
-/// 生成本轮附件处理方案时使用的能力快照。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AttachmentCapabilitySnapshot {
-    pub audio_processor: bool,
-    pub video_processor: bool,
-}
-
 /// 已保存到 Store 的稳定附件信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredAttachment {
@@ -240,14 +229,16 @@ impl AttachmentTransaction {
         &self.created_paths
     }
 
-    /// 根据发送开始时捕获的能力快照生成持久内容与本轮运行内容。
+    /// 生成用户消息的持久内容：正文 + 每个附件的引用与路径说明。
+    ///
+    /// 宿主不判断音视频等附件「能否处理」：只告诉模型附件的本地路径，
+    /// 由提供相应能力的插件在自己的提示词中说明如何处理（如语音识别插件）。
     pub fn prepare_message(
         &mut self,
         message_id: &str,
         text: impl Into<String>,
-        capabilities: AttachmentCapabilitySnapshot,
     ) -> Result<Vec<ContentBlock>, String> {
-        let result = self.build_prepared_message(message_id, text.into(), capabilities);
+        let result = self.build_prepared_message(message_id, text.into());
         match result {
             Ok((message, assets)) => {
                 self.assets = assets;
@@ -277,7 +268,6 @@ impl AttachmentTransaction {
         &self,
         message_id: &str,
         text: String,
-        capabilities: AttachmentCapabilitySnapshot,
     ) -> Result<(Vec<ContentBlock>, Vec<StoredAsset>), String> {
         if message_id.trim().is_empty() {
             return Err("准备用户消息时 message_id 不能为空".to_string());
@@ -322,11 +312,7 @@ impl AttachmentTransaction {
                         asset: asset.clone(),
                     });
                     content.push(ContentBlock::ModelInstruction {
-                        text: audio_attachment_instruction(
-                            index,
-                            &asset,
-                            capabilities.audio_processor,
-                        ),
+                        text: audio_attachment_instruction(index, &asset),
                     });
                 }
                 MediaKind::Video => {
@@ -334,11 +320,7 @@ impl AttachmentTransaction {
                         asset: asset.clone(),
                     });
                     content.push(ContentBlock::ModelInstruction {
-                        text: video_attachment_instruction(
-                            index,
-                            &asset,
-                            capabilities.video_processor,
-                        ),
+                        text: video_attachment_instruction(index, &asset),
                     });
                 }
                 MediaKind::File => {
@@ -393,40 +375,18 @@ fn file_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
     )
 }
 
-fn audio_attachment_instruction(
-    index: usize,
-    asset: &StoredAsset,
-    capability_available: bool,
-) -> String {
-    if capability_available {
-        format!(
-            "本条用户消息包含音频引用。需要获取音频内容时，请调用 speech_to_text 工具，并将下列本地 path 作为 file_path。\n- {}",
-            asset_notice_item(index, asset)
-        )
-    } else {
-        format!(
-            "音频附件所需能力 speech_to_text 当前不可用；请保留附件引用并明确告知用户。\n- {}",
-            asset_notice_item(index, asset)
-        )
-    }
+fn audio_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "本条用户消息包含音频引用，音频内容不会直接发送给模型。需要获取内容时，使用已注册的音频处理能力按下列本地 path 处理；没有可用能力时保留附件引用并告知用户。\n- {}",
+        asset_notice_item(index, asset)
+    )
 }
 
-fn video_attachment_instruction(
-    index: usize,
-    asset: &StoredAsset,
-    capability_available: bool,
-) -> String {
-    if capability_available {
-        format!(
-            "本条用户消息包含视频引用。请使用已注册的视频处理能力按下列本地 path 处理。\n- {}",
-            asset_notice_item(index, asset)
-        )
-    } else {
-        format!(
-            "视频附件所需内容分析能力当前不可用；请保留附件引用并明确告知用户。\n- {}",
-            asset_notice_item(index, asset)
-        )
-    }
+fn video_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "本条用户消息包含视频引用，视频内容不会直接发送给模型。需要获取内容时，使用已注册的视频处理能力按下列本地 path 处理；没有可用能力时保留附件引用并告知用户。\n- {}",
+        asset_notice_item(index, asset)
+    )
 }
 
 impl Drop for AttachmentTransaction {
@@ -951,11 +911,7 @@ mod tests {
             )])
             .unwrap();
         let message = transaction
-            .prepare_message(
-                "message-inline",
-                "look",
-                AttachmentCapabilitySnapshot::default(),
-            )
+            .prepare_message("message-inline", "look")
             .unwrap();
 
         assert_eq!(transaction.assets().len(), 1);
@@ -990,13 +946,7 @@ mod tests {
                 b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
             )])
             .unwrap();
-        let message = transaction
-            .prepare_message(
-                "message-svg",
-                "look",
-                AttachmentCapabilitySnapshot::default(),
-            )
-            .unwrap();
+        let message = transaction.prepare_message("message-svg", "look").unwrap();
 
         assert_eq!(transaction.assets().len(), 1);
         assert_eq!(transaction.assets()[0].mime_type, "image/svg+xml");
@@ -1029,11 +979,7 @@ mod tests {
             ])
             .unwrap();
         let message = transaction
-            .prepare_message(
-                "message-two-images",
-                "try on",
-                AttachmentCapabilitySnapshot::default(),
-            )
+            .prepare_message("message-two-images", "try on")
             .unwrap();
 
         assert_eq!(message.len(), 5);
@@ -1075,14 +1021,7 @@ mod tests {
             ])
             .unwrap();
         let message = other
-            .prepare_message(
-                "message-references",
-                "other",
-                AttachmentCapabilitySnapshot {
-                    audio_processor: true,
-                    video_processor: false,
-                },
-            )
+            .prepare_message("message-references", "other")
             .unwrap();
 
         assert_eq!(other.assets().len(), 3);
@@ -1102,12 +1041,12 @@ mod tests {
         assert!(matches!(
             &message[4],
             ContentBlock::ModelInstruction { text }
-                if text.contains("index=1") && text.contains("speech_to_text")
+                if text.contains("index=1") && text.contains("音频引用") && text.contains("path=")
         ));
         assert!(matches!(
             &message[6],
             ContentBlock::ModelInstruction { text }
-                if text.contains("index=2") && text.contains("当前不可用")
+                if text.contains("index=2") && text.contains("视频引用") && text.contains("path=")
         ));
     }
 

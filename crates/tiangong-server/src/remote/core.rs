@@ -10,9 +10,7 @@ use anyhow::{Result, anyhow};
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
-use tiangong_media_archive::{
-    AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
-};
+use tiangong_media_archive::{AttachmentStore, AttachmentTransaction, RawAttachment};
 use tiangong_types::{
     ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, StreamEvent,
 };
@@ -30,7 +28,6 @@ pub struct ServerCoreManager {
     session_wait_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     /// 串行全局配置刷新与新 Core 安装，避免新实例错过刚完成的配置更新。
     config_update_lock: Arc<AsyncMutex<()>>,
-    core_attachment_capabilities: Arc<Mutex<HashMap<String, AttachmentCapabilitySnapshot>>>,
     trackers: Arc<Mutex<HashMap<String, Arc<ExecutionTracker>>>>,
     remote_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -48,7 +45,6 @@ impl ServerCoreManager {
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
-            core_attachment_capabilities: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
             remote_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -173,15 +169,12 @@ impl ServerCoreManager {
             .await
             .core_manager
             .session_exists(&requested_session_id);
-        let (session_id, _core_capabilities) =
-            self.ensure_core_locked(&requested_session_id).await?;
-        // 能力按每条消息实时判定：插件启停后无需重建 Core 即生效。
-        let capabilities = attachment_capability_snapshot();
+        let session_id = self.ensure_core_locked(&requested_session_id).await?;
 
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
         // 附件准备成功后才登记 waiter，准备失败不会污染 tracker。
         let (transaction, prepared) = self
-            .prepare_user_message(msg_id.clone(), content, media, capabilities)
+            .prepare_user_message(msg_id.clone(), content, media)
             .await?;
         let tracker = self.tracker_for(&session_id);
         let turn_id = tracker.start_turn(msg_id.clone());
@@ -245,10 +238,6 @@ impl ServerCoreManager {
             .await
             .map_err(anyhow::Error::msg)?;
 
-        self.core_attachment_capabilities
-            .lock()
-            .map_err(|error| anyhow!("附件能力快照锁已损坏：{error}"))?
-            .remove(&session_id);
         self.trackers
             .lock()
             .map_err(|error| anyhow!("执行跟踪锁已损坏：{error}"))?
@@ -270,12 +259,11 @@ impl ServerCoreManager {
         message_id: String,
         content: String,
         media: Vec<MediaAsset>,
-        capabilities: AttachmentCapabilitySnapshot,
     ) -> Result<(AttachmentTransaction, Vec<ContentBlock>)> {
         let raw = media.into_iter().map(raw_attachment_from_media).collect();
         let media_root = self.state.lock().await.config.storage_root.join("media");
         tokio::task::spawn_blocking(move || {
-            prepare_user_message_blocking(media_root, raw, message_id, content, capabilities)
+            prepare_user_message_blocking(media_root, raw, message_id, content)
         })
         .await
         .map_err(|error| anyhow!("附件准备任务失败：{error}"))?
@@ -298,21 +286,11 @@ impl ServerCoreManager {
     }
 
     /// 调用方必须持有目标 session 的 `session_operation_lock`。
-    async fn ensure_core_locked(
-        &self,
-        requested_session_id: &str,
-    ) -> Result<(String, AttachmentCapabilitySnapshot)> {
+    async fn ensure_core_locked(&self, requested_session_id: &str) -> Result<String> {
         let session_id = normalize_session_id(requested_session_id)?;
 
         if self.core_manager.has_live_core(&session_id) {
-            let capabilities = self
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .get(&session_id)
-                .copied()
-                .ok_or_else(|| anyhow!("会话 Core 缺少附件能力快照：{session_id}"))?;
-            return Ok((session_id, capabilities));
+            return Ok(session_id);
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
@@ -322,14 +300,7 @@ impl ServerCoreManager {
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
         // 这里同时防御未来新增的未加锁入口。
         if self.core_manager.has_live_core(&session_id) {
-            let capabilities = self
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .get(&session_id)
-                .copied()
-                .ok_or_else(|| anyhow!("会话 Core 缺少附件能力快照：{session_id}"))?;
-            return Ok((session_id, capabilities));
+            return Ok(session_id);
         }
 
         let (mut session_config, storage_root, workspace_dir) = {
@@ -350,7 +321,6 @@ impl ServerCoreManager {
         };
         session_config.trust_mode = TrustMode::FullTrust;
 
-        let attachment_capabilities = attachment_capability_snapshot();
         let plugins = {
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             // prompt 等 WASM 插件由 load_installed_plugins 自动加载。
@@ -378,25 +348,13 @@ impl ServerCoreManager {
         let actual_session_id = ensured.session_id;
 
         if !ensured.is_new {
-            let capabilities = self
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .get(&actual_session_id)
-                .copied()
-                .ok_or_else(|| anyhow!("会话 Core 缺少附件能力快照：{actual_session_id}"))?;
-            return Ok((actual_session_id, capabilities));
+            return Ok(actual_session_id);
         }
-
-        self.core_attachment_capabilities
-            .lock()
-            .map_err(|error| anyhow!("附件能力快照锁已损坏：{error}"))?
-            .insert(actual_session_id.clone(), attachment_capabilities);
 
         let tracker = self.tracker_for(&actual_session_id);
         self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
 
-        Ok((actual_session_id, attachment_capabilities))
+        Ok(actual_session_id)
     }
 
     async fn resolve_connector_session_id(
@@ -842,22 +800,10 @@ fn prepare_user_message_blocking(
     raw: Vec<RawAttachment>,
     message_id: String,
     content: String,
-    capabilities: AttachmentCapabilitySnapshot,
 ) -> std::result::Result<(AttachmentTransaction, Vec<ContentBlock>), String> {
     let mut transaction = AttachmentStore::new(media_root).store_batch(raw)?;
-    let prepared = transaction.prepare_message(&message_id, content, capabilities)?;
+    let prepared = transaction.prepare_message(&message_id, content)?;
     Ok((transaction, prepared))
-}
-
-fn attachment_capability_snapshot() -> AttachmentCapabilitySnapshot {
-    // 图片只归档并以路径注入，按模型能力的处理在 CoreManager 投递时完成。
-    // 音频是否可处理取决于是否有已启用插件提供 speech_to_text 工具。
-    AttachmentCapabilitySnapshot {
-        audio_processor: tiangong_plugin_runtime::registry::tool_available(
-            tiangong_media_archive::SPEECH_TO_TEXT_TOOL,
-        ),
-        video_processor: false,
-    }
 }
 
 fn remote_session_key(connector: &str, channel_id: &str) -> String {
@@ -1331,7 +1277,6 @@ mod tests {
             raw,
             "message-broken".to_string(),
             "broken".to_string(),
-            AttachmentCapabilitySnapshot::default(),
         );
 
         assert!(result.is_err());

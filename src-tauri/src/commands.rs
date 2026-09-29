@@ -654,24 +654,13 @@ async fn send_message_inner(
         return Err(error);
     }
 
-    let capabilities = match attachment_capability_snapshot(state).await {
-        Ok(value) => value,
-        Err(error) => {
-            abort_session_send(state, &session_id, revision, true).await;
-            return Err(error);
-        }
-    };
     let user_message_id = scru128::new().to_string();
     let message_id_for_prepare = user_message_id.clone();
     let content_for_prepare = content.clone();
     let prepared_batch = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
-        let prepared = transaction.prepare_message(
-            &message_id_for_prepare,
-            content_for_prepare,
-            capabilities,
-        )?;
+        let prepared = transaction.prepare_message(&message_id_for_prepare, content_for_prepare)?;
         Ok::<_, String>((transaction, prepared))
     })
     .await
@@ -835,24 +824,6 @@ pub(crate) async fn restore_failed_user_message_state(
             } else {
                 Err(anyhow::anyhow!("目标会话已不存在：{session_id}"))
             }
-        })
-        .await
-}
-
-pub(crate) async fn attachment_capability_snapshot(
-    state: &TiangongApp,
-) -> Result<tiangong_media_archive::AttachmentCapabilitySnapshot, String> {
-    state
-        .with_state_read(|_core_state| {
-            // 图片只归档并以路径注入，按模型能力的处理在 CoreManager 投递时完成。
-            Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
-                // 音频是否可处理取决于是否有已启用插件提供 speech_to_text 工具。
-                audio_processor: tiangong_plugin_runtime::registry::tool_available(
-                    tiangong_media_archive::SPEECH_TO_TEXT_TOOL,
-                ),
-                // 当前没有“视频内容分析”插件；视频生成能力不能冒充输入处理能力。
-                video_processor: false,
-            })
         })
         .await
 }
@@ -1110,17 +1081,12 @@ pub async fn edit_and_resend(
     validate_editable_message(&session_for_validation, &message_id, &base_content)
         .map_err(|error| error.to_string())?;
 
-    let capabilities = attachment_capability_snapshot(state.inner()).await?;
     let content_for_prepare = new_content.clone();
     let message_id_for_prepare = message_id.clone();
     let (transaction, prepared) = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
-        let prepared = transaction.prepare_message(
-            &message_id_for_prepare,
-            content_for_prepare,
-            capabilities,
-        )?;
+        let prepared = transaction.prepare_message(&message_id_for_prepare, content_for_prepare)?;
         Ok::<_, String>((transaction, prepared))
     })
     .await
