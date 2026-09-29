@@ -26,8 +26,6 @@ mod descriptor {
     pub const VERSION: &str = tiangong_plugin_volcengine_protocol::PLUGIN_VERSION;
 }
 
-const SETTINGS_CONTRIBUTION_ID: &str = "volcengine-settings";
-
 fn plugin_err(message: impl Into<String>) -> PluginError {
     PluginError::Message(message.into())
 }
@@ -292,39 +290,15 @@ fn handle_speech_to_text(args: &Value) -> Result<ToolResult, PluginError> {
     })
 }
 
-// ── 设置页 ──
-
-const SETTINGS_HTML: &str = include_str!("settings.html");
-const SETTINGS_CSS: &str = include_str!("settings.css");
-const SETTINGS_JS: &str = include_str!("settings.js");
-
-fn settings_html() -> String {
-    SETTINGS_HTML
-        .replace("/*__SETTINGS_CSS__*/", SETTINGS_CSS)
-        .replace("/*__SETTINGS_JS__*/", SETTINGS_JS)
-}
-
 impl UiGuest for Component {
+    /// 设置页由 plugin.json 的 `ui.contributions`（settings.plugin-page）声明：
+    /// schema v2 插件的 WASM 贡献不会映射到设置页 Slot。
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
-        Ok(vec![Contribution {
-            id: SETTINGS_CONTRIBUTION_ID.to_string(),
-            title: "火山引擎".to_string(),
-            description: "火山方舟图片/视频生成与豆包语音合成/识别的连接与模型配置".to_string(),
-            icon: "image".to_string(),
-            group: "plugins".to_string(),
-            has_view: true,
-        }])
+        Ok(Vec::new())
     }
 
-    fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
-        if contribution_id != SETTINGS_CONTRIBUTION_ID {
-            return Err(plugin_err(format!(
-                "未知的 contribution: {contribution_id}"
-            )));
-        }
-        Ok(ViewResponse {
-            html: settings_html(),
-        })
+    fn open_view(_contribution_id: String) -> Result<ViewResponse, PluginError> {
+        Err(plugin_err("火山引擎设置页由 plugin.json 声明"))
     }
 
     fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {

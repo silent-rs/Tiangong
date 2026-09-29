@@ -16,6 +16,19 @@
     "sidecar.invoke",
     "bridge.call"
   ],
+  "ui": {
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "volcengine-settings",
+        "title": "火山引擎",
+        "description": "火山方舟图片/视频生成与豆包语音合成/识别的连接与模型配置",
+        "icon": "image",
+        "entry": "app/settings.html",
+        "sandbox": "iframe"
+      }
+    ]
+  },
   "entrypoints": [
     "desktop",
     "cli",

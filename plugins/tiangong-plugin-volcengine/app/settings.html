@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>火山引擎</title>
+  <style>
+:root {
+  color-scheme: light;
+  --bg: hsl(var(--host-background, 210 20% 98%));
+  --surface: hsl(var(--host-card, 0 0% 100%));
+  --text: hsl(var(--host-foreground, 222 47% 11%));
+  --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
+  --border: hsl(var(--host-border, 214 18% 88%));
+  --primary: hsl(var(--host-primary, 222 47% 11%));
+  --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+  --accent: hsl(var(--host-accent, 210 40% 96%));
+}
+
+:root[data-theme="dark"] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.page { padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+
+.header h2 { margin: 0 0 4px; font-size: 18px; }
+.header .desc { margin: 0; color: var(--muted); font-size: 13px; }
+
+.card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card-title { margin: 0; font-size: 14px; font-weight: 600; }
+
+.radio-group { display: flex; gap: 20px; }
+.radio { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.radio input { margin: 0; }
+
+.sub-section { display: flex; flex-direction: column; gap: 12px; }
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field .label { font-size: 13px; font-weight: 500; }
+.label-inline { font-size: 14px; }
+
+.input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.input:focus { outline: none; border-color: var(--primary); }
+.textarea { resize: vertical; min-height: 60px; }
+
+.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.hint { color: var(--muted); font-size: 12px; }
+.hint.error { color: hsl(0 84% 60%); }
+
+.actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+
+.status { color: var(--muted); font-size: 13px; flex: 1; }
+.status.error { color: hsl(0 84% 60%); }
+.status.success { color: hsl(142 71% 35%); }
+
+.btn {
+  padding: 8px 20px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 500;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+</style>
+</head>
+<body>
+  <main class="page">
+    <div class="header">
+      <h2>火山引擎</h2>
+      <p class="desc">通过火山方舟（Ark）提供图片生成（Seedream）与视频生成（Seedance），通过豆包语音提供语音合成与语音识别。连接与模型在此单独配置，不使用全局模型配置。</p>
+    </div>
+
+    <section class="card">
+      <h3 class="card-title">火山方舟连接</h3>
+      <label class="field">
+        <span class="label">API Key</span>
+        <input id="api-key" class="input" type="password" placeholder="火山方舟 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="label">Base URL</span>
+        <input id="base-url" class="input" type="text" placeholder="https://ark.cn-beijing.volces.com/api/v3" autocomplete="off" />
+        <span class="hint">留空使用默认地址（华北 2 北京）。</span>
+      </label>
+    </section>
+
+    <section class="card">
+      <h3 class="card-title">模型</h3>
+      <label class="field">
+        <span class="label">图片生成模型</span>
+        <input id="image-model" class="input" type="text" list="image-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
+        <datalist id="image-model-list">
+          <option value="doubao-seedream-5-0-pro-260628"></option>
+          <option value="doubao-seedream-4-5-251128"></option>
+          <option value="doubao-seedream-4-0-250828"></option>
+        </datalist>
+        <span class="hint">留空则不提供图片生成。</span>
+      </label>
+      <label class="field">
+        <span class="label">视频生成模型</span>
+        <input id="video-model" class="input" type="text" list="video-model-list" placeholder="模型 ID 或推理接入点 ep-xxx" autocomplete="off" />
+        <datalist id="video-model-list">
+          <option value="doubao-seedance-2-5-260628"></option>
+          <option value="doubao-seedance-2-0-260128"></option>
+          <option value="doubao-seedance-1-0-pro-250528"></option>
+        </datalist>
+        <span class="hint">留空则不提供视频生成。</span>
+      </label>
+    </section>
+
+    <section class="card">
+      <h3 class="card-title">生成选项</h3>
+      <label class="field">
+        <span class="label">视频等待上限（秒）</span>
+        <input id="video-timeout" class="input" type="number" min="30" step="10" placeholder="300" />
+        <span class="hint">超过上限仍未完成时返回任务 ID，任务在服务端继续执行。</span>
+      </label>
+      <label class="radio">
+        <input id="watermark" type="checkbox" />
+        <span>添加 AI 生成水印</span>
+      </label>
+    </section>
+
+    <section class="card">
+      <h3 class="card-title">语音（豆包语音）</h3>
+      <p class="hint">豆包语音与火山方舟鉴权独立：API Key 在豆包语音控制台「API Key 管理」中获取；旧版控制台可改填 App ID 与 Access Token。需开通对应的语音合成 / 录音文件识别极速版资源。</p>
+      <label class="field">
+        <span class="label">API Key</span>
+        <input id="speech-api-key" class="input" type="password" placeholder="豆包语音 API Key（支持 ${ENV_VAR}）" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="label">App ID（旧版控制台，可选）</span>
+        <input id="speech-app-id" class="input" type="text" placeholder="填写 API Key 后无需填写" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="label">Access Token（旧版控制台，可选）</span>
+        <input id="speech-access-token" class="input" type="password" placeholder="填写 API Key 后无需填写" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="label">语音合成资源 ID</span>
+        <input id="tts-resource-id" class="input" type="text" list="tts-resource-list" placeholder="seed-tts-2.0" autocomplete="off" />
+        <datalist id="tts-resource-list">
+          <option value="seed-tts-2.0"></option>
+          <option value="seed-tts-1.0"></option>
+          <option value="seed-icl-2.0"></option>
+          <option value="seed-icl-1.0"></option>
+        </datalist>
+        <span class="hint">音色需与资源版本对应（*_uranus_bigtts 为 2.0 音色）。</span>
+      </label>
+      <label class="field">
+        <span class="label">默认音色</span>
+        <input id="tts-speaker" class="input" type="text" list="tts-speaker-list" placeholder="zh_female_vv_uranus_bigtts" autocomplete="off" />
+        <datalist id="tts-speaker-list"></datalist>
+      </label>
+      <label class="field">
+        <span class="label">语音识别资源 ID</span>
+        <input id="asr-resource-id" class="input" type="text" placeholder="volc.bigasr.auc_turbo" autocomplete="off" />
+        <span class="hint">录音文件识别极速版，支持 wav / mp3 / ogg。</span>
+      </label>
+      <label class="field">
+        <span class="label">Base URL</span>
+        <input id="speech-base-url" class="input" type="text" placeholder="https://openspeech.bytedance.com" autocomplete="off" />
+        <span class="hint">留空使用默认地址。</span>
+      </label>
+    </section>
+
+    <div class="actions">
+      <span id="status" class="status"></span>
+      <button id="save-btn" class="btn btn-primary" type="button">保存</button>
+    </div>
+  </main>
+  <script>
+// 火山引擎设置页脚本（与其他插件设置页同构的 postMessage 桥接框架）。
+
+const HOST_TIMEOUT_MS = 60000;
+const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const DEFAULT_VIDEO_TIMEOUT = 300;
+const DEFAULT_SPEECH = {
+  base_url: "https://openspeech.bytedance.com",
+  tts_resource_id: "seed-tts-2.0",
+  tts_speaker: "zh_female_vv_uranus_bigtts",
+  asr_resource_id: "volc.bigasr.auc_turbo",
+};
+let hostChannel = null;
+let hostReadyResolve = null;
+const hostReady = new Promise((resolve) => { hostReadyResolve = resolve; });
+let requestSequence = 0;
+
+function applyHostContext(context) {
+  if (hostChannel && context.channel !== hostChannel) return;
+  hostChannel = context.channel;
+  const root = document.documentElement;
+  root.dataset.theme = context.theme === "dark" ? "dark" : "light";
+  Object.entries(context.tokens || {}).forEach(([name, value]) => {
+    if (typeof value === "string" && value) root.style.setProperty(`--host-${name}`, value);
+  });
+  if (typeof context.fontFamily === "string" && context.fontFamily) {
+    root.style.setProperty("--host-font-family", context.fontFamily);
+  }
+  hostReadyResolve?.();
+  hostReadyResolve = null;
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent || !event.data) return;
+  if (event.data.type === "tiangong_host_context" && typeof event.data.channel === "string") {
+    applyHostContext(event.data);
+  }
+});
+window.parent.postMessage({ type: "plugin_host_ready" }, "*");
+
+async function callHost(method, payload = "") {
+  if (!hostChannel) await hostReady;
+  return new Promise((resolve, reject) => {
+    const id = `volc-${Date.now()}-${++requestSequence}`;
+    const channel = hostChannel;
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", handler);
+      reject(new Error("插件请求超时"));
+    }, HOST_TIMEOUT_MS);
+    const handler = (event) => {
+      if (event.source !== window.parent || !event.data || event.data.id !== id || event.data.channel !== channel) return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", handler);
+      if (event.data.error) reject(new Error(String(event.data.error)));
+      else resolve(event.data.result ?? "");
+    };
+    window.addEventListener("message", handler);
+    window.parent.postMessage({ type: "plugin_call", channel, id, method, payload }, "*");
+  });
+}
+
+// ── DOM ──
+
+const apiKey = document.getElementById("api-key");
+const baseUrl = document.getElementById("base-url");
+const imageModel = document.getElementById("image-model");
+const videoModel = document.getElementById("video-model");
+const videoTimeout = document.getElementById("video-timeout");
+const watermark = document.getElementById("watermark");
+const speechApiKey = document.getElementById("speech-api-key");
+const speechAppId = document.getElementById("speech-app-id");
+const speechAccessToken = document.getElementById("speech-access-token");
+const ttsResourceId = document.getElementById("tts-resource-id");
+const ttsSpeaker = document.getElementById("tts-speaker");
+const ttsSpeakerList = document.getElementById("tts-speaker-list");
+const asrResourceId = document.getElementById("asr-resource-id");
+const speechBaseUrl = document.getElementById("speech-base-url");
+const saveBtn = document.getElementById("save-btn");
+const statusEl = document.getElementById("status");
+
+function setStatus(message, type) {
+  statusEl.textContent = message;
+  statusEl.className = `status${type ? ` ${type}` : ""}`;
+}
+
+// ── 加载 ──
+
+async function loadConfig() {
+  try {
+    const raw = await callHost("bootstrap", "{}");
+    const config = raw ? JSON.parse(raw) : {};
+    apiKey.value = config.api_key || "";
+    baseUrl.value = config.base_url && config.base_url !== DEFAULT_BASE_URL ? config.base_url : "";
+    imageModel.value = config.image_model || "";
+    videoModel.value = config.video_model || "";
+    videoTimeout.value = String(config.video_poll_timeout_secs || DEFAULT_VIDEO_TIMEOUT);
+    watermark.checked = Boolean(config.watermark);
+    const speech = config.speech || {};
+    speechApiKey.value = speech.api_key || "";
+    speechAppId.value = speech.app_id || "";
+    speechAccessToken.value = speech.access_token || "";
+    ttsResourceId.value = speech.tts_resource_id || DEFAULT_SPEECH.tts_resource_id;
+    ttsSpeaker.value = speech.tts_speaker || DEFAULT_SPEECH.tts_speaker;
+    asrResourceId.value = speech.asr_resource_id || DEFAULT_SPEECH.asr_resource_id;
+    speechBaseUrl.value = speech.base_url && speech.base_url !== DEFAULT_SPEECH.base_url ? speech.base_url : "";
+  } catch (error) {
+    setStatus(`加载失败：${error.message || error}`, "error");
+  }
+}
+
+async function loadVoices() {
+  try {
+    const raw = await callHost("list_voices", "{}");
+    const voices = (raw ? JSON.parse(raw).voices : []) || [];
+    ttsSpeakerList.replaceChildren(...voices.map((voice) => {
+      const option = document.createElement("option");
+      option.value = voice.id;
+      option.label = voice.name || voice.id;
+      return option;
+    }));
+  } catch {
+    // 音色候选仅为输入提示，加载失败不影响手填。
+  }
+}
+
+// ── 保存 ──
+
+async function saveConfig() {
+  const timeoutValue = Number.parseInt(videoTimeout.value, 10);
+  const hasArk = Boolean(apiKey.value.trim());
+  const hasSpeech = Boolean(speechApiKey.value.trim())
+    || Boolean(speechAppId.value.trim() && speechAccessToken.value.trim());
+  if (!hasArk && !hasSpeech) {
+    setStatus("请填写火山方舟 API Key 或豆包语音凭据", "error");
+    return;
+  }
+  if (hasArk && !imageModel.value.trim() && !videoModel.value.trim()) {
+    setStatus("请至少填写一个图片或视频生成模型", "error");
+    return;
+  }
+  if (!speechApiKey.value.trim() && Boolean(speechAppId.value.trim()) !== Boolean(speechAccessToken.value.trim())) {
+    setStatus("旧版控制台需同时填写 App ID 与 Access Token", "error");
+    return;
+  }
+  saveBtn.disabled = true;
+  setStatus("保存中...", "");
+  try {
+    const payload = {
+      api_key: apiKey.value.trim(),
+      base_url: baseUrl.value.trim() || DEFAULT_BASE_URL,
+      image_model: imageModel.value.trim(),
+      video_model: videoModel.value.trim(),
+      watermark: watermark.checked,
+      video_poll_timeout_secs: Number.isFinite(timeoutValue) ? Math.max(30, timeoutValue) : DEFAULT_VIDEO_TIMEOUT,
+      speech: {
+        base_url: speechBaseUrl.value.trim() || DEFAULT_SPEECH.base_url,
+        api_key: speechApiKey.value.trim(),
+        app_id: speechAppId.value.trim(),
+        access_token: speechAccessToken.value.trim(),
+        tts_resource_id: ttsResourceId.value.trim() || DEFAULT_SPEECH.tts_resource_id,
+        tts_speaker: ttsSpeaker.value.trim() || DEFAULT_SPEECH.tts_speaker,
+        asr_resource_id: asrResourceId.value.trim() || DEFAULT_SPEECH.asr_resource_id,
+      },
+    };
+    await callHost("save_config", JSON.stringify(payload));
+    setStatus("已保存", "success");
+    setTimeout(() => setStatus("", ""), 3000);
+  } catch (error) {
+    setStatus(`保存失败：${error.message || error}`, "error");
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+saveBtn.addEventListener("click", saveConfig);
+loadConfig();
+loadVoices();
+</script>
+</body>
+</html>
