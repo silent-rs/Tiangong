@@ -4,7 +4,10 @@
 
 use anyhow::{Context, Result};
 use tiangong_core::session::{Message, MessageRole};
-use tiangong_llm::{ModelCapability, ModelEndpoint, ModelRequest, SingleProviderClient};
+use tiangong_llm::{
+    ModelCapability, ModelEndpoint, ModelEntry, ModelRequest, ModelsConfig, ResolvedModel,
+    RoutingSlot, SingleProviderClient,
+};
 use tiangong_plugin_analyze_attachment_protocol::{
     ANALYZE_OPERATION, ATTACHMENT_PROTOCOL_VERSION, AnalyzeRequest, AnalyzeResponse, PLUGIN_ID,
     PLUGIN_VERSION,
@@ -82,17 +85,12 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
         anyhow::bail!("没有可分析的图片");
     }
 
-    // 解析 multimodal 端点。
+    // 从模型配置中挑一个能看图的模型。
     let models = tiangong_plugin_sidecar::model::load_models_config()?;
-    let resolved = if models.chat_is_multimodal() {
-        models
-            .resolve_for_capability(ModelCapability::Chat)
-            .ok_or_else(|| anyhow::anyhow!("Chat 模型未配置"))?
-    } else {
-        models
-            .resolve_for_capability(ModelCapability::Multimodal)
-            .ok_or_else(|| anyhow::anyhow!("Multimodal 能力未配置"))?
-    };
+    let resolved = resolve_multimodal(&models).ok_or_else(|| {
+        anyhow::anyhow!("没有可用的多模态模型：请在「设置 → 模型」中为至少一个模型勾选多模态能力")
+    })?;
+    let model_name = resolved.model.clone();
     let endpoint = ModelEndpoint::from_resolved(resolved);
     let client = SingleProviderClient::new(endpoint);
 
@@ -150,7 +148,38 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
         text: response.text,
         prompt_tokens: response.usage.prompt_tokens as u64,
         completion_tokens: response.usage.completion_tokens as u64,
-        model: String::new(),
+        model: model_name,
+    })
+}
+
+/// 选出一个可用于图片理解的模型。
+///
+/// 多模态没有独立路由，按以下顺序取第一个声明了多模态能力且 Provider 仍存在
+/// 的模型：chat 路由 → lite 路由 → 模型注册表（按 key 排序，保证结果稳定）。
+fn resolve_multimodal(models: &ModelsConfig) -> Option<ResolvedModel> {
+    let routed = [RoutingSlot::Chat, RoutingSlot::Lite]
+        .into_iter()
+        .filter_map(|slot| models.routing.get(&slot));
+    let mut registered: Vec<_> = models.models.iter().collect();
+    registered.sort_by_key(|(key, _)| *key);
+    routed
+        .chain(registered.into_iter().map(|(_, entry)| entry))
+        .filter(|entry| entry.capabilities.contains(&ModelCapability::Multimodal))
+        .find_map(|entry| resolve_entry(models, entry))
+}
+
+fn resolve_entry(models: &ModelsConfig, entry: &ModelEntry) -> Option<ResolvedModel> {
+    let provider = models.providers.get(&entry.provider)?;
+    Some(ResolvedModel {
+        headers: provider.headers.clone(),
+        provider: entry.provider.clone(),
+        base_url: provider.base_url.clone(),
+        api_key: ModelsConfig::resolve_api_key(&provider.api_key),
+        timeout_ms: provider.timeout_ms,
+        protocol: provider.protocol,
+        model: entry.model.clone(),
+        options: entry.options.clone(),
+        context_window: entry.context_window,
     })
 }
 
@@ -194,4 +223,56 @@ fn infer_image_mime(path: &str) -> String {
         "image/png"
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_llm::ProviderConfig;
+
+    fn config() -> ModelsConfig {
+        let mut models = ModelsConfig::default();
+        models.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                headers: Default::default(),
+                base_url: "https://api.example.com".to_string(),
+                api_key: "k".to_string(),
+                timeout_ms: 60_000,
+                protocol: Default::default(),
+            },
+        );
+        models.upsert_model("text", "p", "text-model", vec![ModelCapability::Chat]);
+        models.set_route_by_name(RoutingSlot::Chat, "text").unwrap();
+        models
+    }
+
+    #[test]
+    fn 非多模态主模型时从注册表选多模态模型() {
+        let mut models = config();
+        assert!(resolve_multimodal(&models).is_none());
+
+        models.upsert_model(
+            "vision-b",
+            "p",
+            "vision-b-model",
+            vec![ModelCapability::Chat, ModelCapability::Multimodal],
+        );
+        models.upsert_model(
+            "vision-a",
+            "p",
+            "vision-a-model",
+            vec![ModelCapability::Chat, ModelCapability::Multimodal],
+        );
+        assert_eq!(resolve_multimodal(&models).unwrap().model, "vision-a-model");
+
+        models
+            .set_route_by_name(RoutingSlot::Lite, "vision-b")
+            .unwrap();
+        assert_eq!(
+            resolve_multimodal(&models).unwrap().model,
+            "vision-b-model",
+            "路由中的多模态模型优先"
+        );
+    }
 }

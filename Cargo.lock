@@ -11047,7 +11047,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-protocol"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -11055,7 +11055,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-sidecar"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",

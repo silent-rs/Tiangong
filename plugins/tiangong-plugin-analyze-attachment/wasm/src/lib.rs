@@ -12,7 +12,6 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
     ViewResponse,
 };
-use serde_json::Value;
 use tiangong_plugin_analyze_attachment_protocol::{
     Analyze, AnalyzeRequest, AnalyzeResponse, TOOL_ANALYZE_ATTACHMENT,
 };
@@ -27,16 +26,6 @@ fn plugin_err(message: impl Into<String>) -> PluginError {
     PluginError::Message(message.into())
 }
 
-thread_local! {
-    // 主 Chat 模型是否多模态（on_config_updated 注入）。
-    static CHAT_MULTIMODAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// 主模型可直接看图时本插件没有存在意义：工具与提示段都不再提供。
-fn chat_is_multimodal() -> bool {
-    CHAT_MULTIMODAL.with(|flag| flag.get())
-}
-
 struct Component;
 
 impl Guest for Component {
@@ -48,43 +37,26 @@ impl Guest for Component {
         })
     }
 
+    // 通用图片分析工具：不随主模型能力增减，避免会话切换模型后工具集不一致。
     fn tool_specs() -> Result<Vec<ToolSpec>, PluginError> {
-        if chat_is_multimodal() {
-            return Ok(Vec::new());
-        }
         Ok(vec![ToolSpec {
             name: TOOL_ANALYZE_ATTACHMENT.to_string(),
-            description: "按需调用多模态模型解析图片。只有当用户问题确实需要查看图片内容时才调用；images 必须是消息中明确给出的图片本地路径，不要传消息编号或自行猜测路径。文档和其他文件应使用对应文件工具。".to_string(),
+            description: "调用多模态模型分析本地图片。当需要了解图片内容、而当前对话中只有图片的本地路径（看不到图片本身）时使用；images 必须是对话中明确给出的图片本地路径，不要传消息编号或自行猜测路径。文档和其他文件应使用对应文件工具。".to_string(),
             input_schema: r#"{"type":"object","properties":{"instruction":{"type":"string","minLength":1,"description":"希望如何解析图片，例如提取文字、描述画面或回答与图片有关的问题"},"images":{"type":"array","minItems":1,"items":{"type":"string","minLength":1},"description":"待分析图片的本地完整路径列表，原样使用用户消息中的 path；多张图片按希望分析的顺序传入"}},"required":["instruction","images"]}"#
                 .to_string(),
         }])
     }
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
-        if chat_is_multimodal() {
-            return Ok(Vec::new());
-        }
         Ok(vec![format!(
-            "## 附件分析工具\n\
-             当用户消息明确列出需要分析的图片资源，且回答确实需要查看图片内容时，可调用 `{TOOL_ANALYZE_ATTACHMENT}`。\n\
+            "## 图片分析工具\n\
+             当对话中只有图片的本地路径、看不到图片本身，且回答确实需要了解图片内容时，可调用 `{TOOL_ANALYZE_ATTACHMENT}`。\n\
              调用时将要分析的图片本地 `path` 原样传入 `images` 数组，并用 `instruction` 说明问题；不要用消息编号代替图片路径。\n\
              文档和其他文件应使用对应文件工具；普通文本对话、无需查看图片内容或消息未提供可分析图片时，不要调用此工具。"
         )])
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
-        if chat_is_multimodal() {
-            return Ok(ToolResult {
-                ok: false,
-                summary: "主模型已具备多模态能力，本插件未注册工具；请直接根据对话中的图片内容回答"
-                    .to_string(),
-                stdout: String::new(),
-                stderr: "chat model is multimodal; analyze_attachment is not registered"
-                    .to_string(),
-                exit_code: 1,
-                execution: None,
-            });
-        }
         match call.name.as_str() {
             TOOL_ANALYZE_ATTACHMENT => handle_analyze(&call),
             other => Err(plugin_err(format!("未知的 Attachment 工具: {other}"))),
@@ -99,13 +71,7 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_config_updated(config_json: String) -> Result<(), PluginError> {
-        let config: Value = serde_json::from_str(&config_json).unwrap_or(Value::Null);
-        let multimodal = config
-            .get("chat_capabilities")
-            .and_then(Value::as_array)
-            .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("multimodal")));
-        CHAT_MULTIMODAL.with(|flag| flag.set(multimodal));
+    fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -212,44 +178,14 @@ mod tests {
     }
 
     #[test]
-    fn chat_多模态时工具与提示段为空() {
-        Component::on_config_updated(
-            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#.to_string(),
-        )
-        .unwrap();
-        assert!(Component::tool_specs().unwrap().is_empty());
-        assert!(Component::prompt_sections().unwrap().is_empty());
-    }
-
-    #[test]
-    fn chat_非多模态时正常提供工具与提示段() {
-        Component::on_config_updated(r#"{"llm":{},"chat_capabilities":["chat"]}"#.to_string())
-            .unwrap();
-        assert_eq!(Component::tool_specs().unwrap().len(), 1);
-        assert_eq!(Component::prompt_sections().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn 主模型切换时工具与提示段跟随变化() {
-        // 多模态主模型：不提供工具。
-        Component::on_config_updated(
-            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#.to_string(),
-        )
-        .unwrap();
-        assert!(Component::tool_specs().unwrap().is_empty());
-
-        // 切换到非多模态主模型：恢复工具与提示段。
-        Component::on_config_updated(r#"{"llm":{},"chat_capabilities":["chat"]}"#.to_string())
-            .unwrap();
-        assert_eq!(Component::tool_specs().unwrap().len(), 1);
-        assert_eq!(Component::prompt_sections().unwrap().len(), 1);
-
-        // 再切回多模态主模型：再次隐藏。
-        Component::on_config_updated(
-            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#.to_string(),
-        )
-        .unwrap();
-        assert!(Component::tool_specs().unwrap().is_empty());
-        assert!(Component::prompt_sections().unwrap().is_empty());
+    fn 工具与提示段不随主模型能力变化() {
+        for config in [
+            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#,
+            r#"{"llm":{},"chat_capabilities":["chat"]}"#,
+        ] {
+            Component::on_config_updated(config.to_string()).unwrap();
+            assert_eq!(Component::tool_specs().unwrap().len(), 1, "{config}");
+            assert_eq!(Component::prompt_sections().unwrap().len(), 1, "{config}");
+        }
     }
 }

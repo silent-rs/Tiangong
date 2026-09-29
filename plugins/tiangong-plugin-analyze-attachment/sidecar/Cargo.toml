@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-analyze-attachment-sidecar"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "Apache-2.0"
 description = "Analyze-Attachment 独立 sidecar（读取模型配置、构造多模态请求、调用 LLM）"
