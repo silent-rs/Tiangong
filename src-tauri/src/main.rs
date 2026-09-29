@@ -178,8 +178,8 @@ fn run_gui() {
             // 桥接原语驱动；须在任何原语接线之前完成。
             tiangong_app::webview_host::init(app.handle());
 
-            // 媒体生成/转换插件（volcengine 提供 generate_image / generate_video，
-            // 以及 text_to_speech / speech_to_text）在 app.rs 的 create_core_if_absent
+            // 媒体生成/转换能力（generate_image / generate_video / text_to_speech /
+            // speech_to_text 等）由已安装插件提供，在 app.rs 的 create_core_if_absent
             // 中统一组装（与其他进程内插件一致），此处不再单独注册。
 
             // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
