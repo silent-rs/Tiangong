@@ -17,14 +17,25 @@ use crate::model::ProviderProtocol;
 // ---------------------------------------------------------------------------
 
 /// 模型能力枚举 — 描述模型具备什么能力
+///
+/// 模型配置仅支持对话与多模态（图片理解）。多模态不再有独立路由，
+/// 由 chat 路由指向的模型是否声明该能力决定。
+///
+/// `ImageGeneration` / `VideoGeneration` / `Stt` / `Tts` 已从模型配置中移除，
+/// 仅为兼容仍引用它们的插件代码而保留：配置读取时不解析、不列入 [`Self::all`]，
+/// 也不会解析出任何模型端点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
     Chat,
     Multimodal,
+    /// 已移除，仅保留代码兼容
     ImageGeneration,
+    /// 已移除，仅保留代码兼容
     VideoGeneration,
+    /// 已移除，仅保留代码兼容
     Stt,
+    /// 已移除，仅保留代码兼容
     Tts,
 }
 
@@ -34,17 +45,31 @@ pub enum ModelCapability {
 /// 旧版 models.json 中残留的这些键在读取时静默忽略，保证旧文件仍可解析。
 pub const RETIRED_MODEL_KEYS: &[&str] = &["embedding", "rerank"];
 
+/// 已从模型配置中移除的能力键。
+///
+/// 旧版 models.json 中的这些能力在读取时忽略（记录告警），不阻断解析；
+/// 仅声明了这些能力的模型条目整体丢弃，下次保存时从文件中清除。
+pub const REMOVED_CAPABILITY_KEYS: &[&str] =
+    &["image_generation", "video_generation", "stt", "tts"];
+
+/// 已从模型配置中移除的路由槽位键。
+///
+/// 多模态改由 chat 模型的能力声明承担，其余为已移除的媒体能力。
+/// 旧版 models.json 中的这些路由在读取时忽略（记录告警），下次保存时从文件中清除。
+pub const REMOVED_ROUTING_KEYS: &[&str] = &[
+    "multimodal",
+    "image_generation",
+    "video_generation",
+    "stt",
+    "tts",
+];
+
 /// 路由槽位枚举 — 描述哪个模型负责什么任务
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutingSlot {
     Chat,
     Lite,
-    Multimodal,
-    ImageGeneration,
-    VideoGeneration,
-    Stt,
-    Tts,
 }
 
 impl RoutingSlot {
@@ -52,11 +77,6 @@ impl RoutingSlot {
         match self {
             RoutingSlot::Chat => "chat",
             RoutingSlot::Lite => "lite",
-            RoutingSlot::Multimodal => "multimodal",
-            RoutingSlot::ImageGeneration => "image_generation",
-            RoutingSlot::VideoGeneration => "video_generation",
-            RoutingSlot::Stt => "stt",
-            RoutingSlot::Tts => "tts",
         }
     }
 
@@ -64,62 +84,24 @@ impl RoutingSlot {
         match key {
             "chat" => Some(RoutingSlot::Chat),
             "lite" => Some(RoutingSlot::Lite),
-            "multimodal" => Some(RoutingSlot::Multimodal),
-            "image_generation" => Some(RoutingSlot::ImageGeneration),
-            "video_generation" => Some(RoutingSlot::VideoGeneration),
-            "stt" => Some(RoutingSlot::Stt),
-            "tts" => Some(RoutingSlot::Tts),
             _ => None,
         }
     }
 
     pub fn all() -> &'static [RoutingSlot] {
-        &[
-            RoutingSlot::Chat,
-            RoutingSlot::Lite,
-            RoutingSlot::Multimodal,
-            RoutingSlot::ImageGeneration,
-            RoutingSlot::VideoGeneration,
-            RoutingSlot::Stt,
-            RoutingSlot::Tts,
-        ]
+        &[RoutingSlot::Chat, RoutingSlot::Lite]
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
             RoutingSlot::Chat => "对话",
             RoutingSlot::Lite => "轻量文本",
-            RoutingSlot::Multimodal => "多模态",
-            RoutingSlot::ImageGeneration => "图片生成",
-            RoutingSlot::VideoGeneration => "视频生成",
-            RoutingSlot::Stt => "语音识别",
-            RoutingSlot::Tts => "语音合成",
         }
     }
 
-    /// 路由槽位对应的模型能力
-    pub fn capability(&self) -> Option<ModelCapability> {
-        match self {
-            RoutingSlot::Chat => Some(ModelCapability::Chat),
-            RoutingSlot::Lite => None, // Lite 是路由槽位，不对应模型能力
-            RoutingSlot::Multimodal => Some(ModelCapability::Multimodal),
-            RoutingSlot::ImageGeneration => Some(ModelCapability::ImageGeneration),
-            RoutingSlot::VideoGeneration => Some(ModelCapability::VideoGeneration),
-            RoutingSlot::Stt => Some(ModelCapability::Stt),
-            RoutingSlot::Tts => Some(ModelCapability::Tts),
-        }
-    }
-
-    /// 从模型能力获取对应的路由槽位
-    pub fn from_capability(cap: ModelCapability) -> Self {
-        match cap {
-            ModelCapability::Chat => RoutingSlot::Chat,
-            ModelCapability::Multimodal => RoutingSlot::Multimodal,
-            ModelCapability::ImageGeneration => RoutingSlot::ImageGeneration,
-            ModelCapability::VideoGeneration => RoutingSlot::VideoGeneration,
-            ModelCapability::Stt => RoutingSlot::Stt,
-            ModelCapability::Tts => RoutingSlot::Tts,
-        }
+    /// 路由槽位要求模型具备的能力（Lite 与 Chat 一样要求对话能力）
+    pub fn capability(&self) -> ModelCapability {
+        ModelCapability::Chat
     }
 }
 
@@ -136,29 +118,18 @@ impl ModelCapability {
         }
     }
 
-    /// 从配置键解析能力
+    /// 从配置键解析能力（仅识别当前支持的能力，已移除的能力返回 None）
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "chat" => Some(ModelCapability::Chat),
             "multimodal" => Some(ModelCapability::Multimodal),
-            "image_generation" => Some(ModelCapability::ImageGeneration),
-            "video_generation" => Some(ModelCapability::VideoGeneration),
-            "stt" => Some(ModelCapability::Stt),
-            "tts" => Some(ModelCapability::Tts),
             _ => None,
         }
     }
 
     /// 返回所有能力的列表
     pub fn all() -> &'static [ModelCapability] {
-        &[
-            ModelCapability::Chat,
-            ModelCapability::Multimodal,
-            ModelCapability::ImageGeneration,
-            ModelCapability::VideoGeneration,
-            ModelCapability::Stt,
-            ModelCapability::Tts,
-        ]
+        &[ModelCapability::Chat, ModelCapability::Multimodal]
     }
 
     /// 返回能力的显示名称
@@ -171,43 +142,6 @@ impl ModelCapability {
             ModelCapability::Stt => "语音识别",
             ModelCapability::Tts => "语音合成",
         }
-    }
-
-    /// 返回用于意图分类的标签（大写英文）
-    pub fn intent_label(&self) -> &'static str {
-        match self {
-            ModelCapability::Chat => "SIMPLE",
-            ModelCapability::Multimodal => "MULTIMODAL",
-            ModelCapability::ImageGeneration => "IMAGE",
-            ModelCapability::VideoGeneration => "VIDEO",
-            ModelCapability::Stt => "STT",
-            ModelCapability::Tts => "TTS",
-        }
-    }
-
-    /// 返回意图分类的描述
-    pub fn intent_description(&self) -> &'static str {
-        match self {
-            ModelCapability::Chat => {
-                "简单对话（问候、闲聊、知识问答、翻译、解释概念等不需要执行工具或命令的请求）"
-            }
-            ModelCapability::Multimodal => "多模态请求（需要理解图片、音频等多种输入形式）",
-            ModelCapability::ImageGeneration => "图片生成请求（用户要求生成、绘制、创作图片）",
-            ModelCapability::VideoGeneration => "视频生成请求（用户要求生成、制作视频）",
-            ModelCapability::Stt => "语音识别请求（用户要求将语音/音频转为文字）",
-            ModelCapability::Tts => "语音合成请求（用户要求将文字转为语音/朗读）",
-        }
-    }
-
-    /// 除 Chat 外的多媒体能力列表（用于意图分类的动态加载）
-    pub fn media_capabilities() -> &'static [ModelCapability] {
-        &[
-            ModelCapability::ImageGeneration,
-            ModelCapability::VideoGeneration,
-            ModelCapability::Stt,
-            ModelCapability::Tts,
-            ModelCapability::Multimodal,
-        ]
     }
 }
 
@@ -259,8 +193,8 @@ fn default_options() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
-/// 宽松解析能力列表：跳过已迁出（embedding/rerank）或未知的能力键，
-/// 保证旧版 models.json 仍可读取。
+/// 宽松解析能力列表：跳过已迁出（embedding/rerank）、已移除（图片/视频/语音）
+/// 或未知的能力键，保证旧版 models.json 仍可读取。
 fn deserialize_capabilities_lenient<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Vec<ModelCapability>, D::Error>
@@ -268,16 +202,37 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = Vec::<String>::deserialize(deserializer)?;
-    Ok(raw
-        .iter()
-        .filter_map(|key| {
-            let capability = ModelCapability::from_key(key);
-            if capability.is_none() && !RETIRED_MODEL_KEYS.contains(&key.as_str()) {
-                tracing::warn!("忽略未知模型能力：{key}");
+    let mut capabilities = Vec::new();
+    for key in &raw {
+        match ModelCapability::from_key(key) {
+            Some(capability) if !capabilities.contains(&capability) => {
+                capabilities.push(capability)
             }
+            Some(_) => {}
+            None if RETIRED_MODEL_KEYS.contains(&key.as_str()) => {}
+            None if REMOVED_CAPABILITY_KEYS.contains(&key.as_str()) => {
+                tracing::warn!("模型能力 {key} 已移除，读取时忽略");
+            }
+            None => tracing::warn!("忽略未知模型能力：{key}"),
+        }
+    }
+    Ok(capabilities)
+}
+
+/// 判断模型条目是否只声明了已移除的能力（图片/视频/语音）。
+///
+/// 这类条目在新版中没有任何可用能力，若保留会以“无能力”形态出现在
+/// 模型列表中并被当作可选的对话模型，因此读取时整体丢弃。
+fn declares_only_removed_capabilities(entry: &Value) -> bool {
+    let Some(capabilities) = entry.get("capabilities").and_then(Value::as_array) else {
+        return false;
+    };
+    !capabilities.is_empty()
+        && capabilities.iter().all(|capability| {
             capability
+                .as_str()
+                .is_some_and(|key| REMOVED_CAPABILITY_KEYS.contains(&key))
         })
-        .collect())
 }
 
 /// 两层模型配置：Provider + Routing
@@ -341,7 +296,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
             #[serde(default)]
             providers: HashMap<String, ProviderConfig>,
             #[serde(default)]
-            models: HashMap<String, ModelEntry>,
+            models: HashMap<String, Value>,
             #[serde(default)]
             routing: HashMap<String, RawRoutingValue>,
         }
@@ -355,31 +310,43 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
 
         let raw = Raw::deserialize(deserializer)?;
 
+        // 仅声明了已移除能力（图片/视频/语音）的模型整体丢弃；其余条目逐个解析。
+        let mut models = HashMap::with_capacity(raw.models.len());
+        for (key, value) in raw.models {
+            if declares_only_removed_capabilities(&value) {
+                tracing::warn!("模型 {key} 仅声明了已移除的能力，读取时忽略");
+                continue;
+            }
+            let entry = ModelEntry::deserialize(value).map_err(serde::de::Error::custom)?;
+            models.insert(key, entry);
+        }
+
         let routing: HashMap<RoutingSlot, ModelEntry> = raw
             .routing
             .into_iter()
             .filter_map(|(slot_key, val)| {
                 let Some(slot) = RoutingSlot::from_key(&slot_key) else {
                     // embedding/rerank 已迁出到 Memory 独立配置，静默忽略；
-                    // 其它未知槽位记录告警后忽略，不阻断整个文件解析。
-                    if !RETIRED_MODEL_KEYS.contains(&slot_key.as_str()) {
+                    // 已移除的槽位（多模态/图片/视频/语音）与未知槽位记录告警后忽略，
+                    // 不阻断整个文件解析，下次保存时从文件中清除。
+                    if REMOVED_ROUTING_KEYS.contains(&slot_key.as_str()) {
+                        tracing::warn!("路由槽位 {slot_key} 已移除，读取时忽略");
+                    } else if !RETIRED_MODEL_KEYS.contains(&slot_key.as_str()) {
                         tracing::warn!("忽略未知路由槽位：{slot_key}");
                     }
                     return None;
                 };
                 let entry = match val {
-                    RawRoutingValue::Key(key) => {
-                        raw.models.get(&key).cloned().unwrap_or_else(|| {
-                            tracing::warn!("路由引用了不存在的模型：{key}");
-                            ModelEntry {
-                                provider: String::new(),
-                                model: key.clone(),
-                                capabilities: vec![],
-                                options: default_options(),
-                                context_window: None,
-                            }
-                        })
-                    }
+                    RawRoutingValue::Key(key) => models.get(&key).cloned().unwrap_or_else(|| {
+                        tracing::warn!("路由引用了不存在的模型：{key}");
+                        ModelEntry {
+                            provider: String::new(),
+                            model: key.clone(),
+                            capabilities: vec![],
+                            options: default_options(),
+                            context_window: None,
+                        }
+                    }),
                     RawRoutingValue::Entry(entry) => entry,
                 };
                 Some((slot, entry))
@@ -388,7 +355,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
 
         Ok(ModelsConfig {
             providers: raw.providers,
-            models: raw.models,
+            models,
             routing,
         })
     }
@@ -422,17 +389,26 @@ impl ModelsConfig {
         Ok(())
     }
     /// 检查指定能力是否已配置可用
-    /// 对于 Multimodal，除了检查独立路由外，也检查 chat 模型是否自带此能力
+    ///
+    /// 多模态没有独立路由：chat 路由指向的模型声明了多模态能力时视为可用。
     pub fn has_capability(&self, capability: ModelCapability) -> bool {
-        let slot = RoutingSlot::from_capability(capability);
-        if self.routing.contains_key(&slot) {
-            return true;
+        self.capability_slot(capability).is_some()
+    }
+
+    /// 能力当前由哪个路由槽位承担（未配置时为 None）。
+    fn capability_slot(&self, capability: ModelCapability) -> Option<RoutingSlot> {
+        match capability {
+            ModelCapability::Chat => self
+                .routing
+                .contains_key(&RoutingSlot::Chat)
+                .then_some(RoutingSlot::Chat),
+            ModelCapability::Multimodal => self.chat_is_multimodal().then_some(RoutingSlot::Chat),
+            // 已移除的能力没有路由
+            ModelCapability::ImageGeneration
+            | ModelCapability::VideoGeneration
+            | ModelCapability::Stt
+            | ModelCapability::Tts => None,
         }
-        // chat 模型自带 multimodal 能力时，视为多模态可用
-        if capability == ModelCapability::Multimodal && self.chat_is_multimodal() {
-            return true;
-        }
-        false
     }
 
     /// 判断 chat 路由指向的模型是否支持直接处理图片。
@@ -462,16 +438,15 @@ impl ModelsConfig {
         }
     }
 
-    /// 获取指定路由槽位的模型名称
+    /// 获取承担指定能力的路由模型名称
     pub fn routed_model(&self, capability: ModelCapability) -> Option<&str> {
-        let slot = RoutingSlot::from_capability(capability);
+        let slot = self.capability_slot(capability)?;
         self.routing.get(&slot).map(|e| e.model.as_str())
     }
 
-    /// 获取指定路由槽位的完整配置（Provider + Model 合并）
+    /// 获取承担指定能力的完整配置（Provider + Model 合并）
     pub fn resolve_for_capability(&self, capability: ModelCapability) -> Option<ResolvedModel> {
-        let slot = RoutingSlot::from_capability(capability);
-        self.resolve_slot(slot)
+        self.resolve_slot(self.capability_slot(capability)?)
     }
 
     /// 按路由槽位获取完整配置
@@ -699,9 +674,8 @@ impl ModelsConfig {
     /// 设置路由槽位指向某个已注册的模型。
     ///
     /// `name` 必须是 models 注册表中的 key。
-    /// 同时校验模型具备该槽位所需能力：
-    /// - 有明确能力映射的槽位（chat/multimodal/embedding 等）要求模型声明该能力。
-    /// - Lite 槽位无对应能力枚举，宽松接受 chat 能力（轻量文本任务用 chat 模型降级）。
+    /// 同时校验模型具备该槽位所需能力：chat 与 lite 槽位均要求模型声明 chat 能力
+    /// （lite 用于轻量文本任务，同样由对话模型承担）。
     ///
     /// 返回 Ok(()) 或错误（模型不存在 / 能力不匹配）。
     pub fn set_route_by_name(
@@ -716,43 +690,23 @@ impl ModelsConfig {
             .clone();
 
         // capability 校验：确保路由指向的模型确实具备该槽位所需能力
-        match slot.capability() {
-            Some(expected) if !entry.capabilities.contains(&expected) => {
-                let current = if entry.capabilities.is_empty() {
-                    "无".to_string()
-                } else {
-                    entry
-                        .capabilities
-                        .iter()
-                        .map(|c| c.key())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                };
-                return Err(format!(
-                    "模型 {name} 不具备 {} 能力（当前能力：{current}），不能设置到 {} 路由",
-                    expected.key(),
-                    slot.key()
-                ));
-            }
-            None if slot == RoutingSlot::Lite
-                && !entry.capabilities.contains(&ModelCapability::Chat) =>
-            {
-                // Lite 槽位要求 chat 能力（轻量文本任务降级）
-                let current = if entry.capabilities.is_empty() {
-                    "无".to_string()
-                } else {
-                    entry
-                        .capabilities
-                        .iter()
-                        .map(|c| c.key())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                };
-                return Err(format!(
-                    "模型 {name} 不具备 chat 能力（当前能力：{current}），不能设置到 lite 路由"
-                ));
-            }
-            _ => {}
+        let expected = slot.capability();
+        if !entry.capabilities.contains(&expected) {
+            let current = if entry.capabilities.is_empty() {
+                "无".to_string()
+            } else {
+                entry
+                    .capabilities
+                    .iter()
+                    .map(|c| c.key())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            return Err(format!(
+                "模型 {name} 不具备 {} 能力（当前能力：{current}），不能设置到 {} 路由",
+                expected.key(),
+                slot.key()
+            ));
         }
 
         self.routing.insert(slot, entry);
@@ -1096,20 +1050,23 @@ mod tests {
     fn set_route_by_name_rejects_capability_mismatch() {
         // P1 回归：route 设置必须校验模型 capability
         let mut config = ModelsConfig::default();
-        // chat 模型不应能设置到 tts 路由
-        config.upsert_model("chat-only", "p", "gpt", vec![ModelCapability::Chat]);
-        let err = config.set_route_by_name(RoutingSlot::Tts, "chat-only");
-        assert!(err.is_err());
-        assert!(err.unwrap_err().contains("tts"), "应报告缺少 tts 能力");
-        // tts 模型不应能设置到 chat 路由
-        config.upsert_model("tts-only", "p", "tts-1", vec![ModelCapability::Tts]);
-        let err = config.set_route_by_name(RoutingSlot::Chat, "tts-only");
-        assert!(err.is_err());
+        // 只有多模态能力、不具备对话能力的模型不能设置到 chat / lite 路由
+        config.upsert_model("vision-only", "p", "vl", vec![ModelCapability::Multimodal]);
+        let err = config.set_route_by_name(RoutingSlot::Chat, "vision-only");
+        assert!(err.unwrap_err().contains("chat"), "应报告缺少 chat 能力");
+        assert!(
+            config
+                .set_route_by_name(RoutingSlot::Lite, "vision-only")
+                .is_err()
+        );
+        // 无能力声明的模型同样拒绝
+        config.upsert_model("bare", "p", "m", vec![]);
+        assert!(config.set_route_by_name(RoutingSlot::Chat, "bare").is_err());
     }
 
     #[test]
     fn set_route_lite_accepts_chat_capability() {
-        // Lite 槽位无对应能力枚举，接受 chat 能力（轻量文本降级）
+        // Lite 槽位与 chat 一样要求对话能力
         let mut config = ModelsConfig::default();
         config.upsert_model(
             "lite",
@@ -1125,12 +1082,162 @@ mod tests {
     }
 
     #[test]
-    fn set_route_lite_rejects_non_chat() {
-        // Lite 槽位要求 chat 能力，tts 模型不能设为 lite
+    fn multimodal_is_resolved_through_chat_route() {
         let mut config = ModelsConfig::default();
-        config.upsert_model("speech", "p", "tts-1", vec![ModelCapability::Tts]);
-        let err = config.set_route_by_name(RoutingSlot::Lite, "speech");
-        assert!(err.is_err());
+        config.providers.insert("p".to_string(), sample_provider());
+        config.upsert_model("text", "p", "text-model", vec![ModelCapability::Chat]);
+        config.upsert_model(
+            "vision",
+            "p",
+            "vision-model",
+            vec![ModelCapability::Chat, ModelCapability::Multimodal],
+        );
+
+        // chat 模型不支持图片：多模态不可用
+        config.set_route_by_name(RoutingSlot::Chat, "text").unwrap();
+        assert!(!config.has_capability(ModelCapability::Multimodal));
+        assert!(
+            config
+                .resolve_for_capability(ModelCapability::Multimodal)
+                .is_none()
+        );
+        assert_eq!(config.routed_model(ModelCapability::Multimodal), None);
+
+        // chat 模型支持图片：多模态由 chat 路由承担
+        config
+            .set_route_by_name(RoutingSlot::Chat, "vision")
+            .unwrap();
+        assert!(config.has_capability(ModelCapability::Multimodal));
+        assert_eq!(
+            config
+                .resolve_for_capability(ModelCapability::Multimodal)
+                .unwrap()
+                .model,
+            "vision-model"
+        );
+        assert_eq!(
+            config.routed_model(ModelCapability::Multimodal),
+            Some("vision-model")
+        );
+        assert_eq!(
+            config.available_capabilities(),
+            vec![ModelCapability::Chat, ModelCapability::Multimodal]
+        );
+    }
+
+    #[test]
+    fn legacy_media_routes_and_capabilities_are_dropped_on_load() {
+        // 旧版 models.json：含多模态/图片/视频/语音路由与能力。
+        // 应能正常解析，已移除的内容被忽略，保存后从文件中清除。
+        let json = r#"{
+            "providers": {
+                "p": { "base_url": "https://api.test.com", "api_key": "key" }
+            },
+            "models": {
+                "gpt": {
+                    "provider": "p",
+                    "model": "gpt-4o",
+                    "capabilities": ["chat", "multimodal", "tts", "chat"]
+                },
+                "vl": { "provider": "p", "model": "qwen-vl", "capabilities": ["multimodal"] },
+                "flux": {
+                    "provider": "p",
+                    "model": "flux-1",
+                    "capabilities": ["image_generation"],
+                    "options": { "size": "1024x1024" }
+                },
+                "whisper": { "provider": "p", "model": "whisper-1", "capabilities": ["stt"] },
+                "voice": {
+                    "provider": "p",
+                    "model": "tts-1",
+                    "capabilities": ["tts"],
+                    "options": { "voice": "alloy" }
+                },
+                "sora": { "provider": "p", "model": "sora", "capabilities": ["video_generation"] },
+                "bare": { "provider": "p", "model": "bare-model" }
+            },
+            "routing": {
+                "chat": "gpt",
+                "lite": { "provider": "p", "model": "gpt-4o-mini", "capabilities": ["chat"] },
+                "multimodal": "vl",
+                "image_generation": "flux",
+                "video_generation": "sora",
+                "stt": "whisper",
+                "tts": { "provider": "p", "model": "tts-1", "capabilities": ["tts"] }
+            }
+        }"#;
+
+        let config: ModelsConfig = serde_json::from_str(json).expect("旧配置应可解析");
+
+        // 路由只保留 chat / lite
+        assert_eq!(config.routing.len(), 2);
+        assert_eq!(config.routing[&RoutingSlot::Chat].model, "gpt-4o");
+        assert_eq!(config.routing[&RoutingSlot::Lite].model, "gpt-4o-mini");
+        // 混合能力模型只保留 chat / multimodal，且去重
+        assert_eq!(
+            config.models["gpt"].capabilities,
+            vec![ModelCapability::Chat, ModelCapability::Multimodal]
+        );
+        assert_eq!(
+            config.routing[&RoutingSlot::Chat].capabilities,
+            vec![ModelCapability::Chat, ModelCapability::Multimodal]
+        );
+        // 仅多模态的模型保留（仍是合法能力）；仅媒体能力的模型整体丢弃
+        assert_eq!(
+            config.models["vl"].capabilities,
+            vec![ModelCapability::Multimodal]
+        );
+        for removed in ["flux", "whisper", "voice", "sora"] {
+            assert!(!config.models.contains_key(removed), "{removed} 应被丢弃");
+        }
+        // 未声明能力的模型不受影响
+        assert!(config.models["bare"].capabilities.is_empty());
+        // 多模态改由 chat 模型承担
+        assert!(config.has_capability(ModelCapability::Multimodal));
+
+        // 保存后不再写出已移除的路由与能力，且再次读取结果一致
+        let saved = serde_json::to_string(&config).unwrap();
+        for key in REMOVED_ROUTING_KEYS
+            .iter()
+            .filter(|key| **key != "multimodal")
+        {
+            assert!(
+                !saved.contains(&format!("\"{key}\"")),
+                "保存后不应再写出 {key}"
+            );
+        }
+        let routing: serde_json::Value =
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["routing"].clone();
+        assert!(
+            routing.get("multimodal").is_none(),
+            "保存后不应再写出 multimodal 路由"
+        );
+        let reloaded: ModelsConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded, config);
+    }
+
+    #[test]
+    fn legacy_route_referencing_dropped_model_does_not_break_chat() {
+        // chat 路由引用了一个仅有媒体能力（被丢弃）的模型：不报错，按旧逻辑回退为占位条目。
+        let json = r#"{
+            "providers": { "p": { "base_url": "https://api.test.com", "api_key": "key" } },
+            "models": {
+                "voice": { "provider": "p", "model": "tts-1", "capabilities": ["tts"] }
+            },
+            "routing": { "chat": "voice" }
+        }"#;
+        let config: ModelsConfig = serde_json::from_str(json).expect("旧配置应可解析");
+        assert!(config.models.is_empty());
+        assert_eq!(config.routing[&RoutingSlot::Chat].model, "voice");
+        assert!(config.routing[&RoutingSlot::Chat].provider.is_empty());
+        assert!(config.resolve_slot(RoutingSlot::Chat).is_none());
+    }
+
+    #[test]
+    fn malformed_model_entry_still_fails_to_parse() {
+        // 兼容处理只针对已移除能力，不吞掉真正损坏的条目
+        let json = r#"{ "models": { "broken": { "capabilities": ["chat"] } } }"#;
+        assert!(serde_json::from_str::<ModelsConfig>(json).is_err());
     }
 
     #[test]

@@ -157,27 +157,22 @@ impl TiangongConfig {
 
 /// 插件能力集合签名——用于检测配置变化是否影响插件注册集合
 /// （新增/删除能力 vs 仅 endpoint 变更）。
+///
+/// 模型配置只保留对话与多模态；图片/视频/语音能力已移除，
+/// 看图插件仅在 chat 模型自身不支持图片时才需要，而多模态已无独立路由，
+/// 因此当前没有随模型配置变化的插件注册集合。保留签名结构供调用方比较。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PluginSetSignature {
-    pub image: bool,
-    pub video: bool,
-    pub tts: bool,
-    pub stt: bool,
-    pub analyze_attachment: bool,
+    /// chat 模型是否支持图片理解（影响附件的处理方式）。
+    pub chat_multimodal: bool,
 }
 
 /// 从 ModelsConfig 计算插件能力集合签名。
 pub fn plugin_set_signature(
     models: &tiangong_llm::models_config::ModelsConfig,
 ) -> PluginSetSignature {
-    use tiangong_llm::models_config::ModelCapability;
     PluginSetSignature {
-        image: models.has_capability(ModelCapability::ImageGeneration),
-        video: models.has_capability(ModelCapability::VideoGeneration),
-        tts: models.has_capability(ModelCapability::Tts),
-        stt: models.has_capability(ModelCapability::Stt),
-        analyze_attachment: models.has_capability(ModelCapability::Multimodal)
-            && !models.chat_is_multimodal(),
+        chat_multimodal: models.chat_is_multimodal(),
     }
 }
 
@@ -189,7 +184,7 @@ mod tests {
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };
 
-    fn models_with(cap: ModelCapability) -> ModelsConfig {
+    fn models_with_chat(capabilities: Vec<ModelCapability>) -> ModelsConfig {
         let mut m = ModelsConfig::default();
         m.providers.insert(
             "p".to_string(),
@@ -202,11 +197,11 @@ mod tests {
             },
         );
         m.routing.insert(
-            RoutingSlot::from_capability(cap),
+            RoutingSlot::Chat,
             ModelEntry {
                 provider: "p".to_string(),
                 model: "test-model".to_string(),
-                capabilities: vec![cap],
+                capabilities,
                 options: serde_json::json!({}),
                 context_window: None,
             },
@@ -215,43 +210,27 @@ mod tests {
     }
 
     #[test]
-    fn plugin_set_signature_detects_capability_add() {
-        let empty = ModelsConfig::default();
-        let with_image = models_with(ModelCapability::ImageGeneration);
+    fn plugin_set_signature_detects_chat_multimodal_toggle() {
+        let text = models_with_chat(vec![ModelCapability::Chat]);
+        let vision = models_with_chat(vec![ModelCapability::Chat, ModelCapability::Multimodal]);
 
-        let old = plugin_set_signature(&empty);
-        let new = plugin_set_signature(&with_image);
-
-        assert_ne!(old, new, "新增 image 能力后签名应变化");
-        assert!(!old.image);
-        assert!(new.image);
+        assert!(!plugin_set_signature(&text).chat_multimodal);
+        assert!(plugin_set_signature(&vision).chat_multimodal);
+        assert_ne!(plugin_set_signature(&text), plugin_set_signature(&vision));
     }
 
     #[test]
     fn plugin_set_signature_unchanged_when_only_endpoint_diff() {
-        let m1 = models_with(ModelCapability::ImageGeneration);
+        let m1 = models_with_chat(vec![ModelCapability::Chat]);
         let mut m2 = m1.clone();
-        if let Some(entry) = m2.routing.get_mut(&RoutingSlot::ImageGeneration) {
+        if let Some(entry) = m2.routing.get_mut(&RoutingSlot::Chat) {
             entry.model = "different-model".to_string();
         }
 
-        let sig1 = plugin_set_signature(&m1);
-        let sig2 = plugin_set_signature(&m2);
-
-        assert_eq!(sig1, sig2, "仅 endpoint 变化时签名应不变");
-    }
-
-    #[test]
-    fn plugin_set_signature_detects_analyze_attachment_toggle() {
-        // chat 是 multimodal → analyze_attachment 不需要
-        let mut chat_multimodal = models_with(ModelCapability::Chat);
-        if let Some(entry) = chat_multimodal.routing.get_mut(&RoutingSlot::Chat) {
-            entry.capabilities.push(ModelCapability::Multimodal);
-        }
-        assert!(!plugin_set_signature(&chat_multimodal).analyze_attachment);
-
-        // chat 不是 multimodal + 有独立 multimodal 路由 → analyze_attachment 需要
-        let with_independent_multimodal = models_with(ModelCapability::Multimodal);
-        assert!(plugin_set_signature(&with_independent_multimodal).analyze_attachment);
+        assert_eq!(
+            plugin_set_signature(&m1),
+            plugin_set_signature(&m2),
+            "仅 endpoint 变化时签名应不变"
+        );
     }
 }

@@ -852,23 +852,12 @@ fn prepare_user_message_blocking(
 fn attachment_capability_snapshot(
     models: &tiangong_llm::ModelsConfig,
 ) -> AttachmentCapabilitySnapshot {
-    use tiangong_llm::ModelCapability;
-
-    let chat_multimodal = models.chat_is_multimodal();
-    let analyze_attachment = !chat_multimodal
-        && models.has_capability(ModelCapability::Multimodal)
-        && models
-            .resolve_for_capability(ModelCapability::Multimodal)
-            .is_some();
-    let audio_processor = models.has_capability(ModelCapability::Stt)
-        && models
-            .resolve_for_capability(ModelCapability::Stt)
-            .is_some();
-
+    // 多模态已无独立路由、语音识别能力已移除：
+    // 图片只能由支持多模态的 chat 模型直接处理，音频没有处理器。
     AttachmentCapabilitySnapshot {
-        chat_multimodal,
-        analyze_attachment,
-        audio_processor,
+        chat_multimodal: models.chat_is_multimodal(),
+        analyze_attachment: false,
+        audio_processor: false,
         video_processor: false,
     }
 }

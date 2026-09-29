@@ -844,18 +844,14 @@ pub(crate) async fn attachment_capability_snapshot(
 ) -> Result<tiangong_media_archive::AttachmentCapabilitySnapshot, String> {
     state
         .with_state_read(|core_state| {
-            use tiangong_llm::ModelCapability;
             let models = &core_state.config.models;
             let chat_multimodal = models.chat_is_multimodal();
             Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
                 chat_multimodal,
-                analyze_attachment: !chat_multimodal
-                    && models
-                        .resolve_for_capability(ModelCapability::Multimodal)
-                        .is_some(),
-                audio_processor: models
-                    .resolve_for_capability(ModelCapability::Stt)
-                    .is_some(),
+                // 多模态已无独立路由：chat 模型不支持图片时没有可用的看图模型。
+                analyze_attachment: false,
+                // 语音识别能力已从模型配置中移除。
+                audio_processor: false,
                 // 当前没有“视频内容分析”插件；视频生成能力不能冒充输入处理能力。
                 video_processor: false,
             })
@@ -2180,24 +2176,17 @@ pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_jso
     state.with_state_read(|_core_state| Ok(Vec::new())).await
 }
 
-/// 检查 TTS 能力是否已配置
-#[tauri::command]
-pub async fn has_tts_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
-    has_model_capability("tts".to_string(), state).await
-}
-
-/// 检查 STT 能力是否已配置
-#[tauri::command]
-pub async fn has_stt_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
-    has_model_capability("stt".to_string(), state).await
-}
-
 /// 统一的能力可用性查询（基于配置快速检测）
+///
+/// 已移除的旧能力键（图片/视频/语音）按未配置处理，不报错，兼容旧版调用方。
 #[tauri::command]
 pub async fn has_model_capability(
     capability: String,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
+    if tiangong_llm::models_config::REMOVED_CAPABILITY_KEYS.contains(&capability.as_str()) {
+        return Ok(false);
+    }
     let capability = parse_model_capability(&capability)?;
     state
         .with_state_read(|core_state| Ok(has_capability_in_state(core_state, capability)))
