@@ -543,14 +543,9 @@ impl TiangongCore {
     ) -> Result<(), CoreError> {
         if !self.is_busy() {
             // 空闲工具注入不丢弃：写入会话延迟队列，下一轮模型请求自动携带。
-            if let Command::InjectTool {
-                tool_name,
-                payload,
-                supersede,
-            } = command
-            {
+            if let Command::InjectTool { tool_name, payload } = command {
                 let mut session = self.load_session()?;
-                session.defer_tool_injection(tool_name, payload, supersede);
+                session.defer_tool_injection(tool_name, payload);
                 session.try_persist_to_disk().map_err(|error| {
                     tracing::warn!(%error, session_id = %self.session_id, "空闲注入落盘失败");
                     CoreError::WorkerStopped
@@ -741,7 +736,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 Command::InjectTool {
                     tool_name: tool.tool_name().to_string(),
                     payload: tool.render(),
-                    supersede: tool.supersedes(),
                 },
                 "InjectTool",
             ),

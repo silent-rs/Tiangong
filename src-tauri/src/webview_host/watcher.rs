@@ -254,12 +254,8 @@ impl BrowserWatcher {
             "active_tab_id": snapshot.active_tab_id,
             "feedback": feedback,
         });
-        // 纯页面快照可被更新快照顶替；携带用户操作反馈的按事件逐条保留。
-        if has_feedback {
-            tx.inject_tool("browser_data", payload);
-        } else {
-            tx.inject_snapshot("browser_data", payload);
-        }
+        // 页面变化反馈与页面快照同一通道投递（turn 内有效，turn 结束自然失效）。
+        tx.inject_tool("browser_data", payload);
         tracing::info!(
             url = %snapshot.url,
             title = %snapshot.title,

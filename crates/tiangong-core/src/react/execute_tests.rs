@@ -931,7 +931,6 @@ async fn returns_cancelled_on_cancel_command() {
         let _ = cmd_tx.send(Command::InjectTool {
             tool_name: "cancelled_probe".to_string(),
             payload: serde_json::json!({"value": 1}),
-            supersede: false,
         });
         let _ = cmd_tx.send(Command::Cancel);
     });
@@ -1983,7 +1982,6 @@ async fn command_storm_is_processed_in_order_without_panicking() {
         tx.send(Command::InjectTool {
             tool_name: "storm_data".to_string(),
             payload: serde_json::json!({"k": 1}),
-            supersede: false,
         })
         .unwrap();
         tx.send(Command::SetReasoningEffort(
@@ -2154,7 +2152,6 @@ async fn handles_runtime_feedback_while_request_is_running() {
             .send(Command::InjectTool {
                 tool_name: "runtime_probe".to_string(),
                 payload: serde_json::json!({"value": 1}),
-                supersede: false,
             })
             .unwrap();
         runtime_cmd_tx

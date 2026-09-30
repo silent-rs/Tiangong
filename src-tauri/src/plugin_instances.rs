@@ -239,6 +239,7 @@ fn notify_browser_tabs_changed(
     let _ = state.tool_injection_tx().send(crate::ToolInjection {
         session_id: Some(session_id.to_string()),
         browser_source: None,
+        snapshot: true,
         tool: Box::new(crate::webview_host::page_fetcher::BrowserContent {
             title: active
                 .as_ref()

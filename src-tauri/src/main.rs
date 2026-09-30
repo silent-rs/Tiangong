@@ -227,6 +227,7 @@ fn run_gui() {
                 let _ = tx1.send(tiangong_app::ToolInjection {
                     session_id: Some(target_session),
                     browser_source: Some((data.session_id, data.tab_id)),
+                    snapshot: true,
                     tool: Box::new(BrowserContent {
                         title: data.title,
                         url: data.url,
@@ -345,6 +346,7 @@ fn run_gui() {
                         .send(tiangong_app::ToolInjection {
                             session_id: Some(target_session.clone()),
                             browser_source: Some((session_id.clone(), source_tab_id)),
+                            snapshot: false,
                             tool: Box::new(BrowserContent {
                                 title,
                                 url: page_url.clone(),
