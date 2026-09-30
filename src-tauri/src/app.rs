@@ -76,6 +76,9 @@ pub struct TiangongApp {
     tool_injection_tx: tokio::sync::mpsc::UnboundedSender<ToolInjection>,
     /// 消费者 receiver（Option：take 出来启动消费者任务后变 None）。
     tool_injection_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ToolInjection>>>,
+    /// 会话空闲期暂存的页面状态快照（session_id → 最新一条），见
+    /// [`ToolInjection::snapshot`]；下一条用户消息投递前注入。
+    pending_snapshots: std::sync::Arc<Mutex<HashMap<String, ToolInjection>>>,
 }
 
 /// 工具消息注入请求（插件 → app 消费者）。
@@ -84,8 +87,37 @@ pub struct ToolInjection {
     pub session_id: Option<String>,
     /// 浏览器注入来源；消费前再次确认该页面仍有实际标签。
     pub browser_source: Option<(String, String)>,
+    /// 页面状态快照（非事件）：会话空闲时由宿主暂存且只保留最新一条，
+    /// 下一条用户消息投递前再注入，避免空闲期积压的过期页面被批量补入。
+    pub snapshot: bool,
     /// 注入的工具数据。
     pub tool: Box<dyn tiangong_core::agent_input::ToolInput>,
+}
+
+/// 浏览器注入来源的页面是否仍有实际标签（无来源视为有效）。
+fn browser_source_mounted(
+    app_handle: &tauri::AppHandle,
+    source: Option<&(String, String)>,
+) -> bool {
+    let Some((scope, tab_id)) = source else {
+        return true;
+    };
+    app_handle
+        .state::<crate::webview_host::WebviewHostState>()
+        .registry
+        .existing_session_state(scope)
+        .map(crate::webview_host::manager::BrowserManager::from_state)
+        .is_some_and(|manager| manager.is_tab_mounted(tab_id))
+}
+
+/// 暂存页面状态快照：同一会话只保留最新一条（新快照顶替旧快照）。
+fn stash_snapshot(
+    pending: &Mutex<HashMap<String, ToolInjection>>,
+    session_id: String,
+    injection: ToolInjection,
+) {
+    let mut guard = pending.lock().unwrap_or_else(|error| error.into_inner());
+    guard.insert(session_id, injection);
 }
 
 /// 自制插件清单注入（插件变化事件的订阅者投递）。
@@ -98,10 +130,6 @@ struct LocalPluginListInput;
 impl tiangong_core::agent_input::ToolInput for LocalPluginListInput {
     fn tool_name(&self) -> &str {
         tiangong_plugin_runtime::LOCAL_PLUGIN_LIST_INJECTION
-    }
-
-    fn supersedes(&self) -> bool {
-        true
     }
 
     fn render(&self) -> serde_json::Value {
@@ -233,6 +261,7 @@ impl TiangongApp {
             core_manager,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
+            pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -466,10 +495,11 @@ impl TiangongApp {
 
         // 持有 Arc<state> 让消费者任务独立存活
         let state = self.state.clone();
+        let pending_snapshots = self.pending_snapshots.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let session_id = match req.session_id {
-                    Some(id) => id,
+                    Some(ref id) => id.clone(),
                     None => {
                         let guard = state.lock().await;
                         guard.active_session_id.as_str().to_string()
@@ -478,21 +508,20 @@ impl TiangongApp {
 
                 let tool_name = req.tool.tool_name().to_string();
 
-                if let Some((scope, tab_id)) = req.browser_source.as_ref() {
-                    let host_state = app_handle.state::<crate::webview_host::WebviewHostState>();
-                    let still_mounted = host_state
-                        .registry
-                        .existing_session_state(scope)
-                        .map(crate::webview_host::manager::BrowserManager::from_state)
-                        .is_some_and(|manager| manager.is_tab_mounted(tab_id));
-                    if !still_mounted {
-                        tracing::debug!(session_id, tab_id, "浏览器标签已关闭，跳过页面注入");
-                        continue;
-                    }
+                if !browser_source_mounted(&app_handle, req.browser_source.as_ref()) {
+                    tracing::debug!(session_id, "浏览器标签已关闭，跳过页面注入");
+                    continue;
                 }
 
                 // 通过 app_handle 获取 TiangongApp
                 let app_state = app_handle.state::<TiangongApp>();
+                // 页面状态快照：会话空闲时不立即投递（否则进入会话延迟队列，
+                // 多条过期快照会在下一轮一并补入），由宿主暂存最新一条，
+                // 下一条用户消息投递前再注入。
+                if req.snapshot && !app_state.core_manager.is_core_busy(&session_id) {
+                    stash_snapshot(&pending_snapshots, session_id, req);
+                    continue;
+                }
                 // 与发送、编辑和删除共享同一会话边界，覆盖快照读取、ensure、消费者
                 // 绑定和最终 deliver，禁止在 take→删除/重建空窗中复活孤立 Core。
                 let session_lock = app_state.session_send_lock(&session_id);
@@ -536,17 +565,9 @@ impl TiangongApp {
                     tracing::info!(session_id, "消费者自动恢复 core");
                 }
 
-                if let Some((scope, tab_id)) = req.browser_source.as_ref() {
-                    let host_state = app_handle.state::<crate::webview_host::WebviewHostState>();
-                    let still_mounted = host_state
-                        .registry
-                        .existing_session_state(scope)
-                        .map(crate::webview_host::manager::BrowserManager::from_state)
-                        .is_some_and(|manager| manager.is_tab_mounted(tab_id));
-                    if !still_mounted {
-                        tracing::debug!(session_id, tab_id, "浏览器标签已关闭，跳过页面注入");
-                        continue;
-                    }
+                if !browser_source_mounted(&app_handle, req.browser_source.as_ref()) {
+                    tracing::debug!(session_id, "浏览器标签已关闭，跳过页面注入");
+                    continue;
                 }
 
                 let core_sent = app_state
@@ -943,6 +964,7 @@ impl TiangongApp {
             let _ = self.tool_injection_tx.send(ToolInjection {
                 session_id: Some(session_id),
                 browser_source: None,
+                snapshot: false,
                 tool: Box::new(LocalPluginListInput),
             });
         }
@@ -973,6 +995,35 @@ impl TiangongApp {
         }
     }
 
+    /// 用户消息投递前注入会话空闲期暂存的最新页面快照（见
+    /// [`ToolInjection::snapshot`]）。调用方持有会话发送锁；快照来源页面
+    /// 已关闭时丢弃。空闲 Core 会把注入放入会话延迟队列，随本条消息的
+    /// 首次模型请求一并送达，此时队列中只有这一条最新快照。
+    fn flush_pending_snapshot(&self, session_id: &str) {
+        let injection = {
+            let mut guard = self
+                .pending_snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            guard.remove(session_id)
+        };
+        let Some(injection) = injection else {
+            return;
+        };
+        let Some(app_handle) = self.app_handle.get() else {
+            return;
+        };
+        if !browser_source_mounted(app_handle, injection.browser_source.as_ref()) {
+            return;
+        }
+        if !self
+            .core_manager
+            .deliver_to_core_if_live(session_id, AgentInputKind::Tool(injection.tool))
+        {
+            tracing::debug!(session_id, "暂存页面快照投递失败（Core 不存在）");
+        }
+    }
+
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
     ///
     /// app 层只做 host 专属的远端 turn 所有权检查与插件变化的上下文交接，
@@ -1000,6 +1051,7 @@ impl TiangongApp {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
         }
         self.handoff_before_deliver(session_id).await;
+        self.flush_pending_snapshot(session_id);
         self.core_manager
             .deliver_user_message(
                 session_id,
@@ -1122,6 +1174,30 @@ async fn run_plugin_auto_upgrade(app_handle: tauri::AppHandle) -> anyhow::Result
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn stash_snapshot_keeps_only_latest_per_session() {
+        let pending = Mutex::new(HashMap::new());
+        let make = |tab: &str| ToolInjection {
+            session_id: Some("s1".to_string()),
+            browser_source: Some(("s1".to_string(), tab.to_string())),
+            snapshot: true,
+            tool: Box::new(LocalPluginListInput),
+        };
+        stash_snapshot(&pending, "s1".to_string(), make("tab-a"));
+        stash_snapshot(&pending, "s1".to_string(), make("tab-b"));
+        stash_snapshot(&pending, "s2".to_string(), make("tab-c"));
+
+        let guard = pending.lock().unwrap();
+        assert_eq!(guard.len(), 2);
+        assert_eq!(
+            guard["s1"]
+                .browser_source
+                .as_ref()
+                .map(|(_, tab)| tab.as_str()),
+            Some("tab-b")
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn plugin_preload_wait_is_async_and_preserves_failure() {

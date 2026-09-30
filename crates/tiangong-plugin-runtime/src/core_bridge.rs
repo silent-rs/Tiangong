@@ -257,7 +257,7 @@ impl RuntimeCorePlugin {
             .and_then(|guard| {
                 guard
                     .as_ref()
-                    .map(|tx| tx.inject_snapshot(LOCAL_PLUGIN_LIST_INJECTION, inventory))
+                    .map(|tx| tx.inject_tool(LOCAL_PLUGIN_LIST_INJECTION, inventory))
             })
             .unwrap_or(false);
         if !sent {

@@ -551,23 +551,9 @@ impl Session {
         }
     }
 
-    /// 延迟注入入队。`supersede` 为状态快照：先移除队列中同来源的旧快照
-    /// （事件类条目保留），避免下一边界把过期状态连同最新状态一起补入。
-    pub(crate) fn defer_tool_injection(
-        &mut self,
-        tool_name: String,
-        payload: serde_json::Value,
-        supersede: bool,
-    ) {
-        if supersede {
-            self.deferred_tool_injections
-                .retain(|item| !(item.supersede && item.tool_name == tool_name));
-        }
-        self.deferred_tool_injections.push(DeferredToolInjection {
-            tool_name,
-            payload,
-            supersede,
-        });
+    pub(crate) fn defer_tool_injection(&mut self, tool_name: String, payload: serde_json::Value) {
+        self.deferred_tool_injections
+            .push(DeferredToolInjection { tool_name, payload });
     }
 
     pub fn append_worker_message(
@@ -692,40 +678,6 @@ mod persistence_tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
-
-    /// 快照类延迟注入只保留同来源最新一条；事件类与其他来源不受影响。
-    #[test]
-    fn deferred_snapshot_injection_supersedes_same_source() {
-        let mut session = Session::new("defer-supersede");
-        session.defer_tool_injection("browser_data".into(), serde_json::json!({"url": "a"}), true);
-        session.defer_tool_injection(
-            "browser_data".into(),
-            serde_json::json!({"url": "a", "feedback": "click"}),
-            false,
-        );
-        session.defer_tool_injection("terminal_user_input".into(), serde_json::json!({}), false);
-        session.defer_tool_injection("browser_data".into(), serde_json::json!({"url": "b"}), true);
-
-        let urls: Vec<_> = session
-            .deferred_tool_injections
-            .iter()
-            .map(|item| {
-                (
-                    item.tool_name.as_str(),
-                    item.payload["url"].clone(),
-                    item.supersede,
-                )
-            })
-            .collect();
-        assert_eq!(
-            urls,
-            vec![
-                ("browser_data", serde_json::json!("a"), false),
-                ("terminal_user_input", serde_json::Value::Null, false),
-                ("browser_data", serde_json::json!("b"), true),
-            ]
-        );
-    }
 
     /// 轮次锚点必须落在用户真实输入上：宿主注入的 role=User 消息
     /// （图片注入、压缩恢复锚点）不是用户意图，不得劫持 latest 锚点。

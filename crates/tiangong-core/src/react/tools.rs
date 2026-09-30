@@ -282,12 +282,8 @@ fn handle_ambient_command(
                 let _ = stream_tx.send(StreamEvent::TitleChanged { title });
             }
         }
-        Command::InjectTool {
-            tool_name,
-            payload,
-            supersede,
-        } => {
-            injections.receive(stream_tx, tool_name, payload, supersede);
+        Command::InjectTool { tool_name, payload } => {
+            injections.receive(stream_tx, tool_name, payload);
         }
         Command::EmitStreamEvent(event) => {
             let _ = stream_tx.send(*event);

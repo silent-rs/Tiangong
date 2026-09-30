@@ -158,13 +158,6 @@ pub trait ToolInput: Send + Sync {
     /// 工具名（伪造 tool_call 的 name 字段）。
     fn tool_name(&self) -> &str;
 
-    /// 是否为状态快照（默认否）。快照类注入在会话延迟队列中顶替同来源的
-    /// 旧快照，只保留最新状态，避免空闲期积压的过期页面/清单在下一轮
-    /// 一次性补入、与实际状态不符。事件类（终端输入、网络响应）保持默认。
-    fn supersedes(&self) -> bool {
-        false
-    }
-
     /// 注入到对话的结构化内容（JSON）。
     ///
     /// 返回 JSON 而非文本，让 worker 侧根据 tool_name 决定呈现格式，

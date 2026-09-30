@@ -57,10 +57,6 @@ pub struct MessageToolCall {
 pub struct DeferredToolInjection {
     pub tool_name: String,
     pub payload: Value,
-    /// 状态快照类注入（如浏览器页面快照、插件清单）：入队时顶替队列中
-    /// 同来源的旧快照，只保留最新状态；事件类注入保持逐条累积。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub supersede: bool,
 }
 
 /// 消息所属的执行阶段。
