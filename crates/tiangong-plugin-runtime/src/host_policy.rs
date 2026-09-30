@@ -56,6 +56,8 @@ pub struct HostExecutionPolicy {
     pub user_credential_reads: UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub allow_user_cache_write: bool,
+    /// 沙箱内是否放行系统音频输入服务（麦克风录音）。
+    pub allow_audio_input: bool,
 }
 
 /// 解析插件的宿主执行策略。
@@ -81,12 +83,16 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     // 仅对已通过官方发布者签名校验的同名插件保留宿主直启；第三方、自签和
     // 本地插件不得按名称获得例外。通信仍固定使用 stdio，生命周期仍由宿主管理。
     let accessibility_host_child = official_signed && plugin_id == "computer-use";
+    // 官方 volcengine 提供按住说话录音，sidecar 需在沙箱内经 CoreAudio 打开
+    // 麦克风；仅按已验证官方身份授予，清单声明不构成授权输入。
+    let audio_input = official_signed && plugin_id == "volcengine";
     HostExecutionPolicy {
         sandbox: !accessibility_host_child,
         allow_network: true,
         transport: SidecarTransport::Stdio,
         user_credential_reads,
         allow_user_cache_write: git_workflow,
+        allow_audio_input: audio_input,
     }
 }
 
@@ -190,6 +196,20 @@ mod tests {
                 "{id} 不需要 Git 凭据读取能力"
             );
             assert!(!resolve(id, true).allow_user_cache_write);
+        }
+    }
+
+    #[test]
+    fn audio_input_is_granted_only_to_official_volcengine() {
+        let official = resolve("volcengine", true);
+        assert!(official.allow_audio_input, "官方 volcengine 需要录音能力");
+        assert!(official.sandbox, "录音授权不改变沙箱基线");
+        assert!(
+            !resolve("volcengine", false).allow_audio_input,
+            "非官方同名插件不得按名称获得录音能力"
+        );
+        for id in ["terminal", "command", "computer-use", "unknown-third-party"] {
+            assert!(!resolve(id, true).allow_audio_input, "{id} 不需要录音能力");
         }
     }
 

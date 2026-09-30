@@ -40,6 +40,11 @@ pub struct SandboxPolicy {
     /// 用户身份与读取凭据；默认 false，仅宿主显式授权的策略开放。
     #[serde(default)]
     pub allow_credential_services: bool,
+    /// 是否允许访问宿主音频输入服务（macOS CoreAudio HAL）。录音类插件需要
+    /// 经 coreaudiod 枚举与打开麦克风；默认 false，仅宿主按已验证插件身份授权。
+    /// 麦克风隐私授权（TCC）仍由系统按宿主 App 独立把关。
+    #[serde(default)]
+    pub allow_audio_input: bool,
     /// 单次 command 的资源上限。
     #[serde(default)]
     pub resource_limits: SandboxResourceLimits,
@@ -77,6 +82,7 @@ impl SandboxPolicy {
             denied_read_paths: Vec::new(),
             allow_network: false,
             allow_credential_services: false,
+            allow_audio_input: false,
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -90,6 +96,7 @@ impl SandboxPolicy {
             denied_read_paths: Vec::new(),
             allow_network: true,
             allow_credential_services: true,
+            allow_audio_input: true,
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -245,6 +252,7 @@ mod tests {
         assert_eq!(value["workspace"], "/workspace");
         assert_eq!(value["allow_network"], false);
         assert_eq!(value["allow_credential_services"], false);
+        assert_eq!(value["allow_audio_input"], false);
         assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
         assert_eq!(value["resource_limits"]["max_processes"], 64);
 
