@@ -597,7 +597,7 @@ mod tests {
     fn normalize_config_trims_and_defaults() {
         let config = normalize_config(VolcengineConfig {
             api_key: " key ".to_string(),
-            image_model: " doubao-seedream-5-0-pro ".to_string(),
+            image_model: " doubao-seedream-5.0-pro ".to_string(),
             video_model: String::new(),
             watermark: true,
             video_poll_timeout_secs: 1,
@@ -607,7 +607,7 @@ mod tests {
         });
         let defaults = VolcengineConfig::default();
         assert_eq!(config.api_key, "key");
-        assert_eq!(config.image_model, "doubao-seedream-5-0-pro");
+        assert_eq!(config.image_model, "doubao-seedream-5.0-pro");
         assert_eq!(config.video_poll_timeout_secs, 30);
         assert!(config.watermark);
         assert_eq!(config.tts_model, defaults.tts_model);

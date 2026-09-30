@@ -589,11 +589,11 @@ mod tests {
         let config: VolcengineConfig = serde_json::from_str(
             r#"{"base_url":"https://x","api_key":"k","speech":{"api_key":"s"},
                 "access_key_id":"ak","secret_access_key":"sk","edition":"enterprise",
-                "image_model":"doubao-seedream-5-0-pro"}"#,
+                "image_model":"doubao-seedream-5.0-pro"}"#,
         )
         .unwrap();
         assert_eq!(config.api_key, "k");
-        assert_eq!(config.image_model, "doubao-seedream-5-0-pro");
+        assert_eq!(config.image_model, "doubao-seedream-5.0-pro");
         assert_eq!(config.tts_model, DEFAULT_TTS_MODEL);
         let saved = serde_json::to_value(&config).unwrap();
         for legacy in [
