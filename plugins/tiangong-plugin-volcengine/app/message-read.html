@@ -27,7 +27,7 @@
     <button class="rd-btn" id="rd-btn" type="button" title="朗读" aria-label="朗读"></button>
   </div>
   <script>
-    // 消息操作区的朗读按钮（session.message-action）：合成当前消息文本并播放。
+    // 消息操作区的朗读按钮（session.message-action）：朗读当前消息文本（首次边合成边播放，之后直接播放已生成的音频）。
     const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
     const button = uiRoot.getElementById('rd-btn');
     const ICONS = {
@@ -58,6 +58,7 @@
     async function waitPlayback() {
       for (;;) {
         const status = await call('plugin.play_status', {});
+        if (status && status.error) throw new Error(status.error);
         if (!status || !status.playing || phase !== 'playing') return;
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
@@ -74,12 +75,11 @@
       phase = 'loading';
       render();
       try {
-        await call('plugin.stop', {}).catch(() => {});
-        const result = await call('plugin.synthesize', { text });
+        // speak：已生成过的直接播放音频文件；否则边合成边流式播放（同时缓存）。
+        await call('plugin.speak', { text });
         if (phase !== 'loading') return;
         phase = 'playing';
         render();
-        await call('plugin.play', { file_path: result.file_path });
         await waitPlayback();
       } catch (error) {
         window.alert(`语音播放失败：${(error && error.message) || error}`);

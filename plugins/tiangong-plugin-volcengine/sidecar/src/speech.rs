@@ -104,9 +104,17 @@ pub fn speech_rate(speed: f64) -> i64 {
     ((speed - 1.0) * 100.0).round().clamp(-50.0, 100.0) as i64
 }
 
-/// 组装语音合成请求体。
+/// 流式合成（边收边播）的输出采样率：16 bit 单声道 PCM。
+pub const TTS_STREAM_SAMPLE_RATE: u32 = 24_000;
+
+/// 组装语音合成请求体（mp3，落盘为文件）。
 pub fn tts_body(uid: &str, text: &str, options: &TtsOptions<'_>) -> Value {
-    let mut audio_params = json!({ "format": "mp3", "sample_rate": 24000 });
+    tts_body_with_format(uid, text, options, "mp3")
+}
+
+/// 组装语音合成请求体：`format` 为 `mp3` / `pcm`（采样率固定 24 kHz）。
+fn tts_body_with_format(uid: &str, text: &str, options: &TtsOptions<'_>, format: &str) -> Value {
+    let mut audio_params = json!({ "format": format, "sample_rate": TTS_STREAM_SAMPLE_RATE });
     if let Some(speed) = options.speed {
         audio_params["speech_rate"] = json!(speech_rate(speed));
     }
@@ -120,21 +128,65 @@ pub fn tts_body(uid: &str, text: &str, options: &TtsOptions<'_>) -> Value {
     })
 }
 
-/// 解析合成流：逐行 JSON，拼接 base64 音频帧；遇错误码或无结束帧报错。
+/// 解析完整合成响应：逐行 JSON，拼接 base64 音频帧；遇错误码或无结束帧报错。
 pub fn parse_tts_stream(body: &str) -> Result<Vec<u8>> {
     let mut audio = Vec::new();
-    let mut finished = false;
-    for line in body.lines() {
-        let line = line.trim();
+    let mut parser = TtsStreamParser::default();
+    parser.feed(body.as_bytes(), &mut |chunk| audio.extend_from_slice(chunk))?;
+    parser.finish(&mut |chunk| audio.extend_from_slice(chunk))?;
+    Ok(audio)
+}
+
+/// 合成响应的增量解析器：响应按行分块到达（行可能跨网络分包），
+/// 每解出一段音频立即回调，供边收边播。
+#[derive(Default)]
+pub struct TtsStreamParser {
+    pending: Vec<u8>,
+    finished: bool,
+    audio_bytes: usize,
+}
+
+impl TtsStreamParser {
+    /// 送入一段响应字节；完整的行立即解析。
+    pub fn feed(&mut self, bytes: &[u8], on_audio: &mut dyn FnMut(&[u8])) -> Result<()> {
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            self.handle_line(&line, on_audio)?;
+        }
+        Ok(())
+    }
+
+    /// 响应结束：解析残余行，并校验确实收到了音频。
+    pub fn finish(mut self, on_audio: &mut dyn FnMut(&[u8])) -> Result<()> {
+        let rest = std::mem::take(&mut self.pending);
+        self.handle_line(&rest, on_audio)?;
+        if self.audio_bytes == 0 {
+            if self.finished {
+                bail!("豆包语音合成返回空音频，请检查音色与资源 ID 是否匹配");
+            }
+            bail!(
+                "豆包语音合成未返回音频：{}",
+                preview(&String::from_utf8_lossy(&rest))
+            );
+        }
+        Ok(())
+    }
+
+    fn handle_line(&mut self, raw: &[u8], on_audio: &mut dyn FnMut(&[u8])) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(raw);
+        let line = text.trim();
         // 同一接口的 SSE 形式以 `data:` 前缀承载同样的 JSON，这里一并兼容。
         let line = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
         if line.is_empty() || !line.starts_with('{') {
-            continue;
+            return Ok(());
         }
         let frame: Value = serde_json::from_str(line)
             .with_context(|| format!("解析语音合成响应帧失败：{}", preview(line)))?;
-        let code = frame.get("code").and_then(Value::as_i64).unwrap_or(0);
-        match code {
+        match frame.get("code").and_then(Value::as_i64).unwrap_or(0) {
             0 => {
                 if let Some(data) = frame.get("data").and_then(Value::as_str)
                     && !data.is_empty()
@@ -142,13 +194,11 @@ pub fn parse_tts_stream(body: &str) -> Result<Vec<u8>> {
                     let chunk = base64::engine::general_purpose::STANDARD
                         .decode(data)
                         .context("语音合成音频帧 base64 解码失败")?;
-                    audio.extend_from_slice(&chunk);
+                    self.audio_bytes += chunk.len();
+                    on_audio(&chunk);
                 }
             }
-            SUCCESS_CODE => {
-                finished = true;
-                break;
-            }
+            SUCCESS_CODE => self.finished = true,
             other => {
                 let message = frame
                     .get("message")
@@ -157,14 +207,8 @@ pub fn parse_tts_stream(body: &str) -> Result<Vec<u8>> {
                 bail!("豆包语音合成失败（{other}）：{}", friendly_error(message));
             }
         }
+        Ok(())
     }
-    if !finished && audio.is_empty() {
-        bail!("豆包语音合成未返回音频：{}", preview(body));
-    }
-    if audio.is_empty() {
-        bail!("豆包语音合成返回空音频，请检查音色与资源 ID 是否匹配");
-    }
-    Ok(audio)
 }
 
 /// 调用语音合成。
@@ -194,6 +238,53 @@ pub async fn synthesize(
         mime_type: "audio/mpeg",
         extension: "mp3",
     })
+}
+
+/// 流式合成：请求 24 kHz 16 bit PCM，响应分块到达即解析并回调。
+///
+/// `on_audio` 返回 false 表示调用方已放弃（播放被停止），立即结束读取。
+/// 返回 Ok(true) 表示完整收完，Ok(false) 表示被调用方中止。
+pub async fn synthesize_stream(
+    endpoint: &SpeechEndpoint,
+    text: &str,
+    options: &TtsOptions<'_>,
+    mut on_audio: impl FnMut(&[u8]) -> bool,
+) -> Result<bool> {
+    let mut response = http_client()?
+        .post(endpoint.url("/api/v3/plan/tts/unidirectional"))
+        .header("X-Api-Key", &endpoint.api_key)
+        .header("X-Api-Resource-Id", tts_resource_id(options.model))
+        .header("X-Api-Request-Id", request_id())
+        .json(&tts_body_with_format("tiangong", text, options, "pcm"))
+        .send()
+        .await
+        .context("请求豆包语音合成接口失败")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "豆包语音合成调用失败 ({status})：{}",
+            friendly_error(&error_message(&body).unwrap_or_else(|| preview(&body)))
+        );
+    }
+    let mut parser = TtsStreamParser::default();
+    let mut keep = true;
+    while let Some(chunk) = response.chunk().await.context("读取语音合成响应失败")? {
+        parser.feed(&chunk, &mut |audio| {
+            if keep {
+                keep = on_audio(audio);
+            }
+        })?;
+        if !keep {
+            return Ok(false);
+        }
+    }
+    parser.finish(&mut |audio| {
+        if keep {
+            keep = on_audio(audio);
+        }
+    })?;
+    Ok(keep)
 }
 
 // ── 语音识别 ──
@@ -746,6 +837,76 @@ mod tests {
 
         let sse = "data: {\"code\":0,\"data\":\"QUJD\"}\n\ndata: {\"code\":20000000,\"message\":\"ok\"}\n";
         assert_eq!(parse_tts_stream(sse).unwrap(), b"ABC".to_vec());
+    }
+
+    #[test]
+    fn stream_parser_handles_lines_split_across_packets() {
+        let body =
+            "{\"code\":0,\"data\":\"QUJD\"}\n{\"code\":0,\"data\":\"REVG\"}\n{\"code\":20000000}\n";
+        let mut parser = TtsStreamParser::default();
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        // 逐字节送入：任何分包位置都必须按行完整解析。
+        for byte in body.as_bytes() {
+            parser
+                .feed(std::slice::from_ref(byte), &mut |chunk| {
+                    chunks.push(chunk.to_vec())
+                })
+                .unwrap();
+        }
+        parser
+            .finish(&mut |chunk| chunks.push(chunk.to_vec()))
+            .unwrap();
+        assert_eq!(chunks, vec![b"ABC".to_vec(), b"DEF".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn synthesize_stream_requests_pcm_and_delivers_chunks() {
+        let body = "{\"code\":0,\"data\":\"QUJD\"}\n{\"code\":0,\"data\":\"REVG\"}\n{\"code\":20000000,\"message\":\"ok\"}\n";
+        let (base_url, server) = http_stub(format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ))
+        .await;
+        let endpoint = SpeechEndpoint {
+            base_url,
+            api_key: "plan-key".to_string(),
+        };
+        let options = TtsOptions {
+            model: "doubao-seed-tts-2.0",
+            speaker: "zh_female_vv_uranus_bigtts",
+            speed: None,
+        };
+        let mut received = Vec::new();
+        let completed = synthesize_stream(&endpoint, "你好", &options, |chunk| {
+            received.extend_from_slice(chunk);
+            true
+        })
+        .await
+        .unwrap();
+        assert!(completed);
+        assert_eq!(received, b"ABCDEF".to_vec());
+        let request = server.await.unwrap();
+        assert!(request.contains("\"format\":\"pcm\""), "{request}");
+
+        // 调用方中止：首包后返回 false，不再继续回调。
+        let (base_url, _server) = http_stub(format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ))
+        .await;
+        let endpoint = SpeechEndpoint {
+            base_url,
+            api_key: "plan-key".to_string(),
+        };
+        let mut calls = 0;
+        let completed = synthesize_stream(&endpoint, "你好", &options, |_| {
+            calls += 1;
+            false
+        })
+        .await
+        .unwrap();
+        assert!(!completed);
+        assert_eq!(calls, 1);
     }
 
     #[test]

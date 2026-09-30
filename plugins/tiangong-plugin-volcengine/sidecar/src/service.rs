@@ -26,6 +26,7 @@ use tiangong_plugin_volcengine_protocol::{
 use crate::ark::{self, Endpoint, VideoOptions};
 use crate::speech::{self, SpeechEndpoint, TtsOptions};
 use crate::{audio, config};
+use tiangong_plugin_volcengine_protocol::{SPEAK_OPERATION, SpeakRequest, SpeakResponse};
 
 pub struct VolcengineService;
 
@@ -112,6 +113,12 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             serde_json::to_value(list_voices()?).context("序列化 list_voices 响应失败")
         }
 
+        SPEAK_OPERATION => {
+            let request: SpeakRequest =
+                serde_json::from_value(payload).context("解析 speak 请求失败")?;
+            serde_json::to_value(speak(request).await?).context("序列化 speak 响应失败")
+        }
+
         PLAY_OPERATION => {
             let request: PlayRequest =
                 serde_json::from_value(payload).context("解析 play 请求失败")?;
@@ -122,6 +129,7 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             let _: Empty = serde_json::from_value(payload).unwrap_or_default();
             serde_json::to_value(PlayStatusResponse {
                 playing: audio::play_running(),
+                error: audio::take_playback_error(),
             })
             .context("序列化 play_status 响应失败")
         }
@@ -320,6 +328,72 @@ async fn synthesize(request: SynthesizeRequest) -> Result<SynthesizeResponse> {
         mime_type: output.mime_type.to_string(),
         duration: None,
         model: format!("{} / {speaker}", config.tts_model),
+    })
+}
+
+/// 朗读：同一文本 + 音色 + 语速已合成过（缓存文件存在）时直接播放文件；
+/// 否则请求 PCM 流式合成，首包到达即开始播放，同时写入 WAV 缓存，
+/// 完整收完后登记，下次朗读同一内容直接复用。
+async fn speak(request: SpeakRequest) -> Result<SpeakResponse> {
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        bail!("text 不能为空");
+    }
+    let config = config::load()?;
+    let speaker = request
+        .voice
+        .as_deref()
+        .map(str::trim)
+        .filter(|voice| !voice.is_empty())
+        .unwrap_or(&config.tts_speaker)
+        .to_string();
+    let cache = audio::tts_cache_path(&config.tts_model, &speaker, request.speed, &text)?;
+    if cache.is_file() {
+        let file_path = cache.display().to_string();
+        audio::play(PlayRequest {
+            file_path: file_path.clone(),
+        })?;
+        return Ok(SpeakResponse {
+            streamed: false,
+            file_path: Some(file_path),
+        });
+    }
+
+    let endpoint = speech_endpoint(&config)?;
+    let (feed, mut writer) = audio::start_stream_playback(speech::TTS_STREAM_SAMPLE_RATE, &cache)?;
+    let model = config.tts_model.clone();
+    tokio::spawn(async move {
+        let mut feed = feed;
+        let options = TtsOptions {
+            model: &model,
+            speaker: &speaker,
+            speed: request.speed,
+        };
+        let result = speech::synthesize_stream(&endpoint, &text, &options, |chunk| {
+            if feed.is_stopped() {
+                return false;
+            }
+            feed.push_pcm16(chunk);
+            writer.write(chunk);
+            true
+        })
+        .await;
+        // 先登记结果再结束输入：保证前端看到播放结束时已能读到失败原因。
+        match result {
+            // 完整收完才落为缓存；中途停止或失败丢弃半截文件。
+            Ok(true) => writer.commit(),
+            Ok(false) => writer.discard(),
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "流式语音合成失败");
+                audio::set_playback_error(format!("{error:#}"));
+                writer.discard();
+            }
+        }
+        feed.finish();
+    });
+    Ok(SpeakResponse {
+        streamed: true,
+        file_path: None,
     })
 }
 

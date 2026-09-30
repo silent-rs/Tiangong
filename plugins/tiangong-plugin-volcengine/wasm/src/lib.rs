@@ -183,10 +183,12 @@ fn handle_generate_image(args: &Value) -> Result<ToolResult, PluginError> {
         .map(|(index, image)| format!("![图片 {}]({})", index + 1, image.reference))
         .collect::<Vec<_>>()
         .join("\n");
+    // 防重复调用提示由插件自带（宿主不再按工具名特判）。
+    let stdout = format!("{markdown}\n本次已完成，不要以相同参数再次调用 generate_image。");
     Ok(ToolResult {
         ok: true,
         summary: format!("图片生成成功（模型：{}）", response.model),
-        stdout: markdown,
+        stdout,
         stderr: String::new(),
         exit_code: 0,
         execution: None,
@@ -333,6 +335,7 @@ impl UiGuest for Component {
             "synthesize" => forward::<Synthesize>(payload)?,
             "list_voices" => invoke_for_ui::<ListVoices>(&Empty {})?,
             "play" => forward::<Play>(payload)?,
+            "speak" => forward::<tiangong_plugin_volcengine_protocol::Speak>(payload)?,
             "play_status" => invoke_for_ui::<PlayStatus>(&Empty {})?,
             "stop" => invoke_for_ui::<Stop>(&Empty {})?,
             "transcribe" => forward::<Transcribe>(payload)?,

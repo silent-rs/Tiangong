@@ -30,13 +30,14 @@
     // 状态栏自动朗读开关（global.status-item）：订阅本插件 sidecar 推送的最终答复
     // （WASM on_turn_finished 钩子提取本轮 Summary 相位答复 → sidecar 通知
     // volcengine.reply_final，经宿主 sidecar.event 到达；不含工具过程文本），
-    // 按句切分后流水线合成、顺序播放：首句合成完即开播，其余句在播放期间继续合成。
+    // 按句切分成短段后逐段调用 plugin.speak：未合成过的边合成边流式播放（首包即开播），
+    // 已合成过的直接播放缓存文件；一段播完再朗读下一段。
     // 只朗读当前会话；切换会话或关闭开关即停止。
     const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
     const button = uiRoot.getElementById('ar-btn');
     const SENTENCE_END = /[。！？；!?;\n]|[.](?=\s)/;
-    // 首句单独合成以尽快开播；其后句子合并到该长度以内，减少合成请求次数。
-    const CHUNK_MAX = 240;
+    // 每段 1～2 句：流式合成首包即开播，段落过长只会拉长单次请求，过短会增加段间停顿。
+    const CHUNK_MAX = 100;
     const STORAGE_KEY = 'tiangong-volcengine-auto-read';
     const ICON_OFF = '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/>';
     const ICON_ON = '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>';
@@ -46,8 +47,7 @@
       sessionId: (typeof hostContext !== 'undefined' && hostContext && hostContext.session && hostContext.session.id) || null,
       sentences: [],
       lastMessageId: null,
-      audios: [],
-      synthesizing: false,
+      speaking: false,
       playing: false,
       generation: 0,
     };
@@ -69,8 +69,7 @@
     function reset() {
       state.generation += 1;
       state.sentences = [];
-      state.audios = [];
-      state.synthesizing = false;
+      state.speaking = false;
       state.playing = false;
       call('plugin.stop', {}).catch(() => {});
       render();
@@ -103,11 +102,11 @@
         if (sentence) sentences.push(sentence);
       }
       if (rest.trim()) sentences.push(rest.trim());
-      // 首句单独成段；其后句子合并到 CHUNK_MAX 以内。
+      // 相邻短句合并到 CHUNK_MAX 以内。
       const chunks = [];
       for (const sentence of sentences) {
         const last = chunks[chunks.length - 1];
-        if (chunks.length > 1 && last.length + sentence.length <= CHUNK_MAX) {
+        if (last !== undefined && last.length + sentence.length <= CHUNK_MAX) {
           chunks[chunks.length - 1] = last + sentence;
         } else {
           chunks.push(sentence);
@@ -116,46 +115,34 @@
       return chunks;
     }
 
-    async function synthesizeNext() {
-      if (state.synthesizing || state.sentences.length === 0) return;
+    async function speakAll() {
+      if (state.speaking) return;
       const generation = state.generation;
-      state.synthesizing = true;
-      const sentence = state.sentences.shift();
-      try {
-        const result = await call('plugin.synthesize', { text: sentence });
-        if (generation !== state.generation) return;
-        state.audios.push(result.file_path);
-        void playNext();
-      } catch (error) {
-        console.warn('[auto-read] 合成失败', error);
-      } finally {
-        if (generation === state.generation) {
-          state.synthesizing = false;
-          void synthesizeNext();
-        }
-      }
-    }
-
-    async function playNext() {
-      if (state.playing || state.audios.length === 0) return;
-      const generation = state.generation;
+      state.speaking = true;
       state.playing = true;
       render();
-      const path = state.audios.shift();
       try {
-        await call('plugin.play', { file_path: path });
-        for (;;) {
-          const status = await call('plugin.play_status', {});
-          if (!status || !status.playing || generation !== state.generation) break;
-          await new Promise((resolve) => setTimeout(resolve, 200));
+        while (state.sentences.length && generation === state.generation) {
+          const sentence = state.sentences.shift();
+          try {
+            await call('plugin.speak', { text: sentence });
+            for (;;) {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              if (generation !== state.generation) return;
+              const status = await call('plugin.play_status', {});
+              if (status && status.error) throw new Error(status.error);
+              if (!status || !status.playing) break;
+            }
+          } catch (error) {
+            // 单段失败（网络等）跳过该段继续朗读后文。
+            console.warn('[auto-read] 朗读失败', error);
+          }
         }
-      } catch (error) {
-        console.warn('[auto-read] 播放失败', error);
       } finally {
         if (generation === state.generation) {
+          state.speaking = false;
           state.playing = false;
           render();
-          void playNext();
         }
       }
     }
@@ -175,9 +162,9 @@
       const text = toSpeech(event.text || '');
       if (!text) return;
       // 新答复打断上一段仍在播放的朗读。
-      if (state.playing || state.synthesizing || state.sentences.length || state.audios.length) reset();
+      if (state.speaking || state.sentences.length) reset();
       state.sentences.push(...splitSentences(text));
-      void synthesizeNext();
+      void speakAll();
     }
 
     function subscribe() {
@@ -202,7 +189,7 @@
         const next = (context && context.session && context.session.id) || null;
         if (next !== state.sessionId) {
           state.sessionId = next;
-          if (state.playing || state.synthesizing || state.sentences.length) reset();
+          if (state.speaking || state.sentences.length) reset();
         }
       });
     }

@@ -28,6 +28,8 @@ pub const SET_CONFIG_OPERATION: &str = "set_config";
 pub const SYNTHESIZE_OPERATION: &str = "synthesize";
 pub const LIST_VOICES_OPERATION: &str = "list_voices";
 pub const PLAY_OPERATION: &str = "play";
+/// 朗读文本：已有合成音频直接播放文件，否则边合成边流式播放（同时落盘缓存）。
+pub const SPEAK_OPERATION: &str = "speak";
 pub const PLAY_STATUS_OPERATION: &str = "play_status";
 pub const STOP_OPERATION: &str = "stop";
 pub const TRANSCRIBE_OPERATION: &str = "transcribe";
@@ -101,6 +103,13 @@ pub struct Transcribe;
 pub struct RecordStart;
 pub struct RecordStop;
 pub struct RecordCancel;
+pub struct Speak;
+
+impl VolcengineOperation for Speak {
+    const NAME: &'static str = SPEAK_OPERATION;
+    type Request = SpeakRequest;
+    type Response = SpeakResponse;
+}
 pub struct TurnFinished;
 
 impl VolcengineOperation for TurnFinished {
@@ -328,6 +337,26 @@ pub struct SynthesizeResponse {
     pub model: String,
 }
 
+/// 朗读请求：同一文本 + 音色 + 语速只合成一次，之后复用生成的音频文件。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpeakRequest {
+    pub text: String,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub speed: Option<f64>,
+}
+
+/// 朗读响应：请求返回即已开始播放，结束经 `play_status` 轮询。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpeakResponse {
+    /// true：本次边合成边流式播放；false：播放已生成的音频文件。
+    pub streamed: bool,
+    /// 已有音频文件的路径（流式播放时为空，合成完成后写入缓存）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
 /// 播放音频请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayRequest {
@@ -348,6 +377,9 @@ pub struct PlayResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayStatusResponse {
     pub playing: bool,
+    /// 最近一次流式朗读失败的原因（读取即清除）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 音色信息（设置页 / 前端选择用）。

@@ -72,33 +72,184 @@ fn suppress_console_window(command: &mut std::process::Command) {
 #[cfg(not(windows))]
 fn suppress_console_window(_command: &mut std::process::Command) {}
 
-static PLAYING: Mutex<Option<std::process::Child>> = Mutex::new(None);
+/// 当前唯一一路播放：外部播放器进程（播放文件）或流式播放（边合成边播）。
+enum Playing {
+    Process(std::process::Child),
+    Stream(crate::playback::StreamPlayer),
+}
 
-/// 收割已退出的播放进程；仍在播放时返回 `true`。锁中毒时按「无播放」处理。
+static PLAYING: Mutex<Option<Playing>> = Mutex::new(None);
+/// 最近一次流式朗读的失败原因（`play_status` 读取即清除）。
+static PLAYBACK_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn playing_slot() -> std::sync::MutexGuard<'static, Option<Playing>> {
+    PLAYING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 收割已结束的播放；仍在播放时返回 `true`。
 pub fn play_running() -> bool {
-    let Ok(mut guard) = PLAYING.lock() else {
-        return false;
-    };
-    match guard.as_mut() {
+    let mut guard = playing_slot();
+    let running = match guard.as_mut() {
         None => false,
-        Some(child) => match child.try_wait() {
-            Ok(Some(_)) | Err(_) => {
-                *guard = None;
-                false
-            }
-            Ok(None) => true,
-        },
+        Some(Playing::Process(child)) => matches!(child.try_wait(), Ok(None)),
+        Some(Playing::Stream(player)) => player.is_running(),
+    };
+    if !running {
+        *guard = None;
+    }
+    running
+}
+
+/// 终止当前播放（仅终止本 sidecar 自己启动的播放）。
+pub fn stop_playback() {
+    let taken = playing_slot().take();
+    match taken {
+        Some(Playing::Process(mut child)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Some(Playing::Stream(mut player)) => player.stop(),
+        None => {}
     }
 }
 
-/// 终止当前播放进程（仅终止本 sidecar 自己启动的进程）。
-pub fn stop_playback() {
-    let Ok(mut guard) = PLAYING.lock() else {
-        return;
-    };
-    if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+pub fn set_playback_error(message: String) {
+    *PLAYBACK_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
+}
+
+pub fn take_playback_error() -> Option<String> {
+    PLAYBACK_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+/// 开始流式播放（替换当前播放）：返回写入端与缓存写入器。
+pub fn start_stream_playback(
+    sample_rate: u32,
+    cache_path: &std::path::Path,
+) -> Result<(crate::playback::PlayerFeed, TtsCacheWriter)> {
+    stop_playback();
+    take_playback_error();
+    let (player, feed) = crate::playback::StreamPlayer::start(sample_rate)?;
+    *playing_slot() = Some(Playing::Stream(player));
+    Ok((feed, TtsCacheWriter::new(cache_path, sample_rate)))
+}
+
+// ── 朗读缓存 ──
+
+/// 朗读缓存路径：`<media>/tts_cache/<模型·音色·语速·文本 的哈希>.wav`。
+///
+/// 同一内容只合成一次；音色或语速变化视为不同音频。
+pub fn tts_cache_path(
+    model: &str,
+    speaker: &str,
+    speed: Option<f64>,
+    text: &str,
+) -> Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let dir = media_dir()?.join("tts_cache");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("创建朗读缓存目录失败：{}", dir.display()))?;
+    // 两个不同种子的 SipHash 拼成 128 bit，碰撞概率可忽略。
+    let key = format!(
+        "{model}\u{1f}{speaker}\u{1f}{}\u{1f}{text}",
+        speed.map(|value| format!("{value:.3}")).unwrap_or_default()
+    );
+    let digest = [0u64, 0x9e37_79b9_7f4a_7c15].map(|seed| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        seed.hash(&mut hasher);
+        key.hash(&mut hasher);
+        hasher.finish()
+    });
+    Ok(dir.join(format!("{:016x}{:016x}.wav", digest[0], digest[1])))
+}
+
+/// 流式合成的缓存写入：先写临时文件，完整收完后改名为正式缓存，
+/// 中途停止 / 失败时删除，避免缓存半截音频。
+pub struct TtsCacheWriter {
+    target: PathBuf,
+    temp: PathBuf,
+    writer: Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>,
+    carry: Option<u8>,
+}
+
+impl TtsCacheWriter {
+    fn new(target: &std::path::Path, sample_rate: u32) -> Self {
+        let temp = target.with_extension(format!("{}.part", scru128::new()));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let writer = hound::WavWriter::create(&temp, spec)
+            .map_err(|error| tracing::warn!(%error, "创建朗读缓存失败，本次只播放不缓存"))
+            .ok();
+        Self {
+            target: target.to_path_buf(),
+            temp,
+            writer,
+            carry: None,
+        }
+    }
+
+    /// 写入 16 bit 小端 PCM（可跨包拆分奇数字节）；写失败则放弃缓存。
+    pub fn write(&mut self, bytes: &[u8]) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        let mut data = Vec::with_capacity(bytes.len() + 1);
+        data.extend(self.carry.take());
+        data.extend_from_slice(bytes);
+        let (pairs, remainder) = data.as_chunks::<2>();
+        let mut failed = false;
+        for pair in pairs {
+            if writer.write_sample(i16::from_le_bytes(*pair)).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        if let [last] = remainder {
+            self.carry = Some(*last);
+        }
+        if failed {
+            tracing::warn!("写入朗读缓存失败，本次只播放不缓存");
+            self.discard_inner();
+        }
+    }
+
+    /// 完整收完：收尾 WAV 头并改名为正式缓存。
+    pub fn commit(mut self) {
+        let Some(writer) = self.writer.take() else {
+            return;
+        };
+        let committed =
+            writer.finalize().is_ok() && std::fs::rename(&self.temp, &self.target).is_ok();
+        if !committed {
+            tracing::warn!(path = %self.target.display(), "保存朗读缓存失败");
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
+
+    pub fn discard(mut self) {
+        self.discard_inner();
+    }
+
+    fn discard_inner(&mut self) {
+        if self.writer.take().is_some() {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
+}
+
+impl Drop for TtsCacheWriter {
+    fn drop(&mut self) {
+        self.discard_inner();
     }
 }
 
@@ -121,9 +272,7 @@ pub fn play(request: PlayRequest) -> Result<PlayResponse> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("播放失败")?;
-    *PLAYING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(child);
+    *playing_slot() = Some(Playing::Process(child));
     Ok(PlayResponse { started: true })
 }
 
@@ -299,6 +448,45 @@ mod tests {
         );
         stop_playback();
         assert!(!play_running());
+    }
+
+    #[test]
+    fn tts_cache_key_distinguishes_voice_speed_and_text() {
+        let base = tts_cache_path("m", "v1", None, "你好").unwrap();
+        assert_eq!(base, tts_cache_path("m", "v1", None, "你好").unwrap());
+        assert_eq!(base.extension().and_then(|ext| ext.to_str()), Some("wav"));
+        for other in [
+            tts_cache_path("m", "v2", None, "你好").unwrap(),
+            tts_cache_path("m", "v1", Some(1.5), "你好").unwrap(),
+            tts_cache_path("m", "v1", None, "你好。").unwrap(),
+            tts_cache_path("m2", "v1", None, "你好").unwrap(),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
+
+    #[test]
+    fn tts_cache_writer_commits_only_complete_audio() {
+        let dir = std::env::temp_dir().join(format!("volc-tts-cache-{}", scru128::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("a.wav");
+
+        let mut writer = TtsCacheWriter::new(&target, 24_000);
+        writer.write(&[0x00, 0x40, 0x00]);
+        writer.write(&[0xC0]);
+        writer.commit();
+        let reader = hound::WavReader::open(&target).unwrap();
+        assert_eq!(reader.len(), 2, "跨包拆分的字节应拼成完整样本");
+
+        let aborted = dir.join("b.wav");
+        let mut writer = TtsCacheWriter::new(&aborted, 24_000);
+        writer.write(&[0x00, 0x40]);
+        writer.discard();
+        assert!(!aborted.exists());
+        // 临时文件也被清理：目录里只剩已提交的缓存。
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(names.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
