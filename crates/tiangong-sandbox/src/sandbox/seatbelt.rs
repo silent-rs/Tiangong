@@ -214,11 +214,14 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
         );
     }
     if policy.allow_audio_input {
-        // 实测 cpal/CoreAudio 打开默认输入设备的最小集合：缺 audiohald 无法
-        // 枚举设备，缺 AudioComponentRegistrar 找不到 HAL 输入 AudioUnit。
+        // 实测 cpal/CoreAudio 采集默认输入设备的最小集合：缺 audiohald 无法
+        // 枚举设备，缺 AudioComponentRegistrar 找不到 HAL 输入 AudioUnit；
+        // 缺 device-microphone 时设备能打开、回调照常触发，但 coreaudiod 对
+        // 沙箱进程做 sandbox_check 后只下发静音（不报错，采样全 0）。
         sbpl.push_str(
             "(allow mach-lookup (global-name \"com.apple.audio.audiohald\"))\n\
-             (allow mach-lookup (global-name \"com.apple.audio.AudioComponentRegistrar\"))\n",
+             (allow mach-lookup (global-name \"com.apple.audio.AudioComponentRegistrar\"))\n\
+             (allow device-microphone)\n",
         );
     }
     // 显式拒绝名单之外的服务，也约束未提及类别默认放行的旧系统。
@@ -274,6 +277,12 @@ mod tests {
                         assert!(sbpl.find(&rule) < sbpl.find("(deny mach-lookup)"));
                     }
                 }
+                // 麦克风数据同样只随音频授权放行（缺失时只采到静音）。
+                assert_eq!(
+                    sbpl.contains("(allow device-microphone)"),
+                    audio,
+                    "device-microphone 必须独立授权"
+                );
             }
         }
     }
