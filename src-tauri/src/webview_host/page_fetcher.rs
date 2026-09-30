@@ -968,6 +968,11 @@ impl tiangong_core::agent_input::ToolInput for BrowserContent {
         "browser_data"
     }
 
+    /// 纯页面快照可被更新的快照顶替；带用户操作/网络反馈的属于事件，逐条保留。
+    fn supersedes(&self) -> bool {
+        self.feedback.is_none()
+    }
+
     fn render(&self) -> serde_json::Value {
         serde_json::json!({
             "title": self.title,

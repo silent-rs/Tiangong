@@ -72,9 +72,21 @@ impl ToolInjectionBuffer {
         stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
         tool_name: String,
         payload: serde_json::Value,
+        supersede: bool,
     ) {
-        self.pending
-            .push_back(DeferredToolInjection { tool_name, payload });
+        if supersede {
+            // 快照类：本轮缓冲中同来源旧快照直接顶替（会话延迟队列在
+            // commit 时由 defer_tool_injection 同样顶替）。
+            self.pending
+                .retain(|item| !(item.supersede && item.tool_name == tool_name));
+            self.session_deferred
+                .retain(|item| !(item.supersede && item.tool_name == tool_name));
+        }
+        self.pending.push_back(DeferredToolInjection {
+            tool_name,
+            payload,
+            supersede,
+        });
         self.generation = self.generation.saturating_add(1);
 
         let mut injections = Vec::with_capacity(self.session_deferred.len() + self.pending.len());
@@ -87,8 +99,11 @@ impl ToolInjectionBuffer {
     pub(super) fn commit(&mut self, ctx: &mut TurnContext) {
         let received_new_injections = !self.pending.is_empty();
         while let Some(injection) = self.pending.pop_front() {
-            ctx.session
-                .defer_tool_injection(injection.tool_name, injection.payload);
+            ctx.session.defer_tool_injection(
+                injection.tool_name,
+                injection.payload,
+                injection.supersede,
+            );
         }
         if ctx.session.deferred_tool_injections.is_empty() {
             self.session_deferred.clear();

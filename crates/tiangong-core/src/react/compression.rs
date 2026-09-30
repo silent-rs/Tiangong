@@ -1044,6 +1044,7 @@ mod tests {
             .send(Command::InjectTool {
                 tool_name: "plugin_availability".into(),
                 payload: serde_json::json!({}),
+                supersede: false,
             })
             .unwrap();
         cmd_tx
