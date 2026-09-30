@@ -40,7 +40,12 @@
     .vo-toast {
       position: absolute; inset: 0 0 0 48px; display: flex; align-items: center; justify-content: center;
       border-radius: calc(var(--radius, 0.5rem) - 2px); background: hsl(var(--background, 0 0% 100%) / .92);
-      color: hsl(var(--foreground, 222.2 47.4% 11.2%)); font-size: 13px; padding: 0 12px; text-align: center;
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%)); font-size: 13px; line-height: 18px; padding: 0 12px; text-align: center;
+      cursor: pointer;
+    }
+    .vo-toast-text {
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+      word-break: break-all;
     }
     .vo-toast.is-error { color: rgb(239 68 68); }
     @keyframes vo-pulse { 50% { opacity: .35; } }
@@ -119,11 +124,15 @@
     let toastTimer = null;
     function toast(message, isError) {
       const node = $('vo-toast');
-      node.textContent = message;
+      const text = document.createElement('span');
+      text.className = 'vo-toast-text';
+      text.textContent = message;
+      node.replaceChildren(text);
+      node.title = message;
       node.classList.toggle('is-error', Boolean(isError));
       node.hidden = false;
       if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => { node.hidden = true; }, isError ? 3000 : 1500);
+      toastTimer = setTimeout(() => { node.hidden = true; }, isError ? 5000 : 1500);
     }
 
     async function start() {
@@ -132,7 +141,8 @@
       state.recordId = newRecordId();
       render();
       try {
-        await call('plugin.record_start', { session_id: state.recordId });
+        // 边录边识别：录音期间即上传音频，松手后只需等待最后一包的识别结果。
+        await call('plugin.record_start', { session_id: state.recordId, transcribe: true });
         if (state.phase !== 'starting') {
           // 启动期间已松开/取消：立即丢弃这次录音。
           await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
@@ -179,8 +189,13 @@
       render();
       try {
         const recorded = await call('plugin.record_stop', { session_id: state.recordId });
-        const result = await call('plugin.transcribe', { file_path: recorded.file_path });
-        const text = ((result && result.text) || '').trim();
+        let text = recorded && typeof recorded.text === 'string' ? recorded.text : null;
+        if (text === null) {
+          // 旧版 sidecar 不返回实时识别结果：回退为整段识别。
+          const result = await call('plugin.transcribe', { file_path: recorded.file_path });
+          text = (result && result.text) || '';
+        }
+        text = text.trim();
         if (!text) {
           toast('没有识别到语音内容', true);
           return;
@@ -208,39 +223,65 @@
     }
 
     const talk = $('vo-talk');
+    const root = $('vo-root');
+    const focusRoot = () => { try { root.focus({ preventScroll: true }); } catch (_) { /* 忽略 */ } };
     let talkPressed = false;
-    talk.addEventListener('mousedown', (event) => { event.preventDefault(); talkPressed = true; start(); });
+    // mousedown 阻止默认行为后按钮不会获得焦点：显式把焦点交回根节点，空格才能继续生效。
+    talk.addEventListener('mousedown', (event) => { event.preventDefault(); focusRoot(); talkPressed = true; start(); });
     talk.addEventListener('mouseup', () => { talkPressed = false; finish(); });
     talk.addEventListener('mouseleave', () => { if (talkPressed) { talkPressed = false; cancel(); } });
     talk.addEventListener('contextmenu', (event) => event.preventDefault());
     $('vo-keyboard').addEventListener('click', () => leave());
+    // 点击提示条关闭它（长错误会盖住按钮）。
+    $('vo-toast').addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      focusRoot();
+      $('vo-toast').hidden = true;
+    });
 
-    // 空格按住说话、Esc 取消录音：覆盖层显示时宿主把焦点交给本容器根节点
-    // （vo-root 带 tabindex，是 Shadow 内首个可聚焦元素）。
+    // 空格按住说话、Esc 取消录音。监听挂在 document 上：焦点在本覆盖层内，或页面上
+    // 没有其他聚焦元素（焦点落在 body）时生效，避免焦点丢失后空格失灵，
+    // 同时不抢占其他输入框里的空格。
+    const overlayVisible = () => root.isConnected && getComputedStyle(root).visibility === 'visible';
+    const ownsKey = (event) => {
+      if (!overlayVisible()) return false;
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      if (path.includes(root)) return true;
+      const active = document.activeElement;
+      return !active || active === document.body || active === document.documentElement;
+    };
     const onKeyDown = (event) => {
-      if (event.code === 'Space' && !event.repeat) { event.preventDefault(); start(); }
-      else if (event.code === 'Space') { event.preventDefault(); }
-      else if (event.key === 'Escape') {
+      if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.code === 'Space') {
+        if (!ownsKey(event)) return;
+        event.preventDefault();
+        if (!event.repeat) { focusRoot(); start(); }
+      } else if (event.key === 'Escape') {
         // 只取消进行中的录音；退出语音模式需点左侧键盘按钮，避免误触丢失输入模式。
-        if (state.phase === 'recording' || state.phase === 'starting') {
+        if ((state.phase === 'recording' || state.phase === 'starting') && ownsKey(event)) {
           event.preventDefault();
           cancel();
         }
       }
     };
     const onKeyUp = (event) => {
-      if (event.code === 'Space') { event.preventDefault(); finish(); }
+      if (event.code !== 'Space') return;
+      const active = state.phase === 'recording' || state.phase === 'starting';
+      if (!active && !ownsKey(event)) return;
+      event.preventDefault();
+      if (!talkPressed) finish();
     };
-    const root = $('vo-root');
-    root.addEventListener('keydown', onKeyDown);
-    root.addEventListener('keyup', onKeyUp);
+    document.addEventListener('keydown', onKeyDown, true);
+    document.addEventListener('keyup', onKeyUp, true);
     // 录音中失焦（切到别的窗口等）收不到 keyup：视为取消，避免麦克风常开。
-    root.addEventListener('focusout', (event) => {
-      if (!root.contains(event.relatedTarget) && state.phase === 'recording' && !talkPressed) cancel();
-    });
+    const onBlur = () => { if (state.phase === 'recording' && !talkPressed) cancel(); };
+    window.addEventListener('blur', onBlur);
 
     if (typeof registerCleanup === 'function') {
       registerCleanup(() => {
+        document.removeEventListener('keydown', onKeyDown, true);
+        document.removeEventListener('keyup', onKeyUp, true);
+        window.removeEventListener('blur', onBlur);
         stopTimer();
         if (state.phase === 'recording' || state.phase === 'starting') {
           call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
