@@ -277,6 +277,54 @@ fn 默认模型变化时目标随之变化() {
     assert_eq!(second.model, "model-b");
 }
 
+/// 投递未携带模型选择（插件 sendText、队列放行等）时沿用会话已记录的
+/// 选择，不得回落到路由默认模型（曾导致会话选 A、插件消息却由默认 B 回复）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 未携带模型的投递沿用会话选择而非路由默认() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "好的"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        })))
+        .mount(&server)
+        .await;
+    // 路由默认为 a，会话选择了 b。
+    seed_models(&dir, &server.uri(), "model-a");
+    seed_session(&dir, "keep-session-model", Some("model-b"));
+    let manager = manager_at(&dir);
+    make_core(&manager, "keep-session-model").await;
+
+    manager
+        .deliver_user_message(
+            "keep-session-model",
+            AgentInputKind::prepared_with_id(
+                "plugin-msg".to_string(),
+                vec![tiangong_types::ContentBlock::text("插件发送的文本")],
+            ),
+        )
+        .await
+        .expect("投递应成功");
+
+    let current = {
+        let registry = manager.registry();
+        registry
+            .get("keep-session-model")
+            .unwrap()
+            .current_endpoint()
+            .model
+    };
+    assert_eq!(current, "model-b", "未携带模型时应沿用会话选择 model-b");
+    let session = manager.load_session("keep-session-model").unwrap();
+    assert_eq!(session.model_ref.as_deref(), Some("model-b"));
+    assert_eq!(session.summary_up_to, 0, "模型未变化不应触发切换前整理");
+    manager
+        .retire_core("keep-session-model", true)
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn core重建后从会话恢复目标模型() {
     let dir = tempfile::tempdir().unwrap();

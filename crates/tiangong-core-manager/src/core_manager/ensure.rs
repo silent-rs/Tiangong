@@ -306,6 +306,13 @@ impl CoreManager {
         {
             tracing::warn!(session_id, error, "写入会话模型引用失败");
         }
+        // 投递方未携带选择（插件 sendText、队列放行等）时沿用会话已记录的
+        // 选择策略，而不是回落到路由默认——否则会话选定 A 模型时，这类
+        // 投递会被切到默认模型 B 回复，下一次界面发送又切回 A。
+        let model_ref = match model_ref {
+            Some(key) => Some(key),
+            None => self.session_model_ref(session_id),
+        };
         let target = self.resolve_turn_model(model_ref.as_deref())?;
         self.switch_model_if_needed(session_id, target).await?;
         self.deliver_to_core_if_live(session_id, input)
@@ -463,6 +470,16 @@ impl CoreManager {
     /// 由下一次投递时的模型编排完成（见 [`Self::deliver_user_message`]），
     /// 因此用户切走又切回时端点从未变化、也不会白白整理一次上下文。
     /// 运行中不写（core 忙即拒绝）。
+    /// 读取会话已记录的模型选择（`Session.model_ref`；None 表示跟随路由默认）。
+    ///
+    /// 投递方未显式携带模型时据此沿用会话选择；读取失败按跟随默认处理。
+    fn session_model_ref(&self, session_id: &str) -> Option<String> {
+        self.load_session(session_id)
+            .ok()
+            .and_then(|session| session.model_ref)
+            .filter(|key| !key.trim().is_empty())
+    }
+
     pub fn set_core_model_ref(
         &self,
         session_id: &str,
