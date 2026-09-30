@@ -2963,6 +2963,7 @@
                 this._mutationObserver.observe(document.body, {
                     childList: true,
                     subtree: true,
+                    characterData: true,
                     attributes: true,
                     attributeFilter: [
                         'class', 'disabled', 'readonly',
@@ -2986,6 +2987,9 @@
                 var dialogAdded = false;
                 var dialogRemoved = false;
                 var contentChanged = false;
+                // 本批次新增的文本（变化的具体内容），用于反馈“变了什么”
+                var addedTexts = [];
+                var seen = [];
 
                 for (var i = 0; i < mutations.length; i++) {
                     var m = mutations[i];
@@ -2994,14 +2998,39 @@
                         continue;
                     }
 
+                    if (m.type === 'characterData') {
+                        var ct = (m.target && m.target.textContent || '').trim();
+                        if (ct) { contentChanged = true; addedTexts.push(ct); }
+                        continue;
+                    }
+
                     if (m.type === 'childList') {
                         for (var j = 0; j < m.addedNodes.length; j++) {
                             var node = m.addedNodes[j];
+                            if (node.nodeType === 3) {
+                                var tn = (node.textContent || '').trim();
+                                if (tn) { contentChanged = true; addedTexts.push(tn); }
+                                continue;
+                            }
                             if (node.nodeType !== 1) continue;
                             if (this._isDialog(node) || this._containsDialog(node)) {
                                 dialogAdded = true;
                             }
                             if (this._isMainContent(node) || this._isMainContent(m.target)) {
+                                contentChanged = true;
+                            }
+                            var tag = node.tagName;
+                            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') continue;
+                            // 已收集祖先节点时跳过，避免重复
+                            var covered = false;
+                            for (var s = 0; s < seen.length; s++) {
+                                if (seen[s].contains && seen[s].contains(node)) { covered = true; break; }
+                            }
+                            if (covered) continue;
+                            var text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+                            if (text) {
+                                seen.push(node);
+                                addedTexts.push(text);
                                 contentChanged = true;
                             }
                         }
@@ -3028,15 +3057,26 @@
                         timestamp: Date.now()
                     });
                 }
-                if (contentChanged) {
+                if (contentChanged && !dialogAdded) {
                     events.push({
                         type: 'content_changed',
                         timestamp: Date.now(),
-                        detail: this._getContentSummary()
+                        detail: this._summarizeAddedText(addedTexts)
                     });
                 }
 
                 return events;
+            },
+
+            // 变化内容：新增文本拼接（宿主按推送上限头尾截取）；本地先做一层
+            // 上限防止极端页面一次性产出超大字符串。
+            _summarizeAddedText: function(texts) {
+                var joined = texts.join('\n').trim();
+                var cap = 40000;
+                if (joined.length > cap) {
+                    joined = joined.substring(0, cap * 2 / 3) + '\n…\n' + joined.substring(joined.length - cap / 3);
+                }
+                return joined;
             },
 
             // ── 用户行为监听 ──
@@ -3170,12 +3210,7 @@
                 var clone = overlay.cloneNode(true);
                 var interactive = clone.querySelectorAll('button, [role="button"], [class*="close"], [class*="Close"], [aria-label="Close"]');
                 for (var i = 0; i < interactive.length; i++) interactive[i].remove();
-                return (clone.innerText || '').trim().substring(0, 2000);
-            },
-
-            _getContentSummary: function() {
-                var text = (document.body.innerText || '').trim();
-                return text.length > 500 ? text.substring(0, 500) + '...' : text;
+                return (clone.innerText || '').trim();
             },
 
             _pushEvent: function(event) {

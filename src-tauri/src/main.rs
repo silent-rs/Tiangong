@@ -20,20 +20,20 @@ const TRAY_STOP_SERVER_ID: &str = "stop_server";
 const TRAY_STATUS_ID: &str = "server_status";
 const TRAY_QUIT_ID: &str = "quit";
 
+/// 从 observer 事件中提取需要主动注入的页面变化：只有页面本身发生变化
+/// （弹窗、内容更新、导航）才注入；点击、输入、接口响应等过程数据不单独
+/// 反馈。返回（本批全部事件——注入成功后一并确认，变化反馈文本）。
 fn browser_events_to_feedback(
     events: Vec<tiangong_app::webview_host::types::BrowserEvent>,
 ) -> Option<(Vec<tiangong_app::webview_host::types::BrowserEvent>, String)> {
-    let network_events: Vec<_> = events
-        .into_iter()
-        .filter(|event| {
-            matches!(
-                event,
-                tiangong_app::webview_host::types::BrowserEvent::NetworkResponse { .. }
-            )
-        })
-        .collect();
-    let feedback = tiangong_app::webview_host::types::format_browser_events(&network_events)?;
-    Some((network_events, feedback))
+    if !events
+        .iter()
+        .any(tiangong_app::webview_host::types::is_page_change)
+    {
+        return None;
+    }
+    let feedback = tiangong_app::webview_host::types::format_browser_events(&events)?;
+    Some((events, feedback))
 }
 
 async fn observe_browser_snapshot_for_injection(
@@ -242,8 +242,8 @@ fn run_gui() {
                 });
             });
 
-            // 监听浏览器网络响应事件，push 到注入 channel（消费者统一处理）。
-            // 这覆盖页面 JS 自行发起 XHR/fetch、且 DOM 没有明显变化的场景。
+            // 监听浏览器 observer 事件：仅当页面发生变化时注入变化内容（按
+            // 推送上限头尾截取）；点击、输入、接口响应等过程数据不单独反馈。
             let event_inject_handle = app.handle().clone();
             let tx2 = injection_tx.clone();
             app.listen("browser:events", move |event| {
@@ -271,11 +271,14 @@ fn run_gui() {
                 let source_tab_id = payload.tab_id;
                 let events = payload.events;
                 let total_count = events.len();
-                let Some((network_events, feedback)) = browser_events_to_feedback(events) else {
-                    debug!(total_count, "浏览器事件无网络响应，跳过主动注入");
+                let Some((change_events, feedback)) = browser_events_to_feedback(events.clone())
+                else {
+                    // 无页面变化：过程事件直接确认丢弃，不进入后续反馈。
+                    source_manager.ack_events(&events);
+                    debug!(total_count, "浏览器事件未引起页面变化，跳过注入");
                     return;
                 };
-                let network_count = network_events.len();
+                let change_count = change_events.len();
                 let app_handle = event_inject_handle.clone();
                 let injection_tx = tx2.clone();
                 tauri::async_runtime::spawn(async move {
@@ -288,26 +291,10 @@ fn run_gui() {
                         .as_ref()
                         .map(|s| s.title.clone())
                         .unwrap_or_default();
-                    // 优先用 snapshot URL，其次用网络事件 URL，最后用 WebView 当前 URL
                     let url = snapshot
                         .as_ref()
                         .map(|s| s.url.clone())
                         .filter(|u| !u.is_empty())
-                        .or_else(|| {
-                            network_events.iter().find_map(|event| {
-                                match event {
-                                tiangong_app::webview_host::types::BrowserEvent::NetworkResponse {
-                                    url,
-                                    ..
-                                } => Some(url.clone()),
-                                _ => None,
-                            }
-                            })
-                        })
-                        .unwrap_or_default();
-                    let text = snapshot
-                        .as_ref()
-                        .map(|s| s.text.clone())
                         .unwrap_or_default();
                     let tabs = snapshot
                         .as_ref()
@@ -332,17 +319,14 @@ fn run_gui() {
                             .unwrap_or_default();
                     }
                     if page_url.is_empty() {
-                        warn!(
-                            total_count,
-                            network_count, "浏览器网络事件缺少页面 URL，无法注入"
-                        );
+                        warn!(total_count, change_count, "浏览器页面变化缺少页面 URL，无法注入");
                         return;
                     }
 
                     use tiangong_app::webview_host::page_fetcher::BrowserContent;
                     // 插件作用域反解对话 id（见 injection_target_session）
                     let Some(target_session) = injection_target_session(&session_id) else {
-                        debug!("浏览器网络事件来自非会话作用域，跳过注入");
+                        debug!("浏览器页面变化来自非会话作用域，跳过注入");
                         return;
                     };
                     let browser_state =
@@ -355,6 +339,8 @@ fn run_gui() {
                     if !mounted {
                         return;
                     }
+                    // 只注入变化内容（feedback）；整页正文不重复推送，Agent
+                    // 需要完整页面时主动 web_page_text。
                     let queued = injection_tx
                         .send(tiangong_app::ToolInjection {
                             session_id: Some(target_session.clone()),
@@ -362,7 +348,7 @@ fn run_gui() {
                             tool: Box::new(BrowserContent {
                                 title,
                                 url: page_url.clone(),
-                                text,
+                                text: String::new(),
                                 tabs,
                                 active_tab_id,
                                 feedback: Some(feedback),
@@ -372,10 +358,10 @@ fn run_gui() {
                     info!(
                         session_id,
                         url = %page_url,
-                        total_count, network_count, queued, "浏览器网络事件注入检查完成"
+                        total_count, change_count, queued, "浏览器页面变化注入检查完成"
                     );
                     if queued {
-                        ack_browser_events(app_handle, session_id, network_events).await;
+                        ack_browser_events(app_handle, session_id, change_events).await;
                     }
                 });
             });
