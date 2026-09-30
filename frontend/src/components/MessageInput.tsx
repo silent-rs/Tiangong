@@ -1238,9 +1238,11 @@ export function MessageInput({
                 </div>
               )}
 
-              {/* 编辑框内容：输入覆盖层显示时整体 inert（不设定位，按钮区仍相对外层定位） */}
-              <div ref={editorContentRef}>
-              {attachments.length > 0 && (
+              {/* 编辑框内容：输入覆盖层显示时整体 inert 且不可见（不设定位，按钮区仍相对
+                  外层定位）。覆盖层期间草稿仍可能带附件（如语音消息发送事务中），附件
+                  行不渲染：否则会撑高输入区，移除按钮（-top 偏移）还会探出覆盖层。 */}
+              <div ref={editorContentRef} className={inputOverlayVisible ? 'invisible' : undefined}>
+              {attachments.length > 0 && !inputOverlayVisible && (
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   {attachments.map(item => (
                     item.kind === 'image' ? (

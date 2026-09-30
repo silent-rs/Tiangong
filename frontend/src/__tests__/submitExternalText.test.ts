@@ -125,4 +125,21 @@ describe('submitExternalText（插件 sendText 的普通 Enter 语义）', () =>
     expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(0);
     expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(0);
   });
+
+  it('携带附件：附件写入草稿并随发送投递（sendMessage 以草稿附件为准）', () => {
+    const { send } = spyActions();
+    const audio = {
+      kind: 'audio' as const,
+      source: '/Users/me/.tiangong/media/stt_rec_x.wav',
+      original_name: '语音消息.wav',
+      mime_type: 'audio/wav',
+    };
+    useStore.getState().submitExternalText(KEY, '你好', 'full_trust', [audio]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][2]).toEqual([audio]);
+    // 草稿同步写入附件：真实 sendMessage 以同步后的草稿附件投递。
+    const cache = useStore.getState().inputCaches[KEY];
+    expect(cache.attachments).toEqual([audio]);
+    expect(send.mock.calls[0][3]).toBe(cache.revision);
+  });
 });
