@@ -259,6 +259,12 @@ impl ToolOverrideHandler for TsPluginAdapter {
             },
         ))
     }
+
+    fn result_header(&self, call: &ToolCall, ok: bool) -> Option<String> {
+        Some(tiangong_core::tools::extension::plugin_result_header(
+            &self.id, &call.name, ok,
+        ))
+    }
 }
 
 fn sidecar_direct_of(manifest: &PluginManifest) -> bool {

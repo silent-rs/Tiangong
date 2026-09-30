@@ -2557,4 +2557,23 @@ async fn failed_tool_call_does_not_inject_images() {
         &mut pending,
     );
     assert_eq!(pending.len(), 1, "成功结果应注入图片");
+
+    // 工具结果首行为宿主抬头：未注册处理器（编译期路径）使用固定文本。
+    let tool_texts: Vec<String> = ctx
+        .session
+        .messages
+        .iter()
+        .filter(|message| message.role == crate::session::MessageRole::Tool)
+        .map(|message| message.text_content())
+        .collect();
+    assert!(
+        tool_texts[0].starts_with("调用工具 desktop_screenshot：失败\n[tool_failure]"),
+        "失败结果应带失败抬头：{}",
+        tool_texts[0]
+    );
+    assert!(
+        tool_texts[1].starts_with("调用工具 desktop_screenshot：成功\n"),
+        "成功结果应带成功抬头：{}",
+        tool_texts[1]
+    );
 }

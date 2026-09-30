@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::config::core::CoreConfig;
 use crate::permission::TrustMode;
 use crate::session::Session;
-use crate::tools::extension::ToolOverrideHandler;
+use crate::tools::extension::{
+    RenamedToolHandler, ToolOverrideHandler, resolve_tool_name_conflicts,
+};
 use tiangong_llm::tool::ToolSpec;
 
 use super::{Plugin, injection_tool_spec};
@@ -56,21 +58,30 @@ pub(crate) fn prepare_plugins(
 
     let mut tools = vec![injection_tool_spec()];
     let mut tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
-    let mut seen_tool_names = HashSet::new();
-    for plugin in plugins {
-        let plugin_tools = plugin.tool_specs();
-        for spec in plugin_tools {
-            if seen_tool_names.insert(spec.name.clone()) {
-                tool_overrides.insert(spec.name.clone(), plugin.clone());
-                tools.push(spec);
-            } else {
-                tracing::debug!(
-                    tool = %spec.name,
-                    plugin = %plugin.id(),
-                    "跳过与其他插件重名的工具规格（保留先注册者）"
-                );
-            }
-        }
+    let by_id: HashMap<&str, &Arc<dyn Plugin>> =
+        plugins.iter().map(|plugin| (plugin.id(), plugin)).collect();
+    let entries = plugins
+        .iter()
+        .flat_map(|plugin| {
+            plugin
+                .tool_specs()
+                .into_iter()
+                .map(|spec| (plugin.id().to_string(), spec))
+        })
+        .collect();
+    // 重名工具按插件前缀暴露，调用时还原原名转发（不再静默丢弃后注册者）。
+    for (owner, original, spec) in resolve_tool_name_conflicts(entries) {
+        let Some(plugin) = by_id.get(owner.as_str()) else {
+            continue;
+        };
+        let handler: Arc<dyn ToolOverrideHandler> = (*plugin).clone();
+        let handler = if spec.name == original {
+            handler
+        } else {
+            Arc::new(RenamedToolHandler::new(handler, original))
+        };
+        tool_overrides.insert(spec.name.clone(), handler);
+        tools.push(spec);
     }
     PreparedPlugins {
         plugins: sorted,
@@ -110,7 +121,7 @@ mod tests {
     impl ToolOverrideHandler for OrderedPlugin {}
 
     /// 顺序语义锁定：tools 顺序 = 内置注入工具 + 插件 id 字典序（prompt
-    /// 置顶）+ 插件自身输出序（core 不排序）；重名工具保留先注册者。
+    /// 置顶）+ 插件自身输出序（core 不排序）；重名工具按插件前缀暴露。
     #[test]
     fn prepare_keeps_plugin_order_and_dedupes() {
         let marker = format!("order-{}", line!());
@@ -134,8 +145,20 @@ mod tests {
         let names: Vec<&str> = prepared.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["plugin_injection", "alpha_tool", "z_b_first", "a_second"],
-            "tools 顺序应为：内置注入工具 + 插件 id 序 + 插件输出序，重名保留先注册者"
+            vec![
+                "plugin_injection".to_string(),
+                "alpha_tool".to_string(),
+                format!("{marker}-alpha__z_b_first"),
+                format!("{marker}-zeta__z_b_first"),
+                "a_second".to_string(),
+            ],
+            "tools 顺序应为：内置注入工具 + 插件 id 序 + 插件输出序，重名按插件前缀暴露"
+        );
+        assert!(
+            prepared
+                .tool_overrides
+                .contains_key(&format!("{marker}-zeta__z_b_first")),
+            "加前缀的工具应能路由到原插件"
         );
     }
 }

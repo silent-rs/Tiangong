@@ -79,10 +79,29 @@ const TOOL_VARIANTS: Record<string, ToolVariant> = {
   recall_memory: "memory",
 };
 
+/**
+ * 去掉重名工具的插件前缀（`{插件id}__{工具名}` → 工具名），用于按原名分类。
+ * MCP 工具（`mcp__{server}__{tool}`）是插件自身的命名，保持不变。
+ */
+export function baseToolName(toolName: string): string {
+  if (toolName.startsWith("mcp__")) return toolName;
+  const index = toolName.indexOf("__");
+  return index > 0 ? toolName.slice(index + 2) : toolName;
+}
+
+/**
+ * 去掉宿主为模型添加的结果抬头（首行「调用工具 X：成功」/「调用插件 P 的 X：失败」），
+ * 界面只展示工具的原始输出。
+ */
+export function stripToolResultHeader(content: string): string {
+  return content.replace(/^调用(?:工具 \S+|插件 \S+ 的 \S+)：(?:成功|失败)\n?/, "");
+}
+
 /** 以 web_ 开头的浏览器插件工具统一归 web 变体。 */
 export function classifyToolName(toolName: string): ToolVariant {
-  if (TOOL_VARIANTS[toolName]) return TOOL_VARIANTS[toolName];
-  if (toolName.startsWith("web_")) return "web";
+  const name = baseToolName(toolName);
+  if (TOOL_VARIANTS[name]) return TOOL_VARIANTS[name];
+  if (name.startsWith("web_")) return "web";
   return "other";
 }
 
@@ -384,7 +403,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
   // 工具结果消息（role:'tool'）或兜底。
   const variant = classifyToolName(toolName);
   const isError = msg.tool_result_is_error === true;
-  const outputText = content || null;
+  const outputText = (msg.role === "tool" ? stripToolResultHeader(content) : content) || null;
   const argSummary = summaryFromArgs(variant, args);
 
   let summary: string;

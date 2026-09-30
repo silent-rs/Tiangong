@@ -138,10 +138,12 @@ fn handle_generate(call: &ToolCall) -> Result<ToolResult, PluginError> {
         response.model
     );
 
+    // 防重复调用提示由插件自带（宿主不再按工具名特判）。
+    let stdout = format!("{markdown}\n本次已完成，不要以相同参数再次调用 generate_image。");
     Ok(ToolResult {
         ok: true,
         summary,
-        stdout: markdown,
+        stdout,
         stderr: String::new(),
         exit_code: 0,
         execution: None,

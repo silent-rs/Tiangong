@@ -354,22 +354,29 @@ pub(super) fn record_completed_tool_call(
         (!args_summary.is_empty()).then_some(args_summary),
         &result.summary,
     );
+    // 抬头：运行期插件由处理器给出（带插件 id），其余使用固定文本。
+    let header = ctx
+        .tool_overrides
+        .get(&call.name)
+        .and_then(|handler| handler.result_header(call, result.ok))
+        .unwrap_or_else(|| crate::tools::extension::default_result_header(&call.name, result.ok));
+    let body = if result.ok {
+        tool_result_full_output(result)
+    } else {
+        ToolFailureRecord::new(
+            &call.name,
+            &call.id,
+            args_summary.to_string(),
+            classify_tool_result_failure(result),
+            tool_result_full_output(result),
+        )
+        .render_for_model()
+    };
     append_tool_result_message_with_duration(
         &mut ctx.session,
         &call.id,
         &call.name,
-        if result.ok {
-            tool_result_provider_text(&call.name, result, false)
-        } else {
-            ToolFailureRecord::new(
-                &call.name,
-                &call.id,
-                args_summary.to_string(),
-                classify_tool_result_failure(result),
-                tool_result_full_output(result),
-            )
-            .render_for_model()
-        },
+        format!("{header}\n{body}"),
         !result.ok,
         duration_ms,
     );

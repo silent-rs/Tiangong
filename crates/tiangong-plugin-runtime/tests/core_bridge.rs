@@ -494,3 +494,70 @@ fn 自制插件prompt不进系统段落_随清单注入() {
     tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "unsigned-prompt-b", false)
         .expect("清理未签名 prompt 插件");
 }
+
+#[test]
+fn 桥聚合_重名工具按插件前缀暴露并路由到各自插件() {
+    use tiangong_core::tools::extension::ToolOverrideHandler;
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    stage_ts_tool_plugin(root.path(), "dup-alpha", "dup_tool");
+    stage_ts_tool_plugin(root.path(), "dup-beta", "dup_tool");
+    stage_ts_tool_plugin(root.path(), "dup-gamma", "gamma_tool");
+    tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let names = tool_names(&bridge);
+    assert!(
+        names.contains(&"dup-alpha__dup_tool".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"dup-beta__dup_tool".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"gamma_tool".to_string()),
+        "不重名的工具保持原名：{names:?}"
+    );
+    assert!(
+        !names.contains(&"dup_tool".to_string()),
+        "重名原名不应再暴露：{names:?}"
+    );
+
+    let call = |name: &str| tiangong_llm::tool::ToolCall {
+        id: "c".to_string(),
+        name: name.to_string(),
+        arguments: serde_json::json!({}),
+    };
+    assert_eq!(
+        bridge
+            .result_header(&call("dup-beta__dup_tool"), true)
+            .as_deref(),
+        Some("调用插件 dup-beta 的 dup_tool：成功"),
+        "抬头应落到实际插件与原名"
+    );
+    assert_eq!(
+        bridge.result_header(&call("gamma_tool"), false).as_deref(),
+        Some("调用插件 dup-gamma 的 gamma_tool：失败")
+    );
+    assert_eq!(
+        bridge
+            .result_header(
+                &tiangong_llm::tool::ToolCall {
+                    id: "c".to_string(),
+                    name: "call_local_plugin".to_string(),
+                    arguments: serde_json::json!({"plugin_name": "demo", "function_name": "greet"}),
+                },
+                true
+            )
+            .as_deref(),
+        Some("调用插件 demo 的 greet：成功"),
+        "自制插件通道的抬头落到实际插件方法"
+    );
+
+    for id in ["dup-alpha", "dup-beta", "dup-gamma"] {
+        tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), id, false).unwrap();
+    }
+}
