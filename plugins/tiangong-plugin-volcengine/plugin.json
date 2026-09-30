@@ -19,7 +19,6 @@
   ],
   "capabilities": {
     "tools": true,
-    "prompt": true,
     "events": [
       "session.*"
     ]
@@ -89,7 +88,7 @@
     "server"
   ],
   "mention": {
-    "hint": "火山引擎：生成图片或视频、语音合成与语音识别",
+    "hint": "火山引擎：生成图片或视频",
     "mark": "火山"
   }
 }
