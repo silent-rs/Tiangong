@@ -1,8 +1,8 @@
 //! Volcengine sidecar 业务服务（Agent Plan）。
 //!
 //! 读取插件自有配置 → 组织火山方舟请求（见 [`crate::ark`]）或豆包语音请求
-//!（见 [`crate::speech`]）→ 归档 / 落盘 → 返回结果。本机录音与播放见 [`crate::audio`]，
-//! 模型列表见 [`crate::openapi`]（结果缓存于插件 data 目录）。
+//!（见 [`crate::speech`]）→ 归档 / 落盘 → 返回结果。本机录音与播放见 [`crate::audio`]。
+//! 模型名由用户在设置页手动填写（候选见套餐概览），插件不查询模型列表。
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -12,9 +12,8 @@ use tiangong_plugin_runtime::protocol::{
     ServiceStatus,
 };
 use tiangong_plugin_volcengine_protocol::{
-    ARK_OPENAPI_BASE_URL, Ack, AgentPlanModels, DEFAULT_EDITION, Empty, GENERATE_IMAGE_OPERATION,
-    GENERATE_VIDEO_OPERATION, GET_CONFIG_OPERATION, GeneratedImage, ImageRequest, ImageResponse,
-    LIST_MODELS_OPERATION, LIST_VOICES_OPERATION, ListModelsRequest, ListVoicesResponse,
+    Ack, Empty, GENERATE_IMAGE_OPERATION, GENERATE_VIDEO_OPERATION, GET_CONFIG_OPERATION,
+    GeneratedImage, ImageRequest, ImageResponse, LIST_VOICES_OPERATION, ListVoicesResponse,
     PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL, PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID,
     PLUGIN_VERSION, PlayRequest, PlayStatusResponse, RECORD_CANCEL_OPERATION,
     RECORD_START_OPERATION, RECORD_STOP_OPERATION, RecordControlRequest, RecordStartRequest,
@@ -24,7 +23,6 @@ use tiangong_plugin_volcengine_protocol::{
 };
 
 use crate::ark::{self, Endpoint, VideoOptions};
-use crate::openapi::{self, AccessKey};
 use crate::speech::{self, SpeechEndpoint, TtsOptions};
 use crate::{audio, config};
 
@@ -70,7 +68,6 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
                 "video_generation".to_string(),
                 "text_to_speech".to_string(),
                 "speech_to_text".to_string(),
-                "list_models".to_string(),
             ],
             instance_id: format!("volcengine-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
@@ -161,11 +158,6 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             serde_json::to_value(Empty {}).context("序列化 record_cancel 响应失败")
         }
 
-        LIST_MODELS_OPERATION => {
-            let request: ListModelsRequest = serde_json::from_value(payload).unwrap_or_default();
-            serde_json::to_value(list_models(request).await?).context("序列化 list_models 响应失败")
-        }
-
         other => bail!("未知的 Volcengine 操作: {other}"),
     }
 }
@@ -182,12 +174,6 @@ fn normalize_config(mut config: VolcengineConfig) -> VolcengineConfig {
         }
     };
     config.api_key = config.api_key.trim().to_string();
-    config.access_key_id = config.access_key_id.trim().to_string();
-    config.secret_access_key = config.secret_access_key.trim().to_string();
-    config.edition = match config.edition.trim() {
-        "enterprise" => "enterprise".to_string(),
-        _ => DEFAULT_EDITION.to_string(),
-    };
     config.image_model = config.image_model.trim().to_string();
     config.video_model = config.video_model.trim().to_string();
     config.video_poll_timeout_secs = config.video_poll_timeout_secs.max(30);
@@ -215,7 +201,7 @@ fn prepare(
     let api_key = plan_api_key(&config)?;
     let model = pick_model(&config).trim().to_string();
     if model.is_empty() {
-        bail!("未选择{label}模型，请在「设置 → 火山引擎」中刷新模型列表并选择后保存");
+        bail!("未填写{label}模型，请在「设置 → 火山引擎」中填写模型名称后保存");
     }
     let endpoint = Endpoint {
         base_url: PLAN_ARK_BASE_URL.to_string(),
@@ -376,36 +362,6 @@ async fn transcribe(request: TranscribeRequest) -> Result<TranscribeResponse> {
     })
 }
 
-// ── 模型列表 ──
-
-/// 查询 Agent Plan 模型列表：非强制刷新且缓存匹配当前套餐版本时直接返回缓存。
-async fn list_models(request: ListModelsRequest) -> Result<AgentPlanModels> {
-    let saved = config::load()?;
-    let pick = |value: Option<String>, fallback: &str| {
-        value
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| fallback.to_string())
-    };
-    let edition = pick(request.edition, &saved.edition);
-    if !request.refresh
-        && let Some(cached) = config::load_models()?
-        && cached.edition == edition
-    {
-        return Ok(cached);
-    }
-    let key = AccessKey {
-        id: config::resolve_api_key(&pick(request.access_key_id, &saved.access_key_id)),
-        secret: config::resolve_api_key(&pick(request.secret_access_key, &saved.secret_access_key)),
-    };
-    if key.id.is_empty() || key.secret.is_empty() {
-        bail!("查询模型列表需要 Access Key ID 与 Secret Access Key，请在「设置 → 火山引擎」中填写");
-    }
-    let models = openapi::list_agent_plan_models(ARK_OPENAPI_BASE_URL, &key, &edition).await?;
-    config::save_models(&models)?;
-    Ok(models)
-}
-
 /// 参考图输入：http(s) / data URL 原样传递，本地文件读成 base64 data URL。
 fn image_input(reference: &str) -> Result<String> {
     let trimmed = reference.trim();
@@ -431,9 +387,6 @@ mod tests {
     fn normalize_config_trims_and_defaults() {
         let config = normalize_config(VolcengineConfig {
             api_key: " key ".to_string(),
-            access_key_id: " ak ".to_string(),
-            secret_access_key: " sk ".to_string(),
-            edition: "unknown".to_string(),
             image_model: " doubao-seedream-5-0-pro ".to_string(),
             video_model: String::new(),
             watermark: true,
@@ -444,23 +397,12 @@ mod tests {
         });
         let defaults = VolcengineConfig::default();
         assert_eq!(config.api_key, "key");
-        assert_eq!(config.access_key_id, "ak");
-        assert_eq!(config.secret_access_key, "sk");
-        assert_eq!(config.edition, DEFAULT_EDITION);
         assert_eq!(config.image_model, "doubao-seedream-5-0-pro");
         assert_eq!(config.video_poll_timeout_secs, 30);
         assert!(config.watermark);
         assert_eq!(config.tts_model, defaults.tts_model);
         assert_eq!(config.tts_speaker, "my_voice");
         assert_eq!(config.asr_model, defaults.asr_model);
-        assert_eq!(
-            normalize_config(VolcengineConfig {
-                edition: " enterprise ".to_string(),
-                ..VolcengineConfig::default()
-            })
-            .edition,
-            "enterprise"
-        );
     }
 
     #[test]

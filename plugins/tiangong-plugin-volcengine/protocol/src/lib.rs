@@ -5,8 +5,8 @@
 //! - 语音合成（TTS，HTTP Chunked 单向流式）与语音识别（ASR，WebSocket 流式输入），
 //!   走豆包语音的 `/api/v3/plan/...` 路径；以及本机录音与播放。
 //!
-//! 可用模型由管控面 `ListArkAgentPlanModel` 获取（仅支持 Access Key 签名），
-//! 按图片 / 视频 / 语音合成 / 语音识别 / 文本 / 向量分类供设置页选择。
+//! 只需 Agent Plan API Key。模型名由用户在设置页手动填写（候选取自官方套餐概览，
+//! 随插件版本阶段性更新），不调用需 Access Key 签名的管控面模型列表接口。
 //! 连接信息与模型由插件设置页独立配置，不依赖全局模型配置（models.json）。
 
 use serde::de::DeserializeOwned;
@@ -34,7 +34,6 @@ pub const TRANSCRIBE_OPERATION: &str = "transcribe";
 pub const RECORD_START_OPERATION: &str = "record_start";
 pub const RECORD_STOP_OPERATION: &str = "record_stop";
 pub const RECORD_CANCEL_OPERATION: &str = "record_cancel";
-pub const LIST_MODELS_OPERATION: &str = "list_models";
 
 /// Agent Plan 数据面地址（图片 / 视频生成）。
 pub const PLAN_ARK_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan/v3";
@@ -42,12 +41,8 @@ pub const PLAN_ARK_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan/
 pub const PLAN_TEXT_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan";
 /// 豆包语音地址（Agent Plan 路径为 `/api/v3/plan/...`）。
 pub const PLAN_SPEECH_BASE_URL: &str = "https://openspeech.bytedance.com";
-/// 方舟管控面地址（模型列表等 OpenAPI，Access Key 签名）。
-pub const ARK_OPENAPI_BASE_URL: &str = "https://ark.cn-beijing.volcengineapi.com";
 /// 视频任务默认轮询上限（秒）。
 pub const DEFAULT_VIDEO_POLL_TIMEOUT_SECS: u64 = 300;
-/// 默认套餐版本（个人版）。
-pub const DEFAULT_EDITION: &str = "personal";
 /// 默认语音合成模型（豆包语音合成模型 2.0）。
 pub const DEFAULT_TTS_MODEL: &str = "doubao-seed-tts-2.0";
 /// 默认语音识别模型（豆包流式语音识别模型 2.0）。
@@ -100,7 +95,6 @@ pub struct Transcribe;
 pub struct RecordStart;
 pub struct RecordStop;
 pub struct RecordCancel;
-pub struct ListModels;
 
 impl VolcengineOperation for Synthesize {
     const NAME: &'static str = SYNTHESIZE_OPERATION;
@@ -156,12 +150,6 @@ impl VolcengineOperation for RecordCancel {
     type Response = Empty;
 }
 
-impl VolcengineOperation for ListModels {
-    const NAME: &'static str = LIST_MODELS_OPERATION;
-    type Request = ListModelsRequest;
-    type Response = AgentPlanModels;
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Empty {}
 
@@ -171,21 +159,13 @@ pub struct Ack {}
 /// 插件持久化配置（存于插件 data 目录下 `config.json`）。
 ///
 /// 仅对接 Agent Plan：接口地址固定为 Agent Plan 专属地址，不再单独配置。
-/// 凭据字段均支持 `${ENV_VAR}` 形式的环境变量引用。
+/// API Key 支持 `${ENV_VAR}` 形式的环境变量引用；旧版的 Access Key、
+/// 套餐版本等字段读取时忽略、保存时丢弃。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolcengineConfig {
     /// Agent Plan 专属 API Key（图片 / 视频 / 语音共用）。
     #[serde(default)]
     pub api_key: String,
-    /// Access Key ID（仅用于查询 Agent Plan 模型列表）。
-    #[serde(default)]
-    pub access_key_id: String,
-    /// Secret Access Key（仅用于查询 Agent Plan 模型列表）。
-    #[serde(default)]
-    pub secret_access_key: String,
-    /// 套餐版本：`personal`（个人版）/ `enterprise`（企业版）。
-    #[serde(default = "default_edition")]
-    pub edition: String,
     /// 图片生成模型，留空则不提供生图。
     #[serde(default)]
     pub image_model: String,
@@ -209,10 +189,6 @@ pub struct VolcengineConfig {
     pub asr_model: String,
 }
 
-fn default_edition() -> String {
-    DEFAULT_EDITION.to_string()
-}
-
 fn default_video_poll_timeout_secs() -> u64 {
     DEFAULT_VIDEO_POLL_TIMEOUT_SECS
 }
@@ -233,9 +209,6 @@ impl Default for VolcengineConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            edition: default_edition(),
             image_model: String::new(),
             video_model: String::new(),
             watermark: false,
@@ -245,53 +218,6 @@ impl Default for VolcengineConfig {
             asr_model: default_asr_model(),
         }
     }
-}
-
-// ── Agent Plan 模型列表 ──
-
-/// 查询 Agent Plan 模型列表。
-///
-/// `refresh=false` 时优先返回本地缓存；AK/SK 与套餐版本缺省取已保存配置，
-/// 设置页可直接携带表单中尚未保存的值刷新。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ListModelsRequest {
-    #[serde(default)]
-    pub refresh: bool,
-    #[serde(default)]
-    pub access_key_id: Option<String>,
-    #[serde(default)]
-    pub secret_access_key: Option<String>,
-    #[serde(default)]
-    pub edition: Option<String>,
-}
-
-/// 按能力分类的 Agent Plan 可用模型。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentPlanModels {
-    /// 文本生成（在天工「模型配置」中使用）。
-    #[serde(default)]
-    pub text: Vec<String>,
-    /// 图片生成（Seedream）。
-    #[serde(default)]
-    pub image: Vec<String>,
-    /// 视频生成（Seedance）。
-    #[serde(default)]
-    pub video: Vec<String>,
-    /// 语音合成。
-    #[serde(default)]
-    pub tts: Vec<String>,
-    /// 语音识别。
-    #[serde(default)]
-    pub asr: Vec<String>,
-    /// 向量化。
-    #[serde(default)]
-    pub embedding: Vec<String>,
-    /// 套餐版本。
-    #[serde(default)]
-    pub edition: String,
-    /// 获取时间（本地时间，`YYYY-MM-DD HH:MM:SS`）。
-    #[serde(default)]
-    pub fetched_at: String,
 }
 
 /// 图片生成请求。
@@ -483,7 +409,6 @@ mod tests {
     fn config_defaults_fill_missing_fields() {
         let config: VolcengineConfig = serde_json::from_str(r#"{"api_key":"k"}"#).unwrap();
         assert_eq!(config.api_key, "k");
-        assert_eq!(config.edition, DEFAULT_EDITION);
         assert_eq!(
             config.video_poll_timeout_secs,
             DEFAULT_VIDEO_POLL_TIMEOUT_SECS
@@ -497,13 +422,27 @@ mod tests {
 
     #[test]
     fn legacy_config_fields_are_ignored() {
-        // 旧版（按量付费）配置中的 base_url / speech 字段不影响解析。
+        // 旧版配置中的 base_url / speech（按量付费）与 access_key_id /
+        // secret_access_key / edition（模型列表查询）字段不影响解析，且保存时丢弃。
         let config: VolcengineConfig = serde_json::from_str(
-            r#"{"base_url":"https://x","api_key":"k","speech":{"api_key":"s"}}"#,
+            r#"{"base_url":"https://x","api_key":"k","speech":{"api_key":"s"},
+                "access_key_id":"ak","secret_access_key":"sk","edition":"enterprise",
+                "image_model":"doubao-seedream-5-0-pro"}"#,
         )
         .unwrap();
         assert_eq!(config.api_key, "k");
+        assert_eq!(config.image_model, "doubao-seedream-5-0-pro");
         assert_eq!(config.tts_model, DEFAULT_TTS_MODEL);
+        let saved = serde_json::to_value(&config).unwrap();
+        for legacy in [
+            "access_key_id",
+            "secret_access_key",
+            "edition",
+            "base_url",
+            "speech",
+        ] {
+            assert!(saved.get(legacy).is_none(), "{legacy} 不应再被保存");
+        }
     }
 
     #[test]

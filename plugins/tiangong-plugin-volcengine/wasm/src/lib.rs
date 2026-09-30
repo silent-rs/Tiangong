@@ -14,11 +14,10 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_volcengine_protocol::{
-    Empty, GenerateImage, GenerateVideo, GetConfig, ImageRequest, ListModels, ListVoices, Play,
-    PlayStatus, RecordCancel, RecordStart, RecordStop, SetConfig, Stop, Synthesize,
-    SynthesizeRequest, TOOL_GENERATE_IMAGE, TOOL_GENERATE_VIDEO, TOOL_SPEECH_TO_TEXT,
-    TOOL_TEXT_TO_SPEECH, Transcribe, TranscribeRequest, VideoRequest, VideoStatus,
-    VolcengineOperation,
+    Empty, GenerateImage, GenerateVideo, GetConfig, ImageRequest, ListVoices, Play, PlayStatus,
+    RecordCancel, RecordStart, RecordStop, SetConfig, Stop, Synthesize, SynthesizeRequest,
+    TOOL_GENERATE_IMAGE, TOOL_GENERATE_VIDEO, TOOL_SPEECH_TO_TEXT, TOOL_TEXT_TO_SPEECH, Transcribe,
+    TranscribeRequest, VideoRequest, VideoStatus, VolcengineOperation,
 };
 
 mod descriptor {
@@ -332,7 +331,6 @@ impl UiGuest for Component {
             "record_start" => forward::<RecordStart>(payload)?,
             "record_stop" => forward::<RecordStop>(payload)?,
             "record_cancel" => forward::<RecordCancel>(payload)?,
-            "list_models" => forward::<ListModels>(payload)?,
             other => return Err(plugin_err(format!("未知的消息: {other}"))),
         };
         Ok(ViewMessageResponse { payload })

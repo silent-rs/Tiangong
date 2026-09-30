@@ -3,7 +3,7 @@ name = "tiangong-plugin-volcengine-sidecar"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Volcengine 独立 sidecar（Agent Plan：图片/视频生成、语音合成/识别、模型列表、本机录音播放、配置持久化）"
+description = "Volcengine 独立 sidecar（Agent Plan：图片/视频生成、语音合成/识别、本机录音播放、配置持久化）"
 publish = false
 
 [[bin]]
@@ -26,11 +26,6 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macr
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 scru128 = { workspace = true }
-# Agent Plan 模型列表：管控面 OpenAPI 的 Access Key 签名（HMAC-SHA256）与签名时间。
-hmac = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
-chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
 # Agent Plan 流式语音识别：WebSocket 二进制帧协议，载荷 gzip 压缩。
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "__rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }

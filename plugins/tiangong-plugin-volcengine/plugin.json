@@ -31,7 +31,7 @@
         "slot": "settings.plugin-page",
         "id": "volcengine-settings",
         "title": "火山引擎",
-        "description": "火山方舟 Agent Plan：API Key、套餐模型列表与图片/视频/语音模型选择",
+        "description": "火山方舟 Agent Plan：API Key 与图片/视频/语音模型配置",
         "icon": "image",
         "entry": "app/settings.html",
         "sandbox": "iframe"
