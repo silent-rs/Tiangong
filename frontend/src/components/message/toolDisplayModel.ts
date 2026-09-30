@@ -431,18 +431,20 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
   };
 }
 
-/** 运行中工具调用的展示模型（结果未到达，只有名称与参数）。 */
+/** 运行中工具调用的展示模型（结果未到达，只有名称与参数；展开只显示参数）。 */
 export function buildRunningToolModel(name: string, args?: unknown): ToolDisplayModel {
   const variant = classifyToolName(name);
+  const argSummary = summaryFromArgs(variant, args);
+  const command = variant === "terminal" ? (terminalCommandFromArgs(args) ?? argSummary) : null;
   return {
     variant,
     title: VARIANT_TITLES[variant],
-    summary: summaryFromArgs(variant, args) ?? name,
+    summary: argSummary ?? name,
     state: "running",
     errorSummary: null,
-    argsText: null,
+    argsText: argsToText(args),
     outputText: null,
-    terminal: null,
+    terminal: command ? { command, stdout: null, stderr: null } : null,
     filePath: null,
     durationMs: null,
   };
