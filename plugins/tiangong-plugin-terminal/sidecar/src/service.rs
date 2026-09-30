@@ -44,8 +44,9 @@ const COMMAND_POLL_INTERVAL_MS: u64 = 50;
 const SHELL_READY_TIMEOUT_SECS: u64 = 3;
 /// 最后一个 PTY 会话结束后保留短暂窗口，让关闭响应完成并容纳紧邻的新建请求。
 const SIDECAR_IDLE_EXIT_SECS: u64 = 5;
-/// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间。
-const FRONTEND_ATTACH_WAIT_MS: u64 = 1_000;
+/// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间
+/// （宿主统一的实例资源后台挂载上限）。
+const FRONTEND_ATTACH_WAIT_MS: u64 = tiangong_plugin_runtime::protocol::FRONTEND_ATTACH_WAIT_MS;
 /// 非交互命令的静默挂起判定窗口：命令已写入 PTY 后持续无新输出、
 /// 前台被子程序占据、且该程序已把 tty 切成非规范模式（交互程序特征）
 /// 达到本时长，即认定它在等待用户按键。三个条件同时成立时信号很强，
@@ -537,6 +538,32 @@ struct FindResponse {
 #[serde(deny_unknown_fields)]
 struct ListByScopeRequest {
     scope_id: String,
+}
+
+/// 宿主统一实例生命周期协议：`session_id` 为宿主会话，`instance_id` 为
+/// 标签编号（终端即 PTY 编号）。与终端内部字段命名（session_id=PTY）不同，
+/// 这里单独建模后映射到既有关闭逻辑。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstanceClosedRequest {
+    session_id: String,
+    instance_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListInstancesRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstanceEntry {
+    instance_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListInstancesResponse {
+    instances: Vec<InstanceEntry>,
 }
 
 /// terminalListByScope 条目：宿主会话下仍存活的终端（前端切换会话时
@@ -3570,14 +3597,41 @@ async fn dispatch_operation(
                 serde_json::from_value(payload).context("terminalGc 参数无效")?;
             Ok(serde_json::to_value(service.gc_terminals(request)?)?)
         }
-        // 宿主实例移除兜底：前端标签关闭时若插件页面未就绪（冷启动窗口）
-        // 或已卸载，关闭前通知无人接收；宿主在移除标签后对本操作补发一次，
-        // 保证终端被回收。幂等（页面已关闭过则无副作用），归属校验同
+        // 宿主统一实例生命周期：标签移除后宿主保证发出一次（页面未就绪或
+        // 已卸载时 beforeClose 无人接收，也由此回收）。幂等，归属校验同
         // terminalClose——实例编号与终端编号一一对应。
         "instanceClosed" => {
-            let request: CloseRequest =
+            let request: InstanceClosedRequest =
                 serde_json::from_value(payload).context("instanceClosed 参数无效")?;
-            Ok(serde_json::to_value(service.close_session(request)?)?)
+            let scope_id = request.session_id.trim().to_string();
+            let instance_id = request.instance_id.trim().to_string();
+            if scope_id.is_empty() || instance_id.is_empty() {
+                bail!("instanceClosed 需要有效的 session_id 与 instance_id");
+            }
+            Ok(serde_json::to_value(service.close_session(
+                CloseRequest {
+                    session_id: Some(instance_id),
+                    scope_id,
+                },
+            )?)?)
+        }
+        // 宿主统一实例核查：列出会话下持有资源的实例（切换会话恢复标签、
+        // 核查多余资源、逻辑删除会话时释放）。
+        "listInstances" => {
+            let request: ListInstancesRequest =
+                serde_json::from_value(payload).context("listInstances 参数无效")?;
+            let listed = service.list_by_scope(&ListByScopeRequest {
+                scope_id: request.session_id,
+            })?;
+            Ok(serde_json::to_value(ListInstancesResponse {
+                instances: listed
+                    .terminals
+                    .into_iter()
+                    .map(|entry| InstanceEntry {
+                        instance_id: entry.session_id,
+                    })
+                    .collect(),
+            })?)
         }
         "terminalFind" => {
             let request: FindRequest =
@@ -5812,41 +5866,58 @@ mod tests {
             .trim_start_matches("已打开终端 ")
             .to_string();
 
-        // 实例通知不携带工具上下文（宿主生命周期操作）。
-        let host_notice = |scope_id: &str| Request {
+        // 实例通知不携带工具上下文（宿主生命周期操作）：
+        // session_id=宿主会话，instance_id=标签（终端）编号。
+        let host_notice = |scope_id: &str, instance_id: &str| Request {
             protocol_version: PROTOCOL_VERSION.to_string(),
             request_id: format!("test-{}", scru128::new()),
             operation: "instanceClosed".to_string(),
             payload: serde_json::json!({
-                "scope_id": scope_id,
-                "session_id": terminal,
+                "session_id": scope_id,
+                "instance_id": instance_id,
             }),
         };
+        let list_instances = |scope_id: &str| Request {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            request_id: format!("test-{}", scru128::new()),
+            operation: "listInstances".to_string(),
+            payload: serde_json::json!({ "session_id": scope_id }),
+        };
+        let listed = service.dispatch(list_instances("session-a")).await;
+        assert!(listed.success, "listInstances 应成功: {listed:?}");
+        assert_eq!(
+            listed
+                .payload
+                .as_ref()
+                .and_then(|p| p["instances"][0]["instance_id"].as_str()),
+            Some(terminal.as_str()),
+            "listInstances 应返回会话下存活终端"
+        );
         // 跨会话兜底通知：拒绝（终端不属于该会话）。
-        let denied = service.dispatch(host_notice("session-b")).await;
+        let denied = service.dispatch(host_notice("session-b", &terminal)).await;
         assert!(!denied.success, "跨会话兜底必须拒绝: {denied:?}");
 
         // 归属会话：回收成功；重复补发与未知编号幂等成功。
-        let closed = service.dispatch(host_notice("session-a")).await;
+        let closed = service.dispatch(host_notice("session-a", &terminal)).await;
         assert!(closed.success, "归属会话兜底应成功: {closed:?}");
         assert!(
             service.with_session(&terminal, |_| Ok(())).is_err(),
             "终端应已被兜底回收"
         );
-        let again = service.dispatch(host_notice("session-a")).await;
+        let again = service.dispatch(host_notice("session-a", &terminal)).await;
         assert!(again.success, "重复兜底应幂等成功");
         let unknown = service
-            .dispatch(Request {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                request_id: format!("test-{}", scru128::new()),
-                operation: "instanceClosed".to_string(),
-                payload: serde_json::json!({
-                    "scope_id": "session-a",
-                    "session_id": "tty-not-exist",
-                }),
-            })
+            .dispatch(host_notice("session-a", "tty-not-exist"))
             .await;
         assert!(unknown.success, "未知编号兜底应幂等成功");
+        let emptied = service.dispatch(list_instances("session-a")).await;
+        assert_eq!(
+            emptied
+                .payload
+                .as_ref()
+                .and_then(|p| p["instances"].as_array().map(Vec::len)),
+            Some(0)
+        );
     }
 
     #[cfg(unix)]

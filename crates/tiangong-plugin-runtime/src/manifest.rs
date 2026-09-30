@@ -174,6 +174,12 @@ pub struct UiContributionDecl {
     /// 沙箱级别，缺省落到 `ui.sandbox`，再缺省 `shadow`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<SandboxKind>,
+    /// 实例是否持有后端资源（仅 `extension.tab`）。声明后宿主接管实例
+    /// 生命周期：关闭标签必发 `instanceClosed`，会话切换按 `listInstances`
+    /// 恢复标签并核查多余资源，会话删除释放全部实例。资源方为插件
+    /// sidecar，`webview` 沙箱时为宿主 webview 容器。
+    #[serde(default)]
+    pub instance_resources: bool,
 }
 
 /// 单项模型能力需求。
@@ -590,6 +596,24 @@ impl PluginManifest {
                     decl.slot
                 );
             }
+            if decl.instance_resources {
+                if decl.slot != OPEN_MODE_SLOT {
+                    bail!(
+                        "插件 {} 贡献 {} 的 instance_resources 仅对 {OPEN_MODE_SLOT} 生效，{} 不支持",
+                        self.id,
+                        decl.id,
+                        decl.slot
+                    );
+                }
+                let sandbox = decl.sandbox.or(ui.sandbox).unwrap_or_default();
+                if sandbox != SandboxKind::Webview && self.sidecar.is_none() {
+                    bail!(
+                        "插件 {} 贡献 {} 声明 instance_resources 需要实例资源方：声明 sidecar（实现 instanceClosed/listInstances）或使用 webview 沙箱",
+                        self.id,
+                        decl.id
+                    );
+                }
+            }
             for key in &decl.context {
                 let supported = slot.context.iter().any(|ctx| ctx.as_str() == key);
                 if !supported {
@@ -747,6 +771,7 @@ impl PluginManifest {
                 open_mode: decl.open_mode.unwrap_or_default(),
                 context: decl.context.clone(),
                 sandbox: decl.sandbox.unwrap_or(default_sandbox),
+                instance_resources: decl.instance_resources,
             })
             .collect()
     }
@@ -1017,6 +1042,49 @@ mod tests {
         assert!(message.contains("未知挂载点"));
         assert!(message.contains("extension.unknown"));
         assert!(message.contains("slot 无效"));
+    }
+
+    #[test]
+    fn v2_instance_resources_仅对_extension_tab_生效() {
+        let json = v2_json().replace(
+            "\"entry\": \"settings.html\"",
+            "\"entry\": \"settings.html\",\n                        \"instance_resources\": true",
+        );
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("instance_resources"));
+        assert!(error.to_string().contains("extension.tab"));
+    }
+
+    #[test]
+    fn v2_instance_resources_需要资源方() {
+        let json = v2_json().replace(
+            "\"open_mode\": \"multi\",",
+            "\"open_mode\": \"multi\",\n                        \"instance_resources\": true,",
+        );
+        // shadow 沙箱且无 sidecar：没有资源方可接收 instanceClosed
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("instance_resources"));
+
+        // webview 沙箱由宿主 webview 容器充当资源方
+        let webview = json.replace("\"sandbox\": \"shadow\"", "\"sandbox\": \"webview\"");
+        let manifest = parse(&webview).unwrap();
+        let tab = manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|contribution| contribution.slot == "extension.tab")
+            .unwrap();
+        assert!(tab.instance_resources);
+    }
+
+    #[test]
+    fn v2_未声明_instance_resources_缺省为假() {
+        let manifest = parse(&v2_json()).unwrap();
+        assert!(
+            manifest
+                .ui_contributions()
+                .iter()
+                .all(|contribution| !contribution.instance_resources)
+        );
     }
 
     #[test]

@@ -276,6 +276,9 @@ pub struct UiContribution {
     /// 沙箱级别，缺省 `shadow`；`native` 需官方签名。
     #[serde(default)]
     pub sandbox: SandboxKind,
+    /// 实例是否持有后端资源（宿主接管实例生命周期，见 manifest 同名字段）。
+    #[serde(default)]
+    pub instance_resources: bool,
 }
 
 /// App 打开模式。仅对 `extension.tab` 生效。
@@ -420,6 +423,7 @@ mod tests {
             open_mode: OpenMode::Multi,
             context: vec!["session".to_string()],
             sandbox: SandboxKind::Shadow,
+            instance_resources: false,
         };
         let json = serde_json::to_string(&contribution).unwrap();
         assert!(json.contains("\"open_mode\":\"multi\""));

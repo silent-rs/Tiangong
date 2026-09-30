@@ -393,6 +393,10 @@ pub fn dispatch_collaboration(
                                 .get("max_chars")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(40_000) as usize,
+                            show_panel: request
+                                .get("open")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
                             response_tx: tx,
                         })
                         .await;

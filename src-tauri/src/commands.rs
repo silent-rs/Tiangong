@@ -320,6 +320,7 @@ pub async fn load_session(
 #[tauri::command]
 pub async fn delete_session(
     session_id: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let deleted_id = session_id;
@@ -328,6 +329,8 @@ pub async fn delete_session(
         .lock_owned()
         .await;
     let _send_guard = state.session_send_lock(&deleted_id).lock_owned().await;
+    // 实例资源归属会话：删除前解析工作区（删除后会话不可加载）。
+    let release_workspace = crate::plugin_instances::prepare_release(&app, &deleted_id);
     // 逻辑删除：原子移动到 trash + 取消 Core。
     state
         .inner()
@@ -335,6 +338,15 @@ pub async fn delete_session(
         .delete_session(&deleted_id)
         .await
         .map_err(|error| format!("删除会话失败：{error}"))?;
+    // 释放声明实例资源的插件在该会话的全部实例（浏览器页面、终端 PTY 等）。
+    {
+        let app = app.clone();
+        let id = deleted_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::plugin_instances::release_session(&app, &id, release_workspace)
+        })
+        .await;
+    }
     // 清理内存状态。
     state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
     state
@@ -354,6 +366,7 @@ pub async fn delete_session(
 #[tauri::command]
 pub async fn delete_sessions_by_cwd(
     cwd: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<DeleteResult, String> {
     let mut deleted_ids = state
@@ -398,6 +411,18 @@ pub async fn delete_sessions_by_cwd(
             id
         })
         .collect();
+    // 释放声明实例资源的插件在这些会话的全部实例（工作区即 cwd）。
+    {
+        let app = app.clone();
+        let ids = succeeded_ids.clone();
+        let workspace = (!cwd.trim().is_empty()).then(|| PathBuf::from(cwd.trim()));
+        let _ = tokio::task::spawn_blocking(move || {
+            for id in &ids {
+                crate::plugin_instances::release_session(&app, id, workspace.clone());
+            }
+        })
+        .await;
+    }
     // 只清理成功删除的会话的内存状态。
     state
         .with_state(|core_state| {
@@ -4748,6 +4773,68 @@ pub async fn set_webview_mounted_tabs(
 pub async fn list_extension_apps(
 ) -> Result<Vec<tiangong_plugin_runtime::registry::ExtensionApp>, String> {
     Ok(tiangong_plugin_runtime::registry::list_extension_apps())
+}
+
+// ── 插件实例生命周期（宿主统一编排，见 plugin_instances 模块）──
+
+/// 预留实例编号（宿主生成 scru128）：前端新建插件标签时使用。
+#[tauri::command]
+pub async fn plugin_instance_reserve() -> Result<String, String> {
+    Ok(crate::plugin_instances::new_instance_id())
+}
+
+/// 标签已移除：宿主向资源方发出 instanceClosed（唯一释放路径，幂等）。
+#[tauri::command]
+pub async fn plugin_instance_closed(
+    app: AppHandle,
+    plugin_id: String,
+    session_id: String,
+    instance_id: String,
+) -> Result<(), String> {
+    if session_id.trim().is_empty() || instance_id.trim().is_empty() {
+        return Err("instanceClosed 需要有效的 session_id 与 instance_id".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        crate::plugin_instances::instance_closed(&app, &plugin_id, &session_id, &instance_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+/// 列出会话下持有资源的实例（切换会话后按同一编号恢复标签）。
+#[tauri::command]
+pub async fn plugin_instances_list(
+    app: AppHandle,
+    session_id: String,
+) -> Result<Vec<crate::plugin_instances::PluginInstanceEntry>, String> {
+    tokio::task::spawn_blocking(move || crate::plugin_instances::list_instances(&app, &session_id))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 核查会话实例：前端提交当前标签集合，宿主释放无标签归属的多余资源。
+#[tauri::command]
+pub async fn plugin_instances_reconcile(
+    app: AppHandle,
+    session_id: String,
+    live: Vec<crate::plugin_instances::LiveInstance>,
+) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::plugin_instances::reconcile(&app, &session_id, &live).len()
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// 会话离开前台：隐藏该会话全部 webview 实例（资源保留，切回恢复）。
+#[tauri::command]
+pub async fn plugin_instances_detach(app: AppHandle, session_id: String) -> Result<(), String> {
+    if session_id.trim().is_empty() {
+        return Ok(());
+    }
+    crate::plugin_instances::detach_session(&app, &session_id);
+    Ok(())
 }
 
 /// 读取 v2 manifest UI 贡献的入口 HTML（entry 相对插件目录）。

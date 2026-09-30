@@ -158,6 +158,7 @@
         "icon": "terminal",
         "entry": "dist/index.html",
         "open_mode": "multi",
+        "instance_resources": true,
         "context": [
           "session"
         ]

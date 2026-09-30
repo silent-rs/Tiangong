@@ -124,6 +124,7 @@ pub async fn browser_command_handler(
                 session_id,
                 url,
                 max_chars,
+                show_panel,
                 response_tx,
             } => {
                 let url_for_error = url.clone();
@@ -150,7 +151,22 @@ pub async fn browser_command_handler(
                     serde_json::json!({ "session_id": session_id }),
                 );
 
+                // 实例归属：页面编号由宿主生成（scru128），先请求前端以同一
+                // 编号建立标签（标签即页面唯一所有者，关闭标签即关闭页面），
+                // 再有上限地等待挂载后使用；超时照常抓取，标签在切回会话时
+                // 按 listInstances 恢复，不会出现无主页面。
+                let owner = crate::plugin_instances::parse_webview_scope(&session_id);
+                let tab_id = ticket.tab_id.clone();
                 let result = tokio::task::spawn_blocking(move || {
+                    if let Some((plugin_id, owner_session)) = owner {
+                        crate::plugin_instances::request_open(
+                            &plugin_id,
+                            &owner_session,
+                            &tab_id,
+                            show_panel,
+                        );
+                        crate::plugin_instances::wait_mounted(|| manager.is_tab_mounted(&tab_id));
+                    }
                     manager.fetch_page_content(&url, max_chars, &ticket)
                 })
                 .await;
@@ -168,24 +184,29 @@ pub async fn browser_command_handler(
                     continue;
                 };
                 let manager = BrowserManager::from_state(agent_state);
-                if !manager.is_open() {
-                    let _ = app.emit(
-                        "browser:open",
-                        BrowserOpenEvent {
-                            session_id: session_id.clone(),
-                            url: url.clone(),
-                        },
-                    );
-                }
-                // 始终通知前端 agent 正在使用浏览器（用于图标标记）
+                // 标签由下方 request_open 以页面编号建立（带实例编号的
+                // app.open），不再发 browser:open 让前端另行导航建页。
                 let _ = app.emit(
                     "browser:agent_active",
                     BrowserAgentActiveEvent {
                         session_id: session_id.clone(),
                     },
                 );
-                if let Err(error) = manager.navigate_for_agent(&app, &url) {
-                    warn!(%error, %session_id, %url, "browser open URL failed");
+                match manager.navigate_for_agent(&app, &url) {
+                    Ok(ticket) => {
+                        // 与 FetchPage 同一归属流程：页面必有标签所有者。
+                        if let Some((plugin_id, owner_session)) =
+                            crate::plugin_instances::parse_webview_scope(&session_id)
+                        {
+                            crate::plugin_instances::request_open(
+                                &plugin_id,
+                                &owner_session,
+                                &ticket.tab_id,
+                                true,
+                            );
+                        }
+                    }
+                    Err(error) => warn!(%error, %session_id, %url, "browser open URL failed"),
                 }
                 let _ = app.emit(
                     "browser:tab_updated",

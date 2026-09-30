@@ -47,8 +47,9 @@ pub use adapter::WasmPluginAdapter;
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call,
     bridge_call_with_workspace, bridge_emit, bridge_subscribe, bridge_unsubscribe,
-    emit_plugins_changed, set_app_handler, set_browser_handler, set_dialog_handler,
-    set_event_emitter, set_session_input_handler, set_terminal_handler, set_webview_handler,
+    emit_plugins_changed, invoke_plugin_sidecar, request_app_open, set_app_handler,
+    set_browser_handler, set_dialog_handler, set_event_emitter, set_session_input_handler,
+    set_terminal_handler, set_webview_handler,
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;

@@ -243,17 +243,7 @@ pub fn bridge_call_with_workspace(
             if operation.is_empty() {
                 bail!("sidecar 方法缺少操作名（如 sidecar.terminalSpawn）");
             }
-            let storage_root = crate::registry::plugin_install_directory(plugin_id)
-                .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
-                .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()))
-                .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
-            let result = crate::registry::invoke_sidecar_with_workspace(
-                &storage_root,
-                plugin_id,
-                operation,
-                request,
-                workspace,
-            )?;
+            let result = invoke_plugin_sidecar(plugin_id, operation, request, workspace)?;
             // 结果观察者（宿主注入的通用机制，不解析业务语义）：宿主可用
             // 于受信产物溯源登记等策略（如创作链构建登记）。
             if let Some(observer) = sidecar_result_observer() {
@@ -280,6 +270,33 @@ pub fn bridge_call_with_workspace(
             )
         }
     }
+}
+
+/// 宿主可信调用插件 sidecar（实例生命周期 instanceClosed / listInstances 等
+/// 宿主协议操作）：不经 bridge 权限校验，按插件安装目录定位存储根。
+pub fn invoke_plugin_sidecar(
+    plugin_id: &str,
+    operation: &str,
+    payload: serde_json::Value,
+    workspace: Option<&Path>,
+) -> Result<serde_json::Value> {
+    let storage_root = crate::registry::plugin_install_directory(plugin_id)
+        .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
+        .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+    crate::registry::invoke_sidecar_with_workspace(
+        &storage_root,
+        plugin_id,
+        operation,
+        payload,
+        workspace,
+    )
+}
+
+/// 宿主请求打开插件 App 实例（宿主可信调用，路由到注入的 app.open 处理器）。
+/// 用于宿主侧为已预留编号的实例资源建立前端标签。
+pub fn request_app_open(plugin_id: &str, payload: &str) -> Result<String> {
+    open_app_for_plugin(plugin_id, payload)
 }
 
 /// 输入草稿宿主处理器：桌面入口注入后，UI 插件可提交经宿主校验的输入附件。

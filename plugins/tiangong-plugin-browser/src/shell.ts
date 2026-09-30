@@ -34,15 +34,6 @@ type BrowserToolWindow = Window & {
   __tiangongBrowserToolClaims?: Set<string>;
 };
 
-interface WebviewEvent {
-  event?: string;
-  scope?: string;
-  payload?: {
-    tab_id?: string;
-    url?: string;
-  };
-}
-
 /** 进行中的工具调用状态：收到 tool.closed（answered/cancelled/expired
  * 均同）后置 closed。执行体持有对象引用，Map 提前清理后依然可读。 */
 type ActiveInvocation = {
@@ -105,48 +96,6 @@ async function requestOpenInstance(
   } catch (error) {
     console.error('打开浏览器面板失败:', error);
   }
-}
-
-function normalizeNavigationUrl(value: string): string {
-  return value.trim().replace(/\/$/, '');
-}
-
-/** web_fetch 开始导航时取得真实页面编号，并通过 SDK 登记对应 App 实例。 */
-function registerNextNavigation(
-  bridge: HostBridge,
-  sessionId: string,
-  targetUrl: string,
-  showPanel: boolean,
-): () => void {
-  const expectedScope = `webview:browser:${sessionId}`;
-  let stopped = false;
-  let off = () => {};
-  off = bridge.on('webview.event', (raw) => {
-    let event: WebviewEvent;
-    try {
-      event = JSON.parse(raw) as WebviewEvent;
-    } catch {
-      return;
-    }
-    const tabId = event.payload?.tab_id;
-    const eventUrl = event.payload?.url ?? '';
-    if (
-      stopped
-      || event.event !== 'navigation_started'
-      || event.scope !== expectedScope
-      || !tabId
-      || (targetUrl && eventUrl
-        && normalizeNavigationUrl(targetUrl) !== normalizeNavigationUrl(eventUrl))
-    ) return;
-    stopped = true;
-    off();
-    void requestOpenInstance(bridge, sessionId, tabId, showPanel);
-  });
-  return () => {
-    if (stopped) return;
-    stopped = true;
-    off();
-  };
 }
 
 async function main() {
@@ -244,30 +193,17 @@ async function main() {
         }
         // 会话绑定（对齐终端插件）：Agent 打开/操作的页面归属发起对话，
         // 与该对话的浏览器面板是同一实例（插件×会话双维度隔离）。
+        // web_fetch 的页面归属由宿主统一编排：宿主生成页面编号并以同一
+        // 编号建立标签（app.open），有上限地等待挂载后抓取，插件无需补建。
         const invocationArgs = (invocation.arguments as Record<string, unknown>) ?? {};
         if (state.closed) return;
-        const showFetchPanel = invocation.name === 'web_fetch' && invocationArgs.open === true;
-        const stopAppRegistration = invocation.name === 'web_fetch'
-          ? registerNextNavigation(
-            bridge,
-            invocation.session_id,
-            typeof invocationArgs.url === 'string' ? invocationArgs.url : '',
-            showFetchPanel,
-          )
-          : null;
-        const { open: _open, ...webviewArgs } = invocationArgs;
-        let raw: string;
-        try {
-          raw = await bridge.call(
-            method,
-            JSON.stringify({
-              ...webviewArgs,
-              session_id: invocation.session_id,
-            }),
-          );
-        } finally {
-          stopAppRegistration?.();
-        }
+        const raw = await bridge.call(
+          method,
+          JSON.stringify({
+            ...invocationArgs,
+            session_id: invocation.session_id,
+          }),
+        );
         if (state.closed) return;
         const parsed = JSON.parse(raw) as {
           view_id?: string;

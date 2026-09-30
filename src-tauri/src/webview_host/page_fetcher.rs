@@ -77,6 +77,7 @@ impl PageFetcher for BrowserPageFetcher {
                     session_id: session_id.clone(),
                     url,
                     max_chars,
+                    show_panel: false,
                     response_tx
                 },
                 response_rx,
