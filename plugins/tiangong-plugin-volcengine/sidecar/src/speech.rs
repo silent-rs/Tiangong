@@ -1144,6 +1144,9 @@ mod tests {
                     .send(Message::binary(error_frame(code, message)))
                     .await
                     .unwrap();
+                // 错误帧发出后继续读到客户端关闭：立即丢弃连接会触发 TCP 重置，
+                // 客户端仍在发送音频时内核会丢弃尚未读取的错误帧（偶发失败）。
+                while let Some(Ok(_)) = socket.next().await {}
                 return (seen_headers, 0, params);
             }
 
