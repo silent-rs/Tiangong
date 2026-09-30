@@ -385,6 +385,7 @@ fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
         // 凭据服务放行由宿主经策略文件显式授权；通用 CLI 保持默认
         // 拒绝（fail-closed）。
         allow_credential_services: false,
+        allow_audio_input: false,
         resource_limits,
     })
 }

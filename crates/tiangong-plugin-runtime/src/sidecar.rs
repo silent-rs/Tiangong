@@ -308,6 +308,8 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
+    /// 是否在沙箱内放行系统音频输入服务。
+    pub sandbox_audio_input: bool,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
     /// 本机 server 的 HTTP 地址（供需要回调 host 的 sidecar 使用，如 scheduler）。
@@ -373,6 +375,7 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
+            sandbox_audio_input: false,
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
@@ -409,6 +412,11 @@ impl SidecarConfig {
 
     pub fn with_sandbox_user_cache_write(mut self, allowed: bool) -> Self {
         self.sandbox_user_cache_write = allowed;
+        self
+    }
+
+    pub fn with_sandbox_audio_input(mut self, allowed: bool) -> Self {
+        self.sandbox_audio_input = allowed;
         self
     }
 

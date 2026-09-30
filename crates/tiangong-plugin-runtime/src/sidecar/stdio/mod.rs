@@ -631,6 +631,7 @@ impl StdioSidecarConnection {
                 exempt_mcp_config_write(&mut policy, &self.config.storage_root);
             }
             policy.allow_network = self.config.sandbox_network;
+            policy.allow_audio_input = self.config.sandbox_audio_input;
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
             policy
                 .denied_read_paths

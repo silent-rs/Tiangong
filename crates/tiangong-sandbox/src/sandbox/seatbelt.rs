@@ -194,7 +194,8 @@ fn compile_profile_legacy(policy: &SandboxPolicy, writable: &[std::path::PathBuf
     append_system_service_rules(&mut sbpl, policy);
     sbpl
 }
-/// 证书验证随网络授权开放；Keychain 与用户身份解析只随凭据授权开放。
+/// 证书验证随网络授权开放；Keychain 与用户身份解析只随凭据授权开放；
+/// CoreAudio 输入只随音频授权开放。
 /// 两组均限制到精确服务名，不允许任意系统服务查询。
 fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
     if policy.allow_network {
@@ -210,6 +211,14 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
              (allow mach-lookup (global-name \"com.apple.securityd.xpc\"))\n\
              (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))\n\
              (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.membership\"))\n",
+        );
+    }
+    if policy.allow_audio_input {
+        // 实测 cpal/CoreAudio 打开默认输入设备的最小集合：缺 audiohald 无法
+        // 枚举设备，缺 AudioComponentRegistrar 找不到 HAL 输入 AudioUnit。
+        sbpl.push_str(
+            "(allow mach-lookup (global-name \"com.apple.audio.audiohald\"))\n\
+             (allow mach-lookup (global-name \"com.apple.audio.AudioComponentRegistrar\"))\n",
         );
     }
     // 显式拒绝名单之外的服务，也约束未提及类别默认放行的旧系统。
@@ -239,6 +248,35 @@ fn escape(path: &Path) -> String {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_input_services_follow_explicit_authorization() {
+        for audio in [false, true] {
+            let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
+            policy.allow_audio_input = audio;
+            for sbpl in [
+                compile_profile_explicit_categories(&policy, &policy.writable_roots()),
+                compile_profile_legacy(&policy, &policy.writable_roots()),
+            ] {
+                assert!(sbpl.contains("(deny mach-lookup)"));
+                for service in [
+                    "com.apple.audio.audiohald",
+                    "com.apple.audio.AudioComponentRegistrar",
+                ] {
+                    let rule = format!("(allow mach-lookup (global-name \"{service}\"))");
+                    assert_eq!(
+                        sbpl.contains(&rule),
+                        audio,
+                        "音频服务 {service} 必须独立授权"
+                    );
+                    if audio {
+                        // 放行必须位于兜底拒绝之前才生效。
+                        assert!(sbpl.find(&rule) < sbpl.find("(deny mach-lookup)"));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn credential_services_rules_follow_explicit_authorization() {
