@@ -24,12 +24,32 @@ use tiangong_core::react::message::INJECTION_TOOL_NAME;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tools::extension::{
     PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider, call_with_name,
-    default_result_header, plugin_result_header, resolve_tool_name_conflicts,
+    resolve_tool_name_conflicts,
 };
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
 
 use crate::registry::{self, RuntimeKind};
+
+/// 工具结果抬头的状态词。
+fn result_status_text(ok: bool) -> &'static str {
+    if ok { "成功" } else { "失败" }
+}
+
+/// 插件工具结果的抬头：带上实际处理的插件 id 与插件声明的原工具名。
+///
+/// 抬头由插件侧（runtime 适配器）提供，core 只原样放在结果首行。
+pub fn plugin_result_header(plugin_id: &str, tool_name: &str, ok: bool) -> String {
+    format!(
+        "调用插件 {plugin_id} 的 {tool_name}：{}",
+        result_status_text(ok)
+    )
+}
+
+/// 无法定位到具体插件时的抬头（如自制插件通道缺少参数）。
+fn tool_result_header(tool_name: &str, ok: bool) -> String {
+    format!("调用工具 {tool_name}：{}", result_status_text(ok))
+}
 
 /// 自制插件动态调用工具名（description 恒定，不含任何插件信息——
 /// 插件装卸不改变 tools 声明，KV cache 前缀保持稳定）。
@@ -515,10 +535,10 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                 let function = arguments.get("function_name").and_then(|v| v.as_str());
                 Some(match (plugin, function) {
                     (Some(plugin), Some(function)) => plugin_result_header(plugin, function, ok),
-                    _ => default_result_header(&call.name, ok),
+                    _ => tool_result_header(&call.name, ok),
                 })
             }
-            LIST_LOCAL_PLUGINS_TOOL => None,
+            LIST_LOCAL_PLUGINS_TOOL => Some(tool_result_header(&call.name, ok)),
             _ => {
                 let route = self
                     .tool_routes

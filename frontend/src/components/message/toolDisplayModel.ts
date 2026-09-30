@@ -90,7 +90,7 @@ export function baseToolName(toolName: string): string {
 }
 
 /**
- * 去掉宿主为模型添加的结果抬头（首行「调用工具 X：成功」/「调用插件 P 的 X：失败」），
+ * 去掉插件为模型添加的结果抬头（首行「调用工具 X：成功」/「调用插件 P 的 X：失败」），
  * 界面只展示工具的原始输出。
  */
 export function stripToolResultHeader(content: string): string {

@@ -354,12 +354,11 @@ pub(super) fn record_completed_tool_call(
         (!args_summary.is_empty()).then_some(args_summary),
         &result.summary,
     );
-    // 抬头：运行期插件由处理器给出（带插件 id），其余使用固定文本。
+    // 抬头由处理该调用的插件提供，core 只原样放在首行；插件未提供时不加。
     let header = ctx
         .tool_overrides
         .get(&call.name)
-        .and_then(|handler| handler.result_header(call, result.ok))
-        .unwrap_or_else(|| crate::tools::extension::default_result_header(&call.name, result.ok));
+        .and_then(|handler| handler.result_header(call, result.ok));
     let body = if result.ok {
         tool_result_full_output(result)
     } else {
@@ -376,7 +375,10 @@ pub(super) fn record_completed_tool_call(
         &mut ctx.session,
         &call.id,
         &call.name,
-        format!("{header}\n{body}"),
+        match header {
+            Some(header) => format!("{header}\n{body}"),
+            None => body,
+        },
         !result.ok,
         duration_ms,
     );

@@ -25,32 +25,13 @@ pub trait ToolOverrideHandler: Send + Sync + 'static {
         Box::pin(async { None })
     }
 
-    /// 工具结果交给模型时的抬头（首行），说明本次调用由谁处理、是否成功。
+    /// 工具结果交给模型时的抬头（首行），由处理该调用的插件提供。
     ///
-    /// 返回 None 时 core 使用固定文本 `调用工具 {name}：成功/失败`（编译期插件
-    /// 的默认行为）；运行期装载的插件由 runtime 覆写，带上实际处理的插件 id，
-    /// 让模型区分同类能力来自哪个插件。
+    /// core 只负责把返回的文本原样放在结果首行，不生成、不解释抬头内容；
+    /// 返回 None（默认）时结果不带抬头。
     fn result_header(&self, _call: &ToolCall, _ok: bool) -> Option<String> {
         None
     }
-}
-
-/// 工具结果抬头的状态词。
-pub fn result_status_text(ok: bool) -> &'static str {
-    if ok { "成功" } else { "失败" }
-}
-
-/// 编译期插件（及未注册处理器）的固定抬头。
-pub fn default_result_header(tool_name: &str, ok: bool) -> String {
-    format!("调用工具 {tool_name}：{}", result_status_text(ok))
-}
-
-/// 运行期插件的抬头：带上实际处理的插件 id。
-pub fn plugin_result_header(plugin_id: &str, tool_name: &str, ok: bool) -> String {
-    format!(
-        "调用插件 {plugin_id} 的 {tool_name}：{}",
-        result_status_text(ok)
-    )
 }
 
 /// 重名工具的对外名称：`{插件id}__{工具名}`。
@@ -274,7 +255,7 @@ mod tests {
         }
 
         fn result_header(&self, call: &ToolCall, ok: bool) -> Option<String> {
-            Some(plugin_result_header("echo", &call.name, ok))
+            Some(format!("echo:{}:{ok}", call.name))
         }
     }
 
@@ -291,19 +272,7 @@ mod tests {
         assert_eq!(result.stdout, "tool");
         assert_eq!(
             handler.result_header(&call, false).as_deref(),
-            Some("调用插件 echo 的 tool：失败")
-        );
-    }
-
-    #[test]
-    fn 默认抬头使用固定文本() {
-        assert_eq!(
-            default_result_header("read_file", true),
-            "调用工具 read_file：成功"
-        );
-        assert_eq!(
-            default_result_header("read_file", false),
-            "调用工具 read_file：失败"
+            Some("echo:tool:false")
         );
     }
 }
