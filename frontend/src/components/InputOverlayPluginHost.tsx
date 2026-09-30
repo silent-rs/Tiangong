@@ -74,16 +74,25 @@ export function InputOverlayPluginHost({
 
   // 显示时把焦点交给插件内容（Shadow 容器内首个可聚焦元素 / iframe），
   // 插件内的键盘交互（如空格按住说话）才能生效；找不到时聚焦外层容器。
+  // 显隐切换当帧插件内容可能尚不可聚焦，按帧重试直至焦点落入覆盖层。
   useEffect(() => {
     if (!visible) return;
     const container = containerRef.current;
     if (!container) return;
-    const frame = window.requestAnimationFrame(() => {
+    let frame = 0;
+    let attempts = 0;
+    const focusInner = () => {
       const shadowHost = container.querySelector('[data-plugin-shadow-host]');
-      const inner = shadowHost?.shadowRoot?.querySelector<HTMLElement>('[tabindex], button, input, textarea');
+      const shadowRoot = shadowHost?.shadowRoot;
+      const inner = shadowRoot?.querySelector<HTMLElement>('[tabindex], button, input, textarea');
       const iframe = container.querySelector('iframe');
       (inner ?? iframe ?? container).focus({ preventScroll: true });
-    });
+      const focused = container.contains(document.activeElement)
+        || Boolean(shadowRoot?.activeElement);
+      attempts += 1;
+      if (!focused && attempts < 10) frame = window.requestAnimationFrame(focusInner);
+    };
+    frame = window.requestAnimationFrame(focusInner);
     return () => window.cancelAnimationFrame(frame);
   }, [visible]);
 
