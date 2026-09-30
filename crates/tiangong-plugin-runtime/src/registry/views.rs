@@ -305,6 +305,8 @@ pub struct ExtensionApp {
     /// singleton：全局至多一个 tab，重复打开聚焦；multi：每次打开新建。
     pub open_mode: crate::slots::OpenMode,
     pub sandbox: crate::slots::SandboxKind,
+    /// 实例持有后端资源：宿主接管关闭、恢复、核查与会话删除释放。
+    pub instance_resources: bool,
 }
 
 /// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
@@ -337,6 +339,7 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
                 icon: contribution.icon.clone(),
                 open_mode: contribution.open_mode,
                 sandbox: contribution.sandbox,
+                instance_resources: contribution.instance_resources,
             });
         }
     }

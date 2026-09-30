@@ -56,3 +56,17 @@ npx -y @silent-ai/plugin-creator@1.0.2 build <id>
 ## 请求取消
 
 模板使用 sidecar SDK 0.2.0。长任务应监听 `ctx.signal`，并在 `cancel` 钩子中清理子进程和句柄。
+
+## 实例资源（instance_resources）
+
+若每个拓展区标签实例持有后端资源（子进程、PTY、远程连接等），在 `plugin.json`
+的 `extension.tab` 贡献上声明 `"instance_resources": true`，并在 sidecar 的
+`dispatch` 中实现两个宿主协议操作（均需幂等）：
+
+- `instanceClosed`：`{ session_id, instance_id }` → 释放该实例资源（未知编号返回成功）；
+- `listInstances`：`{ session_id }` → `{ instances: [{ instance_id }] }`。
+
+资源一律按页面 `runtime.context.app.instance_id` 归属。标签关闭后宿主保证发出
+`instanceClosed`；切换会话时宿主按 `listInstances` 恢复标签并释放没有标签的多余
+资源；删除会话时释放全部实例。`registerBeforeClose` 只做状态保存。无后端资源的
+插件不要声明该字段。

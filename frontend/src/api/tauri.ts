@@ -96,6 +96,8 @@ export interface TabState {
   contribution_id?: string;
   /** plugin tab 专属：沙箱级别（shadow/iframe）。 */
   sandbox?: SandboxKind;
+  /** plugin tab 专属：实例持有后端资源（manifest `instance_resources`）。 */
+  instance_resources?: boolean;
 }
 
 /** notice：系统发给用户的通知（如轮次失败原因），仅前端可见，不进模型上下文。 */
@@ -565,6 +567,19 @@ export interface AppEntry {
   icon: string;
   open_mode: OpenMode;
   sandbox: SandboxKind;
+  /** 实例持有后端资源（manifest `instance_resources`）：宿主接管关闭/恢复/核查。 */
+  instance_resources?: boolean;
+}
+
+/** 会话下持有资源的插件实例（宿主 listInstances 聚合，恢复标签用）。 */
+export interface PluginInstanceEntry {
+  plugin_id: string;
+  contribution_id: string;
+  title: string;
+  sandbox: SandboxKind;
+  instance_id: string;
+  url: string;
+  page_title: string;
 }
 
 /** Slot 元数据（来自后端 SlotDescriptor）。 */
@@ -1259,6 +1274,33 @@ export const api = {
   /// 列出拓展区 App（声明 extension.tab 贡献的插件，能力矩阵数据源）。
   listExtensionApps: (): Promise<AppEntry[]> =>
     invoke('list_extension_apps'),
+
+  /// 插件实例生命周期：宿主预留实例编号（scru128）。
+  pluginInstanceReserve: (): Promise<string> =>
+    invoke('plugin_instance_reserve'),
+
+  /// 插件实例生命周期：标签已移除，宿主向资源方发出 instanceClosed。
+  pluginInstanceClosed: (
+    pluginId: string,
+    sessionId: string,
+    instanceId: string,
+  ): Promise<void> =>
+    invoke('plugin_instance_closed', { pluginId, sessionId, instanceId }),
+
+  /// 插件实例生命周期：列出会话下持有资源的实例。
+  pluginInstancesList: (sessionId: string): Promise<PluginInstanceEntry[]> =>
+    invoke('plugin_instances_list', { sessionId }),
+
+  /// 插件实例生命周期：提交当前标签集合，宿主释放多余资源，返回释放数量。
+  pluginInstancesReconcile: (
+    sessionId: string,
+    live: { plugin_id: string; instance_id: string }[],
+  ): Promise<number> =>
+    invoke('plugin_instances_reconcile', { sessionId, live }),
+
+  /// 插件实例生命周期：会话离开前台，隐藏其全部 webview 实例。
+  pluginInstancesDetach: (sessionId: string): Promise<void> =>
+    invoke('plugin_instances_detach', { sessionId }),
 
   /// 读取 v2 manifest UI 贡献的入口 HTML。
   pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>

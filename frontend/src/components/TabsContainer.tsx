@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Globe, Grid3x3, Puzzle, X } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { SandboxKind, TabKind, TabState } from '@/api/tauri';
+import type { PluginInstanceEntry, SandboxKind, TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { PluginAppTabContent } from './PluginAppTabContent';
 import { runPluginBeforeClose } from './PluginSandbox';
@@ -37,14 +37,6 @@ interface TabsContainerProps {
 
 const DEFAULT_BROWSER_URL = 'about:blank';
 
-/** 恢复终端标签所用 App 元数据（与终端插件清单 extension.tab 贡献一致）。 */
-const TERMINAL_TAB_META = {
-  pluginId: 'terminal',
-  contributionId: 'terminal',
-  title: '终端',
-  sandbox: 'shadow' as const,
-};
-
 /** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
 export interface AppTabCommand {
   kind: TabKind;
@@ -63,6 +55,8 @@ export interface AppTabCommand {
     instanceId?: string;
     /** 工具调用拉起等宿主侧场景置 true：已有实例时聚焦而非新建（multi 亦然）。 */
     focusExisting?: boolean;
+    /** 实例持有后端资源（manifest `instance_resources`）。 */
+    instanceResources?: boolean;
   };
 }
 
@@ -82,6 +76,19 @@ function isWebviewPluginTab(tab: TabState): boolean {
   return tab.kind === 'plugin'
     && tab.sandbox === 'webview'
     && Boolean(tab.plugin_id && tab.contribution_id);
+}
+
+/** 标签持有宿主统一管理的实例资源（webview 页面或声明 instance_resources）。 */
+function isResourceTab(tab: TabState): boolean {
+  return tab.kind === 'plugin'
+    && Boolean(tab.plugin_id)
+    && (tab.sandbox === 'webview' || Boolean(tab.instance_resources));
+}
+
+function liveResourceInstances(tabs: TabState[]): { plugin_id: string; instance_id: string }[] {
+  return tabs
+    .filter(isResourceTab)
+    .map((tab) => ({ plugin_id: tab.plugin_id as string, instance_id: tab.id }));
 }
 
 function mountedBrowserTabIds(tabs: TabState[]): string[] {
@@ -121,6 +128,7 @@ function createWebviewPluginTab(
     plugin_id: app.pluginId,
     contribution_id: app.contributionId,
     sandbox: app.sandbox,
+    instance_resources: true,
   };
 }
 
@@ -364,77 +372,70 @@ export function TabsContainer({
     };
   }, [terminalSessionId]);
 
-  // 会话挂载后向终端插件查询该会话仍存活的终端并重建可见标签：后台
-  // 会话执行终端命令不占前端资源，切回（或首次打开拓展区）时按真实
-  // 使用情况恢复。标签编号即终端编号，页面挂载后经 terminalFind/幂等
-  // spawn 自行回放历史输出；已有同编号标签（工具静默拉起抢先建好）
-  // 时仅跳过，聚焦交由既有命令通道决定。
-  const restoreTerminalTabs = useCallback(async (sessionId: string) => {
+  // 会话挂载后按宿主 listInstances 以同一编号恢复持有资源的实例标签
+  // （终端 PTY、浏览器页面等；后台会话执行期间不占前端资源），随后提交
+  // 标签集合核查，宿主直接释放无标签归属的多余资源（记 warn）。已有
+  // 同编号标签（工具静默拉起抢先建好）时仅跳过。
+  const restoreInstanceTabs = useCallback(async (sessionId: string) => {
     if (!sessionId) return;
-    let result: { terminals?: { session_id?: string }[] };
+    let entries: PluginInstanceEntry[];
     try {
-      const raw = await api.bridgeCall(
-        'terminal',
-        'sidecar.terminalListByScope',
-        JSON.stringify({ scope_id: sessionId }),
-        sessionId,
-      );
-      result = JSON.parse(raw);
-    } catch {
-      // 终端插件未启用或会话未就绪：无终端可恢复，保持空标签栏。
+      entries = await api.pluginInstancesList(sessionId);
+    } catch (error) {
+      console.error('查询插件实例失败：', error);
       return;
     }
     if (mountedSessionIdRef.current !== sessionId) return;
-    const ids = (result.terminals ?? [])
-      .map((terminal) => terminal.session_id)
-      .filter((id): id is string => Boolean(id));
     let nextTabs = tabsRef.current;
     let changed = false;
-    for (const id of ids) {
-      if (nextTabs.some((tab) => tab.id === id)) continue;
+    for (const entry of entries) {
+      if (nextTabs.some((tab) => tab.id === entry.instance_id)) continue;
       nextTabs = [...nextTabs, {
-        id,
+        id: entry.instance_id,
         kind: 'plugin',
-        title: TERMINAL_TAB_META.title,
-        url: '',
+        title: entry.page_title || entry.title,
+        url: entry.url,
         created_at: nowText(),
-        plugin_id: TERMINAL_TAB_META.pluginId,
-        contribution_id: TERMINAL_TAB_META.contributionId,
-        sandbox: TERMINAL_TAB_META.sandbox,
+        plugin_id: entry.plugin_id,
+        contribution_id: entry.contribution_id,
+        sandbox: entry.sandbox,
+        instance_resources: true,
       }];
       changed = true;
     }
-    if (!changed) return;
-    tabsRef.current = nextTabs;
-    setTabs(nextTabs);
-    // 竞态下工具拉起的标签已建好并聚焦时不抢占；正常切换路径标签栏
-    // 已被清空，聚焦创建序最新的终端。
-    if (!activeTabIdRef.current) {
-      activeTabIdRef.current = ids[ids.length - 1];
-      setActiveTabId(ids[ids.length - 1]);
+    if (changed) {
+      tabsRef.current = nextTabs;
+      setTabs(nextTabs);
+      // 竞态下工具拉起的标签已建好并聚焦时不抢占；正常切换路径标签栏
+      // 已被清空，聚焦最后一个恢复的实例。
+      if (!activeTabIdRef.current && entries.length > 0) {
+        const last = entries[entries.length - 1].instance_id;
+        activeTabIdRef.current = last;
+        setActiveTabId(last);
+      }
     }
+    await api
+      .pluginInstancesReconcile(sessionId, liveResourceInstances(tabsRef.current))
+      .catch((error) => console.error('核查插件实例失败：', error));
   }, []);
 
-  // 拓展区 Tab 仅驻留当前进程。会话变化时通知当前插件实例关闭并清空，
-  // 不读取旧会话记录，也不尝试恢复任何运行实例（终端除外，见下）。
+  // 拓展区 Tab 仅驻留当前进程。会话变化时清空标签栏：无资源的插件实例
+  // 直接关闭（beforeClose 保存状态）；持有资源的实例（终端、浏览器页面等）
+  // 跨会话存活——离开的会话由宿主隐藏其全部 webview 实例，切回时按
+  // listInstances 以同一编号恢复标签，并核查释放多余资源。
   useEffect(() => {
     if (mountedSessionIdRef.current === terminalSessionId) return;
     const previousSessionId = mountedSessionIdRef.current;
     const closingTabs = tabsRef.current;
     mountedSessionIdRef.current = terminalSessionId;
 
-    // 终端插件例外：切换会话不触发 beforeClose（那会提交不含该终端的
-    // 存活集合，把仍在使用的 PTY 当失效回收）。终端的存活跨越会话切换，
-    // 切回时按 terminalListByScope 的真实使用情况恢复标签；用户显式
-    // 关闭标签仍走 handleCloseTab 的 beforeClose 正常回收。
     void Promise.allSettled(
       closingTabs
-        .filter((tab) => tab.kind === 'plugin' && tab.plugin_id !== 'terminal')
+        .filter((tab) => tab.kind === 'plugin' && !isResourceTab(tab))
         .map((tab) => runPluginBeforeClose(tab.id)),
     );
     if (previousSessionId) {
-      void syncMountedBrowserTabs(previousSessionId, []).catch(console.error);
-      hideWebviewPluginTabs(closingTabs, previousSessionId);
+      void api.pluginInstancesDetach(previousSessionId).catch(console.error);
     }
 
     tabsRef.current = [];
@@ -444,8 +445,8 @@ export function TabsContainer({
     setReloadGenerations({});
     setSessionResetVersion((version) => version + 1);
     setActivationRetryVersion((version) => version + 1);
-    restoreTerminalTabs(terminalSessionId);
-  }, [hideWebviewPluginTabs, restoreTerminalTabs, syncMountedBrowserTabs, terminalSessionId]);
+    void restoreInstanceTabs(terminalSessionId);
+  }, [restoreInstanceTabs, terminalSessionId]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
@@ -543,29 +544,9 @@ export function TabsContainer({
       closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
       if (closedIndex === -1) return;
     }
-    if (isWebviewPluginTab(closingTab) && closingTab.plugin_id) {
-      try {
-        await callWebviewPlugin(
-          closingTab.plugin_id,
-          terminalSessionId,
-          'webview.tabClose',
-          { tab_id: closingTab.id },
-        );
-      } catch (error) {
-        if (closingBrowserTab) {
-          await syncMountedBrowserTabs(
-            terminalSessionId,
-            mountedBrowserTabIds(currentTabs),
-          ).catch(console.error);
-        }
-        console.error('关闭 webview 插件标签失败：', error);
-        return;
-      }
-      currentTabs = tabsRef.current;
-      closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
-      if (closedIndex === -1) return;
-    }
-    // 普通 plugin（三方 App）实例无后端运行时，仅移除当前内存状态。
+    // 统一释放路径：标签移除后由宿主向资源方发出 instanceClosed（webview
+    // 页面由宿主 webview 层关闭，sidecar 资源由插件回收）；无资源插件
+    // 仅移除内存状态。
 
     const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
     const currentActiveId = activeTabIdRef.current;
@@ -593,6 +574,17 @@ export function TabsContainer({
     activeTabIdRef.current = nextActiveId;
     setTabs(nextTabs);
     setActiveTabId(nextActiveId);
+
+    if (isResourceTab(closingTab) && closingTab.plugin_id && terminalSessionId) {
+      await api
+        .pluginInstanceClosed(
+          closingTab.plugin_id,
+          webviewSessionId(terminalSessionId),
+          closingTab.id,
+        )
+        // 标签已移除；释放失败由下一次会话核查兜底（宿主直接释放并记 warn）。
+        .catch((error) => console.error('释放插件实例资源失败：', error));
+    }
 
     if (nextTabs.length === 0) {
       // 拓展区三态：全部 tab 关闭后回到 App 矩阵态（面板保持展开）；
@@ -648,21 +640,41 @@ export function TabsContainer({
         setActiveTabId(existing.id);
         return;
       }
-      const nextTab: TabState = {
-        id: instanceId ?? `plugin-${crypto.randomUUID()}`,
-        kind: 'plugin',
-        title,
-        url: '',
-        created_at: new Date().toISOString(),
-        plugin_id: pluginId,
-        contribution_id: contributionId,
-        sandbox,
-      };
-      const nextTabs = [...tabsRef.current, nextTab];
-      tabsRef.current = nextTabs;
-      activeTabIdRef.current = nextTab.id;
-      setTabs(nextTabs);
-      setActiveTabId(nextTab.id);
+      const sessionAtOpen = terminalSessionId;
+      void (async () => {
+        // 实例编号由宿主生成（scru128），资源方以同一编号归属资源。
+        let id = instanceId;
+        if (!id) {
+          try {
+            id = await api.pluginInstanceReserve();
+          } catch (error) {
+            console.error('预留插件实例编号失败：', error);
+            return;
+          }
+        }
+        if (mountedSessionIdRef.current !== sessionAtOpen) return;
+        if (tabsRef.current.some((tab) => tab.id === id)) {
+          activeTabIdRef.current = id;
+          setActiveTabId(id);
+          return;
+        }
+        const nextTab: TabState = {
+          id,
+          kind: 'plugin',
+          title,
+          url: '',
+          created_at: new Date().toISOString(),
+          plugin_id: pluginId,
+          contribution_id: contributionId,
+          sandbox,
+          instance_resources: Boolean(appCommand.app?.instanceResources),
+        };
+        const nextTabs = [...tabsRef.current, nextTab];
+        tabsRef.current = nextTabs;
+        activeTabIdRef.current = nextTab.id;
+        setTabs(nextTabs);
+        setActiveTabId(nextTab.id);
+      })();
       return;
     }
     if (appCommand.action === 'close-plugin' && appCommand.app?.pluginId) {

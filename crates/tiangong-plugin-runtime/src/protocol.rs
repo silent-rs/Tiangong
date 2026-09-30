@@ -12,6 +12,17 @@ pub const PROTOCOL_VERSION: &str = "0.1.0";
 /// 由运行时发起的健康检查操作。
 pub const HANDSHAKE_OPERATION: &str = "runtime.handshake";
 
+/// 插件实例资源的后台挂载等待上限：资源方预留实例编号并请求宿主建立
+/// 标签后，等待前端页面挂载（附着）的最长时间，超时即按无头继续执行。
+/// 终端、浏览器等所有声明 `instance_resources` 的插件共用。
+pub const FRONTEND_ATTACH_WAIT_MS: u64 = 1_000;
+
+/// 实例生命周期：宿主在标签移除后发给资源方的关闭通知操作名。
+pub const INSTANCE_CLOSED_OPERATION: &str = "instanceClosed";
+
+/// 实例生命周期：宿主查询资源方当前持有实例的操作名。
+pub const LIST_INSTANCES_OPERATION: &str = "listInstances";
+
 /// 检测到工具恢复时通知当前活动 Agent，不修改工具声明。
 pub const TOOLS_RECOVERED_CHANNEL: &str = "runtime.tools_recovered";
 

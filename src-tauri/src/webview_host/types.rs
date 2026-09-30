@@ -118,6 +118,9 @@ pub enum BrowserCommand {
         session_id: String,
         url: String,
         max_chars: usize,
+        /// 是否展开拓展区面板展示该页面（web_fetch open=true）；否则
+        /// 仅静默建立标签（实例归属），不打扰用户。
+        show_panel: bool,
         response_tx: oneshot::Sender<BrowserResponse>,
     },
     /// 打开 URL（用于链接点击等场景）

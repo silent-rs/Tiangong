@@ -457,6 +457,7 @@ export function MainApp() {
         session_id?: string;
         background?: boolean;
         instance_id?: string | null;
+        instance_resources?: boolean;
       }>('app:open_plugin', (event) => {
         const payload = event.payload;
         const normalizeSandbox = (): SandboxKind => (
@@ -486,13 +487,14 @@ export function MainApp() {
           });
         };
         // 后台会话（Sub Agent/Bot 等）的实例无法进入当前会话的标签栏，
-        // 仍隐藏挂载保证其工具有人执行，不计入前台标签与绿点。终端插件
-        // 例外：工具编排已下沉 sidecar 直连执行，不需要前端壳接应；后台
-        // 会话不占任何前端资源，切回该会话时由拓展区按 terminalListByScope
-        // 恢复真实使用中的终端标签。
+        // 仍隐藏挂载保证其工具有人执行，不计入前台标签与绿点。带实例
+        // 编号的实例资源（终端 PTY、浏览器页面）例外：资源已由资源方
+        // 持有，后台会话不占前端资源，切回该会话时由拓展区按
+        // listInstances 以同一编号恢复标签。
         if ((useStore.getState().activeSessionId || useStore.getState().newConversationId)
           !== requestedSessionId) {
-          if (payload.plugin_id !== 'terminal') {
+          const ownedResource = Boolean(payload.instance_id && payload.instance_resources);
+          if (!ownedResource && payload.plugin_id !== 'terminal') {
             mountBackgroundShell();
           }
           return;
@@ -517,6 +519,7 @@ export function MainApp() {
             multi: Boolean(payload.multi),
             focusExisting: true,
             instanceId: payload.instance_id ?? undefined,
+            instanceResources: Boolean(payload.instance_resources),
           },
         });
         if (payload.background) {
@@ -759,6 +762,7 @@ export function MainApp() {
                               sandbox: app.sandbox,
                               multi: app.open_mode === 'multi',
                               focusExisting: !opts?.newInstance,
+                              instanceResources: Boolean(app.instance_resources),
                             },
                           });
                           void openWorkspacePanel('plugin');

@@ -514,6 +514,34 @@ runtime?.registerCleanup(() => app.unmount());
 `registerCleanup` 不可省略。插件更新、禁用、卸载或 Slot 销毁时，宿主会调用登记的
 清理函数；事件订阅和定时器也应在 Vue 卸载阶段一并释放。
 
+### 实例资源与生命周期（`instance_resources`）
+
+App 实例若持有页面之外的后端资源（PTY、子进程、远程会话、webview 页面等），在
+`extension.tab` 贡献上声明 `"instance_resources": true`，由宿主统一编排生命周期。
+原则：**拓展区标签是资源的唯一所有者**，归属分两层——作用域
+`(plugin_id, session_id)` + 实例编号 `instance_id`（即标签编号，宿主生成 scru128）。
+
+```json
+{ "slot": "extension.tab", "id": "console", "title": "控制台",
+  "entry": "dist/index.html", "open_mode": "multi", "instance_resources": true }
+```
+
+- 只允许用于 `extension.tab`；非 webview 沙箱必须声明 `sidecar`（资源方）。
+- 资源一律按 `instance_id` 归属；页面从 `runtime.context.app.instance_id` 取得编号。
+- sidecar 必须实现两个宿主协议操作（幂等）：
+  - `instanceClosed {session_id, instance_id}` → 释放该实例资源，未知编号返回成功；
+  - `listInstances {session_id}` → `{instances: [{instance_id}]}`，列出会话下仍持有的实例。
+- 后台（工具）创建资源的统一流程：预留编号 → 经 `host_action` 进度帧发
+  `app.open {session_id, instance_id, mode: "background"}` → 有上限地等待页面附着
+  （`protocol::FRONTEND_ATTACH_WAIT_MS`，超时照常执行）→ 使用。
+- 关闭唯一路径：`registerBeforeClose` 只做状态保存 → 宿主移除标签后保证发出
+  `instanceClosed`。不要在 `beforeClose` 里做唯一一次释放。
+- 会话切换：离开的会话由宿主隐藏实例；切回时宿主按 `listInstances` 以同一编号恢复
+  标签，并核查——资源方持有但没有标签的实例会被直接释放（记 warn 日志）。
+- 逻辑删除会话：宿主释放该会话下全部实例。
+
+无后端资源的 App 不要声明该字段，只用 `registerCleanup` 释放页面内资源即可。
+
 ### 样式与主题
 
 Vue 组件统一使用 `<style scoped>`。Shadow 会隔离插件选择器，而 App 根节点的 CSS

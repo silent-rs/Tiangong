@@ -79,6 +79,11 @@ export interface HostContext {
   };
   /** extension.tab 顶部标签实例及其当前显隐状态。 */
   app?: {
+    /**
+     * 实例编号（宿主生成 scru128，即标签编号）。声明 `instance_resources`
+     * 的插件按此编号归属后端资源，并在 sidecar 实现 `instanceClosed` /
+     * `listInstances`：标签移除后宿主保证发出 `instanceClosed`。
+     */
     instance_id: string;
     visible: boolean;
   };
@@ -101,7 +106,10 @@ export interface ShadowHostRuntime {
   /** 会话等非样式上下文变化；主题颜色直接继承 App 根节点。 */
   onContextChange(handler: (context: HostContext) => void): () => void;
   registerCleanup(cleanup: () => void): void;
-  /** 顶部标签明确关闭前执行；异步处理完成后宿主才移除实例。 */
+  /**
+   * 顶部标签明确关闭前执行；异步处理完成后宿主才移除实例。只做状态保存：
+   * 后端资源释放以宿主在标签移除后发出的 `instanceClosed` 为准。
+   */
   registerBeforeClose(handler: () => void | Promise<void>): void;
 }
 

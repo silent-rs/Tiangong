@@ -466,6 +466,15 @@ fn run_gui() {
                         let requested_instance_id = payload_value.as_ref().and_then(|value| {
                             value["instance_id"].as_str().map(str::to_string)
                         });
+                        // 实例资源方已预留编号：登记核查宽限期，避免前端标签
+                        // 落地前被核查误判为多余资源。
+                        if let Some(instance_id) = requested_instance_id.as_deref() {
+                            tiangong_app::plugin_instances::record_open(
+                                plugin_id,
+                                &session_id,
+                                instance_id,
+                            );
+                        }
                         let _ = app_handle.emit(
                             "app:open_plugin",
                             serde_json::json!({
@@ -473,6 +482,7 @@ fn run_gui() {
                                 "contribution_id": app_entry.contribution_id,
                                 "title": app_entry.title,
                                 "sandbox": app_entry.sandbox,
+                                "instance_resources": app_entry.instance_resources,
                                 "multi": app_entry.open_mode
                                     == tiangong_plugin_runtime::OpenMode::Multi,
                                 "session_id": session_id,
@@ -812,6 +822,11 @@ fn run_gui() {
             tiangong_app::commands::plugin_call,
             tiangong_app::commands::list_slot_contributions,
             tiangong_app::commands::set_webview_mounted_tabs,
+            tiangong_app::commands::plugin_instance_reserve,
+            tiangong_app::commands::plugin_instance_closed,
+            tiangong_app::commands::plugin_instances_list,
+            tiangong_app::commands::plugin_instances_reconcile,
+            tiangong_app::commands::plugin_instances_detach,
             tiangong_app::commands::list_extension_apps,
             tiangong_app::commands::plugin_open_entry,
             tiangong_app::commands::plugin_read_entry_resource,
