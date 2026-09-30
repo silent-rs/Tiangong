@@ -82,9 +82,9 @@ function ToolCardBody({ model, args }: { model: ToolDisplayModel; args?: unknown
   );
 }
 
-/** 该调用是否有详情卡片可展开。 */
+/** 该调用是否有详情卡片可展开；执行中的调用只要有参数就能展开查看。 */
 function isExpandable(model: ToolDisplayModel): boolean {
-  if (model.state === "running") return false;
+  if (model.state === "running") return !!model.terminal?.command || model.argsText !== null;
   if (model.variant === "terminal") return !!model.terminal?.command || !!model.terminal?.stdout || !!model.terminal?.stderr;
   if (model.variant === "file-read") return !!model.outputText;
   return model.argsText !== null || model.outputText !== null;
@@ -92,7 +92,7 @@ function isExpandable(model: ToolDisplayModel): boolean {
 
 /**
  * 单条工具行：图标 + 类别 + 摘要，点击行展开/收起详情卡片。
- * 失败行摘要为错误首行（错误色）；运行行带扫光动画、不可展开。
+ * 失败行摘要为错误首行（错误色）；运行行带扫光动画，展开只显示调用参数。
  */
 function ToolRunRow({
   model,
@@ -194,15 +194,24 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
 
   return (
     <div title={groupTime}>
-      {/* 组统计为静态摘要行：不再折叠包裹工具行，工具行始终直接列出。 */}
-      <div className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground">
-        <Cpu className="w-3 h-3 shrink-0" />
-        <span>{brief}</span>
-      </div>
+      {/* 组统计为静态摘要行：不再折叠包裹工具行，工具行始终直接列出。
+          只有执行中的调用（尚无结果）时不显示「0 次」统计。 */}
+      {tools.length > 0 && (
+        <div className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground">
+          <Cpu className="w-3 h-3 shrink-0" />
+          <span>{brief}</span>
+        </div>
+      )}
       <div className="ml-4 space-y-0">{tools.map(renderToolItem)}</div>
       {runningCalls?.map((call) => (
         <div key={`running-${call.id}`} className="ml-4">
-          <ToolRunRow model={buildRunningToolModel(call.name, call.arguments)} startedAtMs={call.startedAt} />
+          <ToolRunRow
+            model={buildRunningToolModel(call.name, call.arguments)}
+            args={call.arguments}
+            expanded={expansion.isExpanded(`running-${call.id}`)}
+            onToggle={() => expansion.toggle(`running-${call.id}`)}
+            startedAtMs={call.startedAt}
+          />
         </div>
       ))}
     </div>

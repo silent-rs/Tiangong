@@ -279,14 +279,14 @@ function AgentTurnView({
       frag.type === "assistant" && !frag.isStreaming && displayTextContent(frag.msg) && !parseAgentReply(displayTextContent(frag.msg))
     );
     const usageAnchorId = usageAnchor?.type === "assistant" ? usageAnchor.msg.id : null;
-    // 运行行挂在最后一个工具组：执行中的调用总是出现在过程尾部。
+    // 运行行挂在尾部工具组：执行中的调用总是出现在过程尾部。
+    // 只有最后一个片段是工具组时才挂上去；本轮尚无工具结果，或工具组之后
+    // 又出现了思考、解释等片段时为 null，运行行改在轮次尾部单独渲染，
+    // 避免首个调用执行期间界面空白、或运行行被插回较早的工具组。
     // 用工具组自身的 key 定位而非渲染下标——渲染按时序分块后下标不再连续。
     const lastToolGroupKey = (() => {
-      for (let i = mergedFragments.length - 1; i >= 0; i--) {
-        const frag = mergedFragments[i];
-        if (frag.type === "tool_group") return frag.key;
-      }
-      return null;
+      const last = mergedFragments[mergedFragments.length - 1];
+      return last?.type === "tool_group" ? last.key : null;
     })();
 
     return {
@@ -552,6 +552,14 @@ function AgentTurnView({
           </div>
         );
       })}
+      {!lastToolGroupKey && runningToolCalls.length > 0 && (
+        <ToolGroup
+          tools={[]}
+          expansion={toolGroupExpansion}
+          argsOf={argsOfToolMessage}
+          runningCalls={runningToolCalls}
+        />
+      )}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {turnStatusMeta && !isActive && (
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
