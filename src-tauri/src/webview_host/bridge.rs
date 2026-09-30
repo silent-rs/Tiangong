@@ -323,6 +323,7 @@ pub fn handle_webview_primitive(
         // 面板正在看的同一实例——此前缺省会落到 webview:default，工具与
         // 面板各看各的页面。
         "webview.fetch"
+        | "webview.pageText"
         | "webview.queryDom"
         | "webview.click"
         | "webview.formFill"
@@ -392,7 +393,8 @@ pub fn dispatch_collaboration(
                             max_chars: request
                                 .get("max_chars")
                                 .and_then(|v| v.as_u64())
-                                .unwrap_or(40_000) as usize,
+                                .unwrap_or(crate::webview_host::types::PAGE_PUSH_MAX_CHARS as u64)
+                                as usize,
                             show_panel: request
                                 .get("open")
                                 .and_then(|v| v.as_bool())
@@ -407,6 +409,31 @@ pub fn dispatch_collaboration(
                             "content": response.content,
                         }),
                         _ => anyhow::bail!("webview.fetch 超时或通道关闭"),
+                    }
+                }
+                "webview.pageText" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::PageText {
+                            session_id: session_id.clone(),
+                            offset: request.get("offset").and_then(|v| v.as_u64()).unwrap_or(0)
+                                as usize,
+                            max_chars: request
+                                .get("max_chars")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(8000) as usize,
+                            keyword: request
+                                .get("keyword")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .map(str::to_string),
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(result)) => result,
+                        _ => anyhow::bail!("webview.pageText 超时或通道关闭"),
                     }
                 }
                 "webview.queryDom" => {

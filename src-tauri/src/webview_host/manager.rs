@@ -1169,7 +1169,10 @@ impl BrowserManager {
             "page_loaded",
             &serde_json::json!({ "tab_id": tab_id, "title": title, "url": final_url }),
         );
-        let summary = text.chars().take(2000).collect();
+        let summary = crate::webview_host::types::clip_head_tail(
+            &text,
+            crate::webview_host::types::PAGE_PUSH_MAX_CHARS,
+        );
         let _ = app.emit(
             "browser:page_loaded",
             BrowserPageLoadedEvent {
@@ -1688,8 +1691,10 @@ impl BrowserManager {
                                         }
                                         let title = data["title"].as_str().unwrap_or("").to_string();
                                         let url = data["url"].as_str().unwrap_or("").to_string();
-                                        let text: String =
-                                            data["text"].as_str().unwrap_or("").chars().take(2000).collect();
+                                        let text = crate::webview_host::types::clip_head_tail(
+                                            data["text"].as_str().unwrap_or(""),
+                                            crate::webview_host::types::PAGE_PUSH_MAX_CHARS,
+                                        );
                                         let _ = app.emit(
                                             "browser:page_loaded",
                                             BrowserPageLoadedEvent {

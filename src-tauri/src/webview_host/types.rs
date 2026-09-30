@@ -3,6 +3,39 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+/// 页面快照/推送正文上限（字符数）。限制内原文完整推送；超出时保留头尾、
+/// 中间以省略标记替代（见 [`clip_head_tail`]），Agent 需要被省略的内容时
+/// 主动调用 `web_page_text` 按区间读取或按关键词搜索。
+pub const PAGE_PUSH_MAX_CHARS: usize = 12_000;
+
+/// 头尾截取：`text` 在 `limit` 字符内原样返回；超出时保留头部约 2/3、尾部
+/// 约 1/3，中间替换为说明被省略区间与查询方式的标记，结果总长不超过
+/// `limit`（`limit` 过小时退化为只保留头部）。按 Unicode 字符计数，不会
+/// 切到多字节字符中间。
+pub fn clip_head_tail(text: &str, limit: usize) -> String {
+    let total = text.chars().count();
+    if total <= limit {
+        return text.to_string();
+    }
+    let marker_for = |start: usize, end: usize| {
+        format!(
+            "\n\n…[页面内容过长，已省略第 {start}–{end} 字（全文 {total} 字）；如需查看，请调用 web_page_text 按 offset 读取或按 keyword 搜索]…\n\n"
+        )
+    };
+    // 标记长度随数字位数变化，按最大可能位数预估预算。
+    let marker_len = marker_for(total, total).chars().count();
+    let budget = limit.saturating_sub(marker_len);
+    if budget == 0 {
+        return text.chars().take(limit).collect();
+    }
+    let head_len = budget * 2 / 3;
+    let tail_len = budget - head_len;
+    let tail_start = total - tail_len;
+    let head: String = text.chars().take(head_len).collect();
+    let tail: String = text.chars().skip(tail_start).collect();
+    format!("{head}{}{tail}", marker_for(head_len, tail_start))
+}
+
 /// 浏览器标签
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserTab {
@@ -185,6 +218,14 @@ pub enum BrowserCommand {
         selector: String,
         max_results: usize,
         response_tx: oneshot::Sender<QueryDomResult>,
+    },
+    /// Agent 主动查询当前页面正文：按区间读取或按关键词搜索（JSON 结果）。
+    PageText {
+        session_id: String,
+        offset: usize,
+        max_chars: usize,
+        keyword: Option<String>,
+        response_tx: oneshot::Sender<serde_json::Value>,
     },
     /// 获取标签页浏览历史
     TabHistory {
@@ -555,6 +596,51 @@ pub struct AnnotationExtractResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_head_tail_keeps_text_within_limit() {
+        assert_eq!(clip_head_tail("短文本", 100), "短文本");
+        let exact = "a".repeat(100);
+        assert_eq!(clip_head_tail(&exact, 100), exact);
+    }
+
+    #[test]
+    fn clip_head_tail_keeps_head_and_tail_with_marker() {
+        // 中文多字节字符：按字符计数，不得切断。
+        let text: String = (0..5000)
+            .map(|i| char::from_u32(0x4e00 + (i % 500)).unwrap())
+            .collect();
+        let clipped = clip_head_tail(&text, 1000);
+        assert!(clipped.chars().count() <= 1000, "结果不得超过上限");
+        let head: String = text.chars().take(50).collect();
+        let tail: String = text.chars().skip(4950).collect();
+        assert!(clipped.starts_with(&head), "保留头部");
+        assert!(clipped.ends_with(&tail), "保留尾部");
+        assert!(clipped.contains("全文 5000 字"));
+        assert!(clipped.contains("web_page_text"));
+    }
+
+    #[test]
+    fn clip_head_tail_marker_offsets_match_source() {
+        let text: String = (0..3000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let clipped = clip_head_tail(&text, 600);
+        let marker_start = clipped.find("\n\n…[").unwrap();
+        let head_len = clipped[..marker_start].chars().count();
+        let tail_len = clipped.chars().count()
+            - clipped
+                .find("]…\n\n")
+                .map(|i| clipped[..i + "]…\n\n".len()].chars().count())
+                .unwrap();
+        assert!(clipped.contains(&format!("已省略第 {head_len}–{} 字", 3000 - tail_len)));
+    }
+
+    #[test]
+    fn clip_head_tail_tiny_limit_degrades_to_head() {
+        let text = "x".repeat(500);
+        assert_eq!(clip_head_tail(&text, 10), "x".repeat(10));
+    }
 
     #[test]
     fn annotation_rect_roundtrip() {

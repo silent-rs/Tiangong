@@ -245,7 +245,11 @@ impl BrowserWatcher {
         let payload = json!({
             "title": snapshot.title,
             "url": snapshot.url,
-            "text": snapshot.text,
+            // 推送边界统一限长（头尾保留），Agent 需细节时主动 web_page_text。
+            "text": crate::webview_host::types::clip_head_tail(
+                &snapshot.text,
+                crate::webview_host::types::PAGE_PUSH_MAX_CHARS,
+            ),
             "tabs": tabs,
             "active_tab_id": snapshot.active_tab_id,
             "feedback": feedback,

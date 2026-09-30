@@ -87,7 +87,7 @@
     },
     {
       "name": "web_fetch",
-      "description": "使用内嵌浏览器获取 URL 内容。支持 HTTP/HTTPS 网页和本地 file:// 或绝对路径的 HTML 文件。",
+      "description": "使用内嵌浏览器获取 URL 内容。支持 HTTP/HTTPS 网页和本地 file:// 或绝对路径的 HTML 文件。正文超过 max_chars 时保留头尾、中间省略（标注被省略的 offset 区间），需要细节时用 web_page_text 读取或搜索。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -97,8 +97,8 @@
           },
           "max_chars": {
             "type": "integer",
-            "description": "内容最大字符数",
-            "default": 40000
+            "description": "返回正文的最大字符数（超出时头尾保留、中间省略）",
+            "default": 12000
           },
           "open": {
             "type": "boolean",
@@ -111,6 +111,30 @@
         ]
       },
       "timeout_ms": 300000
+    },
+    {
+      "name": "web_page_text",
+      "description": "读取内嵌浏览器当前页面的正文：按 offset/max_chars 分段读取（用于查看推送或 web_fetch 中被省略的部分），或传 keyword 全文搜索并返回命中位置与上下文片段。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "description": "起始字符位置（与省略标记中的区间一致）",
+            "default": 0
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "本次读取的最大字符数（上限 20000）",
+            "default": 8000
+          },
+          "keyword": {
+            "type": "string",
+            "description": "搜索关键词（不区分大小写）；提供时返回命中列表而非区间正文"
+          }
+        }
+      },
+      "timeout_ms": 60000
     },
     {
       "name": "web_query_dom",
@@ -210,7 +234,7 @@
     }
   ],
   "prompt": [
-    "浏览器工具使用规范：获取网页内容用 web_fetch（用户明确要求打开浏览器时设 open=true）；需要向用户展示页面时用 browser_open（打开浏览器面板并导航）；用户要求收起浏览器或浏览任务完成时用 browser_close（关闭浏览器面板）；在当前页面查询元素用 web_query_dom（CSS 选择器）；点击用 web_click；表单先用 web_form_extract 提取再用 web_form_fill 填写；不确定元素位置时用 web_locate_element 定位候选。"
+    "浏览器工具使用规范：获取网页内容用 web_fetch（用户明确要求打开浏览器时设 open=true）；页面正文推送与 web_fetch 结果有长度上限，超长时保留头尾并标注省略区间，需要被省略的内容时主动调用 web_page_text（按 offset 分段读取或按 keyword 搜索），不要凭推送片段臆测全文；需要向用户展示页面时用 browser_open（打开浏览器面板并导航）；用户要求收起浏览器或浏览任务完成时用 browser_close（关闭浏览器面板）；在当前页面查询元素用 web_query_dom（CSS 选择器）；点击用 web_click；表单先用 web_form_extract 提取再用 web_form_fill 填写；不确定元素位置时用 web_locate_element 定位候选。"
   ],
   "ui": {
     "sandbox": "webview",

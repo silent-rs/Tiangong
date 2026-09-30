@@ -484,7 +484,7 @@ impl BrowserToolOverride {
             // observe 失败或超时时回退到 fetch_page 已拿到的 title/url。
             let (title, url_out, text) = match fetcher.observe_page().await {
                 Some(snap) if !snap.url.is_empty() => {
-                    let text = Self::truncate_text(&snap.text, max_chars);
+                    let text = crate::webview_host::types::clip_head_tail(&snap.text, max_chars);
                     (snap.title, snap.url, text)
                 }
                 _ => (
@@ -977,7 +977,11 @@ impl tiangong_core::agent_input::ToolInput for BrowserContent {
         serde_json::json!({
             "title": self.title,
             "url": self.url,
-            "text": self.text,
+            // 推送边界统一限长（头尾保留），避免超大页面撑爆上下文。
+            "text": crate::webview_host::types::clip_head_tail(
+                &self.text,
+                crate::webview_host::types::PAGE_PUSH_MAX_CHARS,
+            ),
             "tabs": self.tabs,
             "active_tab_id": self.active_tab_id,
             "feedback": self.feedback,

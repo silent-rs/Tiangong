@@ -768,6 +768,34 @@ pub async fn browser_command_handler(
                 });
                 let _ = response_tx.send(result);
             }
+            BrowserCommand::PageText {
+                session_id,
+                offset,
+                max_chars,
+                keyword,
+                response_tx,
+            } => {
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
+                let result = tokio::task::spawn_blocking(move || {
+                    let js = format!(
+                        "JSON.stringify(window.__tiangong_bridge.pageText({offset},{max_chars},{}))",
+                        serde_json::to_string(&keyword).unwrap_or_else(|_| "null".into()),
+                    );
+                    manager
+                        .eval_with_result(&js)
+                        .and_then(|raw| decode_eval_json::<serde_json::Value>(&raw))
+                        .filter(|value| value.is_object())
+                        .unwrap_or_else(|| {
+                            serde_json::json!({ "error": "当前没有可读取的页面或页面尚未加载" })
+                        })
+                })
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "页面正文查询任务异常" }));
+                let _ = response_tx.send(result);
+            }
             BrowserCommand::TabHistory {
                 session_id,
                 tab_id,
