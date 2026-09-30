@@ -633,6 +633,8 @@ export interface SessionInputOverlayPayload {
   plugin_id: string;
   visible: boolean;
   session_id?: string | null;
+  /** 覆盖层显示期间替换输入区底部快捷键提示的文案。 */
+  hint?: string | null;
 }
 
 /** 插件入口资源响应（字节数组 + MIME）。 */

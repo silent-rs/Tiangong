@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 pub const INPUT_EVENT: &str = "session_input_attachment";
 /// 输入覆盖层显隐事件名（前端覆盖层宿主监听）。
 pub const OVERLAY_EVENT: &str = "session_input_overlay";
+/// 覆盖层提示文案长度上限（字符），防止插件撑破输入区底栏。
+const MAX_OVERLAY_HINT_CHARS: usize = 60;
 /// 输入覆盖层 Slot。
 pub const OVERLAY_SLOT: &str = "session.input-overlay";
 
@@ -109,6 +111,9 @@ pub fn handle(
             struct OverlayInput {
                 #[serde(default)]
                 session_id: Option<String>,
+                /// 覆盖层显示期间替换输入区底部快捷键提示的文案（可选）。
+                #[serde(default)]
+                hint: Option<String>,
             }
             let input: OverlayInput = if payload.trim().is_empty() {
                 OverlayInput::default()
@@ -121,6 +126,10 @@ pub fn handle(
                     "plugin_id": plugin_id,
                     "visible": method == "session.input.showOverlay",
                     "session_id": input.session_id,
+                    "hint": input
+                        .hint
+                        .map(|hint| hint.trim().chars().take(MAX_OVERLAY_HINT_CHARS).collect::<String>())
+                        .filter(|hint| !hint.is_empty()),
                 }),
             })
         }
@@ -318,6 +327,24 @@ mod tests {
         assert_eq!(event.name, OVERLAY_EVENT);
         assert_eq!(event.payload["visible"], true);
         assert_eq!(event.payload["session_id"], "s1");
+        assert!(event.payload["hint"].is_null());
+        let with_hint = call(
+            "session.input.showOverlay",
+            json!({ "session_id": "s1", "hint": "  按住空格说话  " }),
+            &media,
+        )
+        .unwrap();
+        assert_eq!(with_hint.payload["hint"], "按住空格说话");
+        let long = call(
+            "session.input.showOverlay",
+            json!({ "hint": "长".repeat(200) }),
+            &media,
+        )
+        .unwrap();
+        assert_eq!(
+            long.payload["hint"].as_str().unwrap().chars().count(),
+            MAX_OVERLAY_HINT_CHARS
+        );
         let hide = handle("voice", "session.input.hideOverlay", "", &media, |_| true).unwrap();
         assert_eq!(hide.payload["visible"], false);
         let error = handle("other", "session.input.showOverlay", "{}", &media, |_| {
