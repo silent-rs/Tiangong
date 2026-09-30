@@ -220,11 +220,19 @@ pub fn record_stop(request: RecordControlRequest) -> Result<RecordStopResponse> 
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let session = take_matching_session(&mut guard, &request)?;
     let file_path = session.file_path.to_string_lossy().to_string();
-    let duration = session.stop()?;
+    let stats = session.stop()?;
+    // 整段采样全 0：设备正常打开但系统只下发静音（麦克风权限或沙箱
+    // device-microphone 未放行），送去识别只会得到「没有识别到内容」。
+    if stats.peak == 0 {
+        let _ = std::fs::remove_file(&file_path);
+        bail!(
+            "麦克风没有采集到声音（录音为静音）：请在「系统设置 → 隐私与安全性 → 麦克风」中允许天工访问，并确认输入设备正确"
+        );
+    }
     Ok(RecordStopResponse {
         file_path,
         mime_type: "audio/wav".to_string(),
-        duration: Some(duration),
+        duration: Some(stats.duration),
         text: None,
     })
 }

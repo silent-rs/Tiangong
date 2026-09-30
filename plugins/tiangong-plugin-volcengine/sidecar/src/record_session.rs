@@ -76,9 +76,18 @@ impl LivePcm {
     }
 }
 
+/// 一次录音的收尾统计。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordStats {
+    /// 录音时长（秒）。
+    pub duration: f64,
+    /// 16 bit 采样绝对值峰值；为 0 表示整段静音（通常是麦克风数据被系统屏蔽）。
+    pub peak: u16,
+}
+
 enum Control {
-    /// 停止并收尾，回传写盘的目标采样率样本总数（换算时长）。
-    Stop(Sender<u64>),
+    /// 停止并收尾，回传写盘的样本总数与峰值。
+    Stop(Sender<(u64, u16)>),
     /// 取消：丢弃录音文件。
     Cancel,
 }
@@ -124,17 +133,20 @@ pub fn start(
 }
 
 impl RecordSession {
-    /// 停止录音：等待写盘收尾，返回录音时长（秒）。
-    pub fn stop(mut self) -> Result<f64> {
-        let (ack_tx, ack_rx) = std::sync::mpsc::channel::<u64>();
+    /// 停止录音：等待写盘收尾，返回时长与峰值。
+    pub fn stop(mut self) -> Result<RecordStats> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel::<(u64, u16)>();
         self.control
             .send(Control::Stop(ack_tx))
             .context("发送停止命令失败")?;
-        let samples = ack_rx
+        let (samples, peak) = ack_rx
             .recv_timeout(Duration::from_secs(10))
             .context("等待录音收尾超时")?;
         self.join_worker();
-        Ok(samples as f64 / TARGET_SAMPLE_RATE as f64)
+        Ok(RecordStats {
+            duration: samples as f64 / TARGET_SAMPLE_RATE as f64,
+            peak,
+        })
     }
 
     /// 取消录音：丢弃产物（文件由录音线程删除）。
@@ -190,7 +202,8 @@ fn run_recording(
     // —— 采集写盘循环 ——
     let mut writer = (wav, Resampler::new(src_rate as f64), LivePcm::new(live));
     let mut written_samples: u64 = 0;
-    let mut stop_ack: Option<Sender<u64>> = None;
+    let mut peak: u16 = 0;
+    let mut stop_ack: Option<Sender<(u64, u16)>> = None;
     let mut cancel = false;
     loop {
         match control_rx.try_recv() {
@@ -211,7 +224,7 @@ fn run_recording(
         }
         match audio_rx.recv_timeout(POLL_INTERVAL) {
             Ok(samples) => {
-                write_samples(&mut writer, &samples, &mut written_samples)?;
+                write_samples(&mut writer, &samples, &mut written_samples, &mut peak)?;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             // 采集回调端全部释放（设备错误路径）：结束录音并按停止收尾。
@@ -222,7 +235,7 @@ fn run_recording(
     // 停止采集并排空队列中的剩余音频。
     drop(stream);
     while let Ok(samples) = audio_rx.try_recv() {
-        write_samples(&mut writer, &samples, &mut written_samples)?;
+        write_samples(&mut writer, &samples, &mut written_samples, &mut peak)?;
     }
 
     if cancel {
@@ -240,7 +253,7 @@ fn run_recording(
         tracing::warn!(dropped_frames, "录音期间写入跟不上，丢弃了部分音频帧");
     }
     if let Some(ack) = stop_ack {
-        let _ = ack.send(written_samples);
+        let _ = ack.send((written_samples, peak));
     }
     Ok(())
 }
@@ -311,11 +324,13 @@ fn write_samples<W: std::io::Write + std::io::Seek>(
     writer: &mut (hound::WavWriter<W>, Resampler, LivePcm),
     samples: &[f32],
     written: &mut u64,
+    peak: &mut u16,
 ) -> Result<()> {
     let (wav, resampler, live) = writer;
     resampler.push(samples, |chunk| {
         for sample in chunk {
             wav.write_sample(*sample).context("写入音频数据失败")?;
+            *peak = (*peak).max(sample.unsigned_abs());
         }
         live.push(chunk);
         *written += chunk.len() as u64;
@@ -439,7 +454,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("stt-rec-test-{}.wav", scru128::new()));
         let session = start("live-test".into(), path.clone(), None).expect("启动录音失败");
         std::thread::sleep(Duration::from_secs(3));
-        let duration = session.stop().expect("停止录音失败");
+        let duration = session.stop().expect("停止录音失败").duration;
         assert!(duration > 2.5 && duration < 4.5, "duration={duration}");
 
         let meta = std::fs::metadata(&path).expect("录音文件不存在");
