@@ -4,7 +4,11 @@
   <meta charset="utf-8" />
   <title>朗读</title>
   <style>
-    :host, .rd-root { all: initial; }
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .rd-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .rd-root [hidden] { display: none !important; }
     .rd-root { display: inline-flex; align-items: center; }
     .rd-btn {
       display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;

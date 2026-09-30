@@ -4,14 +4,18 @@
   <meta charset="utf-8" />
   <title>按住说话</title>
   <style>
-    :host, .vo-root { all: initial; }
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .vo-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .vo-root [hidden] { display: none !important; }
+    /* 宿主把覆盖层放在编辑框区域内并与其同尺寸：根节点撑满，行高随编辑框。 */
     .vo-root {
-      display: flex; flex-direction: column; box-sizing: border-box; width: 100%; height: 100%;
-      justify-content: center; gap: 6px;
+      display: flex; box-sizing: border-box; width: 100%; height: 100%; min-height: 60px;
       font-family: var(--host-font-family, inherit); font-size: 14px;
-      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%)); outline: none;
     }
-    .vo-row { display: flex; align-items: stretch; gap: 8px; height: 60px; position: relative; }
+    .vo-row { flex: 1; display: flex; align-items: stretch; gap: 8px; position: relative; }
     .vo-icon-btn {
       display: inline-flex; align-items: center; justify-content: center; width: 40px; flex: none;
       border: 0; border-radius: calc(var(--radius, 0.5rem) - 2px); background: transparent;
@@ -21,10 +25,14 @@
     .vo-talk {
       flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
       border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: calc(var(--radius, 0.5rem) - 2px);
-      background: hsl(var(--muted, 210 40% 96.1%) / .5); color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
-      font: inherit; font-size: 14px; cursor: pointer; user-select: none; -webkit-user-select: none;
+      background: hsl(var(--muted, 210 40% 96.1%) / .6); color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+      font-family: inherit; font-size: 14px; font-weight: 500; line-height: 20px;
+      cursor: pointer; user-select: none; -webkit-user-select: none;
+      transition: background-color .15s, border-color .15s;
     }
-    .vo-talk:hover { background: hsl(var(--muted, 210 40% 96.1%)); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .vo-talk:hover { background: hsl(var(--muted, 210 40% 96.1%)); border-color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%) / .5); }
+    .vo-label { display: inline-flex; align-items: center; gap: 8px; }
+    .vo-label svg { width: 16px; height: 16px; }
     .vo-talk.is-recording { background: rgb(239 68 68 / .1); border-color: rgb(239 68 68 / .3); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
     .vo-talk.is-busy { cursor: wait; }
     .vo-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: rgb(239 68 68); margin-right: 6px; animation: vo-pulse 1s ease-in-out infinite; }
@@ -32,10 +40,9 @@
     .vo-toast {
       position: absolute; inset: 0 0 0 48px; display: flex; align-items: center; justify-content: center;
       border-radius: calc(var(--radius, 0.5rem) - 2px); background: hsl(var(--background, 0 0% 100%) / .92);
-      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 13px;
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%)); font-size: 13px; padding: 0 12px; text-align: center;
     }
-    .vo-toast.is-error { color: hsl(var(--destructive, 0 84.2% 60.2%)); }
-    .vo-foot { display: flex; justify-content: flex-end; font-size: 12px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+    .vo-toast.is-error { color: rgb(239 68 68); }
     @keyframes vo-pulse { 50% { opacity: .35; } }
     svg { width: 20px; height: 20px; }
   </style>
@@ -50,12 +57,11 @@
         </svg>
       </button>
       <button class="vo-talk" id="vo-talk" type="button">
-        <span id="vo-label">按住说话 / 按住空格说话</span>
+        <span class="vo-label" id="vo-label"></span>
         <span class="vo-sub" id="vo-sub" hidden></span>
       </button>
       <div class="vo-toast" id="vo-toast" hidden></div>
     </div>
-    <div class="vo-foot"><span>空格 录音 · Esc 取消</span></div>
   </div>
   <script>
     // 按住说话覆盖层（session.input-overlay）：录音 → 识别 → 以文本 + 录音附件发送。
@@ -63,6 +69,9 @@
     const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
     const $ = (id) => uiRoot.getElementById(id);
     const MIN_DURATION_MS = 1000;
+    const MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" />'
+      + '<line x1="12" x2="12" y1="19" y2="22" /></svg>';
     const state = { phase: 'idle', recordId: null, startedAt: 0, timer: null, sessionId: null };
 
     if (typeof hostContext !== 'undefined' && hostContext && hostContext.session) {
@@ -99,10 +108,10 @@
         sub.textContent = '松开发送，移出取消';
         sub.hidden = false;
       } else if (state.phase === 'transcribing') {
-        $('vo-label').textContent = '识别中…';
+        $('vo-label').textContent = '识别中...';
         sub.hidden = true;
       } else {
-        $('vo-label').textContent = '按住说话 / 按住空格说话';
+        $('vo-label').innerHTML = MIC_ICON + '<span>按住说话 / 按空格说话</span>';
         sub.hidden = true;
       }
     }
@@ -206,15 +215,17 @@
     talk.addEventListener('contextmenu', (event) => event.preventDefault());
     $('vo-keyboard').addEventListener('click', () => leave());
 
-    // 空格按住说话、Esc 取消：覆盖层显示时宿主把焦点交给本容器根节点
+    // 空格按住说话、Esc 取消录音：覆盖层显示时宿主把焦点交给本容器根节点
     // （vo-root 带 tabindex，是 Shadow 内首个可聚焦元素）。
     const onKeyDown = (event) => {
       if (event.code === 'Space' && !event.repeat) { event.preventDefault(); start(); }
       else if (event.code === 'Space') { event.preventDefault(); }
       else if (event.key === 'Escape') {
-        event.preventDefault();
-        if (state.phase === 'recording' || state.phase === 'starting') cancel();
-        else leave();
+        // 只取消进行中的录音；退出语音模式需点左侧键盘按钮，避免误触丢失输入模式。
+        if (state.phase === 'recording' || state.phase === 'starting') {
+          event.preventDefault();
+          cancel();
+        }
       }
     };
     const onKeyUp = (event) => {

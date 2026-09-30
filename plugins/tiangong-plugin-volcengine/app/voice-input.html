@@ -4,7 +4,11 @@
   <meta charset="utf-8" />
   <title>语音输入</title>
   <style>
-    :host, .vi-root { all: initial; }
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .vi-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .vi-root [hidden] { display: none !important; }
     .vi-root { display: inline-flex; width: 32px; height: 32px; }
     .vi-btn {
       display: inline-flex; box-sizing: border-box; width: 32px; height: 32px;
@@ -37,7 +41,11 @@
       const context = typeof hostContext !== 'undefined' && hostContext ? hostContext : {};
       const sessionId = context.session && context.session.id ? context.session.id : null;
       try {
-        await bridge.call('session.input.showOverlay', JSON.stringify({ session_id: sessionId }));
+        // hint 替换输入区底栏的快捷键提示（Enter 发送 …）。
+        await bridge.call('session.input.showOverlay', JSON.stringify({
+          session_id: sessionId,
+          hint: '空格键 录音 · Esc 取消录音',
+        }));
       } catch (error) {
         window.alert(`打开语音模式失败：${(error && error.message) || error}`);
       }
