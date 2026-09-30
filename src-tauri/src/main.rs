@@ -222,6 +222,8 @@ fn run_gui() {
                     debug!("浏览器页面事件来自非会话作用域，跳过注入");
                     return;
                 };
+                // 附带当前作用域的真实标签列表，避免 Agent 误判“无打开页面”。
+                let tab_list = source_manager.tab_list_with_active();
                 let _ = tx1.send(tiangong_app::ToolInjection {
                     session_id: Some(target_session),
                     browser_source: Some((data.session_id, data.tab_id)),
@@ -229,8 +231,12 @@ fn run_gui() {
                         title: data.title,
                         url: data.url,
                         text: data.text,
-                        tabs: vec![],
-                        active_tab_id: None,
+                        tabs: tab_list
+                            .tabs
+                            .into_iter()
+                            .map(|tab| (tab.id, tab.url, tab.title))
+                            .collect(),
+                        active_tab_id: tab_list.active_tab_id,
                         feedback: None,
                     }),
                 });
