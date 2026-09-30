@@ -19,6 +19,21 @@ fn resolve_agent_state(
     Some(registry.session_state(session_id))
 }
 
+/// 解码页面脚本经 eval 回调返回的 JSON 结果。
+///
+/// wry 的 eval 回调会把脚本返回值再做一次 JSON 序列化：脚本以
+/// `JSON.stringify(...)` 返回字符串时，回调拿到的是外层带引号的
+/// “JSON 编码字符串”，需先剥掉这一层；脚本直接返回对象时原样解析。
+fn decode_eval_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    if let Ok(value) = serde_json::from_str::<T>(raw) {
+        return Some(value);
+    }
+    match serde_json::from_str::<serde_json::Value>(raw).ok()? {
+        serde_json::Value::String(inner) => serde_json::from_str::<T>(&inner).ok(),
+        _ => None,
+    }
+}
+
 use crate::webview_host::types::{
     format_browser_events, AnnotationExtractResult, BrowserAgentActiveEvent, BrowserCommand,
     BrowserEvent, BrowserOpenEvent, BrowserPageSnapshot, BrowserResponse, ClickElementResult,
@@ -700,7 +715,7 @@ pub async fn browser_command_handler(
                     );
                     manager
                         .eval_with_result(&js)
-                        .and_then(|raw| serde_json::from_str::<LocateElementResult>(&raw).ok())
+                        .and_then(|raw| decode_eval_json::<LocateElementResult>(&raw))
                         .unwrap_or(LocateElementResult {
                             ok: false,
                             error: Some("定位请求失败".to_string()),
@@ -736,7 +751,7 @@ pub async fn browser_command_handler(
                     );
                     manager
                         .eval_with_result(&js)
-                        .and_then(|raw| serde_json::from_str::<QueryDomResult>(&raw).ok())
+                        .and_then(|raw| decode_eval_json::<QueryDomResult>(&raw))
                         .unwrap_or(QueryDomResult {
                             selector,
                             total: 0,
@@ -866,6 +881,19 @@ mod tests {
             result.contains("[网络响应] POST https://platform.deepseek.com/api_keys (状态 200)")
         );
         assert!(result.contains("sk-dcc5ad16"));
+    }
+
+    #[test]
+    fn decode_eval_json_accepts_stringified_and_plain_results() {
+        let payload = r#"{"selector":"title","total":1,"returned":0,"elements":[]}"#;
+        // 脚本 JSON.stringify 后经 eval 回调二次编码（外层带引号）
+        let wrapped = serde_json::to_string(payload).unwrap();
+        let decoded: QueryDomResult = decode_eval_json(&wrapped).unwrap();
+        assert_eq!(decoded.total, 1);
+        // 脚本直接返回对象
+        let plain: QueryDomResult = decode_eval_json(payload).unwrap();
+        assert_eq!(plain.selector, "title");
+        assert!(decode_eval_json::<QueryDomResult>("null").is_none());
     }
 
     #[test]
