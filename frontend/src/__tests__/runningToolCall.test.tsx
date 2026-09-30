@@ -96,6 +96,72 @@ describe('执行中的工具调用', () => {
     expect(container.textContent).not.toContain('OUT');
   });
 
+  const parallelCalls = () => [
+    call('p1', 'volcengine__generate_image', '并行甲'),
+    call('p2', 'volcengine__generate_image', '并行乙'),
+    call('p3', 'volcengine__generate_image', '并行丙'),
+  ];
+  const runningRows = () => Array.from(container.querySelectorAll('button.tool-run-row'))
+    .map((row) => row.textContent ?? '');
+
+  it('同一批并行调用全部未完成时逐个显示运行行', async () => {
+    await render([
+      msg('user', '并行生成三张图'),
+      msg('assistant', '', { phase: 'react', tool_calls: parallelCalls() }),
+    ]);
+
+    const rows = runningRows();
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain('并行甲');
+    expect(rows[1]).toContain('并行乙');
+    expect(rows[2]).toContain('并行丙');
+  });
+
+  it('并行调用部分完成时已完成的不再显示为运行行，未完成的排在其后', async () => {
+    await render([
+      msg('user', '并行生成三张图'),
+      msg('assistant', '', { phase: 'react', tool_calls: parallelCalls() }),
+      msg('tool', '第二张完成', { tool_call_id: 'p2', tool_name: 'volcengine__generate_image' }),
+    ]);
+
+    const rows = runningRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('并行甲');
+    expect(rows[1]).toContain('并行丙');
+    const text = container.textContent ?? '';
+    expect(text).toContain('工具调用 1 次');
+    // 已完成行（摘要为参数「并行乙」）只出现一次，且在运行行之前。
+    expect(text.split('并行乙')).toHaveLength(2);
+    expect(text.indexOf('并行乙')).toBeLessThan(text.indexOf('并行甲'));
+  });
+
+  it('并行调用全部完成后不再有运行行', async () => {
+    await render([
+      msg('user', '并行生成三张图'),
+      msg('assistant', '', { phase: 'react', tool_calls: parallelCalls() }),
+      msg('tool', '一', { tool_call_id: 'p1', tool_name: 'volcengine__generate_image' }),
+      msg('tool', '三', { tool_call_id: 'p3', tool_name: 'volcengine__generate_image' }),
+      msg('tool', '二', { tool_call_id: 'p2', tool_name: 'volcengine__generate_image' }),
+    ]);
+
+    expect(runningRows()).toHaveLength(0);
+    expect(container.textContent).toContain('工具调用 3 次');
+  });
+
+  it('并行调用的运行行各自独立展开', async () => {
+    await render([
+      msg('user', '并行生成三张图'),
+      msg('assistant', '', { phase: 'react', tool_calls: parallelCalls() }),
+    ]);
+
+    const rows = container.querySelectorAll('button.tool-run-row');
+    await act(async () => (rows[1] as HTMLButtonElement).click());
+    const text = container.textContent ?? '';
+    expect(text).toContain('"prompt": "并行乙"');
+    expect(text).not.toContain('"prompt": "并行甲"');
+    expect(text).not.toContain('"prompt": "并行丙"');
+  });
+
   it('已结束轮次不显示运行行', async () => {
     await render([
       msg('user', '帮我生成图片'),
