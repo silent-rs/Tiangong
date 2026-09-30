@@ -10,19 +10,19 @@
     /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
     .vb-root [hidden] { display: none !important; }
     .vb-root { display: block; font-family: var(--host-font-family, inherit); }
-    .vb-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px; }
+    .vb-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
     .vb-list[hidden] { display: none; }
     .vb-bubble {
-      display: inline-flex; align-items: center; gap: 8px; align-self: flex-start; min-width: 120px;
-      padding: 6px 12px; border: 0; border-radius: 999px; cursor: pointer; font: inherit; font-size: 13px;
-      background: hsl(var(--primary, 222.2 47.4% 11.2%) / .12); color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+      display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
+      padding: 4px 12px 4px 8px; border: 0; border-radius: 999px; cursor: pointer; font: inherit; font-size: 12px;
+      background: hsl(var(--primary, 222.2 47.4% 11.2%) / .1); color: hsl(var(--foreground, 222.2 47.4% 11.2%));
     }
     .vb-bubble:hover { background: hsl(var(--primary, 222.2 47.4% 11.2%) / .2); }
     .vb-bars { display: inline-flex; align-items: center; gap: 2px; height: 14px; }
     .vb-bars i { display: block; width: 2px; border-radius: 1px; background: currentColor; opacity: .7; }
     .vb-bubble.is-playing .vb-bars i { animation: vb-wave .8s ease-in-out infinite; }
     .vb-bars i:nth-child(2) { animation-delay: .1s; } .vb-bars i:nth-child(3) { animation-delay: .2s; }
-    .vb-bars i:nth-child(4) { animation-delay: .3s; }
+    .vb-bars i:nth-child(4) { animation-delay: .3s; } .vb-bars i:nth-child(5) { animation-delay: .4s; }
     @keyframes vb-wave { 50% { transform: scaleY(.4); } }
     svg { width: 14px; height: 14px; display: block; }
   </style>
@@ -90,7 +90,7 @@
           + (playing
             ? '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>'
             : '<path d="M8 5v14l11-7z"/>')
-          + '</svg><span class="vb-bars"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i></span><span>语音消息</span>';
+          + '</svg><span class="vb-bars"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:7px"></i></span><span>' + (playing ? '播放中' : '播放录音') + '</span>';
         bubble.addEventListener('click', () => toggle(item.path));
         return bubble;
       }));

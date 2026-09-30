@@ -455,21 +455,29 @@ pub async fn recognize(
         let _ = sender.send(chunk.to_vec());
     }
     drop(sender);
-    recognize_stream(endpoint, model, format, language, receiver).await
+    recognize_stream(endpoint, model, format, language, receiver, None).await
 }
+
+/// 识别中间结果的接收端（实时显示用，累计全文）。
+pub type PartialSender = tokio::sync::mpsc::UnboundedSender<String>;
 
 /// 边收边传的流式识别：`audio` 每收到一包即发送，通道关闭时以末包标志收尾，
 /// 返回最终结果。录音期间即可建立连接并上传，松手后只需等待最后一包的识别。
+///
+/// 传入 `partial` 时改用双向流式接口（`bigmodel_async`）：服务端每包返回
+/// 当前累计识别文本，经 `partial` 实时推送；否则用流式输入接口
+/// （`bigmodel_nostream`），只在结束时返回结果（整段识别准确率更高）。
 pub async fn recognize_stream(
     endpoint: &SpeechEndpoint,
     model: &str,
     format: AsrFormat,
     language: Option<&str>,
     audio: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    partial: Option<PartialSender>,
 ) -> Result<AsrResult> {
     tokio::time::timeout(
         ASR_TIMEOUT,
-        recognize_inner(endpoint, model, format, language, audio),
+        recognize_inner(endpoint, model, format, language, audio, partial),
     )
     .await
     .map_err(|_| anyhow!("豆包语音识别超时"))?
@@ -481,9 +489,15 @@ async fn recognize_inner(
     format: AsrFormat,
     language: Option<&str>,
     mut audio: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    partial: Option<PartialSender>,
 ) -> Result<AsrResult> {
+    let path = if partial.is_some() {
+        "/api/v3/plan/sauc/bigmodel_async"
+    } else {
+        "/api/v3/plan/sauc/bigmodel_nostream"
+    };
     let mut request = endpoint
-        .ws_url("/api/v3/plan/sauc/bigmodel_nostream")
+        .ws_url(path)
         .into_client_request()
         .context("构造语音识别请求失败")?;
     let headers = request.headers_mut();
@@ -566,6 +580,14 @@ async fn recognize_inner(
             match decode_server_frame(&data)? {
                 ServerFrame::Response { last, payload } => {
                     if !payload.is_null() {
+                        if let Some(partial) = &partial
+                            && !last
+                        {
+                            let text = parse_asr_body(&payload).text;
+                            if !text.is_empty() {
+                                let _ = partial.send(text);
+                            }
+                        }
                         latest = payload;
                     }
                     if last {
@@ -1046,18 +1068,28 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
+        let (partial_tx, mut partial_rx) = tokio::sync::mpsc::unbounded_channel();
         let result = recognize_stream(
             &endpoint,
             "doubao-seed-asr-2.0",
             AsrFormat::Pcm,
             None,
             receiver,
+            Some(partial_tx),
         )
         .await
         .unwrap();
         producer.await.unwrap();
         assert_eq!(result.text, "你好世界");
-        let (_, packets, params) = server.await.unwrap();
+        // 中间结果实时推送（末包结果只作为最终返回值）。
+        assert_eq!(partial_rx.try_recv().unwrap(), "你好");
+        let (headers, packets, params) = server.await.unwrap();
+        assert!(
+            headers
+                .iter()
+                .any(|(key, value)| key == "path" && value == "/api/v3/plan/sauc/bigmodel_async"),
+            "实时识别应走双向流式接口"
+        );
         assert_eq!(packets, 2);
         assert_eq!(params["audio"]["format"], "pcm");
         assert_eq!(params["audio"]["codec"], "raw");

@@ -12,15 +12,15 @@ use tiangong_plugin_runtime::protocol::{
     ServiceStatus,
 };
 use tiangong_plugin_volcengine_protocol::{
-    Ack, Empty, GENERATE_IMAGE_OPERATION, GENERATE_VIDEO_OPERATION, GET_CONFIG_OPERATION,
-    GeneratedImage, ImageRequest, ImageResponse, LIST_VOICES_OPERATION, ListVoicesResponse,
-    PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL, PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID,
-    PLUGIN_VERSION, PlayRequest, PlayStatusResponse, RECORD_CANCEL_OPERATION,
-    RECORD_START_OPERATION, RECORD_STOP_OPERATION, REPLY_FINAL_CHANNEL, RecordControlRequest,
-    RecordStartRequest, SET_CONFIG_OPERATION, STOP_OPERATION, SYNTHESIZE_OPERATION,
-    SynthesizeRequest, SynthesizeResponse, TRANSCRIBE_OPERATION, TURN_FINISHED_OPERATION,
-    TranscribeRequest, TranscribeResponse, TurnFinishedRequest, VOLCENGINE_PROTOCOL_VERSION,
-    VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
+    ASR_PARTIAL_CHANNEL, Ack, Empty, GENERATE_IMAGE_OPERATION, GENERATE_VIDEO_OPERATION,
+    GET_CONFIG_OPERATION, GeneratedImage, ImageRequest, ImageResponse, LIST_VOICES_OPERATION,
+    ListVoicesResponse, PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL, PLAY_OPERATION,
+    PLAY_STATUS_OPERATION, PLUGIN_ID, PLUGIN_VERSION, PlayRequest, PlayStatusResponse,
+    RECORD_CANCEL_OPERATION, RECORD_START_OPERATION, RECORD_STOP_OPERATION, REPLY_FINAL_CHANNEL,
+    RecordControlRequest, RecordStartRequest, SET_CONFIG_OPERATION, STOP_OPERATION,
+    SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse, TRANSCRIBE_OPERATION,
+    TURN_FINISHED_OPERATION, TranscribeRequest, TranscribeResponse, TurnFinishedRequest,
+    VOLCENGINE_PROTOCOL_VERSION, VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
 };
 
 use crate::ark::{self, Endpoint, VideoOptions};
@@ -401,6 +401,19 @@ fn record_start(
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let model = config.asr_model.clone();
     let language = request.language.clone();
+    let session_id = request.session_id.trim().to_string();
+    // 中间结果经 sidecar 通知推给语音覆盖层实时显示（无订阅者时静默丢弃）。
+    let (partial_tx, mut partial_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let notify_session = session_id.clone();
+    tokio::spawn(async move {
+        while let Some(text) = partial_rx.recv().await {
+            let body = serde_json::json!({ "session_id": notify_session, "text": text });
+            tiangong_plugin_sidecar::server::emit_notification(
+                ASR_PARTIAL_CHANNEL,
+                body.to_string(),
+            );
+        }
+    });
     let task = tokio::spawn(async move {
         speech::recognize_stream(
             &endpoint,
@@ -408,10 +421,10 @@ fn record_start(
             speech::AsrFormat::Pcm,
             language.as_deref(),
             receiver,
+            Some(partial_tx),
         )
         .await
     });
-    let session_id = request.session_id.trim().to_string();
     match audio::record_start(request, Some(sender)) {
         Ok(response) => {
             *live_asr_slot() = Some(LiveAsr { session_id, task });

@@ -38,6 +38,8 @@ pub const RECORD_CANCEL_OPERATION: &str = "record_cancel";
 pub const TURN_FINISHED_OPERATION: &str = "turn_finished";
 /// sidecar 通知通道：本轮最终答复（经宿主 `sidecar.event` 到达插件 UI）。
 pub const REPLY_FINAL_CHANNEL: &str = "volcengine.reply_final";
+/// sidecar 通知通道：边录边识别的中间文本（`{session_id, text}`，text 为累计全文）。
+pub const ASR_PARTIAL_CHANNEL: &str = "volcengine.asr_partial";
 
 /// Agent Plan 数据面地址（图片 / 视频生成）。
 pub const PLAN_ARK_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan/v3";
