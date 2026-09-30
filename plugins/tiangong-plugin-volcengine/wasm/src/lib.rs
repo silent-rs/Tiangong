@@ -15,8 +15,9 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 use serde_json::Value;
 use tiangong_plugin_volcengine_protocol::{
     Empty, GenerateImage, GenerateVideo, GetConfig, ImageRequest, ListVoices, Play, PlayStatus,
-    RecordCancel, RecordStart, RecordStop, SetConfig, Stop, Synthesize, TOOL_GENERATE_IMAGE,
-    TOOL_GENERATE_VIDEO, Transcribe, VideoRequest, VideoStatus, VolcengineOperation,
+    RecordCancel, RecordStart, RecordStop, SetConfig, Stop, Synthesize, SynthesizeRequest,
+    TOOL_GENERATE_IMAGE, TOOL_GENERATE_VIDEO, TOOL_SPEECH_TO_TEXT, TOOL_TEXT_TO_SPEECH, Transcribe,
+    TranscribeRequest, VideoRequest, VideoStatus, VolcengineOperation,
 };
 
 mod descriptor {
@@ -60,13 +61,30 @@ impl Guest for Component {
                 input_schema: r#"{"type":"object","properties":{"prompt":{"type":"string","description":"视频描述"},"duration":{"type":"integer","description":"视频时长，单位秒（可选）"},"resolution":{"type":"string","description":"分辨率（可选）：480p / 720p / 1080p"},"ratio":{"type":"string","description":"宽高比（可选）：16:9 / 9:16 / 1:1 等"},"image":{"type":"string","description":"首帧图本地路径或 URL（可选）"}},"required":["prompt"]}"#
                     .to_string(),
             },
+            ToolSpec {
+                name: TOOL_TEXT_TO_SPEECH.to_string(),
+                description: "使用火山方舟 Agent Plan 的豆包语音合成将文本合成为语音音频文件（mp3），返回本地文件路径。"
+                    .to_string(),
+                input_schema: r#"{"type":"object","properties":{"text":{"type":"string","description":"待合成文本"},"voice":{"type":"string","description":"音色 ID（可选，如 zh_female_vv_uranus_bigtts；留空使用设置中的默认音色）"},"speed":{"type":"number","description":"语速倍率（可选，1.0 为正常，范围 0.5～2.0）"}},"required":["text"]}"#
+                    .to_string(),
+            },
+            ToolSpec {
+                name: TOOL_SPEECH_TO_TEXT.to_string(),
+                description: "使用火山方舟 Agent Plan 的豆包流式语音识别将音频文件转录为文本".to_string(),
+                input_schema: r#"{"type":"object","properties":{"file_path":{"type":"string","description":"音频文件路径（仅允许 ~/.tiangong/media 目录下的 wav / mp3 / ogg 文件）"},"language":{"type":"string","description":"语种（可选，如 zh-CN / en-US；留空自动识别）"}},"required":["file_path"]}"#
+                    .to_string(),
+            },
         ])
     }
 
-    /// 语音合成与识别只服务于插件 UI（语音输入、朗读、自动朗读），
-    /// 不作为 Agent 工具暴露，因此没有需要注入的提示词。
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
-        Ok(Vec::new())
+        // 宿主只告诉模型音频附件的本地路径，如何处理由提供能力的插件说明。
+        Ok(vec![
+            "音频附件处理：用户消息附带音频且需要了解其内容时，调用 speech_to_text，\
+            以该附件的 path 作为 file_path。经语音输入发送的消息正文已是识别结果，\
+            其录音附件（名称为「语音消息」）无需再次识别。"
+                .to_string(),
+        ])
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
@@ -74,6 +92,8 @@ impl Guest for Component {
         match call.name.as_str() {
             TOOL_GENERATE_IMAGE => handle_generate_image(&args),
             TOOL_GENERATE_VIDEO => handle_generate_video(&args),
+            TOOL_TEXT_TO_SPEECH => handle_text_to_speech(&args),
+            TOOL_SPEECH_TO_TEXT => handle_speech_to_text(&args),
             other => Err(plugin_err(format!("未知的工具: {other}"))),
         }
     }
@@ -214,6 +234,65 @@ fn handle_generate_video(args: &Value) -> Result<ToolResult, PluginError> {
             exit_code: 1,
             execution: None,
         },
+    })
+}
+
+fn handle_text_to_speech(args: &Value) -> Result<ToolResult, PluginError> {
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Err(plugin_err("缺少必填参数 text"));
+    }
+    let request = SynthesizeRequest {
+        text,
+        voice: optional_string(args, "voice"),
+        speed: args.get("speed").and_then(Value::as_f64),
+    };
+    let response = sidecar_client::invoke::<Synthesize>(&request)
+        .map_err(|error| plugin_err(format!("语音合成失败: {error}")))?;
+    let duration = response
+        .duration
+        .map(|seconds| format!("，时长 {seconds:.1}s"))
+        .unwrap_or_default();
+    Ok(ToolResult {
+        ok: true,
+        summary: format!("语音合成成功（{}{duration}）", response.model),
+        stdout: format!("音频文件已保存到：{}", response.file_path),
+        stderr: String::new(),
+        exit_code: 0,
+        execution: None,
+    })
+}
+
+fn handle_speech_to_text(args: &Value) -> Result<ToolResult, PluginError> {
+    let file_path =
+        optional_string(args, "file_path").ok_or_else(|| plugin_err("缺少必填参数 file_path"))?;
+    let request = TranscribeRequest {
+        file_path,
+        language: optional_string(args, "language"),
+    };
+    let response = sidecar_client::invoke::<Transcribe>(&request)
+        .map_err(|error| plugin_err(format!("语音识别失败: {error}")))?;
+    let language = response
+        .language
+        .as_deref()
+        .map(|language| format!("，语言：{language}"))
+        .unwrap_or_default();
+    let duration = response
+        .duration
+        .map(|seconds| format!("，音频时长：{seconds:.1}s"))
+        .unwrap_or_default();
+    Ok(ToolResult {
+        ok: true,
+        summary: format!("语音识别成功（{}{language}{duration}）", response.model),
+        stdout: response.text,
+        stderr: String::new(),
+        exit_code: 0,
+        execution: None,
     })
 }
 

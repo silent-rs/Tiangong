@@ -8,9 +8,6 @@
 //! 只需 Agent Plan API Key。模型名由用户在设置页手动填写（候选取自官方套餐概览，
 //! 随插件版本阶段性更新），不调用需 Access Key 签名的管控面模型列表接口。
 //! 连接信息与模型由插件设置页独立配置，不依赖全局模型配置（models.json）。
-//!
-//! Agent 工具只有图片 / 视频生成；语音合成与识别仅供插件 UI（语音输入、朗读、
-//! 自动朗读）经 sidecar 操作调用，不作为工具暴露。
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,6 +18,8 @@ pub const VOLCENGINE_PROTOCOL_VERSION: u32 = 1;
 
 pub const TOOL_GENERATE_IMAGE: &str = "generate_image";
 pub const TOOL_GENERATE_VIDEO: &str = "generate_video";
+pub const TOOL_TEXT_TO_SPEECH: &str = "text_to_speech";
+pub const TOOL_SPEECH_TO_TEXT: &str = "speech_to_text";
 
 pub const GENERATE_IMAGE_OPERATION: &str = "generate_image";
 pub const GENERATE_VIDEO_OPERATION: &str = "generate_video";
