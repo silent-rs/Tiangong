@@ -13,17 +13,37 @@ pub const PAGE_PUSH_MAX_CHARS: usize = 12_000;
 /// `limit`（`limit` 过小时退化为只保留头部）。按 Unicode 字符计数，不会
 /// 切到多字节字符中间。
 pub fn clip_head_tail(text: &str, limit: usize) -> String {
+    clip_with_marker(text, limit, |start, end, total| {
+        format!(
+            "\n\n…[页面内容过长，已省略第 {start}–{end} 字（全文 {total} 字）；如需查看，请调用 web_page_text 按 offset 读取或按 keyword 搜索]…\n\n"
+        )
+    })
+}
+
+/// 页面变化文本的头尾截取：标记只说明省略字数（变化文本的位置与页面
+/// 正文 offset 无关），并提示用 web_page_text 查看完整页面。
+pub fn clip_change_text(text: &str, limit: usize) -> String {
+    clip_with_marker(text, limit, |start, end, total| {
+        // 预算估算时以 start==end 调用，此时用 total 估计省略字数的最大位数。
+        let omitted = if end > start { end - start } else { total };
+        format!(
+            "\n\n…[变化内容过长，已省略中间 {omitted} 字；完整页面请调用 web_page_text 查询]…\n\n"
+        )
+    })
+}
+
+/// 头尾截取通用实现：`marker(start, end, total)` 生成省略标记。
+fn clip_with_marker(
+    text: &str,
+    limit: usize,
+    marker: impl Fn(usize, usize, usize) -> String,
+) -> String {
     let total = text.chars().count();
     if total <= limit {
         return text.to_string();
     }
-    let marker_for = |start: usize, end: usize| {
-        format!(
-            "\n\n…[页面内容过长，已省略第 {start}–{end} 字（全文 {total} 字）；如需查看，请调用 web_page_text 按 offset 读取或按 keyword 搜索]…\n\n"
-        )
-    };
-    // 标记长度随数字位数变化，按最大可能位数预估预算。
-    let marker_len = marker_for(total, total).chars().count();
+    // 标记长度随数字位数变化，按最大可能位数（各位置均取 total）预估预算。
+    let marker_len = marker(total, total, total).chars().count();
     let budget = limit.saturating_sub(marker_len);
     if budget == 0 {
         return text.chars().take(limit).collect();
@@ -33,7 +53,7 @@ pub fn clip_head_tail(text: &str, limit: usize) -> String {
     let tail_start = total - tail_len;
     let head: String = text.chars().take(head_len).collect();
     let tail: String = text.chars().skip(tail_start).collect();
-    format!("{head}{}{tail}", marker_for(head_len, tail_start))
+    format!("{head}{}{tail}", marker(head_len, tail_start, total))
 }
 
 /// 浏览器标签
@@ -462,98 +482,58 @@ pub enum BrowserEvent {
     },
 }
 
+/// 页面变化反馈（推送给 Agent）。
+///
+/// 只反馈**页面本身的变化**（弹窗出现/关闭、内容更新、页面导航），并附带
+/// 变化的具体内容；JS 交互（点击、输入）与接口响应等过程数据不单独反馈——
+/// 它们若引起页面变化，会以变化内容的形式体现。整体按
+/// [`PAGE_PUSH_MAX_CHARS`] 头尾截取，Agent 需要完整页面时主动 web_page_text。
 pub fn format_browser_events(events: &[BrowserEvent]) -> Option<String> {
-    if events.is_empty() {
-        return None;
-    }
-
     let mut lines = Vec::new();
     for event in events {
         match event {
             BrowserEvent::DialogOpened { detail, .. } => {
                 lines.push("[页面变化] 出现新的弹窗/覆盖层".to_string());
-                push_preview(&mut lines, detail, 1200);
+                push_detail(&mut lines, detail);
             }
             BrowserEvent::DialogClosed { .. } => {
                 lines.push("[页面变化] 弹窗/覆盖层已关闭".to_string());
             }
             BrowserEvent::ContentChanged { detail, .. } => {
                 lines.push("[页面变化] 页面内容已更新".to_string());
-                push_preview(&mut lines, detail, 1000);
-            }
-            BrowserEvent::UserClick {
-                element,
-                text,
-                selector,
-                ..
-            } => {
-                let mut desc = format!("[用户操作] 点击 <{element}>");
-                if !text.trim().is_empty() {
-                    desc.push_str(&format!(" {}", text.trim()));
-                }
-                if !selector.trim().is_empty() {
-                    desc.push_str(&format!(" ({selector})"));
-                }
-                lines.push(desc);
-            }
-            BrowserEvent::UserInput {
-                selector,
-                label,
-                value_length,
-                ..
-            } => {
-                let target = if label.trim().is_empty() {
-                    selector.as_str()
-                } else {
-                    label.as_str()
-                };
-                lines.push(format!(
-                    "[用户操作] 输入字段 {target} 已变化（长度 {value_length}）"
-                ));
+                push_detail(&mut lines, detail);
             }
             BrowserEvent::UserNavigation { url, .. } => {
-                lines.push(format!("[用户操作] 页面导航到 {url}"));
+                lines.push(format!("[页面变化] 页面导航到 {url}"));
             }
-            BrowserEvent::NetworkResponse {
-                url,
-                method,
-                status,
-                detail,
-                ..
-            } => {
-                lines.push(format!(
-                    "[网络响应] {} {} (状态 {})",
-                    method,
-                    truncate_chars(url, 120),
-                    status
-                ));
-                push_preview(&mut lines, detail, 500);
-            }
+            // 过程数据：未引起页面变化时不反馈。
+            BrowserEvent::UserClick { .. }
+            | BrowserEvent::UserInput { .. }
+            | BrowserEvent::NetworkResponse { .. } => {}
         }
     }
-
     if lines.is_empty() {
         None
     } else {
-        Some(lines.join("\n"))
+        Some(clip_change_text(&lines.join("\n"), PAGE_PUSH_MAX_CHARS))
     }
 }
 
-fn push_preview(lines: &mut Vec<String>, text: &str, max_chars: usize) {
+/// 事件是否属于页面变化（决定是否需要主动注入）。
+pub fn is_page_change(event: &BrowserEvent) -> bool {
+    matches!(
+        event,
+        BrowserEvent::DialogOpened { .. }
+            | BrowserEvent::DialogClosed { .. }
+            | BrowserEvent::ContentChanged { .. }
+            | BrowserEvent::UserNavigation { .. }
+    )
+}
+
+fn push_detail(lines: &mut Vec<String>, text: &str) {
     let text = text.trim();
-    if text.is_empty() {
-        return;
-    }
-    lines.push(truncate_chars(text, max_chars));
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let truncated = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
+    if !text.is_empty() {
+        lines.push(text.to_string());
     }
 }
 

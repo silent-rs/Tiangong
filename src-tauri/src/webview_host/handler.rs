@@ -835,6 +835,7 @@ mod tests {
 
     #[test]
     fn merge_both_some() {
+        // 接口响应本身不反馈；页面变化（diff）照常返回。
         let diff = Some("页面内容变化：新增 key".to_string());
         let events = vec![BrowserEvent::NetworkResponse {
             timestamp: 1,
@@ -844,11 +845,7 @@ mod tests {
             detail: "{\"key\":\"sk-abc\"}".to_string(),
         }];
         let result = merge_diff_and_events(&diff, &events);
-        assert!(result.is_some());
-        let r = result.unwrap();
-        assert!(r.contains("页面内容变化"));
-        assert!(r.contains("[网络响应]"));
-        assert!(r.contains("sk-abc"));
+        assert_eq!(result, diff);
     }
 
     #[test]
@@ -896,19 +893,45 @@ mod tests {
     }
 
     #[test]
-    fn browser_events_format_output() {
-        let events = vec![BrowserEvent::NetworkResponse {
+    fn browser_events_format_only_page_changes() {
+        let network = BrowserEvent::NetworkResponse {
             timestamp: 1,
             url: "https://platform.deepseek.com/api_keys".to_string(),
             method: "POST".to_string(),
             status: 200,
             detail: "{\"data\":{\"key\":\"sk-dcc5ad16\"}}".to_string(),
-        }];
-        let result = format_browser_events(&events).unwrap();
-        assert!(
-            result.contains("[网络响应] POST https://platform.deepseek.com/api_keys (状态 200)")
-        );
-        assert!(result.contains("sk-dcc5ad16"));
+        };
+        let click = BrowserEvent::UserClick {
+            timestamp: 2,
+            element: "button".to_string(),
+            text: "创建".to_string(),
+            selector: "#create".to_string(),
+        };
+        // 仅过程数据（接口响应、点击）：不反馈。
+        assert!(format_browser_events(&[network.clone(), click.clone()]).is_none());
+
+        // 引起页面变化：只反馈变化及其内容，不带过程数据。
+        let change = BrowserEvent::ContentChanged {
+            timestamp: 3,
+            detail: "新密钥：sk-dcc5ad16".to_string(),
+        };
+        let result = format_browser_events(&[network, click, change]).unwrap();
+        assert!(result.contains("[页面变化] 页面内容已更新"));
+        assert!(result.contains("新密钥：sk-dcc5ad16"));
+        assert!(!result.contains("[网络响应]") && !result.contains("[用户操作]"));
+    }
+
+    #[test]
+    fn browser_events_change_text_is_clipped_with_head_and_tail() {
+        let detail = format!("HEAD{}TAIL", "中".repeat(30_000));
+        let result = format_browser_events(&[BrowserEvent::ContentChanged {
+            timestamp: 1,
+            detail,
+        }])
+        .unwrap();
+        assert!(result.chars().count() <= crate::webview_host::types::PAGE_PUSH_MAX_CHARS);
+        assert!(result.contains("HEAD") && result.ends_with("TAIL"));
+        assert!(result.contains("已省略中间"));
     }
 
     #[test]

@@ -1367,3 +1367,44 @@ describe('完整感知链路模拟', () => {
     bridge.observer.stop();
   });
 });
+
+describe('页面变化分析：只反馈变化及其内容', () => {
+  it('新增节点的文本作为变化内容，脚本/样式不计入', () => {
+    setupDOM('<main id="app"><p>旧内容</p></main>');
+    const bridge = getBridge();
+    const main = document.getElementById('app')!;
+    const added = document.createElement('div');
+    added.textContent = '接口返回后渲染的新密钥：sk-new';
+    const script = document.createElement('script');
+    script.textContent = 'var secret = 1;';
+    const events = bridge.observer._analyzeMutations([
+      { type: 'childList', target: main, addedNodes: [added, script], removedNodes: [] },
+    ]);
+    const change = events.find((e: any) => e.type === 'content_changed');
+    expect(change).toBeTruthy();
+    expect(change.detail).toContain('sk-new');
+    expect(change.detail).not.toContain('secret');
+    // 不再附带整页摘要
+    expect(change.detail).not.toContain('旧内容');
+  });
+
+  it('子孙节点不重复计入，纯属性变化不产生事件', () => {
+    setupDOM('<div id="app"></div>');
+    const bridge = getBridge();
+    const app = document.getElementById('app')!;
+    const outer = document.createElement('section');
+    const inner = document.createElement('span');
+    inner.textContent = '唯一文本';
+    outer.appendChild(inner);
+    const events = bridge.observer._analyzeMutations([
+      { type: 'childList', target: app, addedNodes: [outer, inner], removedNodes: [] },
+    ]);
+    const detail = events.find((e: any) => e.type === 'content_changed').detail;
+    expect(detail.split('唯一文本').length - 1).toBe(1);
+
+    const attrOnly = bridge.observer._analyzeMutations([
+      { type: 'attributes', target: app, addedNodes: [], removedNodes: [] },
+    ]);
+    expect(attrOnly).toEqual([]);
+  });
+});
