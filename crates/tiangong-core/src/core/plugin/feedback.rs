@@ -45,10 +45,30 @@ impl PluginFeedbackTx {
     /// 入队后、消费前结束，命令仍可能丢失。彻底消除该竞态需配合 turn 侧在
     /// Agent Loop 结束后立即 drop 接收端（见 `run_turn`）。
     pub fn inject_tool(&self, tool_name: impl Into<String>, payload: serde_json::Value) -> bool {
+        self.send_injection(tool_name.into(), payload, false)
+    }
+
+    /// 注入状态快照（如页面快照、插件清单）：未能立即写入对话而进入延迟
+    /// 队列时，顶替队列中同来源的旧快照，只保留最新状态。
+    pub fn inject_snapshot(
+        &self,
+        tool_name: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> bool {
+        self.send_injection(tool_name.into(), payload, true)
+    }
+
+    fn send_injection(
+        &self,
+        tool_name: String,
+        payload: serde_json::Value,
+        supersede: bool,
+    ) -> bool {
         self.sender
             .send(Command::InjectTool {
-                tool_name: tool_name.into(),
+                tool_name,
                 payload,
+                supersede,
             })
             .is_ok()
     }

@@ -210,7 +210,50 @@ fn webview_close(app: &AppHandle<Wry>, plugin_id: &str, session_id: &str, instan
     };
     let manager = crate::webview_host::manager::BrowserManager::from_state(scope_state);
     // 幂等：标签已不存在视为已关闭。
-    let _ = manager.tab_close(instance_id);
+    if manager.tab_close(instance_id).is_err() {
+        return;
+    }
+    notify_browser_tabs_changed(app, session_id, &manager);
+}
+
+/// 页面关闭后向会话补投一条最新标签状态（状态快照，顶替会话延迟队列中
+/// 已过期的页面快照），避免 Agent 下一轮看到已关闭页面的内容。
+fn notify_browser_tabs_changed(
+    app: &AppHandle<Wry>,
+    session_id: &str,
+    manager: &crate::webview_host::manager::BrowserManager,
+) {
+    let Some(state) = app.try_state::<crate::app::TiangongApp>() else {
+        return;
+    };
+    let tab_list = manager.tab_list_with_active();
+    let active = tab_list
+        .active_tab_id
+        .as_ref()
+        .and_then(|id| tab_list.tabs.iter().find(|tab| &tab.id == id))
+        .cloned();
+    let _ = state.tool_injection_tx().send(crate::ToolInjection {
+        session_id: Some(session_id.to_string()),
+        browser_source: None,
+        tool: Box::new(crate::webview_host::page_fetcher::BrowserContent {
+            title: active
+                .as_ref()
+                .map(|tab| tab.title.clone())
+                .unwrap_or_default(),
+            url: active
+                .as_ref()
+                .map(|tab| tab.url.clone())
+                .unwrap_or_default(),
+            text: String::new(),
+            tabs: tab_list
+                .tabs
+                .into_iter()
+                .map(|tab| (tab.id, tab.url, tab.title))
+                .collect(),
+            active_tab_id: tab_list.active_tab_id,
+            feedback: None,
+        }),
+    });
 }
 
 /// 标签移除后的唯一释放入口：向资源方发出 instanceClosed（幂等）。

@@ -132,8 +132,12 @@ pub(super) async fn handle_command(
             ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort);
             CommandEffect::KeepCurrent
         }
-        Deferred::Command(Command::InjectTool { tool_name, payload }) => {
-            injections.receive(stream_tx, tool_name, payload);
+        Deferred::Command(Command::InjectTool {
+            tool_name,
+            payload,
+            supersede,
+        }) => {
+            injections.receive(stream_tx, tool_name, payload, supersede);
             // PendingFinish 收到工具注入：撤销暂定结果、重新分析（不重置用户
             // 意图预算——这是当前任务的新信息，不是新意图）。
             let phase = state.take_phase();

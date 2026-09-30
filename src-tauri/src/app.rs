@@ -100,6 +100,10 @@ impl tiangong_core::agent_input::ToolInput for LocalPluginListInput {
         tiangong_plugin_runtime::LOCAL_PLUGIN_LIST_INJECTION
     }
 
+    fn supersedes(&self) -> bool {
+        true
+    }
+
     fn render(&self) -> serde_json::Value {
         tiangong_plugin_runtime::registry::local_plugin_inventory()
     }

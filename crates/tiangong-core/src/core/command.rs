@@ -17,6 +17,8 @@ pub enum Command {
     InjectTool {
         tool_name: String,
         payload: serde_json::Value,
+        /// 状态快照：延迟队列中只保留同来源的最新一条。
+        supersede: bool,
     },
     /// 运行中注入用户消息。
     InjectUserMessage {

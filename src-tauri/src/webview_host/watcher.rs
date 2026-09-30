@@ -242,17 +242,20 @@ impl BrowserWatcher {
             .iter()
             .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
             .collect();
-        tx.inject_tool(
-            "browser_data",
-            json!({
-                "title": snapshot.title,
-                "url": snapshot.url,
-                "text": snapshot.text,
-                "tabs": tabs,
-                "active_tab_id": snapshot.active_tab_id,
-                "feedback": feedback,
-            }),
-        );
+        let payload = json!({
+            "title": snapshot.title,
+            "url": snapshot.url,
+            "text": snapshot.text,
+            "tabs": tabs,
+            "active_tab_id": snapshot.active_tab_id,
+            "feedback": feedback,
+        });
+        // 纯页面快照可被更新快照顶替；携带用户操作反馈的按事件逐条保留。
+        if has_feedback {
+            tx.inject_tool("browser_data", payload);
+        } else {
+            tx.inject_snapshot("browser_data", payload);
+        }
         tracing::info!(
             url = %snapshot.url,
             title = %snapshot.title,
