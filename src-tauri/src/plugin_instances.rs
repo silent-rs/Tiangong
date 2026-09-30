@@ -227,6 +227,10 @@ fn notify_browser_tabs_changed(
         return;
     };
     let tab_list = manager.tab_list_with_active();
+    // 最后一个页面关闭后无任何数据：不补投（空快照没有信息量）。
+    if tab_list.tabs.is_empty() {
+        return;
+    }
     let active = tab_list
         .active_tab_id
         .as_ref()

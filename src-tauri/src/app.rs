@@ -926,6 +926,13 @@ impl TiangongApp {
     /// 「刚装完插件模型正要收尾」会重新考虑）；空闲会话本轮投递会因
     /// 无活跃 turn 被丢弃，由聚合桥的轮开始清单检查在下一条消息补上。
     pub fn broadcast_local_plugin_list(&self) {
+        // 自制插件为空时不推送空清单（与轮开始检查一致）；清单有变化时照常推送。
+        let empty = tiangong_plugin_runtime::registry::local_plugin_inventory()["plugins"]
+            .as_array()
+            .is_none_or(Vec::is_empty);
+        if empty {
+            return;
+        }
         let session_ids: Vec<String> = self
             .core_manager
             .registry()
