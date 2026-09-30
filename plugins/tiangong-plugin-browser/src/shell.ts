@@ -23,6 +23,7 @@ const TOOL_METHOD: Record<string, string> = {
   browser_eval: 'webview.eval',
   // 协作工具（策略在 TS，引擎经协作原语）：
   web_fetch: 'webview.fetch',
+  web_page_text: 'webview.pageText',
   web_query_dom: 'webview.queryDom',
   web_click: 'webview.click',
   web_form_fill: 'webview.formFill',
@@ -82,6 +83,40 @@ async function resolveActive(
     if (state.closed) return;
     throw new ToolResolutionError(error);
   }
+}
+
+type PageTextResult = {
+  error?: string;
+  title?: string;
+  url?: string;
+  total_chars?: number;
+  offset?: number;
+  end?: number;
+  has_more?: boolean;
+  text?: string;
+  keyword?: string;
+  match_count?: number;
+  matches?: Array<{ offset: number; snippet: string }>;
+};
+
+/** web_page_text 结果：区间读取给出位置与续读提示，关键词搜索列出命中片段。 */
+function formatPageText(result: PageTextResult): string {
+  if (result.error) return `页面正文查询失败：${result.error}`;
+  const head = `标题：${result.title ?? ''}\nURL：${result.url ?? ''}\n全文 ${result.total_chars ?? 0} 字`;
+  if (result.keyword !== undefined) {
+    const matches = result.matches ?? [];
+    if (matches.length === 0) return `${head}\n关键词「${result.keyword}」无命中。`;
+    const shown = matches
+      .map((match, index) => `[${index + 1}] offset=${match.offset}\n${match.snippet}`)
+      .join('\n\n');
+    const more = (result.match_count ?? 0) > matches.length
+      ? `\n\n（共 ${result.match_count} 处命中，仅列出前 ${matches.length} 处；可按 offset 读取上下文）`
+      : '';
+    return `${head}\n关键词「${result.keyword}」命中 ${result.match_count} 处：\n\n${shown}${more}`;
+  }
+  const range = `第 ${result.offset ?? 0}–${result.end ?? 0} 字`;
+  const next = result.has_more ? `\n\n（未读完，继续读取请用 offset=${result.end}）` : '\n\n（已读到末尾）';
+  return `${head}，本次返回${range}：\n\n${result.text ?? ''}${next}`;
 }
 
 /** 打开浏览器插件 App（app.open 宿主原语，聚焦本进程内的会话实例）。 */
@@ -221,6 +256,8 @@ async function main() {
         } else if (invocation.name === 'web_fetch') {
           const content = (parsed as { content?: string }).content ?? '';
           summary = content.slice(0, 2_000_000) || '(空内容)';
+        } else if (invocation.name === 'web_page_text') {
+          summary = formatPageText(parsed as PageTextResult);
         } else if (
           invocation.name === 'web_query_dom' ||
           invocation.name === 'web_form_extract' ||

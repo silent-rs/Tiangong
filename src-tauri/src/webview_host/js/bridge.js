@@ -232,8 +232,7 @@
             return r;
         },
 
-        getFullText: function(maxChars) {
-            maxChars = maxChars || 12000;
+        _extractFullText: function() {
             var text = '';
             if (document.body) {
                 var clone = document.body.cloneNode(true);
@@ -246,14 +245,74 @@
                     text = (document.body.innerText || '').trim();
                 }
             }
-            if (text.length > maxChars) {
-                text = text.substring(0, maxChars) + '\n...[内容已截断]';
-            }
+            return text;
+        },
+
+        // 头尾截取：限制内完整返回；超出时保留头部约 2/3、尾部约 1/3，
+        // 中间以标记说明被省略区间（offset 与 pageText 一致），总长不超过 maxChars。
+        _clipHeadTail: function(text, maxChars) {
+            var total = text.length;
+            if (total <= maxChars) return text;
+            var markerFor = function(start, end) {
+                return '\n\n…[页面内容过长，已省略第 ' + start + '–' + end + ' 字（全文 ' + total
+                    + ' 字）；如需查看，请调用 web_page_text 按 offset 读取或按 keyword 搜索]…\n\n';
+            };
+            var budget = maxChars - markerFor(total, total).length;
+            if (budget <= 0) return text.substring(0, maxChars);
+            var headLen = Math.floor(budget * 2 / 3);
+            var tailStart = total - (budget - headLen);
+            return text.substring(0, headLen) + markerFor(headLen, tailStart) + text.substring(tailStart);
+        },
+
+        getFullText: function(maxChars) {
+            maxChars = maxChars || 12000;
+            var text = this._extractFullText();
             return {
                 title: document.title,
                 url: window.location.href,
-                text: text,
+                text: this._clipHeadTail(text, maxChars),
+                total_chars: text.length,
             };
+        },
+
+        // Agent 主动查询页面正文：按 offset/max_chars 读取区间，或按 keyword
+        // 搜索（返回命中位置与上下文片段）。offset 与推送中的省略标记一致。
+        pageText: function(offset, maxChars, keyword) {
+            var text = this._extractFullText();
+            var total = text.length;
+            var base = { title: document.title, url: window.location.href, total_chars: total };
+            if (keyword) {
+                var lower = text.toLowerCase();
+                var kw = String(keyword).toLowerCase();
+                var matches = [];
+                var count = 0;
+                var from = 0;
+                var ctx = 150;
+                while (true) {
+                    var idx = lower.indexOf(kw, from);
+                    if (idx < 0) break;
+                    count++;
+                    if (matches.length < 20) {
+                        matches.push({
+                            offset: idx,
+                            snippet: text.substring(Math.max(0, idx - ctx), Math.min(total, idx + kw.length + ctx)),
+                        });
+                    }
+                    from = idx + Math.max(kw.length, 1);
+                }
+                base.keyword = keyword;
+                base.match_count = count;
+                base.matches = matches;
+                return base;
+            }
+            maxChars = Math.max(1, Math.min(maxChars || 8000, 20000));
+            offset = Math.max(0, Math.min(offset || 0, total));
+            var end = Math.min(total, offset + maxChars);
+            base.offset = offset;
+            base.end = end;
+            base.has_more = end < total;
+            base.text = text.substring(offset, end);
+            return base;
         },
 
         _normalizeText: function(text) {
