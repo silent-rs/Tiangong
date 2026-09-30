@@ -34,6 +34,10 @@ pub const TRANSCRIBE_OPERATION: &str = "transcribe";
 pub const RECORD_START_OPERATION: &str = "record_start";
 pub const RECORD_STOP_OPERATION: &str = "record_stop";
 pub const RECORD_CANCEL_OPERATION: &str = "record_cancel";
+/// WASM `on_turn_finished` 生命周期钩子转发：本轮最终答复（自动朗读用）。
+pub const TURN_FINISHED_OPERATION: &str = "turn_finished";
+/// sidecar 通知通道：本轮最终答复（经宿主 `sidecar.event` 到达插件 UI）。
+pub const REPLY_FINAL_CHANNEL: &str = "volcengine.reply_final";
 
 /// Agent Plan 数据面地址（图片 / 视频生成）。
 pub const PLAN_ARK_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/plan/v3";
@@ -95,6 +99,13 @@ pub struct Transcribe;
 pub struct RecordStart;
 pub struct RecordStop;
 pub struct RecordCancel;
+pub struct TurnFinished;
+
+impl VolcengineOperation for TurnFinished {
+    const NAME: &'static str = TURN_FINISHED_OPERATION;
+    type Request = TurnFinishedRequest;
+    type Response = Empty;
+}
 
 impl VolcengineOperation for Synthesize {
     const NAME: &'static str = SYNTHESIZE_OPERATION;
@@ -379,6 +390,12 @@ pub struct TranscribeResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordStartRequest {
     pub session_id: String,
+    /// 边录边识别：录音期间即连接语音识别并实时上传，停止时直接返回识别文本。
+    #[serde(default)]
+    pub transcribe: bool,
+    /// 实时识别语种（可选，同 [`TranscribeRequest::language`]）。
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -399,11 +416,122 @@ pub struct RecordStopResponse {
     pub mime_type: String,
     #[serde(default)]
     pub duration: Option<f64>,
+    /// 开启边录边识别时的识别文本；未开启时为空，调用方可再走 `transcribe`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// 本轮最终答复（`on_turn_finished` 从会话快照提取后转发 sidecar）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnFinishedRequest {
+    pub session_id: String,
+    pub message_id: String,
+    /// 最终答复正文（Markdown 原文，朗读前由 UI 转换）。
+    pub text: String,
+}
+
+/// 从 `on_turn_finished` 的会话快照中提取本轮最终答复。
+///
+/// 只认本轮（用户锚点之后）**Summary 相位**的 assistant 消息——Core 只在
+/// 轮次成功收尾时把最终答复定格为 Summary（失败会回收为过程相位），
+/// 工具执行期间的过程文本（React 相位）与思考过程都不会被选中。
+/// 锚点优先按 `turn_start_message_id` 定位，缺失时回退 `turn_start_idx`。
+pub fn final_reply(session_json: &str, turn_start_idx: u32) -> Option<TurnFinishedRequest> {
+    let session: serde_json::Value = serde_json::from_str(session_json).ok()?;
+    let session_id = session.get("id")?.as_str()?.to_string();
+    let messages = session.get("messages")?.as_array()?;
+    let anchor = session
+        .get("turn_start_message_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| {
+            messages.iter().position(|message| {
+                message.get("id").and_then(serde_json::Value::as_str) == Some(id)
+            })
+        })
+        .unwrap_or(turn_start_idx as usize);
+    let str_field = |message: &serde_json::Value, key: &str| {
+        message
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    messages
+        .get(anchor + 1..)?
+        .iter()
+        .rev()
+        .filter(|message| {
+            str_field(message, "role").as_deref() == Some("assistant")
+                && str_field(message, "phase").as_deref() == Some("summary")
+        })
+        .find_map(|message| {
+            let text = message
+                .get("content")
+                .and_then(serde_json::Value::as_array)?
+                .iter()
+                .filter(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                })
+                .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+                .collect::<String>();
+            (!text.trim().is_empty()).then(|| TurnFinishedRequest {
+                session_id: session_id.clone(),
+                message_id: str_field(message, "id").unwrap_or_default(),
+                text,
+            })
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn message(id: &str, role: &str, phase: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "role": role,
+            "phase": phase,
+            "content": [{ "type": "text", "text": text }],
+        })
+    }
+
+    #[test]
+    fn final_reply_picks_summary_of_current_turn_only() {
+        let session = serde_json::json!({
+            "id": "s1",
+            "turn_start_message_id": "u2",
+            "messages": [
+                message("u1", "user", "normal", "上一轮"),
+                message("a1", "assistant", "summary", "上一轮答复"),
+                message("u2", "user", "normal", "本轮"),
+                message("a2", "assistant", "react", "我先查一下"),
+                message("t1", "tool", "react", "工具结果"),
+                message("a3", "assistant", "summary", "最终答复"),
+            ],
+        })
+        .to_string();
+        let reply = final_reply(&session, 0).unwrap();
+        assert_eq!(reply.session_id, "s1");
+        assert_eq!(reply.message_id, "a3");
+        assert_eq!(reply.text, "最终答复");
+    }
+
+    #[test]
+    fn final_reply_ignores_turns_without_summary() {
+        // 失败 / 取消的轮次没有 Summary 相位答复：只有过程文本时不朗读。
+        let session = serde_json::json!({
+            "id": "s1",
+            "messages": [
+                message("a1", "assistant", "summary", "上一轮答复"),
+                message("u2", "user", "normal", "本轮"),
+                message("a2", "assistant", "react", "过程文本"),
+                message("a3", "assistant", "summary", "  "),
+            ],
+        })
+        .to_string();
+        // 无锚点 id 时回退 turn_start_idx。
+        assert!(final_reply(&session, 1).is_none());
+        assert!(final_reply("not json", 0).is_none());
+    }
 
     #[test]
     fn config_defaults_fill_missing_fields() {

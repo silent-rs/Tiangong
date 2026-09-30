@@ -15,7 +15,7 @@ use tiangong_plugin_volcengine_protocol::{
     RecordStopResponse,
 };
 
-use crate::record_session::{self, RecordSession};
+use crate::record_session::{self, LiveSender, RecordSession};
 
 // ── 媒体目录 ──
 
@@ -191,7 +191,12 @@ fn which(program: &str) -> bool {
 static RECORDING: Mutex<Option<RecordSession>> = Mutex::new(None);
 
 /// 开始录音：使用调用方传入的会话 ID 启动原生采集。
-pub fn record_start(request: RecordStartRequest) -> Result<RecordStartResponse> {
+///
+/// `live` 非空时，采集到的 16 kHz PCM 同时实时转发给识别任务。
+pub fn record_start(
+    request: RecordStartRequest,
+    live: Option<LiveSender>,
+) -> Result<RecordStartResponse> {
     let session_id = request.session_id.trim().to_string();
     if session_id.is_empty() {
         bail!("record_start 缺少 session_id（由调用方生成并传入）");
@@ -204,7 +209,7 @@ pub fn record_start(request: RecordStartRequest) -> Result<RecordStartResponse> 
         stale.cancel();
     }
     let file_path = media_file_path("stt_rec", "wav")?;
-    *guard = Some(record_session::start(session_id.clone(), file_path)?);
+    *guard = Some(record_session::start(session_id.clone(), file_path, live)?);
     Ok(RecordStartResponse { session_id })
 }
 
@@ -220,6 +225,7 @@ pub fn record_stop(request: RecordControlRequest) -> Result<RecordStopResponse> 
         file_path,
         mime_type: "audio/wav".to_string(),
         duration: Some(duration),
+        text: None,
     })
 }
 
@@ -264,9 +270,13 @@ mod tests {
         record_cancel(request.clone());
         assert!(record_stop(request).is_err());
         assert!(
-            record_start(RecordStartRequest {
-                session_id: "  ".to_string()
-            })
+            record_start(
+                RecordStartRequest {
+                    session_id: "  ".to_string(),
+                    ..RecordStartRequest::default()
+                },
+                None
+            )
             .is_err()
         );
     }

@@ -16,10 +16,11 @@ use tiangong_plugin_volcengine_protocol::{
     GeneratedImage, ImageRequest, ImageResponse, LIST_VOICES_OPERATION, ListVoicesResponse,
     PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL, PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID,
     PLUGIN_VERSION, PlayRequest, PlayStatusResponse, RECORD_CANCEL_OPERATION,
-    RECORD_START_OPERATION, RECORD_STOP_OPERATION, RecordControlRequest, RecordStartRequest,
-    SET_CONFIG_OPERATION, STOP_OPERATION, SYNTHESIZE_OPERATION, SynthesizeRequest,
-    SynthesizeResponse, TRANSCRIBE_OPERATION, TranscribeRequest, TranscribeResponse,
-    VOLCENGINE_PROTOCOL_VERSION, VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
+    RECORD_START_OPERATION, RECORD_STOP_OPERATION, REPLY_FINAL_CHANNEL, RecordControlRequest,
+    RecordStartRequest, SET_CONFIG_OPERATION, STOP_OPERATION, SYNTHESIZE_OPERATION,
+    SynthesizeRequest, SynthesizeResponse, TRANSCRIBE_OPERATION, TURN_FINISHED_OPERATION,
+    TranscribeRequest, TranscribeResponse, TurnFinishedRequest, VOLCENGINE_PROTOCOL_VERSION,
+    VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
 };
 
 use crate::ark::{self, Endpoint, VideoOptions};
@@ -140,22 +141,30 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
         RECORD_START_OPERATION => {
             let request: RecordStartRequest =
                 serde_json::from_value(payload).context("解析 record_start 请求失败")?;
-            serde_json::to_value(audio::record_start(request)?)
-                .context("序列化 record_start 响应失败")
+            serde_json::to_value(record_start(request)?).context("序列化 record_start 响应失败")
         }
 
         RECORD_STOP_OPERATION => {
             let request: RecordControlRequest =
                 serde_json::from_value(payload).context("解析 record_stop 请求失败")?;
-            serde_json::to_value(audio::record_stop(request)?)
-                .context("序列化 record_stop 响应失败")
+            serde_json::to_value(record_stop(request).await?).context("序列化 record_stop 响应失败")
         }
 
         RECORD_CANCEL_OPERATION => {
             let request: RecordControlRequest =
                 serde_json::from_value(payload).context("解析 record_cancel 请求失败")?;
+            abort_live_asr(Some(&request.session_id));
             audio::record_cancel(request);
             serde_json::to_value(Empty {}).context("序列化 record_cancel 响应失败")
+        }
+
+        TURN_FINISHED_OPERATION => {
+            let request: TurnFinishedRequest =
+                serde_json::from_value(payload).context("解析 turn_finished 请求失败")?;
+            // 最终答复经通知推送给自动朗读 UI（无订阅者时静默丢弃）。
+            let body = serde_json::to_string(&request).context("序列化最终答复失败")?;
+            tiangong_plugin_sidecar::server::emit_notification(REPLY_FINAL_CHANNEL, body);
+            serde_json::to_value(Empty {}).context("序列化 turn_finished 响应失败")
         }
 
         other => bail!("未知的 Volcengine 操作: {other}"),
@@ -336,6 +345,120 @@ fn list_voices() -> Result<ListVoicesResponse> {
         );
     }
     Ok(ListVoicesResponse { voices })
+}
+
+// ── 边录边识别 ──
+
+/// 进行中的实时识别任务（与录音会话一一对应，同一时刻至多一路）。
+struct LiveAsr {
+    session_id: String,
+    task: tokio::task::JoinHandle<Result<speech::AsrResult>>,
+}
+
+static LIVE_ASR: std::sync::Mutex<Option<LiveAsr>> = std::sync::Mutex::new(None);
+
+fn live_asr_slot() -> std::sync::MutexGuard<'static, Option<LiveAsr>> {
+    LIVE_ASR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 中止实时识别：`session_id` 为空时中止任意残留任务，否则只中止匹配的会话。
+fn abort_live_asr(session_id: Option<&str>) {
+    let mut slot = live_asr_slot();
+    if slot
+        .as_ref()
+        .is_some_and(|live| session_id.is_none_or(|id| live.session_id == id))
+        && let Some(live) = slot.take()
+    {
+        live.task.abort();
+    }
+}
+
+/// 取出与会话匹配的实时识别任务。
+fn take_live_asr(session_id: &str) -> Option<LiveAsr> {
+    let mut slot = live_asr_slot();
+    if slot
+        .as_ref()
+        .is_some_and(|live| live.session_id == session_id)
+    {
+        slot.take()
+    } else {
+        None
+    }
+}
+
+/// 开始录音；开启 `transcribe` 时先建立实时识别任务，再把采集的 PCM 接入。
+fn record_start(
+    request: RecordStartRequest,
+) -> Result<tiangong_plugin_volcengine_protocol::RecordStartResponse> {
+    abort_live_asr(None);
+    if !request.transcribe {
+        return audio::record_start(request, None);
+    }
+    let config = config::load()?;
+    let endpoint = speech_endpoint(&config)?;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let model = config.asr_model.clone();
+    let language = request.language.clone();
+    let task = tokio::spawn(async move {
+        speech::recognize_stream(
+            &endpoint,
+            &model,
+            speech::AsrFormat::Pcm,
+            language.as_deref(),
+            receiver,
+        )
+        .await
+    });
+    let session_id = request.session_id.trim().to_string();
+    match audio::record_start(request, Some(sender)) {
+        Ok(response) => {
+            *live_asr_slot() = Some(LiveAsr { session_id, task });
+            Ok(response)
+        }
+        Err(error) => {
+            task.abort();
+            Err(error)
+        }
+    }
+}
+
+/// 停止录音；有实时识别时等待其最终结果，失败则回退为整段文件识别。
+async fn record_stop(
+    request: RecordControlRequest,
+) -> Result<tiangong_plugin_volcengine_protocol::RecordStopResponse> {
+    let live = take_live_asr(&request.session_id);
+    let stopped = tokio::task::spawn_blocking(move || audio::record_stop(request))
+        .await
+        .context("等待录音收尾失败")?;
+    let mut response = match stopped {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(live) = live {
+                live.task.abort();
+            }
+            return Err(error);
+        }
+    };
+    let Some(live) = live else {
+        return Ok(response);
+    };
+    let text = match live.task.await {
+        Ok(Ok(result)) => result.text,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "实时识别失败，回退为整段识别");
+            transcribe(TranscribeRequest {
+                file_path: response.file_path.clone(),
+                language: None,
+            })
+            .await?
+            .text
+        }
+        Err(error) => bail!("实时识别任务异常：{error}"),
+    };
+    response.text = Some(text);
+    Ok(response)
 }
 
 async fn transcribe(request: TranscribeRequest) -> Result<TranscribeResponse> {

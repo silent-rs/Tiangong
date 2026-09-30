@@ -154,7 +154,7 @@ pub fn parse_tts_stream(body: &str) -> Result<Vec<u8>> {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("未知错误");
-                bail!("豆包语音合成失败（{other}）：{message}");
+                bail!("豆包语音合成失败（{other}）：{}", friendly_error(message));
             }
         }
     }
@@ -185,7 +185,7 @@ pub async fn synthesize(
     if !status.is_success() {
         bail!(
             "豆包语音合成调用失败 ({status})：{}",
-            error_message(&body).unwrap_or_else(|| preview(&body))
+            friendly_error(&error_message(&body).unwrap_or_else(|| preview(&body)))
         );
     }
     let audio = parse_tts_stream(&body)?;
@@ -212,6 +212,8 @@ pub enum AsrFormat {
     Wav,
     Mp3,
     Ogg,
+    /// 16k / 16bit / 单声道小端 PCM（边录边传的实时识别）。
+    Pcm,
 }
 
 impl AsrFormat {
@@ -220,13 +222,14 @@ impl AsrFormat {
             Self::Wav => "wav",
             Self::Mp3 => "mp3",
             Self::Ogg => "ogg",
+            Self::Pcm => "pcm",
         }
     }
 
     fn codec(self) -> &'static str {
         match self {
             Self::Ogg => "opus",
-            Self::Wav | Self::Mp3 => "raw",
+            Self::Wav | Self::Mp3 | Self::Pcm => "raw",
         }
     }
 }
@@ -433,7 +436,7 @@ pub fn parse_asr_body(body: &Value) -> AsrResult {
 /// 音频分包大小：wav 按 16k/16bit/单声道的 200ms 计，压缩格式按 200ms 近似码率。
 fn chunk_size(format: AsrFormat) -> usize {
     match format {
-        AsrFormat::Wav => 16_000 * 2 * ASR_CHUNK_MS / 1000,
+        AsrFormat::Wav | AsrFormat::Pcm => 16_000 * 2 * ASR_CHUNK_MS / 1000,
         // mp3/ogg 为压缩流，按约 128kbps 估算 200ms 分包。
         AsrFormat::Mp3 | AsrFormat::Ogg => 128_000 / 8 * ASR_CHUNK_MS / 1000,
     }
@@ -447,9 +450,26 @@ pub async fn recognize(
     format: AsrFormat,
     language: Option<&str>,
 ) -> Result<AsrResult> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    for chunk in audio.chunks(chunk_size(format)) {
+        let _ = sender.send(chunk.to_vec());
+    }
+    drop(sender);
+    recognize_stream(endpoint, model, format, language, receiver).await
+}
+
+/// 边收边传的流式识别：`audio` 每收到一包即发送，通道关闭时以末包标志收尾，
+/// 返回最终结果。录音期间即可建立连接并上传，松手后只需等待最后一包的识别。
+pub async fn recognize_stream(
+    endpoint: &SpeechEndpoint,
+    model: &str,
+    format: AsrFormat,
+    language: Option<&str>,
+    audio: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Result<AsrResult> {
     tokio::time::timeout(
         ASR_TIMEOUT,
-        recognize_inner(endpoint, model, audio, format, language),
+        recognize_inner(endpoint, model, format, language, audio),
     )
     .await
     .map_err(|_| anyhow!("豆包语音识别超时"))?
@@ -458,9 +478,9 @@ pub async fn recognize(
 async fn recognize_inner(
     endpoint: &SpeechEndpoint,
     model: &str,
-    audio: &[u8],
     format: AsrFormat,
     language: Option<&str>,
+    mut audio: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Result<AsrResult> {
     let mut request = endpoint
         .ws_url("/api/v3/plan/sauc/bigmodel_nostream")
@@ -498,28 +518,32 @@ async fn recognize_inner(
 
     // 读端与写端并行：服务端每收到一包就回一包结果，不读会阻塞发送。
     let (mut sink, mut stream) = socket.split();
-    let chunks: Vec<Vec<u8>> = if audio.is_empty() {
-        vec![Vec::new()]
-    } else {
-        audio
-            .chunks(chunk_size(format))
-            .map(<[u8]>::to_vec)
-            .collect()
-    };
+    // 预留一包：通道关闭时才能确定哪一包是末包（无音频时发送空末包）。
     let writer = async move {
-        let total = chunks.len();
-        for (index, chunk) in chunks.into_iter().enumerate() {
-            let flags = if index + 1 == total {
-                FLAG_LAST_PACKET
-            } else {
-                FLAG_NONE
-            };
-            let frame =
-                encode_client_frame(MSG_AUDIO_ONLY_REQUEST, flags, SERIALIZATION_NONE, &chunk)?;
-            sink.send(Message::binary(frame))
-                .await
-                .context("发送音频分包失败")?;
+        let mut held: Option<Vec<u8>> = None;
+        while let Some(chunk) = audio.recv().await {
+            if let Some(previous) = held.replace(chunk) {
+                let frame = encode_client_frame(
+                    MSG_AUDIO_ONLY_REQUEST,
+                    FLAG_NONE,
+                    SERIALIZATION_NONE,
+                    &previous,
+                )?;
+                sink.send(Message::binary(frame))
+                    .await
+                    .context("发送音频分包失败")?;
+            }
         }
+        let last = held.unwrap_or_default();
+        let frame = encode_client_frame(
+            MSG_AUDIO_ONLY_REQUEST,
+            FLAG_LAST_PACKET,
+            SERIALIZATION_NONE,
+            &last,
+        )?;
+        sink.send(Message::binary(frame))
+            .await
+            .context("发送音频分包失败")?;
         anyhow::Ok(sink)
     };
     let reader = async {
@@ -549,7 +573,7 @@ async fn recognize_inner(
                     }
                 }
                 ServerFrame::Error { code, message } => {
-                    bail!("豆包语音识别失败（{code}）：{message}")
+                    bail!("豆包语音识别失败（{code}）：{}", friendly_error(&message))
                 }
             }
         }
@@ -561,6 +585,19 @@ async fn recognize_inner(
         .map_err(|_| anyhow!("识别连接状态异常"))?;
     let _ = socket.close(None).await;
     Ok(parse_asr_body(&latest))
+}
+
+/// 已知的账号 / 套餐类错误转成可操作的中文提示，其余原样返回。
+fn friendly_error(message: &str) -> String {
+    const HINTS: &[(&str, &str)] = &[(
+        "AgentPlanDeductNotEnabled",
+        "账号未开启 Agent Plan 抵扣，请在火山方舟控制台「Agent Plan → 语音模型」开启超额后付费后重试",
+    )];
+    HINTS
+        .iter()
+        .find(|(needle, _)| message.contains(needle))
+        .map(|(_, hint)| (*hint).to_string())
+        .unwrap_or_else(|| message.to_string())
 }
 
 /// 从错误响应体提取信息（兼容 `{message}`、`{header:{message}}` 等形态）。
@@ -626,6 +663,13 @@ mod tests {
         assert_eq!(speech_rate(1.25), 25);
         assert_eq!(speech_rate(f64::NAN), 0);
         assert_eq!(speech_rate(-1.0), 0);
+    }
+
+    #[test]
+    fn known_account_errors_map_to_actionable_hints() {
+        let raw = "acquire failed err:call ark get status code:403 code:Forbidden.AgentPlanDeductNotEnabled message:Agent Plan deduction is not enabled";
+        assert!(friendly_error(raw).contains("超额后付费"));
+        assert_eq!(friendly_error("other failure"), "other failure");
     }
 
     #[test]
@@ -986,6 +1030,37 @@ mod tests {
         assert_eq!(get("x-api-key"), "plan-key");
         assert_eq!(get("x-api-resource-id"), "volc.seedasr.sauc.duration");
         assert_eq!(get("x-api-sequence"), "-1");
+    }
+
+    #[tokio::test]
+    async fn recognize_stream_sends_packets_as_they_arrive() {
+        let (base_url, server) = ws_stub(None).await;
+        let endpoint = SpeechEndpoint {
+            base_url,
+            api_key: "plan-key".to_string(),
+        };
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let producer = tokio::spawn(async move {
+            for _ in 0..2 {
+                sender.send(vec![0u8; 6400]).unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let result = recognize_stream(
+            &endpoint,
+            "doubao-seed-asr-2.0",
+            AsrFormat::Pcm,
+            None,
+            receiver,
+        )
+        .await
+        .unwrap();
+        producer.await.unwrap();
+        assert_eq!(result.text, "你好世界");
+        let (_, packets, params) = server.await.unwrap();
+        assert_eq!(packets, 2);
+        assert_eq!(params["audio"]["format"], "pcm");
+        assert_eq!(params["audio"]["codec"], "raw");
     }
 
     #[tokio::test]

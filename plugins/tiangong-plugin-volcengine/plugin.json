@@ -21,7 +21,8 @@
     "tools": true,
     "prompt": true,
     "events": [
-      "session.*"
+      "session.*",
+      "sidecar.*"
     ]
   },
   "ui": {

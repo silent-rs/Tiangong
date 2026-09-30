@@ -25,6 +25,56 @@ pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 const AUDIO_QUEUE_FRAMES: usize = 512;
 /// 写盘循环等待音频数据的超时：期间轮询控制命令，停止延迟不超过该值。
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// 实时识别分包：16 kHz / 16bit / 单声道 200ms 的 PCM 字节数。
+const LIVE_CHUNK_BYTES: usize = TARGET_SAMPLE_RATE as usize * 2 / 5;
+
+/// 实时识别的 PCM 输出端：攒满一包即发送；停止时补发剩余并关闭通道，
+/// 取消时直接丢弃。发送失败（识别任务已结束）只停止转发，不影响录音。
+pub type LiveSender = tokio::sync::mpsc::UnboundedSender<Vec<u8>>;
+
+struct LivePcm {
+    sender: Option<LiveSender>,
+    buffer: Vec<u8>,
+}
+
+impl LivePcm {
+    fn new(sender: Option<LiveSender>) -> Self {
+        Self {
+            sender,
+            buffer: Vec::with_capacity(LIVE_CHUNK_BYTES),
+        }
+    }
+
+    fn push(&mut self, samples: &[i16]) {
+        if self.sender.is_none() {
+            return;
+        }
+        for sample in samples {
+            self.buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+        while self.buffer.len() >= LIVE_CHUNK_BYTES {
+            let rest = self.buffer.split_off(LIVE_CHUNK_BYTES);
+            let chunk = std::mem::replace(&mut self.buffer, rest);
+            self.send(chunk);
+        }
+    }
+
+    fn send(&mut self, chunk: Vec<u8>) {
+        if let Some(sender) = &self.sender
+            && sender.send(chunk).is_err()
+        {
+            self.sender = None;
+        }
+    }
+
+    /// 停止收尾：补发不足一包的剩余音频，随后关闭通道（识别端据此发送末包）。
+    fn finish(mut self) {
+        if !self.buffer.is_empty() {
+            let chunk = std::mem::take(&mut self.buffer);
+            self.send(chunk);
+        }
+    }
+}
 
 enum Control {
     /// 停止并收尾，回传写盘的目标采样率样本总数（换算时长）。
@@ -42,14 +92,20 @@ pub struct RecordSession {
 }
 
 /// 启动一次录音：spawn 录音线程，等待其完成设备打开与文件创建。
-pub fn start(session_id: String, file_path: PathBuf) -> Result<RecordSession> {
+///
+/// 传入 `live` 时，重采样后的 16 kHz PCM 同时按 200ms 分包实时转发（边录边识别）。
+pub fn start(
+    session_id: String,
+    file_path: PathBuf,
+    live: Option<LiveSender>,
+) -> Result<RecordSession> {
     let (control_tx, control_rx) = std::sync::mpsc::channel::<Control>();
     let (started_tx, started_rx) = std::sync::mpsc::channel::<Result<()>>();
     let spawn_path = file_path.clone();
     let worker = std::thread::Builder::new()
         .name("volcengine-record".to_string())
         .spawn(move || {
-            if let Err(error) = run_recording(&spawn_path, &control_rx, &started_tx) {
+            if let Err(error) = run_recording(&spawn_path, &control_rx, &started_tx, live) {
                 tracing::warn!(%error, "录音线程结束");
             }
         })
@@ -99,6 +155,7 @@ fn run_recording(
     file_path: &Path,
     control_rx: &Receiver<Control>,
     started_tx: &std::sync::mpsc::Sender<Result<()>>,
+    live: Option<LiveSender>,
 ) -> Result<()> {
     let (stream, src_rate, audio_rx, dropped) = match open_input_stream() {
         Ok(opened) => opened,
@@ -131,7 +188,7 @@ fn run_recording(
     }
 
     // —— 采集写盘循环 ——
-    let mut writer = (wav, Resampler::new(src_rate as f64));
+    let mut writer = (wav, Resampler::new(src_rate as f64), LivePcm::new(live));
     let mut written_samples: u64 = 0;
     let mut stop_ack: Option<Sender<u64>> = None;
     let mut cancel = false;
@@ -169,11 +226,14 @@ fn run_recording(
     }
 
     if cancel {
+        // 取消：丢弃未发送的实时音频，关闭通道（识别任务由调用方中止）。
+        drop(writer.2);
         drop(writer.0);
         let _ = std::fs::remove_file(file_path);
         return Ok(());
     }
 
+    writer.2.finish();
     writer.0.finalize().context("完成 WAV 文件收尾失败")?;
     let dropped_frames = dropped.load(Ordering::Relaxed);
     if dropped_frames > 0 {
@@ -248,14 +308,16 @@ fn open_input_stream() -> Result<OpenedStream> {
 }
 
 fn write_samples<W: std::io::Write + std::io::Seek>(
-    writer: &mut (hound::WavWriter<W>, Resampler),
+    writer: &mut (hound::WavWriter<W>, Resampler, LivePcm),
     samples: &[f32],
     written: &mut u64,
 ) -> Result<()> {
-    writer.1.push(samples, |chunk| {
+    let (wav, resampler, live) = writer;
+    resampler.push(samples, |chunk| {
         for sample in chunk {
-            writer.0.write_sample(*sample).context("写入音频数据失败")?;
+            wav.write_sample(*sample).context("写入音频数据失败")?;
         }
+        live.push(chunk);
         *written += chunk.len() as u64;
         Ok(())
     })
@@ -375,7 +437,7 @@ mod tests {
     #[ignore = "需要真实麦克风，本机手动验证"]
     fn 实录3秒停止并校验wav() {
         let path = std::env::temp_dir().join(format!("stt-rec-test-{}.wav", scru128::new()));
-        let session = start("live-test".into(), path.clone()).expect("启动录音失败");
+        let session = start("live-test".into(), path.clone(), None).expect("启动录音失败");
         std::thread::sleep(Duration::from_secs(3));
         let duration = session.stop().expect("停止录音失败");
         assert!(duration > 2.5 && duration < 4.5, "duration={duration}");
@@ -404,7 +466,7 @@ mod tests {
     #[ignore = "需要真实麦克风，本机手动验证"]
     fn 实录取消不遗留文件() {
         let path = std::env::temp_dir().join(format!("stt-rec-test-{}.wav", scru128::new()));
-        let session = start("live-cancel".into(), path.clone()).expect("启动录音失败");
+        let session = start("live-cancel".into(), path.clone(), None).expect("启动录音失败");
         std::thread::sleep(Duration::from_millis(800));
         session.cancel();
         assert!(!path.exists(), "取消后录音文件应被删除");
@@ -445,6 +507,23 @@ mod tests {
         for value in mono {
             assert!(value.abs() < 1e-6, "静音样本被转为 {value}");
         }
+    }
+
+    #[test]
+    fn 实时pcm按200ms分包且停止时补发剩余() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut live = LivePcm::new(Some(sender));
+        // 1.5 包：满一包立即发送，剩余半包等停止时补发。
+        live.push(&vec![1i16; LIVE_CHUNK_BYTES / 2 + LIVE_CHUNK_BYTES / 4]);
+        assert_eq!(receiver.try_recv().unwrap().len(), LIVE_CHUNK_BYTES);
+        assert!(receiver.try_recv().is_err());
+        live.finish();
+        assert_eq!(receiver.try_recv().unwrap().len(), LIVE_CHUNK_BYTES / 2);
+        // 通道已关闭：识别端据此发送末包。
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]
