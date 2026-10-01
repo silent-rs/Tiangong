@@ -2557,4 +2557,23 @@ async fn failed_tool_call_does_not_inject_images() {
         &mut pending,
     );
     assert_eq!(pending.len(), 1, "成功结果应注入图片");
+
+    // 未注册处理器的工具：core 不自行生成抬头，结果原样交给模型。
+    let tool_texts: Vec<String> = ctx
+        .session
+        .messages
+        .iter()
+        .filter(|message| message.role == crate::session::MessageRole::Tool)
+        .map(|message| message.text_content())
+        .collect();
+    assert!(
+        tool_texts[0].starts_with("[tool_failure]"),
+        "失败结果不应带 core 生成的抬头：{}",
+        tool_texts[0]
+    );
+    assert!(
+        !tool_texts[1].starts_with("调用"),
+        "成功结果不应带 core 生成的抬头：{}",
+        tool_texts[1]
+    );
 }

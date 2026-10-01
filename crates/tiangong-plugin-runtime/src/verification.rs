@@ -409,6 +409,7 @@ mod tests {
             prompt: None,
             resources: None,
             mention: None,
+            tool_icons: None,
         }
     }
 

@@ -566,35 +566,6 @@ fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'st
     }
 }
 
-pub(crate) fn tool_result_provider_text(
-    tool_name: &str,
-    result: &crate::tools::result::ToolResult,
-    _allow_memory_context: bool,
-) -> String {
-    // recall_memory 的引导文案已由 memory 插件内嵌进 ToolResult.stdout，
-    // 不再需要 core 特判包装，统一走 tool_result_full_output。
-    if is_media_tool_name(tool_name) && result.ok {
-        let media_desc = if result.stdout.trim().is_empty() {
-            result.summary.clone()
-        } else {
-            format!("{}\n{}", result.summary, result.stdout)
-        };
-        format!(
-            "工具 {tool_name} 执行成功：{}。不要再次调用该工具。",
-            media_desc
-        )
-    } else {
-        tool_result_full_output(result)
-    }
-}
-
-pub(crate) fn is_media_tool_name(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "generate_image" | "generate_video" | "text_to_speech" | "speech_to_text"
-    )
-}
-
 pub(crate) fn tool_result_full_output(result: &crate::tools::result::ToolResult) -> String {
     if result.ok {
         return if result.stdout.trim().is_empty() {

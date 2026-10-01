@@ -217,6 +217,11 @@ pub fn prompt_status(session_id: &str) {
 
 /// 工具图标
 fn tool_icon(name: &str) -> &'static str {
+    // 重名工具按 `{插件id}__{工具名}` 暴露：按原名取图标（MCP 工具名保持原样）。
+    let name = match name.split_once("__") {
+        Some((_, base)) if !name.starts_with("mcp__") => base,
+        _ => name,
+    };
     match name {
         "read_file" => "📄",
         "write_file" | "replace_in_file" => "✏️",

@@ -652,6 +652,11 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             },
         ))
     }
+    fn result_header(&self, call: &ToolCall, ok: bool) -> Option<String> {
+        Some(crate::core_bridge::plugin_result_header(
+            &self.id, &call.name, ok,
+        ))
+    }
 }
 
 // PromptSectionProvider：供首次会话初始化及压缩、清理后的声明整理使用。

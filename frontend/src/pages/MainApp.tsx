@@ -93,6 +93,11 @@ export function MainApp() {
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [interactionVisible, setInteractionVisible] = useState(false);
   const [inputOverlayVisible, setInputOverlayVisible] = useState(false);
+  const [inputOverlayHint, setInputOverlayHint] = useState<string | null>(null);
+  const handleInputOverlayVisibility = useCallback((visible: boolean, hint: string | null) => {
+    setInputOverlayVisible(visible);
+    setInputOverlayHint(visible ? hint : null);
+  }, []);
   const [messageInputHeight, setMessageInputHeight] = useState(0);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
@@ -715,13 +720,16 @@ export function MainApp() {
                 </div>
 
                 <LazyMessageInput
-                  interactionVisible={interactionVisible || inputOverlayVisible}
+                  interactionVisible={interactionVisible}
+                  inputOverlayVisible={inputOverlayVisible}
+                  inputOverlayHint={inputOverlayHint}
+                  inputOverlay={(
+                    <InputOverlayPluginHost
+                      suppressed={interactionVisible}
+                      onVisibilityChange={handleInputOverlayVisibility}
+                    />
+                  )}
                   onHeightChange={setMessageInputHeight}
-                />
-                <InputOverlayPluginHost
-                  suppressed={interactionVisible}
-                  inputHeight={messageInputHeight}
-                  onVisibilityChange={setInputOverlayVisible}
                 />
                 <InteractionPluginHost
                   inputHeight={messageInputHeight}

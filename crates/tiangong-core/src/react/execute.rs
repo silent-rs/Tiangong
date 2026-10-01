@@ -354,21 +354,30 @@ pub(super) fn record_completed_tool_call(
         (!args_summary.is_empty()).then_some(args_summary),
         &result.summary,
     );
+    // 抬头由处理该调用的插件提供，core 只原样放在首行；插件未提供时不加。
+    let header = ctx
+        .tool_overrides
+        .get(&call.name)
+        .and_then(|handler| handler.result_header(call, result.ok));
+    let body = if result.ok {
+        tool_result_full_output(result)
+    } else {
+        ToolFailureRecord::new(
+            &call.name,
+            &call.id,
+            args_summary.to_string(),
+            classify_tool_result_failure(result),
+            tool_result_full_output(result),
+        )
+        .render_for_model()
+    };
     append_tool_result_message_with_duration(
         &mut ctx.session,
         &call.id,
         &call.name,
-        if result.ok {
-            tool_result_provider_text(&call.name, result, false)
-        } else {
-            ToolFailureRecord::new(
-                &call.name,
-                &call.id,
-                args_summary.to_string(),
-                classify_tool_result_failure(result),
-                tool_result_full_output(result),
-            )
-            .render_for_model()
+        match header {
+            Some(header) => format!("{header}\n{body}"),
+            None => body,
         },
         !result.ok,
         duration_ms,
@@ -406,14 +415,17 @@ pub(super) fn append_failure_recovery_prompt(
     let mut failed_tools = history.failed_names.iter().cloned().collect::<Vec<_>>();
     failed_tools.sort();
     let collaboration_hint = "如果当前执行单元无法继续推进，请优先使用当前已注册工具中合适的协作或替代能力；仍无法解决时，再向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。";
-    let recall_hint = if request_tools
+    // 插件工具以 `{插件id}__{工具名}` 暴露，按原名后缀查找并提示实际名称。
+    let recall_hint = request_tools
         .iter()
-        .any(|tool| tool.name == "recall_memory")
-    {
-        "优先调用 recall_memory，充分查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、使用其他已注册协作能力或请求用户协作。"
-    } else {
-        ""
-    };
+        .find(|tool| tool.name == "recall_memory" || tool.name.ends_with("__recall_memory"))
+        .map(|tool| {
+            format!(
+                "优先调用 {}，充分查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、使用其他已注册协作能力或请求用户协作。",
+                tool.name
+            )
+        })
+        .unwrap_or_default();
     let mut reminder = Message::new(
         MessageRole::Tool,
         format!(

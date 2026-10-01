@@ -825,6 +825,8 @@ fn run_gui() {
             tiangong_app::commands::plugin_open_entry,
             tiangong_app::commands::plugin_read_entry_resource,
             tiangong_app::commands::plugin_read_icon,
+            tiangong_app::commands::list_tool_icons,
+            tiangong_app::commands::plugin_read_tool_icon,
             tiangong_app::commands::plugin_list_trusted_publishers,
             tiangong_app::commands::plugin_import_trusted_publisher,
             tiangong_app::commands::plugin_remove_trusted_publisher,

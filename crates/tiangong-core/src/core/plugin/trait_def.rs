@@ -42,6 +42,15 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 插件唯一标识（日志/调试用）。
     fn id(&self) -> &str;
 
+    /// 工具对外名称是否由插件自己决定。
+    ///
+    /// 默认 false：core 把该插件声明的工具统一改为 `{插件id}__{工具名}` 暴露，
+    /// 调用时还原原名再交给插件。聚合多个插件的桥接实现（自行按真实插件
+    /// 加前缀，并提供不属于任何插件的宿主固定通道）返回 true，core 原样暴露。
+    fn names_own_tools(&self) -> bool {
+        false
+    }
+
     /// 注入当前会话的工作目录。
     ///
     /// core 在 engine 创建时（每 turn 现建）调用，工作目录变更在下次 turn 开始时

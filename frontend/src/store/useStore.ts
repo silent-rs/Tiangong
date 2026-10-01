@@ -1692,10 +1692,13 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     // 空闲：写入草稿并发送（sendMessage 自管 is_sending/revision/清缓存）。
+    // 附件必须一并写入草稿：sendMessage 以同步后的草稿附件为准投递，
+    // 只作为参数传入会被空草稿覆盖（语音输入的录音附件曾因此丢失）。
     get().setInputCacheText(cacheKey, text);
+    if (attachments.length > 0) get().setInputCacheAttachments(cacheKey, attachments);
     const fresh = get().inputCaches[cacheKey];
     if (!fresh) return;
-    void get().sendMessage(cacheKey, text, attachments, fresh.revision, trustMode);
+    void get().sendMessage(cacheKey, text, fresh.attachments, fresh.revision, trustMode);
   },
 
   removeQueuedInputMessage: (cacheKey, messageId) => {

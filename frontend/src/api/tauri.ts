@@ -633,6 +633,14 @@ export interface SessionInputOverlayPayload {
   plugin_id: string;
   visible: boolean;
   session_id?: string | null;
+  /** 覆盖层显示期间替换输入区底部快捷键提示的文案。 */
+  hint?: string | null;
+}
+
+/** 工具图标查询表条目：图标名或插件内资源路径（资源图标带所属插件）。 */
+export interface ToolIconEntry {
+  icon: string;
+  plugin_id?: string | null;
 }
 
 /** 插件入口资源响应（字节数组 + MIME）。 */
@@ -1274,6 +1282,14 @@ export const api = {
   /// 列出拓展区 App（声明 extension.tab 贡献的插件，能力矩阵数据源）。
   listExtensionApps: (): Promise<AppEntry[]> =>
     invoke('list_extension_apps'),
+
+  /// 工具图标查询表（键为工具名与 `{插件id}__{工具名}`；查不到的工具用默认图标）。
+  listToolIcons: (): Promise<Record<string, ToolIconEntry>> =>
+    invoke('list_tool_icons'),
+
+  /// 读取插件在 tool_icons 中声明的图标资源。
+  pluginReadToolIcon: (pluginId: string, icon: string): Promise<PluginEntryResource> =>
+    invoke('plugin_read_tool_icon', { pluginId, icon }),
 
   /// 插件实例生命周期：宿主预留实例编号（scru128）。
   pluginInstanceReserve: (): Promise<string> =>

@@ -72,6 +72,11 @@ pub struct PluginManifest {
     /// @提及声明：声明后插件出现在输入框 @ 候选中，用户可点名调用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mention: Option<MentionManifest>,
+    /// 工具图标：工具原名 → 图标（宿主内置图标名，或插件目录内 png/svg/jpeg
+    /// 相对路径）；键 `*` 为本插件其余工具的默认图标。界面展示用，声明不合法
+    /// 的条目被忽略，不影响插件装载。见 [`crate::tool_icons`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_icons: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// @提及声明（`mention` 字段）。

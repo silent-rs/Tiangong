@@ -259,6 +259,12 @@ impl ToolOverrideHandler for TsPluginAdapter {
             },
         ))
     }
+
+    fn result_header(&self, call: &ToolCall, ok: bool) -> Option<String> {
+        Some(crate::core_bridge::plugin_result_header(
+            &self.id, &call.name, ok,
+        ))
+    }
 }
 
 fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
@@ -564,6 +570,7 @@ mod tests {
             prompt: None,
             resources: None,
             mention,
+            tool_icons: None,
         }
     }
 

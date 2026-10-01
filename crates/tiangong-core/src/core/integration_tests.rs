@@ -40,7 +40,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
             assert_eq!(index,4);
             return ResponseTemplate::new(200).set_body_json(json!({"id":"summary","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"[[SUMMARY]]\n已完成前两轮，第三轮流中断后按截断内容收尾。"}],"stop_reason":"end_turn","usage":usage}));
         }
-        let block = if index==0 { json!({"type":"tool_use","id":"probe-call","name":"probe","input":{}}) } else { json!({"type":"text","text":"完成"}) };
+        let block = if index==0 { json!({"type":"tool_use","id":"probe-call","name":"usage-probe__probe","input":{}}) } else { json!({"type":"text","text":"完成"}) };
         let mut events = vec![
             json!({"type":"message_start","message":{"id":format!("m{index}"),"model":"glm-5.3-flash","role":"assistant","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}),
             json!({"type":"content_block_start","index":0,"content_block":block}),
@@ -298,12 +298,12 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 names,
                 [
                     "plugin_injection",
-                    "identity_b",
-                    "identity_a",
-                    "z_first",
-                    "y_first",
-                    "a_last",
-                    "b_last"
+                    "prompt__identity_b",
+                    "prompt__identity_a",
+                    "alpha__z_first",
+                    "alpha__y_first",
+                    "zeta__a_last",
+                    "zeta__b_last"
                 ]
             );
             let system = payload["messages"][0]["content"].as_str().unwrap();
@@ -456,10 +456,17 @@ async fn tool_roundtrip_executes_plugin_and_answers() {
                     request
                         .latest_user_text()
                         .is_some_and(|text| text.contains("执行 echo 工具"))
-                        && request.defined_tools().iter().any(|name| name == "echo")
+                        && request
+                            .defined_tools()
+                            .iter()
+                            .any(|name| name == "echo-plugin__echo")
                         && request.tool_results().is_empty()
                 },
-                MockReply::sse(stream_tool_call_chunks("call-1", "echo", &["{", "}"])),
+                MockReply::sse(stream_tool_call_chunks(
+                    "call-1",
+                    "echo-plugin__echo",
+                    &["{", "}"],
+                )),
             ),
         ],
     )
@@ -483,12 +490,17 @@ async fn tool_roundtrip_executes_plugin_and_answers() {
     events.assert_single_success_terminal();
 
     let first = chat_request_at(&server, 0).await;
-    assert!(first.defined_tools().iter().any(|name| name == "echo"));
+    assert!(
+        first
+            .defined_tools()
+            .iter()
+            .any(|name| name == "echo-plugin__echo")
+    );
     assert!(first.allows_tool_calls());
     let second = chat_request_at(&server, 1).await;
     assert_eq!(
         second.assistant_tool_calls(),
-        vec![("call-1".to_string(), "echo".to_string())]
+        vec![("call-1".to_string(), "echo-plugin__echo".to_string())]
     );
     let results = second.tool_results();
     assert_eq!(results.len(), 1);
@@ -1176,7 +1188,7 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
             }
             let usage = json!({"input_tokens": 10, "output_tokens": 5});
             let block = if index == 0 {
-                json!({"type": "tool_use", "id": "shot-call", "name": "desktop_screenshot", "input": {}})
+                json!({"type": "tool_use", "id": "shot-call", "name": "computer-use-screenshot-test__desktop_screenshot", "input": {}})
             } else {
                 json!({"type": "text", "text": "已看到截图"})
             };

@@ -23,12 +23,33 @@ use tiangong_core::permission::TrustMode;
 use tiangong_core::react::message::INJECTION_TOOL_NAME;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tools::extension::{
-    PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider, call_with_name,
+    namespace_tool_specs,
 };
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
 
 use crate::registry::{self, RuntimeKind};
+
+/// 工具结果抬头的状态词。
+fn result_status_text(ok: bool) -> &'static str {
+    if ok { "成功" } else { "失败" }
+}
+
+/// 插件工具结果的抬头：带上实际处理的插件 id 与插件声明的原工具名。
+///
+/// 抬头由插件侧（runtime 适配器）提供，core 只原样放在结果首行。
+pub fn plugin_result_header(plugin_id: &str, tool_name: &str, ok: bool) -> String {
+    format!(
+        "调用插件 {plugin_id} 的 {tool_name}：{}",
+        result_status_text(ok)
+    )
+}
+
+/// 无法定位到具体插件时的抬头（如自制插件通道缺少参数）。
+fn tool_result_header(tool_name: &str, ok: bool) -> String {
+    format!("调用工具 {tool_name}：{}", result_status_text(ok))
+}
 
 /// 自制插件动态调用工具名（description 恒定，不含任何插件信息——
 /// 插件装卸不改变 tools 声明，KV cache 前缀保持稳定）。
@@ -107,6 +128,19 @@ fn list_local_plugins_spec() -> ToolSpec {
     }
 }
 
+/// 聚合工具路由：对外名称 → 处理插件与其声明的原名。
+#[derive(Clone)]
+struct ToolRoute {
+    adapter: Arc<dyn Plugin>,
+    original: String,
+}
+
+impl ToolRoute {
+    fn inner_call(&self, call: &ToolCall) -> ToolCall {
+        call_with_name(call, &self.original)
+    }
+}
+
 /// Core 侧的 runtime 聚合插件。
 pub struct RuntimeCorePlugin {
     storage_root: PathBuf,
@@ -115,7 +149,7 @@ pub struct RuntimeCorePlugin {
     delivered: Mutex<HashMap<String, Arc<dyn Plugin>>>,
     /// 最近一次聚合构建的工具路由表（tool_name → 拥有者适配器）。
     /// `tool_specs` 聚合时重建；`handle` 只读查询。
-    tool_routes: RwLock<HashMap<String, Arc<dyn Plugin>>>,
+    tool_routes: RwLock<HashMap<String, ToolRoute>>,
     /// 本 Core 自留的反馈通道（turn 内有效）：自制插件清单变化时经
     /// 注入通道追加到对话历史。
     feedback_tx: RwLock<Option<tiangong_core::core::plugin::PluginFeedbackTx>>,
@@ -182,16 +216,25 @@ impl RuntimeCorePlugin {
     fn aggregate_tool_specs(&self) -> Vec<ToolSpec> {
         let adapters = self.adapters();
         let mut specs = Vec::new();
-        let mut routes = HashMap::new();
-        for adapter in &adapters {
-            if registry::is_local_plugin(adapter.id()) {
-                continue;
-            }
-            for spec in adapter.tool_specs() {
-                if !routes.contains_key(&spec.name) {
-                    routes.insert(spec.name.clone(), adapter.clone());
-                    specs.push(spec);
+        let mut routes: HashMap<String, ToolRoute> = HashMap::new();
+        // 插件工具一律以 `{插件id}__{工具名}` 暴露，路由表记录原名以便转发。
+        for adapter in adapters
+            .iter()
+            .filter(|adapter| !registry::is_local_plugin(adapter.id()))
+        {
+            for (original, spec) in namespace_tool_specs(adapter.id(), adapter.tool_specs()) {
+                if routes.contains_key(&spec.name) {
+                    tracing::warn!(tool = %spec.name, plugin = %adapter.id(), "工具名冲突，保留先注册者");
+                    continue;
                 }
+                routes.insert(
+                    spec.name.clone(),
+                    ToolRoute {
+                        adapter: adapter.clone(),
+                        original,
+                    },
+                );
+                specs.push(spec);
             }
         }
         // 固定通道工具（description 恒定）。路由表按函数名直查自制适配器，
@@ -347,6 +390,10 @@ impl Plugin for RuntimeCorePlugin {
     fn id(&self) -> &str {
         "plugin-runtime"
     }
+    /// 聚合桥自行按真实插件 id 命名工具，固定通道保持原名。
+    fn names_own_tools(&self) -> bool {
+        true
+    }
 
     fn set_execution_context(&self, workspace: Option<&std::path::Path>, trust: TrustMode) {
         self.each_adapter(|adapter| adapter.set_execution_context(workspace, trust));
@@ -465,11 +512,46 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                     .ok()
                     .and_then(|routes| routes.get(&call.name).cloned());
                 match owner {
-                    Some(adapter) => adapter.handle(call, session, actor_id),
+                    Some(route) => route
+                        .adapter
+                        .handle(&route.inner_call(call), session, actor_id),
                     // 路由表在 tool_specs 聚合时重建；未知工具名不拦截，
                     // 交回 core 默认逻辑。
                     None => Box::pin(async { None }),
                 }
+            }
+        }
+    }
+
+    fn result_header(&self, call: &ToolCall, ok: bool) -> Option<String> {
+        match call.name.as_str() {
+            // 自制插件经固定通道调用：抬头落到实际的插件与方法。
+            CALL_LOCAL_PLUGIN_TOOL => {
+                let arguments = &call.arguments;
+                let plugin = arguments.get("plugin_name").and_then(|v| v.as_str());
+                let function = arguments.get("function_name").and_then(|v| v.as_str());
+                Some(match (plugin, function) {
+                    (Some(plugin), Some(function)) => plugin_result_header(plugin, function, ok),
+                    _ => tool_result_header(&call.name, ok),
+                })
+            }
+            LIST_LOCAL_PLUGINS_TOOL => Some(tool_result_header(&call.name, ok)),
+            _ => {
+                let route = self
+                    .tool_routes
+                    .read()
+                    .ok()
+                    .and_then(|routes| routes.get(&call.name).cloned())?;
+                route
+                    .adapter
+                    .result_header(&route.inner_call(call), ok)
+                    .or_else(|| {
+                        Some(plugin_result_header(
+                            route.adapter.id(),
+                            &route.original,
+                            ok,
+                        ))
+                    })
             }
         }
     }

@@ -1,5 +1,5 @@
 import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
-import type { SetStateAction } from 'react';
+import type { ReactNode, SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
@@ -90,7 +90,15 @@ const SLASH_COMMANDS: MentionCandidate[] = [  {
 ];
 
 export interface MessageInputProps {
+  /** 征询交互覆盖整个输入区时为 true：输入区整体不可交互。 */
   interactionVisible?: boolean;
+  /** 输入覆盖层（`session.input-overlay`）接管编辑框时为 true：仅编辑框区域让位，
+   *  上方运行状态 / 模型选择与下方目录 / 用量信息保持可用。 */
+  inputOverlayVisible?: boolean;
+  /** 输入覆盖层宿主节点，渲染在编辑框区域内并与其同尺寸。 */
+  inputOverlay?: ReactNode;
+  /** 输入覆盖层显示期间替换底栏快捷键提示的文案。 */
+  inputOverlayHint?: string | null;
   onHeightChange?: (height: number) => void;
 }
 
@@ -99,6 +107,9 @@ const MODEL_DEFAULT_VALUE = '__default__';
 
 export function MessageInput({
   interactionVisible = false,
+  inputOverlayVisible = false,
+  inputOverlay,
+  inputOverlayHint = null,
   onHeightChange,
 }: MessageInputProps) {
   const cacheKey = useStore(selectCurrentInputCacheKey);
@@ -137,6 +148,7 @@ export function MessageInput({
   const editorRef = useRef<MentionEditorHandle>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
   const interactionContentRef = useRef<HTMLDivElement>(null);
+  const editorContentRef = useRef<HTMLDivElement>(null);
   const lastNativeDropAtRef = useRef(0);
 
   // @提及补全状态
@@ -175,6 +187,24 @@ export function MessageInput({
     }
     return () => content.removeAttribute('inert');
   }, [interactionVisible]);
+
+  // 输入覆盖层只接管编辑框：编辑框与按钮区置为 inert，覆盖层本身不受影响。
+  useLayoutEffect(() => {
+    const content = editorContentRef.current;
+    if (!content) return;
+    if (inputOverlayVisible) {
+      content.setAttribute('inert', '');
+      setMentionOpen(false);
+      setIsDraggingFiles(false);
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && content.contains(activeElement)) {
+        activeElement.blur();
+      }
+    } else {
+      content.removeAttribute('inert');
+    }
+    return () => content.removeAttribute('inert');
+  }, [inputOverlayVisible]);
 
   const setInputContent = useCallback((content: string) => {
     if (cacheKey) setInputCacheText(cacheKey, content);
@@ -345,11 +375,12 @@ export function MessageInput({
     ? 'idle'
     : currentSessionRunStatus || runStatus;
   const isIdle = currentSessionStatus === 'idle';
-  const canSend = !interactionVisible
+  const editorBlocked = interactionVisible || inputOverlayVisible;
+  const canSend = !editorBlocked
     && !isSending
     && !!cacheKey
     && (inputContent.trim().length > 0 || attachments.length > 0);
-  const isTextDropTargetActive = !interactionVisible && !!cacheKey;
+  const isTextDropTargetActive = !editorBlocked && !!cacheKey;
 
   // 运行中实时计时：维护单调递增的显示基准（baseMs@baseAt），事件到达与本地
   // tick 都只向前推进——事件值与外推值取大，杜绝显示回跳；TurnElapsed 事件
@@ -1207,7 +1238,11 @@ export function MessageInput({
                 </div>
               )}
 
-              {attachments.length > 0 && (
+              {/* 编辑框内容：输入覆盖层显示时整体 inert 且不可见（不设定位，按钮区仍相对
+                  外层定位）。覆盖层期间草稿仍可能带附件（如语音消息发送事务中），附件
+                  行不渲染：否则会撑高输入区，移除按钮（-top 偏移）还会探出覆盖层。 */}
+              <div ref={editorContentRef} className={inputOverlayVisible ? 'invisible' : undefined}>
+              {attachments.length > 0 && !inputOverlayVisible && (
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   {attachments.map(item => (
                     item.kind === 'image' ? (
@@ -1329,6 +1364,8 @@ export function MessageInput({
                   )}
                 </Button>
               </div>
+              </div>
+              {inputOverlay}
             </div>
             <div className="mt-1.5 flex items-center justify-between gap-2">
               <SessionInputPluginHost slot="session.after-input" />
@@ -1414,9 +1451,11 @@ export function MessageInput({
                   )}
                 </button>
                 <span>
-                  {isIdle
-                    ? 'Enter 发送 · Shift+Enter 换行'
-                    : `Enter 排队 · ${MOD_KEY_LABEL} 立即引导 · Shift+Enter 换行`}
+                  {inputOverlayVisible && inputOverlayHint
+                    ? inputOverlayHint
+                    : isIdle
+                      ? 'Enter 发送 · Shift+Enter 换行'
+                      : `Enter 排队 · ${MOD_KEY_LABEL} 立即引导 · Shift+Enter 换行`}
                 </span>
               </div>
               </div>
