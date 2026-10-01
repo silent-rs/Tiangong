@@ -561,3 +561,77 @@ fn 桥聚合_重名工具按插件前缀暴露并路由到各自插件() {
         tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), id, false).unwrap();
     }
 }
+
+#[test]
+fn 工具图标_插件声明优先_不合法声明不影响装载() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // 未声明图标的插件：回落 runtime 内置表。
+    stage_ts_tool_plugin(root.path(), "icon-plain", "run_shell");
+    // 声明图标的插件：含合法资源、插件默认图标与不合法条目。
+    let dir = root.path().join("plugins").join("icon-rich");
+    std::fs::create_dir_all(dir.join("icons")).unwrap();
+    std::fs::write(
+        dir.join("icons/speak.svg"),
+        "<svg xmlns='http://www.w3.org/2000/svg'/>",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        r#"{"schema_version":2,"id":"icon-rich","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true},
+            "tools":[
+              {"name":"speak","description":"测试","input_schema":{"type":"object"}},
+              {"name":"read_file","description":"测试","input_schema":{"type":"object"}},
+              {"name":"run_shell","description":"测试","input_schema":{"type":"object"}},
+              {"name":"other_tool","description":"测试","input_schema":{"type":"object"}}
+            ],
+            "tool_icons":{"speak":"icons/speak.svg","read_file":"../escape.svg","*":"flame"}}"#,
+    )
+    .unwrap();
+    tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let names = tool_names(&bridge);
+    assert!(
+        names.contains(&"speak".to_string()),
+        "声明图标的插件应正常装载：{names:?}"
+    );
+
+    let table = tiangong_plugin_runtime::registry::list_tool_icons();
+    assert_eq!(table["speak"].icon, "icons/speak.svg");
+    assert_eq!(table["speak"].plugin_id.as_deref(), Some("icon-rich"));
+    assert_eq!(table["other_tool"].icon, "flame", "插件默认图标");
+    assert_eq!(
+        table["icon-rich__read_file"].icon, "flame",
+        "不合法条目被忽略，落到插件默认图标"
+    );
+    assert_eq!(
+        table["icon-plain__run_shell"].icon, "square-terminal",
+        "未声明时用内置表"
+    );
+    assert_eq!(
+        table["icon-rich__run_shell"].icon, "flame",
+        "重名时各自按插件解析"
+    );
+
+    let (bytes, mime) =
+        tiangong_plugin_runtime::registry::read_plugin_tool_icon("icon-rich", "icons/speak.svg")
+            .unwrap();
+    assert_eq!(mime, "image/svg+xml");
+    assert!(!bytes.is_empty());
+    assert!(
+        tiangong_plugin_runtime::registry::read_plugin_tool_icon("icon-rich", "plugin.json")
+            .is_err(),
+        "未声明的文件不可读取"
+    );
+    assert!(
+        tiangong_plugin_runtime::registry::read_plugin_tool_icon("icon-rich", "../escape.svg")
+            .is_err()
+    );
+
+    for id in ["icon-plain", "icon-rich"] {
+        tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), id, false).unwrap();
+    }
+}

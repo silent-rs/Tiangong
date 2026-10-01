@@ -570,6 +570,7 @@ mod tests {
             prompt: None,
             resources: None,
             mention,
+            tool_icons: None,
         }
     }
 

@@ -403,6 +403,7 @@ fn refresh_verified_sidecar_clears_only_runtime_error() {
         prompt: None,
         resources: None,
         mention: None,
+        tool_icons: None,
     };
     let record = LoadedPlugin {
         directory: PathBuf::from("/tmp/load-error-demo"),

@@ -30,6 +30,8 @@ export interface TerminalMaterial {
 
 export interface ToolDisplayModel {
   variant: ToolVariant;
+  /** 工具对外名（可能带插件前缀），按此查插件提供的图标；未知为空串。 */
+  toolName: string;
   /** 类别标题（命令执行 / 读取文件 / ……）。 */
   title: string;
   /** 单行摘要：优先从参数派生，失败时被 errorSummary 顶替显示。 */
@@ -343,6 +345,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
       "";
     return {
       variant: "plugin",
+      toolName: toolName || "plugin_injection",
       title: VARIANT_TITLES.plugin,
       summary: detail ? `${source} · ${clamp(detail.trim(), 60)}` : source,
       state: "ok",
@@ -361,6 +364,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
     const noHit = content.includes("无相关记忆");
     return {
       variant: "memory",
+      toolName: toolName || "recall_memory",
       title: VARIANT_TITLES.memory,
       summary: noHit ? "无命中" : count ? `${count} 条命中` : "记忆检索",
       state: "ok",
@@ -381,6 +385,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
       trace.command ?? trace.summary ?? firstNonEmptyLine(content) ?? trace.toolName;
     return {
       variant,
+      toolName: trace.toolName,
       title: VARIANT_TITLES[variant],
       summary: summaryFromArgs(variant, args) ?? clamp(fallbackSummary || trace.toolName, 120),
       state: trace.ok ? "ok" : "error",
@@ -438,6 +443,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 
   return {
     variant,
+    toolName,
     title: VARIANT_TITLES[variant],
     summary,
     state: isError ? "error" : "ok",
@@ -457,6 +463,7 @@ export function buildRunningToolModel(name: string, args?: unknown): ToolDisplay
   const command = variant === "terminal" ? (terminalCommandFromArgs(args) ?? argSummary) : null;
   return {
     variant,
+    toolName: name,
     title: VARIANT_TITLES[variant],
     summary: argSummary ?? name,
     state: "running",

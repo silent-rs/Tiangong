@@ -1,18 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Brain,
-  ChevronDown,
-  ChevronRight,
-  Cpu,
-  FilePenLine,
-  FileText,
-  Globe,
-  Plug,
-  Search,
-  SquareTerminal,
-  Wrench,
-  type LucideIcon,
-} from "lucide-react";
+import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
 import type { MessageItem } from "./types";
 import { formatMessageTime, formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
@@ -21,8 +8,8 @@ import {
   buildToolDisplayModel,
   writeContentFromArgs,
   type ToolDisplayModel,
-  type ToolVariant,
 } from "./toolDisplayModel";
+import { ToolIcon } from "./ToolIcon";
 import { TerminalCard } from "./toolViews/TerminalCard";
 import { NumberedFileCard } from "./toolViews/NumberedFileCard";
 import { InOutCard, WritePreviewCard } from "./toolViews/InOutCard";
@@ -44,17 +31,6 @@ interface ToolGroupProps {
   /** 本组之后仍在执行、尚无结果的工具调用，渲染为组尾运行行。 */
   runningCalls?: RunningToolCall[];
 }
-
-const VARIANT_ICONS: Record<ToolVariant, LucideIcon> = {
-  terminal: SquareTerminal,
-  "file-read": FileText,
-  "file-write": FilePenLine,
-  search: Search,
-  web: Globe,
-  memory: Brain,
-  plugin: Plug,
-  other: Wrench,
-};
 
 /** 变体的展开体：terminal → 终端卡；读文件 → 行号内容块；写文件 → 内容预览；其余 → IN/OUT。 */
 function ToolCardBody({ model, args }: { model: ToolDisplayModel; args?: unknown }) {
@@ -110,7 +86,6 @@ function ToolRunRow({
   /** 运行中调用的发起时刻（毫秒时间戳）：行尾实时跳秒。 */
   startedAtMs?: number;
 }) {
-  const Icon = VARIANT_ICONS[model.variant];
   const isError = model.state === "error";
   const isRunning = model.state === "running";
   const summaryText = model.errorSummary ?? model.summary;
@@ -142,7 +117,10 @@ function ToolRunRow({
         ) : (
           <ChevronRight className={`w-3 h-3 shrink-0 ${expandable ? "" : "invisible"}`} />
         )}
-        <Icon className={`w-3 h-3 shrink-0 ${isError ? "text-destructive" : ""}`} />
+        <ToolIcon
+          toolName={model.toolName}
+          className={`w-3 h-3 shrink-0 ${isError ? "text-destructive" : ""}`}
+        />
         <span className="font-medium shrink-0">{model.title}</span>
         {summaryText && (
           <span

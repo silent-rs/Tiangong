@@ -4988,6 +4988,28 @@ pub async fn plugin_read_icon(
     Ok(PluginEntryResource { data, mime })
 }
 
+/// 工具图标查询表（工具行图标：插件声明优先，其次 runtime 内置表；
+/// 查不到的工具不在表中，前端用默认图标）。
+#[tauri::command]
+pub async fn list_tool_icons(
+) -> Result<std::collections::BTreeMap<String, tiangong_plugin_runtime::tool_icons::ToolIcon>, String>
+{
+    tauri::async_runtime::spawn_blocking(tiangong_plugin_runtime::registry::list_tool_icons)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 读取插件声明的工具图标资源（仅限 `tool_icons` 中声明过的路径）。
+#[tauri::command]
+pub async fn plugin_read_tool_icon(
+    plugin_id: String,
+    icon: String,
+) -> Result<PluginEntryResource, String> {
+    let (data, mime) = tiangong_plugin_runtime::registry::read_plugin_tool_icon(&plugin_id, &icon)
+        .map_err(|error| error.to_string())?;
+    Ok(PluginEntryResource { data, mime })
+}
+
 #[derive(serde::Serialize)]
 pub struct PluginEntryResource {
     pub data: Vec<u8>,

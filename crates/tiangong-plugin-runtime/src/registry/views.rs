@@ -1,6 +1,7 @@
 //! manifest 级视图：slots/贡献/扩展页与图标/资源读取。
 
 use super::*;
+use tiangong_core::tools::extension::ToolSpecProvider;
 
 pub fn plugin_manifest(plugin_id: &str) -> Option<PluginManifest> {
     let plugins = loaded_plugins().lock().ok()?;
@@ -181,7 +182,6 @@ pub fn read_manifest_resource(
 /// 规范化后必须仍在插件目录内，拒绝 `../` 逃逸。图标是 UI 展示资源——
 /// 经 `<img>` 渲染（img 中的 SVG 不执行脚本），不进入任何执行路径。
 pub fn read_plugin_icon(plugin_id: &str, contribution_id: &str) -> Result<(Vec<u8>, String)> {
-    const MAX_ICON_BYTES: u64 = 256 * 1024;
     let (directory, icon) = {
         let plugins = loaded_plugins()
             .lock()
@@ -199,7 +199,13 @@ pub fn read_plugin_icon(plugin_id: &str, contribution_id: &str) -> Result<(Vec<u
             })?;
         (loaded.directory.clone(), contribution.icon.clone())
     };
-    let extension = std::path::Path::new(&icon)
+    read_icon_file(plugin_id, &directory, &icon)
+}
+
+/// 读取插件目录内的图标文件：扩展名白名单、256KB 上限、拒绝逃出插件目录。
+fn read_icon_file(plugin_id: &str, directory: &Path, icon: &str) -> Result<(Vec<u8>, String)> {
+    const MAX_ICON_BYTES: u64 = 256 * 1024;
+    let extension = std::path::Path::new(icon)
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
@@ -210,7 +216,7 @@ pub fn read_plugin_icon(plugin_id: &str, contribution_id: &str) -> Result<(Vec<u
         "jpg" | "jpeg" => "image/jpeg",
         _ => bail!("插件 {plugin_id} 图标 {icon} 扩展名不在白名单（png/svg/jpeg）"),
     };
-    let resource = directory.join(&icon);
+    let resource = directory.join(icon);
     let resolved = resource
         .canonicalize()
         .with_context(|| format!("图标路径无效: {icon}"))?;
@@ -307,6 +313,95 @@ pub struct ExtensionApp {
     pub sandbox: crate::slots::SandboxKind,
     /// 实例持有后端资源：宿主接管关闭、恢复、核查与会话删除释放。
     pub instance_resources: bool,
+}
+
+/// 工具图标查询表（界面工具行使用，见 [`crate::tool_icons`]）。
+///
+/// 工具名取自已启用插件的 TS 工具声明与已交付适配器的工具规格；插件
+/// 声明优先，其次 runtime 内置表，查不到的工具不在表中（前端用默认图标）。
+pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons::ToolIcon> {
+    /// 注册表快照：插件 id、清单与仍存活的 WASM / TS 适配器。
+    type PluginSnapshot = (
+        String,
+        PluginManifest,
+        Vec<Arc<WasmPluginAdapter>>,
+        Vec<Arc<TsPluginAdapter>>,
+    );
+    let snapshot: Vec<PluginSnapshot> = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return crate::tool_icons::build_tool_icon_table(Vec::new());
+        };
+        plugins
+            .iter()
+            .filter(|(_, loaded)| loaded.enabled)
+            .map(|(id, loaded)| {
+                (
+                    id.clone(),
+                    loaded.manifest.clone(),
+                    loaded.instances.iter().filter_map(Weak::upgrade).collect(),
+                    loaded
+                        .ts_instances
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    // 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
+    let entries: Vec<(String, PluginManifest, Vec<String>)> = snapshot
+        .into_iter()
+        .map(|(id, manifest, wasm, ts)| {
+            let mut tools: Vec<String> = manifest
+                .tools
+                .iter()
+                .flatten()
+                .map(|tool| tool.name.clone())
+                .collect();
+            for spec in wasm
+                .iter()
+                .flat_map(|adapter| adapter.tool_specs())
+                .chain(ts.iter().flat_map(|adapter| adapter.tool_specs()))
+            {
+                if !tools.contains(&spec.name) {
+                    tools.push(spec.name);
+                }
+            }
+            if let Some(declared) = &manifest.tool_icons {
+                for key in declared.keys() {
+                    if key != crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY && !tools.contains(key) {
+                        tools.push(key.clone());
+                    }
+                }
+            }
+            (id, manifest, tools)
+        })
+        .collect();
+    crate::tool_icons::build_tool_icon_table(entries.iter().map(|(id, manifest, tools)| {
+        crate::tool_icons::PluginToolIcons {
+            plugin_id: id,
+            declared: manifest.tool_icons.as_ref(),
+            tools: tools.clone(),
+        }
+    }))
+}
+
+/// 读取插件声明的工具图标资源（只允许读取 `tool_icons` 中声明过的路径；
+/// 安全约束与 [`read_plugin_icon`] 相同）。
+pub fn read_plugin_tool_icon(plugin_id: &str, icon: &str) -> Result<(Vec<u8>, String)> {
+    let directory = {
+        let plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        if !crate::tool_icons::declares_icon_resource(loaded.manifest.tool_icons.as_ref(), icon) {
+            bail!("插件 {plugin_id} 未声明工具图标 {icon}");
+        }
+        loaded.directory.clone()
+    };
+    read_icon_file(plugin_id, &directory, icon)
 }
 
 /// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
