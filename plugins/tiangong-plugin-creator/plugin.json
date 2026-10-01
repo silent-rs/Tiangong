@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "plugin-creator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "entrypoints": [
     "desktop"
   ],
