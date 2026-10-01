@@ -479,6 +479,11 @@ fn 自制插件prompt不进系统段落_随清单注入() {
         sections.iter().any(|s| s.contains("未签名插件段落")),
         "未签名插件 prompt 保持现状进入 system prompt：{sections:?}"
     );
+    assert_eq!(
+        sections.last().map(String::as_str),
+        Some(tiangong_plugin_runtime::core_bridge::TOOL_NAMING_RULE),
+        "有插件段落时末尾追加工具命名说明：{sections:?}"
+    );
 
     // 清单携带 prompt 内容：纯 prompt 的自制插件也出现在清单里，
     // 与「不进 system prompt」的分流两头一致。
