@@ -16,8 +16,6 @@
 
 > 安全提示：天工默认通过独立 Sandbox Launcher 隔离插件 Sidecar 和按需命令进程。Launcher 分别使用 macOS Seatbelt、Linux bubblewrap、Windows AppContainer 与 Job Object 施加系统级边界；程序缺失、签名无效、自检失败或协议不兼容时拒绝启动受保护进程，不会静默降级。用户可以在「设置 → 沙箱管理」中查看状态、更新 Launcher，并按需配置额外允许目录和环境变量黑名单。关闭按需进程沙箱后，对应进程将以当前用户权限运行，请谨慎操作。
 
-![多智能体协作示例](docs/readme/sub_agent.png)
-
 ## 强烈推荐的插件
 
 天工的能力取决于装了哪些插件。下面三个官方插件让 Agent 能直接看到、操作你的电脑，**强烈推荐安装**；其中 **Computer Use 是天工最有特色的插件，建议首先安装**。安装方式：「设置 → 插件管理」中从官方目录安装并启用。
@@ -55,7 +53,7 @@ macOS 首次使用需授予天工「辅助功能」与「屏幕录制」权限�
 打开飞书日历，看看我明天下午有哪些会
 ```
 
-演示：让 Agent 打开「计算器」算出 128 × 36。Agent 唤起应用、清零、逐个点击按键并输入数字，每一步都截图确认，天工虚拟指针全程显示操作位置（点击图片查看演示视频）：
+演示：Agent 通过 Computer Use 操作「计算器」。以下为 macOS 系统录屏（Cmd+Shift+5）的真实画面，2 倍速播放：Agent 唤起应用、点击按键、键入数字，天工虚拟指针与按键 HUD 全程显示操作位置，左侧对话区同步展示每一次工具调用（点击图片查看演示视频）：
 
 [![Computer Use 操作计算器演示](docs/readme/screenshots/computer-use.jpg)](docs/readme/video/computer-use-calculator.mp4)
 
