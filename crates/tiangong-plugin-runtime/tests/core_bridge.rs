@@ -61,7 +61,7 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
     // 逐项断言插件工具的存在性而非全集相等。
     let has = |names: &[String], expect: &str| names.iter().any(|n| n == expect);
     assert!(
-        has(&tool_names(&bridge), "bridge_a_tool"),
+        has(&tool_names(&bridge), "bridge-view-a__bridge_a_tool"),
         "首轮聚合应见 A 工具"
     );
 
@@ -69,7 +69,10 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
     stage_ts_tool_plugin(root.path(), "bridge-view-b", "bridge_b_tool");
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
     let after_install = tool_names(&bridge);
-    assert!(has(&after_install, "bridge_a_tool") && has(&after_install, "bridge_b_tool"));
+    assert!(
+        has(&after_install, "bridge-view-a__bridge_a_tool")
+            && has(&after_install, "bridge-view-b__bridge_b_tool")
+    );
 
     // prompt 段落聚合为空（两个插件都不声明 prompt），不 panic。
     assert!(bridge.prompt_sections().is_empty());
@@ -79,7 +82,8 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
         .expect("卸载测试插件 B");
     let after_uninstall = tool_names(&bridge);
     assert!(
-        has(&after_uninstall, "bridge_a_tool") && !has(&after_uninstall, "bridge_b_tool"),
+        has(&after_uninstall, "bridge-view-a__bridge_a_tool")
+            && !has(&after_uninstall, "bridge-view-b__bridge_b_tool"),
         "卸载后 B 工具消失、其余不受影响"
     );
     // 注册表是进程级全局，preload 只增量合并：测试插件必须各自卸载，
@@ -118,7 +122,7 @@ fn 桥聚合_并发首见收敛() {
         handle.join().expect("并发聚合线程不得 panic 或卡死");
     }
     assert!(
-        first.iter().any(|n| n == "bridge_c_tool"),
+        first.iter().any(|n| n == "bridge-view-c__bridge_c_tool"),
         "并发聚合应交付 C 工具（固定通道工具亦在声明中）：{first:?}"
     );
     tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "bridge-view-c", false)
@@ -229,12 +233,14 @@ fn 固定通道_自制插件不进声明_清单与判据正确() {
     assert!(names.iter().any(|n| n == "list_local_plugins"));
     // 自制插件的方法不进 tools 声明（保护 KV cache 前缀）。
     assert!(
-        !names.iter().any(|n| n == "local_a_tool"),
+        !names.iter().any(|n| n.ends_with("local_a_tool")),
         "自制插件方法不得进入 tools 声明"
     );
-    // 未签名插件保持逐个声明的现状。
+    // 未签名插件逐个声明（按插件前缀暴露）。
     assert!(
-        names.iter().any(|n| n == "unsigned_b_tool"),
+        names
+            .iter()
+            .any(|n| n == "unsigned-bridge-b__unsigned_b_tool"),
         "未签名插件保持独立声明"
     );
 
@@ -496,7 +502,7 @@ fn 自制插件prompt不进系统段落_随清单注入() {
 }
 
 #[test]
-fn 桥聚合_重名工具按插件前缀暴露并路由到各自插件() {
+fn 桥聚合_插件工具全部按插件前缀暴露并路由到各自插件() {
     use tiangong_core::tools::extension::ToolOverrideHandler;
     let _guard = REGISTRY_LOCK.lock().unwrap();
     ensure_config();
@@ -518,12 +524,12 @@ fn 桥聚合_重名工具按插件前缀暴露并路由到各自插件() {
         "{names:?}"
     );
     assert!(
-        names.contains(&"gamma_tool".to_string()),
-        "不重名的工具保持原名：{names:?}"
+        names.contains(&"dup-gamma__gamma_tool".to_string()),
+        "不重名的工具同样加插件前缀：{names:?}"
     );
     assert!(
-        !names.contains(&"dup_tool".to_string()),
-        "重名原名不应再暴露：{names:?}"
+        !names.contains(&"dup_tool".to_string()) && !names.contains(&"gamma_tool".to_string()),
+        "原名不应再暴露：{names:?}"
     );
 
     let call = |name: &str| tiangong_llm::tool::ToolCall {
@@ -539,7 +545,9 @@ fn 桥聚合_重名工具按插件前缀暴露并路由到各自插件() {
         "抬头应落到实际插件与原名"
     );
     assert_eq!(
-        bridge.result_header(&call("gamma_tool"), false).as_deref(),
+        bridge
+            .result_header(&call("dup-gamma__gamma_tool"), false)
+            .as_deref(),
         Some("调用插件 dup-gamma 的 gamma_tool：失败")
     );
     assert_eq!(
@@ -595,12 +603,13 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
     let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
     let names = tool_names(&bridge);
     assert!(
-        names.contains(&"speak".to_string()),
+        names.contains(&"icon-rich__speak".to_string()),
         "声明图标的插件应正常装载：{names:?}"
     );
 
     let table = tiangong_plugin_runtime::registry::list_tool_icons();
     assert_eq!(table["speak"].icon, "icons/speak.svg");
+    assert_eq!(table["icon-rich__speak"].icon, "icons/speak.svg");
     assert_eq!(table["speak"].plugin_id.as_deref(), Some("icon-rich"));
     assert_eq!(table["other_tool"].icon, "flame", "插件默认图标");
     assert_eq!(
@@ -613,7 +622,7 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
     );
     assert_eq!(
         table["icon-rich__run_shell"].icon, "flame",
-        "重名时各自按插件解析"
+        "同名工具各自按插件解析"
     );
 
     let (bytes, mime) =

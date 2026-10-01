@@ -7,6 +7,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { MessageGroup, MessageItem, SystemMessageMeta } from "./types";
+import { baseToolName } from "./toolDisplayModel";
 
 /** 格式化消息时间戳 */
 export function formatMessageTime(createdAt?: string): string {
@@ -256,7 +257,7 @@ export function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
   }
 
   // recall_memory
-  if (toolName === "recall_memory" || content.startsWith("[记忆检索]")) {
+  if (baseToolName(toolName) === "recall_memory" || content.startsWith("[记忆检索]")) {
     const countMatch = content.match(/命中 (\d+) 条/);
     const count = countMatch ? countMatch[1] : "";
     const noHit = content.includes("无相关记忆");

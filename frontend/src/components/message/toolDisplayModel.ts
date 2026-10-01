@@ -82,7 +82,7 @@ const TOOL_VARIANTS: Record<string, ToolVariant> = {
 };
 
 /**
- * 去掉重名工具的插件前缀（`{插件id}__{工具名}` → 工具名），用于按原名分类。
+ * 去掉插件工具的插件前缀（`{插件id}__{工具名}` → 工具名），用于按原名分类。
  * MCP 工具（`mcp__{server}__{tool}`）是插件自身的命名，保持不变。
  */
 export function baseToolName(toolName: string): string {
@@ -359,7 +359,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
   }
 
   // 记忆检索消息
-  if (toolName === "recall_memory" || content.startsWith("[记忆检索]")) {
+  if (baseToolName(toolName ?? "") === "recall_memory" || content.startsWith("[记忆检索]")) {
     const count = content.match(/命中 (\d+) 条/)?.[1] ?? "";
     const noHit = content.includes("无相关记忆");
     return {

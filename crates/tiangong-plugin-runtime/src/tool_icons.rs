@@ -208,7 +208,7 @@ pub fn resolve_plugin_tool_icon(
     })
 }
 
-/// 建立工具图标查询表：键为工具原名与 `{插件id}__{工具名}`（重名时的对外名）。
+/// 建立工具图标查询表：键为工具对外名 `{插件id}__{工具名}` 与原名（旧会话历史）。
 ///
 /// 先放入内置表（覆盖无插件归属的工具，如 core 内置注入工具），再按插件
 /// 覆盖；查不到的工具不在表中，由前端使用默认图标。
@@ -233,7 +233,9 @@ pub fn build_tool_icon_table<'a>(
             else {
                 continue;
             };
-            table.insert(namespaced_tool_name(plugin.plugin_id, tool), icon.clone());
+            if let Some(exposed) = namespaced_tool_name(plugin.plugin_id, tool) {
+                table.insert(exposed, icon.clone());
+            }
             table.insert(tool.clone(), icon);
         }
     }

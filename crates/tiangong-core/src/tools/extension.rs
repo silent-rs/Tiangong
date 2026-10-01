@@ -34,61 +34,74 @@ pub trait ToolOverrideHandler: Send + Sync + 'static {
     }
 }
 
-/// 重名工具的对外名称：`{插件id}__{工具名}`。
-pub fn namespaced_tool_name(plugin_id: &str, tool_name: &str) -> String {
-    format!("{plugin_id}__{tool_name}")
+/// 插件工具的对外名称：`{插件id}__{工具名}`。
+///
+/// 插件 id 中不允许出现在函数名里的字符（如 `.`）替换为 `-`；替换过或拼接后
+/// 超过 [`TOOL_NAME_MAX_LEN`] 时截断插件 id 并附短哈希，保证唯一且不超长。
+/// 工具名已以 `{插件id}__` 开头（如 MCP 的 `mcp__{server}__{tool}`）时保持不变。
+/// 工具名本身过长、无法容纳任何前缀时返回 None。
+pub fn namespaced_tool_name(plugin_id: &str, tool_name: &str) -> Option<String> {
+    if tool_name.starts_with(&format!("{plugin_id}__")) {
+        return Some(tool_name.to_string());
+    }
+    let sanitized: String = plugin_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let plain = format!("{sanitized}__{tool_name}");
+    if sanitized == plugin_id && plain.len() <= TOOL_NAME_MAX_LEN {
+        return Some(plain);
+    }
+    let hash = short_hash(plugin_id);
+    // `{截断id}-{hash}__{tool}`
+    let budget = TOOL_NAME_MAX_LEN.checked_sub(tool_name.len() + 2 + 1 + hash.len())?;
+    let head: String = sanitized.chars().take(budget).collect();
+    if head.is_empty() {
+        return None;
+    }
+    Some(format!("{head}-{hash}__{tool_name}"))
+}
+
+/// 插件 id 的稳定短哈希（FNV-1a，取 4 位十六进制）。
+fn short_hash(text: &str) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in text.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{:04x}", hash & 0xffff)
 }
 
 /// 工具名长度上限（主流模型接口的函数名限制为 64 个字符）。
 pub const TOOL_NAME_MAX_LEN: usize = 64;
 
-/// 工具规格按名称消解重名：同名工具由多个来源声明时，全部改为
-/// `{来源id}__{工具名}` 对外暴露（描述前标注来源），避免任何一方被静默丢弃。
+/// 把一个插件声明的工具全部改为 `{插件id}__{工具名}` 对外暴露，描述前标注
+/// `[插件 <id>]`，模型从工具名即可知道归属。
 ///
-/// `entries` 为 (来源id, 规格) 列表，按注册顺序排列；返回 (来源id, 原名, 对外规格)。
-/// 加前缀后超长或仍然冲突的，保留先注册者并记录告警。
-pub fn resolve_tool_name_conflicts(
-    entries: Vec<(String, ToolSpec)>,
-) -> Vec<(String, String, ToolSpec)> {
-    use std::collections::{HashMap, HashSet};
-    let mut owners: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (owner, spec) in &entries {
-        let list = owners.entry(spec.name.as_str()).or_default();
-        if !list.contains(&owner.as_str()) {
-            list.push(owner.as_str());
-        }
-    }
-    let conflicted: HashSet<String> = owners
-        .iter()
-        .filter(|(_, list)| list.len() > 1)
-        .map(|(name, list)| {
-            tracing::warn!(
-                tool = %name,
-                plugins = %list.join(","),
-                "多个插件声明了同名工具，改为按插件前缀暴露"
-            );
-            (*name).to_string()
-        })
-        .collect();
-
-    let mut seen = HashSet::new();
-    let mut resolved = Vec::with_capacity(entries.len());
-    for (owner, mut spec) in entries {
+/// 返回 (原名, 对外规格)，顺序同输入；同一插件重复声明只保留一份，
+/// 名称过长无法加前缀的工具不暴露并记录告警。跨插件的去重由调用方负责
+/// （插件 id 唯一，加前缀后正常不会冲突）。
+pub fn namespace_tool_specs(plugin_id: &str, specs: Vec<ToolSpec>) -> Vec<(String, ToolSpec)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut resolved = Vec::with_capacity(specs.len());
+    for mut spec in specs {
         let original = spec.name.clone();
-        if conflicted.contains(&original) {
-            let exposed = namespaced_tool_name(&owner, &original);
-            if exposed.len() <= TOOL_NAME_MAX_LEN {
-                spec.name = exposed;
-                spec.description = format!("[插件 {owner}] {}", spec.description);
-            } else {
-                tracing::warn!(tool = %original, plugin = %owner, "加插件前缀后工具名超长，该插件按原名暴露");
-            }
+        let Some(exposed) = namespaced_tool_name(plugin_id, &original) else {
+            tracing::warn!(tool = %original, plugin = %plugin_id, "工具名过长，无法加插件前缀，不暴露该工具");
+            continue;
+        };
+        if !seen.insert(exposed.clone()) {
+            continue;
         }
-        if seen.insert(spec.name.clone()) {
-            resolved.push((owner, original, spec));
-        } else {
-            tracing::warn!(tool = %spec.name, plugin = %owner, "工具名仍然冲突，保留先注册者");
-        }
+        spec.name = exposed;
+        spec.description = format!("[插件 {plugin_id}] {}", spec.description);
+        resolved.push((original, spec));
     }
     resolved
 }
@@ -102,7 +115,7 @@ pub fn call_with_name(call: &ToolCall, name: &str) -> ToolCall {
     }
 }
 
-/// 以对外名称注册、以原名转发的处理器包装（重名工具加前缀时使用）。
+/// 以对外名称注册、以原名转发的处理器包装（插件工具加前缀后使用）。
 pub struct RenamedToolHandler {
     inner: std::sync::Arc<dyn ToolOverrideHandler>,
     original: String,
@@ -176,61 +189,64 @@ mod tests {
     }
 
     #[test]
-    fn 重名工具全部按插件前缀暴露_不重名保持原名() {
-        let resolved = resolve_tool_name_conflicts(vec![
-            ("generate-image-openai".to_string(), spec("generate_image")),
-            ("terminal".to_string(), spec("run_shell")),
-            ("volcengine".to_string(), spec("generate_image")),
-            ("volcengine".to_string(), spec("generate_video")),
-        ]);
-        let names: Vec<(&str, &str, &str)> = resolved
+    fn 插件工具全部按插件前缀暴露并标注归属() {
+        let resolved = namespace_tool_specs(
+            "terminal",
+            vec![spec("run_shell"), spec("run_command"), spec("run_shell")],
+        );
+        let names: Vec<(&str, &str)> = resolved
             .iter()
-            .map(|(owner, original, spec)| (owner.as_str(), original.as_str(), spec.name.as_str()))
+            .map(|(original, spec)| (original.as_str(), spec.name.as_str()))
             .collect();
         assert_eq!(
             names,
             vec![
-                (
-                    "generate-image-openai",
-                    "generate_image",
-                    "generate-image-openai__generate_image"
-                ),
-                ("terminal", "run_shell", "run_shell"),
-                ("volcengine", "generate_image", "volcengine__generate_image"),
-                ("volcengine", "generate_video", "generate_video"),
-            ]
+                ("run_shell", "terminal__run_shell"),
+                ("run_command", "terminal__run_command"),
+            ],
+            "同插件重复声明只保留一份"
+        );
+        assert_eq!(resolved[0].1.description, "[插件 terminal] 描述");
+    }
+
+    #[test]
+    fn 已带本插件前缀的工具保持原名() {
+        let resolved = namespace_tool_specs("mcp", vec![spec("mcp__probe__read")]);
+        assert_eq!(resolved[0].1.name, "mcp__probe__read");
+        assert_eq!(resolved[0].0, "mcp__probe__read");
+    }
+
+    #[test]
+    fn 超长或含非法字符的插件id截断并附短哈希() {
+        let long_id = "p".repeat(TOOL_NAME_MAX_LEN);
+        let name = namespaced_tool_name(&long_id, "generate_image").unwrap();
+        assert!(name.len() <= TOOL_NAME_MAX_LEN, "{name}");
+        assert!(name.ends_with("__generate_image"));
+        let other = namespaced_tool_name(&format!("{long_id}x"), "generate_image").unwrap();
+        assert_ne!(name, other, "截断后靠哈希区分");
+        assert_eq!(
+            namespaced_tool_name(&long_id, "generate_image").unwrap(),
+            name,
+            "同一 id 名称稳定"
+        );
+
+        let dotted = namespaced_tool_name("com.acme", "tool").unwrap();
+        assert!(
+            dotted.starts_with("com-acme-") && dotted.ends_with("__tool"),
+            "{dotted}"
         );
         assert!(
-            resolved[0]
-                .2
-                .description
-                .starts_with("[插件 generate-image-openai]")
+            dotted
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         );
-        assert_eq!(resolved[1].2.description, "描述", "不重名的工具描述不变");
+        assert_ne!(dotted, namespaced_tool_name("com-acme", "tool").unwrap());
     }
 
     #[test]
-    fn 同一插件重复声明只保留一份() {
-        let resolved = resolve_tool_name_conflicts(vec![
-            ("a".to_string(), spec("tool")),
-            ("a".to_string(), spec("tool")),
-        ]);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].2.name, "tool");
-    }
-
-    #[test]
-    fn 前缀超长时该方按原名暴露_两者仍可调用() {
-        let long_id = "p".repeat(TOOL_NAME_MAX_LEN);
-        let resolved = resolve_tool_name_conflicts(vec![
-            ("short".to_string(), spec("tool")),
-            (long_id, spec("tool")),
-        ]);
-        let names: Vec<&str> = resolved
-            .iter()
-            .map(|(_, _, spec)| spec.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["short__tool", "tool"]);
+    fn 工具名本身过长时不暴露() {
+        let resolved = namespace_tool_specs("a", vec![spec(&"t".repeat(TOOL_NAME_MAX_LEN))]);
+        assert!(resolved.is_empty());
     }
 
     struct EchoHandler;

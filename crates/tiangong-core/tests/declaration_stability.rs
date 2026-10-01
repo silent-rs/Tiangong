@@ -191,10 +191,11 @@ async fn send(
     .unwrap();
 }
 
-fn reply(call: Option<usize>) -> ResponseTemplate {
+/// `call` 为 (序号, 插件 id)：模型按对外名 `{插件id}__probe_read` 调用工具。
+fn reply(call: Option<(usize, &str)>) -> ResponseTemplate {
     let (message, finish) = match call {
-        Some(index) => (
-            json!({"role":"assistant","tool_calls":[{"id":format!("call-{index}"),"type":"function","function":{"name":"probe_read","arguments":"{\"path\":\"probe\"}"}}]}),
+        Some((index, plugin_id)) => (
+            json!({"role":"assistant","tool_calls":[{"id":format!("call-{index}"),"type":"function","function":{"name":format!("{plugin_id}__probe_read"),"arguments":"{\"path\":\"probe\"}"}}]}),
             "tool_calls",
         ),
         None => (json!({"role":"assistant","content":"完成"}), "stop"),
@@ -298,7 +299,7 @@ async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedbac
     Mock::given(method("POST"))
         .respond_with(move |_: &wiremock::Request| {
             let step = step.fetch_add(1, Ordering::SeqCst);
-            reply(matches!(step, 1 | 3).then_some(step))
+            reply(matches!(step, 1 | 3).then_some((step, "dynamic-tools-retry")))
         })
         .mount(&server)
         .await;
@@ -351,7 +352,7 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
     Mock::given(method("POST"))
         .respond_with(move |_: &wiremock::Request| {
             let step = step.fetch_add(1, Ordering::SeqCst);
-            reply((step == 1).then_some(step))
+            reply((step == 1).then_some((step, "dynamic-tools-vanish")))
         })
         .mount(&server)
         .await;
@@ -386,7 +387,10 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
             .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
             .collect()
     };
-    assert_eq!(names_of(&first), vec!["plugin_injection", "probe_read"]);
+    assert_eq!(
+        names_of(&first),
+        vec!["plugin_injection", "dynamic-tools-vanish__probe_read"]
+    );
     assert_eq!(
         names_of(&next),
         vec!["plugin_injection"],
@@ -394,7 +398,7 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
     );
     assert!(
         String::from_utf8_lossy(&requests[2].body)
-            .contains("工具 probe_read 不在本次 tools 定义中"),
+            .contains("工具 dynamic-tools-vanish__probe_read 不在本次 tools 定义中"),
         "插件缺席后模型对其调用的反馈应保留在请求中"
     );
     restored.shutdown_join().unwrap();

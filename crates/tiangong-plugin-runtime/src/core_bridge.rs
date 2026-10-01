@@ -24,7 +24,7 @@ use tiangong_core::react::message::INJECTION_TOOL_NAME;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tools::extension::{
     PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider, call_with_name,
-    resolve_tool_name_conflicts,
+    namespace_tool_specs,
 };
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
@@ -215,25 +215,18 @@ impl RuntimeCorePlugin {
     /// 官方/三方/未签名插件保持逐个声明的现状。
     fn aggregate_tool_specs(&self) -> Vec<ToolSpec> {
         let adapters = self.adapters();
-        let by_id: HashMap<String, Arc<dyn Plugin>> = adapters
-            .iter()
-            .map(|adapter| (adapter.id().to_string(), adapter.clone()))
-            .collect();
-        let entries = adapters
+        let mut specs = Vec::new();
+        let mut routes: HashMap<String, ToolRoute> = HashMap::new();
+        // 插件工具一律以 `{插件id}__{工具名}` 暴露，路由表记录原名以便转发。
+        for adapter in adapters
             .iter()
             .filter(|adapter| !registry::is_local_plugin(adapter.id()))
-            .flat_map(|adapter| {
-                adapter
-                    .tool_specs()
-                    .into_iter()
-                    .map(|spec| (adapter.id().to_string(), spec))
-            })
-            .collect();
-        let mut specs = Vec::new();
-        let mut routes = HashMap::new();
-        // 重名工具按插件前缀暴露（`{插件id}__{工具名}`），路由表记录原名以便转发。
-        for (owner, original, spec) in resolve_tool_name_conflicts(entries) {
-            if let Some(adapter) = by_id.get(&owner) {
+        {
+            for (original, spec) in namespace_tool_specs(adapter.id(), adapter.tool_specs()) {
+                if routes.contains_key(&spec.name) {
+                    tracing::warn!(tool = %spec.name, plugin = %adapter.id(), "工具名冲突，保留先注册者");
+                    continue;
+                }
                 routes.insert(
                     spec.name.clone(),
                     ToolRoute {
@@ -396,6 +389,10 @@ impl RuntimeCorePlugin {
 impl Plugin for RuntimeCorePlugin {
     fn id(&self) -> &str {
         "plugin-runtime"
+    }
+    /// 聚合桥自行按真实插件 id 命名工具，固定通道保持原名。
+    fn names_own_tools(&self) -> bool {
+        true
     }
 
     fn set_execution_context(&self, workspace: Option<&std::path::Path>, trust: TrustMode) {
