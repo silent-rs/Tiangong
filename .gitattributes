@@ -6,3 +6,5 @@ SHA256SUMS* text eol=lf
 
 # 二进制制品，禁止 git 任何转换
 *.wasm binary
+# 插件手写 UI 属于发布制品，禁止 Windows checkout 转 CRLF
+plugins/*/app/*.html text eol=lf
