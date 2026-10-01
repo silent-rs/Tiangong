@@ -569,17 +569,9 @@ impl PromptSectionProvider for RuntimeCorePlugin {
             }
             sections.extend(adapter.prompt_sections());
         }
-        // 插件提示词里的工具名是原名，实际声明带插件前缀：有插件段落时追加
-        // 一段固定的命名说明（内容恒定，不影响请求前缀稳定）。
-        if !sections.is_empty() {
-            sections.push(TOOL_NAMING_RULE.to_string());
-        }
         sections
     }
 }
-
-/// 插件工具命名说明：让模型把提示词里的原名对应到带前缀的实际工具名。
-pub const TOOL_NAMING_RULE: &str = "工具命名规则：插件提供的工具一律以「插件id__工具名」暴露，工具描述开头的 [插件 <id>] 标明归属。上文各插件说明中提到的工具名（如 run_command、web_fetch）均为原名，调用时请使用 tools 定义中带插件前缀的完整名称（如 terminal__run_command）。用户用 @plugin:<id> 点名时，优先调用以该 id 为前缀的工具。MCP 工具（mcp__<server>__<tool>）与宿主固定通道（call_local_plugin、list_local_plugins、plugin_injection）保持原名。";
 
 /// 清单折叠自愈判定的单元测试（完整注入链路见 tests/core_bridge.rs）。
 #[cfg(test)]
