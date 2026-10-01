@@ -29,3 +29,6 @@ src-tauri/binaries/
 
 # 各级需求整理文件由本地工作区维护，不纳入 Git
 requirements.md
+
+# README 演示视频需要入库
+!docs/readme/video/*.mp4
