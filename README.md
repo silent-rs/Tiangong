@@ -55,17 +55,33 @@ macOS 首次使用需授予天工「辅助功能」与「屏幕录制」权限�
 打开飞书日历，看看我明天下午有哪些会
 ```
 
+演示：让 Agent 打开「计算器」算出 128 × 36。Agent 唤起应用、清零、逐个点击按键并输入数字，每一步都截图确认，天工虚拟指针全程显示操作位置（点击图片查看演示视频）：
+
+[![Computer Use 操作计算器演示](docs/readme/screenshots/computer-use.jpg)](docs/readme/video/computer-use-calculator.mp4)
+
 ### 嵌入式浏览器（`browser`）：与你共用同一个页面
 
 - Agent 可打开网页、读取正文（超长页面保留头尾，按需分段读取或关键词搜索）、查询 DOM、填写表单、点击元素。
 - 浏览器就在天工拓展区里，你和 Agent 看的是同一个页面：你手动浏览、登录、点击时，Agent 能感知页面变化并接着做。
 - 适合需要登录态的后台、资料检索、表单填写和网页上的重复操作。
 
+![嵌入式浏览器](docs/readme/screenshots/browser.jpg)
+
 ### 嵌入式终端（`terminal`）：命令执行全程可见
 
 - Agent 执行命令和脚本走真实 PTY 终端，输出实时显示在拓展区终端标签里，长任务也能随时查看进度。
 - 终端跟随会话隔离，自动复用空闲终端；支持交互式程序，可向指定终端继续发送输入。
 - 你也可以直接在同一个终端里手动操作，与 Agent 交替使用；命令同样受沙箱边界约束。
+
+![嵌入式终端](docs/readme/screenshots/terminal.jpg)
+
+## 界面预览
+
+| 主界面：对话、工具过程与运行状态 | 持久 Subagent 管理 |
+| --- | --- |
+| ![主界面](docs/readme/screenshots/main.jpg) | ![Subagent 管理](docs/readme/screenshots/subagent.jpg) |
+| **插件管理：安装、启停与后台服务状态** | **模型配置：多供应商与 ChatGPT 账号** |
+| ![插件管理](docs/readme/screenshots/plugins.jpg) | ![模型配置](docs/readme/screenshots/models.jpg) |
 
 ## 项目起源
 
