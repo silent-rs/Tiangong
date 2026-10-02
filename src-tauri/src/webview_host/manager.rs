@@ -11,6 +11,7 @@ use tauri::{
 };
 
 use crate::webview_host::bridge::{BRIDGE_SCRIPT, DOCUMENT_STATE_SCRIPT, PAGE_SNAPSHOT_SCRIPT};
+use crate::webview_host::passkey;
 use crate::webview_host::types::{
     BrowserEvent, BrowserEventsEvent, BrowserNavigationStateEvent, BrowserNavigationStateKind,
     BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabSource,
@@ -1277,9 +1278,14 @@ impl BrowserManager {
             .unwrap_or_else(|e| e.into_inner().shared.clone());
         let initial_zoom = *shared.zoom_factor.lock().unwrap_or_else(|e| e.into_inner());
         let app_clone = app.clone();
-
-        let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
-            .initialization_script(BRIDGE_SCRIPT)
+        // 通行密钥桥接只在签名具备浏览器通行密钥权限时启用（见 passkey 模块）
+        let passkey_enabled = passkey::is_available();
+        let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
+            .initialization_script(BRIDGE_SCRIPT);
+        if passkey_enabled {
+            builder = builder.initialization_script(passkey::PASSKEY_SCRIPT);
+        }
+        let builder = builder
             .data_directory(data_dir)
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/605.1.15")
             .enable_clipboard_access()
@@ -1412,6 +1418,9 @@ impl BrowserManager {
                 }
             };
 
+        if passkey_enabled {
+            passkey::attach(&webview);
+        }
         // 创建后立即应用当前缩放，避免首屏以 100% 渲染再跳变
         if (initial_zoom - 1.0).abs() > f64::EPSILON {
             if let Err(e) = webview.set_zoom(initial_zoom) {

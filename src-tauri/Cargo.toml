@@ -55,6 +55,13 @@ tauri-plugin-updater = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEvent", "NSView", "NSWindow"] }
 objc2 = "0.6"
+# 内嵌浏览器通行密钥桥接（webview_host::passkey）：WebKit 消息处理器、
+# AuthenticationServices 浏览器通行密钥接口、主线程调度与 block 回调
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKContentWorld", "WKFrameInfo", "WKScriptMessage", "WKScriptMessageHandlerWithReply", "WKSecurityOrigin", "WKUserContentController", "WKWebView"] }
+objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASAuthorization", "ASAuthorizationController", "ASAuthorizationCredential", "ASAuthorizationPlatformPublicKeyCredentialAssertion", "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest", "ASAuthorizationPlatformPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialProvider", "ASAuthorizationPlatformPublicKeyCredentialRegistration", "ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest", "ASAuthorizationProvider", "ASAuthorizationPublicKeyCredentialAssertion", "ASAuthorizationPublicKeyCredentialAssertionRequest", "ASAuthorizationPublicKeyCredentialConstants", "ASAuthorizationPublicKeyCredentialDescriptor", "ASAuthorizationPublicKeyCredentialRegistration", "ASAuthorizationPublicKeyCredentialRegistrationRequest", "ASAuthorizationRequest", "ASAuthorizationWebBrowserPlatformPublicKeyCredentialAssertionRequest", "ASAuthorizationWebBrowserPlatformPublicKeyCredentialProvider", "ASAuthorizationWebBrowserPlatformPublicKeyCredentialRegistrationRequest", "ASAuthorizationWebBrowserPublicKeyCredentialManager", "ASFoundation", "ASPublicKeyCredential", "ASPublicKeyCredentialClientData"] }
+block2 = "0.6"
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

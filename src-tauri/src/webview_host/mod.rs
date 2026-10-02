@@ -20,6 +20,7 @@ pub mod capability;
 pub mod handler;
 pub mod manager;
 pub mod page_fetcher;
+pub mod passkey;
 pub mod session_registry;
 pub mod session_store;
 pub mod types;
