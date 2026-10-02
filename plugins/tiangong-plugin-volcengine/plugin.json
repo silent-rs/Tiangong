@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "id": "volcengine",
+  "version": "0.1.0",
+  "wasm": {
+    "binary": "tiangong_plugin_volcengine_wasm.wasm"
+  },
+  "sidecar": {
+    "binary": "tiangong-volcengine-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 600000
+  },
+  "permissions": [
+    "sidecar.invoke",
+    "bridge.call",
+    "session.write"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "events": [
+      "session.*",
+      "sidecar.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "volcengine-settings",
+        "title": "火山引擎",
+        "description": "火山方舟 Agent Plan：API Key 与图片/视频/语音模型配置",
+        "icon": "image",
+        "entry": "app/settings.html",
+        "sandbox": "iframe"
+      },
+      {
+        "slot": "session.input-action",
+        "id": "voice-input",
+        "title": "语音输入",
+        "description": "切换到按住说话的语音输入模式",
+        "icon": "mic",
+        "entry": "app/voice-input.html",
+        "context": ["session"]
+      },
+      {
+        "slot": "session.input-overlay",
+        "id": "voice-overlay",
+        "title": "按住说话",
+        "description": "按住说话录音，识别后连同录音一起发送",
+        "icon": "mic",
+        "entry": "app/voice-overlay.html",
+        "context": ["session"]
+      },
+      {
+        "slot": "session.message-action",
+        "id": "message-read",
+        "title": "朗读",
+        "description": "朗读助手回复",
+        "icon": "volume-2",
+        "entry": "app/message-read.html",
+        "context": ["session", "message"]
+      },
+      {
+        "slot": "session.message-item",
+        "id": "voice-bubble",
+        "title": "语音消息",
+        "description": "语音输入消息的录音播放气泡",
+        "icon": "audio-lines",
+        "entry": "app/voice-bubble.html",
+        "context": ["session", "message"]
+      },
+      {
+        "slot": "global.status-item",
+        "id": "auto-read",
+        "title": "自动朗读",
+        "description": "边生成边朗读当前会话的助手回复",
+        "icon": "volume-2",
+        "entry": "app/auto-read.html",
+        "context": ["workspace"]
+      }
+    ]
+  },
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ],
+  "mention": {
+    "hint": "火山引擎：生成图片或视频、语音合成与语音识别",
+    "mark": "火山"
+  }
+}

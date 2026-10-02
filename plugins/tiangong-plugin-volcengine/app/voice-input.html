@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>语音输入</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .vi-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .vi-root [hidden] { display: none !important; }
+    .vi-root { display: inline-flex; width: 32px; height: 32px; }
+    .vi-btn {
+      display: inline-flex; box-sizing: border-box; width: 32px; height: 32px;
+      align-items: center; justify-content: center; border: 0; padding: 0;
+      border-radius: calc(var(--radius, 0.5rem) - 2px); background: transparent;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease;
+    }
+    .vi-btn:hover { background: hsl(var(--accent, 210 40% 96.1%)); color: hsl(var(--accent-foreground, 222.2 47.4% 11.2%)); }
+    .vi-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px hsl(var(--ring, 222.2 47.4% 11.2%)); }
+    svg { width: 16px; height: 16px; }
+  </style>
+</head>
+<body>
+  <div class="vi-root">
+    <button class="vi-btn" id="vi-btn" type="button" title="切换到语音模式" aria-label="切换到语音模式">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+        <line x1="12" x2="12" y1="19" y2="22" />
+      </svg>
+    </button>
+  </div>
+  <script>
+    // 输入框旁的麦克风按钮：申请由本插件的 session.input-overlay 贡献接管输入区。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const button = uiRoot.getElementById('vi-btn');
+    button.addEventListener('click', async () => {
+      if (typeof bridge === 'undefined' || !bridge) return;
+      const context = typeof hostContext !== 'undefined' && hostContext ? hostContext : {};
+      const sessionId = context.session && context.session.id ? context.session.id : null;
+      try {
+        // hint 替换输入区底栏的快捷键提示（Enter 发送 …）。
+        await bridge.call('session.input.showOverlay', JSON.stringify({
+          session_id: sessionId,
+          hint: '空格键 录音 · Esc 取消录音',
+        }));
+      } catch (error) {
+        window.alert(`打开语音模式失败：${(error && error.message) || error}`);
+      }
+    });
+  </script>
+</body>
+</html>

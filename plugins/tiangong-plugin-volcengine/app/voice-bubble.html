@@ -1,0 +1,112 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>语音消息</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .vb-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .vb-root [hidden] { display: none !important; }
+    .vb-root { display: block; font-family: var(--host-font-family, inherit); }
+    .vb-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+    .vb-list[hidden] { display: none; }
+    .vb-bubble {
+      display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
+      padding: 4px 12px 4px 8px; border: 0; border-radius: 999px; cursor: pointer; font: inherit; font-size: 12px;
+      background: hsl(var(--primary, 222.2 47.4% 11.2%) / .1); color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    .vb-bubble:hover { background: hsl(var(--primary, 222.2 47.4% 11.2%) / .2); }
+    .vb-bars { display: inline-flex; align-items: center; gap: 2px; height: 14px; }
+    .vb-bars i { display: block; width: 2px; border-radius: 1px; background: currentColor; opacity: .7; }
+    .vb-bubble.is-playing .vb-bars i { animation: vb-wave .8s ease-in-out infinite; }
+    .vb-bars i:nth-child(2) { animation-delay: .1s; } .vb-bars i:nth-child(3) { animation-delay: .2s; }
+    .vb-bars i:nth-child(4) { animation-delay: .3s; } .vb-bars i:nth-child(5) { animation-delay: .4s; }
+    @keyframes vb-wave { 50% { transform: scaleY(.4); } }
+    svg { width: 14px; height: 14px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="vb-root"><div class="vb-list" id="vb-list" hidden></div></div>
+  <script>
+    // 用户消息附加区（session.message-item）：为语音输入的录音附件渲染可播放的语音气泡。
+    // 仅识别本插件录音产生的附件（发送时命名为「语音消息」/ 录音文件前缀 stt_rec_），
+    // 其他音频附件仍由宿主的通用媒体渲染处理。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const list = uiRoot.getElementById('vb-list');
+    let playingPath = null;
+    let current = typeof hostContext !== 'undefined' ? hostContext : null;
+
+    function voiceAttachments(context) {
+      const attachments = (context && context.message && context.message.attachments) || [];
+      return attachments.filter((item) => {
+        if (item.kind !== 'audio') return false;
+        const name = item.name || '';
+        const file = (item.path || '').split(/[\\/]/).pop() || '';
+        return name.startsWith('语音消息') || file.startsWith('stt_rec_');
+      });
+    }
+
+    async function call(method, payload) {
+      const raw = await bridge.call(method, JSON.stringify(payload || {}));
+      return raw ? JSON.parse(raw) : null;
+    }
+
+    async function toggle(path) {
+      if (playingPath === path) {
+        playingPath = null;
+        render(current);
+        await call('plugin.stop', {}).catch(() => {});
+        return;
+      }
+      playingPath = path;
+      render(current);
+      try {
+        await call('plugin.stop', {}).catch(() => {});
+        await call('plugin.play', { file_path: path });
+        for (;;) {
+          const status = await call('plugin.play_status', {});
+          if (!status || !status.playing || playingPath !== path) break;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      } catch (error) {
+        window.alert(`播放语音失败：${(error && error.message) || error}`);
+      } finally {
+        if (playingPath === path) playingPath = null;
+        render(current);
+      }
+    }
+
+    function render(context) {
+      const items = voiceAttachments(context);
+      list.replaceChildren(...items.map((item) => {
+        const playing = playingPath === item.path;
+        const bubble = document.createElement('button');
+        bubble.type = 'button';
+        bubble.className = `vb-bubble${playing ? ' is-playing' : ''}`;
+        bubble.title = playing ? '停止播放' : '播放语音';
+        bubble.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
+          + (playing
+            ? '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>'
+            : '<path d="M8 5v14l11-7z"/>')
+          + '</svg><span class="vb-bars"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:7px"></i></span><span>' + (playing ? '播放中' : '播放录音') + '</span>';
+        bubble.addEventListener('click', () => toggle(item.path));
+        return bubble;
+      }));
+      list.hidden = items.length === 0;
+    }
+
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange((context) => { current = context; render(context); });
+    } else {
+      render(current);
+    }
+    if (typeof registerCleanup === 'function') {
+      registerCleanup(() => {
+        if (playingPath) call('plugin.stop', {}).catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>

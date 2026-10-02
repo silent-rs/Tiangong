@@ -1,0 +1,14 @@
+[package]
+name = "tiangong-plugin-volcengine-protocol"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata.tiangong]
+business-protocol = 1
+description = "Volcengine（火山方舟）WASM 与 sidecar 共用的私有业务协议"
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

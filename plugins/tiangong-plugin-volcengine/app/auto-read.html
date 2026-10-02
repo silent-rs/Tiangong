@@ -1,0 +1,206 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>自动朗读</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .ar-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .ar-root [hidden] { display: none !important; }
+    .ar-root { display: inline-flex; align-items: center; font-family: var(--host-font-family, inherit); }
+    .ar-btn {
+      display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 0; border-radius: 4px;
+      background: transparent; cursor: pointer; font: inherit; font-size: 12px;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+    }
+    .ar-btn:hover { color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .ar-btn.is-on { background: hsl(var(--primary, 222.2 47.4% 11.2%)); color: hsl(var(--primary-foreground, 210 40% 98%)); }
+    .ar-btn.is-playing svg { animation: ar-pulse 1s ease-in-out infinite; }
+    @keyframes ar-pulse { 50% { opacity: .4; } }
+    svg { width: 14px; height: 14px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="ar-root">
+    <button class="ar-btn" id="ar-btn" type="button"></button>
+  </div>
+  <script>
+    // 状态栏自动朗读开关（global.status-item）：订阅本插件 sidecar 推送的最终答复
+    // （WASM on_turn_finished 钩子提取本轮 Summary 相位答复 → sidecar 通知
+    // volcengine.reply_final，经宿主 sidecar.event 到达；不含工具过程文本），
+    // 按句切分成短段后逐段调用 plugin.speak：未合成过的边合成边流式播放（首包即开播），
+    // 已合成过的直接播放缓存文件；一段播完再朗读下一段。
+    // 只朗读当前会话；切换会话或关闭开关即停止。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const button = uiRoot.getElementById('ar-btn');
+    const SENTENCE_END = /[。！？；!?;\n]|[.](?=\s)/;
+    // 每段 1～2 句：流式合成首包即开播，段落过长只会拉长单次请求，过短会增加段间停顿。
+    const CHUNK_MAX = 100;
+    const STORAGE_KEY = 'tiangong-volcengine-auto-read';
+    const ICON_OFF = '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/>';
+    const ICON_ON = '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>';
+
+    const state = {
+      enabled: localStorage.getItem(STORAGE_KEY) === '1',
+      sessionId: (typeof hostContext !== 'undefined' && hostContext && hostContext.session && hostContext.session.id) || null,
+      sentences: [],
+      lastMessageId: null,
+      speaking: false,
+      playing: false,
+      generation: 0,
+    };
+    const unsubscribers = [];
+
+    async function call(method, payload) {
+      const raw = await bridge.call(method, JSON.stringify(payload || {}));
+      return raw ? JSON.parse(raw) : null;
+    }
+
+    function render() {
+      button.className = `ar-btn${state.enabled ? ' is-on' : ''}${state.playing ? ' is-playing' : ''}`;
+      const title = state.enabled ? '关闭自动朗读' : '开启自动朗读';
+      button.title = title;
+      button.setAttribute('aria-label', title);
+      button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${state.enabled ? ICON_ON : ICON_OFF}</svg>`;
+    }
+
+    function reset() {
+      state.generation += 1;
+      state.sentences = [];
+      state.speaking = false;
+      state.playing = false;
+      call('plugin.stop', {}).catch(() => {});
+      render();
+    }
+
+    // Markdown 转朗读文本：去掉代码块、图片、链接地址与格式符号。
+    function toSpeech(markdown) {
+      return markdown
+        .replace(/```[\s\S]*?```/g, '\n（代码略）\n')
+        .replace(/`([^`]*)`/g, '$1')
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/<[^>]+>/g, '')
+        .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+[.)])\s+/gm, '')
+        .replace(/[*_~|]+/g, '')
+        .replace(/^\s*-{3,}\s*$/gm, '')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+    }
+
+    function splitSentences(text) {
+      const sentences = [];
+      let rest = text;
+      for (;;) {
+        const match = SENTENCE_END.exec(rest);
+        if (!match) break;
+        const end = match.index + match[0].length;
+        const sentence = rest.slice(0, end).trim();
+        rest = rest.slice(end);
+        if (sentence) sentences.push(sentence);
+      }
+      if (rest.trim()) sentences.push(rest.trim());
+      // 相邻短句合并到 CHUNK_MAX 以内。
+      const chunks = [];
+      for (const sentence of sentences) {
+        const last = chunks[chunks.length - 1];
+        if (last !== undefined && last.length + sentence.length <= CHUNK_MAX) {
+          chunks[chunks.length - 1] = last + sentence;
+        } else {
+          chunks.push(sentence);
+        }
+      }
+      return chunks;
+    }
+
+    async function speakAll() {
+      if (state.speaking) return;
+      const generation = state.generation;
+      state.speaking = true;
+      state.playing = true;
+      render();
+      try {
+        while (state.sentences.length && generation === state.generation) {
+          const sentence = state.sentences.shift();
+          try {
+            await call('plugin.speak', { text: sentence });
+            for (;;) {
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              if (generation !== state.generation) return;
+              const status = await call('plugin.play_status', {});
+              if (status && status.error) throw new Error(status.error);
+              if (!status || !status.playing) break;
+            }
+          } catch (error) {
+            // 单段失败（网络等）跳过该段继续朗读后文。
+            console.warn('[auto-read] 朗读失败', error);
+          }
+        }
+      } finally {
+        if (generation === state.generation) {
+          state.speaking = false;
+          state.playing = false;
+          render();
+        }
+      }
+    }
+
+    function onSidecarEvent(raw) {
+      if (!state.enabled) return;
+      let event;
+      try {
+        const wrapped = JSON.parse(raw);
+        if (!wrapped || wrapped.channel !== 'volcengine.reply_final') return;
+        event = JSON.parse(wrapped.payload);
+      } catch { return; }
+      if (!event || event.session_id !== state.sessionId) return;
+      // 同一答复只朗读一次。
+      if (event.message_id && event.message_id === state.lastMessageId) return;
+      state.lastMessageId = event.message_id || null;
+      const text = toSpeech(event.text || '');
+      if (!text) return;
+      // 新答复打断上一段仍在播放的朗读。
+      if (state.speaking || state.sentences.length) reset();
+      state.sentences.push(...splitSentences(text));
+      void speakAll();
+    }
+
+    function subscribe() {
+      if (unsubscribers.length) return;
+      unsubscribers.push(bridge.on('sidecar.event', onSidecarEvent));
+    }
+
+    function unsubscribe() {
+      while (unsubscribers.length) unsubscribers.pop()();
+    }
+
+    button.addEventListener('click', () => {
+      state.enabled = !state.enabled;
+      localStorage.setItem(STORAGE_KEY, state.enabled ? '1' : '0');
+      reset();
+      if (state.enabled) subscribe();
+      else unsubscribe();
+    });
+
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange((context) => {
+        const next = (context && context.session && context.session.id) || null;
+        if (next !== state.sessionId) {
+          state.sessionId = next;
+          if (state.speaking || state.sentences.length) reset();
+        }
+      });
+    }
+    if (typeof registerCleanup === 'function') {
+      registerCleanup(() => {
+        unsubscribe();
+        if (state.playing) call('plugin.stop', {}).catch(() => {});
+      });
+    }
+    if (state.enabled) subscribe();
+    render();
+  </script>
+</body>
+</html>

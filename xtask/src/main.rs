@@ -222,6 +222,20 @@ const COMPUTER_USE: PluginConfig = PluginConfig {
     protocol_manifest: Some("plugins/tiangong-plugin-computer-use/protocol/Cargo.toml"),
 };
 
+const VOLCENGINE: PluginConfig = PluginConfig {
+    id: "volcengine",
+    name: "Volcengine",
+    description: "火山引擎：图片/视频生成、语音合成与语音识别",
+    protocol_crate: Some("tiangong-plugin-volcengine-protocol"),
+    wasm_crate: Some("tiangong-plugin-volcengine-wasm"),
+    wasm_artifact: Some("tiangong_plugin_volcengine_wasm.wasm"),
+    sidecar_crate: Some("tiangong-plugin-volcengine-sidecar"),
+    sidecar_artifact: Some("tiangong-volcengine-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-volcengine",
+    plugin_manifest: "plugins/tiangong-plugin-volcengine/plugin.json",
+    protocol_manifest: Some("plugins/tiangong-plugin-volcengine/protocol/Cargo.toml"),
+};
+
 const GENERATE_IMAGE_OPENAI: PluginConfig = PluginConfig {
     id: "generate-image-openai",
     name: "Generate Image OpenAI",
@@ -341,6 +355,14 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         // 手写自包含单文件 UI（无前端构建链）。
         "coding" => &["app/index.html"],
         "computer-use" => &["app/restore-window.html"],
+        "volcengine" => &[
+            "app/settings.html",
+            "app/voice-input.html",
+            "app/voice-overlay.html",
+            "app/message-read.html",
+            "app/voice-bubble.html",
+            "app/auto-read.html",
+        ],
         _ => &[],
     }
 }
@@ -355,6 +377,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "skill" => Ok(&SKILL),
         "coding" => Ok(&CODING),
         "prompt" => Ok(&PROMPT),
+        "volcengine" => Ok(&VOLCENGINE),
         "generate-image-openai" => Ok(&GENERATE_IMAGE_OPENAI),
         "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
         "fs" => Ok(&FS),

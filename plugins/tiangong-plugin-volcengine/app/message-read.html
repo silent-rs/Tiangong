@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>朗读</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器，
+       否则宿主隐藏挂载点（invisible + pointer-events-none）时插件内容仍会拦截点击。 */
+    :host, .rd-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
+    .rd-root [hidden] { display: none !important; }
+    .rd-root { display: inline-flex; align-items: center; }
+    .rd-btn {
+      display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+      padding: 4px; border: 0; border-radius: 4px; background: transparent; cursor: pointer;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+      transition: background-color 120ms ease, color 120ms ease;
+    }
+    .rd-btn:hover { background: hsl(var(--accent, 210 40% 96.1%)); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .rd-spin { animation: rd-spin 1s linear infinite; }
+    @keyframes rd-spin { to { transform: rotate(360deg); } }
+    svg { width: 14px; height: 14px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="rd-root">
+    <button class="rd-btn" id="rd-btn" type="button" title="朗读" aria-label="朗读"></button>
+  </div>
+  <script>
+    // 消息操作区的朗读按钮（session.message-action）：朗读当前消息文本（首次边合成边播放，之后直接播放已生成的音频）。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const button = uiRoot.getElementById('rd-btn');
+    const ICONS = {
+      idle: '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>',
+      loading: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+      playing: '<rect width="14" height="14" x="5" y="5" rx="2"/>',
+    };
+    let phase = 'idle';
+    let text = (typeof hostContext !== 'undefined' && hostContext && hostContext.message && hostContext.message.text) || '';
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange((context) => {
+        text = (context && context.message && context.message.text) || '';
+      });
+    }
+
+    function render() {
+      const title = phase === 'playing' ? '停止播放' : phase === 'loading' ? '合成中' : '朗读';
+      button.title = title;
+      button.setAttribute('aria-label', title);
+      button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="${phase === 'loading' ? 'rd-spin' : ''}">${ICONS[phase]}</svg>`;
+    }
+
+    async function call(method, payload) {
+      const raw = await bridge.call(method, JSON.stringify(payload || {}));
+      return raw ? JSON.parse(raw) : null;
+    }
+
+    async function waitPlayback() {
+      for (;;) {
+        const status = await call('plugin.play_status', {});
+        if (status && status.error) throw new Error(status.error);
+        if (!status || !status.playing || phase !== 'playing') return;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+
+    button.addEventListener('click', async () => {
+      if (phase === 'playing' || phase === 'loading') {
+        phase = 'idle';
+        render();
+        await call('plugin.stop', {}).catch(() => {});
+        return;
+      }
+      if (!text.trim()) return;
+      phase = 'loading';
+      render();
+      try {
+        // speak：已生成过的直接播放音频文件；否则边合成边流式播放（同时缓存）。
+        await call('plugin.speak', { text });
+        if (phase !== 'loading') return;
+        phase = 'playing';
+        render();
+        await waitPlayback();
+      } catch (error) {
+        window.alert(`语音播放失败：${(error && error.message) || error}`);
+      } finally {
+        phase = 'idle';
+        render();
+      }
+    });
+    render();
+  </script>
+</body>
+</html>
