@@ -66,7 +66,8 @@ pub(super) fn to_anthropic_request(
     // 官方约束：开启思考时 temperature 只能为 1、top_p/top_k 不可自定义，
     // 省略字段走协议默认即满足；Claude Code 同款行为，兼容端点用各自
     // 默认采样。丢弃用户配置时留 debug 痕迹，便于排查"温度不生效"类困惑。
-    if thinking.is_some() {
+    let thinking_enabled = matches!(thinking, Some(ThinkingConfig::Adaptive));
+    if thinking_enabled {
         if request.temperature.is_some() {
             tracing::debug!(
                 model = %request.model,
@@ -85,10 +86,10 @@ pub(super) fn to_anthropic_request(
         max_tokens: request.max_tokens,
         system,
         messages,
-        temperature: request.temperature.filter(|_| thinking.is_none()),
+        temperature: request.temperature.filter(|_| !thinking_enabled),
         stop_sequences: (!request.stop_sequences.is_empty())
             .then(|| request.stop_sequences.clone()),
-        top_p: request.top_p.filter(|_| thinking.is_none()),
+        top_p: request.top_p.filter(|_| !thinking_enabled),
         metadata: request.metadata.clone(),
         tools,
         tool_choice,
@@ -145,10 +146,14 @@ fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
     // reasoning_effort 有值即开启思考，统一 adaptive 形态（不区分模型：
     // Claude 新模型仅接受该形态，智谱 GLM 等兼容端点实测已完整支持）；
     // 深度档位由 map_output_config 对齐到 output_config.effort。
-    request
-        .reasoning_effort
-        .is_thinking_enabled()
-        .then_some(ThinkingConfig::Adaptive)
+    // 关闭思考时显式下发 disabled：智谱 GLM 等兼容端点省略 thinking
+    // 字段会回落到"默认开启思考"；Claude 系模型不接受显式 disabled，
+    // 由 AnthropicClient::normalize_thinking_for_model 按模型去掉。
+    Some(if request.reasoning_effort.is_thinking_enabled() {
+        ThinkingConfig::Adaptive
+    } else {
+        ThinkingConfig::Disabled
+    })
 }
 
 /// adaptive 思考深度：天工 ReasoningEffort 档位与 Anthropic effort

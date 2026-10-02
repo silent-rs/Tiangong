@@ -144,7 +144,10 @@ fn test_temperature_kept_when_thinking_disabled() {
     request.reasoning_effort = ReasoningEffort::None;
     let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
     assert_eq!(mapped.temperature, Some(0.2));
-    assert_eq!(mapped.thinking, None);
+    assert_eq!(
+        mapped.thinking,
+        Some(tiangong_anthropic::types::ThinkingConfig::Disabled)
+    );
 }
 
 #[test]
@@ -175,10 +178,13 @@ fn test_adaptive_model_maps_effort_to_output_config() {
         })
     );
 
-    // 关闭思考：不发 thinking，也不发 output_config。
+    // 关闭思考：显式 disabled（Claude 系由 client 层去掉），不发 output_config。
     request.reasoning_effort = ReasoningEffort::None;
     let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
-    assert_eq!(mapped.thinking, None);
+    assert_eq!(
+        mapped.thinking,
+        Some(tiangong_anthropic::types::ThinkingConfig::Disabled)
+    );
     assert_eq!(mapped.output_config, None);
 }
 

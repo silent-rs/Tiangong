@@ -220,18 +220,20 @@ impl AnthropicClient {
         self.request_builder_with_client(&self.http_client, path)
     }
 
-    /// thinking 形态统一规范化（不区分模型）：
+    /// thinking 形态统一规范化：
     ///
     /// 实测智谱 GLM 的 Anthropic 兼容端点已完整支持 adaptive +
     /// output_config.effort（low 档不思考、high 档思考），Claude 官方
-    /// 与中转端点新模型仅接受该形态，因此对所有模型统一下发：
+    /// 与中转端点新模型仅接受该形态，因此开启思考时对所有模型统一下发：
     ///
     /// - `Adaptive` / `None`：保持不变；
-    /// - `Disabled`：置为不发 thinking。自适应思考无法关闭，显式
-    ///   disabled 会被新模型 400 拒收，省略字段即回落到模型默认行为。
+    /// - `Disabled` + Claude 系模型：置为不发 thinking。自适应思考无法关闭，
+    ///   显式 disabled 会被新模型 400 拒收，省略字段即回落到模型默认行为；
+    /// - `Disabled` + 其他模型（智谱 GLM 等兼容端点）：保留显式 disabled，
+    ///   这些端点省略 thinking 字段时默认开启思考，必须显式关闭。
     fn normalize_thinking_for_model(request: &mut MessagesCreateRequest) {
         match request.thinking.take() {
-            Some(ThinkingConfig::Disabled) => {
+            Some(ThinkingConfig::Disabled) if is_claude_model(&request.model) => {
                 tracing::debug!(
                     model = %request.model,
                     "thinking disabled dropped: adaptive thinking cannot be turned off"
@@ -413,6 +415,12 @@ fn parse_sse_event(event_type: &str, data: &str) -> Result<StreamEvent, Anthropi
     }
 }
 
+/// 是否 Anthropic 官方 Claude 系模型（含中转端点上带前缀的命名，如
+/// `anthropic/claude-opus-5-5`）。
+fn is_claude_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("claude")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,12 +473,27 @@ mod tests {
     }
 
     #[test]
-    fn disabled_thinking_is_dropped() {
-        // 自适应思考无法关闭：disabled 会被新模型 400 拒收，省略字段走默认。
-        let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
-        request.model = "claude-opus-5-5".to_string();
-        AnthropicClient::normalize_thinking_for_model(&mut request);
-        assert_eq!(request.thinking, None);
+    fn disabled_thinking_is_dropped_for_claude() {
+        // 自适应思考无法关闭：disabled 会被 Claude 新模型 400 拒收，省略字段走默认。
+        for model in ["claude-opus-5-5", "anthropic/Claude-Sonnet-4-5"] {
+            let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
+            request.model = model.to_string();
+            AnthropicClient::normalize_thinking_for_model(&mut request);
+            assert_eq!(request.thinking, None, "{model}");
+        }
+    }
+
+    #[test]
+    fn disabled_thinking_is_kept_for_compatible_endpoints() {
+        // 智谱 GLM 等兼容端点省略 thinking 即默认思考，关闭时必须显式下发 disabled。
+        for model in ["glm-5.3", "glm-5.3-flash", "step-5-preview"] {
+            let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
+            request.model = model.to_string();
+            AnthropicClient::normalize_thinking_for_model(&mut request);
+            assert_eq!(request.thinking, Some(ThinkingConfig::Disabled), "{model}");
+            let payload = serde_json::to_value(&request).expect("serialize");
+            assert_eq!(payload["thinking"], serde_json::json!({"type": "disabled"}));
+        }
     }
 
     #[test]
