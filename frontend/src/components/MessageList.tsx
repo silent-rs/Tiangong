@@ -752,12 +752,15 @@ export function MessageList() {
     }
   }, [handleSetEditingAttachments]);
 
-  // 拦截 MdPreview 内的链接点击：左键在嵌入浏览器中打开，右键保留系统默认
+  // 拦截 MdPreview 内的链接点击：左键在嵌入浏览器中打开，右键保留系统默认。
+  // 只处理消息列表视口内的链接，设置页等其他区域的外链交由系统浏览器打开，
+  // 否则内嵌浏览器（原生 webview）会覆盖在设置弹窗等界面之上。
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (e.button !== 0) return; // 仅拦截左键
       const anchor = (e.target as HTMLElement).closest('a[href]');
       if (!anchor) return;
+      if (!viewportRef.current?.contains(anchor)) return;
       const href = anchor.getAttribute('href');
       if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
       e.preventDefault();
