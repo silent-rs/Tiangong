@@ -122,53 +122,26 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin tiangong
 
 ## 5. 无界面配置流程
 
-天工 0.12.0 提供完整的模块化 CLI 配置能力（详见 `docs/rfc/0015-cli-modular-config.md`），无需桌面即可完成全部配置。完整流程：
+全部配置在网页配置页完成（详见 `docs/cli-configuration-guide.md`）。服务器上启动配置页，经 SSH 隧道在本地浏览器打开：
 
 ```bash
-# 1. 配置模型供应商（推荐用环境变量名引用密钥）
-tiangong model add-provider deepseek \
-  --protocol deepseek \
-  --base-url https://api.deepseek.com \
-  --api-key-env DEEPSEEK_API_KEY
+# 1. 本地电脑建立隧道
+ssh -L 8800:127.0.0.1:8800 <服务器>
 
-# 2. 配置模型
-tiangong model add-model deepseek-chat \
-  --provider deepseek \
-  --model-id deepseek-chat \
-  --capability chat
-
-# 3. 设置 chat 路由
-tiangong model route set chat deepseek-chat
-
-# 4. 验证模型连通性（真实请求一次）
-tiangong model test chat
-
-# 5. 配置 Server 监听
-tiangong server config set --host 127.0.0.1 --port 8080
-
-# 6. 生成鉴权 Token
-tiangong server token generate
-# 或指定长度：tiangong server token generate --length 48
-
-# 7. （可选）配置自定义 Prompt
-tiangong prompt set "总是使用简体中文回答，回复要简洁直接。"
-
-# 8. （可选）配置 Memory：打印配置页链接，经 SSH 隧道在本地浏览器打开
-#    本地执行：ssh -L 8800:127.0.0.1:8800 <服务器>
-tiangong memory config --port 8800 --no-open
-tiangong memory enable
-
-# 9. 完整环境诊断
-tiangong doctor
+# 2. 服务器上启动配置页，在本地浏览器打开打印的链接
+tiangong config --port 8800 --no-open
 ```
 
-查看当前配置概览：
+在页面中依次完成：
 
-```bash
-tiangong config path     # 列出所有配置文件路径
-tiangong config show     # 配置概览
-tiangong config validate # 本地结构校验
-```
+1. **模型服务**：添加 Provider（推荐用环境变量引用密钥，如 `DEEPSEEK_API_KEY`），点击「拉取模型」批量添加；
+2. **模型**：确认能力并点击「测试」验证连通性；
+3. **默认路由**：选择对话模型；
+4. **Server**：设置监听地址、端口，生成 Token（只显示一次，请妥善保存）；
+5. **插件管理 / 插件配置**：安装所需插件，并在插件配置中设置 MCP、Skills、记忆等；
+6. 点击「完成并关闭」。
+
+> 远程模式下，新登记的环境变量引用不能在页面中测试（防止服务器环境变量被发往任意地址）；请先在服务器环境中设置该变量后再启动配置页，或在页面中直接填写 API Key。
 
 ---
 
@@ -190,7 +163,6 @@ tiangong server --host 0.0.0.0 --port 9000 --token tg_xxxxx
 
 ```bash
 tiangong server -d          # 后台启动，写入 server.pid
-tiangong server status      # 查看状态（PID、进程存活、端口监听、Token）
 tiangong server stop        # 停止后台进程
 ```
 
@@ -288,11 +260,11 @@ server {
 }
 ```
 
-调用方在请求头携带 Token：
+调用方在请求头携带 Token（在配置页「Server」中生成，或查看 `~/.tiangong/server.json`）：
 
 ```bash
 curl https://tiangong.example.com/api/v1/health \
-  -H "Authorization: Bearer $(tiangong server token show --raw)"
+  -H "Authorization: Bearer <token>"
 ```
 
 ---
@@ -307,7 +279,7 @@ Server 模式提供 HTTP REST + WebSocket API，详见 `docs/server-api.md`。�
 | POST | `/api/v1/chat` | 对话 |
 | WS | `/api/v1/ws` | WebSocket 流式对话 |
 
-所有非 health 端点需在请求头携带 `Authorization: Bearer <token>`，Token 通过 `tiangong server token generate` 生成。
+所有非 health 端点需在请求头携带 `Authorization: Bearer <token>`，Token 在 `tiangong config` 配置页的「Server」分区生成。
 
 ---
 
@@ -346,7 +318,7 @@ sudo systemctl start tiangong
 
 # 6. 验证
 tiangong --version
-tiangong doctor
+curl -s http://127.0.0.1:8080/api/v1/health
 ```
 
 **配置与数据不丢失**：所有配置、会话、记忆都存储在 `~/.tiangong/`，与二进制完全解耦。更新二进制只需替换可执行文件，数据目录保持不动。
@@ -367,13 +339,13 @@ sudo systemctl start tiangong
 
 ## 10. 故障排查
 
-| 现象 | 排查命令 |
+| 现象 | 排查方式 |
 |------|---------|
-| Server 启动后无法访问 | `tiangong server status` 检查端口监听；`ss -tlnp \| grep 8080` |
-| 模型请求失败 | `tiangong model test chat` 验证连通性；检查 `--api-key-env` 对应环境变量是否注入 |
-| 鉴权失败 | `tiangong server token show` 确认 Token；请求头格式 `Authorization: Bearer <token>` |
-| Memory 未生效 | `tiangong memory status`；确认无 `~/.tiangong/memory/.disabled` 标记文件 |
-| 不确定哪里配置有问题 | `tiangong doctor`（加 `--deep` 做深度诊断） |
+| Server 启动后无法访问 | `curl http://127.0.0.1:8080/api/v1/health`；`ss -tlnp \| grep 8080` |
+| 模型请求失败 | 配置页「模型」中点击「测试」验证连通性；检查环境变量引用的密钥是否注入 |
+| 鉴权失败 | 配置页「Server」确认是否设置 Token；请求头格式 `Authorization: Bearer <token>` |
+| Memory 未生效 | 配置页「插件管理」确认记忆插件已启用，「插件配置 → 记忆」检查模型配置 |
+| 插件异常 | 配置页「插件管理」查看插件状态与错误信息 |
 
 日志位置：
 

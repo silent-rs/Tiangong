@@ -4,6 +4,7 @@ mod input;
 mod modal;
 mod output;
 mod repl;
+pub mod web_config;
 
 pub fn run_cli() -> anyhow::Result<()> {
     repl::run(None)

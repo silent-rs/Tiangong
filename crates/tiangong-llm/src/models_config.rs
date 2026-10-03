@@ -473,7 +473,7 @@ impl ModelsConfig {
         }
     }
 
-    // ── CLI 友好方法（RFC 0015 §6.1，供 tiangong model 命令使用） ──────
+    // ── 增删改辅助方法（供网页配置页与桌面设置页使用） ──────
 
     /// 新增或覆盖 Provider。
     ///

@@ -1,8 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use tiangong_llm::ProviderProtocol;
-use tiangong_plugin_mcp_protocol::config::McpTransportMode;
-
 #[derive(Debug, Parser)]
 #[command(
     name = "tiangong",
@@ -29,22 +26,12 @@ pub(crate) enum MainCommand {
     },
     #[command(about = "启动 Server 模式")]
     Server(ServerArgs),
-    #[command(about = "MCP 配置管理")]
-    Mcp(McpArgs),
     #[command(about = "Bot 制品管理（下载/配置/安装/升级/启停）")]
     Bot(BotArgs),
-    #[command(about = "模型配置管理（Provider / Model / Routing）")]
-    Model(ModelArgs),
-    #[command(about = "Memory 系统配置管理")]
-    Memory(MemoryArgs),
-    #[command(about = "Skill 配置管理")]
-    Skill(SkillArgs),
-    #[command(about = "自定义 Prompt 管理")]
-    Prompt(PromptArgs),
-    #[command(about = "通用配置查看与校验")]
+    #[command(
+        about = "打开网页配置页（模型 / Server / 通用 / Prompt / 插件管理与插件配置）；配合 --host 可远程配置服务器"
+    )]
     Config(ConfigArgs),
-    #[command(about = "环境诊断")]
-    Doctor(DoctorArgs),
     #[command(about = "检查并安装天工更新")]
     Update(UpdateArgs),
 }
@@ -84,263 +71,23 @@ pub(crate) struct ServerArgs {
 pub(crate) enum ServerSubcommand {
     #[command(about = "停止后台 Server")]
     Stop,
-    #[command(about = "查看 Server 运行状态")]
-    Status,
-    #[command(about = "交互式配置向导（引导完成监听地址与 Token）")]
-    Configure,
-    #[command(about = "管理 Server 监听配置")]
-    Config {
-        #[command(subcommand)]
-        command: ServerConfigSubcommand,
-    },
-    #[command(about = "管理 Server 鉴权 Token")]
-    Token {
-        #[command(subcommand)]
-        command: ServerTokenSubcommand,
-    },
 }
 
-#[derive(Debug, Subcommand)]
-pub(crate) enum ServerConfigSubcommand {
-    #[command(about = "查看 Server 监听配置")]
-    Show,
-    #[command(about = "修改 Server 监听配置（host/port 可选）")]
-    Set {
-        #[arg(long, help = "监听地址")]
-        host: Option<String>,
-        #[arg(long, help = "监听端口")]
-        port: Option<u16>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ServerTokenSubcommand {
-    #[command(about = "查看当前 Token（脱敏）")]
-    Show,
-    #[command(about = "直接设置 Token")]
-    Set {
-        #[arg(help = "Token 值")]
-        token: String,
-    },
-    #[command(about = "生成随机 Token 并写入配置")]
-    Generate {
-        #[arg(long, default_value_t = 32, help = "Token 长度（16-256）")]
-        length: usize,
-    },
-}
-
+/// 网页配置页参数（与 `tiangong-memory-sidecar --config` 一致）。
 #[derive(Debug, Args)]
-pub(crate) struct McpArgs {
-    #[command(subcommand)]
-    pub(crate) command: McpSubcommand,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ModelArgs {
-    #[command(subcommand)]
-    pub(crate) command: ModelSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ModelSubcommand {
-    #[command(about = "查看模型配置（providers / models / routes，默认全部）")]
-    List {
-        #[arg(help = "过滤范围：providers | models | routes")]
-        scope: Option<String>,
-    },
-    #[command(about = "新增或覆盖模型供应商")]
-    AddProvider {
-        #[arg(help = "供应商名称")]
-        name: String,
-        #[arg(long, value_parser = parse_protocol, help = "协议（openai_chatcompletions / anthropic / deepseek）")]
-        protocol: ProviderProtocol,
-        #[arg(long = "base-url", help = "API base URL")]
-        base_url: String,
-        #[arg(
-            long = "api-key",
-            conflicts_with = "api_key_env",
-            help = "明文 API Key（不推荐，建议用 --api-key-env）"
-        )]
-        api_key: Option<String>,
-        #[arg(
-            long = "api-key-env",
-            conflicts_with = "api_key",
-            help = "API Key 环境变量名（写入为 ${VAR} 模板）"
-        )]
-        api_key_env: Option<String>,
-        #[arg(
-            long = "timeout-ms",
-            default_value_t = 60_000,
-            help = "请求超时（毫秒）"
-        )]
-        timeout_ms: u64,
-    },
-    #[command(about = "删除模型供应商（--force 连同引用它的模型和路由一并删除）")]
-    RemoveProvider {
-        #[arg(help = "供应商名称")]
-        name: String,
-        #[arg(long, help = "强制删除，连同引用该供应商的模型与路由")]
-        force: bool,
-    },
-    #[command(about = "新增或覆盖模型")]
-    AddModel {
-        #[arg(help = "模型名称（本地别名）")]
-        name: String,
-        #[arg(long, help = "所属供应商名称")]
-        provider: String,
-        #[arg(long = "model-id", help = "供应商侧的模型 ID")]
-        model_id: String,
-        #[arg(
-            long = "capability",
-            help = "模型能力（可重复）：chat/multimodal（embedding/rerank 已迁至 `tiangong memory config` 配置页）"
-        )]
-        capability: Vec<String>,
-    },
-    #[command(about = "删除模型")]
-    RemoveModel {
-        #[arg(help = "模型名称（本地别名）")]
-        name: String,
-    },
-    #[command(about = "交互式配置向导（引导完成 provider → model → route）")]
-    Configure,
-    #[command(about = "设置路由槽位指向的模型")]
-    Route {
-        #[command(subcommand)]
-        command: RouteSubcommand,
-    },
-    #[command(about = "校验模型配置结构（路由引用、provider 存在性等）")]
-    Validate,
-    #[command(about = "测试模型连通性（真实请求 /models）")]
-    Test {
-        #[arg(help = "测试目标：capability（chat/lite/...）或模型名；默认 chat")]
-        target: Option<String>,
-    },
-    #[command(about = "ChatGPT 账号（Codex 登录）：登录 / 登出 / 查看状态")]
-    Chatgpt {
-        #[command(subcommand)]
-        command: ChatgptSubcommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ChatgptSubcommand {
-    #[command(about = "登录 ChatGPT 账号，并添加固定供应商 ChatGPT")]
-    Login {
-        #[arg(long, help = "使用设备码登录（适合远程 / 无法接收本地回调的环境）")]
-        device: bool,
-    },
-    #[command(about = "退出 ChatGPT 账号并删除本地凭据")]
-    Logout,
-    #[command(about = "查看 ChatGPT 账号登录状态")]
-    Status,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum RouteSubcommand {
-    #[command(about = "查看当前路由表")]
-    List,
-    #[command(about = "设置 capability 路由指向某个已注册模型")]
-    Set {
-        #[arg(help = "能力槽位：chat/lite")]
-        capability: String,
-        #[arg(help = "模型名称（本地别名）")]
-        model: String,
-    },
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct MemoryArgs {
-    #[command(subcommand)]
-    pub(crate) command: MemorySubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum MemorySubcommand {
-    #[command(about = "打开 Memory 配置页（模型、检索与数据管理）；配合 --host 可远程配置")]
-    Config(MemoryConfigArgs),
-    #[command(about = "启用 Memory")]
-    Enable,
-    #[command(about = "禁用 Memory")]
-    Disable,
-    #[command(about = "查看 Memory 状态")]
-    Status,
-    #[command(about = "测试 Memory 模型连通性")]
-    Test,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct MemoryConfigArgs {
+pub(crate) struct ConfigArgs {
     /// 监听地址（缺省 127.0.0.1；远程配置可设为 0.0.0.0 或本机网卡地址）
-    #[arg(long)]
-    pub(crate) host: Option<String>,
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) host: String,
     /// 监听端口（缺省随机）
     #[arg(long)]
     pub(crate) port: Option<u16>,
     /// 不自动打开浏览器，仅打印访问地址（远程/无图形环境使用）
     #[arg(long)]
     pub(crate) no_open: bool,
-}
-
-/// 解析 ProviderProtocol 字符串
-fn parse_protocol(raw: &str) -> Result<ProviderProtocol, String> {
-    raw.parse::<ProviderProtocol>()
-        .map_err(|e| format!("无效的协议 {raw}：{e}"))
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SkillArgs {
-    #[command(subcommand)]
-    pub(crate) command: SkillSubcommand,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct PromptArgs {
-    #[command(subcommand)]
-    pub(crate) command: PromptSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum PromptSubcommand {
-    #[command(about = "查看当前自定义 Prompt")]
-    Show,
-    #[command(about = "设置自定义 Prompt（直接传文本或用 --file 从文件读取）")]
-    Set {
-        /// Prompt 文本（与 --file 互斥）
-        #[arg(help = "Prompt 文本")]
-        text: Option<String>,
-        /// 从文件读取 Prompt 内容
-        #[arg(long = "file", value_name = "PATH", conflicts_with = "text")]
-        file: Option<String>,
-    },
-    #[command(about = "通过 $EDITOR 编辑自定义 Prompt")]
-    Edit,
-    #[command(about = "清空自定义 Prompt")]
-    Clear,
-    #[command(about = "显示自定义 Prompt 存储路径")]
-    Path,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ConfigArgs {
-    #[command(subcommand)]
-    pub(crate) command: ConfigSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ConfigSubcommand {
-    #[command(about = "列出全部配置文件路径")]
-    Path,
-    #[command(about = "配置概览（不展开 JSON）")]
-    Show,
-    #[command(about = "校验本地配置结构（不做外部连通性测试）")]
-    Validate,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct DoctorArgs {
-    /// 深度诊断：执行模型连通性与端口探活（可能较慢）
-    #[arg(long, help = "深度诊断（含模型连通性与端口探活）")]
-    pub(crate) deep: bool,
+    /// 固定访问令牌（至少 8 个字符；缺省每次随机生成一次性令牌）
+    #[arg(long)]
+    pub(crate) token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -358,153 +105,6 @@ impl TrustModeArg {
             TrustModeArg::Supervised => tiangong_core::permission::TrustMode::Supervised,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum McpTransportArg {
-    Auto,
-    Stdio,
-    Http,
-}
-
-impl From<McpTransportArg> for McpTransportMode {
-    fn from(value: McpTransportArg) -> Self {
-        match value {
-            McpTransportArg::Auto => McpTransportMode::Auto,
-            McpTransportArg::Stdio => McpTransportMode::Stdio,
-            McpTransportArg::Http => McpTransportMode::Http,
-        }
-    }
-}
-
-#[derive(Debug, Subcommand)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum McpSubcommand {
-    #[command(about = "查看全部 MCP server")]
-    List,
-    #[command(about = "查看指定 MCP server（不传 name 时等同 list）")]
-    Show {
-        #[arg(help = "MCP server 名称")]
-        name: Option<String>,
-    },
-    #[command(about = "注册 MCP server")]
-    Add {
-        #[arg(help = "MCP server 名称（非 JSON 导入模式必填）")]
-        name: Option<String>,
-        #[arg(help = "MCP server 命令（如 npx；HTTP 可直接填 endpoint）")]
-        command: Option<String>,
-        #[arg(
-            long,
-            help = "通过 JSON 字符串导入（支持单对象或 {\"mcpServers\": {...}}）",
-            conflicts_with = "json_file"
-        )]
-        json: Option<String>,
-        #[arg(
-            long = "json-file",
-            value_name = "PATH",
-            help = "通过 JSON 文件导入（支持单对象或 {\"mcpServers\": {...}}）",
-            conflicts_with = "json"
-        )]
-        json_file: Option<String>,
-        #[arg(long, default_value_t = false, help = "同名 server 存在时覆盖")]
-        force: bool,
-        #[arg(
-            long = "arg",
-            short = 'a',
-            allow_hyphen_values = true,
-            help = "命令参数，可重复，如 -a -y -a @modelcontextprotocol/server-browser"
-        )]
-        args: Vec<String>,
-        #[arg(long, value_delimiter = ',', help = "标签列表，逗号分隔")]
-        tags: Vec<String>,
-        #[arg(long, value_enum, help = "传输类型（auto/stdio/http）")]
-        transport: Option<McpTransportArg>,
-        #[arg(long, help = "HTTP MCP endpoint（如 https://example.com/mcp）")]
-        endpoint: Option<String>,
-        #[arg(long, help = "HTTP MCP Bearer Token（不带 Bearer 前缀）")]
-        auth_header: Option<String>,
-        #[arg(
-            long = "header",
-            value_parser = parse_key_value,
-            help = "HTTP header，格式 key=value，可重复"
-        )]
-        headers: Vec<(String, String)>,
-        #[arg(
-            long = "env",
-            value_parser = parse_key_value,
-            help = "stdio env，格式 key=value，可重复"
-        )]
-        env: Vec<(String, String)>,
-        #[arg(
-            trailing_var_arg = true,
-            allow_hyphen_values = true,
-            value_name = "CMDLINE",
-            help = "通过 -- 传入完整命令，如 -- npx -y @modelcontextprotocol/server-filesystem /path"
-        )]
-        cmdline: Vec<String>,
-        #[arg(long, default_value_t = true, help = "是否启用（true/false）")]
-        enabled: bool,
-    },
-    #[command(about = "删除 MCP server")]
-    Remove {
-        #[arg(help = "MCP server 名称")]
-        name: String,
-    },
-    #[command(about = "启用 MCP server")]
-    Enable {
-        #[arg(help = "MCP server 名称")]
-        name: String,
-    },
-    #[command(about = "禁用 MCP server")]
-    Disable {
-        #[arg(help = "MCP server 名称")]
-        name: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum SkillSubcommand {
-    #[command(about = "查看全部 Skill")]
-    List,
-    #[command(about = "查看指定 Skill（不传 id 时等同 list）")]
-    Show {
-        #[arg(help = "Skill ID")]
-        id: Option<String>,
-    },
-    #[command(
-        about = "初始化 Skill 脚手架（生成 SKILL.md 与 skill.toml）",
-        visible_alias = "create"
-    )]
-    Init {
-        #[arg(help = "目标目录")]
-        path: String,
-        #[arg(long, help = "Skill 名称")]
-        name: Option<String>,
-        #[arg(long, help = "Skill ID")]
-        id: Option<String>,
-        #[arg(long, default_value_t = false, help = "存在同名文件时是否覆盖")]
-        force: bool,
-    },
-    #[command(about = "删除 Skill")]
-    Remove {
-        #[arg(help = "Skill ID")]
-        id: String,
-    },
-    #[command(about = "启用 Skill")]
-    Enable {
-        #[arg(help = "Skill ID")]
-        id: String,
-    },
-    #[command(about = "禁用 Skill")]
-    Disable {
-        #[arg(help = "Skill ID")]
-        id: String,
-    },
-    #[command(about = "刷新 Skill 注册表（重扫 skills/<id>/）")]
-    Refresh,
-    #[command(about = "校验配置")]
-    Validate,
 }
 
 #[derive(Debug, Args)]
@@ -585,14 +185,39 @@ pub(crate) enum BotSubcommand {
     },
 }
 
-pub(crate) fn parse_key_value(raw: &str) -> Result<(String, String), String> {
-    let (key, value) = raw
-        .split_once('=')
-        .ok_or_else(|| format!("参数格式无效（需 key=value）：{raw}"))?;
-    let key = key.trim();
-    let value = value.trim();
-    if key.is_empty() || value.is_empty() {
-        return Err(format!("参数格式无效（key/value 不能为空）：{raw}"));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<MainArgs, clap::Error> {
+        MainArgs::try_parse_from(std::iter::once("tiangong").chain(args.iter().copied()))
     }
-    Ok((key.to_string(), value.to_string()))
+
+    #[test]
+    fn config_has_no_subcommands() {
+        let args = parse(&["config", "--host", "0.0.0.0", "--port", "8800", "--no-open"])
+            .expect("config 参数");
+        let Some(MainCommand::Config(config)) = args.command else {
+            panic!("应解析为 config");
+        };
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.port, Some(8800));
+        assert!(config.no_open);
+        assert!(parse(&["config", "web"]).is_err(), "web 子命令已移除");
+        assert!(parse(&["config", "show"]).is_err(), "show 子命令已移除");
+    }
+
+    #[test]
+    fn removed_config_commands_are_rejected() {
+        for removed in [
+            "model", "mcp", "skill", "memory", "prompt", "doctor", "plugin",
+        ] {
+            assert!(parse(&[removed]).is_err(), "{removed} 应已移除");
+        }
+        assert!(parse(&["server", "configure"]).is_err());
+        assert!(parse(&["server", "token", "show"]).is_err());
+        assert!(parse(&["server", "status"]).is_err());
+        assert!(parse(&["server", "stop"]).is_ok());
+        assert!(parse(&["server", "-d", "--port", "9000"]).is_ok());
+    }
 }

@@ -311,15 +311,11 @@ cargo build --release
 sudo install -m 0755 target/release/tiangong /usr/local/bin/tiangong
 ```
 
-服务端通过模块化 CLI 完成无界面配置（详见 [`docs/linux-server-deployment.md`](docs/linux-server-deployment.md)）：
+服务端通过网页配置页完成无界面配置（详见 [`docs/linux-server-deployment.md`](docs/linux-server-deployment.md)）：
 
 ```bash
-tiangong model add-provider deepseek --protocol deepseek --base-url https://api.deepseek.com --api-key-env DEEPSEEK_API_KEY
-tiangong model add-model deepseek-v4-pro --provider deepseek --model-id deepseek-v4-pro --capability chat
-tiangong model route set chat deepseek-v4-pro
-tiangong server config set --host 127.0.0.1 --port 8080
-tiangong server token generate
-tiangong doctor
+# 本地电脑：ssh -L 8800:127.0.0.1:8800 <服务器>
+tiangong config --port 8800 --no-open   # 在本地浏览器打开打印的链接完成配置
 tiangong server -d
 ```
 
@@ -351,22 +347,18 @@ tiangong update --check   # 检查更新
 
 **更新机制**：桌面应用通过设置页或 `tiangong update` 自动下载安装更新；无界面二进制（Linux 服务器）当前需重新编译或下载新版本二进制替换（`tiangong update --check` 仅检查版本不自动安装）。配置独立存储在 `~/.tiangong/`，更新二进制不丢失配置。
 
-### 模块化配置（0.12.0+）
+### 网页配置
 
-无桌面环境可通过 CLI 完成与桌面设置页等价的分模块配置（设计详见 [RFC 0015](docs/rfc/0015-cli-modular-config.md)）：
+无桌面环境的全部配置（模型、Server、通用设置、自定义 Prompt、插件管理与各插件配置页）统一在网页配置页完成，配合 `--host` / SSH 隧道可在本地浏览器中配置服务器上的天工（详见 [CLI 配置指南](docs/cli-configuration-guide.md)）：
 
 ```bash
-tiangong model list                      # 查看模型配置
-tiangong model route set chat deepseek-v4-pro  # 切换 chat 模型
-tiangong model chatgpt login             # 登录 ChatGPT 账号（加 --device 使用设备码）
-tiangong server token show               # 查看 Server Token
-tiangong memory enable                   # 启用 Memory
-tiangong prompt edit                     # 编辑自定义 Prompt
-tiangong bot list                        # 查看已配置 Bot
-tiangong bot start feishu                # 启动指定 Bot
-tiangong config show                     # 配置概览
-tiangong doctor                          # 环境诊断
+tiangong config                                  # 本机打开配置页
+tiangong config --host 0.0.0.0 --port 8800 --no-open   # 服务器：打印访问链接
+tiangong bot list                                # 查看已配置 Bot
+tiangong bot start feishu                        # 启动指定 Bot
 ```
+
+`tiangong cli` 对话中输入 `/config` 也可打开同一配置页。
 
 ## 配置
 
@@ -388,7 +380,7 @@ tiangong doctor                          # 环境诊断
   sandbox/              Sandbox Launcher 与伴生签名
 ```
 
-模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。自定义 Prompt 独立存储为 `custom-prompt.md`，可通过 `tiangong prompt` 命令管理。
+模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。自定义 Prompt 独立存储为 `custom-prompt.md`，可在 `tiangong config` 配置页中编辑。
 
 详细的 Linux 服务器部署、systemd 托管、反向代理与更新策略见 [部署指南](docs/linux-server-deployment.md)。
 
