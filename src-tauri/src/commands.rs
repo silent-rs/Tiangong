@@ -2154,7 +2154,19 @@ pub async fn get_provider_balance(
             Ok((provider.base_url.clone(), resolved_key))
         })
         .await?;
+    query_provider_balance(&base_url, &api_key).await
+}
 
+/// 查询 Provider 账户余额（`<origin>/user/balance`，Bearer 认证）。
+///
+/// 桌面设置页与浏览器配置页共用。
+pub async fn query_provider_balance(
+    base_url: &str,
+    api_key: &str,
+) -> Result<serde_json::Value, String> {
+    if api_key.trim().is_empty() {
+        return Err("API Key 未设置".to_string());
+    }
     // 余额 API 挂在域名根路径下，需去掉 base_url 中的路径部分
     // e.g. https://api.deepseek.com/anthropic → https://api.deepseek.com/user/balance
     let trimmed = base_url.trim_end_matches('/');
@@ -2178,7 +2190,7 @@ pub async fn get_provider_balance(
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
     let response = client
         .get(&url)
-        .bearer_auth(&api_key)
+        .bearer_auth(api_key)
         .send()
         .await
         .map_err(|e| format!("请求余额失败 ({url}): {e}"))?;

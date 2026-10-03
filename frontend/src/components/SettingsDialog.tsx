@@ -13,6 +13,7 @@ import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Ed
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
+import { isWebHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
 import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, ProviderModelInfo, TrashedSession, SandboxPolicyView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
@@ -25,7 +26,7 @@ import { PluginManagerSettings } from './PluginManagerSettings';
 import { CODEX_PROVIDER_CONFIG, CODEX_PROVIDER_NAME, CodexAuthPanel } from './CodexAuthPanel';
 import { type SlotContributionEntry } from '../api/tauri';
 
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 function contributionIcon(name: string) {
   const Icon = name === 'brain' ? Brain : Puzzle;
@@ -245,7 +246,7 @@ export function SettingsDialog() {
   );
 }
 
-function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+export function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
   const { showError } = useToast();
   const { workspaceDir, setWorkspaceDir } = useStore();
@@ -343,10 +344,12 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
               placeholder="选择或输入工作区目录"
               disabled={isSavingWorkspace}
             />
-            <Button variant="outline" onClick={handleSelectDirectory} disabled={isSavingWorkspace}>
-              <FolderOpen className="w-4 h-4 mr-2" />
-              选择
-            </Button>
+            {!isWebHost() && (
+              <Button variant="outline" onClick={handleSelectDirectory} disabled={isSavingWorkspace}>
+                <FolderOpen className="w-4 h-4 mr-2" />
+                选择
+              </Button>
+            )}
           </div>
           <div className="flex items-center justify-between min-h-7">
             <p className="text-xs text-muted-foreground">
@@ -438,7 +441,7 @@ function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: 
   </div>;
 }
 
-function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+export function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [showRouting, setShowRouting] = useState(false);
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
     providers: {},
@@ -1524,7 +1527,7 @@ function ServerWebhookPanel() {
   return <WebhookPanel serverRunning={serverRunning} />;
 }
 
-function ServerConfigPanel() {
+export function ServerConfigPanel() {
   const [config, setConfig] = useState<ServerConfig>({
     host: '127.0.0.1',
     port: 8080,
@@ -1645,11 +1648,14 @@ function ServerConfigPanel() {
             </div>
             <div className="flex items-center gap-2">
               {isToggling && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
-              <Switch
-                checked={config.enabled}
-                disabled={isSaving || isToggling}
-                onCheckedChange={handleToggleServer}
-              />
+              {/* 浏览器配置页只改配置，启停 Server 用 `tiangong server` 或桌面应用。 */}
+              {!isWebHost() && (
+                <Switch
+                  checked={config.enabled}
+                  disabled={isSaving || isToggling}
+                  onCheckedChange={handleToggleServer}
+                />
+              )}
             </div>
           </div>
 
@@ -1726,7 +1732,7 @@ function formatBytes(value: number) {
 }
 
 /// 插件设置页视图：选中时才加载 HTML，用 iframe 渲染。
-function PluginView({ contribution }: { contribution: SlotContributionEntry }) {
+export function PluginView({ contribution }: { contribution: SlotContributionEntry }) {
   const [html, setHtml] = useState<string>('');
 
   useEffect(() => {

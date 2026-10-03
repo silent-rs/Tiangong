@@ -28,6 +28,12 @@ export default defineConfig({
   },
   build: {
         rollupOptions: {
+      // 多页面：index.html 为桌面主界面，config.html 为浏览器配置页
+      // （`tiangong config` 从嵌入资源提供）。
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        config: path.resolve(__dirname, 'config.html'),
+      },
       output: {
         manualChunks(id) {
           if (id.includes('react-dom') || id.includes('/react/')) return 'react-core'

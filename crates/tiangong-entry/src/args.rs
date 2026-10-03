@@ -73,7 +73,7 @@ pub(crate) enum ServerSubcommand {
     Stop,
 }
 
-/// 网页配置页参数（与 `tiangong-memory-sidecar --config` 一致）。
+/// 网页配置页参数。
 #[derive(Debug, Args)]
 pub(crate) struct ConfigArgs {
     /// 监听地址（缺省 127.0.0.1；远程配置可设为 0.0.0.0 或本机网卡地址）
@@ -85,9 +85,6 @@ pub(crate) struct ConfigArgs {
     /// 不自动打开浏览器，仅打印访问地址（远程/无图形环境使用）
     #[arg(long)]
     pub(crate) no_open: bool,
-    /// 固定访问令牌（至少 8 个字符；缺省每次随机生成一次性令牌）
-    #[arg(long)]
-    pub(crate) token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -203,6 +200,10 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, Some(8800));
         assert!(config.no_open);
+        assert!(
+            parse(&["config", "--token", "abcdefgh"]).is_err(),
+            "访问令牌已移除"
+        );
         assert!(parse(&["config", "web"]).is_err(), "web 子命令已移除");
         assert!(parse(&["config", "show"]).is_err(), "show 子命令已移除");
     }

@@ -6,8 +6,7 @@ export interface MentionRequest {
   max_per_group?: number;
 }
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { invoke, listen } from './host';
 
 // ============================================================================
 // 类型定义

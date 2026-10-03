@@ -117,6 +117,13 @@ fn main() {
     let is_cli = std::env::args().nth(1).as_deref() == Some("cli");
     let _guard = init_logging(!is_cli).expect("failed to initialize logging");
 
+    // 浏览器配置页（`tiangong config` / CLI `/config`）复用嵌入的前端资源。
+    tiangong_cli::web_config::set_launcher(Box::new(|options| {
+        let mut context = generate_tauri_context();
+        let assets = tiangong_app::web_config::assets_from_context(&mut context);
+        tiangong_app::web_config::run(options, assets)
+    }));
+
     if let Err(err) = tiangong_entry::run() {
         eprintln!("错误：{err}");
         std::process::exit(1);

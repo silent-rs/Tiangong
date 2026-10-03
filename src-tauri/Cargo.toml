@@ -34,13 +34,17 @@ scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
-tokio = { workspace = true, features = ["rt", "time", "io-util", "sync", "signal"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "io-util", "sync", "signal", "net"] }
 tracing = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 futures-util = { workspace = true }
+# 浏览器配置页：读取请求体（与 silent 同版本）
+http-body-util = { workspace = true }
 http = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
+# 浏览器配置页（`tiangong config` / CLI `/config`）：调用系统默认浏览器打开
+open = "5"
 
 # Tauri 相关依赖
 tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable"] }

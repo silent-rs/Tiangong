@@ -31,7 +31,6 @@ pub fn run() -> anyhow::Result<()> {
                 host: args.host,
                 port: args.port,
                 open_browser: !args.no_open,
-                token: args.token,
                 initial_tab: None,
             })
         }

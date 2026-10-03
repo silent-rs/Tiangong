@@ -349,11 +349,11 @@ tiangong update --check   # 检查更新
 
 ### 网页配置
 
-无桌面环境的全部配置（模型、Server、通用设置、自定义 Prompt、插件管理与各插件配置页）统一在网页配置页完成，配合 `--host` / SSH 隧道可在本地浏览器中配置服务器上的天工（详见 [CLI 配置指南](docs/cli-configuration-guide.md)）：
+无桌面环境的全部配置（智能体、模型、Server、插件管理与各插件配置页）统一在网页配置页完成，页面与桌面设置页使用同一套组件；配合 `--host` / SSH 隧道可在本地浏览器中配置服务器上的天工（详见 [CLI 配置指南](docs/cli-configuration-guide.md)）：
 
 ```bash
 tiangong config                                  # 本机打开配置页
-tiangong config --host 0.0.0.0 --port 8800 --no-open   # 服务器：打印访问链接
+tiangong config --host 0.0.0.0 --port 8800 --no-open   # 服务器：打印访问地址
 tiangong bot list                                # 查看已配置 Bot
 tiangong bot start feishu                        # 启动指定 Bot
 ```

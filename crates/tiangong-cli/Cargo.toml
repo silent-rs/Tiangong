@@ -15,18 +15,10 @@ tiangong-config = { workspace = true }
 tiangong-types = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "signal"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 anyhow = { workspace = true }
 scru128 = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
 termimad = { workspace = true }
-# 网页配置页（`tiangong config` / REPL `/config`）：HTTP 服务
-silent = { workspace = true }
-# 网页配置页：调用系统默认浏览器打开（与 memory sidecar 同版本）
-open = "5"
-
-[dev-dependencies]
-tempfile = { workspace = true }

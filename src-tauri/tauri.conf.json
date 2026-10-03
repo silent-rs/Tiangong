@@ -4,7 +4,7 @@
   "version": "0.16.15",
   "identifier": "com.silent.tiangong",
   "build": {
-    "beforeDevCommand": "yarn --cwd ../frontend dev",
+    "beforeDevCommand": "yarn --cwd ../frontend build && yarn --cwd ../frontend dev",
     "beforeBuildCommand": "yarn --cwd ../frontend build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../frontend/dist"
