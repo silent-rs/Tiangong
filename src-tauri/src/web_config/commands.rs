@@ -95,6 +95,24 @@ where
         .map_err(CommandError::from)
 }
 
+/// 沙箱程序状态（与桌面端 `get_sandbox_update_state` 返回结构一致）。
+fn sandbox_update_state(
+    (status, version): (
+        tiangong_plugin_runtime::launcher_update::SandboxLauncherStatus,
+        Option<String>,
+    ),
+) -> crate::commands::SandboxUpdateState {
+    use tiangong_plugin_runtime::launcher_update as launcher;
+    let failure = (status == launcher::SandboxLauncherStatus::Failed).then(|| {
+        launcher::startup_prepare_failure_reason().unwrap_or_else(|| "启动准备失败".to_string())
+    });
+    crate::commands::SandboxUpdateState {
+        status: status.as_str().to_string(),
+        version,
+        failure,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FetchModelsArgs {
@@ -153,6 +171,107 @@ pub(crate) async fn dispatch(ctx: &WebConfigContext, command: &str, args: Value)
             tiangong_config::registry::update(config)?;
             Ok(Value::Null)
         }
+        // ── 沙箱 ──
+        "get_sandbox_disabled" => Ok(Value::Bool(
+            tiangong_config::load_tiangong_config_from_dir(&dir).sandbox_disabled,
+        )),
+        "set_sandbox_disabled" => {
+            #[derive(Deserialize)]
+            struct Args {
+                disabled: bool,
+            }
+            let Args { disabled } = parse(args)?;
+            let mut config = tiangong_config::load_tiangong_config_from_dir(&dir);
+            if config.sandbox_disabled != disabled {
+                config.sandbox_disabled = disabled;
+                tiangong_config::registry::update(config)?;
+                // 停止当前按需 sidecar，下次使用按新开关重建（OS 沙箱不能原地切换）。
+                blocking(|| {
+                    tiangong_plugin_runtime::registry::on_sandbox_setting_changed();
+                    Ok(())
+                })
+                .await?;
+            }
+            Ok(Value::Null)
+        }
+        "get_sandbox_policy" => to_json(crate::commands::SandboxPolicyView::from(
+            tiangong_config::load_tiangong_config_from_dir(&dir).sandbox_policy,
+        )),
+        "set_sandbox_policy" => {
+            #[derive(Deserialize)]
+            struct Args {
+                policy: crate::commands::SandboxPolicyView,
+            }
+            let Args { policy } = parse(args)?;
+            let cleaned = tiangong_config::SandboxUserPolicy {
+                directory_allowlist: crate::commands::normalize_path_list(
+                    policy.directory_allowlist,
+                )?,
+                environment_blocklist: crate::commands::normalize_env_list(
+                    policy.environment_blocklist,
+                )?,
+            };
+            let mut config = tiangong_config::load_tiangong_config_from_dir(&dir);
+            config.sandbox_policy = cleaned.clone();
+            config.command_env_blocklist = cleaned.environment_blocklist.clone();
+            tiangong_config::registry::update(config)?;
+            let storage_root = dir.clone();
+            blocking(move || {
+                tiangong_plugin_runtime::registry::on_sandbox_setting_changed();
+                #[cfg(windows)]
+                tiangong_plugin_runtime::registry::invalidate_persistent_grants(&storage_root)?;
+                #[cfg(not(windows))]
+                drop(storage_root);
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                CommandError::bad(format!(
+                    "配置已保存，但旧授权清理或插件重载失败：{}",
+                    error.message
+                ))
+            })?;
+            to_json(crate::commands::SandboxPolicyView::from(cleaned))
+        }
+        "get_sandbox_update_state" => {
+            let storage_root = dir.clone();
+            let status = blocking(move || {
+                Ok(tiangong_plugin_runtime::launcher_update::launcher_status(
+                    &storage_root,
+                ))
+            })
+            .await?;
+            to_json(sandbox_update_state(status))
+        }
+        "upgrade_launcher" => {
+            use tiangong_plugin_runtime::launcher_update as launcher;
+            launcher::mark_launcher_preparing(true);
+            let result = launcher::LauncherUpdater::new()
+                .install_or_update(&dir)
+                .await;
+            launcher::mark_launcher_preparing(false);
+            match result {
+                Ok(version) => {
+                    launcher::record_startup_prepare_failure(None);
+                    // 沙箱修复后重新加载此前因沙箱不可用而失败的插件。
+                    let preload_dir = dir.clone();
+                    blocking(move || {
+                        tiangong_plugin_runtime::registry::preload_installed_plugins(&preload_dir);
+                        Ok(())
+                    })
+                    .await?;
+                    Ok(json!({ "status": "installed", "version": version }))
+                }
+                Err(error) => {
+                    let reason = format!("{error:#}");
+                    launcher::record_startup_prepare_failure(Some(reason.clone()));
+                    Err(CommandError::bad(format!(
+                        "Sandbox 安装或更新失败：{reason}"
+                    )))
+                }
+            }
+        }
+
         "get_workspace_dir" => {
             let config = tiangong_config::load_tiangong_config_from_dir(&dir);
             Ok(Value::String(config.workspace_dir))
@@ -596,6 +715,47 @@ mod tests {
         .unwrap();
         let saved = tiangong_config::load_server_config_from_dir(dir.path());
         assert_eq!(saved.auth_token.as_deref(), Some("tg_token_value"));
+    }
+
+    #[test]
+    fn sandbox_settings_round_trip() {
+        let (dir, ctx) = context(false);
+        assert_eq!(run(&ctx, "get_sandbox_disabled", json!({})).unwrap(), false);
+        run(&ctx, "set_sandbox_disabled", json!({"disabled": true})).unwrap();
+        assert!(tiangong_config::load_tiangong_config_from_dir(dir.path()).sandbox_disabled);
+
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let saved = run(
+            &ctx,
+            "set_sandbox_policy",
+            json!({"policy": {
+                "directory_allowlist": [allowed.to_string_lossy(), allowed.to_string_lossy(), " "],
+                "environment_blocklist": ["MY_TOKEN", "my_token", ""]
+            }}),
+        )
+        .unwrap();
+        // 目录规范化去重、环境变量名大小写不敏感去重。
+        assert_eq!(saved["directory_allowlist"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["environment_blocklist"], json!(["MY_TOKEN"]));
+        assert_eq!(run(&ctx, "get_sandbox_policy", json!({})).unwrap(), saved);
+        let config = tiangong_config::load_tiangong_config_from_dir(dir.path());
+        assert_eq!(config.command_env_blocklist, vec!["MY_TOKEN".to_string()]);
+
+        assert!(run(
+            &ctx,
+            "set_sandbox_policy",
+            json!({"policy": {"directory_allowlist": ["/no/such/dir"], "environment_blocklist": []}})
+        )
+        .is_err());
+        assert!(run(
+            &ctx,
+            "set_sandbox_policy",
+            json!({"policy": {"directory_allowlist": [], "environment_blocklist": ["BAD NAME"]}})
+        )
+        .is_err());
+        let state = run(&ctx, "get_sandbox_update_state", json!({})).unwrap();
+        assert!(state["status"].is_string());
     }
 
     #[test]

@@ -1563,7 +1563,7 @@ pub async fn get_sandbox_policy(
         .await
 }
 
-fn normalize_path_list(values: Vec<String>) -> Result<Vec<String>, String> {
+pub(crate) fn normalize_path_list(values: Vec<String>) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     let base = std::env::current_dir().map_err(|error| error.to_string())?;
     values
@@ -1600,7 +1600,7 @@ fn normalize_path_list(values: Vec<String>) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn normalize_env_list(values: Vec<String>) -> Result<Vec<String>, String> {
+pub(crate) fn normalize_env_list(values: Vec<String>) -> Result<Vec<String>, String> {
     let mut seen = std::collections::BTreeSet::new();
     values
         .into_iter()
