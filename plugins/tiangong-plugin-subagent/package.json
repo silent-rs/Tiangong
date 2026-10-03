@@ -18,5 +18,8 @@
     "vite": "^6.0.5",
     "vite-plugin-singlefile": "^2.1.0",
     "vue-tsc": "^2.2.0"
+  },
+  "resolutions": {
+    "brace-expansion": "^2.1.7"
   }
 }
