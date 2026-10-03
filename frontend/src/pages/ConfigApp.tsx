@@ -1,15 +1,16 @@
 /**
  * 浏览器配置页（`tiangong config` / CLI `/config`）：复用桌面端设置组件，
- * 只包含配置相关分区（智能体、模型、Server、插件管理与插件配置页）。
+ * 只包含配置相关分区（智能体、模型、Server、Bot、插件管理与插件配置页）。
  */
 import { useEffect, useState } from 'react';
-import { Brain, Globe, Loader2, LogOut, Package, Puzzle, Settings, ShieldCheck } from 'lucide-react';
+import { Bot as BotIcon, Brain, Globe, Loader2, LogOut, Package, Puzzle, Settings, ShieldCheck } from 'lucide-react';
 import { api, type AvailablePlugin, type PluginStatus, type SlotContributionEntry } from '@/api/tauri';
 import { closeWebHost } from '@/api/host';
 import { useStore } from '@/store/useStore';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { PluginManagerSettings } from '@/components/PluginManagerSettings';
+import { BotPanel } from '@/components/bots/BotPanel';
 import {
   AgentSettings,
   LLMSettings,
@@ -18,12 +19,13 @@ import {
   type SaveStatus,
 } from '@/components/SettingsDialog';
 
-const BASE_TABS = ['agent', 'llm', 'server', 'plugin-manager'];
+const BASE_TABS = ['agent', 'llm', 'server', 'bots', 'plugin-manager'];
 
 function initialTab(): string {
   const hash = window.location.hash.replace(/^#/, '');
   if (hash === 'models' || hash === 'providers') return 'llm';
   if (hash === 'plugins') return 'plugin-manager';
+  if (hash === 'bot') return 'bots';
   return BASE_TABS.includes(hash) ? hash : 'agent';
 }
 
@@ -110,6 +112,10 @@ export function ConfigApp() {
               <Globe className="w-4 h-4 sm:mr-2" />
               <span className="sr-only sm:not-sr-only">Server</span>
             </TabsTrigger>
+            <TabsTrigger value="bots" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+              <BotIcon className="w-4 h-4 sm:mr-2" />
+              <span className="sr-only sm:not-sr-only">Bot</span>
+            </TabsTrigger>
             <TabsTrigger value="plugin-manager" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
               <Package className="w-4 h-4 sm:mr-2" />
               <span className="sr-only sm:not-sr-only">插件管理</span>
@@ -132,6 +138,9 @@ export function ConfigApp() {
           </TabsContent>
           <TabsContent value="server" className="m-0 min-h-0 flex-1 overflow-y-auto">
             <ServerConfigPanel />
+          </TabsContent>
+          <TabsContent value="bots" className="m-0 min-h-0 flex-1 overflow-y-auto">
+            <BotPanel />
           </TabsContent>
           <TabsContent value="plugin-manager" className="m-0 min-h-0 flex-1 overflow-hidden">
             <PluginManagerSettings

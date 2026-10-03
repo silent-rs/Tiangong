@@ -221,7 +221,7 @@ Sandbox Launcher 也可作为独立程序使用，平台能力、策略格式和
 - **扫码配置**：桌面端调用 Bot 制品发起扫码，展示授权二维码与状态；扫码所得凭证由 Bot 自行保存，天工不接触明文。
 - **运行托管**：Bot 随天工自动运行或手动启停，支持日志查看、配置删除、自动注入天工服务地址和 Token，Windows 停止时抑制终端窗口闪现。
 - **MCP 主动推送**：Bot 自动维护已授权主动发过消息的多目标清单，具备文本、图片和文件推送能力，MCP 注册和注销绑定到 Bot 启停流程。
-- **远程管理**：通过 `tiangong bot` 子命令可在无图形界面环境下完成 Bot 的全生命周期管理。
+- **远程管理**：无图形界面环境下，通过 `tiangong config` 配置页完成 Bot 的安装、配置（含扫码授权）、启停与升级；`tiangong bot start <id>` 可在开机脚本中拉起已配置的 Bot。
 
 ## 定时与触发
 
@@ -354,8 +354,7 @@ tiangong update --check   # 检查更新
 ```bash
 tiangong config                                  # 本机打开配置页
 tiangong config --host 0.0.0.0 --port 8800 --no-open   # 服务器：打印访问地址
-tiangong bot list                                # 查看已配置 Bot
-tiangong bot start feishu                        # 启动指定 Bot
+tiangong bot start feishu                         # 在后台启动已配置的 Bot（如开机脚本中使用）
 ```
 
 `tiangong cli` 对话中输入 `/config` 也可打开同一配置页。

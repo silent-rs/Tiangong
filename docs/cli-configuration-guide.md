@@ -14,7 +14,7 @@
 tiangong config     # 打开网页配置页（唯一配置入口）
 tiangong cli        # 交互式对话；对话中输入 /config 同样打开配置页
 tiangong server     # 启动 Server（-d 后台运行，server stop 停止）
-tiangong bot ...    # Bot 制品管理（扫码授权需要终端，保留命令行）
+tiangong bot start <id>   # 在后台启动已配置的 Bot（安装 / 配置 / 停止 / 升级 / 日志在配置页）
 tiangong update     # 检查并安装天工更新
 ```
 
@@ -55,6 +55,7 @@ tiangong config --port 8800 --no-open   # 在服务器执行，再在本地浏�
 | 智能体 | 新对话默认审核权限、默认工作区目录（填写天工所在机器上的路径） |
 | 模型配置 | 供应商（Base URL、API Key、超时、请求头）、拉取模型列表、模型能力、模型路由；ChatGPT 账号登录（远程配置时使用设备码登录） |
 | Server | 监听地址、端口、认证 Token（启停 Server 使用 `tiangong server` 或桌面应用） |
+| Bot | 从线上目录安装 Bot、填写凭证或扫码授权（页面显示二维码）、启停、升级、日志、推送目标与 MCP 注册；在配置页启动的 Bot 以后台独立进程运行，关闭配置页不影响 |
 | 插件管理 | 已安装插件的启用 / 停用 / 回滚 / 卸载；官方插件市场安装与升级；按路径导入本机插件目录或签名归档；可信发布者公钥管理 |
 | 插件配置 | 各插件自带的配置页（与桌面端设置页同一页面），如 MCP 管理、Skills、记忆、定时任务、索引、火山引擎等 |
 

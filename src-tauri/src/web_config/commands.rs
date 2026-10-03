@@ -29,7 +29,7 @@ pub(crate) struct CommandError {
 }
 
 impl CommandError {
-    fn bad(message: impl Into<String>) -> Self {
+    pub(super) fn bad(message: impl Into<String>) -> Self {
         Self {
             status: 400,
             message: message.into(),
@@ -49,18 +49,22 @@ impl From<anyhow::Error> for CommandError {
     }
 }
 
-type CommandResult = Result<Value, CommandError>;
+pub(super) type CommandResult = Result<Value, CommandError>;
 
 /// 配置页运行期上下文。
 pub(crate) struct WebConfigContext {
     dir: PathBuf,
     /// 是否监听在非回环地址：浏览器回调式登录在远程时不可用。
     remote: bool,
+    /// Bot 管理（`bots.json` 加载失败时为 None，Bot 命令返回错误）。
+    bots: Result<super::bots::BotContext, String>,
 }
 
 impl WebConfigContext {
     pub(crate) fn new(dir: PathBuf, remote: bool) -> Self {
-        Self { dir, remote }
+        let bots =
+            super::bots::BotContext::new().map_err(|error| format!("加载 Bot 配置失败：{error:#}"));
+        Self { dir, remote, bots }
     }
 
     pub(crate) fn dir(&self) -> &Path {
@@ -72,11 +76,11 @@ fn load_models(dir: &Path) -> ModelsConfig {
     tiangong_config::io::load_models_config_at(dir)
 }
 
-fn parse<T: DeserializeOwned>(args: Value) -> Result<T, CommandError> {
+pub(super) fn parse<T: DeserializeOwned>(args: Value) -> Result<T, CommandError> {
     serde_json::from_value(args).map_err(|error| CommandError::bad(format!("参数无效：{error}")))
 }
 
-fn to_json<T: serde::Serialize>(value: T) -> CommandResult {
+pub(super) fn to_json<T: serde::Serialize>(value: T) -> CommandResult {
     serde_json::to_value(value).map_err(|error| CommandError::bad(error.to_string()))
 }
 
@@ -116,6 +120,15 @@ struct ContributionArgs {
 
 /// 按 Tauri 命令名分发。未实现的命令返回 404，前端按普通错误处理。
 pub(crate) async fn dispatch(ctx: &WebConfigContext, command: &str, args: Value) -> CommandResult {
+    if command.starts_with("bot_") {
+        let bots = ctx
+            .bots
+            .as_ref()
+            .map_err(|error| CommandError::bad(error.clone()))?;
+        if let Some(result) = super::bots::dispatch(bots, command, args.clone()).await {
+            return result;
+        }
+    }
     let dir = ctx.dir().to_path_buf();
     match command {
         // ── 智能体 / 通用 ──

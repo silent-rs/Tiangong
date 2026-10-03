@@ -7,6 +7,7 @@
 //! 服务器上可用 `--host 0.0.0.0 --port <端口> --no-open` 在其他机器浏览器中打开。
 //! 页面点击"完成并关闭"或 Ctrl+C 后服务退出。
 
+mod bots;
 mod commands;
 
 use std::net::SocketAddr;

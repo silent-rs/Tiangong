@@ -1,6 +1,6 @@
 mod args;
 mod bot;
-mod interactive;
+pub mod bot_ops;
 mod server;
 mod update;
 
