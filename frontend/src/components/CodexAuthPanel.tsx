@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Loader2, LogIn, LogOut, RefreshCw } from 'lucide-react';
 import { api } from '@/api/tauri';
+import { isRemoteWebHost, isWebHost } from '@/api/host';
 import type { CodexAuthStatus, CodexLoginStart } from '@/api/tauri';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
@@ -60,6 +61,8 @@ export function CodexAuthPanel({ onStatusChange }: Props) {
     try {
       const start = await api.codexAuthStart(method);
       if (seq !== waitSeqRef.current) return;
+      // 浏览器配置页：服务端不代开浏览器，由页面打开授权地址。
+      if (isWebHost()) window.open(start.url, '_blank', 'noopener');
       setPending(start);
       const next = await api.codexAuthWait();
       if (seq !== waitSeqRef.current) return;
@@ -175,7 +178,7 @@ export function CodexAuthPanel({ onStatusChange }: Props) {
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" className="h-8" onClick={() => startLogin('browser')} disabled={busy}>
+          <Button size="sm" className="h-8" onClick={() => startLogin('browser')} disabled={busy || isRemoteWebHost()} title={isRemoteWebHost() ? '远程配置时浏览器回调无法到达服务器，请使用设备码登录' : undefined}>
             <LogIn className="w-3 h-3 mr-1" />登录 ChatGPT
           </Button>
           <Button variant="outline" size="sm" className="h-8" onClick={() => startLogin('device')} disabled={busy}>

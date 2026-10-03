@@ -47,18 +47,6 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
         hint: "查看会话历史",
     },
     SlashCommandDef {
-        name: "/model",
-        hint: "查看/切换模型",
-    },
-    SlashCommandDef {
-        name: "/mcp",
-        hint: "查看 MCP server 列表",
-    },
-    SlashCommandDef {
-        name: "/skill",
-        hint: "查看 Skill 列表",
-    },
-    SlashCommandDef {
         name: "/sessions",
         hint: "会话管理（同 /history）",
     },
@@ -68,7 +56,7 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
     },
     SlashCommandDef {
         name: "/config",
-        hint: "查看/修改配置",
+        hint: "打开网页配置页（模型 / 插件 / Prompt 等）",
     },
     SlashCommandDef {
         name: "/help",

@@ -1,6 +1,4 @@
-pub mod mcp;
 pub mod sessions;
-pub mod skill;
 
 use std::io::{self, Stdout};
 

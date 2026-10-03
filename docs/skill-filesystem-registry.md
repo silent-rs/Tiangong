@@ -48,12 +48,10 @@
 
 ## 命令
 
-```bash
-tiangong skill refresh
-```
+Skill 的启用、停用、删除与刷新统一在 `tiangong config` 配置页的「插件配置 → Skills」中完成（与桌面端设置页同一页面）。
 
-- `refresh`：强制重扫 `skills/<id>/`。
+- 刷新：强制重扫 `skills/<id>/`。
 
-> `gc` / `doctor` 子命令已移除。孤儿托管 MCP 的清理由 `skill remove` 自动完成
+> 孤儿托管 MCP 的清理由删除 skill 时自动完成
 > （删除 skill 时，不再被任何 skill 引用的托管 MCP server 会从 `agent_config.mcp.servers`
 > 移除并持久化）。

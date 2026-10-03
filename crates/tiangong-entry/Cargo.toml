@@ -5,10 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-tiangong-app-state = { workspace = true }
 tiangong-core = { workspace = true }
-tiangong-llm = { workspace = true }
-tiangong-plugin-skill-protocol = { workspace = true }
 tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
@@ -21,9 +18,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["blocking", "json", "rustls"] }
 semver = { workspace = true }
-dialoguer = "0.12"
 minisign-verify = "0.2"
 base64 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "net"] }
 libc = { workspace = true }
-qrcode = { workspace = true }

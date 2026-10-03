@@ -16,6 +16,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { isWebHost } from '@/api/host';
 import {
   api,
   type AvailablePlugin,
@@ -272,11 +273,13 @@ export function PluginManagerSettings({
   const importLocal = async () => {
     let selected: string | string[] | null;
     try {
-      selected = await open({
-        directory: true,
-        multiple: false,
-        title: '选择本地插件目录',
-      });
+      selected = isWebHost()
+        ? window.prompt('输入天工所在机器上的插件目录或 .tar.zst 归档的绝对路径')?.trim() || null
+        : await open({
+          directory: true,
+          multiple: false,
+          title: '选择本地插件目录',
+        });
     } catch (error) {
       showError('选择失败', String(error));
       return;
@@ -926,10 +929,12 @@ function TrustManagerSection({}: TrustManagerSectionProps) {
   );
 
   const pickKeyFile = useCallback(async () => {
-    const picked = await open({
-      multiple: false,
-      filters: [{ name: '公钥文件', extensions: ['pub', 'txt'] }],
-    });
+    const picked = isWebHost()
+      ? window.prompt('输入公钥文件（.pub / .txt）的绝对路径')?.trim() || null
+      : await open({
+        multiple: false,
+        filters: [{ name: '公钥文件', extensions: ['pub', 'txt'] }],
+      });
     if (!picked) return;
     try {
       const content = await api.readPublicKeyFile(picked);

@@ -13,6 +13,7 @@ import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Ed
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
+import { isWebHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
 import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, ProviderModelInfo, TrashedSession, SandboxPolicyView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
@@ -25,7 +26,7 @@ import { PluginManagerSettings } from './PluginManagerSettings';
 import { CODEX_PROVIDER_CONFIG, CODEX_PROVIDER_NAME, CodexAuthPanel } from './CodexAuthPanel';
 import { type SlotContributionEntry } from '../api/tauri';
 
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 function contributionIcon(name: string) {
   const Icon = name === 'brain' ? Brain : Puzzle;
@@ -245,7 +246,7 @@ export function SettingsDialog() {
   );
 }
 
-function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+export function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
   const { showError } = useToast();
   const { workspaceDir, setWorkspaceDir } = useStore();
@@ -343,10 +344,12 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
               placeholder="选择或输入工作区目录"
               disabled={isSavingWorkspace}
             />
-            <Button variant="outline" onClick={handleSelectDirectory} disabled={isSavingWorkspace}>
-              <FolderOpen className="w-4 h-4 mr-2" />
-              选择
-            </Button>
+            {!isWebHost() && (
+              <Button variant="outline" onClick={handleSelectDirectory} disabled={isSavingWorkspace}>
+                <FolderOpen className="w-4 h-4 mr-2" />
+                选择
+              </Button>
+            )}
           </div>
           <div className="flex items-center justify-between min-h-7">
             <p className="text-xs text-muted-foreground">
@@ -375,7 +378,7 @@ const EMPTY_SANDBOX_POLICY: SandboxPolicyView = {
   directory_allowlist: [], environment_blocklist: [],
 };
 
-function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+export function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   // selector 订阅：preparing 轮询每秒刷新 store 时不触发其余字段订阅者重渲染。
   const sandboxDisabled = useStore((state) => state.sandboxDisabled);
   const loadSandboxDisabled = useStore((state) => state.loadSandboxDisabled);
@@ -431,14 +434,14 @@ function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: 
   return <div className="mx-auto max-w-3xl space-y-6 p-6">
     <div><h2 className="text-lg font-semibold">沙箱管理</h2></div>
     <Card><CardContent className="space-y-5 pt-6"><div className="flex items-center justify-between"><div><Label>按需进程沙箱</Label><p className="text-xs text-muted-foreground">Terminal、Command、解释器及其他按需进程</p></div><Switch checked={sandboxDisabled !== true} disabled={sandboxDisabled === null} onCheckedChange={(enabled) => enabled ? void toggle(false) : setConfirmDisable(true)} /></div><div className="flex items-center justify-between"><div><Label>沙箱程序</Label><p className="text-xs text-muted-foreground truncate" title={sandboxStatus}>{sandboxStatus}</p></div><Button variant="outline" disabled={checking} onClick={() => void update()}>{checking ? '正在更新…' : '检查并更新'}</Button></div></CardContent></Card>
-    <Card><CardContent className="space-y-4 pt-6"><div><Label>目录白名单</Label><p className="text-xs text-muted-foreground">列表中的目录允许沙箱进程读取和写入，不限制用户选择范围。</p></div><List items={policy.directory_allowlist} remove={(index) => void save({ ...policy, directory_allowlist: policy.directory_allowlist.filter((_, i) => i !== index) })} /><div className="flex gap-2"><Input value={directoryInput} onChange={(e) => setDirectoryInput(e.target.value)} placeholder="输入目录路径" onKeyDown={(e) => { if (e.key === 'Enter') void addDirectory(); }} /><Button variant="outline" onClick={() => void chooseDirectory()}><FolderOpen className="mr-1 h-4 w-4" />浏览</Button><Button onClick={() => void addDirectory()}><Plus className="mr-1 h-4 w-4" />添加</Button></div></CardContent></Card>
+    <Card><CardContent className="space-y-4 pt-6"><div><Label>目录白名单</Label><p className="text-xs text-muted-foreground">列表中的目录允许沙箱进程读取和写入，不限制用户选择范围。</p></div><List items={policy.directory_allowlist} remove={(index) => void save({ ...policy, directory_allowlist: policy.directory_allowlist.filter((_, i) => i !== index) })} /><div className="flex gap-2"><Input value={directoryInput} onChange={(e) => setDirectoryInput(e.target.value)} placeholder="输入目录路径" onKeyDown={(e) => { if (e.key === 'Enter') void addDirectory(); }} />{!isWebHost() && <Button variant="outline" onClick={() => void chooseDirectory()}><FolderOpen className="mr-1 h-4 w-4" />浏览</Button>}<Button onClick={() => void addDirectory()}><Plus className="mr-1 h-4 w-4" />添加</Button></div></CardContent></Card>
     <Card><CardContent className="space-y-4 pt-6"><div><Label>环境变量黑名单</Label><p className="text-xs text-muted-foreground">列表中的变量不会传给沙箱进程；名称不区分大小写。</p></div><List items={policy.environment_blocklist} remove={(index) => void save({ ...policy, environment_blocklist: policy.environment_blocklist.filter((_, i) => i !== index) })} /><div className="flex gap-2"><Input value={environmentInput} onChange={(e) => setEnvironmentInput(e.target.value)} placeholder="例如 MY_SECRET_TOKEN" onKeyDown={(e) => { if (e.key === 'Enter') void addEnvironment(); }} /><Button onClick={() => void addEnvironment()}><Plus className="mr-1 h-4 w-4" />添加</Button></div></CardContent></Card>
     <p className="text-xs text-muted-foreground">沙箱管理面仍由宿主强制隔离，目录白名单不能覆盖管理项保护。</p>
     <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>关闭按需进程沙箱？</DialogTitle><DialogDescription>关闭后按需进程以完整用户权限运行。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setConfirmDisable(false)}>取消</Button><Button variant="destructive" onClick={() => void toggle(true)}>关闭沙箱</Button></DialogFooter></DialogContent></Dialog>
   </div>;
 }
 
-function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+export function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [showRouting, setShowRouting] = useState(false);
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({
     providers: {},
@@ -1524,7 +1527,7 @@ function ServerWebhookPanel() {
   return <WebhookPanel serverRunning={serverRunning} />;
 }
 
-function ServerConfigPanel() {
+export function ServerConfigPanel() {
   const [config, setConfig] = useState<ServerConfig>({
     host: '127.0.0.1',
     port: 8080,
@@ -1645,11 +1648,14 @@ function ServerConfigPanel() {
             </div>
             <div className="flex items-center gap-2">
               {isToggling && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
-              <Switch
-                checked={config.enabled}
-                disabled={isSaving || isToggling}
-                onCheckedChange={handleToggleServer}
-              />
+              {/* 浏览器配置页只改配置，启停 Server 用 `tiangong server` 或桌面应用。 */}
+              {!isWebHost() && (
+                <Switch
+                  checked={config.enabled}
+                  disabled={isSaving || isToggling}
+                  onCheckedChange={handleToggleServer}
+                />
+              )}
             </div>
           </div>
 
@@ -1726,7 +1732,7 @@ function formatBytes(value: number) {
 }
 
 /// 插件设置页视图：选中时才加载 HTML，用 iframe 渲染。
-function PluginView({ contribution }: { contribution: SlotContributionEntry }) {
+export function PluginView({ contribution }: { contribution: SlotContributionEntry }) {
   const [html, setHtml] = useState<string>('');
 
   useEffect(() => {
