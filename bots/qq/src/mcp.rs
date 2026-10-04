@@ -13,6 +13,7 @@ use rmcp::{ErrorData, ServiceExt, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::reply_quota::{MediaPlan, ReplyKind, TextPlan};
 use crate::target_store::{self, AuthorizedTarget};
 use crate::{
     BotState, RecentMessages, ReplyTarget, provision, send_local_file, send_text,
@@ -25,7 +26,8 @@ const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 30 * 1024 * 1024;
 const MAX_FILE_NAME_CHARS: usize = 255;
 const MCP_MESSAGE_SEQUENCE_START: u32 = 1000;
-const MCP_MESSAGE_SEQUENCE_RANGE: u32 = 64_000;
+const WINDOW_REPLACED: &str =
+    "推送目标不存在、已被删除，或用户已发送新消息开启新的回复窗口；请重新确认后再发送";
 
 #[derive(Serialize)]
 pub struct RegistrationConfig {
@@ -66,6 +68,9 @@ struct SendTextInput {
     text: String,
     /// 本次任务稳定编号；同一目标下重复使用不会再次发送。
     idempotency_key: String,
+    /// 是否为本轮最终答复。进展消息填 false：bot 会限流、合并，并始终为最终答复保留回复额度；
+    /// 最终答复填 true：超长时自动拆分为多条。
+    is_final: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -76,6 +81,8 @@ struct SendLocalMediaInput {
     file_path: String,
     /// 本次任务稳定编号；同一目标下重复使用不会再次发送。
     idempotency_key: String,
+    /// 是否属于本轮最终答复。false 时 bot 会为最终答复保留至少 1 次回复额度。
+    is_final: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -143,7 +150,9 @@ impl QqMcp {
         Ok(Json(PushTargetListOutput { targets }))
     }
 
-    #[tool(description = "使用最近一条入站消息的回复上下文，向已授权 QQ 目标发送文本")]
+    #[tool(
+        description = "使用最近一条入站消息的回复上下文，向已授权 QQ 目标发送文本。QQ 每条消息的回复次数有限（单聊 4 次 / 群聊 5 次）：进展消息设 is_final=false，bot 会限流合并并保留最终答复额度；最终答复设 is_final=true，超长自动拆分"
+    )]
     async fn send_text_message(
         &self,
         Parameters(input): Parameters<SendTextInput>,
@@ -163,28 +172,60 @@ impl QqMcp {
             DeliveryResolution::Ready { path, delivery } => (path, delivery),
             DeliveryResolution::Return(result) => return Ok(Json(result)),
         };
+        let kind = reply_kind(input.is_final);
+        let now = Local::now().naive_local();
+        let plan =
+            target_store::update_quota(&target.target_id, &target.message_id, |policy, quota| {
+                quota.plan_text(policy, kind, text, now)
+            })
+            .map_err(internal_error)?
+            .unwrap_or_else(|| TextPlan::Rejected(WINDOW_REPLACED.to_string()));
+        let (segments, first_seq) = match plan {
+            TextPlan::Send {
+                segments,
+                first_seq,
+            } => (segments, first_seq),
+            TextPlan::Queued { pending } => {
+                return Ok(Json(finish_queued(&path, delivery, pending)));
+            }
+            TextPlan::Rejected(reason) => {
+                return Ok(Json(finish_delivery(
+                    &path,
+                    delivery,
+                    Err(SendFailure::Rejected(reason)),
+                    "",
+                )));
+            }
+        };
+
         let platform_target = reply_target(&target);
-        let message_sequence = message_sequence(&target.target_id, idempotency_key);
-        let outcome = send_text(
-            &self.state,
-            &platform_target,
-            &target.message_id,
-            message_sequence,
-            text,
-        )
-        .await
-        .map(|()| None)
-        .map_err(|error| classify_platform_error("文本发送", error));
-        Ok(Json(finish_delivery(
-            &path,
-            delivery,
-            outcome,
-            "QQ 已受理文本消息（受最近消息回复窗口限制）",
-        )))
+        let total = segments.len();
+        let mut outcome = Ok(None);
+        for (index, segment) in segments.iter().enumerate() {
+            let sent = send_text(
+                &self.state,
+                &platform_target,
+                &target.message_id,
+                message_sequence(first_seq + index as u32),
+                segment,
+            )
+            .await;
+            if let Err(error) = sent {
+                let failure = classify_platform_error("文本发送", error);
+                outcome = Err(partial_failure(failure, index, total));
+                break;
+            }
+        }
+        let accepted = if total > 1 {
+            format!("QQ 已受理文本消息（已拆分为 {total} 条发送）")
+        } else {
+            "QQ 已受理文本消息（受最近消息回复窗口限制）".to_string()
+        };
+        Ok(Json(finish_delivery(&path, delivery, outcome, &accepted)))
     }
 
     #[tool(
-        description = "使用最近一条入站消息的回复上下文发送本地图片；文件必须位于当前工作目录或 ~/.tiangong/media，支持 PNG/JPEG/GIF/WebP，最大 10 MiB"
+        description = "使用最近一条入站消息的回复上下文发送本地图片；文件必须位于当前工作目录或 ~/.tiangong/media，支持 PNG/JPEG/GIF/WebP，最大 10 MiB。每张图片占用 1 次回复额度，属于最终答复时设 is_final=true"
     )]
     async fn send_image_message(
         &self,
@@ -194,7 +235,7 @@ impl QqMcp {
     }
 
     #[tool(
-        description = "使用最近一条入站消息的回复上下文发送本地文件；文件必须位于当前工作目录或 ~/.tiangong/media，最大 30 MiB"
+        description = "使用最近一条入站消息的回复上下文发送本地文件；文件必须位于当前工作目录或 ~/.tiangong/media，最大 30 MiB。每个文件占用 1 次回复额度，属于最终答复时设 is_final=true"
     )]
     async fn send_file_message(
         &self,
@@ -226,13 +267,31 @@ impl QqMcp {
             DeliveryResolution::Ready { path, delivery } => (path, delivery),
             DeliveryResolution::Return(result) => return Ok(Json(result)),
         };
+        let kind = reply_kind(input.is_final);
+        let now = Local::now().naive_local();
+        let plan =
+            target_store::update_quota(&target.target_id, &target.message_id, |policy, quota| {
+                quota.plan_media(policy, kind, now)
+            })
+            .map_err(internal_error)?
+            .unwrap_or_else(|| MediaPlan::Rejected(WINDOW_REPLACED.to_string()));
+        let seq = match plan {
+            MediaPlan::Send { seq } => seq,
+            MediaPlan::Rejected(reason) => {
+                return Ok(Json(finish_delivery(
+                    &path,
+                    delivery,
+                    Err(SendFailure::Rejected(reason)),
+                    "",
+                )));
+            }
+        };
         let platform_target = reply_target(&target);
-        let message_sequence = message_sequence(&target.target_id, idempotency_key);
         let outcome = send_local_file(
             &self.state,
             &platform_target,
             &target.message_id,
-            message_sequence,
+            message_sequence(seq),
             &media.path,
             "",
         )
@@ -340,14 +399,46 @@ fn reply_target(target: &AuthorizedTarget) -> ReplyTarget {
     }
 }
 
-fn message_sequence(target_id: &str, idempotency_key: &str) -> u32 {
-    let mut hasher = Sha256::new();
-    hasher.update(target_id.as_bytes());
-    hasher.update([0]);
-    hasher.update(idempotency_key.as_bytes());
-    let digest = hasher.finalize();
-    let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    MCP_MESSAGE_SEQUENCE_START + value % MCP_MESSAGE_SEQUENCE_RANGE
+/// MCP 发送占用的 `msg_seq` 基数：与常驻进程回退路径（从 1 递增）错开。
+///
+/// QQ 要求同一 `msg_id` 下 `msg_seq` 不重复；额度序号在窗口内单调递增，
+/// 加上基数后即可保证 MCP 发送之间、以及与回退路径之间都不冲突。
+fn message_sequence(slot: u32) -> u32 {
+    MCP_MESSAGE_SEQUENCE_START + slot
+}
+
+fn reply_kind(is_final: bool) -> ReplyKind {
+    if is_final {
+        ReplyKind::Final
+    } else {
+        ReplyKind::Progress
+    }
+}
+
+/// 拆分发送中途失败时，说明已送达的段数，避免 Agent 误判为全部未发送。
+fn partial_failure(failure: SendFailure, sent: usize, total: usize) -> SendFailure {
+    if total <= 1 {
+        return failure;
+    }
+    let note = format!("（共 {total} 段，已发送 {sent} 段）");
+    match failure {
+        SendFailure::Rejected(message) => SendFailure::Rejected(format!("{message}{note}")),
+        SendFailure::Unknown(message) => SendFailure::Unknown(format!("{message}{note}")),
+    }
+}
+
+/// 进展消息被限流暂存：记录为 queued，相同幂等键重复调用不会再次暂存。
+fn finish_queued(path: &Path, mut delivery: StoredDelivery, pending: usize) -> DeliveryResult {
+    delivery.result.status = "queued".to_string();
+    delivery.result.sent_at = now_string();
+    delivery.result.message = format!(
+        "进展发送过于频繁，已暂存（共 {pending} 条），将合并到下一条进展消息中；最终答复会覆盖未发出的暂存进展"
+    );
+    if let Err(error) = replace_delivery(path, &delivery) {
+        delivery.result.status = "unknown".to_string();
+        delivery.result.message = format!("暂存结果保存失败：{error}");
+    }
+    delivery.result
 }
 
 fn finish_delivery(

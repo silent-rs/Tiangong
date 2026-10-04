@@ -20,6 +20,7 @@ mod crypto;
 mod ilink;
 mod mcp;
 mod provision;
+mod reply_quota;
 mod schema;
 mod target_store;
 #[cfg(test)]
@@ -214,8 +215,9 @@ fn message_source(target_kind: &str, push: Option<&(String, String)>) -> String 
     match push {
         Some((server, target_id)) => format!(
             "[来源：{channel}。用户只能收到你经 MCP 服务 {server} 发送的消息，直接输出的文本不会送达：\
-             请用 send_text_message（target_id={target_id}）发送最终答复，图片/文件用 \
-             send_image_message / send_file_message；任务耗时较长时可先发送简短进展。\
+             请用 send_text_message（target_id={target_id}，is_final=true）发送最终答复，图片/文件用 \
+             send_image_message / send_file_message；任务耗时较长时可先用 is_final=false 发送简短进展。\
+             本条消息的回复次数有限，bot 会合并过频的进展并为最终答复保留额度。\
              每次发送使用不同的 idempotency_key]"
         ),
         None => format!("[来源：{channel}]"),
@@ -829,7 +831,7 @@ mod tests {
         let with_push = message_source("direct", Some(&push));
         assert!(with_push.starts_with("[来源：微信私聊"));
         assert!(with_push.contains("bot-weixin"));
-        assert!(with_push.contains("send_text_message（target_id=target-1）"));
+        assert!(with_push.contains("send_text_message（target_id=target-1，is_final=true）"));
         assert!(with_push.contains("直接输出的文本不会送达"));
         assert!(with_push.contains("不同的 idempotency_key"));
         assert!(push_channel(None).is_none());
