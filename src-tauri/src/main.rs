@@ -316,15 +316,26 @@ fn run_gui() {
                     let active_tab_id = snapshot.as_ref().and_then(|s| s.active_tab_id.clone());
                     let mut page_url = url;
                     if page_url.is_empty() {
-                        // 尝试从活跃标签的 WebView 获取当前页面 URL
-                        let browser_state =
-                            app_handle.state::<tiangong_app::webview_host::WebviewHostState>();
-                        page_url = browser_state
+                        // 尝试从活跃标签的 WebView 现场读取 URL：读取需等待主线程，
+                        // 放到阻塞线程并限时，不占用 tokio 工作线程。
+                        let manager = app_handle
+                            .state::<tiangong_app::webview_host::WebviewHostState>()
                             .registry
                             .existing_session_state(&session_id)
-                            .map(tiangong_app::webview_host::manager::BrowserManager::from_state)
-                            .and_then(|manager| manager.current_url())
+                            .map(tiangong_app::webview_host::manager::BrowserManager::from_state);
+                        if let Some(manager) = manager {
+                            let url_app = app_handle.clone();
+                            page_url = tokio::time::timeout(
+                                tiangong_app::webview_host::manager::WEBVIEW_URL_READ_TIMEOUT
+                                    + std::time::Duration::from_secs(1),
+                                tokio::task::spawn_blocking(move || manager.current_url(&url_app)),
+                            )
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .flatten()
                             .unwrap_or_default();
+                        }
                     }
                     if page_url.is_empty() {
                         warn!(total_count, change_count, "浏览器页面变化缺少页面 URL，无法注入");
@@ -1065,9 +1076,24 @@ async fn restore_server_and_bots(app: tauri::AppHandle) {
 }
 
 fn start_tray_status_refresh(app: tauri::AppHandle, tray: tauri::tray::TrayIcon, ui: TrayServerUi) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        refresh_tray_server_status(&app, &tray, &ui);
+    // 周期刷新只在状态变化时更新托盘，并投递到主线程执行、不等待结果：
+    // 菜单项 setter 在非主线程调用会同步等待主线程，主线程繁忙时本线程
+    // 会被一并挂住。主线程内调用 setter 走同线程分支，不跨线程等待。
+    std::thread::spawn(move || {
+        let mut last_status: Option<ServerTrayStatus> = None;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let (text, status) = tray_server_status(&app);
+            if last_status == Some(status) {
+                continue;
+            }
+            last_status = Some(status);
+            let tray = tray.clone();
+            let ui = ui.clone();
+            let _ = app.run_on_main_thread(move || {
+                apply_tray_server_status(&tray, &ui, &text, status);
+            });
+        }
     });
 }
 
@@ -1156,6 +1182,15 @@ fn refresh_tray_server_status(
     ui: &TrayServerUi,
 ) {
     let (text, status) = tray_server_status(app);
+    apply_tray_server_status(tray, ui, &text, status);
+}
+
+fn apply_tray_server_status(
+    tray: &tauri::tray::TrayIcon,
+    ui: &TrayServerUi,
+    text: &str,
+    status: ServerTrayStatus,
+) {
     let _ = ui.status_item.set_text(text);
     let _ = ui
         .start_item

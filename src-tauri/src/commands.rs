@@ -5448,7 +5448,14 @@ pub async fn bridge_call(
     } else {
         None
     };
-    if method.starts_with("plugin-dev.") || method.starts_with("dialog.") {
+    // plugin-dev.* / dialog.*：可能长时间阻塞（构建、等待用户确认）。
+    // webview.*：协作原语同步等待页面加载（可达数十秒），webview 原语需要
+    // 获取浏览器状态锁并可能同步等待主线程——放到阻塞线程，避免并发调用
+    // 占满 tokio 工作线程拖垮整个 app。
+    if method.starts_with("plugin-dev.")
+        || method.starts_with("dialog.")
+        || method.starts_with("webview.")
+    {
         return tokio::task::spawn_blocking(move || {
             tiangong_plugin_runtime::bridge_call_with_workspace(
                 &plugin_id,
