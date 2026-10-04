@@ -60,12 +60,14 @@ pub struct DeleteTargetRequest {
 }
 
 /// 收到用户消息后保存最新回复上下文，并自动授权该会话用于主动推送。
+///
+/// 返回该会话对应的推送目标编号（与 `conversation_id` 一一对应，跨消息稳定）。
 pub fn upsert_discovered(
     conversation_id: &str,
     to_user_id: &str,
     kind: &str,
     context_token: &str,
-) -> Result<()> {
+) -> Result<String> {
     let conversation_id = conversation_id.trim();
     let to_user_id = to_user_id.trim();
     let context_token = context_token.trim();
@@ -85,9 +87,11 @@ pub fn upsert_discovered(
             target.context_token = context_token.to_string();
             target.enabled = true;
             target.last_seen_at = now;
+            Ok(target.target_id.clone())
         } else {
+            let target_id = scru128::new().to_string();
             store.targets.push(TargetRecord {
-                target_id: scru128::new().to_string(),
+                target_id: target_id.clone(),
                 conversation_id: conversation_id.to_string(),
                 to_user_id: to_user_id.to_string(),
                 kind: kind.to_string(),
@@ -95,8 +99,8 @@ pub fn upsert_discovered(
                 enabled: true,
                 last_seen_at: now,
             });
+            Ok(target_id)
         }
-        Ok(())
     })
 }
 

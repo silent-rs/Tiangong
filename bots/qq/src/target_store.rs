@@ -60,7 +60,9 @@ pub struct DeleteTargetRequest {
 }
 
 /// 收到用户消息后保存最新回复消息编号，并自动授权该会话用于主动推送。
-pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Result<()> {
+///
+/// 返回该会话对应的推送目标编号（与 `kind + recipient_id` 一一对应，跨消息稳定）。
+pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Result<String> {
     let recipient_id = recipient_id.trim();
     let message_id = message_id.trim();
     if recipient_id.is_empty() || message_id.is_empty() {
@@ -77,17 +79,19 @@ pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Re
             target.message_id = message_id.to_string();
             target.enabled = true;
             target.last_seen_at = now;
+            Ok(target.target_id.clone())
         } else {
+            let target_id = scru128::new().to_string();
             store.targets.push(TargetRecord {
-                target_id: scru128::new().to_string(),
+                target_id: target_id.clone(),
                 recipient_id: recipient_id.to_string(),
                 kind: kind.to_string(),
                 message_id: message_id.to_string(),
                 enabled: true,
                 last_seen_at: now,
             });
+            Ok(target_id)
         }
-        Ok(())
     })
 }
 

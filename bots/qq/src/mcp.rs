@@ -273,16 +273,25 @@ pub async fn serve() -> Result<()> {
     Ok(())
 }
 
-pub fn registration_config() -> Result<RegistrationConfig> {
+/// 本 Bot 实例注册到天工的 MCP 服务名（`bot-{实例目录名}`）。
+///
+/// 入站消息的来源说明与 MCP 注册共用该名称，保证模型看到的服务名与实际
+/// 注册名一致；多实例时各自不同。
+pub fn server_name() -> Result<String> {
     let executable = std::env::current_exe().context("获取 QQ bot 路径失败")?;
     let bot_id = executable
         .parent()
         .and_then(|directory| directory.file_name())
         .and_then(|name| name.to_str())
         .context("QQ bot 实例目录名称无效")?;
+    Ok(format!("bot-{bot_id}"))
+}
+
+pub fn registration_config() -> Result<RegistrationConfig> {
+    let executable = std::env::current_exe().context("获取 QQ bot 路径失败")?;
     Ok(RegistrationConfig {
         schema_version: 1,
-        name: format!("bot-{bot_id}"),
+        name: server_name()?,
         transport: "stdio".to_string(),
         command: executable.to_string_lossy().to_string(),
         args: vec!["--mcp".to_string()],
