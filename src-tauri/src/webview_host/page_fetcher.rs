@@ -46,9 +46,12 @@ impl BrowserPageFetcher {
     }
 }
 
+/// 投递命令的等待上限：通道已满（消费循环卡住）时放弃，不无限挂起。
+const COMMAND_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 macro_rules! send_and_wait {
     ($tx:expr, $cmd:expr, $rx:expr, $timeout:expr) => {{
-        if $tx.send($cmd).await.is_err() {
+        if $tx.send_timeout($cmd, COMMAND_SEND_TIMEOUT).await.is_err() {
             return None;
         }
         tokio::time::timeout(Duration::from_secs($timeout), $rx)
@@ -237,11 +240,14 @@ impl PageFetcher for BrowserPageFetcher {
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             if tx
-                .send(BrowserCommand::LoadHtml {
-                    session_id: session_id.clone(),
-                    html,
-                    response_tx,
-                })
+                .send_timeout(
+                    BrowserCommand::LoadHtml {
+                        session_id: session_id.clone(),
+                        html,
+                        response_tx,
+                    },
+                    COMMAND_SEND_TIMEOUT,
+                )
                 .await
                 .is_err()
             {

@@ -143,12 +143,27 @@ pub async fn browser_command_handler(
                 response_tx,
             } => {
                 let url_for_error = url.clone();
+                // 调用方已超时放弃：不再导航共用标签（否则会顶掉后续请求的导航）。
+                if response_tx.is_closed() {
+                    debug!(%session_id, %url, "FetchPage 调用方已放弃，跳过");
+                    continue;
+                }
                 let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
                     continue;
                 };
                 let manager = BrowserManager::from_state(agent_state);
 
-                let ticket = match manager.navigate_for_agent(&app, &url) {
+                // navigate_for_agent 会获取 std 锁并可能经 add_child 同步等待主线程，
+                // 放到阻塞线程执行，不占用 tokio 工作线程。
+                let navigate_app = app.clone();
+                let navigate_manager = manager.clone();
+                let navigate_url = url.clone();
+                let navigated = tokio::task::spawn_blocking(move || {
+                    navigate_manager.navigate_for_agent(&navigate_app, &navigate_url)
+                })
+                .await
+                .unwrap_or_else(|_| Err("浏览器导航任务执行失败".to_string()));
+                let ticket = match navigated {
                     Ok(ticket) => ticket,
                     Err(error) => {
                         let _ = response_tx.send(BrowserResponse {
@@ -207,7 +222,14 @@ pub async fn browser_command_handler(
                         session_id: session_id.clone(),
                     },
                 );
-                match manager.navigate_for_agent(&app, &url) {
+                let navigate_app = app.clone();
+                let navigate_url = url.clone();
+                let navigated = tokio::task::spawn_blocking(move || {
+                    manager.navigate_for_agent(&navigate_app, &navigate_url)
+                })
+                .await
+                .unwrap_or_else(|_| Err("浏览器导航任务执行失败".to_string()));
+                match navigated {
                     Ok(ticket) => {
                         // 与 FetchPage 同一归属流程：页面必有标签所有者。
                         if let Some((plugin_id, owner_session)) =
@@ -569,9 +591,15 @@ pub async fn browser_command_handler(
                     continue;
                 };
                 let manager = BrowserManager::from_state(agent_state);
-                // 浏览器未打开时先打开（无头），再加载 HTML
+                // 浏览器未打开时先打开（无头），再加载 HTML。open 获取 std 锁并可能
+                // 同步等待主线程创建 WebView，放到阻塞线程执行。
                 if !manager.is_open() {
-                    let _ = manager.open(&app, "about:blank");
+                    let open_manager = manager.clone();
+                    let open_app = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        open_manager.open(&open_app, "about:blank")
+                    })
+                    .await;
                     let _ = app.emit(
                         "browser:open",
                         BrowserOpenEvent {

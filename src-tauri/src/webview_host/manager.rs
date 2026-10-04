@@ -59,6 +59,38 @@ const NAVIGATION_COMPLETION_PROBE_INTERVAL: Duration = Duration::from_millis(250
 pub(crate) const POLL_EVAL_TIMEOUT: Duration = Duration::from_secs(4);
 /// url_poll 后台线程的 tick 间隔（URL 变化检测延迟）。
 const URL_POLL_TICK: Duration = Duration::from_millis(1000);
+/// 后台线程现场读取 WebView URL 的等待上限：主线程繁忙时超时跳过本轮，
+/// 不无限等待事件循环（见 [`read_webview_url`]）。
+pub const WEBVIEW_URL_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 现场读取 WebView 当前 URL：把读取任务投递到主线程执行，调用方最多
+/// 等待 `timeout`。
+///
+/// `Webview::url()` 在非主线程调用时会向事件循环发消息并**无超时**阻塞
+/// 等待回复；若调用方此时持有 `BrowserState` 锁，而主线程正在
+/// `on_page_load` 回调中等待同一把锁，两者永久互等（app 卡死）。本函数
+/// 在主线程内执行 `url()`（tauri 同线程分支直接处理，不再跨线程等待），
+/// 后台调用方改为限时等待——主线程繁忙时返回 None，由调用方跳过本轮。
+///
+/// **调用约束：调用前必须已释放 `BrowserState` 锁。**
+pub(crate) fn read_webview_url(
+    app: &AppHandle<Wry>,
+    webview: Webview<Wry>,
+    timeout: Duration,
+) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        // WKWebView 导航中 URL() 可能返回 nil，wry 内部会 panic；主线程任务
+        // 内同样兜住，避免 panic 打断事件循环。
+        let url = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| webview.url()))
+            .ok()
+            .and_then(Result::ok)
+            .map(|url| url.to_string());
+        let _ = tx.send(url);
+    })
+    .ok()?;
+    rx.recv_timeout(timeout).ok().flatten()
+}
 
 /// 无头创建矩形：任何代码路径新建 WebView 一律先落在这屏幕外坐标，
 /// 展示位置只由前端显式下发（webview.instanceShow / setPosition）。
@@ -431,6 +463,14 @@ fn agent_tab_id_for_domain(state: &BrowserState, agent_domain: &str) -> Option<S
 }
 
 /// 浏览器 WebView 的共享状态
+///
+/// # 锁约束
+///
+/// `on_page_load` 等回调在主线程上获取本锁。因此**持有本锁期间禁止调用任何
+/// 会同步等待主线程的接口**（`Webview::url()` / `bounds()` / `position()`、
+/// `Window::add_child`、菜单项 getter/setter 等），否则后台线程持锁等主线程、
+/// 主线程等锁，形成死锁。需要这些信息时先在锁内克隆 `Webview` 句柄，释放
+/// 锁后再调用（URL 用 [`read_webview_url`] 限时读取）。
 pub struct BrowserState {
     /// 每个标签页对应的独立 WebView 实例
     pub webviews: HashMap<String, Webview<Wry>>,
@@ -1549,8 +1589,12 @@ impl BrowserManager {
         let app = app.clone();
         let stop = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            // 先通知旧轮询线程退出，再换新停止标志：保证每个作用域同时只有
+            // 一个 url_poll 线程（此前复用同一标志并置 false，旧线程永不退出，
+            // 每次导航累积一个线程，持续加压主线程）。
             s.poll_stop
-                .store(false, std::sync::atomic::Ordering::Relaxed);
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            s.poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             s.last_known_url = initial_url.to_string();
             s.poll_stop.clone()
         };
@@ -1562,6 +1606,7 @@ impl BrowserManager {
         std::thread::Builder::new()
             .name("browser-url-poll".into())
             .spawn(move || {
+                debug!(%session_id, "browser url_poll thread started");
                 let mut tick: u32 = 0;
                 let mut no_webview_ticks: u32 = 0;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1573,7 +1618,8 @@ impl BrowserManager {
                     if !visible.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
-                    let (active_tab_id, navigation_id, current_url) = {
+                    // 锁内只克隆句柄，释放锁后再现场读 URL（见 BrowserState 锁约束）。
+                    let (active_tab_id, navigation_id, webview) = {
                         let s = match state.lock() {
                             Ok(s) => s,
                             Err(e) => e.into_inner(),
@@ -1587,12 +1633,7 @@ impl BrowserManager {
                         match s.webviews.get(&active_tab_id) {
                             Some(wv) => {
                                 no_webview_ticks = 0;
-                                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    wv.url()
-                                })) {
-                                    Ok(Ok(u)) => (active_tab_id, navigation_id, u.to_string()),
-                                    _ => continue,
-                                }
+                                (active_tab_id, navigation_id, wv.clone())
                             }
                             None => {
                                 no_webview_ticks += 1;
@@ -1604,6 +1645,14 @@ impl BrowserManager {
                             }
                         }
                     };
+                    let Some(current_url) =
+                        read_webview_url(&app, webview, WEBVIEW_URL_READ_TIMEOUT)
+                    else {
+                        continue;
+                    };
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                     let changed = {
                         let mut s = match state.lock() {
                             Ok(s) => s,
@@ -1711,7 +1760,7 @@ impl BrowserManager {
                         }
                     }
                 }
-                debug!("browser url_poll thread exiting");
+                debug!(%session_id, "browser url_poll thread exiting");
             })
             .expect("failed to spawn browser URL poll thread");
     }
@@ -2177,19 +2226,21 @@ impl BrowserManager {
     ) -> Option<String> {
         let (sender, rx) = std::sync::mpsc::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(sender)));
-        {
+        // 锁内只克隆句柄：eval_with_callback 在启用 tauri tracing 特性时会
+        // 同步等待主线程，持锁调用存在与 on_page_load 互等的风险。
+        let webview = {
             let state = self.state.lock().ok()?;
-            let webview = state.webviews.get(tab_id)?;
-            webview
-                .eval_with_callback(js, move |result| {
-                    if let Ok(mut guard) = tx.lock() {
-                        if let Some(tx) = guard.take() {
-                            let _ = tx.send(result);
-                        }
+            state.webviews.get(tab_id)?.clone()
+        };
+        webview
+            .eval_with_callback(js, move |result| {
+                if let Ok(mut guard) = tx.lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(result);
                     }
-                })
-                .ok()?;
-        }
+                }
+            })
+            .ok()?;
         rx.recv_timeout(timeout).ok()
     }
 
@@ -3003,14 +3054,17 @@ impl BrowserManager {
         }
     }
 
-    /// 获取当前活跃标签的 WebView URL
-    pub fn current_url(&self) -> Option<String> {
-        let state = self.state.lock().ok()?;
-        let wv = state.active_webview()?;
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wv.url())) {
-            Ok(Ok(u)) => Some(u.to_string()),
-            _ => None,
-        }
+    /// 获取当前活跃标签的 WebView URL（现场读取，限时等待主线程）。
+    ///
+    /// 锁内只克隆句柄，释放锁后再读取；主线程繁忙超过
+    /// [`WEBVIEW_URL_READ_TIMEOUT`] 时返回 None。会阻塞调用线程，异步上下文
+    /// 中请经 `spawn_blocking` 调用。
+    pub fn current_url(&self, app: &AppHandle<Wry>) -> Option<String> {
+        let webview = {
+            let state = self.state.lock().ok()?;
+            state.active_webview()?.clone()
+        };
+        read_webview_url(app, webview, WEBVIEW_URL_READ_TIMEOUT)
     }
 
     /// 获取标签页浏览历史
@@ -3383,14 +3437,35 @@ pub(crate) fn load_global_history() -> Vec<HistoryEntry> {
     }
 }
 
+/// 持久化全局浏览历史（后台线程写盘）。
+///
+/// 调用方可能在主线程（on_page_load → complete_navigation_for_tab），同步写
+/// 文件会占用事件循环。写盘挪到后台线程；写入时在串行锁内重新读取最新
+/// 历史，多次并发触发也能保证最终落盘的是最新内容。
 fn persist_global_history(shared: &Arc<BrowserSharedState>) {
-    let entries = shared
-        .global_history
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let path = global_history_path();
-    if let Ok(content) = serde_json::to_string(&*entries) {
-        let _ = std::fs::write(path, content);
+    static WRITE_LOCK: Mutex<()> = Mutex::new(());
+    let shared = shared.clone();
+    let spawned = std::thread::Builder::new()
+        .name("browser-history-persist".into())
+        .spawn(move || {
+            let _serial = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            write_global_history(&shared);
+        });
+    if let Err(error) = spawned {
+        warn!(%error, "浏览历史后台写盘线程启动失败");
+    }
+}
+
+fn write_global_history(shared: &BrowserSharedState) {
+    let content = {
+        let entries = shared
+            .global_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        serde_json::to_string(&*entries)
+    };
+    if let Ok(content) = content {
+        let _ = std::fs::write(global_history_path(), content);
     }
 }
 

@@ -350,6 +350,28 @@ pub fn handle_webview_primitive(
 /// 页面就绪耗时常见超过 30 秒），给足等待时间；工具级上限
 /// （plugin.json timeout_ms）仍兜底。
 const COLLABORATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// 投递协作命令的等待上限：命令通道已满（消费循环卡住）时尽快报错，
+/// 而不是让调用方无限挂起。
+const COMMAND_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 带超时地向浏览器命令通道投递命令。
+async fn send_command(
+    cmd_tx: &tokio::sync::mpsc::Sender<crate::webview_host::types::BrowserCommand>,
+    command: crate::webview_host::types::BrowserCommand,
+) -> anyhow::Result<()> {
+    match cmd_tx.send_timeout(command, COMMAND_SEND_TIMEOUT).await {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::SendTimeoutError::Timeout(_)) => {
+            anyhow::bail!(
+                "浏览器命令通道繁忙（{}s 内未能投递），请稍后重试",
+                COMMAND_SEND_TIMEOUT.as_secs()
+            )
+        }
+        Err(tokio::sync::mpsc::error::SendTimeoutError::Closed(_)) => {
+            anyhow::bail!("浏览器命令通道已关闭")
+        }
+    }
+}
 
 pub fn dispatch_collaboration(
     state: &crate::webview_host::WebviewHostState,
@@ -382,8 +404,9 @@ pub fn dispatch_collaboration(
             let value = match method.as_str() {
                 "webview.fetch" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::FetchPage {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::FetchPage {
                             session_id: session_id.clone(),
                             url: request
                                 .get("url")
@@ -400,8 +423,9 @@ pub fn dispatch_collaboration(
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false),
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(response)) => serde_json::json!({
                             "ok": response.ok,
@@ -413,8 +437,9 @@ pub fn dispatch_collaboration(
                 }
                 "webview.pageText" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::PageText {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::PageText {
                             session_id: session_id.clone(),
                             offset: request.get("offset").and_then(|v| v.as_u64()).unwrap_or(0)
                                 as usize,
@@ -429,8 +454,9 @@ pub fn dispatch_collaboration(
                                 .filter(|v| !v.is_empty())
                                 .map(str::to_string),
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(result)) => result,
                         _ => anyhow::bail!("webview.pageText 超时或通道关闭"),
@@ -438,8 +464,9 @@ pub fn dispatch_collaboration(
                 }
                 "webview.queryDom" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::QueryDom {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::QueryDom {
                             session_id: session_id.clone(),
                             selector: request
                                 .get("selector")
@@ -451,8 +478,9 @@ pub fn dispatch_collaboration(
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(20) as usize,
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(result)) => serde_json::to_value(result)?,
                         _ => anyhow::bail!("webview.queryDom 超时或通道关闭"),
@@ -460,8 +488,9 @@ pub fn dispatch_collaboration(
                 }
                 "webview.click" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::ClickElement {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::ClickElement {
                             session_id: session_id.clone(),
                             selector: request
                                 .get("selector")
@@ -470,8 +499,9 @@ pub fn dispatch_collaboration(
                                 .to_string(),
                             wait_for: None,
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(result)) => serde_json::to_value(result)?,
                         _ => anyhow::bail!("webview.click 超时或通道关闭"),
@@ -479,8 +509,9 @@ pub fn dispatch_collaboration(
                 }
                 "webview.formFill" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::FormFill {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::FormFill {
                             session_id: session_id.clone(),
                             selector: request
                                 .get("selector")
@@ -499,8 +530,9 @@ pub fn dispatch_collaboration(
                                 .to_string(),
                             wait_for: None,
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(result)) => serde_json::to_value(result)?,
                         _ => anyhow::bail!("webview.formFill 超时或通道关闭"),
@@ -508,12 +540,14 @@ pub fn dispatch_collaboration(
                 }
                 "webview.formExtract" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::FormExtract {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::FormExtract {
                             session_id: session_id.clone(),
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(result)) => serde_json::to_value(result)?,
                         _ => anyhow::bail!("webview.formExtract 超时或通道关闭"),
@@ -521,8 +555,9 @@ pub fn dispatch_collaboration(
                 }
                 "webview.locate" => {
                     let (tx, rx) = oneshot::channel();
-                    let _ = cmd_tx
-                        .send(BrowserCommand::LocateElement {
+                    send_command(
+                        &cmd_tx,
+                        BrowserCommand::LocateElement {
                             session_id: session_id.clone(),
                             query: request
                                 .get("query")
@@ -530,8 +565,9 @@ pub fn dispatch_collaboration(
                                 .unwrap_or_default()
                                 .to_string(),
                             response_tx: tx,
-                        })
-                        .await;
+                        },
+                    )
+                    .await?;
                     match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
                         Ok(Ok(result)) => serde_json::to_value(result)?,
                         _ => anyhow::bail!("webview.locate 超时或通道关闭"),
