@@ -138,11 +138,14 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           span.setAttribute('data-mention-kind', b.kind);
           span.setAttribute('title', b.token);
           span.setAttribute('aria-label', b.token);
-          const icon = document.createElement('span');
-          icon.className = mentionMarkClass(b.kind);
-          icon.textContent = mentionMarkFor(b.kind, b.token);
-          icon.setAttribute('aria-hidden', 'true');
-          span.appendChild(icon);
+          const mark = mentionMarkFor(b.kind, b.token);
+          if (mark) {
+            const icon = document.createElement('span');
+            icon.className = mentionMarkClass(b.kind);
+            icon.textContent = mark;
+            icon.setAttribute('aria-hidden', 'true');
+            span.appendChild(icon);
+          }
           const label = document.createElement('span');
           label.className = MENTION_LABEL_CLASS;
           label.textContent = b.label;

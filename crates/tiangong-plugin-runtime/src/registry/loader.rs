@@ -391,12 +391,16 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
     ) -> Result<Vec<tiangong_types::MentionCandidate>, String> {
         let snapshot = {
             let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
-            plugins
-                .get(&self.id)
-                .filter(|p| p.enabled)
-                .map(|p| (p.ui_plugin.clone(), p.manifest.clone(), p.generation))
+            plugins.get(&self.id).filter(|p| p.enabled).map(|p| {
+                (
+                    p.ui_plugin.clone(),
+                    p.manifest.clone(),
+                    p.descriptor.as_ref().map(|d| d.name.clone()),
+                    p.generation,
+                )
+            })
         };
-        let Some((instance, manifest, generation)) = snapshot else {
+        let Some((instance, manifest, descriptor_name, generation)) = snapshot else {
             return Ok(Vec::new());
         };
         let mut candidates = Vec::new();
@@ -422,9 +426,11 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
         }
         // 静态清单候选也按本次查询词过滤（不过滤会列出全部声明了 mention
         // 的插件），判定与宿主兜底同一函数。
-        if let Some(candidate) =
-            crate::ts_plugin::mention_candidate_from_manifest(&manifest, &query.query)
-        {
+        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(
+            &manifest,
+            descriptor_name.as_deref(),
+            &query.query,
+        ) {
             candidates.push(candidate);
         }
         let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
