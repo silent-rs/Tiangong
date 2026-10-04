@@ -283,6 +283,9 @@ impl ResponseState {
                 }
             }
 
+            // 仅用于界面运行计时；CLI 以按序提交的 ToolResult 输出结果。
+            StreamEvent::ToolFinished { .. } => {}
+
             StreamEvent::ToolResult {
                 name, ok, output, ..
             } => {

@@ -4,6 +4,7 @@ import type { MessageItem } from "./types";
 import { formatMessageTime, formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
+  buildFinishedToolModel,
   buildRunningToolModel,
   buildToolDisplayModel,
   writeContentFromArgs,
@@ -21,6 +22,8 @@ export interface RunningToolCall {
   arguments?: unknown;
   /** 调用发起时刻（Date.now()），运行行据此实时跳秒。 */
   startedAt?: number;
+  /** 任务已执行完成、结果等待前序工具按序提交：停止计时，显示真实耗时。 */
+  finished?: { ok: boolean; durationMs: number | null };
 }
 
 interface ToolGroupProps {
@@ -77,6 +80,7 @@ function ToolRunRow({
   onToggle,
   time,
   startedAtMs,
+  pendingCommit = false,
 }: {
   model: ToolDisplayModel;
   args?: unknown;
@@ -85,6 +89,8 @@ function ToolRunRow({
   time?: string;
   /** 运行中调用的发起时刻（毫秒时间戳）：行尾实时跳秒。 */
   startedAtMs?: number;
+  /** 已执行完成、结果等待前序工具按序提交。 */
+  pendingCommit?: boolean;
 }) {
   const isError = model.state === "error";
   const isRunning = model.state === "running";
@@ -136,8 +142,13 @@ function ToolRunRow({
             {formatToolDuration(runningMs)}
           </span>
         )}
+        {pendingCommit && (
+          <span className="shrink-0 pl-1 text-[11px] text-muted-foreground/60" title="已执行完成，等待前序工具结果后按顺序提交">
+            等待前序结果
+          </span>
+        )}
         {model.durationMs != null && model.durationMs > 0 && (
-          <span className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums" title="本次调用耗时">
+          <span className={`${pendingCommit ? "" : "ml-auto "}shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums`} title="本次调用耗时">
             {formatToolDuration(model.durationMs)}
           </span>
         )}
@@ -184,11 +195,16 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       {runningCalls?.map((call) => (
         <div key={`running-${call.id}`} className="ml-4">
           <ToolRunRow
-            model={buildRunningToolModel(call.name, call.arguments)}
+            model={
+              call.finished
+                ? buildFinishedToolModel(call.name, call.arguments, call.finished)
+                : buildRunningToolModel(call.name, call.arguments)
+            }
             args={call.arguments}
             expanded={expansion.isExpanded(`running-${call.id}`)}
             onToggle={() => expansion.toggle(`running-${call.id}`)}
-            startedAtMs={call.startedAt}
+            startedAtMs={call.finished ? undefined : call.startedAt}
+            pendingCommit={call.finished != null}
           />
         </div>
       ))}

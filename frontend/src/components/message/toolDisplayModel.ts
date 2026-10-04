@@ -481,3 +481,24 @@ function firstLineOr(text: string | null, fallback: string): string {
   const line = firstNonEmptyLine(text);
   return clamp(line || fallback, 80);
 }
+
+/**
+ * 已执行完成、结果尚待按序提交的工具调用展示模型。
+ *
+ * 同批工具结果按模型声明顺序提交，先完成的后序工具需等待前序工具；此期间
+ * 停止运行计时，以 `tool_finished` 事件携带的真实耗时展示。结果文本尚未到达，
+ * 失败时只能给出通用提示，详细错误随 `tool_result` 到达后替换整行。
+ */
+export function buildFinishedToolModel(
+  name: string,
+  args: unknown,
+  finished: { ok: boolean; durationMs: number | null },
+): ToolDisplayModel {
+  const model = buildRunningToolModel(name, args);
+  return {
+    ...model,
+    state: finished.ok ? "ok" : "error",
+    errorSummary: finished.ok ? null : "执行失败",
+    durationMs: finished.durationMs,
+  };
+}
