@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-bot-qq"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "天工 QQ bot 制品——通过 QQ 开放平台 WebSocket 网关接收 QQ 消息并转发到天工"

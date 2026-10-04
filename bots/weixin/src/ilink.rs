@@ -26,7 +26,7 @@ const BOT_TYPE: u32 = 3;
 const ILINK_APP_ID: &str = "bot";
 const ILINK_APP_CLIENT_VERSION: &str = "132102";
 const CHANNEL_VERSION: &str = "2.4.6";
-const BOT_AGENT: &str = "Tiangong/0.2.1";
+const BOT_AGENT: &str = "Tiangong/0.3.0";
 
 fn build_common_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();

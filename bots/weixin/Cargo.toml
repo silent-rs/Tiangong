@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-bot-weixin"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "天工微信 bot 制品——基于腾讯 iLink 协议长轮询接收微信消息并转发到天工"
