@@ -48,6 +48,18 @@ pub enum StreamEvent {
     },
     /// 工具开始执行
     ToolStart { name: String, args_summary: String },
+    /// 单个工具任务已执行完成（结果尚未提交）。
+    ///
+    /// 同批工具结果按模型声明顺序提交（`ToolResult`），先完成的后序工具需等待
+    /// 前序工具。本事件在任务完成的瞬间发出，供界面停止该调用的运行计时并
+    /// 展示真实耗时；完整结果仍以随后的 `ToolResult` 为准，不进入 Session。
+    ToolFinished {
+        tool_call_id: String,
+        name: String,
+        ok: bool,
+        /// 工具执行耗时（毫秒），与随后 `ToolResult.duration_ms` 一致。
+        duration_ms: u64,
+    },
     /// 工具执行结果
     ToolResult {
         name: String,

@@ -47,11 +47,19 @@ interface SessionViewCache {
   lastDurationMs: number | null;
   /** 运行中工具调用的开始时刻（tool_call_id → Date.now()），用于运行行实时跳秒。 */
   toolCallStartedAt: Record<string, number>;
+  /** 已执行完成、结果尚待按序提交的工具调用（tool_call_id → 结论与耗时）。 */
+  toolCallFinished: Record<string, ToolCallFinished>;
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string;
   cwd: string;
   reasoningEffort: string;
+}
+
+/** 工具任务已完成但结果尚未按序提交时的展示信息。 */
+export interface ToolCallFinished {
+  ok: boolean;
+  durationMs: number | null;
 }
 
 const sessionViewCaches = new Map<string, SessionViewCache>();
@@ -523,6 +531,7 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
     lastUsage: null,
     lastDurationMs: null,
     toolCallStartedAt: {},
+    toolCallFinished: {},
     streamingMessageId: null,
     streamingContent: '',
     streamingReasoningContent: '',
@@ -542,6 +551,7 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
     lastUsage: state.lastUsage,
     lastDurationMs: state.lastDurationMs,
     toolCallStartedAt: state.toolCallStartedAt,
+    toolCallFinished: state.toolCallFinished,
     streamingMessageId: state.streamingMessageId,
     streamingContent: state.streamingContent,
     streamingReasoningContent: state.streamingReasoningContent,
@@ -585,6 +595,7 @@ function applyEventToSessionView(
   let lastUsage = current.lastUsage;
   let lastDurationMs = current.lastDurationMs;
   let toolCallStartedAt = current.toolCallStartedAt;
+  let toolCallFinished = current.toolCallFinished;
   let streamingMessageId = current.streamingMessageId;
   let streamingContent = current.streamingContent;
   let streamingReasoningContent = current.streamingReasoningContent;
@@ -606,6 +617,7 @@ function applyEventToSessionView(
       runSummary = '正在处理';
       lastDurationMs = null;
       toolCallStartedAt = {};
+      toolCallFinished = {};
       break;
     case 'delta':
     case 'react_text':
@@ -663,11 +675,27 @@ function applyEventToSessionView(
         ? `正在执行：${event.name || ''} ${event.args_summary}`
         : `正在执行：${event.name || ''}`;
       break;
+    case 'tool_finished':
+      // 任务已完成、结果待按序提交：运行行停止计时并显示真实耗时。
+      if (event.tool_call_id) {
+        toolCallFinished = {
+          ...toolCallFinished,
+          [event.tool_call_id]: {
+            ok: event.ok !== false,
+            durationMs: event.duration_ms ?? null,
+          },
+        };
+      }
+      break;
     case 'tool_result':
       messages = applyToolResult(messages, event);
       if (event.tool_call_id && toolCallStartedAt[event.tool_call_id] != null) {
         const { [event.tool_call_id]: _removed, ...rest } = toolCallStartedAt;
         toolCallStartedAt = rest;
+      }
+      if (event.tool_call_id && toolCallFinished[event.tool_call_id] != null) {
+        const { [event.tool_call_id]: _finished, ...rest } = toolCallFinished;
+        toolCallFinished = rest;
       }
       runSummary = `${event.ok === false ? '失败' : '完成'} ${event.name || ''}`.trim();
       break;
@@ -776,6 +804,7 @@ function applyEventToSessionView(
       runSummary = '';
       contextManagementPending = false;
       toolCallStartedAt = {};
+      toolCallFinished = {};
       streamingMessageId = null;
       streamingContent = '';
       streamingReasoningContent = '';
@@ -791,6 +820,7 @@ function applyEventToSessionView(
       runSummary = errorMessage ? `执行失败：${errorMessage}` : '执行失败';
       contextManagementPending = false;
       toolCallStartedAt = {};
+      toolCallFinished = {};
       streamingMessageId = null;
       streamingContent = '';
       streamingReasoningContent = '';
@@ -809,6 +839,7 @@ function applyEventToSessionView(
     lastUsage,
     lastDurationMs,
     toolCallStartedAt,
+    toolCallFinished,
     streamingMessageId,
     streamingContent,
     streamingReasoningContent,
@@ -831,6 +862,8 @@ export interface AppState {
   lastDurationMs: number | null;
   /** 运行中工具调用的开始时刻（tool_call_id → Date.now()），用于运行行实时跳秒。 */
   toolCallStartedAt: Record<string, number>;
+  /** 已执行完成、结果尚待按序提交的工具调用（tool_call_id → 结论与耗时）。 */
+  toolCallFinished: Record<string, ToolCallFinished>;
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
   mcpServers: McpServer[] | null;
@@ -990,6 +1023,7 @@ export const useStore = create<AppState>((set, get) => ({
   runSummary: '',
   lastDurationMs: null,
   toolCallStartedAt: {},
+  toolCallFinished: {},
   lastUsage: null,
   tokenStats: null,
   mcpServers: null,
@@ -1228,6 +1262,7 @@ export const useStore = create<AppState>((set, get) => ({
           runSummary: cache.runSummary,
           lastDurationMs: cache.lastDurationMs,
           toolCallStartedAt: cache.toolCallStartedAt,
+          toolCallFinished: cache.toolCallFinished,
           lastUsage: cache.lastUsage,
           tokenStats: cache.tokenStats,
           sessionCwd: cache.cwd,
@@ -2055,6 +2090,7 @@ export const useStore = create<AppState>((set, get) => ({
         contextManagementPending: true,
         lastDurationMs: null,
         toolCallStartedAt: {},
+        toolCallFinished: {},
         streamingMessageId: null,
         streamingContent: '',
         streamingReasoningContent: '',
@@ -2065,6 +2101,7 @@ export const useStore = create<AppState>((set, get) => ({
       runSummary: summary,
       lastDurationMs: null,
       toolCallStartedAt: {},
+      toolCallFinished: {},
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
@@ -2162,6 +2199,7 @@ export const useStore = create<AppState>((set, get) => ({
         runSummary: currentCache.runSummary,
         lastDurationMs: currentCache.lastDurationMs,
         toolCallStartedAt: currentCache.toolCallStartedAt,
+        toolCallFinished: currentCache.toolCallFinished,
         lastUsage: currentCache.lastUsage,
         tokenStats: currentCache.tokenStats,
         streamingMessageId: currentCache.streamingMessageId,
