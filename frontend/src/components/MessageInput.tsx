@@ -1187,6 +1187,7 @@ export function MessageInput({
                               );
                             }
                             const i = flatIndex++;
+                            const mark = c.mark?.trim() || mentionMarkFor(c.kind, c.value);
                             return (
                               <button
                                 key={c.value}
@@ -1197,13 +1198,15 @@ export function MessageInput({
                                 onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
                                 onMouseEnter={() => setMentionIndex(i)}
                               >
-                                {/* 标记字符与气泡 chip 同源（插件提供，缺省按 kind 回退） */}
-                                <span
-                                  className={`mt-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
-                                  aria-hidden="true"
-                                >
-                                  {c.mark?.trim() || mentionMarkFor(c.kind, c.value)}
-                                </span>
+                                {/* 标记字符与气泡 chip 同源（插件提供）；未提供标记时不显示 */}
+                                {mark && (
+                                  <span
+                                    className={`mt-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
+                                    aria-hidden="true"
+                                  >
+                                    {mark}
+                                  </span>
+                                )}
                                 <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
                                   {/* 主体完整显示：不截断，放不下就换行——截断后
                                       用户无法确认选中的是哪一个 */}

@@ -505,9 +505,10 @@ impl PromptSectionProvider for TsPluginAdapter {
 /// {@link tiangong_types::mention::candidate_matches_query}，两层语义一致。
 pub(crate) fn mention_candidate_from_manifest(
     manifest: &PluginManifest,
+    descriptor_name: Option<&str>,
     query: &str,
 ) -> Option<tiangong_core::MentionCandidate> {
-    let (label, hint, mark) = mention_candidate_parts(manifest)?;
+    let (label, hint, mark) = mention_candidate_parts(manifest, descriptor_name)?;
     let candidate = tiangong_core::MentionCandidate {
         value: format!("@plugin:{}", manifest.id),
         label,
@@ -518,22 +519,36 @@ pub(crate) fn mention_candidate_from_manifest(
     tiangong_types::mention::candidate_matches_query(&candidate, query).then_some(candidate)
 }
 
-/// 从清单推导 @提及候选的展示字段：label 取首个 UI 贡献标题（缺省插件 id），
-/// hint 取 mention.hint（未声明 mention 则无候选），mark 取 mention.mark
-///（可选，缺省空串由前端按 kind 回退默认标记）。
-fn mention_candidate_parts(manifest: &PluginManifest) -> Option<(String, String, String)> {
+/// 从清单推导 @提及候选的展示字段：hint 取 mention.hint（未声明 mention 则无
+/// 候选），mark 取 mention.mark（可选，缺省空串由前端不显示标记）。
+///
+/// label 是插件名称，优先级：清单 `name` → 页面类贡献（`extension.tab` /
+/// `settings.plugin-page`）标题 → WASM descriptor 名称 → 插件 id。
+/// 不取任意首个贡献的标题：输入区按钮、消息操作等贡献的标题是动作名
+///（如 computer-use 的「恢复窗口」），不是插件名。
+fn mention_candidate_parts(
+    manifest: &PluginManifest,
+    descriptor_name: Option<&str>,
+) -> Option<(String, String, String)> {
     let mention = manifest.mention.as_ref()?;
-    let label = manifest
-        .ui
-        .as_ref()
-        .and_then(|ui| ui.contributions.first())
-        .map(|contribution| {
-            if contribution.title.is_empty() {
-                manifest.id.clone()
-            } else {
-                contribution.title.clone()
-            }
+    let non_empty = |value: &str| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    let page_title = || {
+        manifest.ui.as_ref().and_then(|ui| {
+            ui.contributions
+                .iter()
+                .filter(|c| matches!(c.slot.as_str(), "extension.tab" | "settings.plugin-page"))
+                .find_map(|c| non_empty(&c.title))
         })
+    };
+    let label = manifest
+        .name
+        .as_deref()
+        .and_then(non_empty)
+        .or_else(page_title)
+        .or_else(|| descriptor_name.and_then(non_empty))
         .unwrap_or_else(|| manifest.id.clone());
     let mark = mention.mark.clone().unwrap_or_default();
     Some((label, mention.hint.clone(), mark))
@@ -580,37 +595,64 @@ mod tests {
         let manifest = manifest_with_mention(Some("问候能力"));
         // 空查询不过滤：刚唤出面板时枚举型候选照常返回。
         let candidate =
-            mention_candidate_from_manifest(&manifest, "").expect("声明 mention 应有候选");
+            mention_candidate_from_manifest(&manifest, None, "").expect("声明 mention 应有候选");
         assert_eq!(candidate.value, "@plugin:demo");
         assert_eq!(candidate.label, "演示插件");
         assert_eq!(candidate.kind, "plugin");
         assert_eq!(candidate.hint, "问候能力");
         // 未声明 mention：无候选
-        assert!(mention_candidate_from_manifest(&manifest_with_mention(None), "").is_none());
+        assert!(mention_candidate_from_manifest(&manifest_with_mention(None), None, "").is_none());
     }
     #[test]
     fn mention候选_无ui标题时用插件id() {
         let mut manifest = manifest_with_mention(Some("能力"));
         manifest.ui = None;
         let candidate =
-            mention_candidate_from_manifest(&manifest, "").expect("声明 mention 应有候选");
+            mention_candidate_from_manifest(&manifest, None, "").expect("声明 mention 应有候选");
         assert_eq!(candidate.label, "demo");
+    }
+    #[test]
+    fn mention候选_label取插件名而非动作贡献标题() {
+        let mut manifest = manifest_with_mention(Some("能力"));
+        // 只有动作类贡献（如 computer-use 的「恢复窗口」）：不当插件名
+        manifest.ui = Some(
+            serde_json::from_str(
+                r#"{"contributions":[{"slot":"session.input-action","id":"restore","title":"恢复窗口","entry":"r.html"}]}"#,
+            )
+            .unwrap(),
+        );
+        let label = |m: &PluginManifest, d: Option<&str>| {
+            mention_candidate_from_manifest(m, d, "").unwrap().label
+        };
+        assert_eq!(label(&manifest, Some("Computer Use")), "Computer Use");
+        assert_eq!(label(&manifest, None), "demo");
+        // 页面类贡献标题优先于 descriptor（设置页不在首位也能取到）
+        manifest.ui = Some(
+            serde_json::from_str(
+                r#"{"contributions":[{"slot":"session.input-action","id":"a","title":"语音输入","entry":"a.html"},{"slot":"settings.plugin-page","id":"s","title":"火山引擎","entry":"s.html"}]}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(label(&manifest, Some("Volcengine")), "火山引擎");
+        // 清单 name 最优先
+        manifest.name = Some("显式名称".into());
+        assert_eq!(label(&manifest, Some("Volcengine")), "显式名称");
     }
     #[test]
     fn mention候选_按查询词过滤() {
         let manifest = manifest_with_mention(Some("问候能力"));
         // 命中 label（UI 标题）
-        assert!(mention_candidate_from_manifest(&manifest, "演示").is_some());
+        assert!(mention_candidate_from_manifest(&manifest, None, "演示").is_some());
         // 命中 hint
-        assert!(mention_candidate_from_manifest(&manifest, "问候").is_some());
+        assert!(mention_candidate_from_manifest(&manifest, None, "问候").is_some());
         // 命中 value 剥离 kind 前缀后的插件 id
-        assert!(mention_candidate_from_manifest(&manifest, "demo").is_some());
+        assert!(mention_candidate_from_manifest(&manifest, None, "demo").is_some());
         // kind 前缀本身不参与匹配：输入 plugin 不应命中 @plugin:demo
-        assert!(mention_candidate_from_manifest(&manifest, "plugin").is_none());
+        assert!(mention_candidate_from_manifest(&manifest, None, "plugin").is_none());
         // 词间 AND：两个词分属 label 与 hint 时仍应命中
-        assert!(mention_candidate_from_manifest(&manifest, "演示 问候").is_some());
+        assert!(mention_candidate_from_manifest(&manifest, None, "演示 问候").is_some());
         // 缺一个词即不命中
-        assert!(mention_candidate_from_manifest(&manifest, "演示 不存在").is_none());
+        assert!(mention_candidate_from_manifest(&manifest, None, "演示 不存在").is_none());
     }
     #[test]
     fn 无界面sidecar插件_工具走直连_有界面走页面() {

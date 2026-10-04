@@ -62,6 +62,7 @@ const TOKEN_PREFIX: Record<MentionKind, string> = {
  */
 export function MentionChip({ kind, label, token }: MentionChipProps) {
   const rawToken = token ?? `${TOKEN_PREFIX[kind]}${label}`;
+  const mark = mentionMarkFor(kind, token ?? rawToken);
   return (
     <span
       className={mentionChipClass(kind)}
@@ -70,9 +71,11 @@ export function MentionChip({ kind, label, token }: MentionChipProps) {
       data-mention-token={token}
       data-mention-kind={kind}
     >
-      <span className={mentionMarkClass(kind)} aria-hidden="true">
-        {mentionMarkFor(kind, token ?? rawToken)}
-      </span>
+      {mark && (
+        <span className={mentionMarkClass(kind)} aria-hidden="true">
+          {mark}
+        </span>
+      )}
       <span className={MENTION_LABEL_CLASS}>{label}</span>
     </span>
   );
