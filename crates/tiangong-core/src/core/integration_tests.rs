@@ -735,7 +735,10 @@ async fn high_pressure_triggers_pre_request_compression() {
         compression.defined_tools(),
         chat_request_at(&server, 0).await.defined_tools()
     );
-    assert!(!compression.allows_tool_calls());
+    assert!(
+        compression.allows_tool_calls(),
+        "压缩沿用主循环 tool_choice，避免前缀缓存失效"
+    );
     assert!(
         !compression.is_stream(),
         "压缩沿生产接口使用非流式 completion"

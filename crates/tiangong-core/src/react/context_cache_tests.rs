@@ -2,7 +2,7 @@ use super::*;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn compression_request_preserves_full_prefix_and_tools_with_lower_effort() {
+async fn compression_request_keeps_every_cache_relevant_param_of_main_loop() {
     use crate::context::compressor::ContextCompressor;
     for protocol in [
         ProviderProtocol::OpenAi,
@@ -76,26 +76,31 @@ async fn compression_request_preserves_full_prefix_and_tools_with_lower_effort()
         let before: Value = serde_json::from_slice(&requests[0].body).unwrap();
         let after: Value = serde_json::from_slice(&requests[1].body).unwrap();
         assert_eq!(before["model"], after["model"]);
-        assert_eq!(before["tools"], after["tools"]);
-        assert_eq!(after["tool_choice"], "none");
-        let field = if protocol == ProviderProtocol::OpenAi {
-            assert_eq!(before["instructions"], after["instructions"]);
-            assert_eq!(before["reasoning"]["effort"], "high");
-            assert_eq!(after["reasoning"]["effort"], "low");
-            assert_eq!(
-                before["reasoning"]["summary"],
-                after["reasoning"]["summary"]
-            );
-            assert_eq!(before["prompt_cache_key"], after["prompt_cache_key"]);
-            assert_eq!(after["max_output_tokens"], 4096);
-            "input"
+        // 除输出上限与末尾压缩指令外，所有请求参数必须与主循环完全一致：
+        // tool_choice / thinking / effort 等参与 provider 缓存键与模板渲染，
+        // 任何差异都会让整段历史前缀缓存失效。
+        let (input_field, budget_field) = if protocol == ProviderProtocol::OpenAi {
+            ("input", "max_output_tokens")
         } else {
-            assert_eq!(before["thinking"], after["thinking"]);
-            assert_eq!(before["reasoning_effort"], "high");
-            assert_eq!(after["reasoning_effort"], "low");
-            assert_eq!(after["max_tokens"], 4096);
-            "messages"
+            ("messages", "max_tokens")
         };
+        assert_eq!(after[budget_field], 4096);
+        let strip = |value: &Value| {
+            let mut object = value.as_object().unwrap().clone();
+            object.remove(input_field);
+            object.remove(budget_field);
+            // 传输层字段（流式与否）不参与 prompt 前缀缓存。
+            object.remove("stream");
+            object.remove("stream_options");
+            object
+        };
+        assert_eq!(strip(&before), strip(&after));
+        if protocol == ProviderProtocol::OpenAi {
+            assert_eq!(after["reasoning"]["effort"], "high");
+        } else {
+            assert_eq!(after["reasoning_effort"], "high");
+        }
+        let field = input_field;
         let old = before[field].as_array().unwrap();
         let new = after[field].as_array().unwrap();
         assert_eq!(new.len(), old.len() + 1);

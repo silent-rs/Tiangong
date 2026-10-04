@@ -1,5 +1,5 @@
 use crate::session::{Message, MessagePhase, MessageRole, Session};
-use tiangong_llm::tool::{ToolChoice, ToolSpec};
+use tiangong_llm::tool::ToolSpec;
 use tiangong_llm::{ModelRequest, ReasoningEffort, SingleProviderClient, StopReason};
 use tiangong_types::TokenUsage;
 
@@ -110,9 +110,13 @@ impl ContextCompressor {
             max_output_tokens,
             self.reasoning_effort,
         );
+        // 工具声明与 tool_choice 保持与主循环一致（未指定 → 有工具即 auto）：
+        // 多数 provider 的缓存键/对话模板包含 tool_choice，改为 none 会使
+        // 整段前缀缓存失效。是否调用工具由压缩指令约束，返回工具调用时
+        // 下方拒绝提交摘要。
         let response = self
             .client
-            .complete_async(&request.with_tools(self.tools.clone(), Some(ToolChoice::None)))
+            .complete_async(&request.with_tools(self.tools, None))
             .await
             .map_err(|error| CompressionError::new(error.to_string()))?;
         let usage = response.usage.clone();
@@ -157,12 +161,11 @@ impl ContextCompressor {
             session_id: Some(session.id.clone()),
             user_input: String::new(),
             context,
-            // 摘要只需整理已有事实，降低强度但不切换思考开关。
-            reasoning_effort: if reasoning_effort.is_thinking_enabled() {
-                ReasoningEffort::Low
-            } else {
-                ReasoningEffort::None
-            },
+            // 思考强度沿用主循环：thinking/effort 参与 provider 的缓存键与
+            // 对话模板渲染，改变档位会使历史前缀缓存整体失效。思考长度改由
+            // 压缩指令约束。
+            reasoning_effort,
+            // 仅为输出上限（不参与前缀缓存），按剩余上下文空间限制。
             max_output_tokens: Some(max_output_tokens),
             ..Default::default()
         }
@@ -253,7 +256,7 @@ mod tests {
         let request =
             ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::High);
         assert_eq!(request.session_id.as_deref(), Some(session.id.as_str()));
-        assert_eq!(request.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(request.reasoning_effort, ReasoningEffort::High);
 
         assert_eq!(request.max_output_tokens, Some(10_000));
         assert_eq!(request.context.len(), 4);
@@ -266,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_lowers_effort_without_rewriting_thinking_history() {
+    fn summary_keeps_effort_without_rewriting_thinking_history() {
         let mut session = Session::new("thinking-history");
         session.system_prompt_message = Some(Message::new(MessageRole::System, "固定系统提示"));
         let mut reply = assistant("已完成核对");
@@ -276,15 +279,16 @@ mod tests {
         let original = serde_json::to_value(&session).unwrap();
         let history = serde_json::to_value(session.context()).unwrap();
 
-        for (effort, expected) in [
-            (ReasoningEffort::None, ReasoningEffort::None),
-            (ReasoningEffort::Low, ReasoningEffort::Low),
-            (ReasoningEffort::Medium, ReasoningEffort::Low),
-            (ReasoningEffort::High, ReasoningEffort::Low),
-            (ReasoningEffort::Max, ReasoningEffort::Low),
+        for effort in [
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
         ] {
             let request = ContextCompressor::summary_request(&session, 2, 10_000, effort);
-            assert_eq!(request.reasoning_effort, expected);
+            // 与主循环档位一致，避免 thinking/effort 变化导致缓存失效。
+            assert_eq!(request.reasoning_effort, effort);
             let (instruction, prefix) = request.context.split_last().unwrap();
             assert_eq!(serde_json::to_value(prefix).unwrap(), history);
             assert_eq!(instruction.role, MessageRole::User);
