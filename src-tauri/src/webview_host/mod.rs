@@ -17,6 +17,7 @@ use crate::webview_host::types::BrowserCommand;
 
 pub mod bridge;
 pub mod capability;
+pub(crate) mod fetch_scheduler;
 pub mod handler;
 pub mod manager;
 pub mod page_fetcher;

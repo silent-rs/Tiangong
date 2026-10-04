@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::webview_host::fetch_scheduler::BrowserCommandScheduler;
 use crate::webview_host::manager::{BrowserManager, POLL_EVAL_TIMEOUT};
 
 /// Agent 命令严格按 session_id 解析：空 session_id 返回 None（调用方应跳过/报错）。
@@ -127,88 +128,138 @@ fn merge_diff_and_events(page_diff: &Option<String>, events: &[BrowserEvent]) ->
     }
 }
 
+/// 单个 FetchPage 的执行体（在独立任务中运行，持会话共享锁）。
+///
+/// 同主域名的抓取复用同一工作标签，按到达顺序串行；导航起步（切活跃
+/// 标签 + 发起导航）按会话互斥；页面加载等待与正文抓取不持起步锁，不同
+/// 主域名之间并行。调用方在排队期间放弃时返回 None（不再导航）。
+#[allow(clippy::too_many_arguments)]
+async fn fetch_page(
+    scheduler: &BrowserCommandScheduler,
+    app: &AppHandle<Wry>,
+    manager: BrowserManager,
+    session_id: &str,
+    url: &str,
+    max_chars: usize,
+    show_panel: bool,
+    response_tx: &tokio::sync::oneshot::Sender<BrowserResponse>,
+) -> Option<BrowserResponse> {
+    let failure = |error: String| BrowserResponse {
+        ok: false,
+        title: String::new(),
+        content: String::new(),
+        final_url: url.to_string(),
+        error: Some(error),
+    };
+    // 无法解析主域名的地址由 navigate_for_agent 报错，这里按整串地址加锁。
+    let domain = BrowserManager::agent_domain_key(url).unwrap_or_else(|| url.to_string());
+    let _domain = scheduler.domain(session_id, &domain).await;
+    if response_tx.is_closed() {
+        debug!(%session_id, %url, "FetchPage 调用方排队期间已放弃，跳过");
+        return None;
+    }
+
+    // navigate_for_agent 会获取 std 锁并可能经 add_child 同步等待主线程，
+    // 放到阻塞线程执行，不占用 tokio 工作线程。
+    let navigated = {
+        let _start = scheduler.navigation_start(session_id).await;
+        let navigate_app = app.clone();
+        let navigate_manager = manager.clone();
+        let navigate_url = url.to_string();
+        tokio::task::spawn_blocking(move || {
+            navigate_manager.navigate_for_agent(&navigate_app, &navigate_url)
+        })
+        .await
+        .unwrap_or_else(|_| Err("浏览器导航任务执行失败".to_string()))
+    };
+    let ticket = match navigated {
+        Ok(ticket) => ticket,
+        Err(error) => return Some(failure(error)),
+    };
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({ "session_id": session_id }),
+    );
+
+    // 实例归属：页面编号由宿主生成（scru128），先请求前端以同一
+    // 编号建立标签（标签即页面唯一所有者，关闭标签即关闭页面），
+    // 再有上限地等待挂载后使用；超时照常抓取，标签在切回会话时
+    // 按 listInstances 恢复，不会出现无主页面。
+    let owner = crate::plugin_instances::parse_webview_scope(session_id);
+    let tab_id = ticket.tab_id.clone();
+    let fetch_url = url.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some((plugin_id, owner_session)) = owner {
+            crate::plugin_instances::request_open(&plugin_id, &owner_session, &tab_id, show_panel);
+            crate::plugin_instances::wait_mounted(|| manager.is_tab_mounted(&tab_id));
+        }
+        manager.fetch_page_content(&fetch_url, max_chars, &ticket)
+    })
+    .await;
+    Some(result.unwrap_or_else(|_| failure("浏览器任务执行失败".to_string())))
+}
+
 /// 浏览器命令处理循环
 pub async fn browser_command_handler(
     mut rx: mpsc::Receiver<BrowserCommand>,
     registry: Arc<crate::webview_host::session_registry::BrowserSessionRegistry>,
     app: AppHandle<Wry>,
 ) {
+    let scheduler = Arc::new(BrowserCommandScheduler::new());
     while let Some(cmd) = rx.recv().await {
-        match cmd {
-            BrowserCommand::FetchPage {
-                session_id,
-                url,
-                max_chars,
-                show_panel,
-                response_tx,
-            } => {
-                let url_for_error = url.clone();
-                // 调用方已超时放弃：不再导航共用标签（否则会顶掉后续请求的导航）。
-                if response_tx.is_closed() {
-                    debug!(%session_id, %url, "FetchPage 调用方已放弃，跳过");
-                    continue;
-                }
-                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
-                    continue;
-                };
-                let manager = BrowserManager::from_state(agent_state);
-
-                // navigate_for_agent 会获取 std 锁并可能经 add_child 同步等待主线程，
-                // 放到阻塞线程执行，不占用 tokio 工作线程。
-                let navigate_app = app.clone();
-                let navigate_manager = manager.clone();
-                let navigate_url = url.clone();
-                let navigated = tokio::task::spawn_blocking(move || {
-                    navigate_manager.navigate_for_agent(&navigate_app, &navigate_url)
-                })
-                .await
-                .unwrap_or_else(|_| Err("浏览器导航任务执行失败".to_string()));
-                let ticket = match navigated {
-                    Ok(ticket) => ticket,
-                    Err(error) => {
-                        let _ = response_tx.send(BrowserResponse {
-                            ok: false,
-                            title: String::new(),
-                            content: String::new(),
-                            final_url: url_for_error,
-                            error: Some(error),
-                        });
-                        continue;
-                    }
-                };
-                let _ = app.emit(
-                    "browser:tab_updated",
-                    serde_json::json!({ "session_id": session_id }),
-                );
-
-                // 实例归属：页面编号由宿主生成（scru128），先请求前端以同一
-                // 编号建立标签（标签即页面唯一所有者，关闭标签即关闭页面），
-                // 再有上限地等待挂载后使用；超时照常抓取，标签在切回会话时
-                // 按 listInstances 恢复，不会出现无主页面。
-                let owner = crate::plugin_instances::parse_webview_scope(&session_id);
-                let tab_id = ticket.tab_id.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    if let Some((plugin_id, owner_session)) = owner {
-                        crate::plugin_instances::request_open(
-                            &plugin_id,
-                            &owner_session,
-                            &tab_id,
-                            show_panel,
-                        );
-                        crate::plugin_instances::wait_mounted(|| manager.is_tab_mounted(&tab_id));
-                    }
-                    manager.fetch_page_content(&url, max_chars, &ticket)
-                })
-                .await;
-                let response = result.unwrap_or(BrowserResponse {
-                    ok: false,
-                    title: String::new(),
-                    content: String::new(),
-                    final_url: url_for_error,
-                    error: Some("浏览器任务执行失败".to_string()),
-                });
-                let _ = response_tx.send(response);
+        // FetchPage 在独立任务中并行执行（调度规则见 fetch_scheduler）；
+        // 共享锁在循环内按到达顺序获取，保证与前后独占命令的相对顺序。
+        if let BrowserCommand::FetchPage {
+            session_id,
+            url,
+            max_chars,
+            show_panel,
+            response_tx,
+        } = cmd
+        {
+            // 调用方已超时放弃：不再导航共用标签（否则会顶掉后续请求的导航）。
+            if response_tx.is_closed() {
+                debug!(%session_id, %url, "FetchPage 调用方已放弃，跳过");
+                continue;
             }
+            let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                continue;
+            };
+            let shared = scheduler.shared(&session_id).await;
+            let scheduler = scheduler.clone();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _shared = shared;
+                let response = fetch_page(
+                    &scheduler,
+                    &app,
+                    BrowserManager::from_state(agent_state),
+                    &session_id,
+                    &url,
+                    max_chars,
+                    show_panel,
+                    &response_tx,
+                )
+                .await;
+                if let Some(response) = response {
+                    let _ = response_tx.send(response);
+                }
+            });
+            continue;
+        }
+        // 其余命令作用于活跃标签：等在途抓取结束后独占执行。
+        // 页面观察是 watcher 的周期性轮询：抓取进行中活跃标签频繁切换，
+        // 此时直接跳过本轮（丢弃响应端，observe 返回 None），不阻塞循环。
+        let _exclusive = if matches!(cmd, BrowserCommand::ObservePage { .. }) {
+            match scheduler.try_exclusive(cmd.session_id()) {
+                Some(guard) => guard,
+                None => continue,
+            }
+        } else {
+            scheduler.exclusive(cmd.session_id()).await
+        };
+        match cmd {
+            BrowserCommand::FetchPage { .. } => unreachable!("FetchPage 已在上方分流"),
             BrowserCommand::OpenUrl { session_id, url } => {
                 let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
                     continue;

@@ -862,6 +862,12 @@ impl BrowserManager {
         self.navigate(app, &url)
     }
 
+    /// Agent 工作标签的复用键（主域名）；与 [`Self::navigate_for_agent`]
+    /// 的标签选择一致，供命令调度按域名串行同标签的抓取。
+    pub(crate) fn agent_domain_key(url: &str) -> Option<String> {
+        agent_domain_for_url(&normalize_navigation_url(url)).ok()
+    }
+
     /// Agent 按主域名复用自己的工作标签，不占用用户标签。
     pub(crate) fn navigate_for_agent(
         &self,

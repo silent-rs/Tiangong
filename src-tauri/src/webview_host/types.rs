@@ -262,6 +262,31 @@ pub enum BrowserCommand {
     },
 }
 
+impl BrowserCommand {
+    /// 命令所属的浏览器作用域（会话）编号，供命令调度按会话加锁。
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::FetchPage { session_id, .. }
+            | Self::OpenUrl { session_id, .. }
+            | Self::ObservePage { session_id, .. }
+            | Self::FormExtract { session_id, .. }
+            | Self::FormFill { session_id, .. }
+            | Self::ClickElement { session_id, .. }
+            | Self::LoadHtml { session_id, .. }
+            | Self::TabList { session_id, .. }
+            | Self::TabNew { session_id, .. }
+            | Self::TabSwitch { session_id, .. }
+            | Self::TabClose { session_id, .. }
+            | Self::AnnotationExtract { session_id, .. }
+            | Self::LocateElement { session_id, .. }
+            | Self::QueryDom { session_id, .. }
+            | Self::PageText { session_id, .. }
+            | Self::TabHistory { session_id, .. }
+            | Self::GlobalHistory { session_id, .. } => session_id,
+        }
+    }
+}
+
 /// 浏览器响应
 #[derive(Debug, Clone)]
 pub struct BrowserResponse {
