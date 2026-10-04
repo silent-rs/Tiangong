@@ -185,6 +185,14 @@ pub(super) async fn execute_tool_batch(
         let running_record = running
             .remove(&task_id)
             .expect("完成的工具任务必须存在运行记录");
+        // 任务完成即通知界面（结果仍按声明顺序提交，见下方提交边界）：
+        // 先完成的后序工具不再把等待前序工具的时间计入运行时长。
+        let _ = stream_tx.send(StreamEvent::ToolFinished {
+            tool_call_id: running_record.tool.call.id.clone(),
+            name: running_record.tool.call.name.clone(),
+            ok: task_output.result.ok,
+            duration_ms: task_output.duration_ms,
+        });
         completed_buffer.push((running_record.tool.index, running_record, task_output));
         // 提交边界：index 小于仍在途（运行或待启动）的最小 index 的结果
         // 按 model 声明顺序落库（ALR-301）。

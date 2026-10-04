@@ -62,6 +62,7 @@ function AgentTurnView({
   const toolGroupExpansion = useExpansionState();
   const agents = useStore((state) => state.agents);
   const toolCallStartedAt = useStore((state) => state.toolCallStartedAt);
+  const toolCallFinished = useStore((state) => state.toolCallFinished);
   const resolvedTheme = useResolvedTheme();
 
   // 已完成轮次默认折叠「过程」（思考/解释/工具/ReAct 文本等），仅保留总结回复可见，
@@ -316,7 +317,11 @@ function AgentTurnView({
   const runningToolCalls = isActive
     ? [...toolCallArgs.values()]
         .filter((call) => !settledToolCallIds.has(call.id))
-        .map((call) => ({ ...call, startedAt: toolCallStartedAt[call.id] }))
+        .map((call) => ({
+          ...call,
+          startedAt: toolCallStartedAt[call.id],
+          finished: toolCallFinished[call.id],
+        }))
     : [];
 
   const renderFragment = (frag: Fragment, i: number) => {

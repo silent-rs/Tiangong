@@ -2290,6 +2290,85 @@ async fn returns_cancelled_when_tool_execution_is_cancelled() {
     assert_eq!(app_results, vec!["call_block_1", "call_block_2"]);
 }
 
+/// 先完成的后序工具立即发出 ToolFinished（界面据此停止计时），
+/// 完整结果仍按模型声明顺序以 ToolResult 提交。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_finished_is_emitted_on_completion_while_results_stay_ordered() {
+    let server = MockServer::builder().start().await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_slow", "slow_tool", "{}"),
+            tool_call_chunk("call_fast", "fast_tool", "{}"),
+            usage_chunk(9, 2),
+        ],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("完成。"), usage_chunk(11, 3)],
+    )
+    .await;
+
+    let slow_started = Arc::new(Notify::new());
+    let slow_release = Arc::new(Notify::new());
+    let slow: Arc<dyn ToolOverrideHandler> = Arc::new(PausedTool {
+        started: slow_started.clone(),
+        release: slow_release.clone(),
+    });
+    let fast: Arc<dyn ToolOverrideHandler> = Arc::new(EchoTool {
+        invocations: Arc::new(Mutex::new(Vec::new())),
+    });
+    let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    overrides.insert("slow_tool".to_string(), slow);
+    overrides.insert("fast_tool".to_string(), fast);
+    let mut harness = TestHarness::new(
+        &server,
+        vec![tool_spec("slow_tool"), tool_spec("fast_tool")],
+        overrides,
+    );
+
+    let release_task = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), slow_started.notified())
+            .await
+            .expect("慢工具未开始执行");
+        // 给快工具足够时间先完成，再放行慢工具。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        slow_release.notify_one();
+    });
+
+    let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+    release_task.await.unwrap();
+    assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Finished(String),
+        Result(String),
+    }
+    let seen = harness
+        .stream_rx
+        .try_iter()
+        .filter_map(|event| match event {
+            StreamEvent::ToolFinished { tool_call_id, .. } => Some(Seen::Finished(tool_call_id)),
+            StreamEvent::ToolResult {
+                tool_call_id: Some(id),
+                ..
+            } => Some(Seen::Result(id)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seen,
+        vec![
+            Seen::Finished("call_fast".to_string()),
+            Seen::Finished("call_slow".to_string()),
+            Seen::Result("call_slow".to_string()),
+            Seen::Result("call_fast".to_string()),
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn continues_after_tool_failure_with_recovery_context() {
     let server = MockServer::builder().start().await;
