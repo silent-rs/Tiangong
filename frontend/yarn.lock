@@ -1157,7 +1157,7 @@
   resolved "https://registry.npmmirror.com/@tauri-apps/api/-/api-2.11.0.tgz#00fb69996010178a5153798d4a84f6fe3a1e1182"
   integrity sha512-7CinYODhky9lmO23xHnUFv0Xt43fbtWMyxZcLcRBlFkcgXKuEirBvHpmtJ89YMhyeGcq20Wuc47Fa4XjyniywA==
 
-"@tauri-apps/api@^2.11.0", "@tauri-apps/api@^2.12.0":
+"@tauri-apps/api@^2.10.1", "@tauri-apps/api@^2.11.0", "@tauri-apps/api@^2.8.0":
   version "2.12.1"
   resolved "https://registry.npmmirror.com/@tauri-apps/api/-/api-2.12.1.tgz#51dbfb830f6559dd13e808c0752ae022928d2853"
   integrity sha512-DeyFHa3wynpyoqTDikDEDGTJIq4LQ5USfolQGRmGIWT6JMADyxZBTDa5cAdT3tDg73rUXufPaCwN7aXBos4OnQ==
@@ -1176,33 +1176,33 @@
   dependencies:
     "@tauri-apps/api" "^2.11.0"
 
-"@tauri-apps/plugin-notification@^2.0.0":
-  version "2.5.1"
-  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-notification/-/plugin-notification-2.5.1.tgz#cf2a6043b9cd043f63bcb89132a9b23df2963eaa"
-  integrity sha512-i0nD48YsLov18siENevC3X7SmJpQE1cImq+JUsjrUPdu73J8cTIOyNIS8H0qxftFAc1k2w6s1E74DoFE02Jirw==
+"@tauri-apps/plugin-notification@2.3.3":
+  version "2.3.3"
+  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-notification/-/plugin-notification-2.3.3.tgz#01581e3abd3bd18200121b213d3e6ebff2967fe2"
+  integrity sha512-Zw+ZH18RJb41G4NrfHgIuofJiymusqN+q8fGUIIV7vyCH+5sSn5coqRv/MWB9qETsUs97vmU045q7OyseCV3Qg==
   dependencies:
-    "@tauri-apps/api" "^2.12.0"
+    "@tauri-apps/api" "^2.8.0"
 
-"@tauri-apps/plugin-process@^2.3.1":
-  version "2.4.0"
-  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-process/-/plugin-process-2.4.0.tgz#71ce05886bc7b16b0cae4e03309b0d2200f50517"
-  integrity sha512-GddrmsSLAYrLa/yTXlXK/YRDzUgYeeOnUXTbiyvJWkmI424RmDPD3FVLeqcon7rv6O6ZfhBilcrHWnSo7o6hIQ==
+"@tauri-apps/plugin-process@2.3.1":
+  version "2.3.1"
+  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-process/-/plugin-process-2.3.1.tgz#fff77aa7550c9c5347689c859d581f88287bf7ae"
+  integrity sha512-nCa4fGVaDL/B9ai03VyPOjfAHRHSBz5v6F/ObsB73r/dA3MHHhZtldaDMIc0V/pnUw9ehzr2iEG+XkSEyC0JJA==
   dependencies:
-    "@tauri-apps/api" "^2.12.0"
+    "@tauri-apps/api" "^2.8.0"
 
-"@tauri-apps/plugin-shell@^2.0.0":
-  version "2.4.0"
-  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-shell/-/plugin-shell-2.4.0.tgz#ac8a9c5890cb2afe44bc4218b8f76d0be16e6f56"
-  integrity sha512-kto+mIv8reX1iryIDdjfsdv3l3BtMN0tvQ6dhs3uMO1MgjvdHsD9zql4cBE6W44qnRw/GMtsiThWsgcQASd+ig==
+"@tauri-apps/plugin-shell@2.3.5":
+  version "2.3.5"
+  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-shell/-/plugin-shell-2.3.5.tgz#ec7b5c2aedaae9e4641cd3ccf1106e443e193919"
+  integrity sha512-jewtULhiQ7lI7+owCKAjc8tYLJr92U16bPOeAa472LHJdgaibLP83NcfAF2e+wkEcA53FxKQAZ7byDzs2eeizg==
   dependencies:
-    "@tauri-apps/api" "^2.12.0"
+    "@tauri-apps/api" "^2.10.1"
 
-"@tauri-apps/plugin-updater@^2.10.1":
-  version "2.13.1"
-  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-updater/-/plugin-updater-2.13.1.tgz#2ad227ba05293fe34c5c59c0ff8a1cd690c8e9a8"
-  integrity sha512-+STDzJ0sdQLImjc63zkv6Nncimqeo6jyCWoTQtbSwgGLNj1qbP9I6LC4p5R5ocBk3gNKAZs6i/AJz0jxysytiw==
+"@tauri-apps/plugin-updater@2.10.1":
+  version "2.10.1"
+  resolved "https://registry.npmmirror.com/@tauri-apps/plugin-updater/-/plugin-updater-2.10.1.tgz#ea0efd766890394b6c719b9fc21de7da0029c69c"
+  integrity sha512-NFYMg+tWOZPJdzE/PpFj2qfqwAWwNS3kXrb1tm1gnBJ9mYzZ4WDRrwy8udzWoAnfGCHLuePNLY1WVCNHnh3eRA==
   dependencies:
-    "@tauri-apps/api" "^2.12.0"
+    "@tauri-apps/api" "^2.10.1"
 
 "@types/chai@^5.2.2":
   version "5.2.3"
