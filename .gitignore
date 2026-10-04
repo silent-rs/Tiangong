@@ -32,3 +32,5 @@ requirements.md
 
 # README 演示视频需要入库
 !docs/readme/video/*.mp4
+# 官网独立仓库（silent-rs/tiangong-website），仅本机保留
+/website/
