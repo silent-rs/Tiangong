@@ -20,6 +20,7 @@ mod crypto;
 mod ilink;
 mod mcp;
 mod provision;
+mod reply_quota;
 mod schema;
 mod target_store;
 #[cfg(test)]
@@ -161,6 +162,65 @@ impl ApiMessageContent {
             | Self::Video { url, .. } => Some(url),
             Self::Text { .. } => None,
         }
+    }
+
+    /// 在消息正文前附加来源说明；纯图片/视频附加到说明文字。
+    fn with_source(self, source: &str) -> Self {
+        let prefix = |text: Option<String>| match text.filter(|text| !text.trim().is_empty()) {
+            Some(text) => format!("{source}\n{text}"),
+            None => source.to_string(),
+        };
+        match self {
+            Self::Text { text } => Self::Text {
+                text: prefix(Some(text)),
+            },
+            Self::Image { url, caption } => Self::Image {
+                url,
+                caption: Some(prefix(caption)),
+            },
+            Self::Video { url, caption } => Self::Video {
+                url,
+                caption: Some(prefix(caption)),
+            },
+            other @ (Self::File { .. } | Self::Audio { .. }) => other,
+        }
+    }
+}
+
+/// 本条消息可用的推送通道：(MCP 服务名, 推送目标编号)。
+///
+/// 两者都可用时，回复全部交由 Agent 经 MCP 发送（issue #572）；任一缺失时
+/// Agent 无法推送，退回由 Bot 转发同步响应。
+fn push_channel(target_id: Option<String>) -> Option<(String, String)> {
+    let target_id = target_id?;
+    match mcp::server_name() {
+        Ok(server) => Some((server, target_id)),
+        Err(error) => {
+            tracing::warn!("获取微信 MCP 服务名失败，回退为同步回复: {error}");
+            None
+        }
+    }
+}
+
+/// 生成附加在入站消息前的来源说明（issue #572）。
+///
+/// 推送通道可用时要求 Agent 经本 Bot 的 MCP 工具发送全部回复（含最终答复），
+/// 直接输出的文本不会送达移动端。
+fn message_source(target_kind: &str, push: Option<&(String, String)>) -> String {
+    let channel = if target_kind == "group" {
+        "微信群聊"
+    } else {
+        "微信私聊"
+    };
+    match push {
+        Some((server, target_id)) => format!(
+            "[来源：{channel}。用户只能收到你经 MCP 服务 {server} 发送的消息，直接输出的文本不会送达：\
+             请用 send_text_message（target_id={target_id}，is_final=true）发送最终答复，图片/文件用 \
+             send_image_message / send_file_message；任务耗时较长时可先用 is_final=false 发送简短进展。\
+             本条消息的回复次数有限，bot 会合并过频的进展并为最终答复保留额度。\
+             每次发送使用不同的 idempotency_key]"
+        ),
+        None => format!("[来源：{channel}]"),
     }
 }
 
@@ -453,11 +513,14 @@ async fn handle_message(
     } else {
         "group"
     };
-    if let Err(error) =
-        target_store::upsert_discovered(channel_id, sender_id, target_kind, context_token)
-    {
-        tracing::warn!("更新微信推送目标失败: {error}");
-    }
+    let target_id =
+        match target_store::upsert_discovered(channel_id, sender_id, target_kind, context_token) {
+            Ok(target_id) => Some(target_id),
+            Err(error) => {
+                tracing::warn!("更新微信推送目标失败: {error}");
+                None
+            }
+        };
 
     let text = message.text_content();
     let mut images = Vec::new();
@@ -493,6 +556,12 @@ async fn handle_message(
     if parsed.content.is_empty() {
         return Ok(());
     }
+    let push = push_channel(target_id);
+    let source = message_source(target_kind, push.as_ref());
+    let parsed = ParsedMessage {
+        content: parsed.content.with_source(&source),
+        media: parsed.media,
+    };
     tracing::info!(
         "转发微信消息 sender={sender_id} content_type={} images={}",
         parsed.content.kind(),
@@ -508,6 +577,10 @@ async fn handle_message(
         parsed.media,
     )
     .await?;
+    if push.is_some() {
+        tracing::debug!("微信回复由 Agent 经 MCP 发送，忽略同步响应");
+        return Ok(());
+    }
     send_reply(state, sender_id, context_token, reply).await
 }
 
@@ -726,6 +799,42 @@ mod tests {
         assert!(started.elapsed() >= LONG_MOCK_DELAY);
         assert_eq!(reply.text, "mock-ok");
         server.await.expect("长时 Mock 服务异常退出");
+    }
+
+    #[test]
+    fn source_is_prefixed_to_text_and_media_caption() {
+        let source = "[来源：微信私聊]";
+        let text = ApiMessageContent::Text {
+            text: "总结群聊".into(),
+        }
+        .with_source(source);
+        assert!(
+            matches!(text, ApiMessageContent::Text { ref text } if text == "[来源：微信私聊]\n总结群聊")
+        );
+
+        let image = ApiMessageContent::Image {
+            url: "data:image/png;base64,AA==".into(),
+            caption: None,
+        }
+        .with_source(source);
+        assert!(matches!(
+            image,
+            ApiMessageContent::Image { ref caption, .. } if caption.as_deref() == Some(source)
+        ));
+    }
+
+    #[test]
+    fn source_requires_mcp_reply_only_when_push_is_available() {
+        assert_eq!(message_source("group", None), "[来源：微信群聊]");
+
+        let push = ("bot-weixin".to_string(), "target-1".to_string());
+        let with_push = message_source("direct", Some(&push));
+        assert!(with_push.starts_with("[来源：微信私聊"));
+        assert!(with_push.contains("bot-weixin"));
+        assert!(with_push.contains("send_text_message（target_id=target-1，is_final=true）"));
+        assert!(with_push.contains("直接输出的文本不会送达"));
+        assert!(with_push.contains("不同的 idempotency_key"));
+        assert!(push_channel(None).is_none());
     }
 
     #[test]

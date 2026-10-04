@@ -13,6 +13,7 @@ use rmcp::{ErrorData, ServiceExt, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::reply_quota::{MediaPlan, ReplyKind, TextPlan};
 use crate::target_store::{self, AuthorizedTarget};
 use crate::{BotState, RecentMessages, ilink, provision};
 
@@ -21,6 +22,8 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 30 * 1024 * 1024;
 const MAX_FILE_NAME_CHARS: usize = 255;
+const WINDOW_REPLACED: &str =
+    "推送目标不存在、已被删除，或用户已发送新消息开启新的回复窗口；请重新确认后再发送";
 
 #[derive(Serialize)]
 pub struct RegistrationConfig {
@@ -61,6 +64,9 @@ struct SendTextInput {
     text: String,
     /// 本次任务稳定编号；同一目标下重复使用不会再次发送。
     idempotency_key: String,
+    /// 是否为本轮最终答复。进展消息填 false：bot 会限流、合并，并始终为最终答复保留回复额度；
+    /// 最终答复填 true：超长时自动拆分为多条。
+    is_final: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -71,6 +77,8 @@ struct SendLocalMediaInput {
     file_path: String,
     /// 本次任务稳定编号；同一目标下重复使用不会再次发送。
     idempotency_key: String,
+    /// 是否属于本轮最终答复。false 时 bot 会为最终答复保留至少 1 次回复额度。
+    is_final: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -138,7 +146,9 @@ impl WeixinMcp {
         Ok(Json(PushTargetListOutput { targets }))
     }
 
-    #[tool(description = "使用最近一条入站消息的回复上下文，向已授权微信目标发送文本")]
+    #[tool(
+        description = "使用最近一条入站消息的回复上下文，向已授权微信目标发送文本。每条入站消息的回复次数有限：进展消息设 is_final=false，bot 会限流合并并保留最终答复额度；最终答复设 is_final=true，超长自动拆分"
+    )]
     async fn send_text_message(
         &self,
         Parameters(input): Parameters<SendTextInput>,
@@ -158,27 +168,58 @@ impl WeixinMcp {
             DeliveryResolution::Ready { path, delivery } => (path, delivery),
             DeliveryResolution::Return(result) => return Ok(Json(result)),
         };
-        let outcome = ilink::send_message(
-            &self.state.http,
-            &self.state.api_base_url,
-            &self.state.bot_token,
-            &target.to_user_id,
+        let kind = reply_kind(input.is_final);
+        let now = Local::now().naive_local();
+        let plan = target_store::update_quota(
+            &target.target_id,
             &target.context_token,
-            text,
+            |policy, quota| quota.plan_text(policy, kind, text, now),
         )
-        .await
-        .map(|()| None)
-        .map_err(|error| classify_platform_error("文本发送", error));
-        Ok(Json(finish_delivery(
-            &path,
-            delivery,
-            outcome,
-            "微信已受理文本消息（受最近消息回复窗口限制）",
-        )))
+        .map_err(internal_error)?
+        .unwrap_or_else(|| TextPlan::Rejected(WINDOW_REPLACED.to_string()));
+        let segments = match plan {
+            TextPlan::Send { segments, .. } => segments,
+            TextPlan::Queued { pending } => {
+                return Ok(Json(finish_queued(&path, delivery, pending)));
+            }
+            TextPlan::Rejected(reason) => {
+                return Ok(Json(finish_delivery(
+                    &path,
+                    delivery,
+                    Err(SendFailure::Rejected(reason)),
+                    "",
+                )));
+            }
+        };
+
+        let total = segments.len();
+        let mut outcome = Ok(None);
+        for (index, segment) in segments.iter().enumerate() {
+            let sent = ilink::send_message(
+                &self.state.http,
+                &self.state.api_base_url,
+                &self.state.bot_token,
+                &target.to_user_id,
+                &target.context_token,
+                segment,
+            )
+            .await;
+            if let Err(error) = sent {
+                let failure = classify_platform_error("文本发送", error);
+                outcome = Err(partial_failure(failure, index, total));
+                break;
+            }
+        }
+        let accepted = if total > 1 {
+            format!("微信已受理文本消息（已拆分为 {total} 条发送）")
+        } else {
+            "微信已受理文本消息（受最近消息回复窗口限制）".to_string()
+        };
+        Ok(Json(finish_delivery(&path, delivery, outcome, &accepted)))
     }
 
     #[tool(
-        description = "使用最近一条入站消息的回复上下文发送本地图片；文件必须位于当前工作目录或 ~/.tiangong/media，支持 PNG/JPEG/GIF/WebP，最大 10 MiB"
+        description = "使用最近一条入站消息的回复上下文发送本地图片；文件必须位于当前工作目录或 ~/.tiangong/media，支持 PNG/JPEG/GIF/WebP，最大 10 MiB。每张图片占用 1 次回复额度，属于最终答复时设 is_final=true"
     )]
     async fn send_image_message(
         &self,
@@ -188,7 +229,7 @@ impl WeixinMcp {
     }
 
     #[tool(
-        description = "使用最近一条入站消息的回复上下文发送本地文件；文件必须位于当前工作目录或 ~/.tiangong/media，最大 30 MiB"
+        description = "使用最近一条入站消息的回复上下文发送本地文件；文件必须位于当前工作目录或 ~/.tiangong/media，最大 30 MiB。每个文件占用 1 次回复额度，属于最终答复时设 is_final=true"
     )]
     async fn send_file_message(
         &self,
@@ -220,6 +261,23 @@ impl WeixinMcp {
             DeliveryResolution::Ready { path, delivery } => (path, delivery),
             DeliveryResolution::Return(result) => return Ok(Json(result)),
         };
+        let kind = reply_kind(input.is_final);
+        let now = Local::now().naive_local();
+        let plan = target_store::update_quota(
+            &target.target_id,
+            &target.context_token,
+            |policy, quota| quota.plan_media(policy, kind, now),
+        )
+        .map_err(internal_error)?
+        .unwrap_or_else(|| MediaPlan::Rejected(WINDOW_REPLACED.to_string()));
+        if let MediaPlan::Rejected(reason) = plan {
+            return Ok(Json(finish_delivery(
+                &path,
+                delivery,
+                Err(SendFailure::Rejected(reason)),
+                "",
+            )));
+        }
         let outcome = ilink::send_local_file(
             &self.state.http,
             &self.state.api_base_url,
@@ -268,16 +326,25 @@ pub async fn serve() -> Result<()> {
     Ok(())
 }
 
-pub fn registration_config() -> Result<RegistrationConfig> {
+/// 本 Bot 实例注册到天工的 MCP 服务名（`bot-{实例目录名}`）。
+///
+/// 入站消息的来源说明与 MCP 注册共用该名称，保证模型看到的服务名与实际
+/// 注册名一致；多实例时各自不同。
+pub fn server_name() -> Result<String> {
     let executable = std::env::current_exe().context("获取微信 bot 路径失败")?;
     let bot_id = executable
         .parent()
         .and_then(|directory| directory.file_name())
         .and_then(|name| name.to_str())
         .context("微信 bot 实例目录名称无效")?;
+    Ok(format!("bot-{bot_id}"))
+}
+
+pub fn registration_config() -> Result<RegistrationConfig> {
+    let executable = std::env::current_exe().context("获取微信 bot 路径失败")?;
     Ok(RegistrationConfig {
         schema_version: 1,
-        name: format!("bot-{bot_id}"),
+        name: server_name()?,
         transport: "stdio".to_string(),
         command: executable.to_string_lossy().to_string(),
         args: vec!["--mcp".to_string()],
@@ -316,6 +383,40 @@ fn resolve_delivery(
         DeliveryClaim::Existing(result) => Ok(DeliveryResolution::Return(result)),
         DeliveryClaim::New { path, delivery } => Ok(DeliveryResolution::Ready { path, delivery }),
     }
+}
+
+fn reply_kind(is_final: bool) -> ReplyKind {
+    if is_final {
+        ReplyKind::Final
+    } else {
+        ReplyKind::Progress
+    }
+}
+
+/// 拆分发送中途失败时，说明已送达的段数，避免 Agent 误判为全部未发送。
+fn partial_failure(failure: SendFailure, sent: usize, total: usize) -> SendFailure {
+    if total <= 1 {
+        return failure;
+    }
+    let note = format!("（共 {total} 段，已发送 {sent} 段）");
+    match failure {
+        SendFailure::Rejected(message) => SendFailure::Rejected(format!("{message}{note}")),
+        SendFailure::Unknown(message) => SendFailure::Unknown(format!("{message}{note}")),
+    }
+}
+
+/// 进展消息被限流暂存：记录为 queued，相同幂等键重复调用不会再次暂存。
+fn finish_queued(path: &Path, mut delivery: StoredDelivery, pending: usize) -> DeliveryResult {
+    delivery.result.status = "queued".to_string();
+    delivery.result.sent_at = now_string();
+    delivery.result.message = format!(
+        "进展发送过于频繁，已暂存（共 {pending} 条），将合并到下一条进展消息中；最终答复会覆盖未发出的暂存进展"
+    );
+    if let Err(error) = replace_delivery(path, &delivery) {
+        delivery.result.status = "unknown".to_string();
+        delivery.result.message = format!("暂存结果保存失败：{error}");
+    }
+    delivery.result
 }
 
 fn finish_delivery(

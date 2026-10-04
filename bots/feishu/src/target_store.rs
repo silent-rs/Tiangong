@@ -57,7 +57,9 @@ pub struct DeleteTargetRequest {
 }
 
 /// 收到用户消息后发现或刷新目标，并自动授权该会话用于主动推送。
-pub fn upsert_discovered(chat_id: &str, kind: &str) -> Result<()> {
+///
+/// 返回该会话对应的推送目标编号（与 `chat_id` 一一对应，跨消息稳定）。
+pub fn upsert_discovered(chat_id: &str, kind: &str) -> Result<String> {
     let chat_id = chat_id.trim();
     if chat_id.is_empty() {
         bail!("飞书会话 ID 不能为空");
@@ -73,16 +75,18 @@ pub fn upsert_discovered(chat_id: &str, kind: &str) -> Result<()> {
             target.kind = kind.to_string();
             target.enabled = true;
             target.last_seen_at = now;
+            Ok(target.target_id.clone())
         } else {
+            let target_id = scru128::new().to_string();
             store.targets.push(TargetRecord {
-                target_id: scru128::new().to_string(),
+                target_id: target_id.clone(),
                 chat_id: chat_id.to_string(),
                 kind: kind.to_string(),
                 enabled: true,
                 last_seen_at: now,
             });
+            Ok(target_id)
         }
-        Ok(())
     })
 }
 

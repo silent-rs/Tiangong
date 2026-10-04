@@ -9,6 +9,8 @@ use chrono::Local;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::reply_quota::{QuotaPolicy, QuotaState};
+
 const TARGETS_FILE: &str = "targets.json";
 const TARGETS_LOCK_FILE: &str = "targets.lock";
 
@@ -33,6 +35,22 @@ struct TargetRecord {
     context_token: String,
     enabled: bool,
     last_seen_at: String,
+    /// 当前回复窗口的额度状态；旧记录缺省为空窗口。
+    #[serde(default)]
+    quota: QuotaState,
+}
+
+/// 微信 iLink 未公开 `context_token` 的可回复次数与有效期，采用保守策略：
+/// 每条入站消息最多回复 5 次，窗口有效期不在本地判断（以平台拒绝为准），
+/// 进展消息至少间隔 30 秒，超出部分合并。
+pub fn quota_policy() -> QuotaPolicy {
+    QuotaPolicy {
+        max_replies: 5,
+        window_secs: None,
+        progress_interval_secs: 30,
+        segment_chars: 2000,
+        max_pending_progress: 5,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,12 +78,14 @@ pub struct DeleteTargetRequest {
 }
 
 /// 收到用户消息后保存最新回复上下文，并自动授权该会话用于主动推送。
+///
+/// 返回该会话对应的推送目标编号（与 `conversation_id` 一一对应，跨消息稳定）。
 pub fn upsert_discovered(
     conversation_id: &str,
     to_user_id: &str,
     kind: &str,
     context_token: &str,
-) -> Result<()> {
+) -> Result<String> {
     let conversation_id = conversation_id.trim();
     let to_user_id = to_user_id.trim();
     let context_token = context_token.trim();
@@ -74,7 +94,9 @@ pub fn upsert_discovered(
     }
     let kind = if kind == "group" { "group" } else { "direct" };
     with_exclusive_store(|store| {
-        let now = Local::now().naive_local().to_string();
+        let now = Local::now().naive_local();
+        let now_text = now.to_string();
+        let window_context = context_digest(context_token);
         if let Some(target) = store
             .targets
             .iter_mut()
@@ -84,19 +106,55 @@ pub fn upsert_discovered(
             target.kind = kind.to_string();
             target.context_token = context_token.to_string();
             target.enabled = true;
-            target.last_seen_at = now;
+            target.last_seen_at = now_text;
+            target.quota.observe_inbound(&window_context, now);
+            Ok(target.target_id.clone())
         } else {
+            let target_id = scru128::new().to_string();
+            let mut quota = QuotaState::default();
+            quota.observe_inbound(&window_context, now);
             store.targets.push(TargetRecord {
-                target_id: scru128::new().to_string(),
+                target_id: target_id.clone(),
                 conversation_id: conversation_id.to_string(),
                 to_user_id: to_user_id.to_string(),
                 kind: kind.to_string(),
                 context_token: context_token.to_string(),
                 enabled: true,
-                last_seen_at: now,
+                last_seen_at: now_text,
+                quota,
             });
+            Ok(target_id)
         }
-        Ok(())
+    })
+}
+
+/// 回复窗口以 `context_token` 区分；只保存摘要，避免令牌在状态中重复出现。
+fn context_digest(context_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(context_token.as_bytes()))
+}
+
+/// 在跨进程文件锁内读取并更新目标的回复窗口额度。
+///
+/// 闭包结束后状态立即落盘，保证并发的 MCP 子进程不会重复占用同一额度。
+/// 目标不存在、未授权或窗口已被新消息替换（`context_token` 变化）时返回 `None`。
+pub fn update_quota<T>(
+    target_id: &str,
+    expected_context_token: &str,
+    plan: impl FnOnce(&QuotaPolicy, &mut QuotaState) -> T,
+) -> Result<Option<T>> {
+    with_exclusive_store(|store| {
+        let Some(target) = store
+            .targets
+            .iter_mut()
+            .find(|target| target.target_id == target_id && target.enabled)
+        else {
+            return Ok(None);
+        };
+        if target.context_token != expected_context_token {
+            return Ok(None);
+        }
+        Ok(Some(plan(&quota_policy(), &mut target.quota)))
     })
 }
 

@@ -9,6 +9,8 @@ use chrono::Local;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::reply_quota::{QuotaPolicy, QuotaState};
+
 const TARGETS_FILE: &str = "targets.json";
 const TARGETS_LOCK_FILE: &str = "targets.lock";
 
@@ -32,6 +34,32 @@ struct TargetRecord {
     message_id: String,
     enabled: bool,
     last_seen_at: String,
+    /// 当前回复窗口的额度状态；旧记录缺省为空窗口。
+    #[serde(default)]
+    quota: QuotaState,
+}
+
+/// QQ 被动回复规则（官方文档「消息收发概述 · 频率与时效规则」）：
+/// 单聊每条消息 60 分钟内可回复 4 次，群聊 5 分钟内可回复 5 次。
+/// 有效期扣除安全余量，避免临界时刻发送失败。
+pub fn quota_policy(kind: &str) -> QuotaPolicy {
+    if kind == "group" {
+        QuotaPolicy {
+            max_replies: 5,
+            window_secs: Some(5 * 60 - 20),
+            progress_interval_secs: 30,
+            segment_chars: 2000,
+            max_pending_progress: 5,
+        }
+    } else {
+        QuotaPolicy {
+            max_replies: 4,
+            window_secs: Some(60 * 60 - 120),
+            progress_interval_secs: 60,
+            segment_chars: 2000,
+            max_pending_progress: 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +88,9 @@ pub struct DeleteTargetRequest {
 }
 
 /// 收到用户消息后保存最新回复消息编号，并自动授权该会话用于主动推送。
-pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Result<()> {
+///
+/// 返回该会话对应的推送目标编号（与 `kind + recipient_id` 一一对应，跨消息稳定）。
+pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Result<String> {
     let recipient_id = recipient_id.trim();
     let message_id = message_id.trim();
     if recipient_id.is_empty() || message_id.is_empty() {
@@ -68,7 +98,8 @@ pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Re
     }
     let kind = if kind == "group" { "group" } else { "direct" };
     with_exclusive_store(|store| {
-        let now = Local::now().naive_local().to_string();
+        let now = Local::now().naive_local();
+        let now_text = now.to_string();
         if let Some(target) = store
             .targets
             .iter_mut()
@@ -76,18 +107,50 @@ pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Re
         {
             target.message_id = message_id.to_string();
             target.enabled = true;
-            target.last_seen_at = now;
+            target.last_seen_at = now_text;
+            target.quota.observe_inbound(message_id, now);
+            Ok(target.target_id.clone())
         } else {
+            let target_id = scru128::new().to_string();
+            let mut quota = QuotaState::default();
+            quota.observe_inbound(message_id, now);
             store.targets.push(TargetRecord {
-                target_id: scru128::new().to_string(),
+                target_id: target_id.clone(),
                 recipient_id: recipient_id.to_string(),
                 kind: kind.to_string(),
                 message_id: message_id.to_string(),
                 enabled: true,
-                last_seen_at: now,
+                last_seen_at: now_text,
+                quota,
             });
+            Ok(target_id)
         }
-        Ok(())
+    })
+}
+
+/// 在跨进程文件锁内读取并更新目标的回复窗口额度。
+///
+/// `plan` 接收当前窗口对应的 `msg_id`、额度策略与可变状态，返回规划结果；
+/// 闭包结束后状态立即落盘，保证并发的 MCP 子进程不会重复占用同一额度。
+/// 目标不存在、未授权或窗口已被新消息替换时返回 `None`。
+pub fn update_quota<T>(
+    target_id: &str,
+    expected_message_id: &str,
+    plan: impl FnOnce(&QuotaPolicy, &mut QuotaState) -> T,
+) -> Result<Option<T>> {
+    with_exclusive_store(|store| {
+        let Some(target) = store
+            .targets
+            .iter_mut()
+            .find(|target| target.target_id == target_id && target.enabled)
+        else {
+            return Ok(None);
+        };
+        if target.message_id != expected_message_id {
+            return Ok(None);
+        }
+        let policy = quota_policy(&target.kind);
+        Ok(Some(plan(&policy, &mut target.quota)))
     })
 }
 

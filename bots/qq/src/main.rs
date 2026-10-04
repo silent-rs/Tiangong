@@ -29,6 +29,7 @@ use tracing_subscriber::EnvFilter;
 mod gateway;
 mod mcp;
 mod provision;
+mod reply_quota;
 mod schema;
 mod target_store;
 #[cfg(test)]
@@ -178,6 +179,65 @@ impl ApiMessageContent {
             Self::Text { .. } => None,
         }
     }
+
+    /// 在消息正文前附加来源说明；纯图片/视频附加到说明文字。
+    fn with_source(self, source: &str) -> Self {
+        let prefix = |text: Option<String>| match text.filter(|text| !text.trim().is_empty()) {
+            Some(text) => format!("{source}\n{text}"),
+            None => source.to_string(),
+        };
+        match self {
+            Self::Text { text } => Self::Text {
+                text: prefix(Some(text)),
+            },
+            Self::Image { url, caption } => Self::Image {
+                url,
+                caption: Some(prefix(caption)),
+            },
+            Self::Video { url, caption } => Self::Video {
+                url,
+                caption: Some(prefix(caption)),
+            },
+            other @ (Self::File { .. } | Self::Audio { .. }) => other,
+        }
+    }
+}
+
+/// 本条消息可用的推送通道：(MCP 服务名, 推送目标编号)。
+///
+/// 两者都可用时，回复全部交由 Agent 经 MCP 发送（issue #572）；任一缺失时
+/// Agent 无法推送，退回由 Bot 转发同步响应。
+fn push_channel(target_id: Option<String>) -> Option<(String, String)> {
+    let target_id = target_id?;
+    match mcp::server_name() {
+        Ok(server) => Some((server, target_id)),
+        Err(error) => {
+            tracing::warn!("获取 QQ MCP 服务名失败，回退为同步回复: {error}");
+            None
+        }
+    }
+}
+
+/// 生成附加在入站消息前的来源说明（issue #572）。
+///
+/// 推送通道可用时要求 Agent 经本 Bot 的 MCP 工具发送全部回复（含最终答复），
+/// 直接输出的文本不会送达移动端。
+fn message_source(target_kind: &str, push: Option<&(String, String)>) -> String {
+    let channel = if target_kind == "group" {
+        "QQ 群聊"
+    } else {
+        "QQ 私聊"
+    };
+    match push {
+        Some((server, target_id)) => format!(
+            "[来源：{channel}。用户只能收到你经 MCP 服务 {server} 发送的消息，直接输出的文本不会送达：\
+             请用 send_text_message（target_id={target_id}，is_final=true）发送最终答复，图片/文件用 \
+             send_image_message / send_file_message；任务耗时较长时可先用 is_final=false 发送简短进展。\
+             本条消息的回复次数有限，bot 会合并过频的进展并为最终答复保留额度。\
+             每次发送使用不同的 idempotency_key]"
+        ),
+        None => format!("[来源：{channel}]"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,6 +267,15 @@ impl MediaAsset {
 struct ParsedMessage {
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
+}
+
+impl ParsedMessage {
+    fn with_source(self, source: &str) -> Self {
+        Self {
+            content: self.content.with_source(source),
+            media: self.media,
+        }
+    }
 }
 
 struct BotReply {
@@ -454,10 +523,14 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
     } else {
         message.author.user_openid.as_str()
     };
-    if let Err(error) = target_store::upsert_discovered("group", &message.group_openid, message_id)
-    {
-        tracing::warn!("更新 QQ 群聊推送目标失败: {error}");
-    }
+    let target_id =
+        match target_store::upsert_discovered("group", &message.group_openid, message_id) {
+            Ok(target_id) => Some(target_id),
+            Err(error) => {
+                tracing::warn!("更新 QQ 群聊推送目标失败: {error}");
+                None
+            }
+        };
     if !state
         .recent_messages
         .lock()
@@ -473,6 +546,8 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
         tracing::debug!("QQ 群消息没有可处理的文本或图片，跳过");
         return Ok(());
     };
+    let push = push_channel(target_id);
+    let parsed = parsed.with_source(&message_source("group", push.as_ref()));
 
     let _ = seq;
     tracing::info!(
@@ -494,6 +569,10 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
             return Err(error);
         }
     };
+    if push.is_some() {
+        tracing::debug!("QQ 群聊回复由 Agent 经 MCP 发送，忽略同步响应");
+        return Ok(());
+    }
     send_reply(state, ReplyTarget::Group(group_openid), message_id, reply).await
 }
 
@@ -510,9 +589,13 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         return Ok(());
     }
     let channel_id = format!("c2c:{user_openid}");
-    if let Err(error) = target_store::upsert_discovered("direct", &user_openid, message_id) {
-        tracing::warn!("更新 QQ 私聊推送目标失败: {error}");
-    }
+    let target_id = match target_store::upsert_discovered("direct", &user_openid, message_id) {
+        Ok(target_id) => Some(target_id),
+        Err(error) => {
+            tracing::warn!("更新 QQ 私聊推送目标失败: {error}");
+            None
+        }
+    };
     if !state
         .recent_messages
         .lock()
@@ -532,6 +615,8 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
     if parsed.content.is_empty() {
         return Ok(());
     }
+    let push = push_channel(target_id);
+    let parsed = parsed.with_source(&message_source("direct", push.as_ref()));
     let _ = seq;
     tracing::info!(
         "转发 QQ 私聊消息 user={} content_type={} images={}",
@@ -552,6 +637,10 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
             return Err(error);
         }
     };
+    if push.is_some() {
+        tracing::debug!("QQ 私聊回复由 Agent 经 MCP 发送，忽略同步响应");
+        return Ok(());
+    }
     send_reply(state, ReplyTarget::User(user_openid), message_id, reply).await
 }
 
@@ -1059,6 +1148,30 @@ fn truncate_str(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_is_prefixed_and_mentions_push_target_only_when_available() {
+        let parsed = ParsedMessage {
+            content: ApiMessageContent::Text {
+                text: "你好".into(),
+            },
+            media: Vec::new(),
+        }
+        .with_source("[来源：QQ 群聊]");
+        assert!(matches!(
+            parsed.content,
+            ApiMessageContent::Text { ref text } if text == "[来源：QQ 群聊]\n你好"
+        ));
+
+        assert_eq!(message_source("group", None), "[来源：QQ 群聊]");
+        let push = ("bot-qq".to_string(), "target-1".to_string());
+        let with_push = message_source("direct", Some(&push));
+        assert!(with_push.starts_with("[来源：QQ 私聊"));
+        assert!(with_push.contains("bot-qq"));
+        assert!(with_push.contains("send_text_message（target_id=target-1，is_final=true）"));
+        assert!(with_push.contains("直接输出的文本不会送达"));
+        assert!(push_channel(None).is_none());
+    }
 
     const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
 

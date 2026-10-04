@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-bot-feishu"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "天工飞书 bot 制品——WebSocket 长连接接收飞书消息并转发到天工"

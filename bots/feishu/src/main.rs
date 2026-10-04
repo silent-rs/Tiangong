@@ -219,6 +219,68 @@ impl ApiMessageContent {
             Self::Video { .. } => "video",
         }
     }
+
+    /// 在消息正文前附加来源说明；纯图片/视频附加到说明文字。
+    fn with_source(self, source: &str) -> Self {
+        let prefix = |text: Option<String>| match text.filter(|text| !text.trim().is_empty()) {
+            Some(text) => format!("{source}\n{text}"),
+            None => source.to_string(),
+        };
+        match self {
+            Self::Text { text } => Self::Text {
+                text: prefix(Some(text)),
+            },
+            Self::Image { url, caption } => Self::Image {
+                url,
+                caption: Some(prefix(caption)),
+            },
+            Self::Video { url, caption } => Self::Video {
+                url,
+                caption: Some(prefix(caption)),
+            },
+            other @ (Self::File { .. } | Self::Audio { .. }) => other,
+        }
+    }
+}
+
+/// 生成附加在入站消息前的来源说明（issue #572）。
+///
+/// 告诉模型消息来自哪个渠道；推送目标可用时说明如何经本 Bot 的 MCP 发送工具
+/// 向用户推送中间进展。最终答复仍走同步响应，避免重复发送。
+/// 本条消息可用的推送通道：(MCP 服务名, 推送目标编号)。
+///
+/// 两者都可用时，回复全部交由 Agent 经 MCP 发送（issue #572）；任一缺失时
+/// Agent 无法推送，退回由 Bot 转发同步响应。
+fn push_channel(target_id: Option<String>) -> Option<(String, String)> {
+    let target_id = target_id?;
+    match mcp::server_name() {
+        Ok(server) => Some((server, target_id)),
+        Err(error) => {
+            tracing::warn!("获取飞书 MCP 服务名失败，回退为同步回复: {error}");
+            None
+        }
+    }
+}
+
+/// 生成附加在入站消息前的来源说明（issue #572）。
+///
+/// 推送通道可用时要求 Agent 经本 Bot 的 MCP 工具发送全部回复（含最终答复），
+/// 直接输出的文本不会送达移动端。
+fn message_source(target_kind: &str, push: Option<&(String, String)>) -> String {
+    let channel = if target_kind == "group" {
+        "飞书群聊"
+    } else {
+        "飞书私聊"
+    };
+    match push {
+        Some((server, target_id)) => format!(
+            "[来源：{channel}。用户只能收到你经 MCP 服务 {server} 发送的消息，直接输出的文本不会送达：\
+             请用 send_text_message（target_id={target_id}）发送最终答复，图片/文件用 \
+             send_image_message / send_file_message；任务耗时较长时可先发送简短进展。\
+             每次发送使用不同的 idempotency_key]"
+        ),
+        None => format!("[来源：{channel}]"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -663,9 +725,16 @@ async fn handle_event(state: &Arc<BotState>, payload: &[u8]) -> Result<()> {
     } else {
         "direct"
     };
-    if let Err(error) = target_store::upsert_discovered(chat_id, target_kind) {
-        tracing::warn!("更新飞书推送目标失败: {error}");
-    }
+    let target_id = match target_store::upsert_discovered(chat_id, target_kind) {
+        Ok(target_id) => Some(target_id),
+        Err(error) => {
+            tracing::warn!("更新飞书推送目标失败: {error}");
+            None
+        }
+    };
+    let push = push_channel(target_id);
+    let source = message_source(target_kind, push.as_ref());
+    let reply_by_agent = push.is_some();
     let msg_type = &envelope.event.message.msg_type;
     let message_id = envelope.event.message.message_id.clone();
     let sender_id = envelope
@@ -710,6 +779,8 @@ async fn handle_event(state: &Arc<BotState>, payload: &[u8]) -> Result<()> {
         chat_id,
         &sender_id,
         &message_id,
+        &source,
+        reply_by_agent,
     )
     .await;
 
@@ -752,6 +823,8 @@ async fn process_user_message(
     chat_id: &str,
     sender_id: &str,
     message_id: &Option<String>,
+    source: &str,
+    reply_by_agent: bool,
 ) -> Result<MessageHandling> {
     let parsed = match message.msg_type.as_str() {
         "text" => {
@@ -812,12 +885,16 @@ async fn process_user_message(
         chat_id,
         sender_id,
         message_id,
-        parsed.content,
+        parsed.content.with_source(source),
         parsed.media,
     )
     .await
     {
         Ok(reply) => {
+            if reply_by_agent {
+                tracing::debug!("飞书回复由 Agent 经 MCP 发送，忽略同步响应 chat_id={chat_id}");
+                return Ok(MessageHandling::Forwarded);
+            }
             tracing::info!(
                 "天工回复 chat_id={chat_id} text_len={} images={}",
                 reply.text.len(),
@@ -1544,6 +1621,27 @@ fn mime_extension(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_is_prefixed_and_mentions_push_target_only_when_available() {
+        let text = ApiMessageContent::Text {
+            text: "你好".into(),
+        }
+        .with_source("[来源：飞书群聊]");
+        assert!(matches!(
+            text,
+            ApiMessageContent::Text { ref text } if text == "[来源：飞书群聊]\n你好"
+        ));
+
+        assert_eq!(message_source("group", None), "[来源：飞书群聊]");
+        let push = ("bot-feishu".to_string(), "target-1".to_string());
+        let with_push = message_source("direct", Some(&push));
+        assert!(with_push.starts_with("[来源：飞书私聊"));
+        assert!(with_push.contains("bot-feishu"));
+        assert!(with_push.contains("send_text_message（target_id=target-1）"));
+        assert!(with_push.contains("直接输出的文本不会送达"));
+        assert!(push_channel(None).is_none());
+    }
 
     const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
 
