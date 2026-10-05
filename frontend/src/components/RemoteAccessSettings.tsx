@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Loader2, QrCode, RefreshCw, Smartphone, Unlink, KeyRound, Wifi, Globe } from 'lucide-react';
+import {
+  Check, ChevronDown, Copy, Globe, Loader2, QrCode, RefreshCw, Smartphone, Unlink, Wifi,
+} from 'lucide-react';
 import { api, type RemoteAccessMode, type RemoteAccessView, type RemotePairing } from '@/api/tauri';
+import { cn } from '@/lib/utils';
 import { Button } from './ui/button';
 import { Card, CardContent } from './ui/card';
 import { Input } from './ui/input';
@@ -10,10 +13,24 @@ import { Switch } from './ui/switch';
 import { Badge } from './ui/badge';
 import { useToast } from './Toast';
 
-const STATE_LABEL: Record<RemoteAccessMode, Record<RemoteAccessView['state'], string>> = {
-  lan: { disabled: '未启用', connecting: '启动中', connected: '局域网服务运行中', error: '启动失败' },
-  relay: { disabled: '未启用', connecting: '连接中', connected: '已连接中继', error: '连接失败' },
+type LinkState = RemoteAccessView['state'];
+
+const STATE_LABEL: Record<RemoteAccessMode, Record<LinkState, string>> = {
+  lan: { disabled: '未启用', connecting: '启动中', connected: '运行中', error: '启动失败' },
+  relay: { disabled: '未启用', connecting: '连接中', connected: '已连接', error: '连接失败' },
 };
+
+const STATE_DOT: Record<LinkState, string> = {
+  disabled: 'bg-muted-foreground/40',
+  connecting: 'bg-amber-500 animate-pulse',
+  connected: 'bg-emerald-500',
+  error: 'bg-destructive',
+};
+
+const MODES: { value: RemoteAccessMode; title: string; desc: string; icon: typeof Wifi }[] = [
+  { value: 'lan', title: '局域网直连', desc: '同一 Wi-Fi 下直接使用，无需部署', icon: Wifi },
+  { value: 'relay', title: '中继服务', desc: '经自部署中继，任意网络可用', icon: Globe },
+];
 
 interface Draft {
   mode: RemoteAccessMode;
@@ -44,6 +61,8 @@ export function RemoteAccessSettings() {
   const [saving, setSaving] = useState(false);
   const [pairing, setPairing] = useState<RemotePairing | null>(null);
   const [remaining, setRemaining] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -139,6 +158,16 @@ export function RemoteAccessSettings() {
     }
   };
 
+  const copyAccessUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (error) {
+      showError('复制失败', String(error));
+    }
+  };
+
   if (!view || !draft) {
     return (
       <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
@@ -150,7 +179,8 @@ export function RemoteAccessSettings() {
   const saved = draftOf(view);
   const dirty = (Object.keys(saved) as (keyof Draft)[]).some((key) => draft[key].trim() !== saved[key]);
   const lan = draft.mode === 'lan';
-  const ready = view.enabled && view.state === 'connected' && !dirty;
+  const running = view.enabled && view.state === 'connected';
+  const ready = running && !dirty;
 
   const switchMode = (mode: RemoteAccessMode) => {
     if (mode === draft.mode) return;
@@ -162,14 +192,20 @@ export function RemoteAccessSettings() {
 
   return (
     <div className="space-y-4 p-4 sm:p-6">
+      {/* 总开关与运行状态 */}
       <Card>
         <CardContent className="space-y-4 pt-6">
           <div className="flex items-start justify-between gap-4">
-            <div>
-              <Label className="text-base">远程访问</Label>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <Label className="text-base">远程访问</Label>
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className={cn('h-2 w-2 rounded-full', STATE_DOT[view.state])} />
+                  {STATE_LABEL[view.mode][view.state]}
+                </span>
+              </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                在手机浏览器中扫码使用天工对话。远程端只能使用对话功能，不开放设置与拓展区；
-                同一时间只允许一台已绑定的设备使用。
+                用手机浏览器扫码即可使用天工对话。远程端仅开放对话功能，同一时间只允许一台已绑定的设备使用。
               </p>
             </div>
             <Switch
@@ -179,43 +215,74 @@ export function RemoteAccessSettings() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              variant={lan ? 'default' : 'outline'}
-              className="justify-start"
-              disabled={saving}
-              onClick={() => switchMode('lan')}
-            >
-              <Wifi className="mr-2 h-4 w-4" />局域网直连
-            </Button>
-            <Button
-              variant={!lan ? 'default' : 'outline'}
-              className="justify-start"
-              disabled={saving}
-              onClick={() => switchMode('relay')}
-            >
-              <Globe className="mr-2 h-4 w-4" />中继服务
-            </Button>
+          {running && view.access_url && (
+            <div className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2">
+              <span className="shrink-0 text-xs text-muted-foreground">访问地址</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs" title={view.access_url}>
+                {view.access_url}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0"
+                title="复制访问地址"
+                onClick={() => { void copyAccessUrl(view.access_url!); }}
+              >
+                {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+              </Button>
+            </div>
+          )}
+          {view.last_error && (
+            <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive break-all">
+              {view.last_error}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 连接方式 */}
+      <Card>
+        <CardContent className="space-y-4 pt-6">
+          <Label className="text-base">连接方式</Label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {MODES.map(({ value, title, desc, icon: Icon }) => {
+              const active = draft.mode === value;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={saving}
+                  onClick={() => switchMode(value)}
+                  className={cn(
+                    'flex items-start gap-3 rounded-lg border p-3 text-left transition-colors disabled:opacity-60',
+                    active ? 'border-primary bg-primary/5' : 'hover:bg-accent',
+                  )}
+                >
+                  <Icon className={cn('mt-0.5 h-4 w-4 shrink-0', active ? 'text-primary' : 'text-muted-foreground')} />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium">{title}</span>
+                    <span className="block text-xs text-muted-foreground">{desc}</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           {lan ? (
-            <>
-              <p className="text-xs text-muted-foreground">
-                手机与电脑连接同一 Wi-Fi 即可扫码使用，无需部署任何服务。首次启用时系统可能询问是否允许天工接受传入连接，请选择允许。
-              </p>
-              <div className="grid gap-3 sm:grid-cols-[1fr_8rem]">
-                <div className="space-y-2">
-                  <Label htmlFor="remote-lan-host">局域网地址</Label>
+            <div className="space-y-2">
+              <div className="grid gap-3 sm:grid-cols-[1fr_7rem]">
+                <div className="space-y-1.5">
+                  <Label htmlFor="remote-lan-host" className="text-xs">局域网地址</Label>
                   <Input
                     id="remote-lan-host"
                     value={draft.lanHost}
                     onChange={(e) => setDraft({ ...draft, lanHost: e.target.value })}
-                    placeholder={view.detected_lan_ip ? `自动：${view.detected_lan_ip}` : '自动探测失败，请手动填写'}
+                    placeholder={view.detected_lan_ip ? `自动（${view.detected_lan_ip}）` : '未探测到，请手动填写'}
                     autoComplete="off"
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="remote-lan-port">端口</Label>
+                <div className="space-y-1.5">
+                  <Label htmlFor="remote-lan-port" className="text-xs">端口</Label>
                   <Input
                     id="remote-lan-port"
                     inputMode="numeric"
@@ -226,71 +293,52 @@ export function RemoteAccessSettings() {
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">
-                局域网地址留空时自动探测；多网卡或探测不准时可手动填写电脑在当前 Wi-Fi 下的 IP。局域网内为 HTTP 明文传输，请勿在公共网络中开启。
+                手机需与电脑连接同一网络；局域网内为 HTTP 明文传输，请勿在公共网络中开启。首次启用时如系统询问是否允许传入连接，请选择允许。
               </p>
-            </>
+            </div>
           ) : (
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="remote-host">中继地址（Host）</Label>
-                <Input
-                  id="remote-host"
-                  value={draft.host}
-                  onChange={(e) => setDraft({ ...draft, host: e.target.value })}
-                  placeholder="https://relay.example.com"
-                  autoComplete="off"
-                />
-                <p className="text-xs text-muted-foreground">
-                  填写已部署的 tiangong-relay 地址即可，中继无需配置任何令牌。公网部署请使用 HTTPS 地址。
-                </p>
-              </div>
-            </>
+            <div className="space-y-1.5">
+              <Label htmlFor="remote-host" className="text-xs">中继地址</Label>
+              <Input
+                id="remote-host"
+                value={draft.host}
+                onChange={(e) => setDraft({ ...draft, host: e.target.value })}
+                placeholder="https://relay.example.com"
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                填写已部署的 tiangong-relay 地址，无需令牌。公网部署请使用 HTTPS。
+              </p>
+            </div>
           )}
 
-          <div className="flex items-center justify-between gap-3 rounded-md border p-3">
-            <div className="flex min-w-0 items-center gap-3">
-              <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 text-xs">
-                <div className="text-sm">远程通道</div>
-                <div className="truncate font-mono text-muted-foreground" title={view.channel ?? undefined}>
-                  {view.channel ?? '启用后自动生成'}
-                </div>
-                <div className="text-muted-foreground">通道密钥由天工自动生成并只保存在本机，中继只能看到通道 ID。</div>
-              </div>
+          {(dirty || !view.enabled) && (
+            <div className="flex justify-end">
+              <Button disabled={saving} onClick={() => { void save(true); }}>
+                {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+                {view.enabled ? '保存' : '保存并启用'}
+              </Button>
             </div>
-            <Button variant="ghost" size="sm" disabled={saving || !view.channel} onClick={() => { void resetChannel(); }}>
-              <RefreshCw className="mr-1 h-4 w-4" />重置
-            </Button>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button disabled={saving || (!dirty && view.enabled)} onClick={() => { void save(true); }}>
-              {saving && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
-              {lan ? '保存并启动' : '保存并连接'}
-            </Button>
-            <Badge variant={view.state === 'connected' ? 'default' : view.state === 'error' ? 'destructive' : 'secondary'}>
-              {STATE_LABEL[view.mode][view.state]}
-            </Badge>
-            {view.enabled && view.access_url && view.state === 'connected' && (
-              <span className="text-xs text-muted-foreground break-all">访问地址：{view.access_url}</span>
-            )}
-            {view.last_error && (
-              <span className="text-xs text-destructive break-all">{view.last_error}</span>
-            )}
-          </div>
+          )}
         </CardContent>
       </Card>
 
+      {/* 设备绑定 */}
       <Card>
         <CardContent className="space-y-4 pt-6">
           <div className="flex items-center justify-between gap-4">
             <div>
               <Label className="text-base">手机扫码</Label>
               <p className="mt-1 text-xs text-muted-foreground">
-                二维码 10 分钟内有效且只能使用一次。扫码绑定新设备后，之前绑定的设备将失效。
+                二维码 10 分钟内有效且仅能使用一次；绑定新设备后，之前的设备将失效。
               </p>
             </div>
-            <Button variant="outline" disabled={!ready} onClick={() => { void createPairing(); }}>
+            <Button
+              variant="outline"
+              disabled={!ready}
+              title={ready ? undefined : '请先启用远程访问并保存配置'}
+              onClick={() => { void createPairing(); }}
+            >
               {pairing ? <RefreshCw className="mr-1 h-4 w-4" /> : <QrCode className="mr-1 h-4 w-4" />}
               {pairing ? '重新生成' : '生成二维码'}
             </Button>
@@ -298,11 +346,11 @@ export function RemoteAccessSettings() {
 
           {pairing && (
             <div className="flex flex-col items-center gap-2 py-2">
-              <div className="rounded-lg bg-white p-3">
+              <div className="rounded-lg bg-white p-3 shadow-sm">
                 <QRCodeSVG value={pairing.url} size={208} level="M" />
               </div>
               <span className="text-xs text-muted-foreground">
-                请用手机浏览器扫码打开（{Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')} 后失效）
+                请用手机浏览器扫码（{Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')} 后失效）
               </span>
             </div>
           )}
@@ -337,6 +385,34 @@ export function RemoteAccessSettings() {
           </div>
         </CardContent>
       </Card>
+
+      {/* 高级：远程通道 */}
+      <div className="rounded-lg border">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between px-4 py-3 text-sm text-muted-foreground hover:text-foreground"
+          onClick={() => setAdvanced((value) => !value)}
+        >
+          高级
+          <ChevronDown className={cn('h-4 w-4 transition-transform', advanced && 'rotate-180')} />
+        </button>
+        {advanced && (
+          <div className="flex items-center justify-between gap-3 border-t px-4 py-3">
+            <div className="min-w-0 text-xs">
+              <div className="text-sm">远程通道</div>
+              <div className="truncate font-mono text-muted-foreground" title={view.channel ?? undefined}>
+                {view.channel ?? '启用后自动生成'}
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                通道密钥由天工自动生成并仅保存在本机。访问地址泄露或提示通道被占用时可重置，重置后需重新扫码。
+              </div>
+            </div>
+            <Button variant="outline" size="sm" disabled={saving || !view.channel} onClick={() => { void resetChannel(); }}>
+              <RefreshCw className="mr-1 h-4 w-4" />重置
+            </Button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

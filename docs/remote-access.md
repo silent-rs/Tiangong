@@ -71,7 +71,7 @@ journalctl -u tiangong-relay -f           # 查看日志
 | `--max-agents` | `TIANGONG_RELAY_MAX_AGENTS` | 最多同时接入的天工桌面端数量，默认 256 |
 | `--tls-cert` / `--tls-key` | `TIANGONG_RELAY_TLS_CERT` / `TIANGONG_RELAY_TLS_KEY` | PEM 证书与私钥，两者同时提供时中继直接以 HTTPS 监听（不使用反向代理时） |
 
-本地联调：`bash scripts/relay/dev-local.sh` 以 `https://localhost:8443` 启动中继。证书优先用 `CERT`/`KEY` 环境变量，其次是 `~/Documents/certs/localhost+2.pem`，都没有时用 mkcert 现场签发。
+天工连接中继时，除了内置的公共根证书，还会信任系统钥匙串里的根证书。所以使用企业 CA 或自签证书部署时，只要把对应的 CA 加入系统信任即可。
 
 中继不需要令牌。从源码运行：`cargo run --release -p tiangong-relay -- --listen 127.0.0.1:8790`。
 

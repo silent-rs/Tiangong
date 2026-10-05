@@ -223,6 +223,25 @@ Sandbox Launcher 也可作为独立程序使用，平台能力、策略格式和
 - **MCP 主动推送**：Bot 自动维护已授权主动发过消息的多目标清单，具备文本、图片和文件推送能力，MCP 注册和注销绑定到 Bot 启停流程。
 - **远程管理**：无图形界面环境下，通过 `tiangong config` 配置页完成 Bot 的安装、配置（含扫码授权）、启停与升级；`tiangong bot start <id>` 可在开机脚本中拉起已配置的 Bot。
 
+## 手机远程访问（H5）
+
+在「设置 → 远程访问」中开启后，用手机浏览器扫码即可使用天工对话。手机端使用的是与桌面端同一份前端，命令走与本地完全相同的处理链路。
+
+- **两种连接方式**：
+  - **局域网直连（默认）**：桌面端在本机端口（默认 `8790`）内嵌服务，手机与电脑连接同一 Wi-Fi 即可使用，无需部署任何服务。
+  - **中继服务**：部署 `tiangong-relay` 后可跨网络访问。中继是纯转发服务，部署时不需要令牌；通道密钥由天工自动生成并只保存在本机，中继只能看到它的单向摘要。一个中继可同时服务多台天工，各通道相互隔离。
+- **只开放对话**：桌面端按命令白名单裁决每个请求。设置、插件管理、拓展区、浏览器与桌面操控、本地文件选择均不开放；手机端隐藏右上角搜索、插件、拓展区、主题切换按钮。
+- **单设备绑定**：二维码携带一次性配对码（10 分钟有效），配对后签发设备令牌，桌面端只保存其摘要。同一时间只允许一台设备、一条连接在线，重新扫码会使旧设备失效。
+- **移动端适配**：附件从手机上传；页面跟随软键盘调整高度，输入时不缩放；新建或切换对话后侧栏自动收起。
+
+部署中继（Linux，systemd 守护运行，支持一键升级与失败回滚）：
+
+```bash
+curl -fsSL https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/relay/install.sh | sudo bash
+```
+
+然后在天工「设置 → 远程访问 → 中继服务」中填写中继地址（公网请在前面配置 HTTPS 反向代理，也可以用 `--tls-cert/--tls-key` 让中继直接提供 HTTPS）。架构、部署与安全细节见 [远程访问文档](docs/remote-access.md)。
+
 ## 定时与触发
 
 定时任务由 `scheduler` 插件提供（底层基于 `tiangong-scheduler` crate），Webhook 触发由 Server 内置，两者都用于按计划或外部事件驱动 Agent 执行：
@@ -249,6 +268,7 @@ crates/
   tiangong-media-archive/  输入附件本地归档
   tiangong-bots/           移动端控制：Bot 制品下载、配置、启停和监控
   tiangong-scheduler/      定时任务（Cron）与 Webhook 触发
+  tiangong-relay/          手机远程访问中继（纯转发，独立部署或由桌面端内嵌于局域网）
   tiangong-cli/            CLI / TUI 前端
   tiangong-entry/          统一命令入口
   tiangong-server/         HTTP REST + WebSocket Server
@@ -419,6 +439,7 @@ yarn --cwd frontend dev
 - [Computer Use 文档](docs/computer-use/README.md)
 - [Memory 插件](plugins/tiangong-plugin-memory/README.md)
 - [Bot 制品说明](bots/README.md)
+- [手机远程访问与中继部署](docs/remote-access.md)
 - [CLI 配置指南](docs/cli-configuration-guide.md)
 - [Server API](docs/server-api.md)
 - [Linux 服务器部署指南](docs/linux-server-deployment.md)
