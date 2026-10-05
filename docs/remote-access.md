@@ -69,6 +69,9 @@ journalctl -u tiangong-relay -f           # 查看日志
 |------|----------|------|
 | `--listen` | `TIANGONG_RELAY_LISTEN` | 监听地址，默认 `0.0.0.0:8790` |
 | `--max-agents` | `TIANGONG_RELAY_MAX_AGENTS` | 最多同时接入的天工桌面端数量，默认 256 |
+| `--tls-cert` / `--tls-key` | `TIANGONG_RELAY_TLS_CERT` / `TIANGONG_RELAY_TLS_KEY` | PEM 证书与私钥，两者同时提供时中继直接以 HTTPS 监听（不使用反向代理时） |
+
+本地联调可以用 mkcert 签发 `localhost` 证书，以 `https://localhost:8443` 启动中继：`bash scripts/relay/dev-local.sh`。
 
 中继不需要令牌。从源码运行：`cargo run --release -p tiangong-relay -- --listen 127.0.0.1:8790`。
 

@@ -24,6 +24,12 @@ struct Args {
         default_value_t = tiangong_relay::DEFAULT_MAX_AGENTS
     )]
     max_agents: usize,
+    /// HTTPS 证书（PEM，含完整证书链）；与 --tls-key 同时提供时中继直接以 HTTPS 监听
+    #[arg(long, env = "TIANGONG_RELAY_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<std::path::PathBuf>,
+    /// HTTPS 私钥（PEM）
+    #[arg(long, env = "TIANGONG_RELAY_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<std::path::PathBuf>,
 }
 
 /// 等待 Ctrl-C 或 SIGTERM（systemd 停止服务时发送）。
@@ -64,11 +70,21 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(tiangong_relay::serve(
-        args.listen,
-        tiangong_relay::RelayOptions {
-            max_agents: args.max_agents,
-        },
-        shutdown_signal(),
-    ))
+    let options = tiangong_relay::RelayOptions {
+        max_agents: args.max_agents,
+    };
+    runtime.block_on(async move {
+        match args.tls_cert.zip(args.tls_key) {
+            Some((cert, key)) => {
+                tiangong_relay::serve_tls(
+                    args.listen,
+                    tiangong_relay::TlsFiles { cert, key },
+                    options,
+                    shutdown_signal(),
+                )
+                .await
+            }
+            None => tiangong_relay::serve(args.listen, options, shutdown_signal()).await,
+        }
+    })
 }

@@ -8900,6 +8900,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9633,6 +9642,9 @@ dependencies = [
  "mime",
  "mime_guess",
  "once_cell",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "scru128",
  "serde",
  "serde_html_form",
@@ -9640,6 +9652,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -10921,6 +10934,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rustls",
+ "rustls-native-certs",
  "scru128",
  "serde",
  "serde_json",
@@ -11912,11 +11926,14 @@ dependencies = [
  "futures-util",
  "if-addrs",
  "reqwest 0.13.4",
+ "rustls",
+ "rustls-pki-types",
  "scru128",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "silent",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",

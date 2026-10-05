@@ -333,6 +333,119 @@ async fn channels_are_isolated() {
     expect_silence(&mut phone_a).await;
 }
 
+/// 生成 localhost 自签证书（需要系统 openssl；不可用时返回 None）。
+#[cfg(feature = "tls")]
+fn self_signed_localhost(
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    let status = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+        ])
+        .args(["-nodes", "-days", "1", "-subj", "/CN=localhost"])
+        .args(["-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+        .args(["-addext", "basicConstraints=critical,CA:FALSE"])
+        .args(["-addext", "extendedKeyUsage=serverAuth"])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    status.success().then_some((cert, key))
+}
+
+/// 中继直接以 HTTPS 监听：信任该证书的客户端可经 https/wss 访问。
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn tls_mode() {
+    use rustls_pki_types::pem::PemObject;
+
+    let dir = tempfile::tempdir().unwrap();
+    let Some((cert, key)) = self_signed_localhost(dir.path()) else {
+        eprintln!("系统缺少 openssl，跳过 TLS 测试");
+        return;
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (_shutdown, rx) = tokio::sync::oneshot::channel::<()>();
+    let tls = tiangong_relay::TlsFiles {
+        cert: cert.clone(),
+        key,
+    };
+    tokio::spawn(async move {
+        tiangong_relay::serve_tls_with_listener(listener, &tls, RelayOptions::default(), async {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut roots = rustls::RootCertStore::empty();
+    for der in rustls_pki_types::CertificateDer::pem_file_iter(&cert).unwrap() {
+        roots.add(der.unwrap()).unwrap();
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = std::sync::Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let connect = |url: String, secret: Option<&str>| {
+        let config = config.clone();
+        let mut request = url.into_client_request().unwrap();
+        if let Some(secret) = secret {
+            request
+                .headers_mut()
+                .insert("Authorization", format!("Bearer {secret}").parse().unwrap());
+        }
+        async move {
+            tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                None,
+                false,
+                Some(tokio_tungstenite::Connector::Rustls(config)),
+            )
+            .await
+            .unwrap()
+            .0
+        }
+    };
+
+    // 桌面端经 wss://localhost 接入，手机端经 wss 连到同一通道。
+    let mut agent = connect(format!("wss://localhost:{port}/agent/ws"), Some(SECRET)).await;
+    assert_eq!(next_agent_frame(&mut agent).await, RelayToAgent::Welcome);
+    let channel = channel_id(SECRET);
+    let mut phone = connect(format!("wss://localhost:{port}/ws?c={channel}"), None).await;
+    let RelayToAgent::ClientOpen { conn } = next_agent_frame(&mut agent).await else {
+        panic!("应收到连接建立");
+    };
+    send_agent(
+        &mut agent,
+        AgentToRelay::ToClient {
+            conn,
+            data: r#"{"t":"ready"}"#.into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut phone).await.as_deref(),
+        Some(r#"{"t":"ready"}"#)
+    );
+}
+
 fn detect_lan_ip() -> Option<std::net::IpAddr> {
     // 与桌面端同口径：取已启用、非点对点网卡上的私有 IPv4（排除代理 TUN）。
     if_addrs::get_if_addrs()

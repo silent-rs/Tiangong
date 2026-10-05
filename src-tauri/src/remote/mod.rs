@@ -188,6 +188,13 @@ fn rustls_config() -> Result<Arc<rustls::ClientConfig>> {
     if added == 0 {
         anyhow::bail!("加载 TLS 根证书失败");
     }
+    // 叠加系统信任的根证书：自签/企业 CA、本地 mkcert 等部署方式（https://localhost）。
+    let native = rustls_native_certs::load_native_certs();
+    let (native_added, _) = roots.add_parsable_certificates(native.certs);
+    if !native.errors.is_empty() {
+        tracing::debug!(errors = ?native.errors, "读取系统根证书时有部分失败");
+    }
+    tracing::debug!(native_added, "已加载系统根证书");
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()

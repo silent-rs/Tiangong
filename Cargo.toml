@@ -139,7 +139,7 @@ tiangong-server = { path = "crates/tiangong-server" }
 tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-sandbox = { path = "crates/tiangong-sandbox" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
-tiangong-relay = { path = "crates/tiangong-relay" }
+tiangong-relay = { path = "crates/tiangong-relay", default-features = false }
 tiangong-types = { path = "crates/tiangong-types" }
 tiangong-bots = { path = "crates/tiangong-bots" }
 

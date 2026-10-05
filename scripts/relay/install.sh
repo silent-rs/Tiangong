@@ -170,6 +170,9 @@ write_env() {
 # 天工远程中继配置（修改后执行 systemctl restart tiangong-relay）
 TIANGONG_RELAY_LISTEN=${LISTEN}
 TIANGONG_RELAY_MAX_AGENTS=${MAX_AGENTS}
+# 不使用反向代理时可让中继直接提供 HTTPS（证书需对 ${SERVICE_USER} 可读）：
+# TIANGONG_RELAY_TLS_CERT=/etc/tiangong-relay/fullchain.pem
+# TIANGONG_RELAY_TLS_KEY=/etc/tiangong-relay/privkey.pem
 RUST_LOG=info
 EOF
   chmod 0644 "$ENV_FILE"

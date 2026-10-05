@@ -50,6 +50,8 @@ tiangong-relay = { workspace = true }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "__rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 webpki-root-certs = "1"
+# 叠加系统信任的根证书（自签/企业 CA、本地 mkcert），已在依赖树中（Apache-2.0 OR ISC OR MIT）
+rustls-native-certs = "0.8"
 sha2 = { workspace = true }
 subtle = { workspace = true }
 getrandom = { workspace = true }

@@ -707,21 +707,84 @@ pub async fn serve_with_listener(
     Ok(())
 }
 
+/// 中继直接提供 HTTPS 时使用的证书（PEM）。
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone)]
+pub struct TlsFiles {
+    pub cert: std::path::PathBuf,
+    pub key: std::path::PathBuf,
+}
+
+/// 以 HTTPS 在给定监听器上运行中继（无反向代理时使用，如本地 `https://localhost`）。
+#[cfg(feature = "tls")]
+pub async fn serve_tls_with_listener(
+    listener: tokio::net::TcpListener,
+    tls: &TlsFiles,
+    options: RelayOptions,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let store = silent::CertificateStore::builder()
+        .cert_path(&tls.cert)
+        .key_path(&tls.key)
+        .build()
+        .with_context(|| {
+            format!(
+                "加载 TLS 证书失败（cert={}，key={}）",
+                tls.cert.display(),
+                tls.key.display()
+            )
+        })?;
+    // 仅 HTTP/1.1：WebSocket 升级依赖 HTTP/1.1。
+    let acceptor = store
+        .tls_acceptor(&[b"http/1.1"])
+        .context("初始化 TLS 失败")?;
+    let hub = Hub::new(options);
+    let server = Server::new()
+        .listen(Listener::from(listener).tls(acceptor))
+        .with_shutdown(Duration::from_secs(2));
+    tokio::select! {
+        _ = server.serve(routes(hub)) => {}
+        _ = shutdown => {}
+    }
+    Ok(())
+}
+
 /// 绑定地址并运行中继，直到 `shutdown` 完成。
 pub async fn serve(
     addr: SocketAddr,
     options: RelayOptions,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("监听 {addr} 失败"))?;
+    let listener = bind(addr).await?;
     tracing::info!(
         "天工远程中继 v{} 已启动：http://{}",
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?
     );
     serve_with_listener(listener, options, shutdown).await
+}
+
+/// 绑定地址并以 HTTPS 运行中继，直到 `shutdown` 完成。
+#[cfg(feature = "tls")]
+pub async fn serve_tls(
+    addr: SocketAddr,
+    tls: TlsFiles,
+    options: RelayOptions,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let listener = bind(addr).await?;
+    tracing::info!(
+        "天工远程中继 v{} 已启动：https://{}",
+        env!("CARGO_PKG_VERSION"),
+        listener.local_addr()?
+    );
+    serve_tls_with_listener(listener, &tls, options, shutdown).await
+}
+
+async fn bind(addr: SocketAddr) -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("监听 {addr} 失败"))
 }
 
 #[cfg(test)]
