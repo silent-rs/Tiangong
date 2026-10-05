@@ -1391,6 +1391,8 @@ export interface RemoteAccessView {
   enabled: boolean;
   mode: RemoteAccessMode;
   host: string;
+  /** 缺省中继地址（host 为空时使用）。 */
+  default_host: string;
   /** 通道 ID（通道密钥的单向摘要；密钥由天工自动生成，不出桌面端）。 */
   channel: string | null;
   lan_host: string;

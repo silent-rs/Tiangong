@@ -1,10 +1,11 @@
 //! 远程访问：天工桌面端向手机 H5 提供对话侧能力，两种方式共用同一套逻辑。
 //!
-//! - **局域网直连**（缺省）：桌面端在本机局域网端口内嵌运行中继服务，手机与电脑
-//!   在同一网络内扫码即用，不需要额外部署；
-//! - **中继**：桌面端主动连到自部署的 `tiangong-relay`，适合跨网络访问。中继是纯转发
+//! - **中继**（缺省）：桌面端主动连到 `tiangong-relay`，缺省使用官方中继
+//!   `https://relay.smart7.tech`，也可填写自部署地址，适合跨网络访问。中继是纯转发
 //!   服务，部署时无需配置令牌：通道密钥由天工自动生成并只保存在本机，中继只看到
-//!   它的单向摘要（通道 ID），据此把手机端路由到本桌面端。
+//!   它的单向摘要（通道 ID），据此把手机端路由到本桌面端；
+//! - **局域网直连**：桌面端在本机局域网端口内嵌运行中继服务，手机与电脑
+//!   在同一网络内扫码即用，不经过任何外部服务。
 //!
 //! 链路：手机浏览器 ⇄ 中继（内嵌或独立部署）⇄（桌面端发起的 WebSocket）⇄ 本模块。
 //!
@@ -89,7 +90,10 @@ pub struct RemoteService(Arc<Shared>);
 pub struct RemoteView {
     pub enabled: bool,
     pub mode: RemoteMode,
+    /// 自定义中继地址（为空表示使用缺省中继）。
     pub host: String,
+    /// 缺省中继地址。
+    pub default_host: &'static str,
     /// 通道 ID（通道密钥的单向摘要，可公开展示；密钥本身不出桌面端）。
     pub channel: Option<String>,
     /// 局域网直连二维码地址（留空表示自动探测）。
@@ -315,7 +319,7 @@ impl RemoteService {
         let service = self.clone();
         match inner.config.mode {
             RemoteMode::Relay => {
-                let url = match config::agent_ws_url(&inner.config.host) {
+                let url = match config::agent_ws_url(inner.config.relay_host()) {
                     Ok(url) => url,
                     Err(error) => {
                         inner.state = LinkState::Error;
@@ -702,6 +706,7 @@ impl RemoteService {
             enabled: inner.config.enabled,
             mode: inner.config.mode,
             host: inner.config.host.clone(),
+            default_host: config::DEFAULT_RELAY_HOST,
             channel: inner.config.channel(),
             lan_host: inner.config.lan_host.clone(),
             lan_port: inner.config.lan_port(),
@@ -724,11 +729,17 @@ impl RemoteService {
             lan_host,
             lan_port,
         } = input;
+        // 留空或与缺省一致时存为空：跟随缺省中继地址（后续版本调整缺省值时自动生效）。
         let host = host.trim().to_string();
-        let host = if (enabled && mode == RemoteMode::Relay) || !host.is_empty() {
-            config::normalize_host(&host)?
-        } else {
+        let host = if host.is_empty() {
             host
+        } else {
+            let host = config::normalize_host(&host)?;
+            if host == config::DEFAULT_RELAY_HOST {
+                String::new()
+            } else {
+                host
+            }
         };
         let lan_host = config::normalize_lan_host(&lan_host)?.unwrap_or_default();
         if lan_port == Some(0) {
