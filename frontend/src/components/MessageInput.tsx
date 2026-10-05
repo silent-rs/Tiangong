@@ -1447,7 +1447,7 @@ export function MessageInput({
                     )}
                   </div>
                 )}
-                {sandboxState?.status === 'failed' && (
+                {sandboxState?.status === 'failed' && !isRemoteHost() && (
                   <button
                     onClick={() => setPendingSettingsTab('sandbox')}
                     className="flex items-center gap-1 text-amber-500 transition-colors hover:text-amber-400"
@@ -1461,7 +1461,7 @@ export function MessageInput({
                     <span>沙箱无效</span>
                   </button>
                 )}
-                {sandboxDisabled === true && (
+                {sandboxDisabled === true && !isRemoteHost() && (
                   <button
                     onClick={() => setPendingSettingsTab('sandbox')}
                     className="flex items-center gap-1 text-red-500 transition-colors hover:text-red-400"
