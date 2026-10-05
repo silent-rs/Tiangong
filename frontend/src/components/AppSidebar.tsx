@@ -12,6 +12,7 @@ import {
 import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
+import { isRemoteHost } from '@/api/host';
 import { useToast } from './Toast';
 import type { Session } from '@/api/tauri';
 
@@ -353,10 +354,12 @@ export function AppSidebar() {
         </div>
       </ScrollArea>
 
-      {/* 底部设置 */}
-      <div className="p-2 border-t border-sidebar-border shrink-0">
-        <SettingsDialog />
-      </div>
+      {/* 底部设置（远程模式不开放设置） */}
+      {!isRemoteHost() && (
+        <div className="p-2 border-t border-sidebar-border shrink-0">
+          <SettingsDialog />
+        </div>
+      )}
     </div>
   );
 

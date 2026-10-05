@@ -23,6 +23,8 @@ import { InputOverlayPluginHost } from '@/components/InputOverlayPluginHost';
 import { useToast } from '@/components/Toast';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
+import { isRemoteHost, listen as hostListen } from '@/api/host';
+import { RemoteStatusBanner } from '@/components/RemoteStatusBanner';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize, currentMonitor } from '@tauri-apps/api/window';
 
@@ -84,6 +86,7 @@ function browserPluginSessionId(sessionId?: string | null): string {
 }
 
 export function MainApp() {
+  const remote = isRemoteHost();
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const { showWarning } = useToast();
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -292,34 +295,39 @@ export function MainApp() {
   }, [closeWorkspacePanel]);
 
   useEffect(() => {
-    ensureDesktopNotificationPermission().catch(console.warn);
+    // 远程模式：仅对话侧，没有窗口管理、插件引导与模型配置入口。
+    if (!remote) {
+      ensureDesktopNotificationPermission().catch(console.warn);
 
-    // 启动时按当前屏幕工作区裁剪初始窗口，避免低分辨率屏幕上窗口超出可视区
-    fitWindowToScreen(lockResize, unlockResize, (logicalW) => {
-      if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
-        setSidebarOpenByLayout(false);
-      }
-    }).catch(console.warn);
+      // 启动时按当前屏幕工作区裁剪初始窗口，避免低分辨率屏幕上窗口超出可视区
+      fitWindowToScreen(lockResize, unlockResize, (logicalW) => {
+        if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
+          setSidebarOpenByLayout(false);
+        }
+      }).catch(console.warn);
+    }
 
     loadSessions();
 
-    // 首次启动时检测缺失的默认插件，有缺失则弹出推荐安装引导。
-    // 独立 catch，网络异常或检测失败都不影响主初始化流程。
-    api.checkDefaultPlugins()
-      .then((check) => {
-        if (check.first_launch_pending && check.missing.length > 0) {
-          setOnboardingMissing(check.missing);
-        }
-      })
-      .catch((error) => console.warn('默认插件检测失败', error));
+    if (!remote) {
+      // 首次启动时检测缺失的默认插件，有缺失则弹出推荐安装引导。
+      // 独立 catch，网络异常或检测失败都不影响主初始化流程。
+      api.checkDefaultPlugins()
+        .then((check) => {
+          if (check.first_launch_pending && check.missing.length > 0) {
+            setOnboardingMissing(check.missing);
+          }
+        })
+        .catch((error) => console.warn('默认插件检测失败', error));
 
-    // 未配置主对话模型（chat 路由）时在主页面弹出快速配置引导；
-    // 独立 catch，检测失败不影响主初始化流程。
-    api.getModelsConfig()
-      .then((cfg) => {
-        if (!cfg.routing.chat) setModelSetupOpen(true);
-      })
-      .catch((error) => console.warn('模型配置检测失败', error));
+      // 未配置主对话模型（chat 路由）时在主页面弹出快速配置引导；
+      // 独立 catch，检测失败不影响主初始化流程。
+      api.getModelsConfig()
+        .then((cfg) => {
+          if (!cfg.routing.chat) setModelSetupOpen(true);
+        })
+        .catch((error) => console.warn('模型配置检测失败', error));
+    }
 
     const flushStreamEvents = () => {
       streamEventTimerRef.current = null;
@@ -356,7 +364,7 @@ export function MainApp() {
         track(await api.onStreamEvent(scheduleStreamEvent));
         guard();
 
-        const { listen } = await import('@tauri-apps/api/event');
+        const listen = hostListen;
       // 尾沿去抖 + in-flight 串行化 + dirty rerun。
       // - 每次事件都重置 120ms 计时器，等事件静默后再刷新；
       // - 刷新进行中来的事件标记 dirty，settle 后 rerun 一次，避免并发读取。
@@ -407,6 +415,8 @@ export function MainApp() {
         }
       }));
       guard();
+      // 远程模式不开放拓展区：不响应浏览器/插件 App 打开请求，也没有原生窗口。
+      if (remote) return;
 
       // 兼容旧宿主浏览器命令的 browser:open；插件工具（web_fetch / browser_open）
       // 已由浏览器插件通过 SDK 的 app.open 自行决定是否展开拓展区。
@@ -628,6 +638,11 @@ export function MainApp() {
     const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
       if (typeof url !== 'string' || !url.trim()) return;
+      // 远程模式没有内嵌浏览器：链接在手机浏览器新标签页打开。
+      if (remote) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+        return;
+      }
       const store = useStore.getState();
       const sessionId = store.activeSessionId || store.newConversationId;
       if (!sessionId) {
@@ -692,6 +707,7 @@ export function MainApp() {
     closeWorkspacePanel,
     lockResize,
     unlockResize,
+    remote,
   ]);
 
   return (
@@ -699,11 +715,12 @@ export function MainApp() {
       {/* 工具接应的后台插件实例：隐藏挂载，仅保证插件工具有人执行 */}
       <BackgroundPluginHost instances={bgPluginInstances} />
       <div className="flex flex-col h-screen w-full overflow-hidden">
+        {remote && <RemoteStatusBanner />}
         <LazyStatusPanel
           // 高亮 = 拓展区面板展开中；绿点 = 会话存在已打开的 App 实例（在用标记）
           extensionActive={showWorkspacePanel}
           extensionAgentActive={runningPluginApps.length > 0}
-          onToggleExtension={handleToggleExtension}
+          onToggleExtension={remote ? undefined : handleToggleExtension}
         />
 
         <div className="flex flex-1 min-h-0">
@@ -744,7 +761,7 @@ export function MainApp() {
                 />
               )}
 
-              {workspacePanelMounted && (
+              {workspacePanelMounted && !remote && (
                 <div className={`min-w-0 flex-1 ${showWorkspacePanel ? 'flex' : 'hidden'}`}>
                   <TabsContainer
                     initialTabKind={workspaceTabKind}
@@ -793,20 +810,24 @@ export function MainApp() {
         </div>
       </div>
 
-      <DefaultPluginOnboarding
-        missing={onboardingMissing}
-        onOpenChange={(open) => {
-          if (!open) setOnboardingMissing(null);
-        }}
-        onComplete={() => {
-          /* 安装后 registry 会热加载，Core 创建时按需感知已装插件，无需额外刷新 */
-        }}
-      />
+      {!remote && (
+        <DefaultPluginOnboarding
+          missing={onboardingMissing}
+          onOpenChange={(open) => {
+            if (!open) setOnboardingMissing(null);
+          }}
+          onComplete={() => {
+            /* 安装后 registry 会热加载，Core 创建时按需感知已装插件，无需额外刷新 */
+          }}
+        />
+      )}
 
-      <FirstRunModelSetup
-        open={modelSetupOpen}
-        onOpenChange={setModelSetupOpen}
-      />
+      {!remote && (
+        <FirstRunModelSetup
+          open={modelSetupOpen}
+          onOpenChange={setModelSetupOpen}
+        />
+      )}
     </SidebarProvider>
   );
 }

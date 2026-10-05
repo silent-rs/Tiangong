@@ -1,0 +1,38 @@
+[package]
+name = "tiangong-relay"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "天工远程访问中继：桌面端反向接入 + 手机 H5 访问代理"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tiangong-relay"
+path = "src/main.rs"
+
+[dependencies]
+silent = { workspace = true, features = ["upgrade"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "signal", "net"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+async-lock = { workspace = true }
+scru128 = { workspace = true }
+subtle = { workspace = true }
+# 与 silent 内 async-tungstenite 同版本，仅用于设置 WebSocket 消息上限
+tungstenite = { version = "0.29", default-features = false }
+base64 = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+futures-util = { workspace = true, features = ["sink"] }
+reqwest = { workspace = true, default-features = false, features = ["json"] }
+if-addrs = "0.15"
+base64 = { workspace = true }

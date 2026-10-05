@@ -1,5 +1,11 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { ContentBlock, RawAttachment } from '@/api/tauri';
+import { isRemoteHost, remoteFileUrl } from '@/api/remote';
+
+/** 本地文件路径转为可加载地址：桌面端走 asset 协议，远程走中继文件代理。 */
+function localFileSrc(path: string): string {
+  return isRemoteHost() ? remoteFileUrl(path) : convertFileSrc(path);
+}
 
 export const MAX_ATTACHMENT_BASE64_BYTES = 50 * 1024 * 1024;
 
@@ -97,13 +103,13 @@ export function resolveAttachmentUrl(url: string): string {
   // 再交给 Tauri 的资源协议转换，避免 Windows WebView 将其当网页地址解析。
   const localPath = fileUrlToLocalPath(url);
   if (localPath !== null) {
-    return convertFileSrc(localPath);
+    return localFileSrc(localPath);
   }
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
     return url;
   }
   if (url.startsWith('/') || /^[A-Za-z]:[\\/]/.test(url) || url.startsWith('\\\\')) {
-    return convertFileSrc(url);
+    return localFileSrc(url);
   }
   return url;
 }

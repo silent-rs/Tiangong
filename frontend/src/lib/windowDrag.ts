@@ -1,5 +1,6 @@
 import type { MouseEvent } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isBrowserHost } from '@/api/host';
 
 /**
  * header 按下拖动窗口的统一入口。
@@ -11,6 +12,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
  */
 export function startWindowDrag(e: MouseEvent) {
   if (e.button !== 0) return;
+  if (isBrowserHost()) return;
   if (!document.hasFocus()) return;
   const target = e.target as HTMLElement;
   if (target.tagName === 'INPUT' || target.tagName === 'BUTTON') return;

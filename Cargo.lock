@@ -4674,6 +4674,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10900,19 +10910,24 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "getrandom 0.3.4",
  "http",
  "http-body-util",
+ "if-addrs",
  "objc2",
  "objc2-app-kit",
  "open",
  "psl",
  "reqwest 0.13.4",
  "rmcp",
+ "rustls",
  "scru128",
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.11.0",
  "silent",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -10935,11 +10950,14 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
+ "tiangong-relay",
  "tiangong-server",
  "tiangong-types",
  "tokio",
+ "tokio-tungstenite",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
+ "webpki-root-certs",
  "wiremock",
 ]
 
@@ -11880,6 +11898,30 @@ dependencies = [
  "serde_json",
  "tiangong-plugin-volcengine-protocol",
  "wit-bindgen 0.60.0",
+]
+
+[[package]]
+name = "tiangong-relay"
+version = "0.16.16"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-lock",
+ "base64 0.23.1",
+ "clap",
+ "futures-util",
+ "if-addrs",
+ "reqwest 0.13.4",
+ "scru128",
+ "serde",
+ "serde_json",
+ "silent",
+ "subtle",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
 ]
 
 [[package]]

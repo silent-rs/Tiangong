@@ -11,6 +11,7 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { listen as tauriListen } from '@tauri-apps/api/event';
 import type { EventCallback, UnlistenFn } from '@tauri-apps/api/event';
+import { isRemoteHost, remoteInvoke, remoteListen } from './remote';
 
 interface WebHost {
   /** 配置服务是否监听在非回环地址（在其他机器的浏览器中配置）。 */
@@ -66,11 +67,20 @@ export async function closeWebHost(): Promise<void> {
 }
 
 export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (isRemoteHost()) return remoteInvoke<T>(command, args);
   if (isWebHost()) return webInvoke<T>(command, args);
   return tauriInvoke<T>(command, args);
 }
 
 export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+  if (isRemoteHost()) return remoteListen(event, handler as Parameters<typeof remoteListen>[1]);
   if (isWebHost()) return Promise.resolve(() => {});
   return tauriListen<T>(event, handler);
 }
+
+/** 是否运行在浏览器中（配置页或远程 H5），此时没有 Tauri 原生能力。 */
+export function isBrowserHost(): boolean {
+  return isWebHost() || isRemoteHost();
+}
+
+export { isRemoteHost };

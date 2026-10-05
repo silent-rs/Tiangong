@@ -135,6 +135,9 @@ fn run_gui() {
 
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
+        .manage(tiangong_app::remote::RemoteService::new(
+            tiangong_config::io::storage_root(),
+        ))
         .setup(|app| {
             use tauri::Listener;
 
@@ -151,6 +154,10 @@ fn run_gui() {
             // 注入 app_handle（builder 链构造时尚无 handle，setup 阶段补入）。
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
+
+            // 远程访问：按配置接入中继，向手机 H5 提供对话侧能力。
+            app.state::<tiangong_app::remote::RemoteService>()
+                .start(app.handle().clone());
 
             // 启动阶段一次性预加载插件快照。后续状态查询、设置页和 Core 创建
             // 只复用该快照，不隐式扫描、编译或热加载插件。
@@ -909,6 +916,11 @@ fn run_gui() {
             tiangong_app::commands::bot_check_update,
             tiangong_app::commands::bot_upgrade,
             tiangong_app::commands::resolve_model_context_window,
+            tiangong_app::remote::remote_get_config,
+            tiangong_app::remote::remote_set_config,
+            tiangong_app::remote::remote_create_pairing,
+            tiangong_app::remote::remote_unbind_device,
+            tiangong_app::remote::remote_generate_token,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

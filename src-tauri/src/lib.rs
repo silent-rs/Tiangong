@@ -8,6 +8,7 @@ mod embedded_server;
 #[cfg(target_os = "macos")]
 pub mod inactive_hover;
 pub mod plugin_instances;
+pub mod remote;
 pub mod session_input;
 mod session_ops;
 mod state_ops;

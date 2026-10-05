@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload, Route } from 'lucide-react';
+import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload, Route, Smartphone } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
@@ -24,6 +24,7 @@ import { PluginIframe } from './PluginIframe';
 import { PluginSandbox } from './PluginSandbox';
 import { PluginManagerSettings } from './PluginManagerSettings';
 import { CODEX_PROVIDER_CONFIG, CODEX_PROVIDER_NAME, CodexAuthPanel } from './CodexAuthPanel';
+import { RemoteAccessSettings } from './RemoteAccessSettings';
 import { type SlotContributionEntry } from '../api/tauri';
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -154,6 +155,12 @@ export function SettingsDialog() {
                   <BotIcon className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">移动端控制</span>
                 </TabsTrigger>
+                {!isWebHost() && (
+                  <TabsTrigger value="remote" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                    <Smartphone className="w-4 h-4 sm:mr-2" />
+                    <span className="sr-only sm:not-sr-only">远程访问</span>
+                  </TabsTrigger>
+                )}
                 <TabsTrigger value="sandbox" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                   <ShieldCheck className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">沙箱管理</span>
@@ -201,6 +208,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <BotPanel />
+              </TabsContent>
+              <TabsContent value="remote" className="m-0 flex-1 min-h-0 overflow-y-auto">
+                <RemoteAccessSettings />
               </TabsContent>
               <TabsContent value="sandbox" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <SandboxSettings onSaveStatusChange={setSaveStatus} />
