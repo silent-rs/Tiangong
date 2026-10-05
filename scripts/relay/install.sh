@@ -217,10 +217,14 @@ EOF
 }
 
 wait_healthy() {
-  local port="${LISTEN##*:}" i
-  for i in $(seq 1 20); do
+  local port="${LISTEN##*:}" scheme="http" _
+  # relay.env 启用了中继自带 HTTPS 时，健康检查也要走 https（证书可能只签给域名，故 -k）。
+  if [[ -f "$ENV_FILE" ]] && grep -qE '^TIANGONG_RELAY_TLS_CERT=.+' "$ENV_FILE"; then
+    scheme="https"
+  fi
+  for _ in $(seq 1 20); do
     if command -v curl >/dev/null 2>&1; then
-      curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1 && return 0
+      curl -fsSk "${scheme}://127.0.0.1:${port}/healthz" >/dev/null 2>&1 && return 0
     elif systemctl is-active --quiet tiangong-relay; then
       return 0
     fi
@@ -334,7 +338,11 @@ do_status() {
   fi
   load_listen_from_env
   if command -v curl >/dev/null 2>&1; then
-    echo "健康检查：$(curl -fsS "http://127.0.0.1:${LISTEN##*:}/healthz" 2>/dev/null || echo 不可达)"
+    local scheme="http"
+    if [[ -f "$ENV_FILE" ]] && grep -qE '^TIANGONG_RELAY_TLS_CERT=.+' "$ENV_FILE"; then
+      scheme="https"
+    fi
+    echo "健康检查：$(curl -fsSk "${scheme}://127.0.0.1:${LISTEN##*:}/healthz" 2>/dev/null || echo 不可达)"
   fi
 }
 
