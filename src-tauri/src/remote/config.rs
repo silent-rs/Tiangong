@@ -47,7 +47,9 @@ pub struct RemoteConfig {
     /// 中继地址（如 `https://relay.example.com`）。
     #[serde(default)]
     pub host: String,
-    /// 中继接入令牌（与中继部署时设置的一致）。
+    /// 通道密钥：由天工自动生成并只保存在本机，接入中继时出示；中继只用它的
+    /// 单向摘要（通道 ID）路由手机端，部署中继时无需配置任何令牌。
+    /// 局域网直连同样使用它，重新生成后需要重新扫码。
     #[serde(default)]
     pub token: String,
     /// 已绑定设备的令牌摘要（hex）。
@@ -86,6 +88,22 @@ impl RemoteConfig {
         Ok(())
     }
 
+    /// 确保存在通道密钥；新生成时返回 true（调用方负责保存）。
+    pub fn ensure_token(&mut self) -> bool {
+        if tiangong_relay::validate_secret(&self.token).is_ok() {
+            return false;
+        }
+        self.token = random_token();
+        true
+    }
+
+    /// 通道 ID（通道密钥的单向摘要），出现在手机端访问地址中。
+    pub fn channel(&self) -> Option<String> {
+        tiangong_relay::validate_secret(&self.token)
+            .ok()
+            .map(|_| tiangong_relay::channel_id(&self.token))
+    }
+
     /// 规范化后的中继地址（去尾部 `/`，要求 http/https）。
     pub fn normalized_host(&self) -> Result<String> {
         normalize_host(&self.host)
@@ -106,10 +124,11 @@ impl RemoteConfig {
         self.lan_port.unwrap_or(DEFAULT_LAN_PORT)
     }
 
-    /// 手机端访问的根地址：中继模式为中继地址，局域网模式为 `http://<局域网地址>:<端口>`。
-    pub fn public_base(&self) -> Result<String> {
-        match self.mode {
-            RemoteMode::Relay => self.normalized_host(),
+    /// 手机端访问地址：中继模式为 `<中继地址>/?c=<通道 ID>`，局域网模式为
+    /// `http://<局域网地址>:<端口>/?c=<通道 ID>`。
+    pub fn access_url(&self) -> Result<String> {
+        let base = match self.mode {
+            RemoteMode::Relay => self.normalized_host()?,
             RemoteMode::Lan => {
                 let host = match normalize_lan_host(&self.lan_host)? {
                     Some(host) => host,
@@ -117,9 +136,11 @@ impl RemoteConfig {
                         .map(|ip| ip.to_string())
                         .context("未能探测到本机局域网地址，请手动填写")?,
                 };
-                Ok(format!("http://{}:{}", host, self.lan_port()))
+                format!("http://{}:{}", host, self.lan_port())
             }
-        }
+        };
+        let channel = self.channel().context("通道密钥缺失，请重新启用远程访问")?;
+        Ok(format!("{base}/?c={channel}"))
     }
 }
 
@@ -247,8 +268,8 @@ impl Default for Pairing {
 }
 
 /// 扫码地址：配对码放在 URL 片段中，不进入中继访问日志。
-pub fn pairing_url(host: &str, code: &str) -> Result<String> {
-    Ok(format!("{}/#pair={code}", normalize_host(host)?))
+pub fn pairing_url(access_url: &str, code: &str) -> String {
+    format!("{access_url}#pair={code}")
 }
 
 #[cfg(test)]
@@ -270,8 +291,8 @@ mod tests {
             "ws://1.2.3.4:8790/agent/ws"
         );
         assert_eq!(
-            pairing_url("https://a.com", "c").unwrap(),
-            "https://a.com/#pair=c"
+            pairing_url("https://a.com/?c=abc", "c"),
+            "https://a.com/?c=abc#pair=c"
         );
     }
 
@@ -315,24 +336,47 @@ mod tests {
             Some("mac.local")
         );
         assert!(normalize_lan_host("a b").is_err());
+        let token = "s".repeat(32);
+        let channel = tiangong_relay::channel_id(&token);
         let config = RemoteConfig {
             mode: RemoteMode::Lan,
             lan_host: "192.168.1.5".into(),
             lan_port: Some(9000),
+            token: token.clone(),
             ..Default::default()
         };
-        assert_eq!(config.public_base().unwrap(), "http://192.168.1.5:9000");
+        assert_eq!(
+            config.access_url().unwrap(),
+            format!("http://192.168.1.5:9000/?c={channel}")
+        );
         let default_port = RemoteConfig {
             lan_host: "10.0.0.2".into(),
+            token: token.clone(),
             ..Default::default()
         };
-        assert_eq!(default_port.public_base().unwrap(), "http://10.0.0.2:8790");
+        assert_eq!(
+            default_port.access_url().unwrap(),
+            format!("http://10.0.0.2:8790/?c={channel}")
+        );
         let relay = RemoteConfig {
             mode: RemoteMode::Relay,
             host: "https://r.example.com/".into(),
+            token,
             ..Default::default()
         };
-        assert_eq!(relay.public_base().unwrap(), "https://r.example.com");
+        assert_eq!(
+            relay.access_url().unwrap(),
+            format!("https://r.example.com/?c={channel}")
+        );
+        // 没有通道密钥时不能生成地址；补齐后保持不变。
+        let mut missing = RemoteConfig {
+            lan_host: "10.0.0.2".into(),
+            ..Default::default()
+        };
+        assert!(missing.access_url().is_err());
+        assert!(missing.ensure_token());
+        assert!(!missing.ensure_token());
+        assert!(missing.access_url().is_ok());
         // 旧配置缺省字段时按局域网模式读取。
         let legacy: RemoteConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(legacy.mode, RemoteMode::Lan);

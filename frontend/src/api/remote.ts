@@ -50,15 +50,21 @@ export function onRemoteStatus(listener: (status: RemoteStatus) => void): () => 
   return () => statusListeners.delete(listener);
 }
 
+/** 通道 ID：首次访问地址中的 `?c=`，中继据此把请求路由到本桌面端（同时写入 Cookie）。 */
+function channelParam(): string {
+  const channel = new URLSearchParams(window.location.search).get('c');
+  return channel ? `&c=${encodeURIComponent(channel)}` : '';
+}
+
 /** 会话媒体文件的远程访问地址（设备在线期间有效）。 */
 export function remoteFileUrl(path: string): string {
-  return `remote/file?path=${encodeURIComponent(path)}&k=${encodeURIComponent(mediaKey)}`;
+  return `remote/file?path=${encodeURIComponent(path)}&k=${encodeURIComponent(mediaKey)}${channelParam()}`;
 }
 
 function takePairCode(): string | null {
   const match = /(?:^#|&)pair=([^&]+)/.exec(window.location.hash);
   if (!match) return null;
-  // 配对码只用一次：立即从地址栏移除，避免被分享或回退复用。
+  // 配对码只用一次：立即从地址栏移除（保留通道参数），避免被分享或回退复用。
   history.replaceState(null, '', window.location.pathname + window.location.search);
   return decodeURIComponent(match[1]);
 }
@@ -67,6 +73,9 @@ function wsUrl(): string {
   const base = new URL('ws', window.location.href);
   base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
   base.hash = '';
+  base.search = '';
+  const channel = new URLSearchParams(window.location.search).get('c');
+  if (channel) base.searchParams.set('c', channel);
   return base.toString();
 }
 

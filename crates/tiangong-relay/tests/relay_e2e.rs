@@ -1,24 +1,27 @@
-//! 中继端到端：桌面端接入、手机端消息透传、静态资源代理与单桌面端约束。
+//! 中继端到端：桌面端以自生成密钥接入、通道隔离、手机端消息透传、静态资源代理
+//! 与单通道单桌面端约束。
 
 use std::time::Duration;
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tiangong_relay::protocol::{AgentToRelay, RelayToAgent};
+use tiangong_relay::{RelayOptions, channel_id};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-const TOKEN: &str = "test-token-0123456789";
+const SECRET: &str = "test-secret-0123456789";
+const OTHER_SECRET: &str = "other-secret-0123456789";
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn start() -> (String, tokio::sync::oneshot::Sender<()>) {
+async fn start(options: RelayOptions) -> (String, tokio::sync::oneshot::Sender<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        tiangong_relay::serve_with_listener(listener, TOKEN.to_string(), async {
+        tiangong_relay::serve_with_listener(listener, options, async {
             let _ = rx.await;
         })
         .await
@@ -28,14 +31,21 @@ async fn start() -> (String, tokio::sync::oneshot::Sender<()>) {
     (format!("127.0.0.1:{}", addr.port()), tx)
 }
 
-async fn connect_agent(addr: &str, token: &str) -> Ws {
+async fn connect_agent(addr: &str, secret: &str) -> Ws {
     let mut request = format!("ws://{addr}/agent/ws")
         .into_client_request()
         .unwrap();
     request
         .headers_mut()
-        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        .insert("Authorization", format!("Bearer {secret}").parse().unwrap());
     tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+
+async fn connect_client(addr: &str, channel: &str) -> Ws {
+    tokio_tungstenite::connect_async(format!("ws://{addr}/ws?c={channel}"))
+        .await
+        .unwrap()
+        .0
 }
 
 async fn next_text(ws: &mut Ws) -> Option<String> {
@@ -62,6 +72,12 @@ async fn next_agent_frame(ws: &mut Ws) -> RelayToAgent {
     serde_json::from_str(&text).unwrap_or_else(|_| panic!("帧格式无效：{text}"))
 }
 
+/// 一段时间内不应收到任何帧。
+async fn expect_silence(ws: &mut Ws) {
+    let result = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    assert!(result.is_err(), "不应收到帧：{result:?}");
+}
+
 async fn send_agent(ws: &mut Ws, frame: AgentToRelay) {
     ws.send(Message::text(serde_json::to_string(&frame).unwrap()))
         .await
@@ -70,28 +86,86 @@ async fn send_agent(ws: &mut Ws, frame: AgentToRelay) {
 
 #[tokio::test]
 async fn relay_end_to_end() {
-    let (addr, _shutdown) = start().await;
+    let (addr, _shutdown) = start(RelayOptions::default()).await;
+    let channel = channel_id(SECRET);
 
-    // 令牌错误被拒绝。
-    let mut bad = connect_agent(&addr, "wrong-token-xxxxxxxx").await;
+    // 过短的密钥被拒绝。
+    let mut bad = connect_agent(&addr, "short").await;
     assert_eq!(next_text(&mut bad).await.as_deref(), Some("close:4003"));
 
-    // 桌面端未在线时页面返回 503。
-    let offline = reqwest::get(format!("http://{addr}/")).await.unwrap();
+    // 未带通道时给出引导页；通道桌面端未在线时页面返回 503。
+    let anonymous = reqwest::get(format!("http://{addr}/")).await.unwrap();
+    assert_eq!(anonymous.status().as_u16(), 404);
+    let offline = reqwest::get(format!("http://{addr}/?c={channel}"))
+        .await
+        .unwrap();
     assert_eq!(offline.status().as_u16(), 503);
 
-    let mut agent = connect_agent(&addr, TOKEN).await;
+    let mut agent = connect_agent(&addr, SECRET).await;
     assert_eq!(next_agent_frame(&mut agent).await, RelayToAgent::Welcome);
 
-    // 同一时刻只接受一个桌面端。
-    let mut second = connect_agent(&addr, TOKEN).await;
+    // 同一通道同一时刻只接受一个桌面端。
+    let mut second = connect_agent(&addr, SECRET).await;
     assert_eq!(next_text(&mut second).await.as_deref(), Some("close:4009"));
 
-    // 静态资源经桌面端提供。
+    // 健康检查按通道报告在线状态。
+    let health: serde_json::Value = reqwest::get(format!("http://{addr}/healthz?c={channel}"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["agent_online"], true);
+    assert_eq!(health["agents"], 1);
+
+    // 首次带通道参数访问：资源经桌面端提供，并写入通道 Cookie。
     let fetch = tokio::spawn({
         let addr = addr.clone();
+        let channel = channel.clone();
         async move {
-            let response = reqwest::get(format!("http://{addr}/assets/a.js?v=1"))
+            let response = reqwest::get(format!("http://{addr}/?c={channel}"))
+                .await
+                .unwrap();
+            let cookie = response
+                .headers()
+                .get("set-cookie")
+                .map(|value| value.to_str().unwrap().to_string());
+            (response.status().as_u16(), cookie)
+        }
+    });
+    let RelayToAgent::AssetReq { req, path, .. } = next_agent_frame(&mut agent).await else {
+        panic!("应收到资源请求");
+    };
+    assert_eq!(path, "");
+    send_agent(
+        &mut agent,
+        AgentToRelay::AssetRes {
+            req,
+            status: 200,
+            mime: "text/html".into(),
+            body: base64::engine::general_purpose::STANDARD.encode("<html></html>"),
+            no_store: true,
+            sandbox: false,
+        },
+    )
+    .await;
+    let (status, cookie) = fetch.await.unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        cookie
+            .unwrap()
+            .starts_with(&format!("tg_channel={channel}"))
+    );
+
+    // 之后的绝对路径资源请求靠 Cookie 路由到同一通道。
+    let fetch = tokio::spawn({
+        let addr = addr.clone();
+        let channel = channel.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .get(format!("http://{addr}/assets/a.js?v=1"))
+                .header("cookie", format!("tg_channel={channel}"))
+                .send()
                 .await
                 .unwrap();
             let status = response.status().as_u16();
@@ -130,9 +204,7 @@ async fn relay_end_to_end() {
     );
 
     // 手机端消息双向透传。
-    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let mut client = connect_client(&addr, &channel).await;
     let RelayToAgent::ClientOpen { conn } = next_agent_frame(&mut agent).await else {
         panic!("应收到连接建立");
     };
@@ -174,9 +246,7 @@ async fn relay_end_to_end() {
     let _ = client.send(Message::text(r#"{"t":"invoke"}"#)).await;
 
     // 手机端主动断开时桌面端收到通知。
-    let (mut client3, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let mut client3 = connect_client(&addr, &channel).await;
     let RelayToAgent::ClientOpen { conn: conn3 } = next_agent_frame(&mut agent).await else {
         panic!("应收到连接建立");
     };
@@ -188,9 +258,7 @@ async fn relay_end_to_end() {
     );
 
     // 桌面端断开后，在线手机端被告知离线。
-    let (mut client2, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let mut client2 = connect_client(&addr, &channel).await;
     assert!(matches!(
         next_agent_frame(&mut agent).await,
         RelayToAgent::ClientOpen { .. }
@@ -198,9 +266,71 @@ async fn relay_end_to_end() {
     agent.close(None).await.unwrap();
     assert_eq!(next_text(&mut client2).await.as_deref(), Some("close:4001"));
 
+    // 桌面端离线时新的手机端连接直接被告知离线。
+    let mut late = connect_client(&addr, &channel).await;
+    assert_eq!(next_text(&mut late).await.as_deref(), Some("close:4001"));
+
     // 断开后新的桌面端可以接入。
-    let mut agent2 = connect_agent(&addr, TOKEN).await;
+    let mut agent2 = connect_agent(&addr, SECRET).await;
     assert_eq!(next_agent_frame(&mut agent2).await, RelayToAgent::Welcome);
+}
+
+/// 多个桌面端共用一个中继：各自通道互不可见。
+#[tokio::test]
+async fn channels_are_isolated() {
+    let (addr, _shutdown) = start(RelayOptions { max_agents: 2 }).await;
+    let mut agent_a = connect_agent(&addr, SECRET).await;
+    assert_eq!(next_agent_frame(&mut agent_a).await, RelayToAgent::Welcome);
+    let mut agent_b = connect_agent(&addr, OTHER_SECRET).await;
+    assert_eq!(next_agent_frame(&mut agent_b).await, RelayToAgent::Welcome);
+
+    // 接入数达到上限。
+    let mut third = connect_agent(&addr, "third-secret-0123456789").await;
+    assert_eq!(next_text(&mut third).await.as_deref(), Some("close:4029"));
+
+    // 手机端只连到自己通道的桌面端。
+    let mut phone_a = connect_client(&addr, &channel_id(SECRET)).await;
+    let RelayToAgent::ClientOpen { conn: conn_a } = next_agent_frame(&mut agent_a).await else {
+        panic!("A 应收到连接建立");
+    };
+    expect_silence(&mut agent_b).await;
+
+    // B 不能向 A 通道的手机端发消息或关闭其连接。
+    send_agent(
+        &mut agent_b,
+        AgentToRelay::ToClient {
+            conn: conn_a.clone(),
+            data: r#"{"t":"spoof"}"#.into(),
+        },
+    )
+    .await;
+    send_agent(
+        &mut agent_b,
+        AgentToRelay::CloseClient {
+            conn: conn_a.clone(),
+            reason: "spoof".into(),
+        },
+    )
+    .await;
+    expect_silence(&mut phone_a).await;
+
+    // A 正常通信。
+    send_agent(
+        &mut agent_a,
+        AgentToRelay::ToClient {
+            conn: conn_a,
+            data: r#"{"t":"ready"}"#.into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut phone_a).await.as_deref(),
+        Some(r#"{"t":"ready"}"#)
+    );
+
+    // B 断开不影响 A 的手机端。
+    agent_b.close(None).await.unwrap();
+    expect_silence(&mut phone_a).await;
 }
 
 fn detect_lan_ip() -> Option<std::net::IpAddr> {
@@ -227,7 +357,7 @@ async fn lan_direct_mode() {
     let port = listener.local_addr().unwrap().port();
     let (_shutdown, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        tiangong_relay::serve_with_listener(listener, TOKEN.to_string(), async {
+        tiangong_relay::serve_with_listener(listener, RelayOptions { max_agents: 1 }, async {
             let _ = rx.await;
         })
         .await
@@ -235,8 +365,9 @@ async fn lan_direct_mode() {
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut agent = connect_agent(&format!("127.0.0.1:{port}"), TOKEN).await;
+    let mut agent = connect_agent(&format!("127.0.0.1:{port}"), SECRET).await;
     assert_eq!(next_agent_frame(&mut agent).await, RelayToAgent::Welcome);
+    let channel = channel_id(SECRET);
 
     let lan = format!("{lan_ip}:{port}");
     // 直连局域网地址：不走系统代理（代理会把私网请求转发出去），并设置短超时。
@@ -245,7 +376,11 @@ async fn lan_direct_mode() {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-    let health: serde_json::Value = match client.get(format!("http://{lan}/healthz")).send().await {
+    let health: serde_json::Value = match client
+        .get(format!("http://{lan}/healthz?c={channel}"))
+        .send()
+        .await
+    {
         Ok(response) => response.json().await.unwrap(),
         Err(error) => {
             // 部分受限环境（如沙箱化终端）会拦截本地编译程序的局域网入站，
@@ -258,7 +393,7 @@ async fn lan_direct_mode() {
 
     let (mut phone, _) = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio_tungstenite::connect_async(format!("ws://{lan}/ws")),
+        tokio_tungstenite::connect_async(format!("ws://{lan}/ws?c={channel}")),
     )
     .await
     .expect("局域网 WebSocket 连接超时")

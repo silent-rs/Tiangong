@@ -920,7 +920,7 @@ fn run_gui() {
             tiangong_app::remote::remote_set_config,
             tiangong_app::remote::remote_create_pairing,
             tiangong_app::remote::remote_unbind_device,
-            tiangong_app::remote::remote_generate_token,
+            tiangong_app::remote::remote_reset_channel,
         ])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())

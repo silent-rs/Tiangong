@@ -1373,8 +1373,8 @@ export const api = {
   remoteUnbindDevice: (): Promise<RemoteAccessView> =>
     invoke('remote_unbind_device'),
 
-  remoteGenerateToken: (): Promise<string> =>
-    invoke('remote_generate_token'),
+  remoteResetChannel: (): Promise<RemoteAccessView> =>
+    invoke('remote_reset_channel'),
 };
 
 export type RemoteAccessMode = 'lan' | 'relay';
@@ -1383,7 +1383,6 @@ export interface RemoteAccessInput {
   enabled: boolean;
   mode: RemoteAccessMode;
   host: string;
-  token: string;
   lanHost: string;
   lanPort: number | null;
 }
@@ -1392,7 +1391,8 @@ export interface RemoteAccessView {
   enabled: boolean;
   mode: RemoteAccessMode;
   host: string;
-  token: string;
+  /** 通道 ID（通道密钥的单向摘要；密钥由天工自动生成，不出桌面端）。 */
+  channel: string | null;
   lan_host: string;
   lan_port: number;
   detected_lan_ip: string | null;

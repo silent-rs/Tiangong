@@ -18,7 +18,6 @@ const STATE_LABEL: Record<RemoteAccessMode, Record<RemoteAccessView['state'], st
 interface Draft {
   mode: RemoteAccessMode;
   host: string;
-  token: string;
   lanHost: string;
   lanPort: string;
 }
@@ -27,7 +26,6 @@ function draftOf(view: RemoteAccessView): Draft {
   return {
     mode: view.mode,
     host: view.host,
-    token: view.token,
     lanHost: view.lan_host,
     lanPort: String(view.lan_port),
   };
@@ -98,7 +96,6 @@ export function RemoteAccessSettings() {
         enabled,
         mode: next.mode,
         host: next.host,
-        token: next.token,
         lanHost: next.lanHost,
         lanPort: port,
       });
@@ -128,6 +125,17 @@ export function RemoteAccessSettings() {
       showSuccess('已解除设备绑定');
     } catch (error) {
       showError('解除绑定失败', String(error));
+    }
+  };
+
+  const resetChannel = async () => {
+    if (!window.confirm('重置通道后，原访问地址立即失效，已绑定的设备需要重新扫码。确定重置？')) return;
+    try {
+      setView(await api.remoteResetChannel());
+      setPairing(null);
+      showSuccess('已重置远程通道');
+    } catch (error) {
+      showError('重置通道失败', String(error));
     }
   };
 
@@ -232,30 +240,28 @@ export function RemoteAccessSettings() {
                   placeholder="https://relay.example.com"
                   autoComplete="off"
                 />
-                <p className="text-xs text-muted-foreground">公网部署请使用 HTTPS 地址，手机扫码后直接打开该地址。</p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="remote-token">接入令牌</Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="remote-token"
-                    type="password"
-                    value={draft.token}
-                    onChange={(e) => setDraft({ ...draft, token: e.target.value })}
-                    placeholder="与中继 TIANGONG_RELAY_TOKEN 一致，至少 16 位"
-                    autoComplete="off"
-                  />
-                  <Button
-                    variant="outline"
-                    title="生成随机令牌"
-                    onClick={() => { void api.remoteGenerateToken().then((token) => setDraft({ ...draft, token })); }}
-                  >
-                    <KeyRound className="mr-1 h-4 w-4" />生成
-                  </Button>
-                </div>
+                <p className="text-xs text-muted-foreground">
+                  填写已部署的 tiangong-relay 地址即可，中继无需配置任何令牌。公网部署请使用 HTTPS 地址。
+                </p>
               </div>
             </>
           )}
+
+          <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 text-xs">
+                <div className="text-sm">远程通道</div>
+                <div className="truncate font-mono text-muted-foreground" title={view.channel ?? undefined}>
+                  {view.channel ?? '启用后自动生成'}
+                </div>
+                <div className="text-muted-foreground">通道密钥由天工自动生成并只保存在本机，中继只能看到通道 ID。</div>
+              </div>
+            </div>
+            <Button variant="ghost" size="sm" disabled={saving || !view.channel} onClick={() => { void resetChannel(); }}>
+              <RefreshCw className="mr-1 h-4 w-4" />重置
+            </Button>
+          </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <Button disabled={saving || (!dirty && view.enabled)} onClick={() => { void save(true); }}>

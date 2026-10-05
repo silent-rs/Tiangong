@@ -1,9 +1,9 @@
 [package]
 name = "tiangong-relay"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "天工远程访问中继：桌面端反向接入 + 手机 H5 访问代理"
+description = "天工远程访问中继：纯转发中继，桌面端以自生成通道密钥反向接入 + 手机 H5 访问代理"
 
 [lib]
 path = "src/lib.rs"
@@ -21,7 +21,7 @@ anyhow = { workspace = true }
 async-channel = { workspace = true }
 async-lock = { workspace = true }
 scru128 = { workspace = true }
-subtle = { workspace = true }
+sha2 = { workspace = true }
 # 与 silent 内 async-tungstenite 同版本，仅用于设置 WebSocket 消息上限
 tungstenite = { version = "0.29", default-features = false }
 base64 = { workspace = true }

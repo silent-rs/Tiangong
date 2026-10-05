@@ -118,6 +118,44 @@
   }
 }
 
+/* 手机 H5（远程模式）：高度跟随可视视口（软键盘弹出时不把输入区顶出屏幕），
+   页面本身不滚动、不回弹；输入控件字号不小于 16px，避免 iOS 聚焦时自动放大。 */
+@layer base {
+  html.tg-remote,
+  html.tg-remote body {
+    height: var(--tg-app-height, 100dvh);
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    touch-action: manipulation;
+  }
+  html.tg-remote body {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+  }
+  html.tg-remote #root {
+    height: 100%;
+  }
+  html.tg-remote .h-screen {
+    height: var(--tg-app-height, 100dvh);
+  }
+  html.tg-remote .min-h-svh {
+    min-height: var(--tg-app-height, 100dvh);
+  }
+  html.tg-remote input,
+  html.tg-remote textarea,
+  html.tg-remote select,
+  html.tg-remote [contenteditable='true'] {
+    font-size: 16px;
+  }
+  /* 软键盘弹出后可视高度很小：限制输入框高度，保证消息区与发送按钮都可见。 */
+  html.tg-remote .mention-editor {
+    max-height: min(200px, calc(var(--tg-app-height, 100dvh) * 0.3));
+  }
+}
+
 /* 刻度尺滚动条的问答预览小卡片：淡入 + 轻微上浮 */
 @keyframes ruler-card-in {
   from {

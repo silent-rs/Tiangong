@@ -2,7 +2,9 @@
 //!
 //! - **局域网直连**（缺省）：桌面端在本机局域网端口内嵌运行中继服务，手机与电脑
 //!   在同一网络内扫码即用，不需要额外部署；
-//! - **中继**：桌面端主动连到自部署的 `tiangong-relay`，适合跨网络访问。
+//! - **中继**：桌面端主动连到自部署的 `tiangong-relay`，适合跨网络访问。中继是纯转发
+//!   服务，部署时无需配置令牌：通道密钥由天工自动生成并只保存在本机，中继只看到
+//!   它的单向摘要（通道 ID），据此把手机端路由到本桌面端。
 //!
 //! 链路：手机浏览器 ⇄ 中继（内嵌或独立部署）⇄（桌面端发起的 WebSocket）⇄ 本模块。
 //!
@@ -88,7 +90,8 @@ pub struct RemoteView {
     pub enabled: bool,
     pub mode: RemoteMode,
     pub host: String,
-    pub token: String,
+    /// 通道 ID（通道密钥的单向摘要，可公开展示；密钥本身不出桌面端）。
+    pub channel: Option<String>,
     /// 局域网直连二维码地址（留空表示自动探测）。
     pub lan_host: String,
     pub lan_port: u16,
@@ -113,8 +116,6 @@ pub struct RemoteConfigInput {
     pub mode: RemoteMode,
     #[serde(default)]
     pub host: String,
-    #[serde(default)]
-    pub token: String,
     #[serde(default)]
     pub lan_host: String,
     #[serde(default)]
@@ -198,8 +199,9 @@ fn rustls_config() -> Result<Arc<rustls::ClientConfig>> {
 
 fn close_reason(code: u16, reason: &str) -> String {
     match code {
-        4003 => "中继拒绝接入：接入令牌无效".to_string(),
-        4009 => "中继已有其他天工桌面端接入".to_string(),
+        4003 => "中继拒绝接入：通道密钥无效".to_string(),
+        4009 => "该通道已有其他天工桌面端接入（可在设置中重置通道）".to_string(),
+        4029 => "中继接入数已满，请联系中继管理员".to_string(),
         _ if reason.is_empty() => format!("中继关闭了连接（{code}）"),
         _ => format!("中继关闭了连接（{code}）：{reason}"),
     }
@@ -246,7 +248,13 @@ async fn invoke_via_ipc(app: &AppHandle, cmd: String, args: Value) -> Result<Val
 
 impl RemoteService {
     pub fn new(root: PathBuf) -> Self {
-        let config = RemoteConfig::load(&root);
+        let mut config = RemoteConfig::load(&root);
+        // 通道密钥由天工自行生成并保存，用户无需配置。
+        if config.ensure_token() {
+            if let Err(error) = config.save(&root) {
+                tracing::warn!(%error, "保存远程访问通道密钥失败");
+            }
+        }
         Self(Arc::new(Shared {
             root,
             inner: Mutex::new(Inner {
@@ -315,16 +323,17 @@ impl RemoteService {
             }
             RemoteMode::Lan => {
                 let port = inner.config.lan_port();
+                let token = inner.config.token.trim().to_string();
                 inner.task = Some(tauri::async_runtime::spawn(async move {
-                    service.run_lan(port).await;
+                    service.run_lan(port, token).await;
                 }));
             }
         }
     }
 
-    /// 局域网直连：监听 `0.0.0.0:<port>` 运行内嵌中继，桌面端经回环接入。
-    /// 接入令牌每次启动随机生成且不出本进程，局域网内其他设备无法冒充桌面端。
-    async fn run_lan(&self, port: u16) {
+    /// 局域网直连：监听 `0.0.0.0:<port>` 运行内嵌中继（仅接入一个桌面端），
+    /// 桌面端经回环用同一通道密钥接入，手机端访问地址与中继模式同构。
+    async fn run_lan(&self, port: u16, token: String) {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => listener,
@@ -338,11 +347,12 @@ impl RemoteService {
                 return;
             }
         };
-        let token = random_token();
         let agent_url = format!("ws://127.0.0.1:{port}/agent/ws");
         tracing::info!(port, "远程访问：局域网直连已监听");
+        // 内嵌中继只服务本机：先占住唯一接入名额，局域网内其他设备无法接入。
+        let options = tiangong_relay::RelayOptions { max_agents: 1 };
         tokio::select! {
-            result = tiangong_relay::serve_with_listener(listener, token.clone(), std::future::pending()) => {
+            result = tiangong_relay::serve_with_listener(listener, options, std::future::pending()) => {
                 if let Err(error) = result {
                     self.set_state(LinkState::Error, Some(format!("局域网服务异常退出：{error:#}")));
                 }
@@ -685,11 +695,11 @@ impl RemoteService {
             enabled: inner.config.enabled,
             mode: inner.config.mode,
             host: inner.config.host.clone(),
-            token: inner.config.token.clone(),
+            channel: inner.config.channel(),
             lan_host: inner.config.lan_host.clone(),
             lan_port: inner.config.lan_port(),
             detected_lan_ip: config::detect_lan_ip().map(|ip| ip.to_string()),
-            access_url: inner.config.public_base().ok(),
+            access_url: inner.config.access_url().ok(),
             state: inner.state,
             last_error: inner.last_error.clone(),
             device_bound: inner.config.device_token_sha256.is_some(),
@@ -704,20 +714,15 @@ impl RemoteService {
             enabled,
             mode,
             host,
-            token,
             lan_host,
             lan_port,
         } = input;
         let host = host.trim().to_string();
-        let token = token.trim().to_string();
         let host = if (enabled && mode == RemoteMode::Relay) || !host.is_empty() {
             config::normalize_host(&host)?
         } else {
             host
         };
-        if enabled && mode == RemoteMode::Relay {
-            tiangong_relay::validate_token(&token)?;
-        }
         let lan_host = config::normalize_lan_host(&lan_host)?.unwrap_or_default();
         if lan_port == Some(0) {
             anyhow::bail!("局域网端口不能为 0");
@@ -726,19 +731,38 @@ impl RemoteService {
             let mut inner = self.lock();
             let changed_target = inner.config.mode != mode
                 || inner.config.host != host
-                || inner.config.token != token
                 || inner.config.lan_host != lan_host
                 || inner.config.lan_port != lan_port;
             inner.config.enabled = enabled;
             inner.config.mode = mode;
             inner.config.host = host;
-            inner.config.token = token;
             inner.config.lan_host = lan_host;
             inner.config.lan_port = lan_port;
+            inner.config.ensure_token();
             if changed_target {
                 inner.pairing = None;
             }
             inner.config.save(&self.0.root)?;
+        }
+        self.apply();
+        Ok(self.view())
+    }
+
+    /// 重置通道：换一个新的通道密钥（旧访问地址失效，已绑定设备需重新扫码）。
+    /// 用于通道地址泄露或被他人占用时。
+    pub fn reset_channel(&self) -> Result<RemoteView> {
+        let previous = {
+            let mut inner = self.lock();
+            inner.config.token = random_token();
+            inner.config.device_token_sha256 = None;
+            inner.config.device_label = None;
+            inner.config.device_bound_at = None;
+            inner.pairing = None;
+            inner.config.save(&self.0.root)?;
+            inner.device.take().map(|device| device.conn)
+        };
+        if let Some(conn) = previous {
+            self.reject(&conn, "桌面端已重置远程通道，请重新扫码");
         }
         self.apply();
         Ok(self.view())
@@ -749,9 +773,9 @@ impl RemoteService {
         if !inner.config.enabled {
             anyhow::bail!("请先启用远程访问");
         }
-        let base = inner.config.public_base()?;
+        let access_url = inner.config.access_url()?;
         let pairing = Pairing::new();
-        let url = config::pairing_url(&base, pairing.code())?;
+        let url = config::pairing_url(&access_url, pairing.code());
         let expires_in_secs = pairing.remaining().as_secs();
         inner.pairing = Some(pairing);
         Ok(PairingView {
@@ -802,6 +826,6 @@ pub fn remote_unbind_device(state: State<'_, RemoteService>) -> Result<RemoteVie
 }
 
 #[tauri::command]
-pub fn remote_generate_token() -> String {
-    random_token()
+pub fn remote_reset_channel(state: State<'_, RemoteService>) -> Result<RemoteView, String> {
+    state.reset_channel().map_err(|error| error.to_string())
 }

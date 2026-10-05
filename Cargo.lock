@@ -11902,7 +11902,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-relay"
-version = "0.16.16"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -11915,8 +11915,8 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "silent",
- "subtle",
  "tokio",
  "tokio-tungstenite",
  "tracing",
