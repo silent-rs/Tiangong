@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '@/store/useStore';
+import { isBrowserHost } from '@/api/host';
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 const INITIAL_DELAY_MS = 5000; // 5s
@@ -10,6 +11,8 @@ export function useUpdateCheck() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    // 远程 H5 没有应用更新能力。
+    if (isBrowserHost()) return;
     let cancelled = false;
 
     const doCheck = async () => {

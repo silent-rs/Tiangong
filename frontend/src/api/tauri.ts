@@ -1359,7 +1359,56 @@ export const api = {
 
   onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>
     listen<BridgeEventPayload>('bridge_event', (event) => callback(event.payload)),
+
+  // ── 远程访问（经中继向手机 H5 提供对话侧能力） ──
+  remoteGetConfig: (): Promise<RemoteAccessView> =>
+    invoke('remote_get_config'),
+
+  remoteSetConfig: (config: RemoteAccessInput): Promise<RemoteAccessView> =>
+    invoke('remote_set_config', { config }),
+
+  remoteCreatePairing: (): Promise<RemotePairing> =>
+    invoke('remote_create_pairing'),
+
+  remoteUnbindDevice: (): Promise<RemoteAccessView> =>
+    invoke('remote_unbind_device'),
+
+  remoteResetChannel: (): Promise<RemoteAccessView> =>
+    invoke('remote_reset_channel'),
 };
+
+export type RemoteAccessMode = 'lan' | 'relay';
+
+export interface RemoteAccessInput {
+  enabled: boolean;
+  mode: RemoteAccessMode;
+  host: string;
+  lanHost: string;
+  lanPort: number | null;
+}
+
+export interface RemoteAccessView {
+  enabled: boolean;
+  mode: RemoteAccessMode;
+  host: string;
+  /** 通道 ID（通道密钥的单向摘要；密钥由天工自动生成，不出桌面端）。 */
+  channel: string | null;
+  lan_host: string;
+  lan_port: number;
+  detected_lan_ip: string | null;
+  access_url: string | null;
+  state: 'disabled' | 'connecting' | 'connected' | 'error';
+  last_error: string | null;
+  device_bound: boolean;
+  device_label: string | null;
+  device_bound_at: string | null;
+  device_online: boolean;
+}
+
+export interface RemotePairing {
+  url: string;
+  expires_in_secs: number;
+}
 
 /// 插件设置页贡献项。
 export interface PluginContributionEntry {

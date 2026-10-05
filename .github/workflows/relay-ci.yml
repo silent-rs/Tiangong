@@ -1,0 +1,71 @@
+name: Relay CI
+# 天工远程中继：测试、Linux musl 静态构建与安装脚本检查。
+# （fmt / clippy / nextest 已由 App CI 按受影响 crate 覆盖，这里只补发布形态相关的检查。）
+on:
+  pull_request:
+    paths:
+      - "crates/tiangong-relay/**"
+      - "scripts/relay/**"
+      - ".github/workflows/relay-ci.yml"
+      - ".github/workflows/release-relay.yml"
+      - "Cargo.lock"
+  workflow_dispatch:
+concurrency:
+  group: relay-ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+defaults:
+  run:
+    shell: bash
+jobs:
+  install-script:
+    name: Install script lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n scripts/relay/install.sh
+      - name: ShellCheck
+        run: shellcheck -S warning scripts/relay/install.sh
+
+  build-musl:
+    name: Build & smoke (x86_64 musl)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: relay-ci-musl
+      - name: Test
+        run: cargo test --locked -p tiangong-relay
+      - name: Build static binary
+        run: cargo build --release --locked -p tiangong-relay --target x86_64-unknown-linux-musl
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          bin=target/x86_64-unknown-linux-musl/release/tiangong-relay
+          if ldd "$bin" 2>&1 | grep -q '=>'; then
+            echo "::error::中继二进制不是静态链接"
+            exit 1
+          fi
+          "$bin" --version
+          "$bin" --listen 127.0.0.1:18790 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18790/healthz; then
+              echo
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::中继启动后健康检查失败"
+          exit 1

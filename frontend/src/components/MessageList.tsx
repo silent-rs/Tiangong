@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
-import { listen } from '@tauri-apps/api/event';
+import { isRemoteHost, listen } from '@/api/host';
 import { hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
 import {
   type Attachment,
@@ -691,6 +691,34 @@ export function MessageList() {
   }, []);
 
   const handleAttachFilesForEdit = useCallback(async () => {
+    // 远程模式：从手机选择文件，以 data URL 上传。
+    if (isRemoteHost()) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.onchange = async () => {
+        const files = Array.from(input.files ?? []);
+        try {
+          const uploaded = await Promise.all(files.map(async (file) => {
+            const mimeType = file.type || 'application/octet-stream';
+            if (estimatedBase64Size(file.size) > 50 * 1024 * 1024) {
+              throw new Error(`附件"${file.name}"超过 50MB，已停止添加。`);
+            }
+            return {
+              kind: attachmentKindFromMime(mimeType),
+              source: await fileToDataUrl(file),
+              original_name: file.name,
+              mime_type: mimeType,
+            };
+          }));
+          handleSetEditingAttachments(prev => [...prev, ...uploaded]);
+        } catch (err) {
+          alert(err instanceof Error ? err.message : '读取附件失败');
+        }
+      };
+      input.click();
+      return;
+    }
     try {
       const selected = await open({
         multiple: true,

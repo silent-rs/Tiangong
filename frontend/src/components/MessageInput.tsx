@@ -8,6 +8,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, type MentionTarget, type RawAttachment } from '@/api/tauri';
+import { isRemoteHost } from '@/api/host';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { useMentionGroups } from '@/hooks/useMentionGroups';
 import {
@@ -660,7 +661,8 @@ export function MessageInput({
   }, [addAttachments]);
 
   useEffect(() => {
-    if (!isTextDropTargetActive) {
+    // 远程 H5 没有原生拖放事件，使用 DOM 拖放（handleDrop）。
+    if (!isTextDropTargetActive || isRemoteHost()) {
       setIsDraggingFiles(false);
       return;
     }
@@ -725,6 +727,20 @@ export function MessageInput({
       };
     }));
     addAttachments(items);
+  };
+
+  const remoteFileInputRef = useRef<HTMLInputElement>(null);
+  const handleRemoteFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    if (files.length === 0) return;
+    try {
+      await filesToAttachments(files);
+      editorRef.current?.focus();
+    } catch (err) {
+      console.error('读取附件失败:', err);
+      alert(err instanceof Error ? err.message : '读取附件失败');
+    }
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -938,6 +954,11 @@ export function MessageInput({
   };
 
   const handleAttachFiles = async () => {
+    // 远程模式：从手机选择文件，以 data URL 上传（不引用桌面端本地路径）。
+    if (isRemoteHost()) {
+      remoteFileInputRef.current?.click();
+      return;
+    }
     try {
       const selected = await open({
         multiple: true,
@@ -968,6 +989,8 @@ export function MessageInput({
   };
 
   const handleChangeCwd = async () => {
+    // 远程模式不开放选择桌面端目录。
+    if (isRemoteHost()) return;
     try {
       const selected = await open({ directory: true, multiple: false, defaultPath: sessionCwd || undefined, title: '选择对话目录' });
       if (selected && typeof selected === 'string') { await setSessionCwd(selected); }
@@ -1326,6 +1349,16 @@ export function MessageInput({
               {/* 按钮区域 */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
                 <SessionInputPluginHost slot="session.input-action" />
+                {isRemoteHost() && (
+                  <input
+                    ref={remoteFileInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    accept="image/*,audio/*,video/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.json,.csv"
+                    onChange={(e) => { void handleRemoteFiles(e); }}
+                  />
+                )}
                 <Button
                   onClick={handleAttachFiles}
                   disabled={!cacheKey}
@@ -1376,7 +1409,7 @@ export function MessageInput({
               <div className="flex items-center gap-3 min-w-0">
                 <button
                   onClick={handleChangeCwd}
-                  disabled={!isIdle}
+                  disabled={!isIdle || isRemoteHost()}
                   className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
                   title={sessionCwd || '点击设置对话目录'}
                 >

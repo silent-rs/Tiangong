@@ -12,6 +12,7 @@ import {
 import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
+import { isRemoteHost } from '@/api/host';
 import { useToast } from './Toast';
 import type { Session } from '@/api/tauri';
 
@@ -93,6 +94,7 @@ export function AppSidebar() {
     activeSessionId,
     isNewConversation,
     sessionRunStatuses,
+    newConversationId,
     startNewConversation,
     switchSession,
     deleteSession,
@@ -127,8 +129,9 @@ export function AppSidebar() {
   // 是否存在非默认（workspace 分类）分组；没有时默认分组不收缩、全部平铺
   const hasWorkspaceGroups = groups.some((g) => !g.isDefault);
 
-  // 浮出态（窄窗口）下切换/新建会话后收起侧边栏，避免持续遮挡内容
-  const conversationKey = isNewConversation ? 'new' : activeSessionId;
+  // 浮出态（窄窗口/手机）下切换/新建会话后收起侧边栏，避免持续遮挡内容。
+  // 新建对话时会话 ID 为 newConversationId（已在新对话中再次新建也会变化）。
+  const conversationKey = isNewConversation ? `new:${newConversationId ?? ''}` : activeSessionId;
   useEffect(() => {
     if (isMobile && openMobile) {
       setOpenMobile(false);
@@ -136,6 +139,16 @@ export function AppSidebar() {
     // 仅在会话切换时触发；isMobile/openMobile 不入依赖（否则打开浮层会被立即收起）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationKey]);
+
+  // 点击后立即收起浮层：不等异步的新建/切换完成，也覆盖"点了当前会话"这类不触发切换的情况。
+  const closeOverlay = () => {
+    if (isMobile) setOpenMobile(false);
+  };
+  const newConversation = (cwd?: string) => {
+    if (isSending) return;
+    closeOverlay();
+    void startNewConversation(cwd);
+  };
 
   const showMore = (key: string, total: number) => {
     setVisibleCounts((prev) => {
@@ -187,6 +200,7 @@ export function AppSidebar() {
           type="button"
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
           onClick={() => {
+            closeOverlay();
             if (session.id !== activeSessionId || isNewConversation) {
               switchSession(session.id);
             }
@@ -271,7 +285,7 @@ export function AppSidebar() {
               </div>
               <button
                 className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
-                onClick={() => !isSending && startNewConversation(group.fullPath)}
+                onClick={() => newConversation(group.fullPath)}
                 disabled={isSending}
                 title="在此 workspace 下新建对话"
               >
@@ -300,7 +314,7 @@ export function AppSidebar() {
         <ContextMenuContent>
           <ContextMenuItem
             disabled={isSending}
-            onSelect={() => startNewConversation(group.fullPath)}
+            onSelect={() => newConversation(group.fullPath)}
           >
             <FilePlus2 className="w-4 h-4 mr-2" />
             新对话
@@ -333,7 +347,7 @@ export function AppSidebar() {
           variant="ghost"
           className="w-full justify-start"
           disabled={isSending}
-          onClick={() => !isSending && startNewConversation()}
+          onClick={() => newConversation()}
         >
           <Plus className="w-4 h-4 mr-2" />
           新对话
@@ -353,10 +367,12 @@ export function AppSidebar() {
         </div>
       </ScrollArea>
 
-      {/* 底部设置 */}
-      <div className="p-2 border-t border-sidebar-border shrink-0">
-        <SettingsDialog />
-      </div>
+      {/* 底部设置（远程模式不开放设置） */}
+      {!isRemoteHost() && (
+        <div className="p-2 border-t border-sidebar-border shrink-0">
+          <SettingsDialog />
+        </div>
+      )}
     </div>
   );
 

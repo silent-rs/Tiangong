@@ -45,6 +45,18 @@ toml = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 # 浏览器配置页（`tiangong config` / CLI `/config`）：调用系统默认浏览器打开
 open = "5"
+# 远程访问：经中继（tiangong-relay）向手机 H5 提供对话侧能力
+tiangong-relay = { workspace = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "__rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+webpki-root-certs = "1"
+# 叠加系统信任的根证书（自签/企业 CA、本地 mkcert），已在依赖树中（Apache-2.0 OR ISC OR MIT）
+rustls-native-certs = "0.8"
+sha2 = { workspace = true }
+subtle = { workspace = true }
+getrandom = { workspace = true }
+# 局域网直连：枚举网卡以探测手机可访问的局域网地址（MIT OR BSD-3-Clause）
+if-addrs = "0.15"
 
 # Tauri 相关依赖
 tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable"] }

@@ -1,0 +1,238 @@
+name: Release Relay
+# 天工远程中继（tiangong-relay）独立发版，仅提供 Linux 静态二进制（musl）。
+#
+# - tag 约定：relay-v<version>（如 relay-v0.1.0），须与 crates/tiangong-relay/Cargo.toml 版本一致
+# - 制品：tiangong-relay-<target> 与同名 .sha256，另附 install.sh（安装 / 升级 / systemd 守护）
+# - 同步上传阿里云 OSS（国内下载默认走 OSS）：
+#     relay/<tag>/<制品>      版本目录
+#     relay/latest.json        最新版本指针（草稿发布不更新）
+#     relay/install.sh         最新安装脚本固定入口
+# - 一键安装：curl -fsSL https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/relay/install.sh | sudo bash
+#   （Release 不标记为 latest，避免抢占桌面端发布）
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布标签，如 relay-v0.1.0"
+        required: true
+        type: string
+      release_draft:
+        description: "创建草稿 Release"
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "relay-v*"
+concurrency:
+  group: release-relay-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+defaults:
+  run:
+    shell: bash
+jobs:
+  resolve:
+    name: Resolve tag
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.parse.outputs.tag }}
+      version: ${{ steps.parse.outputs.version }}
+      draft: ${{ steps.parse.outputs.draft }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse tag
+        id: parse
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRAFT: ${{ inputs.release_draft }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+            draft="false"
+          else
+            tag="$INPUT_TAG"
+            draft="$INPUT_DRAFT"
+          fi
+          if [[ ! "$tag" =~ ^relay-v([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+            echo "::error::标签格式无效：期望 'relay-v<version>'（如 relay-v0.1.0），实际 '$tag'"
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          crate_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/tiangong-relay/Cargo.toml | head -n1)"
+          if [[ "$crate_version" != "$version" ]]; then
+            echo "::error::标签版本 $version 与 crates/tiangong-relay/Cargo.toml 版本 $crate_version 不一致"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: relay-${{ matrix.target }}
+      - name: Test relay
+        run: cargo test --locked -p tiangong-relay
+      - name: Build static binary
+        run: cargo build --release --locked -p tiangong-relay --target ${{ matrix.target }}
+      - name: Stage artifact
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset="tiangong-relay-${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/tiangong-relay"
+          file "$bin"
+          # 静态链接：任意发行版可直接运行
+          if ldd "$bin" 2>&1 | grep -q '=>'; then
+            echo "::error::$bin 不是静态链接"
+            exit 1
+          fi
+          actual="$("$bin" --version | awk '{print $2}')"
+          if [[ "$actual" != "$VERSION" ]]; then
+            echo "::error::二进制版本 $actual 与标签版本 $VERSION 不一致"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$bin" "dist/${asset}"
+          chmod +x "dist/${asset}"
+          (cd dist && sha256sum "${asset}" | awk '{print $1}' > "${asset}.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  upload-to-oss:
+    name: Upload to Aliyun OSS
+    needs: [resolve, publish]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: relay-*
+          path: dist
+          merge-multiple: true
+      - name: Stage install script
+        run: |
+          set -euo pipefail
+          cp scripts/relay/install.sh dist/install.sh
+          (cd dist && sha256sum install.sh | awk '{print $1}' > install.sh.sha256)
+      - name: Install ossutil
+        run: |
+          curl -fsSL https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip -o /tmp/ossutil.zip
+          unzip -o /tmp/ossutil.zip -d /tmp/ossutil
+          sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
+      - name: Configure ossutil
+        run: |
+          ossutil config \
+            -e oss-cn-hangzhou.aliyuncs.com \
+            -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
+            -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+      - name: Upload versioned artifacts
+        working-directory: dist
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 版本目录：relay/<tag>/，与 GitHub Release 制品同名
+          for f in tiangong-relay-* install.sh install.sh.sha256; do
+            echo "  $f -> relay/${TAG}/${f}"
+            ossutil cp "$f" "oss://silent-tiangong/relay/${TAG}/${f}" -f
+          done
+      - name: Update latest pointer
+        # 草稿发布只上传版本目录，不切换 latest
+        if: ${{ needs.resolve.outputs.draft != 'true' }}
+        working-directory: dist
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          jq -n --arg tag "$TAG" --arg version "$VERSION" \
+            '{tag: $tag, version: $version}' > latest.json
+          cat latest.json
+          # 安装脚本据此解析最新版本；固定入口 relay/install.sh 始终为最新脚本
+          ossutil cp latest.json oss://silent-tiangong/relay/latest.json -f
+          ossutil cp install.sh oss://silent-tiangong/relay/install.sh -f
+          ossutil cp install.sh.sha256 oss://silent-tiangong/relay/install.sh.sha256 -f
+      - name: Verify download
+        if: ${{ needs.resolve.outputs.draft != 'true' }}
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          base="https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/relay"
+          curl -fsS "${base}/latest.json?run=${GITHUB_RUN_ID}" | jq -e --arg tag "$TAG" '.tag == $tag'
+          curl -fsSI "${base}/${TAG}/tiangong-relay-x86_64-unknown-linux-musl" | head -n1
+
+  publish:
+    name: Publish GitHub Release
+    needs: [resolve, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: relay-*
+          path: dist
+          merge-multiple: true
+      - name: Attach install script
+        run: |
+          set -euo pipefail
+          cp scripts/relay/install.sh dist/install.sh
+          (cd dist && sha256sum install.sh | awk '{print $1}' > install.sh.sha256)
+          ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          draft: ${{ needs.resolve.outputs.draft }}
+          # 中继与桌面端共用仓库：不抢占桌面端的 latest 标记
+          make_latest: false
+          name: "天工远程中继 ${{ needs.resolve.outputs.tag }}"
+          body: |
+            # 天工远程中继 ${{ needs.resolve.outputs.tag }}
+
+            纯转发中继，部署时无需任何令牌：天工桌面端自动生成通道密钥接入。仅提供 Linux 静态二进制（x86_64 / aarch64）。
+
+            ## 安装（systemd 守护运行）
+            ```bash
+            curl -fsSL https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/relay/install.sh | sudo bash
+            ```
+
+            ## 升级
+            ```bash
+            curl -fsSL https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/relay/install.sh | sudo bash -s -- upgrade
+            ```
+
+            指定本版本：追加 `--version ${{ needs.resolve.outputs.tag }}`；海外服务器可加环境变量 `TIANGONG_RELAY_SOURCE=github` 改从 GitHub Release 下载。
+
+            部署说明见 `docs/remote-access.md`。
+          files: |
+            dist/tiangong-relay-*
+            dist/install.sh
+            dist/install.sh.sha256

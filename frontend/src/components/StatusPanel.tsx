@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
+import { isRemoteHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
 import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
@@ -54,6 +55,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   const savingRef = useRef(false);
 
   const { theme, setTheme } = useTheme();
+  const remote = isRemoteHost();
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
   const activeSession = isNewConversation ? null : sessions.find((s) => s.id === activeSessionId);
   const currentTitle = isNewConversation ? '新对话' : (activeSession?.title || '新对话');
@@ -115,7 +117,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   };
 
 
-  const titlePaddingLeft = navigator.platform.includes('Mac') ? '80px' : '16px';
+  const titlePaddingLeft = !remote && navigator.platform.includes('Mac') ? '80px' : '16px';
 
   return (
       <header
@@ -183,7 +185,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
         <span data-no-drag className="contents">
           <GlobalStatusPluginHost />
         </span>
-        {updateAvailable && (
+        {updateAvailable && !remote && (
           <button
             data-no-drag
             onClick={() => setPendingSettingsTab('about')}
@@ -194,16 +196,18 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <span>v{updateAvailable.version}</span>
           </button>
         )}
-        <SearchButton />
-        <button
-          data-no-drag
-          onClick={() => setPendingSettingsTab('plugin-manager')}
-          className="text-muted-foreground transition-colors hover:text-foreground"
-          title="插件管理"
-        >
-          <Puzzle className="w-4 h-4" />
-        </button>
-        {onToggleExtension && (
+        {!remote && <SearchButton />}
+        {!remote && (
+          <button
+            data-no-drag
+            onClick={() => setPendingSettingsTab('plugin-manager')}
+            className="text-muted-foreground transition-colors hover:text-foreground"
+            title="插件管理"
+          >
+            <Puzzle className="w-4 h-4" />
+          </button>
+        )}
+        {onToggleExtension && !remote && (
           <button
             data-no-drag
             onClick={onToggleExtension}
@@ -224,14 +228,16 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             )}
           </button>
         )}
-        <button
-          data-no-drag
-          onClick={cycleTheme}
-          className="text-muted-foreground hover:text-foreground transition-colors"
-          title={themeLabel}
-        >
-          <ThemeIcon className="w-4 h-4" />
-        </button>
+        {!remote && (
+          <button
+            data-no-drag
+            onClick={cycleTheme}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            title={themeLabel}
+          >
+            <ThemeIcon className="w-4 h-4" />
+          </button>
+        )}
       </div>
     </header>
   );
