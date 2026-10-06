@@ -72,6 +72,8 @@ export function MessageList() {
   const userOutline = useStore(s => s.userOutline);
   const historyStart = useStore(s => s.historyStart);
   const loadingOlderMessages = useStore(s => s.loadingOlderMessages);
+  const switchingSessionId = useStore(s => s.switchingSessionId);
+  const remoteHost = isRemoteHost();
   const searchActive = useSearchStore(s => s.searchActive);
 
   // 用 ref 持有搜索 query 和 matchIndex，避免每次按键导致 MessageList 重渲染
@@ -999,10 +1001,23 @@ export function MessageList() {
 
   return (
     <div className="relative h-full">
+    {/* 远程模式切换会话加载中：遮住旧会话内容并提示正在加载（桌面本地加载很快，不显示以免闪烁） */}
+    {remoteHost && switchingSessionId && (
+      <div
+        className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="flex items-center gap-2 rounded-full border border-border/60 bg-background px-4 py-2 text-sm text-muted-foreground shadow-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          正在从电脑加载对话…
+        </div>
+      </div>
+    )}
     <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
-          {messages.length === 0 && !isThinking ? (
+          {messages.length === 0 && !isThinking && !(remoteHost && switchingSessionId) ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
                 <Cpu className="w-8 h-8 text-primary-foreground" />
@@ -1032,8 +1047,9 @@ export function MessageList() {
                     type="button"
                     disabled={loadingOlderMessages}
                     onClick={() => void useStore.getState().loadOlderMessages()}
-                    className="text-xs text-muted-foreground hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
+                    className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
                   >
+                    {loadingOlderMessages && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                     {loadingOlderMessages ? '正在加载更早的对话…' : `加载更早的对话（还有 ${historyStart} 条消息）`}
                   </button>
                 </div>

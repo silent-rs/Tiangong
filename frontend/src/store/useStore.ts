@@ -934,6 +934,8 @@ export interface AppState {
   userOutline: UserOutlineItem[] | null;
   /** 正在向前加载历史。 */
   loadingOlderMessages: boolean;
+  /** 正在从后端加载、尚未展示的目标会话（切换会话加载提示）。 */
+  switchingSessionId: string | null;
   runStatus: string;
   runSummary: string;
   lastDurationMs: number | null;
@@ -1103,6 +1105,7 @@ export const useStore = create<AppState>((set, get) => ({
   historyStart: 0,
   userOutline: null,
   loadingOlderMessages: false,
+  switchingSessionId: null,
   runStatus: 'idle',
   runSummary: '',
   lastDurationMs: null,
@@ -1252,6 +1255,8 @@ export const useStore = create<AppState>((set, get) => ({
   startNewConversation: async (targetCwd?: string) => {
     switchRequestVersion += 1;
     const requestVersion = ++newConversationRequestVersion;
+    // 进行中的会话切换被新对话取代：撤下其加载提示。
+    if (get().switchingSessionId) set({ switchingSessionId: null });
     const workspaceDir = get().workspaceDir;
     const newConversationCwd = targetCwd || workspaceDir;
     const { reasoningEffortPerSession } = get();
@@ -1308,6 +1313,14 @@ export const useStore = create<AppState>((set, get) => ({
   switchSession: async (id: string) => {
     newConversationRequestVersion += 1;
     const requestVersion = ++switchRequestVersion;
+    // 需要从后端拉取会话时显示加载提示（远程模式下传输较慢，避免看似无响应）。
+    const needsFetch = !sessionViewCaches.get(id)?.hydrated;
+    if (needsFetch) set({ switchingSessionId: id });
+    const clearSwitching = () => {
+      if (requestVersion === switchRequestVersion && get().switchingSessionId === id) {
+        set({ switchingSessionId: null });
+      }
+    };
     try {
       const initialState = get();
       const existingCache = sessionViewCaches.get(id);
@@ -1369,6 +1382,8 @@ export const useStore = create<AppState>((set, get) => ({
       });
     } catch (error) {
       console.error('切换会话失败:', error);
+    } finally {
+      clearSwitching();
     }
   },
 
