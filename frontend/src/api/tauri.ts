@@ -852,8 +852,8 @@ export const api = {
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
     invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
 
-  cancelTurn: (): Promise<boolean> =>
-    invoke('cancel_turn'),
+  cancelTurn: (sessionId: string): Promise<boolean> =>
+    invoke('cancel_turn', { sessionId }),
 
   appendMessage: (
     sessionId: string,

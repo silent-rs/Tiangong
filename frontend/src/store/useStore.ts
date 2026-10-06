@@ -2054,8 +2054,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 取消当前执行
   cancelTurn: async () => {
+    // 取消目标即当前界面所在会话（新对话首轮投递期间为预留的会话 ID），
+    // 明确传给后端，不依赖后端的全局活动会话。
     const cacheKey = selectCurrentInputCacheKey(get());
-    if (cacheKey) {
+    if (!cacheKey) return false;
+    {
       const cache = sessionViewCaches.get(cacheKey);
       if (cache && cache.runStatus !== 'idle') {
         sessionViewCaches.set(cacheKey, { ...cache, runSummary: '正在取消...' });
@@ -2073,7 +2076,7 @@ export const useStore = create<AppState>((set, get) => ({
             : '取消仍在后台处理中，可再次点击停止重试',
         }));
       }, 2000);
-      const cancelled = await api.cancelTurn();
+      const cancelled = await api.cancelTurn(cacheKey);
       if (cancelled) {
         let settledCache: InputCache | undefined;
         set((state) => {

@@ -1314,10 +1314,15 @@ async fn restore_edited_session(
         .await;
 }
 #[tauri::command]
-pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> {
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
+pub async fn cancel_turn(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<bool, String> {
+    // 取消目标由前端明确指定。全局 active_session_id 由桌面端与远程设备共用，
+    // 且新对话首轮投递完成前尚未切换过去，按它取消会命中错误（空闲）会话。
+    if session_id.trim().is_empty() {
+        return Err("取消目标会话 ID 不能为空".to_string());
+    }
     if state.inner().core_manager.cancel_core(&session_id) {
         return Ok(true);
     }
