@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "发布标签，留空时使用 v0.16.16"
+        description: "发布标签，留空时使用 v0.16.17"
         required: false
         type: string
       release_draft:
@@ -66,7 +66,7 @@ jobs:
           else
             tag="${{ inputs.tag }}"
             if [[ -z "$tag" ]]; then
-              tag="v0.16.16"
+              tag="v0.16.17"
             fi
             draft="${{ inputs.release_draft }}"
           fi
@@ -258,7 +258,7 @@ jobs:
         with:
           projectPath: .
           tagName: ${{ steps.release.outputs.tag }}
-          releaseName: "天工 v0.16.16"
+          releaseName: "天工 v0.16.17"
           releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: ${{ steps.release.outputs.draft }}
           prerelease: false
@@ -307,7 +307,7 @@ jobs:
           else
             tag="${{ inputs.tag }}"
             if [[ -z "$tag" ]]; then
-              tag="v0.16.16"
+              tag="v0.16.17"
             fi
           fi
           # Strip leading 'v' or 'app-v' to get bare version
