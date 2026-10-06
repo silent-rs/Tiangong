@@ -60,4 +60,10 @@ export default {
   	}
   },
   plugins: [require("tailwindcss-animate")],
+  future: {
+    // hover: 只在支持悬停的设备上生效（@media (hover: hover)）。触屏（手机远程访问）
+    // 上 iOS Safari 会把首次点击当作悬停以呈现 hover 样式变化（如会话行的删除按钮
+    // 由透明变为可见），导致要点两次才切换会话。
+    hoverOnlyWhenSupported: true,
+  },
 }

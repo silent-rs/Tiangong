@@ -214,7 +214,7 @@ export function AppSidebar() {
         {!isRunning && (
           <button
             type="button"
-            className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+            className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-destructive transition-opacity"
             onClick={() => {
               setPendingDeleteSessionId(session.id);
               setShowDeleteConfirm(true);
@@ -284,7 +284,7 @@ export function AppSidebar() {
                 <span className="text-muted-foreground/70 shrink-0">{group.sessions.length}</span>
               </div>
               <button
-                className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
+                className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
                 onClick={() => newConversation(group.fullPath)}
                 disabled={isSending}
                 title="在此 workspace 下新建对话"
