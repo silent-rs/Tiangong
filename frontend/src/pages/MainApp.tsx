@@ -25,6 +25,7 @@ import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import { isRemoteHost, listen as hostListen } from '@/api/host';
 import { RemoteStatusBanner } from '@/components/RemoteStatusBanner';
+import { getRemoteStatus, onRemoteStatus } from '@/api/remote';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize, currentMonitor } from '@tauri-apps/api/window';
 
@@ -309,6 +310,17 @@ export function MainApp() {
 
     loadSessions();
 
+    // 远程模式：连接（重新）就绪后重新拉取会话列表，避免首个请求因连接
+    // 中断失败后列表一直为空；首次就绪与挂载时的加载重复无害（请求版本去重）。
+    let unsubscribeRemote: (() => void) | undefined;
+    if (remote) {
+      let wasReady = getRemoteStatus().kind === 'ready';
+      unsubscribeRemote = onRemoteStatus((status) => {
+        const ready = status.kind === 'ready';
+        if (ready && !wasReady) void loadSessions({ protective: true });
+        wasReady = ready;
+      });
+    }
     if (!remote) {
       // 首次启动时检测缺失的默认插件，有缺失则弹出推荐安装引导。
       // 独立 catch，网络异常或检测失败都不影响主初始化流程。
@@ -685,6 +697,7 @@ export function MainApp() {
       // 先标记本轮 disposed，使尚未完成的异步注册流程在后续 guard 处自行放弃；
       // 再释放本轮已收纳的监听，避免遗留孤儿监听导致事件被重复消费。
       disposed = true;
+      unsubscribeRemote?.();
       while (cleanups.length > 0) {
         const un = cleanups.pop();
         un?.();

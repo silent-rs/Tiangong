@@ -9,8 +9,8 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu';
-import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight, RefreshCw, Search, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
 import { isRemoteHost } from '@/api/host';
 import { useToast } from './Toast';
@@ -100,6 +100,8 @@ export function AppSidebar() {
     deleteSession,
     deleteSessionsByCwd,
     isLoadingSessions,
+    sessionsLoadError,
+    loadSessions,
     workspaceDir,
   } = useStore();
   const isSending = useStore(selectCurrentIsSending);
@@ -116,10 +118,18 @@ export function AppSidebar() {
   // 折叠的分组：true 时整组收起不显示任何会话（点击分组头切换），展开后恢复之前的显示数
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
-  // 仅展示有消息的会话或当前活跃会话
+  // 仅展示有消息的会话或当前活跃会话；有过滤词时再按标题与 workspace 路径过滤（不区分大小写）。
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterText, setFilterText] = useState('');
+  const filterQuery = filterText.trim().toLowerCase();
   const visibleSessions = useMemo(
-    () => sessions.filter((s) => s.message_count > 0 || s.id === activeSessionId),
-    [sessions, activeSessionId],
+    () => sessions.filter((s) => {
+      if (!(s.message_count > 0 || s.id === activeSessionId)) return false;
+      if (!filterQuery) return true;
+      return (s.title || '新对话').toLowerCase().includes(filterQuery)
+        || (s.cwd || '').toLowerCase().includes(filterQuery);
+    }),
+    [sessions, activeSessionId, filterQuery],
   );
 
   const groups = useMemo(
@@ -148,6 +158,33 @@ export function AppSidebar() {
     if (isSending) return;
     closeOverlay();
     void startNewConversation(cwd);
+  };
+
+  // 刷新会话列表：普通加载（显示加载中并在失败时给出原因），供远程连接异常后手动恢复。
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await loadSessions();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // 过滤会话：打开时聚焦输入框，关闭时清空过滤词恢复完整列表。
+  const filterInputRef = useRef<HTMLInputElement>(null);
+  const closeFilter = () => {
+    setFilterOpen(false);
+    setFilterText('');
+  };
+  const toggleFilter = () => {
+    if (filterOpen) {
+      closeFilter();
+      return;
+    }
+    setFilterOpen(true);
+    requestAnimationFrame(() => filterInputRef.current?.focus());
   };
 
   const showMore = (key: string, total: number) => {
@@ -230,16 +267,19 @@ export function AppSidebar() {
   };
 
   const renderGroup = (group: SessionGroup) => {
-    const isCollapsed = collapsedGroups[group.key];
+    const isCollapsed = !filterQuery && collapsedGroups[group.key];
     // 默认分组在无 workspace 分类分组时不收缩，全部平铺
     const allowCollapse = group.isDefault ? hasWorkspaceGroups : true;
-    // 渐进显示：未记录时为 COLLAPSED_LIMIT，"显示更多"逐步追加直至全部
-    const visibleCount = Math.min(visibleCounts[group.key] ?? COLLAPSED_LIMIT, group.sessions.length);
+    // 渐进显示：未记录时为 COLLAPSED_LIMIT，"显示更多"逐步追加直至全部；
+    // 过滤时直接展示全部匹配项，避免命中项藏在「显示更多」后面。
+    const visibleCount = filterQuery
+      ? group.sessions.length
+      : Math.min(visibleCounts[group.key] ?? COLLAPSED_LIMIT, group.sessions.length);
     const allShown = visibleCount >= group.sessions.length;
     const visibleItems = !allowCollapse || allShown
       ? group.sessions
       : group.sessions.slice(0, visibleCount);
-    const canCollapse = allowCollapse && group.sessions.length > COLLAPSED_LIMIT;
+    const canCollapse = !filterQuery && allowCollapse && group.sessions.length > COLLAPSED_LIMIT;
     // workspace 下任一会话正在运行时，禁用批量删除。
     const groupHasRunning = group.sessions.some(
       (session) => !!sessionRunStatuses[session.id],
@@ -341,17 +381,72 @@ export function AppSidebar() {
 
   const content = (
     <div className="flex flex-col h-full min-h-0 min-w-[var(--sidebar-width,16rem)]">
-      {/* 新建会话 */}
-      <div className="p-2 shrink-0">
-        <Button
-          variant="ghost"
-          className="w-full justify-start"
-          disabled={isSending}
-          onClick={() => newConversation()}
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          新对话
-        </Button>
+      {/* 顶部操作：刷新列表 | 新对话 | 过滤会话 */}
+      <div className="p-2 shrink-0 space-y-2">
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9 shrink-0"
+            disabled={isLoadingSessions || refreshing}
+            onClick={handleRefresh}
+            title="刷新会话列表"
+            aria-label="刷新会话列表"
+          >
+            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+          </Button>
+          <Button
+            variant="ghost"
+            className="flex-1 min-w-0 justify-start"
+            disabled={isSending}
+            onClick={() => newConversation()}
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            新对话
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`h-9 w-9 shrink-0 ${filterOpen || filterQuery ? 'bg-sidebar-accent text-sidebar-accent-foreground' : ''}`}
+            onClick={toggleFilter}
+            title="搜索会话"
+            aria-label="搜索会话"
+            aria-pressed={filterOpen}
+          >
+            <Search className="w-4 h-4" />
+          </Button>
+        </div>
+        {filterOpen && (
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              ref={filterInputRef}
+              type="search"
+              value={filterText}
+              onChange={(event) => setFilterText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') closeFilter();
+              }}
+              placeholder="按标题或工作目录过滤"
+              aria-label="过滤会话"
+              className="h-8 w-full rounded-md border border-sidebar-border bg-background pl-8 pr-8 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            {filterText && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterText('');
+                  filterInputRef.current?.focus();
+                }}
+                className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                title="清空"
+                aria-label="清空过滤"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 会话列表（按 workspace 分组） */}
@@ -359,6 +454,16 @@ export function AppSidebar() {
         <div className="space-y-2 py-1 pr-1">
           {isLoadingSessions ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">加载中...</div>
+          ) : groups.length === 0 && sessionsLoadError ? (
+            <div className="space-y-2 px-3 py-2 text-sm">
+              <div className="text-destructive">会话列表加载失败</div>
+              <div className="break-all text-xs text-muted-foreground">{sessionsLoadError}</div>
+              <Button size="sm" variant="outline" onClick={() => void loadSessions()}>
+                重试
+              </Button>
+            </div>
+          ) : groups.length === 0 && filterQuery ? (
+            <div className="px-3 py-2 text-sm text-muted-foreground">没有匹配的对话</div>
           ) : groups.length === 0 ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">暂无对话</div>
           ) : (

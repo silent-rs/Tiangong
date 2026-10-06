@@ -251,6 +251,15 @@ fn result_frame(id: u64, value: Value, gzip: bool) -> Value {
     json!({ "t": "result", "id": id, "ok": true, "value": value })
 }
 
+/// 命令失败原因的日志文本：字符串错误原样输出，其他结构序列化后截断。
+fn error_text(error: &Value) -> String {
+    let text = match error {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    text.chars().take(300).collect()
+}
+
 fn gzip_base64(bytes: &[u8]) -> Option<String> {
     use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(
@@ -671,20 +680,39 @@ impl RemoteService {
                 &conn,
                 json!({ "t": "result", "id": id, "ok": true, "value": value }),
             ),
-            Decision::Deny(reason) => self.send_client(
-                &conn,
-                json!({ "t": "result", "id": id, "ok": false, "error": reason }),
-            ),
+            Decision::Deny(reason) => {
+                tracing::warn!(%cmd, reason, "远程命令被拒绝");
+                self.send_client(
+                    &conn,
+                    json!({ "t": "result", "id": id, "ok": false, "error": reason }),
+                )
+            }
             Decision::Allow => {
                 let Some(app) = self.app().cloned() else {
+                    tracing::warn!(%cmd, "远程命令无法执行：应用句柄未就绪");
+                    self.send_client(
+                        &conn,
+                        json!({ "t": "result", "id": id, "ok": false, "error": "天工桌面端尚未就绪，请稍后重试" }),
+                    );
                     return;
                 };
                 let service = self.clone();
                 tauri::async_runtime::spawn(async move {
                     let slim = matches!(cmd.as_str(), "load_session" | "load_session_messages");
-                    let result = invoke_via_ipc(&app, cmd, args).await;
+                    let started = std::time::Instant::now();
+                    let result = invoke_via_ipc(&app, cmd.clone(), args).await;
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    // 只记录命令名、结果、耗时与大小，不记录参数与内容（可能含对话与附件）。
+                    match &result {
+                        Ok(_) => tracing::info!(%cmd, elapsed_ms, "远程命令完成"),
+                        Err(error) => {
+                            let error = error_text(error);
+                            tracing::warn!(%cmd, elapsed_ms, %error, "远程命令失败");
+                        }
+                    }
                     // 期间设备被取代则不再回复。
                     if !service.is_active(&conn) {
+                        tracing::info!(%cmd, "远程设备已更换，丢弃命令结果");
                         return;
                     }
                     let gzip = service.device_gzip(&conn);
@@ -700,8 +728,15 @@ impl RemoteService {
                         }
                     })
                     .await;
-                    if let Ok(reply) = reply {
-                        service.send_client(&conn, reply);
+                    match reply {
+                        Ok(reply) => service.send_client(&conn, reply),
+                        Err(error) => {
+                            tracing::warn!(%error, "构造远程命令结果失败");
+                            service.send_client(
+                                &conn,
+                                json!({ "t": "result", "id": id, "ok": false, "error": "构造命令结果失败" }),
+                            );
+                        }
                     }
                 });
             }

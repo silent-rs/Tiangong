@@ -999,6 +999,8 @@ export interface AppState {
 
   // 加载状态
   isLoadingSessions: boolean;
+  /** 最近一次会话列表加载失败的原因；成功加载后清空。 */
+  sessionsLoadError: string | null;
 
   // 更新检查
   updateAvailable: null | { version: string; body?: string; date?: string };
@@ -1143,6 +1145,7 @@ export const useStore = create<AppState>((set, get) => ({
   streamingContent: '',
   streamingReasoningContent: '',
   isLoadingSessions: false,
+  sessionsLoadError: null,
   agents: [],
 
   // 加载会话列表
@@ -1200,6 +1203,7 @@ export const useStore = create<AppState>((set, get) => ({
         : null;
       set((state) => ({
         sessions,
+        sessionsLoadError: null,
         isLoadingSessions: ordinaryLoadInFlight === 0 ? false : state.isLoadingSessions,
         newConversationId,
         sessionCwd: activeSessionId ? state.sessionCwd : state.workspaceDir,
@@ -1225,6 +1229,10 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     } catch (error) {
       console.error('加载会话失败:', error);
+      // 只记录最新一次请求的失败；成功的刷新会清除该提示。
+      if (requestVersion === loadSessionsRequestVersion) {
+        set({ sessionsLoadError: error instanceof Error ? error.message : String(error) });
+      }
       finishOrdinary();
       return;
     }
