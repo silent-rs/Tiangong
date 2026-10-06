@@ -318,4 +318,20 @@ describe('loadSessions refresh contract', () => {
     expect(switchSessionMock).toHaveBeenNthCalledWith(2, 'healthy-session');
     expect(useStore.getState().activeSessionId).toBe('healthy-session');
   });
+
+  it('切换会话加载期间给出加载提示，完成或失败后撤下', async () => {
+    const pendingLoad = deferred<ReturnType<typeof loadedSession>>();
+    loadSessionMock.mockReturnValueOnce(pendingLoad.promise);
+
+    const switching = useStore.getState().switchSession('slow-session');
+    expect(useStore.getState().switchingSessionId).toBe('slow-session');
+    pendingLoad.resolve(loadedSession('slow-session'));
+    await switching;
+    expect(useStore.getState().switchingSessionId).toBeNull();
+    expect(useStore.getState().activeSessionId).toBe('slow-session');
+
+    loadSessionMock.mockRejectedValueOnce(new Error('网络中断'));
+    await useStore.getState().switchSession('broken-session');
+    expect(useStore.getState().switchingSessionId).toBeNull();
+  });
 });

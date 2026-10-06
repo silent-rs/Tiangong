@@ -281,9 +281,13 @@ pub async fn switch_session(
 }
 
 /// 从 Session 真相源加载指定会话的界面数据。
+///
+/// `paged = true` 时只返回最近一段消息（在轮次边界切分），更早的消息由
+/// [`load_session_messages`] 向前分页；不传时返回全部（兼容旧调用方）。
 #[tauri::command]
 pub async fn load_session(
     session_id: String,
+    paged: Option<bool>,
     state: State<'_, TiangongApp>,
 ) -> Result<crate::view::LoadedSessionView, String> {
     let config = state.core_manager.config().snapshot();
@@ -310,7 +314,57 @@ pub async fn load_session(
         &mut view.messages,
         &state.agent_worker_view_messages(&session_id),
     );
+    view.total = view.messages.len();
+    if paged.unwrap_or(false) {
+        let start = crate::view::page_start(
+            &view.messages,
+            view.messages.len(),
+            crate::view::SESSION_PAGE_MIN_MESSAGES,
+            crate::view::SESSION_PAGE_MAX_BYTES,
+        );
+        view.messages.drain(..start);
+        view.start = start;
+    }
     Ok(view)
+}
+
+/// 向前分页加载会话历史：返回 `before_id` 之前的一段消息（在轮次边界切分）。
+///
+/// `before_id` 找不到（如会话被编辑重发截断）时返回错误，前端据此整体重新加载。
+#[tauri::command]
+pub async fn load_session_messages(
+    session_id: String,
+    before_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<crate::view::SessionMessagesPage, String> {
+    let manager = state.core_manager.clone();
+    let session_id_for_load = session_id.clone();
+    let session = tokio::task::spawn_blocking(move || manager.load_session(&session_id_for_load))
+        .await
+        .map_err(|error| format!("等待会话加载失败：{error}"))??;
+    let mut messages = session.messages;
+    merge_agent_worker_messages(
+        &mut messages,
+        &state.agent_worker_view_messages(&session_id),
+    );
+    let total = messages.len();
+    let end = messages
+        .iter()
+        .position(|message| message.id == before_id)
+        .ok_or_else(|| "会话历史已变化，请重新加载".to_string())?;
+    let start = crate::view::page_start(
+        &messages,
+        end,
+        crate::view::SESSION_PAGE_MIN_MESSAGES,
+        crate::view::SESSION_PAGE_MAX_BYTES,
+    );
+    messages.truncate(end);
+    messages.drain(..start);
+    Ok(crate::view::SessionMessagesPage {
+        messages,
+        start,
+        total,
+    })
 }
 
 /// 删除指定会话（逻辑删除）。
@@ -1260,10 +1314,15 @@ async fn restore_edited_session(
         .await;
 }
 #[tauri::command]
-pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> {
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
+pub async fn cancel_turn(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<bool, String> {
+    // 取消目标由前端明确指定。全局 active_session_id 由桌面端与远程设备共用，
+    // 且新对话首轮投递完成前尚未切换过去，按它取消会命中错误（空闲）会话。
+    if session_id.trim().is_empty() {
+        return Err("取消目标会话 ID 不能为空".to_string());
+    }
     if state.inner().core_manager.cancel_core(&session_id) {
         return Ok(true);
     }

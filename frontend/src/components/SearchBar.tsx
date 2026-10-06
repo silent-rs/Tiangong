@@ -1,5 +1,5 @@
 import { useEffect, useRef, useMemo, useState, KeyboardEvent } from 'react';
-import { ChevronUp, ChevronDown, X, ChevronDown as DropdownIcon } from 'lucide-react';
+import { ChevronUp, ChevronDown, X, ChevronDown as DropdownIcon, Loader2 } from 'lucide-react';
 import { useSearchStore, type SearchScope } from '@/store/useSearchStore';
 import { useStore } from '@/store/useStore';
 import { findSearchMatches } from '@/utils/search';
@@ -26,6 +26,8 @@ export function SearchBar() {
   const scopeRef = useRef<HTMLDivElement>(null);
 
   const messages = useStore((s) => s.messages);
+  // 搜索前会自动向前加载全部历史；加载完成前结果不完整，显示加载提示。
+  const loadingHistory = useStore((s) => s.loadingOlderMessages);
   const setCurrentMatchInfo = useSearchStore((s) => s.setCurrentMatchInfo);
 
   const searchResults = useMemo(() => {
@@ -120,8 +122,9 @@ export function SearchBar() {
           </div>
         )}
       </div>
-      <span className="shrink-0 text-xs text-muted-foreground min-w-[3rem] text-right">
-        {position}
+      <span className="shrink-0 inline-flex items-center justify-end gap-1 text-xs text-muted-foreground min-w-[3rem] text-right">
+        {loadingHistory && <Loader2 className="h-3 w-3 animate-spin" />}
+        {loadingHistory ? '加载全部历史…' : position}
       </span>
       <button
         onClick={() => prevMatch(matchCount)}

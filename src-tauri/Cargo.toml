@@ -53,6 +53,8 @@ webpki-root-certs = "1"
 # 叠加系统信任的根证书（自签/企业 CA、本地 mkcert），已在依赖树中（Apache-2.0 OR ISC OR MIT）
 rustls-native-certs = "0.8"
 sha2 = { workspace = true }
+# 远程访问：长会话等大结果 gzip 压缩后再经中继传输（已在依赖树中）
+flate2 = "1"
 subtle = { workspace = true }
 getrandom = { workspace = true }
 # 局域网直连：枚举网卡以探测手机可访问的局域网地址（MIT OR BSD-3-Clause）

@@ -84,6 +84,17 @@ function failPending(reason: string) {
   pending.clear();
 }
 
+/** 浏览器是否支持 gzip 解压（iOS 16.4+ / Chrome 80+）；不支持时桌面端发送原始结果。 */
+const SUPPORTS_GZIP = typeof DecompressionStream !== 'undefined';
+
+async function gunzipJson(packed: string): Promise<unknown> {
+  const binary = atob(packed);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return JSON.parse(await new Response(stream).text());
+}
+
 function connect() {
   if (stopped) return;
   setStatus({ kind: 'connecting' });
@@ -96,6 +107,7 @@ function connect() {
       pair: pairCode ?? undefined,
       device: localStorage.getItem(DEVICE_KEY) ?? undefined,
       label: navigator.userAgent,
+      gzip: SUPPORTS_GZIP,
     }));
   };
   ws.onmessage = (message) => {
@@ -123,6 +135,14 @@ function connect() {
         pending.delete(Number(data.id));
         if (data.ok) entry.resolve(data.value);
         else entry.reject(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+        break;
+      }
+      case 'result_z': {
+        // 大结果（如长会话）以 gzip + base64 传输，解压后再交给调用方。
+        const entry = pending.get(Number(data.id));
+        if (!entry) return;
+        pending.delete(Number(data.id));
+        gunzipJson(String(data.z)).then(entry.resolve, (error: unknown) => entry.reject(`解压结果失败：${String(error)}`));
         break;
       }
       case 'event': {

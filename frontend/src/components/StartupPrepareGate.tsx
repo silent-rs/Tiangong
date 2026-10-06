@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { api } from '@/api/tauri';
+import { isRemoteHost } from '@/api/host';
 import type { SandboxUpdateState, StartupPrepareResult } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
@@ -54,6 +55,13 @@ function notifyDegraded(info: DegradedInfo, showWarning: (title: string, message
  * 提示一次，常驻状态位在输入区底部与设置页沙箱管理。
  */
 export function StartupPrepareGate({ children }: { children: React.ReactNode }) {
+  // 远程（手机 H5）：桌面端早已完成启动准备，手机端只是同一会话的另一块屏幕，
+  // 不重复执行启动流程，也不提示宿主侧的沙箱/插件降级（修复入口在桌面端设置）。
+  if (isRemoteHost()) return <>{children}</>;
+  return <LocalStartupPrepareGate>{children}</LocalStartupPrepareGate>;
+}
+
+function LocalStartupPrepareGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const attempt = useRef(0);
   const { showWarning } = useToast();

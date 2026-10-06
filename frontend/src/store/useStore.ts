@@ -12,6 +12,7 @@ import type {
   InputCache,
   StreamEvent,
   TokenStats,
+  UserOutlineItem,
 } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
 import {
@@ -39,6 +40,10 @@ let ordinaryLoadInFlight = 0;
 interface SessionViewCache {
   hydrated: boolean;
   messages: Message[];
+  /** 已加载消息的起点在完整历史中的下标；0 表示已加载全部历史。 */
+  historyStart: number;
+  /** 完整的用户提问目录（加载会话时由后端给出）；null 表示未知，按已加载消息推算。 */
+  userOutline: UserOutlineItem[] | null;
   runStatus: string;
   runSummary: string;
   contextManagementPending: boolean;
@@ -63,6 +68,8 @@ export interface ToolCallFinished {
 }
 
 const sessionViewCaches = new Map<string, SessionViewCache>();
+// 正在进行的向前分段加载（同一时刻只发一个请求，后来者复用其结果）。
+let olderMessagesInFlight: Promise<boolean> | null = null;
 
 /** 输入队列消息：执行期间暂存、等待空闲后按序投递的用户输入（含附件快照）。 */
 export interface QueuedInputMessage {
@@ -524,6 +531,8 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
   return {
     hydrated: false,
     messages: [],
+    historyStart: 0,
+    userOutline: null,
     runStatus,
     runSummary: runStatus === 'idle' ? '' : '正在处理',
     contextManagementPending: false,
@@ -544,6 +553,8 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
   return {
     hydrated: !!state.activeSessionId,
     messages: state.messages,
+    historyStart: state.historyStart,
+    userOutline: state.userOutline,
     runStatus: state.runStatus,
     runSummary: state.runSummary,
     contextManagementPending: false,
@@ -571,6 +582,8 @@ function hydrateSessionViewCache(
     ...current,
     hydrated: true,
     messages,
+    historyStart: loaded.start ?? 0,
+    userOutline: loaded.user_outline ?? null,
     tokenStats: cacheHasNewerUsage && current.tokenStats
       ? current.tokenStats
       : loaded.token_stats,
@@ -832,6 +845,8 @@ function applyEventToSessionView(
 
   return {
     messages,
+    historyStart: current.historyStart,
+    userOutline: syncUserOutline(current.userOutline, current.messages, messages),
     runStatus,
     runSummary,
     contextManagementPending,
@@ -849,6 +864,62 @@ function applyEventToSessionView(
   };
 }
 
+/** 是否为轮次锚点（真正的用户提问），与后端 `is_turn_anchor`、前端分组规则一致。 */
+export function isTurnAnchor(message: Message): boolean {
+  return message.role === 'user'
+    && !message.worker_id
+    && message.phase !== 'hostinjected'
+    && message.phase !== 'compressedresume';
+}
+
+/**
+ * 流式事件追加新消息后同步提问目录：新增的用户提问追加到末尾；目录中最后一条
+ * 还没有回复预览时，用其后第一段非空文本补齐。消息未变化时原样返回。
+ *
+ * 流式事件频繁触发，只从末尾向前扫描到最后一个轮次锚点（一轮的长度），
+ * 不遍历整个会话。
+ */
+function syncUserOutline(
+  outline: UserOutlineItem[] | null,
+  previous: Message[],
+  messages: Message[],
+): UserOutlineItem[] | null {
+  if (!outline || previous === messages) return outline;
+  let anchorIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (isTurnAnchor(messages[i])) {
+      anchorIndex = i;
+      break;
+    }
+  }
+  if (anchorIndex < 0) return outline;
+  const anchor = messages[anchorIndex];
+  let next = outline;
+  const last = outline[outline.length - 1];
+  const question = textContent(anchor).trim().slice(0, 160);
+  if (!last || last.id !== anchor.id) {
+    const existing = outline.findIndex((item) => item.id === anchor.id);
+    // 编辑重发：沿用原用户消息 id 并截断其后的历史，目录同步截断并刷新提问。
+    next = existing >= 0
+      ? [...outline.slice(0, existing), { id: anchor.id, question, answer: '' }]
+      : [...outline, { id: anchor.id, question, answer: '' }];
+  } else if (last.question !== question) {
+    next = [...outline.slice(0, -1), { id: anchor.id, question, answer: '' }];
+  }
+  const tail = next[next.length - 1];
+  if (!tail.answer) {
+    for (let i = anchorIndex + 1; i < messages.length; i += 1) {
+      const text = textContent(messages[i]).trim();
+      if (text) {
+        if (next === outline) next = [...outline];
+        next[next.length - 1] = { ...tail, answer: text.slice(0, 360) };
+        break;
+      }
+    }
+  }
+  return next;
+}
+
 export interface AppState {
   // 状态
   sessions: Session[];
@@ -857,6 +928,14 @@ export interface AppState {
   newConversationId: string | null;
   inputCaches: InputCacheMap;
   messages: Message[];
+  /** 已加载消息起点在完整历史中的下标；大于 0 表示前面还有未加载的历史。 */
+  historyStart: number;
+  /** 完整的用户提问目录（刻度条、回合跳转）；null 表示按已加载消息推算。 */
+  userOutline: UserOutlineItem[] | null;
+  /** 正在向前加载历史。 */
+  loadingOlderMessages: boolean;
+  /** 正在从后端加载、尚未展示的目标会话（切换会话加载提示）。 */
+  switchingSessionId: string | null;
   runStatus: string;
   runSummary: string;
   lastDurationMs: number | null;
@@ -938,6 +1017,10 @@ export interface AppState {
   updateSessionMeta: (sessionId: string) => Promise<void>;
   startNewConversation: (targetCwd?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
+  /** 向前加载一段更早的历史；返回是否加载到了新消息。 */
+  loadOlderMessages: () => Promise<boolean>;
+  /** 加载当前会话的全部历史（会话内搜索前调用）。 */
+  loadAllMessages: () => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   deleteSessionsByCwd: (cwd: string) => Promise<{ failed: number }>;
 
@@ -1019,6 +1102,10 @@ export const useStore = create<AppState>((set, get) => ({
   newConversationId: null as string | null,
   inputCaches: {},
   messages: [],
+  historyStart: 0,
+  userOutline: null,
+  loadingOlderMessages: false,
+  switchingSessionId: null,
   runStatus: 'idle',
   runSummary: '',
   lastDurationMs: null,
@@ -1168,6 +1255,8 @@ export const useStore = create<AppState>((set, get) => ({
   startNewConversation: async (targetCwd?: string) => {
     switchRequestVersion += 1;
     const requestVersion = ++newConversationRequestVersion;
+    // 进行中的会话切换被新对话取代：撤下其加载提示。
+    if (get().switchingSessionId) set({ switchingSessionId: null });
     const workspaceDir = get().workspaceDir;
     const newConversationCwd = targetCwd || workspaceDir;
     const { reasoningEffortPerSession } = get();
@@ -1196,6 +1285,8 @@ export const useStore = create<AppState>((set, get) => ({
           newConversationId,
           inputCaches,
           messages: [],
+          historyStart: 0,
+          userOutline: null,
           runStatus: 'idle',
           runSummary: '',
           lastUsage: null,
@@ -1222,6 +1313,14 @@ export const useStore = create<AppState>((set, get) => ({
   switchSession: async (id: string) => {
     newConversationRequestVersion += 1;
     const requestVersion = ++switchRequestVersion;
+    // 需要从后端拉取会话时显示加载提示（远程模式下传输较慢，避免看似无响应）。
+    const needsFetch = !sessionViewCaches.get(id)?.hydrated;
+    if (needsFetch) set({ switchingSessionId: id });
+    const clearSwitching = () => {
+      if (requestVersion === switchRequestVersion && get().switchingSessionId === id) {
+        set({ switchingSessionId: null });
+      }
+    };
     try {
       const initialState = get();
       const existingCache = sessionViewCaches.get(id);
@@ -1258,6 +1357,8 @@ export const useStore = create<AppState>((set, get) => ({
             } : {}),
           },
           messages: cache.messages,
+          historyStart: cache.historyStart,
+          userOutline: cache.userOutline,
           runStatus: cache.runStatus,
           runSummary: cache.runSummary,
           lastDurationMs: cache.lastDurationMs,
@@ -1281,6 +1382,65 @@ export const useStore = create<AppState>((set, get) => ({
       });
     } catch (error) {
       console.error('切换会话失败:', error);
+    } finally {
+      clearSwitching();
+    }
+  },
+
+  loadOlderMessages: async () => {
+    const sessionId = get().activeSessionId;
+    const state = get();
+    // 已有加载在进行：等待它完成并复用结果，避免滚动加载与回合跳转互相打断。
+    if (olderMessagesInFlight) return olderMessagesInFlight;
+    if (!sessionId || state.historyStart <= 0) return false;
+    const first = state.messages[0];
+    if (!first) return false;
+    const run = (async () => {
+    set({ loadingOlderMessages: true });
+    try {
+      const page = await api.loadSessionMessages(sessionId, first.id);
+      let added = false;
+      set((current) => {
+        // 期间切走会话或历史已被替换：丢弃本段结果。
+        if (current.activeSessionId !== sessionId || current.messages[0]?.id !== first.id) {
+          return { loadingOlderMessages: false };
+        }
+        const known = new Set(current.messages.map((message) => message.id));
+        const older = page.messages.filter((message) => !known.has(message.id));
+        added = older.length > 0;
+        const messages = [...older, ...current.messages];
+        const cache = sessionViewCaches.get(sessionId);
+        if (cache) {
+          sessionViewCaches.set(sessionId, { ...cache, messages, historyStart: page.start });
+        }
+        return { messages, historyStart: page.start, loadingOlderMessages: false };
+      });
+      return added;
+    } catch (error) {
+      console.error('加载更早的历史失败:', error);
+      set({ loadingOlderMessages: false });
+      // 历史已变化（如编辑重发截断）：丢弃缓存整体重新加载当前会话。
+      if (get().activeSessionId === sessionId) {
+        sessionViewCaches.delete(sessionId);
+        await get().switchSession(sessionId);
+      }
+      return false;
+    }
+    })();
+    olderMessagesInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (olderMessagesInFlight === run) olderMessagesInFlight = null;
+    }
+  },
+
+  loadAllMessages: async () => {
+    const sessionId = get().activeSessionId;
+    // 逐段向前加载直到最早；每段都会校验会话未切换。
+    while (sessionId && get().activeSessionId === sessionId && get().historyStart > 0) {
+      const added = await get().loadOlderMessages();
+      if (!added) break;
     }
   },
 
@@ -1909,8 +2069,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 取消当前执行
   cancelTurn: async () => {
+    // 取消目标即当前界面所在会话（新对话首轮投递期间为预留的会话 ID），
+    // 明确传给后端，不依赖后端的全局活动会话。
     const cacheKey = selectCurrentInputCacheKey(get());
-    if (cacheKey) {
+    if (!cacheKey) return false;
+    {
       const cache = sessionViewCaches.get(cacheKey);
       if (cache && cache.runStatus !== 'idle') {
         sessionViewCaches.set(cacheKey, { ...cache, runSummary: '正在取消...' });
@@ -1928,7 +2091,7 @@ export const useStore = create<AppState>((set, get) => ({
             : '取消仍在后台处理中，可再次点击停止重试',
         }));
       }, 2000);
-      const cancelled = await api.cancelTurn();
+      const cancelled = await api.cancelTurn(cacheKey);
       if (cancelled) {
         let settledCache: InputCache | undefined;
         set((state) => {
@@ -2195,6 +2358,8 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       ...(currentCache ? {
         messages: currentCache.messages,
+        historyStart: currentCache.historyStart,
+        userOutline: currentCache.userOutline,
         runStatus: currentCache.runStatus,
         runSummary: currentCache.runSummary,
         lastDurationMs: currentCache.lastDurationMs,

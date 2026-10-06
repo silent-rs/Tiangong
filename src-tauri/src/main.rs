@@ -782,6 +782,7 @@ fn run_gui() {
             tiangong_app::commands::get_session_meta,
             tiangong_app::commands::switch_session,
             tiangong_app::commands::load_session,
+            tiangong_app::commands::load_session_messages,
             tiangong_app::commands::get_session_model,
             tiangong_app::commands::list_session_chat_models,
             tiangong_app::commands::set_session_model,

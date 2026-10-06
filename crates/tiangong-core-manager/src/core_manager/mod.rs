@@ -29,6 +29,8 @@ use tiangong_core::session::Session;
 
 use crate::SessionMetadata;
 
+type MetadataCache = HashMap<String, ((Option<std::time::SystemTime>, u64), SessionMetadata)>;
+
 /// `ensure_core` 的返回：区分新建与复用既有 Core。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsuredCore {
@@ -49,6 +51,8 @@ pub struct CoreManager {
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
     creation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    /// 会话元数据缓存：id → ((修改时间, 文件大小), 元数据)。
+    metadata_cache: Arc<Mutex<MetadataCache>>,
     config: tiangong_core::config::core::CoreConfigProvider,
     storage_root: PathBuf,
 }
@@ -67,6 +71,7 @@ impl CoreManager {
             cores: Arc::new(Mutex::new(HashMap::new())),
             mention_sources: Arc::new(Mutex::new(Vec::new())),
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
+            metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             config,
             storage_root: storage_root.into(),
         }
@@ -111,20 +116,60 @@ impl CoreManager {
 
     /// 批量加载所有会话的元数据（浅字段，不构造完整 Session）。
     ///
+    /// 按文件修改时间与大小缓存解析结果：会话列表频繁刷新，而绝大多数会话文件
+    /// 未变化，命中缓存时只需一次 stat，不再重读、重解析数百 MB 的历史。
     /// 会话文件损坏时跳过（记 warn），不阻断列表。
     pub fn list_session_metadata(&self) -> Vec<SessionMetadata> {
-        self.list_session_ids()
-            .iter()
-            .filter_map(
-                |id| match SessionMetadata::load_from_storage(&self.storage_root, id) {
-                    Ok(meta) => Some(meta),
-                    Err(error) => {
-                        tracing::warn!(session_id = %id, %error, "跳过损坏的会话文件");
-                        None
-                    }
-                },
-            )
-            .collect()
+        let dir = self.storage_root.join("sessions");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut cache = self
+            .metadata_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(file_meta) = entry.metadata() else {
+                continue;
+            };
+            if !file_meta.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension() != Some(std::ffi::OsStr::new("json")) {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let stamp = (file_meta.modified().ok(), file_meta.len());
+            seen.insert(id.clone());
+            if let Some((cached_stamp, meta)) = cache.get(&id)
+                && *cached_stamp == stamp
+                && stamp.0.is_some()
+            {
+                result.push(meta.clone());
+                continue;
+            }
+            match SessionMetadata::load_from_storage(&self.storage_root, &id) {
+                Ok(meta) => {
+                    cache.insert(id, (stamp, meta.clone()));
+                    result.push(meta);
+                }
+                Err(error) => {
+                    cache.remove(&id);
+                    tracing::warn!(session_id = %id, %error, "跳过损坏的会话文件");
+                }
+            }
+        }
+        cache.retain(|id, _| seen.contains(id));
+        result
     }
 
     /// 指定会话在磁盘上是否存在。

@@ -28,8 +28,8 @@ const STATE_DOT: Record<LinkState, string> = {
 };
 
 const MODES: { value: RemoteAccessMode; title: string; desc: string; icon: typeof Wifi }[] = [
-  { value: 'lan', title: '局域网直连', desc: '同一 Wi-Fi 下直接使用，无需部署', icon: Wifi },
-  { value: 'relay', title: '中继服务', desc: '经自部署中继，任意网络可用', icon: Globe },
+  { value: 'relay', title: '中继服务', desc: '任意网络可用，默认使用官方中继', icon: Globe },
+  { value: 'lan', title: '局域网直连', desc: '同一 Wi-Fi 下直连，不经过外部服务', icon: Wifi },
 ];
 
 interface Draft {
@@ -50,8 +50,8 @@ function draftOf(view: RemoteAccessView): Draft {
 
 /**
  * 设置 → 远程访问：手机扫码使用天工对话。
- * - 局域网直连：手机与电脑在同一网络，桌面端自身监听局域网端口，无需部署任何服务；
- * - 中继：经自部署的 tiangong-relay 跨网络访问。
+ * - 中继（缺省）：经 tiangong-relay 跨网络访问，缺省使用官方中继，也可填写自部署地址；
+ * - 局域网直连：手机与电脑在同一网络，桌面端自身监听局域网端口，不经过外部服务。
  * 只绑定一个设备，重新扫码会取代旧设备。
  */
 export function RemoteAccessSettings() {
@@ -303,11 +303,11 @@ export function RemoteAccessSettings() {
                 id="remote-host"
                 value={draft.host}
                 onChange={(e) => setDraft({ ...draft, host: e.target.value })}
-                placeholder="https://relay.example.com"
+                placeholder={`默认：${view.default_host}`}
                 autoComplete="off"
               />
               <p className="text-xs text-muted-foreground">
-                填写已部署的 tiangong-relay 地址，无需令牌。公网部署请使用 HTTPS。
+                留空使用默认中继 {view.default_host}；也可填写自部署的 tiangong-relay 地址（无需令牌，公网请使用 HTTPS）。
               </p>
             </div>
           )}

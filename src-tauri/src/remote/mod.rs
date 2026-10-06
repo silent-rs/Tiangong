@@ -1,10 +1,11 @@
 //! 远程访问：天工桌面端向手机 H5 提供对话侧能力，两种方式共用同一套逻辑。
 //!
-//! - **局域网直连**（缺省）：桌面端在本机局域网端口内嵌运行中继服务，手机与电脑
-//!   在同一网络内扫码即用，不需要额外部署；
-//! - **中继**：桌面端主动连到自部署的 `tiangong-relay`，适合跨网络访问。中继是纯转发
+//! - **中继**（缺省）：桌面端主动连到 `tiangong-relay`，缺省使用官方中继
+//!   `https://relay.smart7.tech`，也可填写自部署地址，适合跨网络访问。中继是纯转发
 //!   服务，部署时无需配置令牌：通道密钥由天工自动生成并只保存在本机，中继只看到
-//!   它的单向摘要（通道 ID），据此把手机端路由到本桌面端。
+//!   它的单向摘要（通道 ID），据此把手机端路由到本桌面端；
+//! - **局域网直连**：桌面端在本机局域网端口内嵌运行中继服务，手机与电脑
+//!   在同一网络内扫码即用，不经过任何外部服务。
 //!
 //! 链路：手机浏览器 ⇄ 中继（内嵌或独立部署）⇄（桌面端发起的 WebSocket）⇄ 本模块。
 //!
@@ -45,6 +46,8 @@ const INVOKE_TIMEOUT: Duration = Duration::from_secs(600);
 const PING_INTERVAL: Duration = Duration::from_secs(25);
 /// 设备标识最长保留字符数。
 const MAX_LABEL_CHARS: usize = 120;
+/// 命令结果超过该大小时压缩传输（手机端支持时）。
+const COMPRESS_THRESHOLD: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +64,8 @@ struct Device {
     conn: String,
     /// 媒体文件访问密钥：随连接签发，设备下线或被取代即失效。
     media_key: String,
+    /// 手机端支持 gzip 压缩的大结果（浏览器 `DecompressionStream`）。
+    gzip: bool,
 }
 
 #[derive(Default)]
@@ -89,7 +94,10 @@ pub struct RemoteService(Arc<Shared>);
 pub struct RemoteView {
     pub enabled: bool,
     pub mode: RemoteMode,
+    /// 自定义中继地址（为空表示使用缺省中继）。
     pub host: String,
+    /// 缺省中继地址。
+    pub default_host: &'static str,
     /// 通道 ID（通道密钥的单向摘要，可公开展示；密钥本身不出桌面端）。
     pub channel: Option<String>,
     /// 局域网直连二维码地址（留空表示自动探测）。
@@ -139,6 +147,9 @@ enum ClientMsg {
         device: Option<String>,
         #[serde(default)]
         label: Option<String>,
+        /// 是否支持 gzip 压缩的大结果。
+        #[serde(default)]
+        gzip: bool,
     },
     Invoke {
         id: u64,
@@ -212,6 +223,43 @@ fn close_reason(code: u16, reason: &str) -> String {
         _ if reason.is_empty() => format!("中继关闭了连接（{code}）"),
         _ => format!("中继关闭了连接（{code}）：{reason}"),
     }
+}
+
+/// 手机端只用于展示，不需要推理签名（仅回传模型续写时使用，长会话中可占数 MB）。
+fn strip_reasoning_signatures(value: &mut Value) {
+    if let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_signature");
+            }
+        }
+    }
+}
+
+/// 构造命令结果帧：结果较大且手机端支持时以 gzip + base64 传输（`t: "result_z"`），
+/// 长会话加载的数据量通常可降到原来的 1/4 以下。
+fn result_frame(id: u64, value: Value, gzip: bool) -> Value {
+    if gzip {
+        let text = value.to_string();
+        if text.len() >= COMPRESS_THRESHOLD {
+            if let Some(packed) = gzip_base64(text.as_bytes()) {
+                return json!({ "t": "result_z", "id": id, "ok": true, "z": packed });
+            }
+        }
+        return json!({ "t": "result", "id": id, "ok": true, "value": value });
+    }
+    json!({ "t": "result", "id": id, "ok": true, "value": value })
+}
+
+fn gzip_base64(bytes: &[u8]) -> Option<String> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(
+        Vec::with_capacity(bytes.len() / 4),
+        flate2::Compression::fast(),
+    );
+    encoder.write_all(bytes).ok()?;
+    let packed = encoder.finish().ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(packed))
 }
 
 /// 经主 WebView 的 IPC 入口执行命令：与桌面端前端调用走同一条处理链路
@@ -315,7 +363,7 @@ impl RemoteService {
         let service = self.clone();
         match inner.config.mode {
             RemoteMode::Relay => {
-                let url = match config::agent_ws_url(&inner.config.host) {
+                let url = match config::agent_ws_url(inner.config.relay_host()) {
                     Ok(url) => url,
                     Err(error) => {
                         inner.state = LinkState::Error;
@@ -496,6 +544,13 @@ impl RemoteService {
             .is_some_and(|device| device.conn == conn)
     }
 
+    fn device_gzip(&self, conn: &str) -> bool {
+        self.lock()
+            .device
+            .as_ref()
+            .is_some_and(|device| device.conn == conn && device.gzip)
+    }
+
     fn handle_relay(&self, frame: RelayToAgent) {
         match frame {
             RelayToAgent::Welcome | RelayToAgent::ClientOpen { .. } => {}
@@ -515,7 +570,8 @@ impl RemoteService {
                         pair,
                         device,
                         label,
-                    }) => self.authenticate(&conn, pair, device, label),
+                        gzip,
+                    }) => self.authenticate(&conn, pair, device, label, gzip),
                     Ok(ClientMsg::Invoke { id, cmd, args }) => {
                         if self.is_active(&conn) {
                             self.dispatch(conn, id, cmd, args);
@@ -536,6 +592,7 @@ impl RemoteService {
         pair: Option<String>,
         device: Option<String>,
         label: Option<String>,
+        gzip: bool,
     ) {
         let label = label
             .map(|label| label.chars().take(MAX_LABEL_CHARS).collect::<String>())
@@ -581,6 +638,7 @@ impl RemoteService {
                 inner.device = Some(Device {
                     conn: conn.to_string(),
                     media_key: media_key.clone(),
+                    gzip,
                 });
                 (token, media_key, previous)
             })
@@ -623,14 +681,26 @@ impl RemoteService {
                 };
                 let service = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let reply = match invoke_via_ipc(&app, cmd, args).await {
-                        Ok(value) => json!({ "t": "result", "id": id, "ok": true, "value": value }),
+                    let slim = matches!(cmd.as_str(), "load_session" | "load_session_messages");
+                    let result = invoke_via_ipc(&app, cmd, args).await;
+                    // 期间设备被取代则不再回复。
+                    if !service.is_active(&conn) {
+                        return;
+                    }
+                    let gzip = service.device_gzip(&conn);
+                    let reply = tauri::async_runtime::spawn_blocking(move || match result {
+                        Ok(mut value) => {
+                            if slim {
+                                strip_reasoning_signatures(&mut value);
+                            }
+                            result_frame(id, value, gzip)
+                        }
                         Err(error) => {
                             json!({ "t": "result", "id": id, "ok": false, "error": error })
                         }
-                    };
-                    // 期间设备被取代则不再回复。
-                    if service.is_active(&conn) {
+                    })
+                    .await;
+                    if let Ok(reply) = reply {
                         service.send_client(&conn, reply);
                     }
                 });
@@ -702,6 +772,7 @@ impl RemoteService {
             enabled: inner.config.enabled,
             mode: inner.config.mode,
             host: inner.config.host.clone(),
+            default_host: config::DEFAULT_RELAY_HOST,
             channel: inner.config.channel(),
             lan_host: inner.config.lan_host.clone(),
             lan_port: inner.config.lan_port(),
@@ -724,11 +795,17 @@ impl RemoteService {
             lan_host,
             lan_port,
         } = input;
+        // 留空或与缺省一致时存为空：跟随缺省中继地址（后续版本调整缺省值时自动生效）。
         let host = host.trim().to_string();
-        let host = if (enabled && mode == RemoteMode::Relay) || !host.is_empty() {
-            config::normalize_host(&host)?
-        } else {
+        let host = if host.is_empty() {
             host
+        } else {
+            let host = config::normalize_host(&host)?;
+            if host == config::DEFAULT_RELAY_HOST {
+                String::new()
+            } else {
+                host
+            }
         };
         let lan_host = config::normalize_lan_host(&lan_host)?.unwrap_or_default();
         if lan_port == Some(0) {
@@ -835,4 +912,50 @@ pub fn remote_unbind_device(state: State<'_, RemoteService>) -> Result<RemoteVie
 #[tauri::command]
 pub fn remote_reset_channel(state: State<'_, RemoteService>) -> Result<RemoteView, String> {
     state.reset_channel().map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn large_results_are_gzipped_for_capable_clients() {
+        let big = json!({ "messages": [{ "content": "x".repeat(COMPRESS_THRESHOLD * 2) }] });
+        let frame = result_frame(7, big.clone(), true);
+        assert_eq!(frame["t"], "result_z");
+        assert_eq!(frame["id"], 7);
+        let packed = base64::engine::general_purpose::STANDARD
+            .decode(frame["z"].as_str().unwrap())
+            .unwrap();
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(packed.as_slice())
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), big);
+        assert!(packed.len() < text.len() / 10);
+
+        // 不支持解压的手机端、或结果很小时按原样返回。
+        assert_eq!(result_frame(7, big.clone(), false)["t"], "result");
+        assert_eq!(
+            result_frame(7, json!({ "ok": 1 }), true)["value"],
+            json!({ "ok": 1 })
+        );
+    }
+
+    #[test]
+    fn reasoning_signatures_are_stripped() {
+        let mut value = json!({
+            "id": "s",
+            "messages": [
+                { "role": "assistant", "content": "a", "reasoning_signature": "sig" },
+                { "role": "tool", "content": "b" }
+            ]
+        });
+        strip_reasoning_signatures(&mut value);
+        assert_eq!(
+            value["messages"],
+            json!([{ "role": "assistant", "content": "a" }, { "role": "tool", "content": "b" }])
+        );
+    }
 }

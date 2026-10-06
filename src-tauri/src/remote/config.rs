@@ -18,15 +18,17 @@ use subtle::ConstantTimeEq;
 pub const PAIRING_TTL: Duration = Duration::from_secs(600);
 /// 局域网直连缺省端口。
 pub const DEFAULT_LAN_PORT: u16 = 8790;
+/// 缺省中继地址（官方中继）；配置中 `host` 为空时使用。
+pub const DEFAULT_RELAY_HOST: &str = "https://relay.smart7.tech";
 
 /// 远程访问方式。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteMode {
     /// 局域网直连：桌面端自身监听局域网端口，手机与电脑在同一网络内扫码使用。
-    #[default]
     Lan,
-    /// 经自部署中继（tiangong-relay），适合跨网络访问。
+    /// 经中继（tiangong-relay）跨网络访问；缺省使用 [`DEFAULT_RELAY_HOST`]。
+    #[default]
     Relay,
 }
 
@@ -44,7 +46,7 @@ pub struct RemoteConfig {
     /// 局域网直连二维码使用的地址（留空自动探测本机局域网 IP）。
     #[serde(default)]
     pub lan_host: String,
-    /// 中继地址（如 `https://relay.example.com`）。
+    /// 自定义中继地址（如 `https://relay.example.com`）；为空时使用 [`DEFAULT_RELAY_HOST`]。
     #[serde(default)]
     pub host: String,
     /// 通道密钥：由天工自动生成并只保存在本机，接入中继时出示；中继只用它的
@@ -104,9 +106,19 @@ impl RemoteConfig {
             .map(|_| tiangong_relay::channel_id(&self.token))
     }
 
+    /// 实际使用的中继地址：未自定义时为 [`DEFAULT_RELAY_HOST`]。
+    pub fn relay_host(&self) -> &str {
+        let host = self.host.trim();
+        if host.is_empty() {
+            DEFAULT_RELAY_HOST
+        } else {
+            host
+        }
+    }
+
     /// 规范化后的中继地址（去尾部 `/`，要求 http/https）。
     pub fn normalized_host(&self) -> Result<String> {
-        normalize_host(&self.host)
+        normalize_host(self.relay_host())
     }
 
     pub fn device_matches(&self, token: &str) -> bool {
@@ -350,6 +362,7 @@ mod tests {
             format!("http://192.168.1.5:9000/?c={channel}")
         );
         let default_port = RemoteConfig {
+            mode: RemoteMode::Lan,
             lan_host: "10.0.0.2".into(),
             token: token.clone(),
             ..Default::default()
@@ -361,15 +374,30 @@ mod tests {
         let relay = RemoteConfig {
             mode: RemoteMode::Relay,
             host: "https://r.example.com/".into(),
-            token,
+            token: token.clone(),
             ..Default::default()
         };
         assert_eq!(
             relay.access_url().unwrap(),
             format!("https://r.example.com/?c={channel}")
         );
+        // 未填写中继地址时使用缺省中继。
+        let default_relay = RemoteConfig {
+            mode: RemoteMode::Relay,
+            token,
+            ..Default::default()
+        };
+        assert_eq!(
+            default_relay.access_url().unwrap(),
+            format!("{DEFAULT_RELAY_HOST}/?c={channel}")
+        );
+        assert_eq!(
+            agent_ws_url(default_relay.relay_host()).unwrap(),
+            "wss://relay.smart7.tech/agent/ws"
+        );
         // 没有通道密钥时不能生成地址；补齐后保持不变。
         let mut missing = RemoteConfig {
+            mode: RemoteMode::Lan,
             lan_host: "10.0.0.2".into(),
             ..Default::default()
         };
@@ -377,10 +405,14 @@ mod tests {
         assert!(missing.ensure_token());
         assert!(!missing.ensure_token());
         assert!(missing.access_url().is_ok());
-        // 旧配置缺省字段时按局域网模式读取。
+        // 旧配置缺省字段时按中继模式读取，地址跟随缺省中继。
         let legacy: RemoteConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
-        assert_eq!(legacy.mode, RemoteMode::Lan);
+        assert_eq!(legacy.mode, RemoteMode::Relay);
+        assert_eq!(legacy.relay_host(), DEFAULT_RELAY_HOST);
         assert_eq!(legacy.lan_port(), DEFAULT_LAN_PORT);
+        // 显式选择过局域网直连的配置保持不变。
+        let lan: RemoteConfig = serde_json::from_str(r#"{"enabled":true,"mode":"lan"}"#).unwrap();
+        assert_eq!(lan.mode, RemoteMode::Lan);
     }
 
     #[test]

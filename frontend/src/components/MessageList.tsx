@@ -28,7 +28,7 @@ import { parseScheduledTaskMessage } from '@/utils/scheduledTaskMessage';
 import { parseWebhookMessage } from '@/utils/webhookMessage';
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   groupMessages,
   liveRunStartIndex,
@@ -43,7 +43,8 @@ import { type MentionEditorHandle } from "./MentionEditor";
  * 无记录（首次进入）才定位到底部。目标会话正在执行时例外：
  * 无视锚点强制贴底并进入跟随，保证切回去即看到最新执行输出。 */
 interface SessionScrollAnchor {
-  index: number;
+  /** 视口顶部分组的 key（分段加载前插历史后下标会偏移，按 key 恢复）。 */
+  key: string;
   atBottom: boolean;
 }
 const sessionScrollAnchors = new Map<string, SessionScrollAnchor>();
@@ -68,7 +69,11 @@ export function MessageList() {
   const streamingReasoningContent = useStore(s => s.streamingReasoningContent);
   const editAndResend = useStore(s => s.editAndResend);
   const activeSessionId = useStore(s => s.activeSessionId);
-
+  const userOutline = useStore(s => s.userOutline);
+  const historyStart = useStore(s => s.historyStart);
+  const loadingOlderMessages = useStore(s => s.loadingOlderMessages);
+  const switchingSessionId = useStore(s => s.switchingSessionId);
+  const remoteHost = isRemoteHost();
   const searchActive = useSearchStore(s => s.searchActive);
 
   // 用 ref 持有搜索 query 和 matchIndex，避免每次按键导致 MessageList 重渲染
@@ -85,6 +90,9 @@ export function MessageList() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
+  const prevLastMessageIdRef = useRef<string | undefined>(undefined);
+  // 视口顶部分组及其在视口内的偏移：前插更早历史后据此保持阅读位置。
+  const topAnchorRef = useRef<{ key: string; offset: number } | null>(null);
   const prevStreamingIdRef = useRef<string | null>(null);
   const prevRunStatusRef = useRef('idle');
   // undefined 表示尚未跑过首次定位（挂载时走新消息路径），此后记录上次会话 id
@@ -277,8 +285,16 @@ export function MessageList() {
   }, [messages]);
 
   // 虚拟化
+  const completedGroupsRef = useRef(completedGroups);
+  completedGroupsRef.current = completedGroups;
+  // 以分组 key 标识条目：分段加载前插历史后，已测量的高度仍跟随原分组。
+  const getGroupKey = useCallback(
+    (index: number) => completedGroups[index]?.key ?? index,
+    [completedGroups],
+  );
   const virtualizer = useVirtualizer({
     count: completedGroups.length,
+    getItemKey: getGroupKey,
     getScrollElement: () => viewportRef.current,
     estimateSize: (index) => {
       const group = completedGroups[index];
@@ -328,10 +344,19 @@ export function MessageList() {
       }
       // 滚动瞬间记录锚点，保证切走会话时的位置始终是最新的
       // （新对话态 activeSessionId 为空，无会话内容可记）
-      if (activeSessionId) {
-        const topItem = virtualizer.getVirtualItemForOffset(el.scrollTop);
-        if (topItem) {
-          sessionScrollAnchors.set(activeSessionId, { index: topItem.index, atBottom: next });
+      const topItem = virtualizer.getVirtualItemForOffset(el.scrollTop);
+      const topKey = topItem ? completedGroupsRef.current[topItem.index]?.key : undefined;
+      topAnchorRef.current = topItem && topKey
+        ? { key: topKey, offset: el.scrollTop - topItem.start }
+        : null;
+      if (activeSessionId && topKey) {
+        sessionScrollAnchors.set(activeSessionId, { key: topKey, atBottom: next });
+      }
+      // 接近顶部且还有未加载的更早历史：向前加载一段。
+      if (el.scrollTop < 400) {
+        const store = useStore.getState();
+        if (store.activeSessionId === activeSessionId && store.historyStart > 0 && !store.loadingOlderMessages) {
+          void store.loadOlderMessages();
         }
       }
     };
@@ -386,6 +411,7 @@ export function MessageList() {
   }, [searchActive, virtualizer]);
 
   // 新消息到达时滚动到底部
+  const lastMessageId = messages[messages.length - 1]?.id;
   useEffect(() => {
     let cancelled = false;
     const sessionSwitched = prevActiveSessionRef.current !== undefined
@@ -398,6 +424,7 @@ export function MessageList() {
       prevStreamingIdRef.current = null;
       prevRunStatusRef.current = 'idle';
       prevMessagesLengthRef.current = messages.length;
+      prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
       // 切到正在执行的会话：贴底状态立即置位（同步，防止定位帧被后续
       // 流式事件作废后丢失跟随），定位帧强制拉到底部看实时输出
       const targetSessionRunning = runStatus !== 'idle';
@@ -406,13 +433,16 @@ export function MessageList() {
         if (cancelled) return;
         const lastIndex = completedGroups.length - 1;
         const anchor = sessionScrollAnchors.get(activeSessionId);
+        const anchorIndex = anchor
+          ? completedGroupsRef.current.findIndex((group) => group.key === anchor.key)
+          : -1;
         if (targetSessionRunning) {
           if (streamingGroup && scrollRef.current) {
             scrollRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
           } else if (lastIndex >= 0) {
             virtualizer.scrollToIndex(lastIndex, { behavior: 'auto', align: 'end' });
           }
-        } else if (anchor && anchor.index <= lastIndex) {
+        } else if (anchor && anchorIndex >= 0) {
           // 有记录则恢复到离开时的阅读位置（贴底的回到底部保持跟随）；
           // 首次进入（或记录越界，如消息被删除/压缩）定位到底部看最新内容
           if (anchor.atBottom) {
@@ -423,7 +453,7 @@ export function MessageList() {
               virtualizer.scrollToIndex(lastIndex, { behavior: 'auto', align: 'end' });
             }
           } else {
-            virtualizer.scrollToIndex(anchor.index, { behavior: 'auto', align: 'start' });
+            virtualizer.scrollToIndex(anchorIndex, { behavior: 'auto', align: 'start' });
           }
         } else if (streamingGroup && scrollRef.current) {
           scrollRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
@@ -437,9 +467,11 @@ export function MessageList() {
       return () => { cancelled = true; };
     }
 
-    const newMessageArrived = messages.length > prevMessagesLengthRef.current;
-    const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
     const lastMsg = messages[messages.length - 1];
+    // 以末条消息变化判定新消息：分段加载在头部前插历史时长度也会增长，不算新消息。
+    const newMessageArrived = messages.length > prevMessagesLengthRef.current
+      && lastMsg?.id !== prevLastMessageIdRef.current;
+    const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
     const isUserSelfSent = newMessageArrived && lastMsg?.role === 'user';
     // 回复完成（流式 id 清空且运行态归位 idle，含出错/取消中止）：不再
     // 强制拉底，保留用户当前阅读位置。工具执行阶段流式 id 同样会暂时
@@ -483,13 +515,37 @@ export function MessageList() {
     }
 
     prevMessagesLengthRef.current = messages.length;
+    prevLastMessageIdRef.current = lastMsg?.id;
     prevStreamingIdRef.current = streamingMessageId;
     prevRunStatusRef.current = runStatus;
     prevActiveSessionRef.current = activeSessionId;
     return () => {
       cancelled = true;
     };
-  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup, runStatus, activeSessionId]);
+  }, [messages.length, lastMessageId, streamingMessageId, completedGroups.length, streamingGroup, runStatus, activeSessionId]);
+
+  // 头部前插更早历史后保持阅读位置：原视口顶部分组仍停在原来的位置。
+  const prevFirstGroupKeyRef = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    const prevFirstKey = prevFirstGroupKeyRef.current;
+    prevFirstGroupKeyRef.current = completedGroups[0]?.key;
+    if (!prevFirstKey || prevFirstKey === completedGroups[0]?.key) return;
+    // 原首组仍在且不在开头 → 本次是前插
+    const shiftedIndex = completedGroups.findIndex((group) => group.key === prevFirstKey);
+    if (shiftedIndex <= 0) return;
+    const el = viewportRef.current;
+    const anchor = topAnchorRef.current;
+    if (!el || !anchor || isAtBottomRef.current) return;
+    const anchorIndex = completedGroups.findIndex((group) => group.key === anchor.key);
+    const start = anchorIndex >= 0 ? virtualizer.measurementsCache[anchorIndex]?.start : undefined;
+    if (start === undefined) return;
+    el.scrollTop = start + anchor.offset;
+  }, [completedGroups, virtualizer]);
+
+  // 打开会话内搜索：先自动加载全部历史，保证能搜到更早的内容。
+  useEffect(() => {
+    if (searchActive) void useStore.getState().loadAllMessages();
+  }, [searchActive, activeSessionId]);
 
   // 流式输出时自动滚动
   useEffect(() => {
@@ -575,38 +631,6 @@ export function MessageList() {
     const elRect = el.getBoundingClientRect();
     return elRect.top >= viewportRect.top && elRect.top < viewportRect.bottom;
   }, []);
-
-  // 滚动到上一条用户提问：
-  // 若当前游标对应的用户提问不在视口内（已被滚出顶部），先将其带入视口；
-  // 已在视口内时才跳到上一条
-  const scrollToPrevUserMessage = useCallback(() => {
-    if (userGroupIndices.length === 0) return;
-    const cursorPos = getActiveUserPos();
-    if (cursorPos < 0) {
-      scrollToUserGroupTop(userGroupIndices[0]);
-      return;
-    }
-    // 当前游标提问不在视口内 → 先跳到本条
-    const cursorGroupIndex = userGroupIndices[cursorPos];
-    if (!isGroupInView(cursorGroupIndex)) {
-      scrollToUserGroupTop(cursorGroupIndex);
-      return;
-    }
-    // 已在视口内 → 跳到上一条
-    const targetPos = cursorPos <= 0 ? 0 : cursorPos - 1;
-    scrollToUserGroupTop(userGroupIndices[targetPos]);
-  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop, isGroupInView]);
-
-  // 滚动到当前可见区域之下的最近一条用户提问
-  const scrollToNextUserMessage = useCallback(() => {
-    if (userGroupIndices.length === 0) return;
-    const lastPos = userGroupIndices.length - 1;
-    const cursorPos = getActiveUserPos();
-    // 视口顶部在所有用户提问之前（cursorPos === -1）时跳到第一条
-    // 已在最后一条时停在最后一条；否则向后一个
-    const targetPos = cursorPos === -1 ? 0 : cursorPos >= lastPos ? lastPos : cursorPos + 1;
-    scrollToUserGroupTop(userGroupIndices[targetPos]);
-  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
 
   // 编辑相关回调
   const handleStartEdit = useCallback((messageId: string, text: string) => {
@@ -800,39 +824,142 @@ export function MessageList() {
   }, []);
 
   // ---- 会话导航 ----
-  const userCount = userGroupIndices.length;
+  // 刻度条与回合跳转基于完整的用户提问目录（userOutline，加载会话时由后端给出），
+  // 分段加载时未加载的回合同样有横条；跳转到未加载回合时先向前加载到该回合。
+  const userCount = Math.max(userOutline?.length ?? 0, userGroupIndices.length);
 
   // ---- 用户消息边栏节点数据 ----
-  // 每根横条严格对应一条用户消息，顺序与 userGroupIndices 一致。
+  // 每根横条严格对应一条用户消息。已加载的回合 groupIndex 指向分组下标，
+  // 未加载的为 -1。
   const turnNodes = useMemo(() => {
-    return userGroupIndices.map((groupIndex, pos) => {
-      const qRaw = textContent(completedGroups[groupIndex].messages[0]);
+    const loadedGroupById = new Map<string, number>();
+    for (const groupIndex of userGroupIndices) {
+      loadedGroupById.set(completedGroups[groupIndex].messages[0].id, groupIndex);
+    }
+    const describe = (qRaw: string) => {
       const scheduledTask = parseScheduledTaskMessage(qRaw);
       const webhook = parseWebhookMessage(qRaw);
-      const question = (
+      return (
         scheduledTask
           ? `定时：${scheduledTask.name || '未命名任务'}`
           : webhook
             ? `Webhook：${webhook.name || '未命名触发'}`
             : qRaw
       ).trim().slice(0, 160);
+    };
+    const fromGroup = (groupIndex: number) => {
       let answer = '';
       for (let j = groupIndex + 1; j < completedGroups.length; j++) {
         if (completedGroups[j].type === 'user') break;
         const text = completedGroups[j].messages.map(m => textContent(m)).join('\n').trim();
         if (text) { answer = text; break; }
       }
-      return { pos, groupIndex, question, answer: answer.slice(0, 360) };
+      return {
+        id: completedGroups[groupIndex].messages[0].id,
+        groupIndex,
+        question: describe(textContent(completedGroups[groupIndex].messages[0])),
+        answer: answer.slice(0, 360),
+      };
+    };
+    // 目录覆盖了全部已加载回合时以目录为准；否则（目录缺失或落后）退回已加载分组。
+    const outlineCoversLoaded = !!userOutline
+      && userGroupIndices.every((groupIndex) =>
+        userOutline.some((item) => item.id === completedGroups[groupIndex].messages[0].id));
+    if (!outlineCoversLoaded || !userOutline) {
+      return userGroupIndices.map((groupIndex, pos) => ({ pos, ...fromGroup(groupIndex) }));
+    }
+    return userOutline.map((item, pos) => {
+      const groupIndex = loadedGroupById.get(item.id);
+      if (groupIndex !== undefined) return { pos, ...fromGroup(groupIndex) };
+      return { pos, id: item.id, groupIndex: -1, question: describe(item.question), answer: item.answer };
     });
-  }, [userGroupIndices, completedGroups]);
+  }, [userOutline, userGroupIndices, completedGroups]);
 
-  // 正文当前可见位置对应的用户消息，用于边栏弱高亮。
+  // 已加载的第一个回合在完整目录中的序号（未加载的更早回合数）。
+  const firstLoadedTurnPos = useMemo(
+    () => Math.max(0, turnNodes.findIndex((node) => node.groupIndex >= 0)),
+    [turnNodes],
+  );
+
+  // 跳转到指定回合：未加载时先逐段向前加载，直到该回合进入已加载范围。
+  const pendingTurnJumpRef = useRef<string | null>(null);
+  const scrollToTurn = useCallback(async (node: { id: string; groupIndex: number }) => {
+    if (node.groupIndex >= 0) {
+      scrollToUserGroupTop(node.groupIndex);
+      return;
+    }
+    pendingTurnJumpRef.current = node.id;
+    const { loadOlderMessages } = useStore.getState();
+    while (pendingTurnJumpRef.current === node.id) {
+      if (useStore.getState().messages.some((message) => message.id === node.id)) break;
+      if (!(await loadOlderMessages())) break;
+    }
+  }, [scrollToUserGroupTop]);
+
+  // 目标回合加载完成并完成分组后执行定位。
+  useEffect(() => {
+    const targetId = pendingTurnJumpRef.current;
+    if (!targetId) return;
+    const node = turnNodes.find((item) => item.id === targetId);
+    if (node && node.groupIndex >= 0) {
+      pendingTurnJumpRef.current = null;
+      scrollToUserGroupTop(node.groupIndex);
+    }
+  }, [turnNodes, scrollToUserGroupTop]);
+
+  // 切换会话时放弃未完成的跳转。
+  useEffect(() => {
+    pendingTurnJumpRef.current = null;
+  }, [activeSessionId]);
+
+  // 正文当前可见位置对应的用户消息，用于边栏弱高亮（换算为完整目录中的序号）。
   const activeUserPos = (() => {
     if (userGroupIndices.length === 0) return -1;
     const item = virtualizer.getVirtualItemForOffset(virtualizer.scrollOffset ?? 0);
     if (!item) return -1;
-    return findUserCursorPos(item.index);
+    const loadedPos = findUserCursorPos(item.index);
+    return loadedPos < 0 ? loadedPos : loadedPos + firstLoadedTurnPos;
   })();
+
+  // 滚动到上一条用户提问：
+  // 若当前游标对应的用户提问不在视口内（已被滚出顶部），先将其带入视口；
+  // 已在视口内时才跳到上一条
+  const scrollToPrevUserMessage = useCallback(() => {
+    if (userGroupIndices.length === 0) return;
+    const cursorPos = getActiveUserPos();
+    if (cursorPos < 0) {
+      scrollToUserGroupTop(userGroupIndices[0]);
+      return;
+    }
+    // 当前游标提问不在视口内 → 先跳到本条
+    const cursorGroupIndex = userGroupIndices[cursorPos];
+    if (!isGroupInView(cursorGroupIndex)) {
+      scrollToUserGroupTop(cursorGroupIndex);
+      return;
+    }
+    // 已在视口内 → 跳到上一条；已是已加载的第一条且还有更早历史时，
+    // 按完整目录跳到前一回合（自动向前加载）。
+    if (cursorPos <= 0) {
+      const prevNode = turnNodes[firstLoadedTurnPos - 1];
+      if (prevNode) {
+        void scrollToTurn(prevNode);
+        return;
+      }
+    }
+    const targetPos = cursorPos <= 0 ? 0 : cursorPos - 1;
+    scrollToUserGroupTop(userGroupIndices[targetPos]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop, isGroupInView, turnNodes, firstLoadedTurnPos, scrollToTurn]);
+
+  // 滚动到当前可见区域之下的最近一条用户提问
+  const scrollToNextUserMessage = useCallback(() => {
+    if (userGroupIndices.length === 0) return;
+    const lastPos = userGroupIndices.length - 1;
+    const cursorPos = getActiveUserPos();
+    // 视口顶部在所有用户提问之前（cursorPos === -1）时跳到第一条
+    // 已在最后一条时停在最后一条；否则向后一个
+    const targetPos = cursorPos === -1 ? 0 : cursorPos >= lastPos ? lastPos : cursorPos + 1;
+    scrollToUserGroupTop(userGroupIndices[targetPos]);
+  }, [userGroupIndices, getActiveUserPos, scrollToUserGroupTop]);
 
   const railActiveNodeIdx = railHoverInfo?.markerIndex ?? -1;
 
@@ -863,21 +990,34 @@ export function MessageList() {
         const node = hover.markerIndex >= 0 ? turnNodes[hover.markerIndex] : undefined;
         if (inCardZone && node) {
           setRailHoverInfo(null);
-          scrollToUserGroupTop(node.groupIndex);
+          void scrollToTurn(node);
         }
       }
     });
     return () => {
       void unlistenClick.then((fn) => fn());
     };
-  }, [turnNodes, scrollToUserGroupTop]);
+  }, [turnNodes, scrollToTurn]);
 
   return (
     <div className="relative h-full">
+    {/* 远程模式切换会话加载中：遮住旧会话内容并提示正在加载（桌面本地加载很快，不显示以免闪烁） */}
+    {remoteHost && switchingSessionId && (
+      <div
+        className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="flex items-center gap-2 rounded-full border border-border/60 bg-background px-4 py-2 text-sm text-muted-foreground shadow-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          正在从电脑加载对话…
+        </div>
+      </div>
+    )}
     <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
-          {messages.length === 0 && !isThinking ? (
+          {messages.length === 0 && !isThinking && !(remoteHost && switchingSessionId) ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
                 <Cpu className="w-8 h-8 text-primary-foreground" />
@@ -899,6 +1039,21 @@ export function MessageList() {
           ) : (
             <>
               {searchActive && <SearchBar />}
+
+              {/* 分段加载：还有更早的历史时显示加载入口 */}
+              {historyStart > 0 && (
+                <div className="flex justify-center py-1">
+                  <button
+                    type="button"
+                    disabled={loadingOlderMessages}
+                    onClick={() => void useStore.getState().loadOlderMessages()}
+                    className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground disabled:cursor-default disabled:hover:text-muted-foreground"
+                  >
+                    {loadingOlderMessages && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {loadingOlderMessages ? '正在加载更早的对话…' : `加载更早的对话（还有 ${historyStart} 条消息）`}
+                  </button>
+                </div>
+              )}
 
               {/* 虚拟化渲染已完成消息 */}
               <div
@@ -1066,7 +1221,7 @@ export function MessageList() {
       currentMarker={activeUserPos >= 0 ? activeUserPos : null}
       onSelect={(markerIndex) => {
         const node = turnNodes[markerIndex];
-        if (node) scrollToUserGroupTop(node.groupIndex);
+        if (node) void scrollToTurn(node);
       }}
       onHover={(info) => {
         if (railPreviewHideTimerRef.current) {
@@ -1114,7 +1269,7 @@ export function MessageList() {
             answer={node.answer}
             onClick={() => {
               setRailHoverInfo(null);
-              scrollToUserGroupTop(node.groupIndex);
+              void scrollToTurn(node);
             }}
           />
         </div>
