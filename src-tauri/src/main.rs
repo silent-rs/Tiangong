@@ -1171,12 +1171,8 @@ fn show_main_window(app: &tauri::AppHandle) {
         tiangong_app::webview_host::manager::BrowserManager::from_state(state).set_visible(true);
     }
 
-    let Some(window) = app.get_webview_window("main") else {
-        // 尝试用 get_window 作为后备
-        if let Some(win) = app.get_window("main") {
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
+    // 按窗口标签取主窗口：内嵌子 webview（浏览器等）后 `get_webview_window` 返回 None。
+    let Some(window) = app.get_window("main") else {
         return;
     };
     let _ = window.show();
