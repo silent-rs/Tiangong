@@ -459,14 +459,14 @@ impl WasmPluginAdapter {
         call_wasm_off_runtime(inner, call)
     }
 
-    /// 序列化 PluginSession 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
+    /// 会话级钩子：快照只含会话元信息，不含消息。失败仅 warn。
     fn forward_session_hook(
         &self,
         hook: &'static str,
         session: &Session,
         call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
     ) {
-        let plugin_session = tiangong_types::PluginSession::from(session);
+        let plugin_session = plugin_session(session, Vec::new());
         let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
             Err(e) => {
@@ -485,7 +485,12 @@ impl WasmPluginAdapter {
         }
     }
 
-    /// 同上，但带 turn_start_idx 参数。
+    /// 轮次钩子：快照只含本轮消息（`session.messages[turn_start_idx..]`）。
+    ///
+    /// 本轮范围由 turn 决定（`turn_start_idx` 为本轮锚点），不携带跨轮历史：
+    /// 长会话的完整历史可达数十 MB，每轮整份序列化给每个插件既无必要，也会
+    /// 让插件解析超出执行预算而 trap。快照首条即本轮锚点，`turn_start_message_id`
+    /// 指向它、`turn_start_idx` 传 0，现有插件无论按 ID 还是按位置定位都落在首条。
     fn forward_session_hook_with_idx(
         &self,
         hook: &'static str,
@@ -493,12 +498,10 @@ impl WasmPluginAdapter {
         turn_start_idx: usize,
         call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
     ) {
-        let mut plugin_session = tiangong_types::PluginSession::from(session);
-        // 本轮起点同时以消息 ID 提供：插件按 ID 定位不受快照消息增删影响。
-        plugin_session.turn_start_message_id = session
-            .messages
-            .get(turn_start_idx)
-            .map(|message| message.id.clone());
+        let turn_messages = turn_messages(session, turn_start_idx);
+        let turn_start_message_id = turn_messages.first().map(|message| message.id.clone());
+        let mut plugin_session = plugin_session(session, turn_messages);
+        plugin_session.turn_start_message_id = turn_start_message_id;
         let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
             Err(e) => {
@@ -512,11 +515,98 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        // idx 兼容仍按位置定位的旧版插件；快照剔除 Notice 后位置前移，同步换算。
-        let idx = tiangong_core::session::plugin_turn_start_idx(session, turn_start_idx) as u32;
-        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
+        // 快照首条即本轮锚点：按位置定位的插件取 0。
+        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, 0)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
+    }
+}
+
+/// 组装插件只读会话快照（会话元信息 + 给定消息）。
+///
+/// 不暴露 Core 内部状态（token 计数、任务记录、信任模式等）。
+fn plugin_session(
+    session: &Session,
+    messages: Vec<tiangong_types::Message>,
+) -> tiangong_types::PluginSession {
+    // 工作区标识：取 cwd 的末尾目录名（平台无关，由宿主生成）。
+    let workspace_id = session
+        .cwd
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&session.cwd)
+        .to_string();
+    tiangong_types::PluginSession {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        cwd: session.cwd.clone(),
+        workspace_id,
+        parent_session_id: session.parent_session_id.clone(),
+        turn_start_message_id: None,
+        reasoning_effort: session
+            .reasoning_effort
+            .map(|effort| effort.as_str().to_string()),
+        messages,
+        context_summary: session.context_summary.clone(),
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+    }
+}
+
+/// 本轮消息：从本轮锚点到末尾，剔除 Notice（宿主发给用户的系统通知，
+/// 不属于对话内容）。锚点越界时为空。
+fn turn_messages(session: &Session, turn_start_idx: usize) -> Vec<tiangong_types::Message> {
+    session
+        .messages
+        .get(turn_start_idx..)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|message| message.role != tiangong_types::MessageRole::Notice)
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod plugin_session_tests {
+    use super::*;
+    use tiangong_types::{MessagePhase, MessageRole};
+
+    #[test]
+    fn 会话级快照不含消息() {
+        let mut session = Session::new("会话级");
+        session.cwd = "/tmp/ws".to_string();
+        session.append_message(MessageRole::User, "第一轮");
+        session.append_message(MessageRole::Assistant, "回复");
+        let snapshot = plugin_session(&session, Vec::new());
+        assert!(snapshot.messages.is_empty());
+        assert_eq!(snapshot.id, session.id);
+        assert_eq!(snapshot.workspace_id, "ws");
+    }
+
+    #[test]
+    fn 本轮消息从锚点开始且剔除_notice() {
+        let mut session = Session::new("轮次");
+        session.append_message(MessageRole::User, "上一轮");
+        session.append_message(MessageRole::Assistant, "上一轮回复");
+        session.append_message(MessageRole::Notice, "上一轮失败通知");
+        session.append_message(MessageRole::User, "本轮输入");
+        session.append_message(MessageRole::Notice, "本轮通知");
+        session.append_message(MessageRole::User, "运行中引导");
+        let mut injected = tiangong_types::Message::new(MessageRole::User, "[injected-images]");
+        injected.phase = MessagePhase::HostInjected;
+        session.messages.push(injected);
+        session.append_message(MessageRole::Assistant, "本轮回复");
+
+        let texts: Vec<String> = turn_messages(&session, 3)
+            .iter()
+            .map(|message| message.text_content())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["本轮输入", "运行中引导", "[injected-images]", "本轮回复"]
+        );
+        assert!(turn_messages(&session, 99).is_empty());
     }
 }
 

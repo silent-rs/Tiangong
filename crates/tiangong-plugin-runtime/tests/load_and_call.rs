@@ -694,3 +694,53 @@ fn file_plugin_preparation_never_starts_a_sidecar() {
         "仅设置目录、信任模式或读取声明不应调用 sidecar"
     );
 }
+
+#[test]
+fn turn_hooks_receive_only_current_turn_messages() {
+    // 长会话：轮次钩子只把本轮消息交给插件，跨轮历史不得进入快照。
+    use tiangong_types::{Message, MessageRole};
+    let sidecar = Arc::new(MockMemorySidecar::default());
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
+    let config = PluginRuntimeConfig::default();
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+    let mut session = test_session();
+    for turn in 0..200 {
+        session
+            .messages
+            .push(Message::new(MessageRole::User, format!("历史问题 {turn}")));
+        session.messages.push(Message::new(
+            MessageRole::Assistant,
+            format!("历史回答 {turn}"),
+        ));
+    }
+    let start = session.messages.len();
+    session
+        .messages
+        .push(Message::new(MessageRole::User, "本轮问题"));
+    session
+        .messages
+        .push(Message::new(MessageRole::Notice, "本轮系统通知"));
+    session
+        .messages
+        .push(Message::new(MessageRole::User, "运行中引导"));
+    session
+        .messages
+        .push(Message::new(MessageRole::Assistant, "本轮回答"));
+
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, start);
+    assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
+    let turn = sidecar.payload("run_enhanced_micro_rumination")["turn_result"].clone();
+    assert_eq!(turn["user_input"], "本轮问题");
+    let contents: Vec<String> = turn["turn_messages"]
+        .as_array()
+        .expect("turn_messages 应为数组")
+        .iter()
+        .map(|message| message["content"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(contents, vec!["本轮问题", "运行中引导", "本轮回答"]);
+}
