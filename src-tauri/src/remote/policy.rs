@@ -28,6 +28,7 @@ const ALLOWED: &[&str] = &[
     "get_session_meta",
     "switch_session",
     "load_session",
+    "load_session_messages",
     "get_session_model",
     "list_session_chat_models",
     "set_session_model",
@@ -226,6 +227,7 @@ mod tests {
         for command in [
             "get_sessions",
             "load_session",
+            "load_session_messages",
             "cancel_turn",
             "get_mention_groups",
         ] {

@@ -681,7 +681,7 @@ impl RemoteService {
                 };
                 let service = self.clone();
                 tauri::async_runtime::spawn(async move {
-                    let slim = cmd == "load_session";
+                    let slim = matches!(cmd.as_str(), "load_session" | "load_session_messages");
                     let result = invoke_via_ipc(&app, cmd, args).await;
                     // 期间设备被取代则不再回复。
                     if !service.is_active(&conn) {

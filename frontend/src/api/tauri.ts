@@ -72,11 +72,32 @@ export interface PurgeProgress {
 export interface LoadedSession {
   id: string;
   messages: Message[];
+  /** `messages` 第一条在完整消息序列中的下标；0 表示已是全部历史。 */
+  start: number;
+  /** 完整消息条数。 */
+  total: number;
+  /** 完整的用户提问目录（刻度条、回合跳转使用）。 */
+  user_outline: UserOutlineItem[];
   token_stats: TokenStats;
   last_duration_ms?: number;
   last_usage?: TokenUsage;
   cwd: string;
   reasoning_effort: string;
+}
+
+/** 用户提问目录项。 */
+export interface UserOutlineItem {
+  id: string;
+  question: string;
+  answer: string;
+}
+
+/** 向前分页加载的一段历史。 */
+export interface SessionMessagesPage {
+  messages: Message[];
+  /** 本段第一条在完整消息序列中的下标；0 表示已到最早。 */
+  start: number;
+  total: number;
 }
 
 /** 拓展区 App tab 类型。browser/terminal 为旧内置时代的存量值（布局
@@ -768,7 +789,11 @@ export const api = {
     invoke('switch_session', { sessionId }),
 
   loadSession: (sessionId: string): Promise<LoadedSession> =>
-    invoke('load_session', { sessionId }),
+    invoke('load_session', { sessionId, paged: true }),
+
+  /** 向前分页加载 `beforeId` 之前的一段历史消息。 */
+  loadSessionMessages: (sessionId: string, beforeId: string): Promise<SessionMessagesPage> =>
+    invoke('load_session_messages', { sessionId, beforeId }),
 
   getSessionMeta: (sessionId: string): Promise<Session | null> =>
     invoke('get_session_meta', { sessionId }),
