@@ -276,10 +276,11 @@ fn gzip_base64(bytes: &[u8]) -> Option<String> {
 async fn invoke_via_ipc(app: &AppHandle, cmd: String, args: Value) -> Result<Value, Value> {
     use tauri::ipc::{CallbackFn, InvokeBody, InvokeError, InvokeResponse, InvokeResponseBody};
 
-    let Some(window) = app.get_webview_window("main") else {
+    // 按 webview 标签取主界面：主窗口内嵌了浏览器等子 webview 后不再是「单 webview
+    // 窗口」，`get_webview_window("main")` 会返回 None，导致全部远程命令失败。
+    let Some(webview) = app.get_webview("main") else {
         return Err(json!("天工主窗口不可用"));
     };
-    let webview: tauri::Webview = window.as_ref().clone();
     let url = webview.url().map_err(|error| json!(error.to_string()))?;
     let (tx, rx) = oneshot::channel::<InvokeResponse>();
     let request = tauri::webview::InvokeRequest {

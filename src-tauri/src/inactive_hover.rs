@@ -176,7 +176,8 @@ fn poll_loop(app: AppHandle) {
 /// 主线程采样：读取窗口状态并把全局鼠标位置转换为页面视口坐标。
 /// 原生对象访问失败时按「本轮无悬停」处理，不影响后续轮次。
 fn sample_on_main_thread(app: &AppHandle) -> Sample {
-    let Some(window) = app.get_webview_window("main") else {
+    // 按窗口标签取主窗口：内嵌子 webview（浏览器等）后 `get_webview_window` 返回 None。
+    let Some(window) = app.get_window("main") else {
         return Sample::WindowGone;
     };
     let visible = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false);
