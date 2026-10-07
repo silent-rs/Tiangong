@@ -10889,7 +10889,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "tiangong-config",
@@ -10898,7 +10898,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-anthropic"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "bytes",
  "eventsource-stream",
@@ -10913,7 +10913,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -10978,7 +10978,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app-state"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "serde",
  "tiangong-config",
@@ -10989,7 +10989,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-bots"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11013,7 +11013,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-cli"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -11036,7 +11036,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-config"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "fs4 0.8.4",
@@ -11054,7 +11054,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11074,7 +11074,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core-manager"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -11106,7 +11106,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-entry"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -11129,7 +11129,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-llm"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -11159,7 +11159,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-media-archive"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "base64 0.23.1",
  "reqwest 0.13.4",
@@ -11172,7 +11172,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-memory"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11640,7 +11640,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-runtime"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -11751,7 +11751,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-sidecar"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11970,7 +11970,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-scheduler"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11985,7 +11985,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-server"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -12021,7 +12021,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-toolkit"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "anyhow",
  "dunce",
@@ -12032,7 +12032,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-types"
-version = "0.16.17"
+version = "0.16.18"
 dependencies = [
  "chrono",
  "scru128",
