@@ -77,9 +77,10 @@ function setHostMask(visible) {
 }
 
 function syncHostMask() {
-  const detailOpen = !document.getElementById("detail-modal").hidden;
-  const envOpen = !document.getElementById("env-modal").hidden;
-  setHostMask(detailOpen || envOpen);
+  const anyOpen = ["detail-modal", "env-modal", "remove-modal"].some(
+    (id) => !document.getElementById(id).hidden,
+  );
+  setHostMask(anyOpen);
 }
 
 // ── 状态 ──
@@ -228,16 +229,45 @@ async function toggleEnabled(id, enabled) {
   }
 }
 
-async function removeSkill(id) {
-  if (!confirm(`确定删除 Skill「${id}」？此操作不可恢复。`)) return;
+// 待删除的 skill id（删除确认模态框打开期间有效）。
+let removingSkillId = null;
+
+/// 打开删除确认框。插件页运行在 sandbox="allow-scripts" 的 iframe 中，
+/// window.confirm 会被宿主静默拦截并返回 false，因此改用页内模态框确认。
+function removeSkill(id) {
+  if (!id) {
+    showStatus("删除失败：skill id 为空", true);
+    return;
+  }
+  removingSkillId = id;
+  const skill = skills.find((item) => item.id === id);
+  const label = skill && skill.name && skill.name !== id ? `${skill.name}（${id}）` : id;
+  document.getElementById("remove-message").textContent =
+    `确定删除 Skill「${label}」？该 Skill 目录将被删除，此操作不可恢复。`;
+  document.getElementById("remove-status").hidden = true;
+  document.getElementById("remove-confirm-btn").disabled = false;
+  openModal("remove-modal");
+}
+
+async function confirmRemoveSkill() {
+  const id = removingSkillId;
+  if (!id) return;
+  const confirmBtn = document.getElementById("remove-confirm-btn");
+  confirmBtn.disabled = true;
   try {
     const raw = await callHost("remove", JSON.stringify({ id }));
     const data = raw ? JSON.parse(raw) : {};
     // 孤儿 MCP 清理由 host 入口层处理（wasm 仅返回 orphan 列表）。
+    removingSkillId = null;
+    closeModal("remove-modal");
     await loadSkills();
     showStatus(data.message || `已删除：${id}`, false);
   } catch (error) {
-    showStatus(`删除失败：${error.message || error}`, true);
+    const status = document.getElementById("remove-status");
+    status.textContent = `删除失败：${error.message || error}`;
+    status.hidden = false;
+  } finally {
+    confirmBtn.disabled = false;
   }
 }
 
@@ -477,6 +507,7 @@ document.getElementById("detail-reveal-btn").addEventListener("click", () => {
 });
 document.getElementById("detail-save-btn").addEventListener("click", saveSkillMd);
 document.getElementById("detail-cancel-btn").addEventListener("click", () => setDetailEditMode(false));
+document.getElementById("remove-confirm-btn").addEventListener("click", confirmRemoveSkill);
 
 // 所有 data-close 元素关闭对应模态框。
 document.querySelectorAll("[data-close]").forEach((el) => {
