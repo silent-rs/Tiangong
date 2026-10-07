@@ -11774,7 +11774,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-protocol"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -11782,7 +11782,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-sidecar"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-skill-sidecar"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 license = "Apache-2.0"
 description = "Skill 独立 sidecar 进程（承载 skill 注册表扫描、skill.toml 读写与审计日志）"

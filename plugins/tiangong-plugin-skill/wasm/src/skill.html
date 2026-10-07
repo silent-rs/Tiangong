@@ -88,6 +88,25 @@
     </div>
   </div>
 
+  <!-- 删除确认模态框（插件页运行在未开放 allow-modals 的沙箱 iframe 中，window.confirm 会被静默拦截） -->
+  <div id="remove-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="remove-title">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="remove-title">删除 Skill</h2>
+        <button class="icon-btn" type="button" data-close="remove-modal" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p id="remove-message" class="detail-desc"></p>
+        <p id="remove-status" class="page-status error" role="status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" type="button" data-close="remove-modal">取消</button>
+        <button id="remove-confirm-btn" class="btn btn-danger" type="button">删除</button>
+      </div>
+    </div>
+  </div>
   <script>/*__SKILL_JS__*/</script>
 </body>
 </html>

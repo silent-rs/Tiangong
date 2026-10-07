@@ -152,6 +152,16 @@ input:disabled {
   background: transparent;
 }
 
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
 .btn-sm {
   padding: 6px 10px;
   font-size: 13px;
