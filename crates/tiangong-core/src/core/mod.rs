@@ -12,7 +12,7 @@ use typed_builder::TypedBuilder;
 
 use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::react::turn::run_turn;
-use crate::session::Session;
+use crate::session::{MessageRole, Session};
 use crate::turn_context::TurnContext;
 use tiangong_llm::ModelEndpoint;
 use tiangong_llm::SingleProviderClient;
@@ -406,8 +406,18 @@ impl TiangongCore {
             .clone();
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
+        // 恢复本轮归属：最近一个带状态的起轮消息仍为 `Processing`，说明该轮没有
+        // 正常收尾（进程意外退出等），接续它；否则由首条用户消息起新轮。
+        let turn_id = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User && message.turn_status.is_some())
+            .filter(|message| message.turn_status == Some(tiangong_types::TurnStatus::Processing))
+            .map(|message| message.id.clone());
 
         Ok(TurnContext::builder()
+            .turn_id(turn_id)
             .client(client)
             .session(session)
             .stream_tx(stream_tx)
@@ -442,6 +452,9 @@ impl TiangongCore {
 
     /// 空闲起轮：构建上下文 → 校验并保存用户消息（成功才确认）→ spawn turn task。
     ///
+    /// 上一轮意外中断时，构建上下文已恢复其 `turn_id`，新消息作为引导消息接续
+    /// 该轮，收尾按正常路径写入终态并通知插件。
+    ///
     /// on_session_ready 仅在本 Core 实例的首次 turn 执行（会话级一次性初始化），
     /// 与系统提示重建、落盘一起在任务启动闭包内同步完成后再进入 Agent Loop。
     fn start_user_turn(
@@ -451,18 +464,11 @@ impl TiangongCore {
     ) -> Result<(), CoreError> {
         let mut ctx = self.build_turn_context()?;
         // 保存成功才确认（ALR-202）；失败向调用方返回明确错误，不虚报成功。
-        ctx.session
-            .try_append_prepared_user_message_with_id(message_id.clone(), content.clone())
+        ctx.try_append_prepared_user_message_with_id(message_id, content)
             .map_err(|error| {
                 tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
                 CoreError::WorkerStopped
             })?;
-        let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
-            message_id,
-            content: tiangong_types::content_blocks_text(&content),
-            content_blocks: tiangong_types::stable_content_blocks(&content),
-            media: Vec::new(),
-        });
         let session_ready = self.session_ready.clone();
         let core = self.clone();
         crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
@@ -524,11 +530,15 @@ impl TiangongCore {
             return;
         };
         for (message_id, content) in messages {
-            if let Err(error) = session
-                .try_append_prepared_user_message_with_id(message_id.clone(), content.clone())
-            {
+            if let Err(error) = tiangong_types::validate_ready_content_blocks(content) {
                 tracing::warn!(%error, message_id, "排队消息保存失败");
+                continue;
             }
+            // 同 ID 的宿主镜像消息先移除；排队消息不起轮，不带轮次状态。
+            session
+                .messages
+                .retain(|message| &message.id != message_id || message.role != MessageRole::User);
+            session.append_prepared_user_message_with_id(message_id.clone(), content.clone());
         }
         if let Err(error) = session.try_persist_to_disk() {
             tracing::warn!(%error, session_id = %self.session_id, "排队消息落盘失败");

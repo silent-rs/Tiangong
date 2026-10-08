@@ -489,11 +489,12 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
     let turn_status = messages
         .iter()
         .rev()
-        .find_map(|message| message.turn_status.as_ref())
-        .map(|status| match status {
-            tiangong_types::TurnStatus::Success => TurnStatus::Completed,
-            tiangong_types::TurnStatus::Failed => TurnStatus::Failed,
-            tiangong_types::TurnStatus::Cancelled => TurnStatus::Cancelled,
+        .find_map(|message| match message.turn_status? {
+            tiangong_types::TurnStatus::Success => Some(TurnStatus::Completed),
+            tiangong_types::TurnStatus::Failed => Some(TurnStatus::Failed),
+            tiangong_types::TurnStatus::Cancelled => Some(TurnStatus::Cancelled),
+            // 收尾通知时起轮消息已写入终态；未收尾状态不参与。
+            tiangong_types::TurnStatus::Processing => None,
         })
         .unwrap_or_default();
     let turn_result =

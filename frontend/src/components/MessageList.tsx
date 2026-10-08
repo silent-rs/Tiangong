@@ -226,15 +226,18 @@ export function MessageList() {
     return indices;
   }, [completedGroups]);
 
-  // 每轮 agent_turn 的终态（总时长 + 最终状态）：取该轮用户消息（前置最近
-  // user 组）的 elapsed_ms/turn_status；回复底部与轮次末尾状态行据此展示。
+  // 每轮 agent_turn 的终态（总时长 + 最终状态）：取该轮起轮用户消息（前置
+  // 最近一个带 turn_status 的 user 组；引导消息不带状态，沿用所属轮次）的
+  // elapsed_ms/turn_status；回复底部与轮次末尾状态行据此展示。
   const turnResultByGroupKey = useMemo(() => {
     const map = new Map<string, { elapsedMs?: number; status?: string }>();
     let current: { elapsedMs?: number; status?: string } | undefined;
     for (const group of filteredGroups) {
       if (group.type === 'user') {
         const msg = group.messages[0];
-        current = { elapsedMs: msg?.elapsed_ms ?? undefined, status: msg?.turn_status ?? undefined };
+        if (msg?.turn_status != null) {
+          current = { elapsedMs: msg.elapsed_ms ?? undefined, status: msg.turn_status };
+        }
       } else if (group.type === 'agent_turn') {
         map.set(group.key, current ?? {});
       }
@@ -251,11 +254,12 @@ export function MessageList() {
     [isThinking, completedGroups],
   );
 
-  // 流式轮的终态：本轮最后一条用户消息的 elapsed_ms/turn_status。
+  // 流式轮的终态：本轮起轮用户消息（最近一个带 turn_status 的用户消息）的
+  // elapsed_ms/turn_status。
   const streamingTurnResult = useMemo(() => {
     if (!streamingGroup) return undefined;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i].role === 'user') {
+      if (messages[i].role === 'user' && messages[i].turn_status != null) {
         return {
           elapsedMs: messages[i].elapsed_ms ?? undefined,
           status: messages[i].turn_status ?? undefined,

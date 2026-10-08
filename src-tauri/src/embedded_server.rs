@@ -350,7 +350,12 @@ async fn send_message_and_wait(
             .messages
             .into_iter()
             .find(|message| message.id == message_id)
-            .map(|message| (message.role, message.turn_status))
+            .map(|message| {
+                (
+                    message.role,
+                    message.turn_status.filter(|status| status.is_terminal()),
+                )
+            })
     } else {
         None
     };
@@ -550,7 +555,7 @@ async fn completed_message_result(
         Err(match status {
             TurnStatus::Cancelled => "执行已取消".to_string(),
             TurnStatus::Failed => "执行失败".to_string(),
-            TurnStatus::Success => unreachable!(),
+            TurnStatus::Processing | TurnStatus::Success => unreachable!("仅以终态调用"),
         })
     }
 }
@@ -559,21 +564,17 @@ pub(crate) async fn complete_remote_turn_from_stream(
     state: &TiangongApp,
     session_id: &str,
     message_id: &str,
+    terminal: &tiangong_types::StreamEvent,
 ) {
-    // 消息终态需读 messages（完整 Session）；从磁盘 load（issue #245）。
-    let status = match state.core_manager.load_session(session_id) {
-        Ok(session) => session
-            .messages
-            .iter()
-            .find(|message| message.id == message_id && message.role == MessageRole::User)
-            .and_then(|message| message.turn_status)
-            .ok_or_else(|| anyhow!("未找到远程消息的终态：{message_id}")),
-        Err(error) => Err(anyhow!("加载会话失败：{error}")),
+    // 远程轮次独占会话（单流）：收到的终态事件即本条远程消息所属轮次的结果。
+    let status = match terminal {
+        tiangong_types::StreamEvent::Done { .. } => TurnStatus::Success,
+        tiangong_types::StreamEvent::Error { message } if message == "已取消" => {
+            TurnStatus::Cancelled
+        }
+        _ => TurnStatus::Failed,
     };
-    let result = match status {
-        Ok(status) => completed_message_result(state, session_id, message_id, status).await,
-        Err(error) => Err(error.to_string()),
-    };
+    let result = completed_message_result(state, session_id, message_id, status).await;
     state.complete_remote_turn_waiters(session_id, message_id, result);
 }
 

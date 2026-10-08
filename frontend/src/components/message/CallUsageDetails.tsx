@@ -6,7 +6,7 @@ import { cacheHitRate, sumUsage } from "./usage";
 const number = new Intl.NumberFormat("zh-CN");
 const compactNumber = new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
 const rateText = (rate: number | null) => rate == null ? "未知" : `${(rate * 100).toFixed(1)}%`;
-const statuses = { success: "完成", failed: "失败", cancelled: "中断" };
+const statuses = { processing: "进行中", success: "完成", failed: "失败", cancelled: "中断" };
 
 export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
   const calls = messages.filter((message) => message.usage != null);

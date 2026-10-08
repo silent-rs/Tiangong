@@ -22,10 +22,7 @@ async fn compression_request_keeps_every_cache_relevant_param_of_main_loop() {
             "先前结论",
             "保留这段历史思考",
         ));
-        harness
-            .ctx
-            .session
-            .append_message(MessageRole::User, "最新问题仍需原样保留");
+        harness.start_turn_with("最新问题仍需原样保留");
         let before_session = serde_json::to_vec(&harness.ctx.session).unwrap();
         if protocol == ProviderProtocol::OpenAi {
             mount_responses(&server, vec![answer("正常回复")], 0, true).await;
@@ -301,10 +298,7 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
                 .session
                 .append_message(MessageRole::User, format!("追问 {turn}"));
             // 同一用户连续追加，不能合并、替换以前发出的消息。
-            harness
-                .ctx
-                .session
-                .append_message(MessageRole::User, format!("补充条件 {turn}"));
+            harness.start_turn_with(format!("补充条件 {turn}"));
         }
         crate::react::message::inject_tool_to_messages(
             &mut harness.ctx.session,
@@ -339,10 +333,7 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
         .await;
 
         let before = serde_json::to_value(harness.ctx.session.context()).unwrap();
-        let turn_id = harness.ctx.session.messages
-            [harness.ctx.session.latest_user_message_index().unwrap()]
-        .id
-        .clone();
+        let turn_id = harness.ctx.turn_id.clone().unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             execute_turn(&mut harness.ctx, &mut harness.cmd_rx),
@@ -591,10 +582,7 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
     );
 
     mount_responses(&server, vec![answer("继续完成")], 1024, true).await;
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续");
+    harness.start_turn_with("继续");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
     let next = responses_request(&server, 1).await;

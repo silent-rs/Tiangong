@@ -682,10 +682,6 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
-    ctx.turn_id = ctx
-        .session
-        .latest_user_message_index()
-        .map(|index| ctx.session.messages[index].id.clone());
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
     let context_organizer = ContextOrganizer::new(context_limit);

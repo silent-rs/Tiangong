@@ -361,6 +361,9 @@ impl TestHarness {
         let mut session = Session::new("test-session".to_string());
         session.bind_storage_root(root.path());
         session.append_message(MessageRole::User, "你好");
+        // 同生产起轮：起轮消息带 Processing，本轮用户消息在起轮时即已知。
+        session.messages.last_mut().unwrap().turn_status =
+            Some(tiangong_types::TurnStatus::Processing);
         session.rebuild_system_prompt(&SystemPromptConfig::from_plugin_sections(Vec::new()));
         // 暴露 storage_root 供 turn 级测试磁盘重载验证。
         let storage_root = root.path().to_path_buf();
@@ -374,8 +377,10 @@ impl TestHarness {
         };
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let turn_id = session.messages.last().map(|message| message.id.clone());
 
         let ctx = TurnContext::builder()
+            .turn_id(turn_id)
             .client(client)
             .session(session)
             .stream_tx(stream_tx)
@@ -411,6 +416,26 @@ impl TestHarness {
     /// 排空 stream 通道里的所有积压事件(非阻塞),避免 channel 满导致 send 阻塞。
     fn drain_stream(&self) {
         while self.stream_rx.try_recv().is_ok() {}
+    }
+
+    /// 结束当前轮并以新用户消息发起下一轮（同生产：上一轮由 `run_turn` 收尾写入
+    /// 终态，新消息起轮带 `Processing` 并成为 `turn_id`）。仅改内存，不依赖落盘，
+    /// 供存储故障等场景复用；真实起轮路径由 Core 集成测试覆盖。
+    fn start_turn_with(&mut self, content: impl Into<String>) {
+        if let Some(turn_id) = self.ctx.turn_id.take()
+            && let Some(message) = self
+                .ctx
+                .session
+                .messages
+                .iter_mut()
+                .find(|message| message.id == turn_id)
+        {
+            message.set_turn_result(0, tiangong_types::TurnStatus::Success);
+        }
+        self.ctx.session.append_message(MessageRole::User, content);
+        let message = self.ctx.session.messages.last_mut().unwrap();
+        message.turn_status = Some(tiangong_types::TurnStatus::Processing);
+        self.ctx.turn_id = Some(message.id.clone());
     }
 }
 
@@ -516,10 +541,7 @@ async fn compression_persists_summary_and_keeps_recent_interaction() {
     assert_eq!(first.usage.total_tokens, 185_905);
 
     // 新 turn：请求前压力检查触发压缩（新增用户消息成为续接的当前任务）。
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提出新问题");
+    harness.start_turn_with("继续提出新问题");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
@@ -592,10 +614,7 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
         .ctx
         .session
         .append_message(MessageRole::Assistant, "较早回答");
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "处理 latest.txt");
+    harness.start_turn_with("处理 latest.txt");
     let mut assistant = Message::new(MessageRole::Assistant, "");
     assistant.tool_calls = vec![MessageToolCall {
         id: "latest-call".to_string(),
@@ -678,10 +697,7 @@ async fn truncated_compression_does_not_advance_summary_boundary() {
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
     let first = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     assert!(matches!(first.outcome, TurnExecutionOutcome::Success));
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提问");
+    harness.start_turn_with("继续提问");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
@@ -728,10 +744,7 @@ async fn persistence_failure_keeps_original_compression_state() {
     harness.ctx.session.bind_storage_root(blocking_file);
 
     let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提问");
+    harness.start_turn_with("继续提问");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     let events = harness.stream_rx.try_iter().collect::<Vec<_>>();
 
@@ -777,10 +790,7 @@ async fn cancel_interrupts_active_context_compression() {
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
     let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     harness.drain_stream();
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提问");
+    harness.start_turn_with("继续提问");
 
     let TestHarness {
         mut ctx,
@@ -836,10 +846,7 @@ async fn cancel_interrupts_manual_context_compression() {
         .ctx
         .session
         .append_message(MessageRole::Assistant, "较早回答");
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "最近问题");
+    harness.start_turn_with("最近问题");
     let TestHarness {
         ctx,
         stream_rx,
@@ -1407,10 +1414,10 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
     );
 }
 
-/// ALR-107（多消息）：注入引导消息后，最终 turn_status 写入最新（注入的）
-/// 用户消息，原始消息不被覆盖；磁盘重载后一致。
+/// 注入引导消息后，最终 turn_status 仍写入起轮消息（turn_id），引导消息
+/// 不承载轮次状态；磁盘重载后一致。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn final_status_anchors_to_injected_latest_user_message() {
+async fn final_status_anchors_to_turn_start_message_after_injection() {
     use super::super::turn::run_turn;
 
     let server = MockServer::builder().start().await;
@@ -1473,7 +1480,7 @@ async fn final_status_anchors_to_injected_latest_user_message() {
     run_turn(ctx, &mut cmd_rx).await;
     let _ = inject_task.await;
 
-    // 磁盘重载验证：最新用户消息（注入的）有 turn_status，原始消息无。
+    // 磁盘重载验证：起轮消息有 turn_status，注入的引导消息与锚点无关。
     let reloaded = Session::load_from_storage(&storage_root, &session_id).expect("重载 session");
     let latest = reloaded
         .messages
@@ -1482,20 +1489,14 @@ async fn final_status_anchors_to_injected_latest_user_message() {
         .find(|m| m.role == MessageRole::User)
         .expect("应有用户消息");
     assert_eq!(latest.id, "injected-anchor", "最新用户消息应为注入的消息");
-    assert!(
-        latest.turn_status.is_some(),
-        "最终状态应写入最新（注入的）用户消息（ALR-107）"
-    );
+    assert!(latest.turn_status.is_none(), "引导消息不承载轮次状态");
     let first = reloaded
         .messages
         .iter()
         .find(|m| m.role == MessageRole::User)
         .expect("应有原始用户消息");
     assert_eq!(first.text_content(), "你好", "原始用户消息应保持");
-    assert!(
-        first.turn_status.is_none(),
-        "原始用户消息不应被写入最终状态（ALR-107）"
-    );
+    assert!(first.turn_status.is_some(), "最终状态应写入起轮消息");
     // 唯一终态保持（ALR-109）。
     let terminal: Vec<String> = stream_rx
         .try_iter()
@@ -1722,10 +1723,7 @@ async fn inject_during_compression_cancels_and_restarts_without_applying_summary
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
     let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     harness.drain_stream();
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续任务");
+    harness.start_turn_with("继续任务");
 
     let TestHarness {
         mut ctx,

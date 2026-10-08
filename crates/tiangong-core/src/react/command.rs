@@ -24,21 +24,10 @@ use super::interrupt::interrupt_active_work;
 pub(super) fn save_user_message_and_restart(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
-    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
     message_id: String,
     content: Vec<tiangong_types::ContentBlock>,
 ) -> Result<(), String> {
-    let content_text = tiangong_types::content_blocks_text(&content);
-    let content_blocks = tiangong_types::stable_content_blocks(&content);
-    let event_message_id = message_id.clone();
-    ctx.session
-        .try_append_prepared_user_message_with_id(message_id, content)?;
-    let _ = stream_tx.send(StreamEvent::UserMessage {
-        message_id: event_message_id,
-        content: content_text,
-        content_blocks,
-        media: Vec::new(),
-    });
+    ctx.try_append_prepared_user_message_with_id(message_id, content)?;
     tracing::info!(
         session_id = %ctx.session.id,
         "运行中注入用户消息：中断当前执行并追加新消息"
@@ -106,7 +95,7 @@ pub(super) async fn handle_command(
             // 引导消息：中断主循环直接拥有的活动（Summary 降级 ALR-104），
             // 校验并保存，成功才确认，然后从新意图重启（ALR-101/102）。
             interrupt_active_work(ctx, state, injections, stream_tx, context_limit, true).await;
-            match save_user_message_and_restart(ctx, state, stream_tx, message_id, content) {
+            match save_user_message_and_restart(ctx, state, message_id, content) {
                 Ok(()) => CommandEffect::ToPhase(ExecutionPhase::NeedModel),
                 Err(error) => {
                     tracing::warn!(

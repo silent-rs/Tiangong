@@ -545,8 +545,9 @@ async fn steering_message_aborts_and_restarts_current_turn() {
     wait_requests(&server, 1).await;
     send_message(&core, "msg-steer", "STEER-NEW-INTENT 换个方向处理");
 
+    // 引导消息不结束轮次，终态写在起轮消息上。
     assert_eq!(
-        wait_turn_status(&env, &sid, "msg-steer").await,
+        wait_turn_status(&env, &sid, "msg-a").await,
         TurnStatus::Success
     );
     wait_idle(&sid).await;
@@ -582,6 +583,119 @@ async fn steering_message_aborts_and_restarts_current_turn() {
     }));
     routes["slow-original"].assert_hits(1);
     routes["steered-answer"].assert_hits(1);
+    core.shutdown_join().expect("关闭失败");
+}
+
+/// 进程意外退出遗留 `Processing` 的轮次：下一条用户消息作为引导消息接续该轮，
+/// 先闭合遗留工具调用，终态写回中断轮的起轮消息，插件按正常路径收到本轮快照。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn next_message_resumes_interrupted_turn() {
+    use crate::core::plugin::Plugin;
+    use crate::session::{Message, MessagePhase, Session};
+    use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
+    use std::sync::Mutex;
+    use tiangong_types::MessageToolCall;
+
+    /// 记录 on_turn_finished 看到的本轮消息 ID（从本轮起点到末尾）。
+    #[derive(Default)]
+    struct RecordingPlugin {
+        finished: Mutex<Vec<Vec<String>>>,
+    }
+    impl ToolOverrideHandler for RecordingPlugin {}
+    impl ToolSpecProvider for RecordingPlugin {}
+    impl PromptSectionProvider for RecordingPlugin {}
+    impl Plugin for RecordingPlugin {
+        fn id(&self) -> &str {
+            "recording"
+        }
+        fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
+            let ids = session.messages[turn_start_idx..]
+                .iter()
+                .map(|message| message.id.clone())
+                .collect();
+            self.finished.lock().unwrap().push(ids);
+        }
+    }
+
+    let (env, sid) = TestEnv::new("resume");
+    let server = MockServer::builder().start().await;
+    let routes = mount_prompt_router(
+        &server,
+        vec![PromptRoute::new(
+            "resumed-answer",
+            latest_user_contains("RESUME-NEXT"),
+            MockReply::sse(stream_text_chunks(&["接续", "完成。"])),
+        )],
+    )
+    .await;
+    let plugin = Arc::new(RecordingPlugin::default());
+    let (core, mut events) = core_with(
+        &env,
+        &sid,
+        &server.uri(),
+        TrustMode::FullTrust,
+        vec![plugin.clone() as Arc<dyn Plugin>],
+    );
+
+    // 模拟崩溃现场：起轮消息仍为 Processing，工具调用没有结果。
+    let mut session = env.load_session(&sid);
+    session.append_message(MessageRole::User, "RESUME-ORIGINAL 原始任务");
+    let origin_id = session.messages.last().unwrap().id.clone();
+    session.messages.last_mut().unwrap().turn_status = Some(TurnStatus::Processing);
+    let mut assistant = Message::new(MessageRole::Assistant, "").with_phase(MessagePhase::React);
+    assistant.tool_calls = vec![MessageToolCall {
+        id: "crashed-call".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({}),
+    }];
+    session.messages.push(assistant);
+    session.try_persist_to_disk().unwrap();
+
+    send_message(&core, "msg-next", "RESUME-NEXT 继续");
+    assert_eq!(
+        wait_turn_status(&env, &sid, &origin_id).await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    events.wait_done();
+    events.assert_single_success_terminal();
+
+    let session = env.load_session(&sid);
+    let next = session
+        .messages
+        .iter()
+        .find(|message| message.id == "msg-next")
+        .expect("新消息应已保存");
+    assert_eq!(next.turn_status, None, "接续时新消息是引导消息，不承载状态");
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(
+                |message| message.tool_call_id.as_deref() == Some("crashed-call")
+                    && message.tool_result_is_error
+            ),
+        "遗留工具调用应补齐失败结果"
+    );
+    // on_turn_finished 在后台线程投递，等它落地。
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let snapshot = loop {
+        if let Some(snapshot) = plugin.finished.lock().unwrap().first().cloned() {
+            break snapshot;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "插件应收到 on_turn_finished"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        snapshot.first().map(String::as_str),
+        Some(origin_id.as_str()),
+        "插件看到的本轮应从中断轮的起轮消息开始"
+    );
+    assert!(snapshot.iter().any(|id| id == "msg-next"));
+    routes["resumed-answer"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }
 
@@ -1048,7 +1162,12 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
         .iter()
         .find(|message| message.id == "msg-b")
         .expect("已接受未执行的 B 必须在关闭时保存");
-    assert!(pending.turn_status.is_none(), "未执行的 B 不应有最终状态");
+    // B 已起轮但未执行：保留 Processing（非终态），下一条消息到来时接续执行。
+    assert_eq!(
+        pending.turn_status,
+        Some(TurnStatus::Processing),
+        "未执行的 B 不应有最终状态"
+    );
     routes["shutdown-a"].assert_hits(1);
 }
 

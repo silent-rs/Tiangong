@@ -359,14 +359,28 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
       ];
   const existingIndex = messages.findIndex((message) => message.id === event.message_id);
   const existing = existingIndex >= 0 ? messages[existingIndex] : undefined;
-  const turnBase = existingIndex >= 0 ? messages.slice(0, existingIndex + 1) : messages;
-  return upsertStreamMessage(turnBase, {
+  const turnBase = existingIndex >= 0 ? messages.slice(0, existingIndex) : messages;
+  return upsertStreamMessage(existingIndex >= 0 ? messages.slice(0, existingIndex + 1) : messages, {
     id: event.message_id,
     role: 'user',
     content: blocks,
     reasoning_content: '',
     created_at: existing?.created_at || new Date().toISOString(),
+    // 与后端同一规则：最近的起轮消息仍为 processing 时是引导消息（不带状态），
+    // 否则起新轮。已加载的同 ID 消息以其持久化状态为准。
+    ...(existing?.turn_status != null
+      ? { turn_status: existing.turn_status }
+      : latestTurnStatus(turnBase) === 'processing' ? {} : { turn_status: 'processing' as const }),
   });
+}
+
+/** 最近一个带轮次状态的用户消息（起轮消息）的状态。 */
+function latestTurnStatus(messages: Message[]): Message['turn_status'] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'user' && message.turn_status != null) return message.turn_status;
+  }
+  return undefined;
 }
 
 function applyToolCalls(messages: Message[], event: StreamEvent): Message[] {
@@ -454,14 +468,16 @@ function applyAgentLifecycle(messages: Message[], event: StreamEvent): Message[]
   });
 }
 
-function updateLatestUserTurn(
+/** 终态事件到达时更新本轮起轮消息（`processing` 状态的用户消息）。
+ *  后端在终态前已推送带终态的起轮消息快照，这里只是本地兜底。 */
+function updateProcessingTurn(
   messages: Message[],
   status: 'success' | 'failed' | 'cancelled',
   elapsedMs: number | null,
 ): Message[] {
   let index = -1;
   for (let candidate = messages.length - 1; candidate >= 0; candidate -= 1) {
-    if (messages[candidate].role === 'user') {
+    if (messages[candidate].role === 'user' && messages[candidate].turn_status === 'processing') {
       index = candidate;
       break;
     }
@@ -811,7 +827,7 @@ function applyEventToSessionView(
             : runSummary;
       break;
     case 'done':
-      messages = updateLatestUserTurn(messages, 'success', lastDurationMs);
+      messages = updateProcessingTurn(messages, 'success', lastDurationMs);
       if (!lastUsage && event.usage) lastUsage = event.usage;
       runStatus = 'idle';
       runSummary = '';
@@ -824,7 +840,7 @@ function applyEventToSessionView(
       break;
     case 'error': {
       const errorMessage = typeof event.message === 'string' ? event.message : '';
-      messages = updateLatestUserTurn(
+      messages = updateProcessingTurn(
         messages,
         errorMessage === '已取消' ? 'cancelled' : 'failed',
         lastDurationMs,
