@@ -198,8 +198,8 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
-        forward_turn_batch(&session_json, turn_start_idx)
+    fn on_turn_finished(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        forward_turn_batch(&session_json)
     }
 
     fn on_session_ended(session_json: String) -> Result<(), PluginError> {
@@ -324,10 +324,10 @@ fn handle_search_code(call: &ToolCall) -> Result<ToolResult, PluginError> {
 }
 
 /// 从 PluginSession 提取本轮消息，组装成 TurnData 批量转发给 sidecar。
-fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
+fn forward_turn_batch(session_json: &str) -> Result<(), PluginError> {
     let session: PluginSession = serde_json::from_str(session_json)
         .map_err(|e| plugin_err(format!("解析 session 失败: {e}")))?;
-    let turns = collect_turn_data(&session, turn_start_idx);
+    let turns = collect_turn_data(&session);
     if turns.is_empty() {
         return Ok(());
     }
@@ -347,20 +347,11 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
 ///   `CompressedResume` 压缩恢复锚点）：不是用户意图，图片消息经
 ///   `text_content()` 提取后内容为空，索引后是空内容条目；
 /// - 文本内容为空的消息（纯媒体内容），避免空文档进入 Tantivy。
-fn collect_turn_data(session: &PluginSession, turn_start_idx: u32) -> Vec<TurnData> {
-    // 优先按本轮起始消息 ID 定位（不受快照消息增删影响）；旧宿主未提供时回退 idx。
-    let start = match &session.turn_start_message_id {
-        Some(id) => session
-            .messages
-            .iter()
-            .position(|msg| &msg.id == id)
-            .unwrap_or(turn_start_idx as usize),
-        None => turn_start_idx as usize,
-    };
+///
+/// 宿主快照只含本轮消息。
+fn collect_turn_data(session: &PluginSession) -> Vec<TurnData> {
     session
         .messages
-        .get(start..)
-        .unwrap_or(&[])
         .iter()
         .filter_map(|msg| {
             let role = match msg.role {
@@ -600,7 +591,6 @@ mod tests {
             title: String::new(),
             cwd: "/tmp/ws".to_string(),
             workspace_id: "ws".to_string(),
-            turn_start_message_id: None,
             reasoning_effort: None,
             messages,
             context_summary: None,
@@ -639,7 +629,7 @@ mod tests {
             // 纯媒体消息：无文本，不应产生空内容索引条目。
             host_injected_image_message(),
         ]);
-        let turns = collect_turn_data(&session, 0);
+        let turns = collect_turn_data(&session);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
         assert_eq!(turns[0].content, "帮我看下这张截图");
@@ -652,7 +642,7 @@ mod tests {
         let resume = Message::new(MessageRole::User, "压缩恢复锚点")
             .with_phase(MessagePhase::CompressedResume);
         let session = test_session(vec![resume, Message::new(MessageRole::User, "真实输入")]);
-        let turns = collect_turn_data(&session, 0);
+        let turns = collect_turn_data(&session);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].content, "真实输入");
     }

@@ -621,9 +621,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let hub = RunnerHub::new();
         let begin = begin_frame(None);
+        // 先读空 stdin：子进程不得在宿主写入 begin 帧前退出，否则写入遇 Broken pipe。
         hub.spawn(
             "run-env",
-            r#"printf '%s|%s|%s' "${TIANGONG_PLUGIN_TRANSPORT-<unset>}" "${TIANGONG_PLUGIN_STDIO_TOKEN-<unset>}" "$TIANGONG_STORAGE_ROOT" > env.txt"#,
+            r#"cat > /dev/null; printf '%s|%s|%s' "${TIANGONG_PLUGIN_TRANSPORT-<unset>}" "${TIANGONG_PLUGIN_STDIO_TOKEN-<unset>}" "$TIANGONG_STORAGE_ROOT" > env.txt"#,
             temp.path(),
             &[],
             &begin,

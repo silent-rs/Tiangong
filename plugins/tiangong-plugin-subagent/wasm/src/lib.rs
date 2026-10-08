@@ -159,8 +159,8 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
-        forward_turn_finished(&session_json, turn_start_idx);
+    fn on_turn_finished(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        forward_turn_finished(&session_json);
         Ok(())
     }
 
@@ -279,7 +279,7 @@ fn latest_user_attachments() -> Vec<Value> {
 }
 
 /// 提取本轮信息并转发 sidecar（天工会话后端的完成回报）。
-fn forward_turn_finished(session_json: &str, turn_start_idx: u32) {
+fn forward_turn_finished(session_json: &str) {
     let Ok(session) = serde_json::from_str::<Value>(session_json) else {
         return;
     };
@@ -291,42 +291,24 @@ fn forward_turn_finished(session_json: &str, turn_start_idx: u32) {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let anchor_id = session.get("turn_start_message_id").and_then(Value::as_str);
-    // 本轮用户锚点：优先按 id 定位，回退剔除 Notice 前移后的索引。
-    let anchor = anchor_id
-        .and_then(|id| {
-            messages
-                .iter()
-                .find(|message| message.get("id").and_then(Value::as_str) == Some(id))
-        })
-        .or_else(|| messages.get(turn_start_idx as usize));
-    let (user_text, turn_status, anchor_idx) = match anchor {
-        Some(anchor) => {
-            let idx = messages
-                .iter()
-                .position(|message| std::ptr::eq(message, anchor))
-                .unwrap_or(0);
-            (
-                message_text(anchor),
-                anchor
-                    .get("turn_status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("success")
-                    .to_string(),
-                idx,
-            )
-        }
-        None => (String::new(), "success".to_string(), 0),
+    // 本轮用户锚点：宿主快照只含本轮消息，锚点即首条。
+    let (user_text, turn_status) = match messages.first() {
+        Some(anchor) => (
+            message_text(anchor),
+            anchor
+                .get("turn_status")
+                .and_then(Value::as_str)
+                .unwrap_or("success")
+                .to_string(),
+        ),
+        None => (String::new(), "success".to_string()),
     };
-    // 最终回复：本轮（锚点之后）倒序第一条 assistant（优先 summary 阶段，
-    // 过滤空文本）。切片从锚点之后开始——锚点已排除，倒序第一条即本轮
-    // 最后一条消息（最终答案），不得再跳过。
+    // 最终回复：锚点之后倒序第一条 assistant（优先 summary 阶段，过滤空
+    // 文本）。锚点已排除，倒序第一条即本轮最后一条消息（最终答案），
+    // 不得再跳过。
     let mut assistant_text = String::new();
     for phase in ["summary", "normal"] {
-        for message in messages[(anchor_idx + 1).min(messages.len())..]
-            .iter()
-            .rev()
-        {
+        for message in messages.iter().skip(1).rev() {
             if message.get("role").and_then(Value::as_str) == Some("assistant")
                 && message
                     .get("phase")

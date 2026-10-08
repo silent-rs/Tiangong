@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "volcengine",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "wasm": {
     "binary": "tiangong_plugin_volcengine_wasm.wasm"
   },

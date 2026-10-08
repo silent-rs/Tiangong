@@ -469,20 +469,11 @@ pub struct TurnFinishedRequest {
 /// 只认本轮（用户锚点之后）**Summary 相位**的 assistant 消息——Core 只在
 /// 轮次成功收尾时把最终答复定格为 Summary（失败会回收为过程相位），
 /// 工具执行期间的过程文本（React 相位）与思考过程都不会被选中。
-/// 锚点优先按 `turn_start_message_id` 定位，缺失时回退 `turn_start_idx`。
-pub fn final_reply(session_json: &str, turn_start_idx: u32) -> Option<TurnFinishedRequest> {
+/// 宿主快照只含本轮消息，首条即本轮用户输入。
+pub fn final_reply(session_json: &str) -> Option<TurnFinishedRequest> {
     let session: serde_json::Value = serde_json::from_str(session_json).ok()?;
     let session_id = session.get("id")?.as_str()?.to_string();
     let messages = session.get("messages")?.as_array()?;
-    let anchor = session
-        .get("turn_start_message_id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|id| {
-            messages.iter().position(|message| {
-                message.get("id").and_then(serde_json::Value::as_str) == Some(id)
-            })
-        })
-        .unwrap_or(turn_start_idx as usize);
     let str_field = |message: &serde_json::Value, key: &str| {
         message
             .get(key)
@@ -490,8 +481,8 @@ pub fn final_reply(session_json: &str, turn_start_idx: u32) -> Option<TurnFinish
             .map(str::to_string)
     };
     messages
-        .get(anchor + 1..)?
         .iter()
+        .skip(1)
         .rev()
         .filter(|message| {
             str_field(message, "role").as_deref() == Some("assistant")
@@ -530,12 +521,10 @@ mod tests {
 
     #[test]
     fn final_reply_picks_summary_of_current_turn_only() {
+        // 本轮快照：首条即本轮用户输入。
         let session = serde_json::json!({
             "id": "s1",
-            "turn_start_message_id": "u2",
             "messages": [
-                message("u1", "user", "normal", "上一轮"),
-                message("a1", "assistant", "summary", "上一轮答复"),
                 message("u2", "user", "normal", "本轮"),
                 message("a2", "assistant", "react", "我先查一下"),
                 message("t1", "tool", "react", "工具结果"),
@@ -543,7 +532,7 @@ mod tests {
             ],
         })
         .to_string();
-        let reply = final_reply(&session, 0).unwrap();
+        let reply = final_reply(&session).unwrap();
         assert_eq!(reply.session_id, "s1");
         assert_eq!(reply.message_id, "a3");
         assert_eq!(reply.text, "最终答复");
@@ -555,16 +544,14 @@ mod tests {
         let session = serde_json::json!({
             "id": "s1",
             "messages": [
-                message("a1", "assistant", "summary", "上一轮答复"),
                 message("u2", "user", "normal", "本轮"),
                 message("a2", "assistant", "react", "过程文本"),
                 message("a3", "assistant", "summary", "  "),
             ],
         })
         .to_string();
-        // 无锚点 id 时回退 turn_start_idx。
-        assert!(final_reply(&session, 1).is_none());
-        assert!(final_reply("not json", 0).is_none());
+        assert!(final_reply(&session).is_none());
+        assert!(final_reply("not json").is_none());
     }
 
     #[test]

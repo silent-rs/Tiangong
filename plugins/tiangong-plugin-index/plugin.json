@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "index",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "wasm": {
     "binary": "tiangong_plugin_index_wasm.wasm"
   },
