@@ -667,10 +667,6 @@ async fn next_message_resumes_interrupted_turn() {
         .find(|message| message.id == "msg-next")
         .expect("新消息应已保存");
     assert_eq!(next.turn_status, None, "接续时新消息是引导消息，不承载状态");
-    assert_eq!(
-        session.turn_status_of("msg-next"),
-        Some(TurnStatus::Success)
-    );
     assert!(
         session
             .messages

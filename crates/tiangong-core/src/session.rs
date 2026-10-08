@@ -381,20 +381,6 @@ impl Session {
         self.updated_at = now_text();
     }
 
-    /// 指定用户消息所属轮次的状态：起轮消息取自身状态，引导消息取其前最近
-    /// 一个起轮消息的状态。消息不存在或之前没有起轮消息时为 None。
-    pub fn turn_status_of(&self, message_id: &str) -> Option<tiangong_types::TurnStatus> {
-        let index = self
-            .messages
-            .iter()
-            .position(|message| message.id == message_id)?;
-        self.messages[..=index]
-            .iter()
-            .rev()
-            .filter(|message| message.role == MessageRole::User)
-            .find_map(|message| message.turn_status)
-    }
-
     /// 补齐未完成工具调用的失败结果，并在有变更时立即落盘。
     ///
     /// 补齐结果落盘失败时，删除新增结果和对应的悬空调用后再次落盘，避免后续

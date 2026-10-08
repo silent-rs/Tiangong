@@ -1065,6 +1065,7 @@ pub(crate) fn start_stream_consumer(
                         app.state::<TiangongApp>().inner(),
                         &final_sid,
                         &message_id,
+                        &event,
                     ));
                 }
 
