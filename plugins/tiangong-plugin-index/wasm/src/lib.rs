@@ -198,8 +198,8 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
-        forward_turn_batch(&session_json, turn_start_idx)
+    fn on_turn_finished(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        forward_turn_batch(&session_json)
     }
 
     fn on_session_ended(session_json: String) -> Result<(), PluginError> {
@@ -324,10 +324,10 @@ fn handle_search_code(call: &ToolCall) -> Result<ToolResult, PluginError> {
 }
 
 /// 从 PluginSession 提取本轮消息，组装成 TurnData 批量转发给 sidecar。
-fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
+fn forward_turn_batch(session_json: &str) -> Result<(), PluginError> {
     let session: PluginSession = serde_json::from_str(session_json)
         .map_err(|e| plugin_err(format!("解析 session 失败: {e}")))?;
-    let turns = collect_turn_data(&session, turn_start_idx);
+    let turns = collect_turn_data(&session);
     if turns.is_empty() {
         return Ok(());
     }
@@ -348,13 +348,10 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
 ///   `text_content()` 提取后内容为空，索引后是空内容条目；
 /// - 文本内容为空的消息（纯媒体内容），避免空文档进入 Tantivy。
 ///
-/// 宿主快照只含本轮消息（`turn_start_idx` 为 0）；旧宿主传完整历史与本轮
-/// 起点位置，按位置截取兼容。
-fn collect_turn_data(session: &PluginSession, turn_start_idx: u32) -> Vec<TurnData> {
+/// 宿主快照只含本轮消息。
+fn collect_turn_data(session: &PluginSession) -> Vec<TurnData> {
     session
         .messages
-        .get(turn_start_idx as usize..)
-        .unwrap_or(&[])
         .iter()
         .filter_map(|msg| {
             let role = match msg.role {
@@ -632,7 +629,7 @@ mod tests {
             // 纯媒体消息：无文本，不应产生空内容索引条目。
             host_injected_image_message(),
         ]);
-        let turns = collect_turn_data(&session, 0);
+        let turns = collect_turn_data(&session);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
         assert_eq!(turns[0].content, "帮我看下这张截图");
@@ -645,7 +642,7 @@ mod tests {
         let resume = Message::new(MessageRole::User, "压缩恢复锚点")
             .with_phase(MessagePhase::CompressedResume);
         let session = test_session(vec![resume, Message::new(MessageRole::User, "真实输入")]);
-        let turns = collect_turn_data(&session, 0);
+        let turns = collect_turn_data(&session);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].content, "真实输入");
     }

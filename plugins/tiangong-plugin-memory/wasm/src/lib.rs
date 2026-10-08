@@ -327,9 +327,9 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
+    fn on_turn_finished(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
         // 轮次结束：从 session 只读快照提取本轮信息，转发给 sidecar 做 micro 反刍。
-        forward_turn_rumination(&session_json, turn_start_idx)?;
+        forward_turn_rumination(&session_json)?;
 
         // 每 10 轮触发 Meta 反刍（与原生版本一致）。
         if state::increment_turn_and_check_meta() {
@@ -463,21 +463,18 @@ fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
 /// - CompressedResume 消息不算轮次起点
 /// - System/Notice 通知不进入任何提取
 /// - recall_memory 等只读工具结果不生成候选（避免召回结果回写）
-fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
+fn forward_turn_rumination(session_json: &str) -> Result<(), PluginError> {
     let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
         .map_err(|e| PluginError::Message(format!("解析 PluginSession 失败: {e}")))?;
 
-    // 校验起点：必须是用户真实输入（User 且非宿主注入消息）。
-    // HostInjected（插件反馈图片注入，RFC 0017）与 CompressedResume 都是
-    // role=User 的模型上下文载体，不是用户意图，不得作为反刍轮次锚点。
-    let Some(idx) = locate_turn_start(&session, turn_start_idx) else {
+    // 宿主快照只含本轮消息，首条即本轮起点；起点必须是用户真实输入。
+    let Some(start_msg) = turn_start(&session) else {
         return Ok(());
     };
-    let all_messages = &session.messages;
-    let start_msg = &all_messages[idx];
 
     let user_input = extract_message_text(start_msg);
-    let messages = all_messages[idx..]
+    let messages = session
+        .messages
         .iter()
         .filter(|message| {
             !matches!(
@@ -518,25 +515,17 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// 定位本轮起始消息（on_turn_finished 反刍路径共用）。
+/// 取本轮起始消息（on_turn_finished 反刍路径）。
 ///
-/// 宿主快照只含本轮消息（`turn_start_idx` 为 0，起点即首条）；旧宿主传完整
-/// 历史与本轮起点位置，按位置定位兼容。定位后必须校验：起点应是用户真实
-/// 输入——`MessagePhase::is_user_input` 排除宿主注入的 role=User 消息
+/// 宿主快照只含本轮消息，起点即首条。起点必须是用户真实输入——
+/// `MessagePhase::is_user_input` 排除宿主注入的 role=User 消息
 ///（`HostInjected` 图片注入、`CompressedResume` 压缩恢复锚点），它们不是
 /// 用户意图，作为锚点会产生空 user_input 的异常反刍数据。
-fn locate_turn_start(
-    session: &tiangong_types::PluginSession,
-    turn_start_idx: u32,
-) -> Option<usize> {
-    let idx = turn_start_idx as usize;
+fn turn_start(session: &tiangong_types::PluginSession) -> Option<&tiangong_types::Message> {
     session
         .messages
-        .get(idx)
-        .is_some_and(|m| {
-            matches!(m.role, tiangong_types::MessageRole::User) && m.phase.is_user_input()
-        })
-        .then_some(idx)
+        .first()
+        .filter(|m| matches!(m.role, tiangong_types::MessageRole::User) && m.phase.is_user_input())
 }
 
 /// 提取最近一条用户真实输入文本，作为 recall_memory 缺省查询兜底。
@@ -765,22 +754,23 @@ mod tests {
     }
 
     #[test]
-    fn locate_turn_start_rejects_host_injected_anchor() {
+    fn turn_start_rejects_host_injected_anchor() {
         let user = tiangong_types::Message::new(tiangong_types::MessageRole::User, "真实用户输入");
+        // 首条为注入消息：不得作为轮次锚点。
+        let session = test_session(vec![host_injected_image_message(), user.clone()]);
+        assert!(turn_start(&session).is_none());
+        // 首条为真实用户输入：正常放行。
         let session = test_session(vec![user, host_injected_image_message()]);
-        // 起点指向注入消息：不得作为轮次锚点。
-        assert_eq!(locate_turn_start(&session, 1), None);
-        // 本轮快照首条为真实用户输入：正常放行。
-        assert_eq!(locate_turn_start(&session, 0), Some(0));
+        assert!(turn_start(&session).is_some());
     }
 
     #[test]
-    fn locate_turn_start_still_rejects_compressed_resume() {
+    fn turn_start_still_rejects_compressed_resume() {
         let resume =
             tiangong_types::Message::new(tiangong_types::MessageRole::User, "压缩恢复锚点")
                 .with_phase(tiangong_types::MessagePhase::CompressedResume);
         let session = test_session(vec![resume]);
-        assert_eq!(locate_turn_start(&session, 0), None);
+        assert!(turn_start(&session).is_none());
     }
 }
 

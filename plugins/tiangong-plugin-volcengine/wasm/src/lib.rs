@@ -119,13 +119,11 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
+    fn on_turn_finished(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
         // 本轮最终答复（Agent 收尾总结）转发 sidecar，由其通知自动朗读 UI。
         // 没有最终答复（失败 / 取消 / 纯工具轮次）时不打扰 sidecar；
         // 朗读是纯增益，转发失败静默。
-        if let Some(reply) =
-            tiangong_plugin_volcengine_protocol::final_reply(&session_json, turn_start_idx)
-        {
+        if let Some(reply) = tiangong_plugin_volcengine_protocol::final_reply(&session_json) {
             let _ = sidecar_client::invoke::<TurnFinished>(&reply);
         }
         Ok(())
