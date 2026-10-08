@@ -30,6 +30,7 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use tiangong_plugin_computer_use_protocol::ops::KeyboardActionKind;
 
+use super::input_cancel::{CancelToken, cancelled_message};
 use super::keys::normalize_key_name;
 
 /// key 手势 down → up 间隔。
@@ -215,16 +216,22 @@ pub(crate) fn is_known_key(name: &str) -> bool {
     modifier_keycode(&normalized).is_some() || plain_keycode(&normalized).is_some()
 }
 
-/// 执行一次键盘手势；成功返回人读摘要。
+/// 执行一次键盘手势；成功返回人读摘要。`cancel` 置位后在下一个事件前
+/// 停止（已按下的键照常抬起），返回取消说明。
 pub fn perform(
     action: KeyboardActionKind,
     text: Option<String>,
     key: Option<String>,
     keys: Option<Vec<String>>,
+    cancel: &CancelToken,
 ) -> Result<String, String> {
+    // 排队等锁期间可能已被取消：拿到锁后先检查，避免取消后仍开始输入。
     let _guard = input_guard();
+    if cancel.is_cancelled() {
+        return Err(cancelled_message("键盘输入"));
+    }
     let io = KeyboardIo::new()?;
-    let result = perform_locked(&io, action, text, key, keys);
+    let result = perform_locked(&io, action, text, key, keys, cancel);
     sleep(GESTURE_SETTLE);
     result
 }
@@ -235,6 +242,7 @@ fn perform_locked(
     text: Option<String>,
     key: Option<String>,
     keys: Option<Vec<String>>,
+    cancel: &CancelToken,
 ) -> Result<String, String> {
     match action {
         KeyboardActionKind::Type => {
@@ -243,14 +251,22 @@ fn perform_locked(
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .ok_or("type 缺少 text")?;
-            for ch in text.chars() {
+            let total = text.chars().count();
+            for (typed, ch) in text.chars().enumerate() {
+                // 每个字符前检查取消；down/up 成对投递，不留按住状态。
+                if cancel.is_cancelled() {
+                    return Err(format!(
+                        "{}，已输入 {typed}/{total} 个字符",
+                        cancelled_message("文本输入")
+                    ));
+                }
                 let unit = ch.to_string();
                 io.post_char(&unit, true)?;
                 sleep(KEY_DOWN_UP);
                 io.post_char(&unit, false)?;
                 sleep(TYPE_GAP);
             }
-            Ok(format!("已输入 {len} 个字符", len = text.chars().count()))
+            Ok(format!("已输入 {total} 个字符"))
         }
         KeyboardActionKind::Key => {
             let name = key
@@ -301,6 +317,11 @@ fn perform_locked(
             let events = combo_events(&modifier_names, plain);
             let mut result = Ok(());
             for (index, (code, down, flags)) in events.iter().enumerate() {
+                // 取消只在按下阶段生效：已开始抬起就让序列走完。
+                if *down && cancel.is_cancelled() {
+                    result = Err(cancelled_message("组合键"));
+                    break;
+                }
                 if let Err(error) = io.post_key(*code, *down, *flags) {
                     result = Err(error);
                     break;

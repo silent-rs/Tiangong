@@ -203,6 +203,8 @@ fn cfg_if_current_backend() -> Box<dyn Backend> {
 pub mod app_launch;
 #[cfg(target_os = "macos")]
 pub mod ax;
+/// 键鼠手势的请求级取消令牌（平台无关）。
+pub mod input_cancel;
 /// 键盘合成输入（CGEvent，RFC 0018 §2.4，仅 macOS）。
 #[cfg(target_os = "macos")]
 pub mod keyboard;

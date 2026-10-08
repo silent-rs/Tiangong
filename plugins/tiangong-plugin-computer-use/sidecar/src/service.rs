@@ -20,6 +20,7 @@ use tiangong_plugin_runtime::protocol::{
     ServiceStatus,
 };
 
+use crate::backend::input_cancel::{self, CancelOnDrop, CancelToken};
 use crate::backend::{self, Backend};
 
 /// Computer Use sidecar 业务服务。
@@ -153,14 +154,22 @@ impl ComputerUseService {
             DESKTOP_MOUSE_OPERATION => {
                 let req: ops::MouseRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 desktop_mouse 请求失败")?;
-                let result = self.backend.mouse(&req).await;
+                // 取消（dispatch future 被丢弃）时守卫析构置位令牌，
+                // 阻塞线程中的拖拽轨迹随即停止并补发抬起。
+                let token = CancelToken::new();
+                let _cancel_guard = CancelOnDrop::new(token.clone());
+                let result = input_cancel::scope(token, self.backend.mouse(&req)).await;
                 serde_json::to_value(map_mouse(result))
                     .with_context(|| "序列化 desktop_mouse 响应失败")
             }
             DESKTOP_KEYBOARD_OPERATION => {
                 let req: ops::KeyboardRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 desktop_keyboard 请求失败")?;
-                let result = self.backend.keyboard(&req).await;
+                // 同上：取消后 type 逐字符循环在下一个字符前停止，
+                // 释放手势锁，后续键鼠请求不再排队等待旧文本打完。
+                let token = CancelToken::new();
+                let _cancel_guard = CancelOnDrop::new(token.clone());
+                let result = input_cancel::scope(token, self.backend.keyboard(&req)).await;
                 serde_json::to_value(map_keyboard(result))
                     .with_context(|| "序列化 desktop_keyboard 响应失败")
             }

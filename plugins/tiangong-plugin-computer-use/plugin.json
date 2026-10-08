@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "computer-use",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "wasm": {
     "binary": "tiangong_plugin_computer_use_wasm.wasm"
   },

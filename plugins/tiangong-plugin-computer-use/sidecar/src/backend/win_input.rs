@@ -40,6 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use tiangong_plugin_computer_use_protocol::ops::{KeyboardActionKind, MouseGesture};
 
+use super::input_cancel::{CancelToken, cancelled_message};
 use super::keys::{combo_keys, key_symbol, normalize_key_name};
 use super::win_overlay as overlay;
 
@@ -198,8 +199,13 @@ pub fn perform_mouse(
     y: f64,
     to: Option<(f64, f64)>,
     scroll: (f64, f64),
+    cancel: &CancelToken,
 ) -> Result<String, String> {
     let _guard = input_guard();
+    // 排队等锁期间可能已被取消：拿到锁后先检查。
+    if cancel.is_cancelled() {
+        return Err(cancelled_message("鼠标手势"));
+    }
     match gesture {
         MouseGesture::Move => {
             // 纯虚拟移动：只动天工指针，系统鼠标不动（hover 指示语义）。
@@ -257,6 +263,10 @@ pub fn perform_mouse(
                 let distance = (tx - x).hypot(ty - y).max(1.0);
                 let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
                 for step in 1..=steps {
+                    // 取消时在当前位置抬起（外层统一补发 LEFTUP 并归还）。
+                    if cancel.is_cancelled() {
+                        return Err(cancelled_message("拖拽"));
+                    }
                     let progress = step as f64 / steps as f64;
                     let ease = progress * (2.0 - progress); // ease-out 轨迹
                     let nx = x + (tx - x) * ease;
@@ -431,8 +441,12 @@ pub fn perform_keyboard(
     text: Option<String>,
     key: Option<String>,
     keys: Option<Vec<String>>,
+    cancel: &CancelToken,
 ) -> Result<String, String> {
     let _guard = input_guard();
+    if cancel.is_cancelled() {
+        return Err(cancelled_message("键盘输入"));
+    }
     match action {
         KeyboardActionKind::Type => {
             let text = text
@@ -440,7 +454,15 @@ pub fn perform_keyboard(
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .ok_or("type 缺少 text")?;
-            for ch in text.chars() {
+            let total = text.chars().count();
+            for (typed, ch) in text.chars().enumerate() {
+                // 每个字符前检查取消；down/up 成对投递，不留按住状态。
+                if cancel.is_cancelled() {
+                    return Err(format!(
+                        "{}，已输入 {typed}/{total} 个字符",
+                        cancelled_message("文本输入")
+                    ));
+                }
                 match ch {
                     // 换行/制表按真实按键发送（Unicode 分派在部分控件不换行）。
                     '\n' => tap(0x0D)?,
@@ -461,7 +483,7 @@ pub fn perform_keyboard(
                 }
                 sleep(TYPE_GAP);
             }
-            Ok(format!("已输入 {len} 个字符", len = text.chars().count()))
+            Ok(format!("已输入 {total} 个字符"))
         }
         KeyboardActionKind::Key => {
             let name = key
@@ -502,9 +524,15 @@ pub fn perform_keyboard(
             let mut pressed: Vec<u16> = Vec::new();
             let result = (|| {
                 for vk in &modifiers {
+                    if cancel.is_cancelled() {
+                        return Err(cancelled_message("组合键"));
+                    }
                     send(&[key_input(*vk, true)])?;
                     pressed.push(*vk);
                     sleep(MOD_GAP);
+                }
+                if cancel.is_cancelled() {
+                    return Err(cancelled_message("组合键"));
                 }
                 tap(plain)
             })();
