@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use tiangong_core::tools::extension::{PromptSectionProvider, ToolSpecProvider};
 use tiangong_plugin_runtime::RuntimeCorePlugin;
+use tiangong_plugin_runtime::registry::RuntimeKind;
 
 /// 全局插件注册表是进程级单例，本文件用例经此锁串行执行。
 static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -56,7 +57,11 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
         "插件 A 应装入注册表"
     );
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     // 固定通道工具（call_local_plugin/list_local_plugins）恒在声明中，
     // 逐项断言插件工具的存在性而非全集相等。
     let has = |names: &[String], expect: &str| names.iter().any(|n| n == expect);
@@ -102,7 +107,11 @@ fn 桥聚合_并发首见收敛() {
     stage_ts_tool_plugin(root.path(), "bridge-view-c", "bridge_c_tool");
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
 
-    let bridge = Arc::new(RuntimeCorePlugin::desktop(root.path().to_path_buf()));
+    let bridge = Arc::new(RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    ));
     let (tx, rx) = std::sync::mpsc::channel();
     let mut handles = Vec::new();
     for _ in 0..4 {
@@ -226,7 +235,11 @@ fn 固定通道_自制插件不进声明_清单与判据正确() {
         "未签名插件不走固定通道"
     );
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     let names = tool_names(&bridge);
     // 固定通道工具在声明中（description 恒定）。
     assert!(names.iter().any(|n| n == "call_local_plugin"));
@@ -268,7 +281,11 @@ async fn 固定通道_方法不存在返回可用方法() {
     stage_local_signed_plugin(root.path(), "local-bridge-c", "local_c_tool");
     preload_installed_plugins(root.path());
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     let mut session = Session::new("local-call-missing-fn");
     let result = bridge
         .handle(
@@ -307,7 +324,11 @@ async fn 固定通道_插件卸载后实时返回清单() {
     stage_local_signed_plugin(root.path(), "local-bridge-d", "local_d_tool");
     preload_installed_plugins(root.path());
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     // 卸载后路由实时感知（不依赖聚合缓存）。
     tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-bridge-d", false)
         .unwrap();
@@ -340,7 +361,11 @@ async fn 固定通道_查询工具返回清单() {
     stage_local_signed_plugin(root.path(), "local-bridge-e", "local_e_tool");
     preload_installed_plugins(root.path());
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     let mut session = Session::new("local-list");
     let call = ToolCall {
         id: "t_list".to_string(),
@@ -469,7 +494,11 @@ fn 自制插件prompt不进系统段落_随清单注入() {
         "两个 prompt 插件都应装入注册表"
     );
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     let sections = bridge.prompt_sections();
     assert!(
         !sections.iter().any(|s| s.contains("自制插件专属段落")),
@@ -513,7 +542,11 @@ fn 桥聚合_插件工具全部按插件前缀暴露并路由到各自插件() {
     stage_ts_tool_plugin(root.path(), "dup-gamma", "gamma_tool");
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     let names = tool_names(&bridge);
     assert!(
         names.contains(&"dup-alpha__dup_tool".to_string()),
@@ -600,7 +633,11 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
     .unwrap();
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
 
-    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-test-session",
+    );
     let names = tool_names(&bridge);
     assert!(
         names.contains(&"icon-rich__speak".to_string()),

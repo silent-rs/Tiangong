@@ -106,11 +106,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             session_config.trust_mode = default_trust_mode;
             state.workspace_dir.clone()
         };
-        let plugins = if state.core_manager.has_live_core(&session_id) {
-            Vec::new()
-        } else {
-            build_cli_plugins(&storage_root, &state.config.models)
-        };
         runtime
             .block_on(state.core_manager.ensure_core(
                 &session_id,
@@ -118,7 +113,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                 workspace_dir,
                 None,
                 stream_tx.clone(),
-                || plugins,
+                || build_cli_plugins(&storage_root, &session_id),
             ))
             .map_err(anyhow::Error::msg)?;
 
@@ -152,21 +147,18 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     Ok(())
 }
 
+/// 构造 CLI 会话 Core 的插件集合：与桌面端/Server 一致，只含为该会话
+/// 实例化的 runtime 聚合桥（在新建 Core 时才调用）。插件按清单的
+/// `entrypoints` 与 `RuntimeKind::Cli` 过滤。
 fn build_cli_plugins(
     storage_root: &std::path::Path,
-    _models: &tiangong_llm::models_config::ModelsConfig,
+    session_id: &str,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
-    let storage_root = storage_root.to_path_buf();
-
-    let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
-    plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
-        &storage_root,
+    vec![tiangong_plugin_runtime::RuntimeCorePlugin::new(
         tiangong_plugin_runtime::registry::RuntimeKind::Cli,
-    ));
-    // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
-    // 不注册 scheduler 插件：定时任务属于 Desktop / Server 这类长期运行宿主的能力。
-    // CLI 作为前台交互工具，生命周期不稳定，不承载调度执行（见 issue 说明）。
-    plugins
+        storage_root.to_path_buf(),
+        session_id,
+    )]
 }
 
 /// 处理完整的响应流

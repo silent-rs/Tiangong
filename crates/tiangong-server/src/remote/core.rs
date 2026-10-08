@@ -321,18 +321,9 @@ impl ServerCoreManager {
         };
         session_config.trust_mode = TrustMode::FullTrust;
 
-        let plugins = {
-            // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-            // prompt 等 WASM 插件由 load_installed_plugins 自动加载。
-            let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
-            plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
-                &storage_root,
-                tiangong_plugin_runtime::registry::RuntimeKind::Server,
-            ));
-            // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
-            // skill/analyze-attachment 等 WASM 插件由 load_installed_plugins 自动加载。
-            plugins
-        };
+        // 与桌面端一致：Core 只持有 runtime 聚合桥，在需要新建 Core 时才为该
+        // 会话实例化；已安装插件由桥在被调用时按需装载。
+        let plugin_session_id = session_id.clone();
         let ensured = self
             .core_manager
             .ensure_core(
@@ -341,7 +332,14 @@ impl ServerCoreManager {
                 workspace_dir,
                 None,
                 stream_tx,
-                || plugins,
+                move || {
+                    vec![tiangong_plugin_runtime::RuntimeCorePlugin::new(
+                        tiangong_plugin_runtime::registry::RuntimeKind::Server,
+                        storage_root,
+                        plugin_session_id,
+                    )
+                        as std::sync::Arc<dyn tiangong_core::core::Plugin>]
+                },
             )
             .await
             .map_err(anyhow::Error::msg)?;

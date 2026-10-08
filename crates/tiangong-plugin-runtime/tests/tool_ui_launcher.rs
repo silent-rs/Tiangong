@@ -117,7 +117,7 @@ fn stage_tool_plugin_with_permissions(root: &std::path::Path, id: &str, permissi
 fn load_plugin(root: &std::path::Path, id: &str) -> Arc<dyn Plugin> {
     tiangong_config::registry::init_from_dir(root);
     preload_installed_plugins(root);
-    load_installed_plugins(root, RuntimeKind::Desktop)
+    load_installed_plugins(root, RuntimeKind::Desktop, "tool-ui-session")
         .into_iter()
         .find(|plugin| plugin.id() == id)
         .expect("工具插件应注册")

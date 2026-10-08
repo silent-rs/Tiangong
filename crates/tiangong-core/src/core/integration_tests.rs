@@ -591,15 +591,14 @@ async fn steering_message_aborts_and_restarts_current_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn next_message_resumes_interrupted_turn() {
     use crate::core::plugin::Plugin;
-    use crate::session::{Message, MessagePhase, Session};
+    use crate::session::{Message, MessagePhase};
     use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
     use std::sync::Mutex;
-    use tiangong_types::MessageToolCall;
+    use tiangong_types::{MessageToolCall, PluginSession};
 
-    /// 记录 on_turn_finished 看到的本轮消息 ID（从本轮起点到末尾）。
     #[derive(Default)]
     struct RecordingPlugin {
-        finished: Mutex<Vec<Vec<String>>>,
+        finished: Mutex<Vec<PluginSession>>,
     }
     impl ToolOverrideHandler for RecordingPlugin {}
     impl ToolSpecProvider for RecordingPlugin {}
@@ -608,12 +607,8 @@ async fn next_message_resumes_interrupted_turn() {
         fn id(&self) -> &str {
             "recording"
         }
-        fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
-            let ids = session.messages[turn_start_idx..]
-                .iter()
-                .map(|message| message.id.clone())
-                .collect();
-            self.finished.lock().unwrap().push(ids);
+        fn on_turn_finished(&self, session: &PluginSession) {
+            self.finished.lock().unwrap().push(session.clone());
         }
     }
 
@@ -690,11 +685,16 @@ async fn next_message_resumes_interrupted_turn() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     assert_eq!(
-        snapshot.first().map(String::as_str),
+        snapshot.messages.first().map(|message| message.id.as_str()),
         Some(origin_id.as_str()),
-        "插件看到的本轮应从中断轮的起轮消息开始"
+        "插件快照应从中断轮的起轮消息开始"
     );
-    assert!(snapshot.iter().any(|id| id == "msg-next"));
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|message| message.id == "msg-next")
+    );
     routes["resumed-answer"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }

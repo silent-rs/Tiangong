@@ -1379,6 +1379,7 @@ await runSidecar({
         true,
         id.to_string(),
         Some(first.clone()),
+        "stale-ref-session",
     );
     let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
     let mut session = tiangong_core::session::Session::new("stale-ref-session");
@@ -1391,7 +1392,7 @@ await runSidecar({
 
     // 基线：wasm 工具经注入连接完成调用。（memory 组件每轮只回忆一次，
     // 每步先触发轮次开始钩子重置去重标记，确保真实走 sidecar 链路。）
-    adapter.on_turn_started(&mut session, 0);
+    adapter.on_turn_started();
     let baseline = runtime
         .block_on(
             tiangong_core::tools::extension::ToolOverrideHandler::handle(
@@ -1410,7 +1411,7 @@ await runSidecar({
 
     // 恢复：同一 wasm 实例再次调用，宿主状态应自动换代连接并成功
     //（无自动恢复时旧引用恒报「已停止」，memory 工具降级为不可用）。
-    adapter.on_turn_started(&mut session, 0);
+    adapter.on_turn_started();
     let recovered = runtime
         .block_on(
             tiangong_core::tools::extension::ToolOverrideHandler::handle(
@@ -1430,7 +1431,7 @@ await runSidecar({
     // 取消：挂起的调用被取消时，取消必须打到换代后的现役连接
     //（打旧引用是 no-op，sidecar 日志不会出现 cancel-reached）。
     let log = installed.directory.join("logs").join("sidecar.log");
-    adapter.on_turn_started(&mut session, 0);
+    adapter.on_turn_started();
     let future = tiangong_core::tools::extension::ToolOverrideHandler::handle(
         &adapter,
         &recall("挂起 __hang__"),

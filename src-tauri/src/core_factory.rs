@@ -28,18 +28,22 @@ pub struct DesktopCoreFactory {
 impl DesktopCoreFactory {
     /// 构造桌面端 Core 的插件集合（issue #245；`ensure_core` 按需回调）。
     ///
-    /// 返回单元素列表：runtime 聚合桥。每个 Core 持有独立桥实例（交付表
-    /// 互不共享），与既有「各 Core 适配器隔离 per-session 状态」语义一致。
+    /// 返回单元素列表：为该会话实例化的 runtime 聚合桥。每个 Core 持有独立
+    /// 桥实例（交付表互不共享），与既有「各 Core 适配器隔离 per-session 状态」
+    /// 语义一致。
     pub fn build_plugins_sync(
         &self,
+        session_id: &str,
         _models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
         if self.app_handle.get().is_none() {
             tracing::warn!("app_handle 尚未注入，桌面插件构造中止");
             return Vec::new();
         }
-        vec![tiangong_plugin_runtime::RuntimeCorePlugin::desktop(
+        vec![tiangong_plugin_runtime::RuntimeCorePlugin::new(
+            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
             self.storage_root.clone(),
+            session_id,
         )]
     }
 }

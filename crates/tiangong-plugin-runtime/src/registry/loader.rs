@@ -42,11 +42,19 @@ pub fn core_plugin_ids(_storage_root: &Path, runtime: RuntimeKind) -> Vec<String
     plugin_ids
 }
 
-/// 为一个 Core 创建独立实例。实例使用注册表已接受的同一份 WASM 字节快照。
+/// 为一个会话直接创建全部已安装插件的独立适配器（不经聚合桥）。
+///
+/// 各入口构造 Core 时统一经 [`crate::RuntimeCorePlugin`] 接入插件；本函数
+/// 保留给需要直接拿到单个适配器的测试与工具场景。实例使用注册表已接受的
+/// 同一份 WASM 字节快照。
 ///
 /// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
 /// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
-pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
+pub fn load_installed_plugins(
+    _storage_root: &Path,
+    runtime: RuntimeKind,
+    session_id: &str,
+) -> Vec<Arc<dyn Plugin>> {
     let Ok(_operation) = LOAD_OPERATION.write() else {
         tracing::warn!("插件加载操作锁已损坏");
         return Vec::new();
@@ -54,7 +62,7 @@ pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec
 
     core_plugin_ids(_storage_root, runtime)
         .into_iter()
-        .filter_map(|plugin_id| load_core_plugin(&plugin_id, runtime))
+        .filter_map(|plugin_id| load_core_plugin(&plugin_id, runtime, session_id))
         .collect()
 }
 
@@ -455,10 +463,11 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     loaded.enabled.then(|| loaded.directory.clone())
 }
 
-/// 从指定路径加载 WASM 插件，供运行时集成测试使用。
+/// 从指定路径为会话 `session_id` 加载 WASM 插件，供运行时集成测试使用。
 pub fn load_wasm_plugin_at(
     wasm_path: &Path,
     sidecar: Option<Arc<dyn SidecarConnection>>,
+    session_id: &str,
 ) -> Option<Arc<dyn Plugin>> {
     let plugin_id = wasm_path
         .file_stem()
@@ -476,10 +485,15 @@ pub fn load_wasm_plugin_at(
     Some(Arc::new(WasmPluginAdapter::new(
         plugin,
         PluginRuntimeConfig::default(),
+        session_id,
     )))
 }
 /// 适配器。创建失败（纯 UI 插件、WASM 实例化失败）返回 `None`。
-pub fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
+pub fn load_core_plugin(
+    plugin_id: &str,
+    runtime: RuntimeKind,
+    session_id: &str,
+) -> Option<Arc<dyn Plugin>> {
     let (manifest, component, descriptor_id, sidecar, enabled, storage_access, verified_sidecar) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
@@ -544,6 +558,7 @@ pub fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn
         enabled,
         descriptor_id,
         sidecar.map(|s| s as Arc<dyn SidecarConnection>),
+        session_id,
     ));
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(loaded) = plugins.get_mut(plugin_id)

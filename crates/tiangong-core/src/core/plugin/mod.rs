@@ -17,7 +17,8 @@
 //! 模块组织：
 //! - [`trait_def`]：`Plugin` trait 定义与信任模式/反馈默认能力。
 //! - [`feedback`]：插件状态反馈通道（`PluginFeedback` + `PluginFeedbackTx`）。
-//! - [`notify`]：收尾钩子（on_turn_finished / on_session_ended）的统一后台通知投递。
+//! - [`notify`]：收尾钩子（on_turn_finished / on_session_ended）的统一后台通知投递，
+//!   含 on_turn_finished 的本轮只读快照组装。
 //! - [`registry`]：`register_plugin` 编排逻辑（core 在 engine 创建时遍历调用）。
 //! - [`injection`]：插件事件注入通道（synthetic tool）的工具规格。
 //! - [`tool_spec`]：插件基础设施相关的工具名常量集中点。

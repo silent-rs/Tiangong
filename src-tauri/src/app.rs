@@ -920,7 +920,7 @@ impl TiangongApp {
                 workspace_dir,
                 initial_model_ref,
                 stream_tx,
-                || factory.build_plugins_sync(models),
+                || factory.build_plugins_sync(session_id, models),
             )
             .await
     }

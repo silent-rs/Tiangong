@@ -35,9 +35,10 @@ use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSp
 /// 中完成（core 在收集 specs 前调用）。
 /// 工具规格 / 工具覆盖 / Prompt 段落由 core 根据 supertrait 自动收集，无需插件手动注册。
 ///
-/// 此外，core 在 worker_loop 的关键生命周期节点遍历插件，回调下述生命周期钩子
-///（均提供默认空实现），传入 `&mut Session` 供插件做必要处理（如维护索引、归档
-/// 记忆等）。插件按需覆写关心的节点即可。
+/// 插件实例在构造 Core 时为该会话实例化，与会话无关对话内容的数据（如会话
+/// 身份）由插件构造方直接提供；运行上下文经上面的注入方法下发。生命周期
+/// 钩子只通知时机，不携带会话数据；唯一例外是
+/// [`on_turn_finished`](Plugin::on_turn_finished)，它交付本轮对话内容。
 pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider {
     /// 插件唯一标识（日志/调试用）。
     fn id(&self) -> &str;
@@ -120,10 +121,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// - `on_session_ended`：Core 即将退出，插件做最终清理。
     ///
     /// 默认实现为空——不关心取消的插件无需覆写。
-    fn on_cancel<'a>(
-        &'a self,
-        _session: &mut crate::session::Session,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    fn on_cancel(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
 
@@ -138,8 +136,9 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
 
     // ── 生命周期钩子 ──
     //
-    // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理
-    //（如维护索引、归档记忆等）。全部默认空实现，插件按需覆写。
+    // 在对应节点遍历插件回调。会话身份由插件构造时获得，钩子只通知时机；
+    // 只有 on_turn_finished 交付本轮对话内容（只读快照，插件不能改写 Core
+    // 会话状态）。全部默认空实现，插件按需覆写。
 
     /// 首轮 TurnContext 构建且 feedback 注入完成后、turn task 启动前调用一次。
     ///
@@ -148,39 +147,35 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 均已注入，插件可安全读取已存储的上下文。适合做一次性的会话级初始化（如对工作
     /// 目录做首次全量扫描）。仅触发一次；后续 Context 重建由 [`Plugin::on_config_updated`]
     /// 承载再配置语义。
-    fn on_session_ready(&self, _session: &mut crate::session::Session) {}
+    fn on_session_ready(&self) {}
 
     /// 一个对话轮次开始前调用：用户消息已写入 session，`execute_turn` 调用前。
-    ///
-    /// `turn_start_idx` 为本轮用户消息在 `session.messages` 中的起始索引，
-    /// 可供 [`Plugin::on_turn_finished`] 计算本轮新增消息范围。
-    fn on_turn_started(&self, _session: &mut crate::session::Session, _turn_start_idx: usize) {}
+    fn on_turn_started(&self) {}
 
     /// 一个对话轮次结束后调用：本轮已**最终落盘、终态已发布**（钩子在终态
     /// 之后投递；落盘失败的降级与候选回收都发生在钩子之前，钩子看到的
     /// 状态即最终磁盘状态）。
     ///
+    /// `session` 是本轮的只读快照：`messages` 只含本轮消息（剔除 Notice），
+    /// 首条为本轮用户输入，其后为引导消息、工具调用与结果、插件注入消息、
+    /// 最终回复；不含跨轮历史。
+    ///
     /// 通知型钩子：Core 后台线程投递、不等待完成（turn 终态与任务收尾不受
-    /// 插件收尾速度影响），钩子收到的是**会话快照**（只读），对 session 的
-    /// 修改不会被持久化。实现应只做快速入队/通知，重活交给插件自身后台
+    /// 插件收尾速度影响）。实现应只做快速入队/通知，重活交给插件自身后台
     ///（sidecar 或后台任务）；失败/超时由实现自行记录日志。
     ///
     /// 顺序边界：每个通知独立投递、即发即忘，**不保证跨轮次的送达顺序**
     ///（连续快速对话时本轮通知可能先于上一轮到达）。通知自带本轮完整数据、
     /// 相互独立；需要顺序或背压消化的插件应在自身后台处理（如 memory 的
     /// sidecar 队列）。
-    ///
-    /// `turn_start_idx` 与 [`Plugin::on_turn_started`] 接收的值一致，可用于取出本轮
-    /// 新增的消息做后处理（如批量写入索引）。
-    fn on_turn_finished(&self, _session: &crate::session::Session, _turn_start_idx: usize) {}
+    fn on_turn_finished(&self, _session: &tiangong_types::PluginSession) {}
 
     /// 会话结束、worker 即将退出前调用（finalize 用）。
     ///
     /// 通知型钩子：Core 在后台线程投递、不等待完成（关闭会话/退出应用不被
-    /// 插件阻塞），钩子收到的是**会话快照**（只读），对 session 的修改不会被
-    /// 持久化。实现应快速返回或自身可被 detach；耗时收尾应自带超时上限，
-    /// 失败/超时由实现自行记录日志。
+    /// 插件阻塞）。实现应快速返回或自身可被 detach；耗时收尾应自带超时
+    /// 上限，失败/超时由实现自行记录日志。
     ///
     /// 注意：此时 stream 通道可能已关闭，钩子内不应再投递流事件。
-    fn on_session_ended(&self, _session: &crate::session::Session) {}
+    fn on_session_ended(&self) {}
 }

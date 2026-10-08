@@ -20,14 +20,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tiangong_core::core::plugin::Plugin;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::react::message::INJECTION_TOOL_NAME;
-use tiangong_core::session::{MessageRole, Session};
+use tiangong_core::session::Session;
 use tiangong_core::tools::extension::{
     PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider, call_with_name,
     namespace_tool_specs,
 };
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
+use tiangong_types::PluginSession;
 
 use crate::registry::{self, RuntimeKind};
 
@@ -153,21 +153,43 @@ pub struct RuntimeCorePlugin {
     /// 本 Core 自留的反馈通道（turn 内有效）：自制插件清单变化时经
     /// 注入通道追加到对话历史。
     feedback_tx: RwLock<Option<tiangong_core::core::plugin::PluginFeedbackTx>>,
-    /// 最近一次注入的自制插件清单（序列化文本）：轮开始时比对，
-    /// 变化才注入——append-only，cache 前缀不受影响。
-    last_inventory: Mutex<Option<String>>,
+    /// 最近一次注入的自制插件清单及注入时的上下文摘要：轮开始时比对，
+    /// 清单变化或其后发生过压缩才注入——append-only，cache 前缀不受影响。
+    last_inventory: Mutex<Option<InjectedInventory>>,
+    /// 最近一轮结束时的上下文摘要（`on_turn_finished` 更新）。
+    latest_summary: Mutex<Option<String>>,
+    /// 所属会话：桥随 Core 构造为该会话实例化，装载的适配器在构造时获得。
+    session_id: String,
+}
+
+/// 最近一次注入的自制插件清单状态。
+#[derive(PartialEq, Eq)]
+struct InjectedInventory {
+    /// 清单序列化文本。
+    text: String,
+    /// 注入时的上下文摘要：摘要变化说明其后发生过压缩，清单可能已被折叠。
+    context_summary: Option<String>,
 }
 
 impl RuntimeCorePlugin {
-    /// 构造桌面端桥实例。
-    pub fn desktop(storage_root: PathBuf) -> Arc<Self> {
+    /// 为一个会话构造桥实例：在构造该会话的 Core 时调用（各入口统一）。
+    ///
+    /// 会话身份等与对话内容无关的会话数据在此一次性提供；已安装插件的
+    /// 适配器在被调用时按需装载，构造时即获得所属会话。
+    pub fn new(
+        runtime: RuntimeKind,
+        storage_root: PathBuf,
+        session_id: impl Into<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             storage_root,
-            runtime: RuntimeKind::Desktop,
+            runtime,
             delivered: Mutex::new(HashMap::new()),
             tool_routes: RwLock::new(HashMap::new()),
             feedback_tx: RwLock::new(None),
             last_inventory: Mutex::new(None),
+            latest_summary: Mutex::new(None),
+            session_id: session_id.into(),
         })
     }
 
@@ -193,7 +215,7 @@ impl RuntimeCorePlugin {
         };
         let mut loaded = Vec::with_capacity(missing.len());
         for id in missing {
-            if let Some(adapter) = registry::load_core_plugin(&id, self.runtime) {
+            if let Some(adapter) = registry::load_core_plugin(&id, self.runtime, &self.session_id) {
                 loaded.push((id, adapter));
             }
         }
@@ -260,33 +282,42 @@ impl RuntimeCorePlugin {
     /// 自制插件为空时不推送空清单（没有信息量）；之后再出现自制插件时
     /// 按变化注入。
     ///
-    /// **压缩自愈**：注入的清单与其他 Tool 消息一样可被压缩折叠；最近一条
-    /// 清单被折进摘要边界之前时，模型侧「以最近一条清单为准」的锚点已不
-    /// 存在——此时即使清单内容未变也重新注入一份（见
-    /// [`Self::inventory_injection_folded`]）。
+    /// **压缩自愈**：注入的清单与其他 Tool 消息一样可被压缩折叠，折叠后模型
+    /// 侧「以最近一条清单为准」的锚点不复存在。桥看不到会话历史，按上下文
+    /// 摘要判定：最近一轮结束时的摘要与注入时不同，说明其后发生过压缩，即使
+    /// 清单内容未变也重新注入一份。压缩本身已重建请求前缀，此时追加注入不
+    /// 额外破坏 KV cache。摘要来自 `on_turn_finished`，轮次之间的手动压缩会
+    /// 在其后一轮结束时被观察到。
     ///
     /// 经反馈通道走 `Command::InjectTool` → 工具批次收敛后的安全点注入，
     /// 对话历史 append-only，KV cache 前缀不受影响。
-    fn maybe_inject_local_inventory(&self, session: &Session) {
+    fn maybe_inject_local_inventory(&self) {
         let inventory = registry::local_plugin_inventory();
         let text = inventory.to_string();
         let empty = inventory["plugins"]
             .as_array()
             .is_some_and(std::vec::Vec::is_empty);
-        let folded = Self::inventory_injection_folded(session);
+        let current = InjectedInventory {
+            text,
+            context_summary: self
+                .latest_summary
+                .lock()
+                .ok()
+                .and_then(|summary| summary.clone()),
+        };
         let needs_inject = {
             let Ok(mut last) = self.last_inventory.lock() else {
                 return;
             };
-            if !folded && last.as_deref() == Some(text.as_str()) {
+            if last.as_ref() == Some(&current) {
                 false
             } else if empty {
                 // 自制插件为空：不推送空清单。记录当前状态，之后再出现
                 // 自制插件时清单变化，照常注入。
-                *last = Some(text);
+                *last = Some(current);
                 false
             } else {
-                *last = Some(text);
+                *last = Some(current);
                 true
             }
         };
@@ -310,31 +341,6 @@ impl RuntimeCorePlugin {
                 *last = None;
             }
         }
-    }
-
-    /// 最近一条清单注入消息是否已被压缩折叠出模型上下文。
-    ///
-    /// 清单注入产生 assistant(tool_call) + tool result 消息对（见
-    /// `react::message::inject_tool_to_messages`），与其他 Tool 消息一样
-    /// 可压缩；`summary_up_to` 边界之前的消息不再进入 `Session::context()`。
-    /// 检测：从后向前找最近一次清单注入的 assistant 消息（tool_call 的
-    /// source 标记为清单注入），其索引落在边界之前即已折叠。
-    fn inventory_injection_folded(session: &Session) -> bool {
-        session
-            .messages
-            .iter()
-            .rposition(|message| {
-                message.role == MessageRole::Assistant
-                    && message.tool_calls.iter().any(|call| {
-                        call.name == INJECTION_TOOL_NAME
-                            && call
-                                .arguments
-                                .get("source")
-                                .and_then(serde_json::Value::as_str)
-                                == Some(LOCAL_PLUGIN_LIST_INJECTION)
-                    })
-            })
-            .is_some_and(|index| index < session.summary_up_to)
     }
 
     /// 解析并路由 `call_local_plugin`。
@@ -421,17 +427,13 @@ impl Plugin for RuntimeCorePlugin {
         self.each_adapter(|adapter| adapter.set_exec_env(env.clone()));
     }
 
-    fn on_cancel<'a>(
-        &'a self,
-        session: &mut Session,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    fn on_cancel(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         // 与各适配器实现约定一致：取消工作在同步段完成，返回的 future 为
-        // 空壳（见 WasmPluginAdapter::on_cancel）。桥在同步段逐适配器驱动，
-        // session 引用不进入返回的 future——这正是 trait 生命周期签名的
-        // 隐含约定；若未来出现真正的异步取消实现，需扩展 trait 签名。
+        // 空壳（见 WasmPluginAdapter::on_cancel）。桥在同步段逐适配器驱动；
+        // 若未来出现真正的异步取消实现，需扩展 trait 签名。
         let adapters = self.adapters();
         for adapter in adapters {
-            let future = adapter.on_cancel(session);
+            let future = adapter.on_cancel();
             let mut future = std::pin::pin!(future);
             let mut context = std::task::Context::from_waker(std::task::Waker::noop());
             let _ = future.as_mut().poll(&mut context);
@@ -443,24 +445,29 @@ impl Plugin for RuntimeCorePlugin {
         self.each_adapter(|adapter| adapter.on_config_updated(config));
     }
 
-    fn on_session_ready(&self, session: &mut Session) {
-        self.each_adapter(|adapter| adapter.on_session_ready(session));
+    fn on_session_ready(&self) {
+        self.each_adapter(|adapter| adapter.on_session_ready());
     }
 
-    fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
-        self.each_adapter(|adapter| adapter.on_turn_started(session, turn_start_idx));
+    fn on_turn_started(&self) {
+        self.each_adapter(|adapter| adapter.on_turn_started());
         // 轮开始注入/刷新自制插件清单：覆盖首轮基线、空闲期间发生的
         // 装卸（变化事件的 turn 内注入由宿主订阅者另行投递），以及最近
         // 一条清单被压缩折叠后的自愈重注入。
-        self.maybe_inject_local_inventory(session);
+        self.maybe_inject_local_inventory();
     }
 
-    fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
-        self.each_adapter(|adapter| adapter.on_turn_finished(session, turn_start_idx));
+    fn on_turn_finished(&self, session: &PluginSession) {
+        // 记录本轮结束时的上下文摘要：压缩会改写摘要，下一轮开始时据此
+        // 判断清单是否可能已被折叠。
+        if let Ok(mut summary) = self.latest_summary.lock() {
+            *summary = session.context_summary.clone();
+        }
+        self.each_adapter(|adapter| adapter.on_turn_finished(session));
     }
 
-    fn on_session_ended(&self, session: &Session) {
-        self.each_adapter(|adapter| adapter.on_session_ended(session));
+    fn on_session_ended(&self) {
+        self.each_adapter(|adapter| adapter.on_session_ended());
     }
 }
 
@@ -573,73 +580,28 @@ impl PromptSectionProvider for RuntimeCorePlugin {
     }
 }
 
-/// 清单折叠自愈判定的单元测试（完整注入链路见 tests/core_bridge.rs）。
+/// 清单注入判定的单元测试（完整注入链路见 tests/core_bridge.rs）。
 #[cfg(test)]
-mod inventory_fold_tests {
+mod inventory_state_tests {
     use super::*;
-    use tiangong_core::session::{Message, MessageRole, MessageToolCall};
 
-    /// 构造一条清单注入 assistant 消息（source 标记为清单注入）。
-    fn inventory_injection_message() -> Message {
-        let mut message = Message::new(MessageRole::Assistant, String::new());
-        message.tool_calls = vec![MessageToolCall {
-            id: format!("inj_{}", scru128::new()),
-            name: INJECTION_TOOL_NAME.to_string(),
-            arguments: serde_json::json!({
-                "source": LOCAL_PLUGIN_LIST_INJECTION,
-            }),
-        }];
-        message
+    fn state(text: &str, summary: Option<&str>) -> InjectedInventory {
+        InjectedInventory {
+            text: text.to_string(),
+            context_summary: summary.map(str::to_string),
+        }
     }
 
     #[test]
-    fn 无清单注入时不判折叠() {
-        let mut session = Session::new("no-injection");
-        session.summary_up_to = 2;
-        session
-            .messages
-            .push(Message::new(MessageRole::User, "问题"));
-        assert!(!RuntimeCorePlugin::inventory_injection_folded(&session));
+    fn 清单与摘要都未变时视为已注入() {
+        assert!(state("a", Some("s1")) == state("a", Some("s1")));
+        assert!(state("a", None) == state("a", None));
     }
 
     #[test]
-    fn 清单在保留区时不判折叠() {
-        let mut session = Session::new("kept");
-        session
-            .messages
-            .push(Message::new(MessageRole::User, "早前问题"));
-        session
-            .messages
-            .push(Message::new(MessageRole::Assistant, "早前回答"));
-        session.messages.push(inventory_injection_message());
-        session.summary_up_to = 2; // 边界在清单消息之前 → 保留区可见。
-        assert!(!RuntimeCorePlugin::inventory_injection_folded(&session));
-    }
-
-    #[test]
-    fn 清单被折叠时判折叠_多条取最近() {
-        let mut session = Session::new("folded");
-        session.messages.push(inventory_injection_message());
-        session
-            .messages
-            .push(Message::new(MessageRole::User, "早前问题"));
-        session
-            .messages
-            .push(Message::new(MessageRole::Assistant, "早前回答"));
-        session.messages.push(inventory_injection_message()); // 最近一条
-        session.summary_up_to = 4; // 两条清单注入都在边界之前。
-        assert!(RuntimeCorePlugin::inventory_injection_folded(&session));
-    }
-
-    #[test]
-    fn 最近清单在保留区时旧清单折叠不判折叠() {
-        let mut session = Session::new("re-injected");
-        session.messages.push(inventory_injection_message()); // 旧的（已折叠）
-        session
-            .messages
-            .push(Message::new(MessageRole::User, "早前问题"));
-        session.messages.push(inventory_injection_message()); // 最近（保留区）
-        session.summary_up_to = 2;
-        assert!(!RuntimeCorePlugin::inventory_injection_folded(&session));
+    fn 清单变化或其后发生压缩时需重新注入() {
+        assert!(state("a", Some("s1")) != state("b", Some("s1")), "清单变化");
+        assert!(state("a", None) != state("a", Some("s1")), "首次压缩");
+        assert!(state("a", Some("s1")) != state("a", Some("s2")), "再次压缩");
     }
 }
