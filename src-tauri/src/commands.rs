@@ -221,7 +221,6 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
         manager
             .list_session_metadata()
             .iter()
-            .filter(|metadata| metadata.parent_session_id.is_none())
             .map(SessionListItem::from_metadata)
             .collect()
     })
@@ -241,8 +240,7 @@ pub async fn get_session_meta(
             manager.storage_root(),
             &session_id,
         )
-        .ok()
-        .filter(|m| m.parent_session_id.is_none());
+        .ok();
         Ok(meta.as_ref().map(SessionListItem::from_metadata))
     })
     .await

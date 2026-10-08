@@ -20,9 +20,6 @@ pub struct PluginSession {
     pub cwd: String,
     /// 工作区标识（由宿主生成的平台无关 ID，通常取 cwd 的末尾目录名）。
     pub workspace_id: String,
-    /// 父会话 ID（子 Agent 时存在）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
     /// 本轮起始用户消息 ID（on_turn_started / on_turn_finished 钩子填充）。
     ///
     /// 插件按 ID 定位本轮起点，不受快照消息增删（如剔除 Notice）影响；

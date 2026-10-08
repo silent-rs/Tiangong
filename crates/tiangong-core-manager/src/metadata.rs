@@ -30,9 +30,6 @@ pub struct SessionMetadata {
     /// 消息条数（UI 列表展示）。P3 移除完整 Session 后需另从磁盘/缓存取。
     #[serde(default)]
     pub message_count: usize,
-    /// 父会话 ID（Worker 子会话标注；UI 列表按此过滤掉子会话）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
 }
 
 impl From<&Session> for SessionMetadata {
@@ -47,7 +44,6 @@ impl From<&Session> for SessionMetadata {
             cwd: session.cwd.clone(),
             cwd_mode: session.cwd_mode.clone(),
             message_count: session.messages.len(),
-            parent_session_id: session.parent_session_id.clone(),
         }
     }
 }
@@ -98,11 +94,6 @@ impl SessionMetadata {
                 .and_then(|item| serde_json::from_value(item).ok())
                 .unwrap_or_default(),
             message_count: raw.messages.0,
-            parent_session_id: raw
-                .parent_session_id
-                .as_ref()
-                .and_then(|item| item.as_str())
-                .map(str::to_string),
         })
     }
 }
@@ -129,8 +120,6 @@ struct RawMetadata {
     cwd_mode: Option<serde_json::Value>,
     #[serde(default)]
     messages: ElementCount,
-    #[serde(default)]
-    parent_session_id: Option<serde_json::Value>,
 }
 
 /// 只统计 JSON 数组元素个数、不构造元素的反序列化目标；非数组按 0 计。
@@ -219,7 +208,6 @@ mod tests {
             cwd: "/tmp".into(),
             cwd_mode: SessionCwdMode::Inherit,
             message_count: 3,
-            parent_session_id: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: SessionMetadata = serde_json::from_str(&json).unwrap();
@@ -232,14 +220,13 @@ mod tests {
             "id": "s1", "title": "t", "created_at": "c", "updated_at": "u",
             "trust_mode": "bogus", "cwd": "/w", "context_summary": {"big": [1,2,3]},
             "messages": [{"role":"user","content":[{"text":"a"}]}, {"role":"assistant"}, 3],
-            "parent_session_id": "p"
+            "parent_session_id": "legacy-parent"
         }"#;
         let meta = SessionMetadata::from_slice(content).unwrap();
         assert_eq!(meta.id, "s1");
         assert_eq!(meta.cwd, "/w");
         assert_eq!(meta.message_count, 3);
         assert_eq!(meta.trust_mode, TrustMode::default());
-        assert_eq!(meta.parent_session_id.as_deref(), Some("p"));
 
         let empty = SessionMetadata::from_slice(br#"{"id": 1, "messages": null}"#).unwrap();
         assert_eq!(empty.id, "");
@@ -259,7 +246,6 @@ mod tests {
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             message_count: 0,
-            parent_session_id: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("reasoning_effort"));
