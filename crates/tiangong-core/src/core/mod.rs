@@ -477,7 +477,7 @@ impl TiangongCore {
                 .is_ok()
             {
                 for plugin in &ctx.plugins {
-                    plugin.on_session_ready(&mut ctx.session);
+                    plugin.on_session_ready();
                 }
             }
             // 每轮重拼 system prompt：内容一致时 rebuild 内部保留原消息
@@ -699,16 +699,8 @@ impl TiangongCore {
         // 取消活跃 turn 并等待任务收敛，再投递插件收尾通知、返回最终 session。
         crate::shared_runtime::cancel_and_join(&self.session_id)?;
         let session = self.load_session()?;
-        self.finalize_plugins(&session);
+        crate::core::plugin::notify_session_ended(&self.plugin_instances());
         Ok(session)
-    }
-
-    /// 投递全部 `on_session_ended` 通知（worker 退出前的 finalize 钩子）。
-    ///
-    /// 通知型钩子：后台线程投递、不等待完成——关闭会话/退出应用不被任何插件
-    /// 无限阻塞（issue #404）。钩子收到只读快照，收尾成败与产出由插件自行负责。
-    fn finalize_plugins(&self, session: &Session) {
-        crate::core::plugin::notify_session_ended(&self.plugin_instances(), session);
     }
 }
 

@@ -20,16 +20,14 @@ pub struct PluginSession {
     pub cwd: String,
     /// 工作区标识（由宿主生成的平台无关 ID，通常取 cwd 的末尾目录名）。
     pub workspace_id: String,
-    /// 本轮起始用户消息 ID（on_turn_started / on_turn_finished 钩子填充）。
-    ///
-    /// 插件按 ID 定位本轮起点，不受快照消息增删（如剔除 Notice）影响；
-    /// 其余钩子（会话就绪/结束）无本轮概念，不填充。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_start_message_id: Option<String>,
     /// 思考强度。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// 消息列表（完整对话历史）。
+    /// 本轮消息（剔除 Notice），不含本轮之前的历史。
+    ///
+    /// 只有 `on_turn_finished` 交付会话快照：首条为本轮用户输入，其后为运行中
+    /// 引导消息、工具调用与结果、插件注入消息、最终回复。
+    #[serde(default)]
     pub messages: Vec<Message>,
     /// 上下文摘要。
     #[serde(default, skip_serializing_if = "Option::is_none")]

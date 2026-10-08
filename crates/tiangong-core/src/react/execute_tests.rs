@@ -1167,10 +1167,22 @@ async fn run_turn_emits_single_done_and_anchors_status_to_latest_user_message() 
     );
 }
 
-/// 计数 on_turn_started / on_turn_finished 调用次数的插件，用于验证生命周期唯一性。
+/// 计数 on_turn_started / on_turn_finished 调用次数的插件，用于验证生命周期唯一性；
+/// 同时记录 on_turn_finished 收到的本轮消息文本，用于验证快照范围。
 struct LifecycleCountingPlugin {
     started: Arc<AtomicU32>,
     finished: Arc<AtomicU32>,
+    finished_texts: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl LifecycleCountingPlugin {
+    fn new(started: Arc<AtomicU32>, finished: Arc<AtomicU32>) -> Self {
+        Self {
+            started,
+            finished,
+            finished_texts: Arc::default(),
+        }
+    }
 }
 
 impl ToolOverrideHandler for LifecycleCountingPlugin {}
@@ -1181,10 +1193,15 @@ impl Plugin for LifecycleCountingPlugin {
     fn id(&self) -> &str {
         "lifecycle-counter"
     }
-    fn on_turn_started(&self, _: &mut Session, _: usize) {
+    fn on_turn_started(&self) {
         self.started.fetch_add(1, Ordering::SeqCst);
     }
-    fn on_turn_finished(&self, _: &Session, _: usize) {
+    fn on_turn_finished(&self, session: &tiangong_types::PluginSession) {
+        *self.finished_texts.lock().unwrap() = session
+            .messages
+            .iter()
+            .map(|message| message.text_content())
+            .collect();
         self.finished.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -1215,10 +1232,10 @@ async fn run_turn_invokes_lifecycle_hooks_exactly_once() {
     .await;
     let started = Arc::new(AtomicU32::new(0));
     let finished = Arc::new(AtomicU32::new(0));
-    let plugin = Arc::new(LifecycleCountingPlugin {
-        started: started.clone(),
-        finished: finished.clone(),
-    });
+    let plugin = Arc::new(LifecycleCountingPlugin::new(
+        started.clone(),
+        finished.clone(),
+    ));
     let harness = TestHarness::new_with_plugins(&server, Vec::new(), HashMap::new(), vec![plugin]);
     let (_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
     run_turn(harness.ctx, &mut cmd_rx).await;
@@ -1350,10 +1367,11 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
     .await;
     let hook_started = Arc::new(AtomicU32::new(0));
     let hook_finished = Arc::new(AtomicU32::new(0));
-    let plugin = Arc::new(LifecycleCountingPlugin {
-        started: hook_started.clone(),
-        finished: hook_finished.clone(),
-    });
+    let plugin = Arc::new(LifecycleCountingPlugin::new(
+        hook_started.clone(),
+        hook_finished.clone(),
+    ));
+    let finished_texts = plugin.finished_texts.clone();
     let TestHarness {
         ctx,
         cmd_tx,
@@ -1401,6 +1419,18 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
     );
     wait_for_counter(&hook_finished, 1);
     assert_eq!(hook_finished.load(Ordering::SeqCst), 1);
+    // 插件快照只含本轮：首条为本轮用户输入，运行中引导消息与最终回复都在本轮内。
+    let texts = finished_texts.lock().unwrap().clone();
+    assert_eq!(texts.first().map(String::as_str), Some("你好"), "{texts:?}");
+    assert!(
+        texts.iter().any(|text| text.contains("看这张新截图")),
+        "引导消息应在本轮快照内: {texts:?}"
+    );
+    assert_eq!(
+        texts.last().map(String::as_str),
+        Some("好的。"),
+        "{texts:?}"
+    );
     assert!(
         server
             .received_requests()
@@ -1526,10 +1556,7 @@ impl Plugin for CancelCountingPlugin {
     fn id(&self) -> &str {
         "cancel-counter"
     }
-    fn on_cancel<'a>(
-        &'a self,
-        _session: &mut Session,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    fn on_cancel(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         let cancelled = self.cancelled.clone();
         Box::pin(async move {
             cancelled.fetch_add(1, Ordering::SeqCst);
@@ -2500,7 +2527,7 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
         fn id(&self) -> &str {
             "stalling-finish"
         }
-        fn on_turn_finished(&self, _session: &Session, _turn_start_idx: usize) {
+        fn on_turn_finished(&self, _session: &tiangong_types::PluginSession) {
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
     }

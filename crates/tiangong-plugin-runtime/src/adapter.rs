@@ -16,12 +16,12 @@ use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::session::Session;
 use tiangong_core::tools::extension::{
     PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
 use tiangong_core::tools::result::{ToolExecutionRecord, ToolResult};
 use tiangong_llm::tool::{ToolCall, ToolSpec};
+use tiangong_types::PluginSession;
 use tokio::task;
 
 use crate::config::PluginRuntimeConfig;
@@ -43,6 +43,8 @@ pub struct WasmPluginAdapter {
     context_updates: Mutex<()>,
     enabled: AtomicBool,
     sidecar: Option<Arc<dyn SidecarConnection>>,
+    /// 所属会话：适配器为某个会话的 Core 实例化，构造时即确定。
+    session_id: String,
     /// 声明冻结快照：首次成功读取后，同一次运行内 tools/prompt 固定
     /// 返回冻结值——插件内部状态波动（探测重写、健康翻转）不得改写
     /// 请求前缀（KV cache 稳定），也免去每轮 WASM 声明调用。换代
@@ -63,32 +65,13 @@ struct ReloadContext {
 }
 
 impl WasmPluginAdapter {
-    pub fn new(plugin: WasmPlugin, config: PluginRuntimeConfig) -> Self {
-        Self::new_with_enabled(plugin, config, true, None)
-    }
-
-    pub(crate) fn new_with_enabled(
-        plugin: WasmPlugin,
-        config: PluginRuntimeConfig,
-        enabled: bool,
-        sidecar: Option<Arc<dyn SidecarConnection>>,
-    ) -> Self {
+    /// 为会话 `session_id` 创建适配器（插件 ID 经 `describe` 读取）。
+    pub fn new(plugin: WasmPlugin, config: PluginRuntimeConfig, session_id: &str) -> Self {
         let inner = Arc::new(Mutex::new(plugin));
-        let id_string = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe())
+        let id = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe())
             .map(|d| d.id)
             .unwrap_or_else(|_| "wasm-unknown".to_string());
-        Self {
-            inner: RwLock::new(Some(inner)),
-            id: id_string,
-            config,
-            feedback_tx: RwLock::new(None),
-            context: Mutex::new(ReloadContext::default()),
-            context_updates: Mutex::new(()),
-            enabled: AtomicBool::new(enabled),
-            sidecar,
-            cached_tools: Mutex::new(None),
-            cached_prompt_sections: Mutex::new(None),
-        }
+        Self::from_parts(inner, config, true, id, None, session_id)
     }
 
     /// 使用预加载阶段已校验的插件 ID 构造实例，避免每个 Core 重复调用 describe。
@@ -98,9 +81,28 @@ impl WasmPluginAdapter {
         enabled: bool,
         id: String,
         sidecar: Option<Arc<dyn SidecarConnection>>,
+        session_id: &str,
+    ) -> Self {
+        Self::from_parts(
+            Arc::new(Mutex::new(plugin)),
+            config,
+            enabled,
+            id,
+            sidecar,
+            session_id,
+        )
+    }
+
+    fn from_parts(
+        inner: Arc<Mutex<WasmPlugin>>,
+        config: PluginRuntimeConfig,
+        enabled: bool,
+        id: String,
+        sidecar: Option<Arc<dyn SidecarConnection>>,
+        session_id: &str,
     ) -> Self {
         Self {
-            inner: RwLock::new(Some(Arc::new(Mutex::new(plugin)))),
+            inner: RwLock::new(Some(inner)),
             id,
             config,
             feedback_tx: RwLock::new(None),
@@ -108,6 +110,7 @@ impl WasmPluginAdapter {
             context_updates: Mutex::new(()),
             enabled: AtomicBool::new(enabled),
             sidecar,
+            session_id: session_id.to_string(),
             cached_tools: Mutex::new(None),
             cached_prompt_sections: Mutex::new(None),
         }
@@ -323,42 +326,52 @@ impl Plugin for WasmPluginAdapter {
         }
     }
 
-    /// 会话就绪：序列化 session 只读快照转发到 WASM。
-    fn on_session_ready(&self, session: &mut Session) {
-        self.forward_session_hook("on_session_ready", session, |plugin, json| {
+    /// 会话就绪：以所属会话身份组装 WIT 所需的会话 JSON 转发到 WASM。
+    fn on_session_ready(&self) {
+        let Some(json) = self.session_identity_json() else {
+            return;
+        };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
+        self.call_hook("on_session_ready", move |plugin| {
             plugin.on_session_ready(json)
         });
     }
 
-    /// 轮次开始：序列化 session 转发。
-    fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(
-            "on_turn_started",
-            session,
-            turn_start_idx,
-            |plugin, json, idx| plugin.on_turn_started(json, idx),
-        );
+    /// 轮次开始：WIT 仍要求会话 JSON，只携带会话身份（不含消息）。
+    fn on_turn_started(&self) {
+        let Some(json) = self.session_identity_json() else {
+            return;
+        };
+        self.call_hook("on_turn_started", move |plugin| {
+            plugin.on_turn_started(json, 0)
+        });
     }
 
-    /// 轮次结束：序列化 session 只读快照转发（通知型钩子）。
+    /// 轮次结束：序列化本轮只读快照转发（通知型钩子）。
     ///
     /// Core 已在后台通知线程中调用本方法（issue #404），此处同步转发即可；
     /// Memory 等插件在 WASM 内同步确认 sidecar 入队，耗时被隔离在通知线程。
-    fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(
-            "on_turn_finished",
-            session,
-            turn_start_idx,
-            |plugin, json, idx| plugin.on_turn_finished(json, idx),
-        );
+    /// 快照只含本轮消息（首条即本轮起点），WIT 的 `turn-start-idx` 固定传 0。
+    fn on_turn_finished(&self, session: &PluginSession) {
+        let Some(json) = serialize_snapshot(session) else {
+            return;
+        };
+        self.call_hook("on_turn_finished", move |plugin| {
+            plugin.on_turn_finished(json, 0)
+        });
     }
 
-    /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
+    /// 会话结束：以所属会话身份转发（WASM 内部触发 meso 反刍）。
     ///
     /// 通知型钩子：Core 已在后台通知线程中调用本方法（issue #404），此处同步
     /// 转发，不再自行 detached。
-    fn on_session_ended(&self, session: &Session) {
-        self.forward_session_hook("on_session_ended", session, |plugin, json| {
+    fn on_session_ended(&self) {
+        let Some(json) = self.session_identity_json() else {
+            return;
+        };
+        self.call_hook("on_session_ended", move |plugin| {
             plugin.on_session_ended(json)
         });
     }
@@ -424,16 +437,13 @@ impl Plugin for WasmPluginAdapter {
         }
     }
 
-    fn on_cancel<'a>(
-        &'a self,
-        session: &mut Session,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    fn on_cancel(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         // 引用可能已被换代（wasm 调用侧触发刷新）：取消要打到现役连接。
         if let Some(sidecar) =
             crate::registry::refresh_stale_sidecar(self.sidecar.as_ref(), &self.id)
-            && let Err(error) = sidecar.cancel_session(&session.id)
+            && let Err(error) = sidecar.cancel_session(&self.session_id)
         {
-            tracing::warn!(plugin_id = %self.id, session_id = %session.id, %error, "取消 sidecar 调用失败");
+            tracing::warn!(plugin_id = %self.id, session_id = %self.session_id, %error, "取消 sidecar 调用失败");
         }
         Box::pin(async {})
     }
@@ -459,154 +469,56 @@ impl WasmPluginAdapter {
         call_wasm_off_runtime(inner, call)
     }
 
-    /// 会话级钩子：快照只含会话元信息，不含消息。失败仅 warn。
-    fn forward_session_hook(
-        &self,
-        hook: &'static str,
-        session: &Session,
-        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
-    ) {
-        let plugin_session = plugin_session(session, Vec::new());
-        let json = match serde_json::to_string(&plugin_session) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
-                return;
-            }
-        };
-        if let Ok(mut context) = self.context.lock() {
-            context.session_json = Some(json.clone());
-        }
-        if !self.is_enabled() {
-            return;
-        }
-        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
-            tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
-        }
-    }
-
-    /// 轮次钩子：快照只含本轮消息（`session.messages[turn_start_idx..]`）。
+    /// 以所属会话身份组装 WIT 生命周期钩子所需的会话 JSON（不含消息）。
     ///
-    /// 本轮范围由 turn 决定（`turn_start_idx` 为本轮锚点），不携带跨轮历史：
-    /// 长会话的完整历史可达数十 MB，每轮整份序列化给每个插件既无必要，也会
-    /// 让插件解析超出执行预算而 trap。快照首条即本轮锚点，`turn_start_message_id`
-    /// 指向它、`turn_start_idx` 传 0，现有插件无论按 ID 还是按位置定位都落在首条。
-    fn forward_session_hook_with_idx(
+    /// WIT 0.1.0 的会话级钩子仍以 `session-json` 为参数（兼容已安装插件）；
+    /// Core 不随钩子下发会话数据，适配器用构造时获得的会话 ID 与已注入的
+    /// 工作目录拼出最小快照。
+    fn session_identity_json(&self) -> Option<String> {
+        let id = self.session_id.clone();
+        let cwd = self
+            .context
+            .lock()
+            .ok()
+            .and_then(|context| context.workspace.clone())
+            .unwrap_or_default();
+        let workspace_id = cwd
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&cwd)
+            .to_string();
+        serialize_snapshot(&PluginSession {
+            id,
+            title: String::new(),
+            cwd,
+            workspace_id,
+            reasoning_effort: None,
+            messages: Vec::new(),
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+    }
+
+    fn call_hook(
         &self,
         hook: &'static str,
-        session: &Session,
-        turn_start_idx: usize,
-        call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
+        call: impl FnOnce(&mut WasmPlugin) -> anyhow::Result<()> + Send,
     ) {
-        let turn_messages = turn_messages(session, turn_start_idx);
-        let turn_start_message_id = turn_messages.first().map(|message| message.id.clone());
-        let mut plugin_session = plugin_session(session, turn_messages);
-        plugin_session.turn_start_message_id = turn_start_message_id;
-        let json = match serde_json::to_string(&plugin_session) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
-                return;
-            }
-        };
-        if let Ok(mut context) = self.context.lock() {
-            context.session_json = Some(json.clone());
-        }
         if !self.is_enabled() {
             return;
         }
-        // 快照首条即本轮锚点：按位置定位的插件取 0。
-        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, 0)) {
+        if let Err(error) = self.call_wasm_off_runtime(call) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
     }
 }
 
-/// 组装插件只读会话快照（会话元信息 + 给定消息）。
-///
-/// 不暴露 Core 内部状态（token 计数、任务记录、信任模式等）。
-fn plugin_session(
-    session: &Session,
-    messages: Vec<tiangong_types::Message>,
-) -> tiangong_types::PluginSession {
-    // 工作区标识：取 cwd 的末尾目录名（平台无关，由宿主生成）。
-    let workspace_id = session
-        .cwd
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&session.cwd)
-        .to_string();
-    tiangong_types::PluginSession {
-        id: session.id.clone(),
-        title: session.title.clone(),
-        cwd: session.cwd.clone(),
-        workspace_id,
-        turn_start_message_id: None,
-        reasoning_effort: session
-            .reasoning_effort
-            .map(|effort| effort.as_str().to_string()),
-        messages,
-        context_summary: session.context_summary.clone(),
-        created_at: session.created_at.clone(),
-        updated_at: session.updated_at.clone(),
-    }
-}
-
-/// 本轮消息：从本轮锚点到末尾，剔除 Notice（宿主发给用户的系统通知，
-/// 不属于对话内容）。锚点越界时为空。
-fn turn_messages(session: &Session, turn_start_idx: usize) -> Vec<tiangong_types::Message> {
-    session
-        .messages
-        .get(turn_start_idx..)
-        .unwrap_or(&[])
-        .iter()
-        .filter(|message| message.role != tiangong_types::MessageRole::Notice)
-        .cloned()
-        .collect()
-}
-
-#[cfg(test)]
-mod plugin_session_tests {
-    use super::*;
-    use tiangong_types::{MessagePhase, MessageRole};
-
-    #[test]
-    fn 会话级快照不含消息() {
-        let mut session = Session::new("会话级");
-        session.cwd = "/tmp/ws".to_string();
-        session.append_message(MessageRole::User, "第一轮");
-        session.append_message(MessageRole::Assistant, "回复");
-        let snapshot = plugin_session(&session, Vec::new());
-        assert!(snapshot.messages.is_empty());
-        assert_eq!(snapshot.id, session.id);
-        assert_eq!(snapshot.workspace_id, "ws");
-    }
-
-    #[test]
-    fn 本轮消息从锚点开始且剔除_notice() {
-        let mut session = Session::new("轮次");
-        session.append_message(MessageRole::User, "上一轮");
-        session.append_message(MessageRole::Assistant, "上一轮回复");
-        session.append_message(MessageRole::Notice, "上一轮失败通知");
-        session.append_message(MessageRole::User, "本轮输入");
-        session.append_message(MessageRole::Notice, "本轮通知");
-        session.append_message(MessageRole::User, "运行中引导");
-        let mut injected = tiangong_types::Message::new(MessageRole::User, "[injected-images]");
-        injected.phase = MessagePhase::HostInjected;
-        session.messages.push(injected);
-        session.append_message(MessageRole::Assistant, "本轮回复");
-
-        let texts: Vec<String> = turn_messages(&session, 3)
-            .iter()
-            .map(|message| message.text_content())
-            .collect();
-        assert_eq!(
-            texts,
-            vec!["本轮输入", "运行中引导", "[injected-images]", "本轮回复"]
-        );
-        assert!(turn_messages(&session, 99).is_empty());
-    }
+fn serialize_snapshot(session: &PluginSession) -> Option<String> {
+    serde_json::to_string(session)
+        .inspect_err(|e| tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}"))
+        .ok()
 }
 
 // ToolSpecProvider：返回插件声明的工具规格。
@@ -850,6 +762,7 @@ mod unloaded_adapter_tests {
             context_updates: Mutex::new(()),
             enabled: AtomicBool::new(true),
             sidecar: None,
+            session_id: "test-session".into(),
             cached_tools: Mutex::new(None),
             cached_prompt_sections: Mutex::new(None),
         }
@@ -870,7 +783,7 @@ mod unloaded_adapter_tests {
             name: "sample_tool".into(),
             arguments: serde_json::json!({}),
         };
-        let mut session = Session::new("unit");
+        let mut session = tiangong_core::session::Session::new("unit");
         for (enabled, expected) in [(false, "已停用"), (true, "当前不可用")] {
             adapter.set_enabled(enabled);
             let result = adapter.handle(&call, &mut session, "").await.unwrap();

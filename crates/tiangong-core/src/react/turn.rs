@@ -23,17 +23,12 @@ pub(crate) async fn run_turn(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> StreamEvent {
     // ── 本轮锚点 ──
-    // 起轮时已知本轮用户消息（`turn_id`）；最终 turn_status/elapsed_ms 也写在
-    // 它上面。插件生命周期仍按位置定位本轮（turn_start_idx），在 turn 开始时
-    // 由 turn_id 换算并固定（ALR-108：一个物理 turn 只触发一次）。
+    // 起轮时已知本轮用户消息（`turn_id`）：on_turn_finished 按它定位本轮范围
+    // （按 ID 而非位置：运行中压缩会在锚点前插入消息，位置会后移），最终
+    // turn_status/elapsed_ms 也写在它上面。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
-    let Some(turn_start_idx) = ctx.turn_id.as_ref().and_then(|turn_id| {
-        ctx.session
-            .messages
-            .iter()
-            .position(|message| &message.id == turn_id)
-    }) else {
+    let Some(turn_id) = ctx.turn_id.clone() else {
         let event = StreamEvent::Error {
             message: "本轮缺少用户消息".to_string(),
         };
@@ -43,9 +38,8 @@ pub(crate) async fn run_turn(
     let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
 
     // ── 启动插件生命周期 ──
-    // 插件看到的是已包含本轮用户消息的完整 Session。
     for plugin in &ctx.plugins {
-        plugin.on_turn_started(&mut ctx.session, turn_start_idx);
+        plugin.on_turn_started();
     }
 
     // ── 执行 Agent Loop ──
@@ -183,7 +177,7 @@ pub(crate) async fn run_turn(
     if status == tiangong_types::TurnStatus::Cancelled {
         let cancelled = tokio::time::timeout(PLUGIN_FINISH_TIMEOUT, async {
             for plugin in &ctx.plugins {
-                plugin.on_cancel(&mut ctx.session).await;
+                plugin.on_cancel().await;
             }
         })
         .await;
@@ -194,7 +188,7 @@ pub(crate) async fn run_turn(
             );
         }
     }
-    crate::core::plugin::notify_turn_finished(&ctx.plugins, &ctx.session, turn_start_idx);
+    crate::core::plugin::notify_turn_finished(&ctx.plugins, &ctx.session, &turn_id);
     terminal
 }
 

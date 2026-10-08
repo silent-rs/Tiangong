@@ -283,7 +283,7 @@ fn handle_unknown_tool_returns_error() {
     assert!(result.is_err(), "未知工具应返回错误");
 
     // 插件已接管调用后产生的错误必须穿过适配器，不能退成未注册。
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
     let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
     let call = tiangong_llm::tool::ToolCall {
         id: "call_2".into(),
@@ -423,7 +423,7 @@ fn adapter_integrates_with_core_plugin_trait() {
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
 
     assert_eq!(adapter.id(), "memory");
     let specs = <WasmPluginAdapter as ToolSpecProvider>::tool_specs(&adapter);
@@ -435,7 +435,27 @@ fn adapter_integrates_with_core_plugin_trait() {
 
 // ── 生命周期钩子 + session 注入测试 ──
 
-/// 构造一个带消息的测试 Session。
+/// 构造 `on_turn_finished` 的本轮快照（同 Core：从 `idx` 起为本轮消息）。
+fn turn_at(session: &Session, idx: usize) -> tiangong_types::PluginSession {
+    let workspace_id = session
+        .cwd
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    tiangong_types::PluginSession {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        cwd: session.cwd.clone(),
+        workspace_id,
+        reasoning_effort: None,
+        messages: session.messages[idx..].to_vec(),
+        context_summary: session.context_summary.clone(),
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+    }
+}
+/// 构造一个测试 Session。
 fn test_session() -> Session {
     let mut session = Session::new("test-session");
     session.cwd = "/tmp/test-workspace".to_string();
@@ -483,14 +503,14 @@ fn lifecycle_hooks_forward_session_without_panic() {
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
 
-    let mut session = test_session();
+    let session = test_session_with_user_message();
     // 全部钩子调用不应 panic。
-    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter, &mut session);
-    <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, 0);
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
-    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter, &session);
+    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter);
+    <WasmPluginAdapter as Plugin>::on_turn_started(&adapter);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
+    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter);
 }
 
 #[test]
@@ -503,11 +523,11 @@ fn on_turn_finished_with_connection_forwards_rumination() {
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
 
     let session = test_session_with_user_message();
     // 有用户消息时，on_turn_finished 应有序投递反刍任务并等待 sidecar 入队确认。
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
     assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
     assert!(sidecar.called("run_enhanced_micro_rumination"));
     let payload = sidecar.payload("run_enhanced_micro_rumination");
@@ -529,13 +549,13 @@ fn turn_finish_waits_only_for_sidecar_enqueue_and_releases_wasm_lock() {
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = Arc::new(WasmPluginAdapter::new(plugin, config));
+    let adapter = Arc::new(WasmPluginAdapter::new(plugin, config, "test-session"));
     let session = test_session_with_user_message();
     let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
     let finish_adapter = Arc::clone(&adapter);
     let finish_thread = std::thread::spawn(move || {
         let session = session;
-        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &session, 0);
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &turn_at(&session, 0));
         let _ = finish_tx.send(());
     });
     assert!(sidecar.wait_for_call("run_enhanced_micro_rumination", Duration::from_secs(1)));
@@ -557,6 +577,31 @@ fn turn_finish_waits_only_for_sidecar_enqueue_and_releases_wasm_lock() {
     assert!(!sidecar.auto_released(), "测试不应依赖自动释放上限");
 }
 #[test]
+fn session_hooks_use_session_identity_from_construction() {
+    // 会话级钩子不携带会话数据：适配器以构造时获得的会话身份与已注入的
+    // 工作目录组装 WIT 所需的会话 JSON。
+    let sidecar = Arc::new(MockMemorySidecar::default());
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
+    let config = PluginRuntimeConfig::default();
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config, "owner-session");
+
+    <WasmPluginAdapter as Plugin>::set_workspace(
+        &adapter,
+        Some(std::path::Path::new("/tmp/owner-ws")),
+    );
+    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter);
+    assert!(sidecar.wait_for_call_count("run_meso_rumination", 1));
+    let payload = sidecar.payload("run_meso_rumination");
+    assert_eq!(payload["session_id"], "owner-session");
+    assert_eq!(payload["workspace_id"], "owner-ws");
+}
+
+#[test]
 fn every_tenth_turn_forwards_meta_rumination() {
     let sidecar = Arc::new(MockMemorySidecar::default());
     let Some(wasm) = wasm_or_skip() else {
@@ -566,15 +611,15 @@ fn every_tenth_turn_forwards_meta_rumination() {
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
     let session = test_session_with_user_message();
 
     for _ in 0..9 {
-        <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
     }
     assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 9));
     assert!(!sidecar.called("run_meta_rumination"));
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
     assert!(sidecar.wait_for_call_count("run_meta_rumination", 1));
     assert!(sidecar.called("run_meta_rumination"));
 }
@@ -590,7 +635,7 @@ fn prompt_sections_without_handle_returns_empty() {
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
 
     let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
     assert!(sections.is_empty(), "无 handle 时应返回空注入");
@@ -606,7 +651,7 @@ fn new_turns_do_not_load_memory_into_system_prompt() {
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
 
     // 注入 workspace 和 session。
     <WasmPluginAdapter as Plugin>::set_workspace(
@@ -614,7 +659,7 @@ fn new_turns_do_not_load_memory_into_system_prompt() {
         Some(std::path::Path::new("/tmp/test-ws")),
     );
     let mut session = test_session();
-    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter, &mut session);
+    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter);
 
     session.system_prompt_message = Some(tiangong_types::Message::new(
         tiangong_types::MessageRole::System,
@@ -629,8 +674,7 @@ fn new_turns_do_not_load_memory_into_system_prompt() {
             tiangong_core::permission::TrustMode::FullTrust,
         );
         session.append_message(tiangong_types::MessageRole::User, format!("继续 {turn}"));
-        let start = session.messages.len() - 1;
-        <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, start);
+        <WasmPluginAdapter as Plugin>::on_turn_started(&adapter);
         let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
         assert!(
             sections.is_empty(),
@@ -672,7 +716,7 @@ fn file_plugin_preparation_never_starts_a_sidecar() {
     // 每个新对话仍有独立 WASM 状态；首次及后续准备均不得启动进程。
     for conversation in 0..3 {
         let plugin = loader.load(&wasm, &config).unwrap();
-        let adapter = WasmPluginAdapter::new(plugin, config.clone());
+        let adapter = WasmPluginAdapter::new(plugin, config.clone(), "test-session");
         for turn in 0..3 {
             let started = Instant::now();
             adapter.on_config_updated(&CoreConfig::default());
@@ -707,7 +751,7 @@ fn turn_hooks_receive_only_current_turn_messages() {
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config);
+    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
     let mut session = test_session();
     for turn in 0..200 {
         session
@@ -732,7 +776,7 @@ fn turn_hooks_receive_only_current_turn_messages() {
         .messages
         .push(Message::new(MessageRole::Assistant, "本轮回答"));
 
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, start);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, start));
     assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
     let turn = sidecar.payload("run_enhanced_micro_rumination")["turn_result"].clone();
     assert_eq!(turn["user_input"], "本轮问题");
