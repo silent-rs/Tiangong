@@ -542,7 +542,6 @@ fn plugin_session(
         title: session.title.clone(),
         cwd: session.cwd.clone(),
         workspace_id,
-        parent_session_id: session.parent_session_id.clone(),
         turn_start_message_id: None,
         reasoning_effort: session
             .reasoning_effort

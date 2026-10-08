@@ -721,7 +721,6 @@ mod tests {
             title: String::new(),
             cwd: "/tmp/ws".to_string(),
             workspace_id: "ws".to_string(),
-            parent_session_id: None,
             turn_start_message_id: None,
             reasoning_effort: None,
             messages,

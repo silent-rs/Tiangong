@@ -116,9 +116,6 @@ pub struct Session {
     pub system_prompt_message: Option<Message>,
     pub created_at: String,
     pub updated_at: String,
-    /// 父会话 ID（Worker 子会话标注所属的父会话）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
     /// 工具调用批次闭合前收到的外部工具输入；下一安全边界按顺序注入。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tool_injections: Vec<DeferredToolInjection>,
@@ -162,7 +159,6 @@ impl Session {
             system_prompt_message: None,
             created_at: now.clone(),
             updated_at: now,
-            parent_session_id: None,
             deferred_tool_injections: Vec::new(),
             model_ref: None,
             storage_root: None,
@@ -197,7 +193,6 @@ impl Session {
             system_prompt_message: None,
             created_at: now.clone(),
             updated_at: now,
-            parent_session_id: None,
             deferred_tool_injections: Vec::new(),
             model_ref: None,
             storage_root: None,
@@ -779,7 +774,7 @@ mod persistence_tests {
     }
 
     #[test]
-    fn legacy_workspace_tabs_are_ignored_and_never_serialized_again() {
+    fn legacy_tabs_and_parent_session_are_ignored_and_never_serialized_again() {
         let mut value = serde_json::to_value(Session::new("legacy-tabs")).unwrap();
         let object = value.as_object_mut().unwrap();
         object.insert(
@@ -793,11 +788,16 @@ mod persistence_tests {
             }]),
         );
         object.insert("active_tab_id".to_string(), serde_json::json!("terminal-1"));
+        object.insert(
+            "parent_session_id".to_string(),
+            serde_json::json!("legacy-parent"),
+        );
 
         let restored: Session = serde_json::from_value(value).unwrap();
         let serialized = serde_json::to_value(restored).unwrap();
         assert!(serialized.get("tabs").is_none());
         assert!(serialized.get("active_tab_id").is_none());
+        assert!(serialized.get("parent_session_id").is_none());
     }
 
     #[test]
