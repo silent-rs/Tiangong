@@ -119,17 +119,12 @@ interface plugin {
     on-session-ready: func(session-json: string) -> result<_, plugin-error>;
 
     /// 轮次开始。
-    ///
-    /// `turn-start-idx` 已废弃：宿主固定传 0，插件不应读取；下次 WIT 破坏性升级时删除。
     on-turn-started: func(
         session-json: string,
         turn-start-idx: u32,
     ) -> result<_, plugin-error>;
 
     /// 轮次结束（触发 micro 反刍）。
-    ///
-    /// `session-json` 只含本轮消息，首条即本轮起点。
-    /// `turn-start-idx` 已废弃：宿主固定传 0，插件不应读取；下次 WIT 破坏性升级时删除。
     on-turn-finished: func(
         session-json: string,
         turn-start-idx: u32,
