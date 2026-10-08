@@ -36,6 +36,7 @@ import {
   UserMessageGroup,
   AgentTurn,
 } from "./message";
+import { shouldCompensateItemResize } from "./message/virtualScrollAdjust";
 import { type MentionEditorHandle } from "./MentionEditor";
 
 /** 每个会话的阅读位置锚点：视口顶部对齐的分组索引 + 离开时是否贴底。
@@ -333,6 +334,27 @@ export function MessageList() {
     },
     overscan: 5,
   });
+  // 尺寸变化的滚动补偿改按 DOM 实际位置判定（判定说明见 shouldCompensateItemResize）：
+  // 轮次结束时流式组带着旧缓存尺寸/估算尺寸并回列表并收缩过程，库的默认判定
+  // 会把跨越视口的末组当成"在视口之上"补偿滚动，把消息拉出视口。
+  const streamingGroupRef = useRef(streamingGroup);
+  streamingGroupRef.current = streamingGroup;
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    const viewport = viewportRef.current;
+    const el = instance.elementsCache.get(item.key);
+    const domTop = viewport && el && el.isConnected
+      ? el.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+      : null;
+    return shouldCompensateItemResize({
+      isLast: item.index === instance.options.count - 1 && !streamingGroupRef.current,
+      isFirstMeasure: !instance.itemSizeCache.has(item.key),
+      domTop,
+      prevSize: instance.itemSizeCache.get(item.key) ?? item.size,
+      itemStart: item.start,
+      scrollOffset: (instance.scrollOffset ?? 0) + instance.scrollAdjustments,
+      scrollingBackward: instance.scrollDirection === 'backward',
+    });
+  };
 
   // 监听滚动位置，维护 isAtBottom 状态与当前会话的阅读位置锚点。
   // 置于 virtualizer 声明之后（handleScroll 需要按像素偏移取顶部组索引）
