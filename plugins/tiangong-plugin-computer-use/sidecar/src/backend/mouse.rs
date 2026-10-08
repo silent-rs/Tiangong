@@ -22,6 +22,7 @@ use core_graphics::geometry::CGPoint;
 
 use tiangong_plugin_computer_use_protocol::ops::MouseGesture;
 
+use super::input_cancel::{CancelToken, cancelled_message};
 use super::overlay;
 
 /// down → up 间隔：足够应用完成点击归一（不触成长按）。
@@ -87,16 +88,21 @@ impl MouseIo {
     }
 }
 
-/// 执行一次手势；成功返回人读摘要。
+/// 执行一次手势；成功返回人读摘要。`cancel` 置位后不再开始手势，
+/// 拖拽轨迹中途停止并补发抬起。
 pub fn perform(
     gesture: MouseGesture,
     x: f64,
     y: f64,
     to: Option<(f64, f64)>,
     scroll: (f64, f64),
+    cancel: &CancelToken,
 ) -> Result<String, String> {
     // 与键盘共用手势锁：并发调用时点击/拖拽不与按键事件交错。
     let _guard = super::keyboard::input_guard();
+    if cancel.is_cancelled() {
+        return Err(cancelled_message("鼠标手势"));
+    }
     let io = MouseIo::new()?;
     match gesture {
         MouseGesture::Move => {
@@ -149,18 +155,34 @@ pub fn perform(
             sleep(DRAG_SETTLE);
             let distance = ((tx - x).hypot(ty - y)).max(1.0);
             let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
+            let mut last = (x, y);
+            let mut interrupted = false;
             for step in 1..=steps {
+                // 取消时在当前位置抬起并归还，不留按住状态。
+                if cancel.is_cancelled() {
+                    interrupted = true;
+                    break;
+                }
                 let progress = step as f64 / steps as f64;
                 let ease = progress * (2.0 - progress); // ease-out 轨迹
                 let nx = x + (tx - x) * ease;
                 let ny = y + (ty - y) * ease;
                 io.post(CGEventType::LeftMouseDragged, CGMouseButton::Left, nx, ny)?;
                 overlay::move_to(nx, ny);
+                last = (nx, ny);
                 sleep(DRAG_STEP_INTERVAL);
             }
-            io.post(CGEventType::LeftMouseUp, CGMouseButton::Left, tx, ty)?;
+            io.post(
+                CGEventType::LeftMouseUp,
+                CGMouseButton::Left,
+                last.0,
+                last.1,
+            )?;
             // 闪移归还：系统鼠标瞬移回拖拽前的位置，用户指针无感。
             io.move_to(origin_x, origin_y)?;
+            if interrupted {
+                return Err(cancelled_message("拖拽"));
+            }
             Ok(format!(
                 "已从 ({x:.0}, {y:.0}) 拖拽到 ({tx:.0}, {ty:.0})（系统鼠标已归位）"
             ))

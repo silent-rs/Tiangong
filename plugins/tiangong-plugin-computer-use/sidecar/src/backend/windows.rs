@@ -770,8 +770,9 @@ impl Backend for WindowsBackend {
         let (x, y) = (req.x, req.y);
         let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
         // 手势内含阻塞等待（指针滑行、按压间隔），放到阻塞线程池执行。
+        let cancel = super::input_cancel::current();
         let outcome = tokio::task::spawn_blocking(move || {
-            super::win_input::perform_mouse(gesture, x, y, to, scroll)
+            super::win_input::perform_mouse(gesture, x, y, to, scroll, &cancel)
         })
         .await
         .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
@@ -791,8 +792,9 @@ impl Backend for WindowsBackend {
             req.key.clone(),
             req.keys.clone(),
         );
+        let cancel = super::input_cancel::current();
         let outcome = tokio::task::spawn_blocking(move || {
-            super::win_input::perform_keyboard(action, text, key, keys)
+            super::win_input::perform_keyboard(action, text, key, keys, &cancel)
         })
         .await
         .unwrap_or_else(|e| Err(format!("键盘输入执行线程异常：{e}")));

@@ -754,10 +754,12 @@ impl Backend for MacosBackend {
         };
         let (gesture, x, y) = (req.gesture, req.x, req.y);
         let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
-        let outcome =
-            tokio::task::spawn_blocking(move || super::mouse::perform(gesture, x, y, to, scroll))
-                .await
-                .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
+        let cancel = super::input_cancel::current();
+        let outcome = tokio::task::spawn_blocking(move || {
+            super::mouse::perform(gesture, x, y, to, scroll, &cancel)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
         match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::MouseResult {
                 performed: true,
@@ -781,11 +783,14 @@ impl Backend for MacosBackend {
             req.key.clone(),
             req.keys.clone(),
         );
-        // 手势内含阻塞等待与进程级互斥锁，放到阻塞线程池执行。
-        let outcome =
-            tokio::task::spawn_blocking(move || super::keyboard::perform(action, text, key, keys))
-                .await
-                .unwrap_or_else(|e| Err(format!("键盘输入执行线程异常：{e}")));
+        // 手势内含阻塞等待与进程级互斥锁，放到阻塞线程池执行；
+        // 取消令牌须在进入阻塞线程前取出（阻塞线程不继承任务上下文）。
+        let cancel = super::input_cancel::current();
+        let outcome = tokio::task::spawn_blocking(move || {
+            super::keyboard::perform(action, text, key, keys, &cancel)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("键盘输入执行线程异常：{e}")));
         match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::KeyboardResult {
                 performed: true,

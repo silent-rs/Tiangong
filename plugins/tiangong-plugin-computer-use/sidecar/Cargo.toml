@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-computer-use-sidecar"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Computer Use 独立 sidecar 进程（访问 Windows UI Automation / macOS AXUIElement / Linux AT-SPI2）"
