@@ -653,20 +653,6 @@ impl Session {
         self.messages.truncate(idx + 1);
         remove_count
     }
-
-    /// 获取最新用户消息的 index（轮次锚点）。
-    ///
-    /// 宿主注入的 role=User 消息（图片注入、压缩恢复锚点）不是用户
-    /// 意图，不得作为锚点——否则轮次的 elapsed_ms/turn_status 会写到
-    /// 前端不展示的消息上，执行总时长与轮次状态随之丢失。
-    pub fn latest_user_message_index(&self) -> Option<usize> {
-        self.messages
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, m)| m.role == MessageRole::User && m.phase.is_user_input())
-            .map(|(idx, _)| idx)
-    }
 }
 
 fn new_id() -> String {
@@ -678,31 +664,6 @@ mod persistence_tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
-
-    /// 轮次锚点必须落在用户真实输入上：宿主注入的 role=User 消息
-    /// （图片注入、压缩恢复锚点）不是用户意图，不得劫持 latest 锚点。
-    #[test]
-    fn latest_user_message_index_skips_host_injected_user_messages() {
-        let mut session = Session::new("anchor");
-        session.append_message(MessageRole::User, "真实问题");
-        session.append_message(MessageRole::Assistant, "回答");
-        let mut injected = Message::new(MessageRole::User, "[injected-images]");
-        injected.phase = MessagePhase::HostInjected;
-        session.messages.push(injected);
-        assert_eq!(
-            session.latest_user_message_index(),
-            Some(0),
-            "图片注入消息不得成为轮次锚点"
-        );
-        let mut resume = Message::new(MessageRole::User, "上一轮续接状态");
-        resume.phase = MessagePhase::CompressedResume;
-        session.messages.push(resume);
-        assert_eq!(
-            session.latest_user_message_index(),
-            Some(0),
-            "压缩恢复锚点不得劫持轮次锚点"
-        );
-    }
 
     #[test]
     fn atomic_replace_file_serializes_complete_replacements() -> io::Result<()> {

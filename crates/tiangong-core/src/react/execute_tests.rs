@@ -374,8 +374,9 @@ impl TestHarness {
         };
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let user_message_id = session.messages.last().map(|message| message.id.clone());
 
-        let ctx = TurnContext::builder()
+        let mut ctx = TurnContext::builder()
             .client(client)
             .session(session)
             .stream_tx(stream_tx)
@@ -387,6 +388,8 @@ impl TestHarness {
             .tool_overrides(tool_overrides)
             .tools(tools)
             .build();
+        // 同生产起轮：本轮用户消息在起轮时即已知。
+        ctx.begin_user_turn(user_message_id.expect("测试会话应有用户消息"));
 
         Self {
             ctx,
@@ -411,6 +414,13 @@ impl TestHarness {
     /// 排空 stream 通道里的所有积压事件(非阻塞),避免 channel 满导致 send 阻塞。
     fn drain_stream(&self) {
         while self.stream_rx.try_recv().is_ok() {}
+    }
+
+    /// 追加一条用户消息并以它发起新一轮（同生产 `start_user_turn`）。
+    fn start_turn_with(&mut self, content: impl Into<String>) {
+        self.ctx.session.append_message(MessageRole::User, content);
+        let id = self.ctx.session.messages.last().unwrap().id.clone();
+        self.ctx.begin_user_turn(id);
     }
 }
 
@@ -516,10 +526,7 @@ async fn compression_persists_summary_and_keeps_recent_interaction() {
     assert_eq!(first.usage.total_tokens, 185_905);
 
     // 新 turn：请求前压力检查触发压缩（新增用户消息成为续接的当前任务）。
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提出新问题");
+    harness.start_turn_with("继续提出新问题");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
@@ -592,10 +599,7 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
         .ctx
         .session
         .append_message(MessageRole::Assistant, "较早回答");
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "处理 latest.txt");
+    harness.start_turn_with("处理 latest.txt");
     let mut assistant = Message::new(MessageRole::Assistant, "");
     assistant.tool_calls = vec![MessageToolCall {
         id: "latest-call".to_string(),
@@ -678,10 +682,7 @@ async fn truncated_compression_does_not_advance_summary_boundary() {
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
     let first = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     assert!(matches!(first.outcome, TurnExecutionOutcome::Success));
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提问");
+    harness.start_turn_with("继续提问");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
@@ -728,10 +729,7 @@ async fn persistence_failure_keeps_original_compression_state() {
     harness.ctx.session.bind_storage_root(blocking_file);
 
     let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提问");
+    harness.start_turn_with("继续提问");
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     let events = harness.stream_rx.try_iter().collect::<Vec<_>>();
 
@@ -777,10 +775,7 @@ async fn cancel_interrupts_active_context_compression() {
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
     let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     harness.drain_stream();
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续提问");
+    harness.start_turn_with("继续提问");
 
     let TestHarness {
         mut ctx,
@@ -836,10 +831,7 @@ async fn cancel_interrupts_manual_context_compression() {
         .ctx
         .session
         .append_message(MessageRole::Assistant, "较早回答");
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "最近问题");
+    harness.start_turn_with("最近问题");
     let TestHarness {
         ctx,
         stream_rx,
@@ -1722,10 +1714,7 @@ async fn inject_during_compression_cancels_and_restarts_without_applying_summary
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
     let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     harness.drain_stream();
-    harness
-        .ctx
-        .session
-        .append_message(MessageRole::User, "继续任务");
+    harness.start_turn_with("继续任务");
 
     let TestHarness {
         mut ctx,

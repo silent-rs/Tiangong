@@ -457,6 +457,7 @@ impl TiangongCore {
                 tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
                 CoreError::WorkerStopped
             })?;
+        ctx.begin_user_turn(message_id.clone());
         let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
             message_id,
             content: tiangong_types::content_blocks_text(&content),

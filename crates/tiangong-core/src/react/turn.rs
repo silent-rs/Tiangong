@@ -22,16 +22,20 @@ pub(crate) async fn run_turn(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> StreamEvent {
-    // ── 固定轮次锚点 ──
-    // 生命周期锚点 turn_start_idx 在 turn 开始时固定，供 on_turn_started/
-    // on_turn_finished 使用同一消息范围（ALR-108：一个物理 turn 只触发一次）。
-    // 最终 turn_status 锚点不同：写入**提交时最新**的用户消息（ALR-107）——运行中
-    // 注入的引导消息成为当前任务锚点，原始用户消息保留无最终状态。
+    // ── 本轮锚点 ──
+    // 起轮时已知本轮用户消息（`turn_id`）；最终 turn_status 也写在它上面。
+    // 插件生命周期仍按位置定位本轮（turn_start_idx），在 turn 开始时由
+    // turn_id 换算并固定（ALR-108：一个物理 turn 只触发一次）。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
-    let Some(turn_start_idx) = ctx.session.latest_user_message_index() else {
+    let Some(turn_start_idx) = ctx.turn_id.as_ref().and_then(|turn_id| {
+        ctx.session
+            .messages
+            .iter()
+            .position(|message| &message.id == turn_id)
+    }) else {
         let event = StreamEvent::Error {
-            message: "本轮 Session 缺少用户消息".to_string(),
+            message: "本轮缺少用户消息".to_string(),
         };
         let _ = stream_tx.send(event.clone());
         return event;
@@ -78,13 +82,12 @@ pub(crate) async fn run_turn(
     // 测试同步点：Agent Loop 已提交结果，turn 尚未执行最终收尾。
     #[cfg(test)]
     crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
-    // 结果写入**提交时最新**的用户消息（ALR-107）：运行中注入的引导消息成为当前
-    // 任务锚点；生命周期锚点 turn_start_idx 保持 turn 开始时的值不变。
+    // 结果写入本轮当前要回应的用户消息（ALR-107）。
     elapsed_timer.stop().await;
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let status = outcome.status();
-    if let Some(idx) = ctx.session.latest_user_message_index() {
-        ctx.session.messages[idx].set_turn_result(elapsed_ms, status);
+    if let Some(message) = current_user_message(&mut ctx) {
+        message.set_turn_result(elapsed_ms, status);
     }
 
     // ── 失败轮次追加用户可见的错误消息 ──
@@ -119,9 +122,8 @@ pub(crate) async fn run_turn(
         if was_success {
             demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
         }
-        if let Some(idx) = ctx.session.latest_user_message_index() {
-            ctx.session.messages[idx]
-                .set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
+        if let Some(message) = current_user_message(&mut ctx) {
+            message.set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
         }
         let _ = ctx.session.try_persist_to_disk();
     }
@@ -162,8 +164,8 @@ pub(crate) async fn run_turn(
     // set_turn_result 只更新后端 Session；前端轮次总时长依赖秒级 TurnElapsed
     // 事件累计，事件链路波动时会缺失。终态前补发含最终 elapsed_ms/turn_status
     // 的用户消息快照，回复底部与用户消息旁的「执行总时长」始终有精确值。
-    if let Some(idx) = ctx.session.latest_user_message_index() {
-        let mut snapshot = ctx.session.messages[idx].clone();
+    if let Some(message) = current_user_message(&mut ctx) {
+        let mut snapshot = message.clone();
         snapshot.clear_transient_data();
         let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
             message: snapshot,
@@ -194,6 +196,15 @@ pub(crate) async fn run_turn(
     }
     crate::core::plugin::notify_turn_finished(&ctx.plugins, &ctx.session, turn_start_idx);
     terminal
+}
+
+/// 本轮当前要回应的用户消息（起轮消息，或运行中注入的最新引导消息）。
+fn current_user_message(ctx: &mut TurnContext) -> Option<&mut Message> {
+    let id = ctx.user_message_id.as_deref()?;
+    ctx.session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == id)
 }
 
 /// 取消回滚（on_cancel）的宽限上限：正常回滚应为毫秒级，超时意味着插件或其

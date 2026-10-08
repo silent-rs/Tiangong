@@ -31,9 +31,14 @@ use typed_builder::TypedBuilder;
     build_method(vis = "pub(crate)")
 )]
 pub struct TurnContext {
-    /// 一轮执行的初始用户消息，运行中追加要求不改变用量归属。
+    /// 本轮发起时的用户消息 ID（起轮时即已知）：用量归属与插件本轮快照的
+    /// 起点，运行中追加要求不改变。维护任务（手动压缩）没有用户消息，为 None。
     #[builder(default)]
     pub(crate) turn_id: Option<String>,
+    /// 本轮当前要回应的用户消息 ID：起轮时同 `turn_id`，运行中注入引导消息后
+    /// 改为该消息（ALR-107：最终 turn_status/elapsed_ms 写在它上面）。
+    #[builder(default)]
+    pub(crate) user_message_id: Option<String>,
     /// 模型请求客户端
     pub client: SingleProviderClient,
     /// 本轮会话（turn 期间独占,turn 结束时取回落盘）
@@ -58,6 +63,12 @@ pub struct TurnContext {
 }
 
 impl TurnContext {
+    /// 以已保存的用户消息发起本轮。
+    pub(crate) fn begin_user_turn(&mut self, message_id: String) {
+        self.user_message_id = Some(message_id.clone());
+        self.turn_id = Some(message_id);
+    }
+
     // ===== 能力 accessor =====
 
     pub fn client(&self) -> &SingleProviderClient {
