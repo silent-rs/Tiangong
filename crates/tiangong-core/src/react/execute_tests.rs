@@ -361,6 +361,9 @@ impl TestHarness {
         let mut session = Session::new("test-session".to_string());
         session.bind_storage_root(root.path());
         session.append_message(MessageRole::User, "你好");
+        // 同生产起轮：起轮消息带 Processing，本轮用户消息在起轮时即已知。
+        session.messages.last_mut().unwrap().turn_status =
+            Some(tiangong_types::TurnStatus::Processing);
         session.rebuild_system_prompt(&SystemPromptConfig::from_plugin_sections(Vec::new()));
         // 暴露 storage_root 供 turn 级测试磁盘重载验证。
         let storage_root = root.path().to_path_buf();
@@ -377,7 +380,6 @@ impl TestHarness {
         let turn_id = session.messages.last().map(|message| message.id.clone());
 
         let ctx = TurnContext::builder()
-            // 同生产起轮：本轮用户消息在起轮时即已知。
             .turn_id(turn_id)
             .client(client)
             .session(session)
@@ -416,11 +418,24 @@ impl TestHarness {
         while self.stream_rx.try_recv().is_ok() {}
     }
 
-    /// 追加一条用户消息并以它发起新一轮（同生产 `start_user_turn`）。
+    /// 结束当前轮并以新用户消息发起下一轮（同生产：上一轮由 `run_turn` 收尾写入
+    /// 终态，新消息起轮带 `Processing` 并成为 `turn_id`）。仅改内存，不依赖落盘，
+    /// 供存储故障等场景复用；真实起轮路径由 Core 集成测试覆盖。
     fn start_turn_with(&mut self, content: impl Into<String>) {
+        if let Some(turn_id) = self.ctx.turn_id.take()
+            && let Some(message) = self
+                .ctx
+                .session
+                .messages
+                .iter_mut()
+                .find(|message| message.id == turn_id)
+        {
+            message.set_turn_result(0, tiangong_types::TurnStatus::Success);
+        }
         self.ctx.session.append_message(MessageRole::User, content);
-        let id = self.ctx.session.messages.last().unwrap().id.clone();
-        self.ctx.turn_id = Some(id);
+        let message = self.ctx.session.messages.last_mut().unwrap();
+        message.turn_status = Some(tiangong_types::TurnStatus::Processing);
+        self.ctx.turn_id = Some(message.id.clone());
     }
 }
 

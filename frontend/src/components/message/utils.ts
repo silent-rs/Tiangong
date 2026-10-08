@@ -377,25 +377,22 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
 /** 当前执行链的起始组下标。
  *
  * 引导消息不结束轮次：执行中注入的用户消息与其前序过程同属一次执行。
- * 从分组末尾向前找连续「未结算」的用户消息（无 turn_status/elapsed_ms，
- * 即轮次尚未提交终态），链上最早一条即当前执行的锚点；遇到已结算的
- * 用户消息即停——其后的组属于当前执行，之前的属于历史轮次。ALR-107
- * 下终态只写入提交时最新的用户消息，链上更早的用户消息保持无终态，
- * 因此锚点会覆盖整条引导消息链。末尾没有未结算用户消息时返回
- * groups.length（无活跃组）。
+ * 起轮的用户消息在执行期间带 `processing` 状态（引导消息不带状态），
+ * 最近一个 `processing` 的用户组即当前执行的锚点，其后（含引导消息）
+ * 都属于当前执行。没有 `processing` 的用户组时返回 groups.length
+ * （无活跃组）。
  *
  * 调用方仅在会话执行中把 >= 该下标的 agent_turn 视为活跃（过程展开），
  * 执行整体结束（runStatus 回 idle）后统一收缩。 */
 export function liveRunStartIndex(groups: MessageGroup[]): number {
-  let anchor = -1;
   for (let i = groups.length - 1; i >= 0; i -= 1) {
     const group = groups[i];
     if (group.type !== "user") continue;
-    const msg = group.messages[0];
-    if (msg && (msg.turn_status != null || msg.elapsed_ms != null)) break;
-    anchor = i;
+    const status = group.messages[0]?.turn_status;
+    if (status === "processing") return i;
+    if (status != null) break;
   }
-  return anchor >= 0 ? anchor : groups.length;
+  return groups.length;
 }
 
 export function workerContentMessages(messages: MessageItem[]): MessageItem[] {

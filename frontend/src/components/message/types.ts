@@ -21,10 +21,10 @@ export interface MessageItem {
   compact?: boolean;
   phase?: MessagePhase;
   created_at: string;
-  /** 该用户消息所属轮次的执行时长（毫秒）。仅用户消息携带。 */
+  /** 该用户消息发起的轮次的执行时长（毫秒）。仅起轮的用户消息携带。 */
   elapsed_ms?: number;
-  /** 该轮次的最终状态。仅用户消息携带。 */
-  turn_status?: "success" | "failed" | "cancelled";
+  /** 该用户消息发起的轮次的状态。仅起轮的用户消息携带，引导消息为空。 */
+  turn_status?: "processing" | "success" | "failed" | "cancelled";
   /** 本次模型输出思考阶段的耗时（毫秒）。仅 assistant 消息携带。 */
   reasoning_elapsed_ms?: number | null;
   /** 本次模型输出正文生成阶段的耗时（毫秒）。仅 assistant 消息携带。 */

@@ -344,13 +344,19 @@ async fn send_message_and_wait(
         })
         .await?;
     let existing = if session_exists {
-        state
-            .core_manager
-            .load_session(&session_id)?
+        let session = state.core_manager.load_session(&session_id)?;
+        session
             .messages
-            .into_iter()
+            .iter()
             .find(|message| message.id == message_id)
-            .map(|message| (message.role, message.turn_status))
+            .map(|message| {
+                (
+                    message.role,
+                    session
+                        .turn_status_of(&message_id)
+                        .filter(|status| status.is_terminal()),
+                )
+            })
     } else {
         None
     };
@@ -550,7 +556,7 @@ async fn completed_message_result(
         Err(match status {
             TurnStatus::Cancelled => "执行已取消".to_string(),
             TurnStatus::Failed => "执行失败".to_string(),
-            TurnStatus::Success => unreachable!(),
+            TurnStatus::Processing | TurnStatus::Success => unreachable!("仅以终态调用"),
         })
     }
 }
@@ -561,12 +567,11 @@ pub(crate) async fn complete_remote_turn_from_stream(
     message_id: &str,
 ) {
     // 消息终态需读 messages（完整 Session）；从磁盘 load（issue #245）。
+    // 按消息所属轮次取状态：远程消息接续意外中断的轮次时是引导消息，自身无状态。
     let status = match state.core_manager.load_session(session_id) {
         Ok(session) => session
-            .messages
-            .iter()
-            .find(|message| message.id == message_id && message.role == MessageRole::User)
-            .and_then(|message| message.turn_status)
+            .turn_status_of(message_id)
+            .filter(|status| status.is_terminal())
             .ok_or_else(|| anyhow!("未找到远程消息的终态：{message_id}")),
         Err(error) => Err(anyhow!("加载会话失败：{error}")),
     };

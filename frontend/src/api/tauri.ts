@@ -124,8 +124,9 @@ export interface TabState {
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool' | 'notice';
 export type MessagePhase = 'normal' | 'react' | 'summary' | 'compressedresume' | 'hostinjected';
 
-/** 单个对话轮次的最终执行状态（持久化在用户消息上，历史会话同样可见）。 */
-export type TurnStatus = 'success' | 'failed' | 'cancelled';
+/** 单个对话轮次的执行状态（持久化在起轮的用户消息上，历史会话同样可见）。
+ *  processing：已起轮尚未收尾；引导消息不携带状态。 */
+export type TurnStatus = 'processing' | 'success' | 'failed' | 'cancelled';
 export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;

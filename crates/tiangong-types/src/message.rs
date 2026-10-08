@@ -30,18 +30,31 @@ pub enum MessageRole {
     Notice,
 }
 
-/// 单个对话轮次的最终执行状态，仅持久化到用户消息（turn 锚点）。
+/// 单个对话轮次的执行状态，仅持久化到起轮的用户消息（turn 锚点）。
+///
+/// 起轮时写入 `Processing`，收尾改为终态；进程意外退出时会残留
+/// `Processing`，下一条用户消息到来时由 Core 接续该轮。引导消息等
+/// 非起轮的用户消息始终为 None。
 ///
 /// 向后兼容：旧 session 反序列化时缺失该字段默认为 None，前端不展示状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnStatus {
+    /// 执行中（已起轮、尚未收尾）。
+    Processing,
     /// 正常完成（含总结阶段产出最终回复）。
     Success,
     /// 执行过程中出错。
     Failed,
     /// 用户主动取消。
     Cancelled,
+}
+
+impl TurnStatus {
+    /// 是否为轮次终态（非 `Processing`）。
+    pub fn is_terminal(self) -> bool {
+        self != Self::Processing
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

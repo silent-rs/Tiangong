@@ -381,36 +381,18 @@ impl Session {
         self.updated_at = now_text();
     }
 
-    /// 校验并事务性写入 Core 已接收的用户消息。
-    ///
-    /// 同 ID 的宿主镜像消息会先移除；只有完整 Session 成功落盘后才返回。失败时
-    /// 恢复调用前的 Session。上一轮遗留工具调用由该轮取消收尾负责闭合。
-    pub(crate) fn try_append_prepared_user_message_with_id(
-        &mut self,
-        id: String,
-        content: Vec<ContentBlock>,
-    ) -> Result<(), String> {
-        tiangong_types::validate_ready_content_blocks(&content)?;
-
-        if self
+    /// 指定用户消息所属轮次的状态：起轮消息取自身状态，引导消息取其前最近
+    /// 一个起轮消息的状态。消息不存在或之前没有起轮消息时为 None。
+    pub fn turn_status_of(&self, message_id: &str) -> Option<tiangong_types::TurnStatus> {
+        let index = self
             .messages
             .iter()
-            .any(|message| message.id == id && message.role != MessageRole::User)
-        {
-            return Err(format!("消息 ID {id} 已被非用户消息占用"));
-        }
-
-        let before = self.clone();
-        self.messages
-            .retain(|message| message.id != id || message.role != MessageRole::User);
-        self.append_prepared_user_message_with_id(id, content);
-
-        if let Err(error) = self.try_persist_to_disk() {
-            *self = before;
-            return Err(error);
-        }
-
-        Ok(())
+            .position(|message| message.id == message_id)?;
+        self.messages[..=index]
+            .iter()
+            .rev()
+            .filter(|message| message.role == MessageRole::User)
+            .find_map(|message| message.turn_status)
     }
 
     /// 补齐未完成工具调用的失败结果，并在有变更时立即落盘。
