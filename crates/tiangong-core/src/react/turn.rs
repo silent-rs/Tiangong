@@ -23,9 +23,9 @@ pub(crate) async fn run_turn(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> StreamEvent {
     // ── 本轮锚点 ──
-    // 起轮时已知本轮用户消息（`turn_id`）；最终 turn_status 也写在它上面。
-    // 插件生命周期仍按位置定位本轮（turn_start_idx），在 turn 开始时由
-    // turn_id 换算并固定（ALR-108：一个物理 turn 只触发一次）。
+    // 起轮时已知本轮用户消息（`turn_id`）；最终 turn_status/elapsed_ms 也写在
+    // 它上面。插件生命周期仍按位置定位本轮（turn_start_idx），在 turn 开始时
+    // 由 turn_id 换算并固定（ALR-108：一个物理 turn 只触发一次）。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
     let Some(turn_start_idx) = ctx.turn_id.as_ref().and_then(|turn_id| {
@@ -82,7 +82,7 @@ pub(crate) async fn run_turn(
     // 测试同步点：Agent Loop 已提交结果，turn 尚未执行最终收尾。
     #[cfg(test)]
     crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
-    // 结果写入本轮当前要回应的用户消息（ALR-107）。
+    // 结果写入本轮起轮的用户消息（turn_id）。
     elapsed_timer.stop().await;
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let status = outcome.status();
@@ -198,9 +198,9 @@ pub(crate) async fn run_turn(
     terminal
 }
 
-/// 本轮当前要回应的用户消息（起轮消息，或运行中注入的最新引导消息）。
+/// 本轮发起时的用户消息（轮次状态的落点）。
 fn current_user_message(ctx: &mut TurnContext) -> Option<&mut Message> {
-    let id = ctx.user_message_id.as_deref()?;
+    let id = ctx.turn_id.as_deref()?;
     ctx.session
         .messages
         .iter_mut()

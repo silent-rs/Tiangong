@@ -32,9 +32,7 @@ pub(super) fn save_user_message_and_restart(
     let content_blocks = tiangong_types::stable_content_blocks(&content);
     let event_message_id = message_id.clone();
     ctx.session
-        .try_append_prepared_user_message_with_id(message_id.clone(), content)?;
-    // 注入的引导消息成为本轮当前要回应的用户消息（ALR-107）。
-    ctx.user_message_id = Some(message_id);
+        .try_append_prepared_user_message_with_id(message_id, content)?;
     let _ = stream_tx.send(StreamEvent::UserMessage {
         message_id: event_message_id,
         content: content_text,

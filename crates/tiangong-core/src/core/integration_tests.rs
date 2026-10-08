@@ -545,8 +545,9 @@ async fn steering_message_aborts_and_restarts_current_turn() {
     wait_requests(&server, 1).await;
     send_message(&core, "msg-steer", "STEER-NEW-INTENT 换个方向处理");
 
+    // 引导消息不结束轮次，终态写在起轮消息上。
     assert_eq!(
-        wait_turn_status(&env, &sid, "msg-steer").await,
+        wait_turn_status(&env, &sid, "msg-a").await,
         TurnStatus::Success
     );
     wait_idle(&sid).await;

@@ -374,9 +374,11 @@ impl TestHarness {
         };
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
-        let user_message_id = session.messages.last().map(|message| message.id.clone());
+        let turn_id = session.messages.last().map(|message| message.id.clone());
 
-        let mut ctx = TurnContext::builder()
+        let ctx = TurnContext::builder()
+            // 同生产起轮：本轮用户消息在起轮时即已知。
+            .turn_id(turn_id)
             .client(client)
             .session(session)
             .stream_tx(stream_tx)
@@ -388,8 +390,6 @@ impl TestHarness {
             .tool_overrides(tool_overrides)
             .tools(tools)
             .build();
-        // 同生产起轮：本轮用户消息在起轮时即已知。
-        ctx.begin_user_turn(user_message_id.expect("测试会话应有用户消息"));
 
         Self {
             ctx,
@@ -420,7 +420,7 @@ impl TestHarness {
     fn start_turn_with(&mut self, content: impl Into<String>) {
         self.ctx.session.append_message(MessageRole::User, content);
         let id = self.ctx.session.messages.last().unwrap().id.clone();
-        self.ctx.begin_user_turn(id);
+        self.ctx.turn_id = Some(id);
     }
 }
 
@@ -1399,10 +1399,10 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
     );
 }
 
-/// ALR-107（多消息）：注入引导消息后，最终 turn_status 写入最新（注入的）
-/// 用户消息，原始消息不被覆盖；磁盘重载后一致。
+/// 注入引导消息后，最终 turn_status 仍写入起轮消息（turn_id），引导消息
+/// 不承载轮次状态；磁盘重载后一致。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn final_status_anchors_to_injected_latest_user_message() {
+async fn final_status_anchors_to_turn_start_message_after_injection() {
     use super::super::turn::run_turn;
 
     let server = MockServer::builder().start().await;
@@ -1465,7 +1465,7 @@ async fn final_status_anchors_to_injected_latest_user_message() {
     run_turn(ctx, &mut cmd_rx).await;
     let _ = inject_task.await;
 
-    // 磁盘重载验证：最新用户消息（注入的）有 turn_status，原始消息无。
+    // 磁盘重载验证：起轮消息有 turn_status，注入的引导消息与锚点无关。
     let reloaded = Session::load_from_storage(&storage_root, &session_id).expect("重载 session");
     let latest = reloaded
         .messages
@@ -1474,20 +1474,14 @@ async fn final_status_anchors_to_injected_latest_user_message() {
         .find(|m| m.role == MessageRole::User)
         .expect("应有用户消息");
     assert_eq!(latest.id, "injected-anchor", "最新用户消息应为注入的消息");
-    assert!(
-        latest.turn_status.is_some(),
-        "最终状态应写入最新（注入的）用户消息（ALR-107）"
-    );
+    assert!(latest.turn_status.is_none(), "引导消息不承载轮次状态");
     let first = reloaded
         .messages
         .iter()
         .find(|m| m.role == MessageRole::User)
         .expect("应有原始用户消息");
     assert_eq!(first.text_content(), "你好", "原始用户消息应保持");
-    assert!(
-        first.turn_status.is_none(),
-        "原始用户消息不应被写入最终状态（ALR-107）"
-    );
+    assert!(first.turn_status.is_some(), "最终状态应写入起轮消息");
     // 唯一终态保持（ALR-109）。
     let terminal: Vec<String> = stream_rx
         .try_iter()
