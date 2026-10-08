@@ -11486,7 +11486,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-protocol"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -11494,7 +11494,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-sidecar"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11568,7 +11568,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -11576,7 +11576,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11810,7 +11810,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-protocol"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "serde",
  "serde_json",
@@ -11818,7 +11818,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-sidecar"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11842,7 +11842,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-wasm"
-version = "0.2.38"
+version = "0.2.39"
 dependencies = [
  "serde",
  "serde_json",
@@ -11872,7 +11872,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11880,7 +11880,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-sidecar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11907,7 +11907,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",

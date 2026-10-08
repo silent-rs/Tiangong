@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 license = "Apache-2.0"
 description = "Memory System 独立 sidecar 进程（承载 SQLite/tantivy/lancedb 原生运行；支持 --mcp / --daemon / --config / --update 通用模式）"

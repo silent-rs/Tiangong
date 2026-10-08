@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-volcengine-sidecar"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Volcengine 独立 sidecar（Agent Plan：图片/视频生成、语音合成/识别、本机录音播放、配置持久化）"

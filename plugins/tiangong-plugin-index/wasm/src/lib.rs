@@ -347,19 +347,13 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
 ///   `CompressedResume` 压缩恢复锚点）：不是用户意图，图片消息经
 ///   `text_content()` 提取后内容为空，索引后是空内容条目；
 /// - 文本内容为空的消息（纯媒体内容），避免空文档进入 Tantivy。
+///
+/// 宿主快照只含本轮消息（`turn_start_idx` 为 0）；旧宿主传完整历史与本轮
+/// 起点位置，按位置截取兼容。
 fn collect_turn_data(session: &PluginSession, turn_start_idx: u32) -> Vec<TurnData> {
-    // 优先按本轮起始消息 ID 定位（不受快照消息增删影响）；旧宿主未提供时回退 idx。
-    let start = match &session.turn_start_message_id {
-        Some(id) => session
-            .messages
-            .iter()
-            .position(|msg| &msg.id == id)
-            .unwrap_or(turn_start_idx as usize),
-        None => turn_start_idx as usize,
-    };
     session
         .messages
-        .get(start..)
+        .get(turn_start_idx as usize..)
         .unwrap_or(&[])
         .iter()
         .filter_map(|msg| {
@@ -600,7 +594,6 @@ mod tests {
             title: String::new(),
             cwd: "/tmp/ws".to_string(),
             workspace_id: "ws".to_string(),
-            turn_start_message_id: None,
             reasoning_effort: None,
             messages,
             context_summary: None,

@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-subagent-sidecar"
-version = "0.2.38"
+version = "0.2.39"
 edition = "2024"
 license = "Apache-2.0"
 description = "Subagent 插件 sidecar：持久 Agent 注册表、会话激活、任务运行与 Hook 投递总线"

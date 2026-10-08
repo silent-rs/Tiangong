@@ -291,15 +291,9 @@ fn forward_turn_finished(session_json: &str, turn_start_idx: u32) {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let anchor_id = session.get("turn_start_message_id").and_then(Value::as_str);
-    // 本轮用户锚点：优先按 id 定位，回退剔除 Notice 前移后的索引。
-    let anchor = anchor_id
-        .and_then(|id| {
-            messages
-                .iter()
-                .find(|message| message.get("id").and_then(Value::as_str) == Some(id))
-        })
-        .or_else(|| messages.get(turn_start_idx as usize));
+    // 本轮用户锚点：宿主快照只含本轮消息（turn_start_idx 为 0，锚点即首条）；
+    // 旧宿主传完整历史与本轮起点位置，按位置定位兼容。
+    let anchor = messages.get(turn_start_idx as usize);
     let (user_text, turn_status, anchor_idx) = match anchor {
         Some(anchor) => {
             let idx = messages

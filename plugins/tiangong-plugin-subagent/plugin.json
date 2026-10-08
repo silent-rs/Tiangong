@@ -2,7 +2,7 @@
   "schema_version": 2,
   "require_server": true,
   "id": "subagent",
-  "version": "0.2.38",
+  "version": "0.2.39",
   "entrypoints": [
     "desktop"
   ],

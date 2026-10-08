@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-index-sidecar"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 license = "Apache-2.0"
 description = "Index 独立 sidecar 进程（承载 tantivy 索引、后台扫描、rg/grep 检索原生运行）"

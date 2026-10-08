@@ -520,23 +520,16 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
 
 /// 定位本轮起始消息（on_turn_finished 反刍路径共用）。
 ///
-/// 优先按本轮起始消息 ID 定位（不受快照消息增删影响）；旧宿主未提供时回退
-/// idx。定位后必须校验：起点应是用户真实输入——`MessagePhase::is_user_input`
-/// 排除宿主注入的 role=User 消息（`HostInjected` 图片注入、`CompressedResume`
-/// 压缩恢复锚点），它们不是用户意图，作为锚点会产生空 user_input 的异常
-/// 反刍数据。
+/// 宿主快照只含本轮消息（`turn_start_idx` 为 0，起点即首条）；旧宿主传完整
+/// 历史与本轮起点位置，按位置定位兼容。定位后必须校验：起点应是用户真实
+/// 输入——`MessagePhase::is_user_input` 排除宿主注入的 role=User 消息
+///（`HostInjected` 图片注入、`CompressedResume` 压缩恢复锚点），它们不是
+/// 用户意图，作为锚点会产生空 user_input 的异常反刍数据。
 fn locate_turn_start(
     session: &tiangong_types::PluginSession,
     turn_start_idx: u32,
 ) -> Option<usize> {
-    let idx = match &session.turn_start_message_id {
-        Some(id) => session
-            .messages
-            .iter()
-            .position(|msg| &msg.id == id)
-            .unwrap_or(turn_start_idx as usize),
-        None => turn_start_idx as usize,
-    };
+    let idx = turn_start_idx as usize;
     session
         .messages
         .get(idx)
@@ -722,7 +715,6 @@ mod tests {
             title: String::new(),
             cwd: "/tmp/ws".to_string(),
             workspace_id: "ws".to_string(),
-            turn_start_message_id: None,
             reasoning_effort: None,
             messages,
             context_summary: None,
@@ -775,12 +767,10 @@ mod tests {
     #[test]
     fn locate_turn_start_rejects_host_injected_anchor() {
         let user = tiangong_types::Message::new(tiangong_types::MessageRole::User, "真实用户输入");
-        let injected = host_injected_image_message();
-        let mut session = test_session(vec![user.clone(), injected]);
-        // 旧宿主回退 idx 路径指向注入消息：不得作为轮次锚点。
+        let session = test_session(vec![user, host_injected_image_message()]);
+        // 起点指向注入消息：不得作为轮次锚点。
         assert_eq!(locate_turn_start(&session, 1), None);
-        // 按消息 ID 定位到真实用户消息：正常放行。
-        session.turn_start_message_id = Some(user.id.clone());
+        // 本轮快照首条为真实用户输入：正常放行。
         assert_eq!(locate_turn_start(&session, 0), Some(0));
     }
 
