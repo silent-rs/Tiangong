@@ -736,7 +736,7 @@ fn run_gui() {
             }
 
             let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(restore_server_and_bots(app_handle));
+            tauri::async_runtime::spawn(restore_server(app_handle));
 
             // 插件自动升级：后台按可更新状态升级已启用插件；
             // 离线或失败仅记日志。
@@ -890,25 +890,6 @@ fn run_gui() {
             tiangong_app::commands::webhook_delete,
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
-            tiangong_app::commands::bot_list,
-            tiangong_app::commands::bot_health,
-            tiangong_app::commands::bot_log,
-            tiangong_app::commands::bot_config_schema,
-            tiangong_app::commands::bot_provision_begin,
-            tiangong_app::commands::bot_provision_poll,
-            tiangong_app::commands::bot_available,
-            tiangong_app::commands::bot_scan_local,
-            tiangong_app::commands::bot_push_targets,
-            tiangong_app::commands::bot_delete_push_target,
-            tiangong_app::commands::bot_register_mcp,
-            tiangong_app::commands::bot_register,
-            tiangong_app::commands::bot_update,
-            tiangong_app::commands::bot_remove,
-            tiangong_app::commands::bot_install,
-            tiangong_app::commands::bot_start,
-            tiangong_app::commands::bot_stop,
-            tiangong_app::commands::bot_check_update,
-            tiangong_app::commands::bot_upgrade,
             tiangong_app::commands::resolve_model_context_window,
             tiangong_app::remote::remote_get_config,
             tiangong_app::remote::remote_set_config,
@@ -925,7 +906,7 @@ fn run_gui() {
         .build(generate_tauri_context())
         .expect("error while building tauri application")
         .run(|handle, event| {
-            // Desktop 退出时停止自己 supervisor 管理的 bot（仅 entries，不影响 CLI 独立启动的）。
+            // Desktop 退出时停止所有插件 sidecar。
             if let tauri::RunEvent::ExitRequested { api: _exit_api, code: _exit_code, .. } = &event {
                 #[cfg(windows)]
                 {
@@ -938,9 +919,6 @@ fn run_gui() {
                             let handle = handle.clone();
                             let exit_code = _exit_code.unwrap_or(0);
                             tauri::async_runtime::spawn(async move {
-                                if let Some(state) = handle.try_state::<tiangong_app::TiangongApp>() {
-                                    state.bot_runtime.stop_all().await;
-                                }
                                 if let Err(error) = tauri::async_runtime::spawn_blocking(
                                     tiangong_plugin_runtime::registry::shutdown_all_sidecars
                                 ).await {
@@ -955,12 +933,6 @@ fn run_gui() {
                 #[cfg(not(windows))]
                 {
                 tiangong_plugin_runtime::registry::begin_sidecar_shutdown();
-                if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
-                    let runtime = app_state.bot_runtime.clone();
-                    tauri::async_runtime::block_on(async move {
-                        runtime.stop_all().await;
-                    });
-                }
                 // 等待后台准备任务结束，再逐个停止所有 sidecar。
                 tiangong_plugin_runtime::registry::shutdown_all_sidecars();
                 }
@@ -1034,50 +1006,14 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-async fn restore_server_and_bots(app: tauri::AppHandle) {
+async fn restore_server(app: tauri::AppHandle) {
     let state = app.state::<tiangong_app::TiangongApp>();
-    // Server 恢复只遵循自身开关，不由 Bot 是否启用决定。恢复失败保留开启
-    // 意图，托盘和设置页据此显示红色异常状态。
+    // Server 恢复只遵循自身开关。恢复失败保留开启意图，托盘和设置页据此
+    // 显示红色异常状态。
     match tiangong_app::commands::restore_embedded_server(state.inner()).await {
         Ok(Some(message)) => info!(%message, "嵌入式 Server 已恢复"),
         Ok(None) => {}
         Err(error) => warn!(%error, "嵌入式 Server 自动恢复失败"),
-    }
-
-    // Bot 独立恢复，不隐式改变 Server 开关。
-    let has_enabled_bot = state.bot_store.list().iter().any(|bot| bot.enabled);
-    if !has_enabled_bot {
-        return;
-    }
-    // Server 地址/Token 从配置读取注入（供 bot 回连），但不强制 Server 运行。
-    let server_config = state
-        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
-        .await
-        .unwrap_or_default();
-    let extra_env = tiangong_app::commands::bot_server_env(&server_config);
-    state.bot_runtime.start_enabled(&extra_env).await;
-    // MCP 注册需要 Server 运行；Server 未运行时跳过（bot 仍独立运行）。
-    let server_ok = tiangong_app::commands::server_health_check(&server_config);
-    if !server_ok {
-        info!("Server 未运行，已启动的 bot 将独立运行；启动 Server 后可恢复 Agent 调用");
-        return;
-    }
-    for bot in state.bot_store.list().into_iter().filter(|bot| bot.enabled) {
-        if !matches!(
-            state.bot_runtime.health(&bot.id).await,
-            tiangong_bots::BotHealth::Running
-        ) {
-            continue;
-        }
-        if let Err(register_error) =
-            tiangong_app::commands::ensure_bot_mcp_registered(&bot.id, state.inner()).await
-        {
-            warn!(
-                bot_id = %bot.id,
-                error = %register_error,
-                "bot 自动启动后注册 MCP 失败"
-            );
-        }
     }
 }
 

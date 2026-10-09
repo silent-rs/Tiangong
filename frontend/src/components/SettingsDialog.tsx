@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload, Route, Smartphone } from 'lucide-react';
+import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Package, Brain, HardDriveDownload, Route, Smartphone } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
@@ -19,7 +19,6 @@ import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { WebhookPanel } from './automation/WebhookPanel';
-import { BotPanel } from './bots/BotPanel';
 import { PluginIframe } from './PluginIframe';
 import { PluginSandbox } from './PluginSandbox';
 import { PluginManagerSettings } from './PluginManagerSettings';
@@ -151,10 +150,6 @@ export function SettingsDialog() {
                   <Globe className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">Server</span>
                 </TabsTrigger>
-                <TabsTrigger value="bots" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
-                  <BotIcon className="w-4 h-4 sm:mr-2" />
-                  <span className="sr-only sm:not-sr-only">移动端控制</span>
-                </TabsTrigger>
                 {!isWebHost() && (
                   <TabsTrigger value="remote" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                     <Smartphone className="w-4 h-4 sm:mr-2" />
@@ -205,9 +200,6 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="server" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <ServerSettings />
-              </TabsContent>
-              <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
-                <BotPanel />
               </TabsContent>
               <TabsContent value="remote" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <RemoteAccessSettings />

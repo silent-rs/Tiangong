@@ -72,7 +72,7 @@ jobs:
                 ;;
             esac
             case "$file" in
-              frontend/*|src/*|src-tauri/*|crates/*|plugins/*|bots/*)
+              frontend/*|src/*|src-tauri/*|crates/*|plugins/*)
                 scoped_change=true
                 ;;
             esac

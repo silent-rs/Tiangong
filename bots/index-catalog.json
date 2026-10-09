@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "indexes": [
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/feishu.json",
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/weixin.json",
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/qq.json"
-  ]
-}

@@ -1,6 +1,4 @@
 mod args;
-mod bot;
-pub mod bot_ops;
 mod server;
 mod update;
 
@@ -25,7 +23,6 @@ pub fn run() -> anyhow::Result<()> {
     };
     match args.command {
         Some(MainCommand::Server(args)) => server::run_server_command(args),
-        Some(MainCommand::Bot(args)) => bot::run_bot_command(args),
         Some(MainCommand::Config(args)) => {
             tiangong_cli::web_config::run(tiangong_cli::web_config::WebConfigOptions {
                 host: args.host,

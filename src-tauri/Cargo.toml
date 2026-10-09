@@ -12,7 +12,6 @@ tiangong-llm = { workspace = true }
 tiangong-app-state = { workspace = true }
 tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
-tiangong-bots = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }

@@ -36,15 +36,6 @@ pub struct TiangongApp {
     /// 当前进程已明确丢弃/删除的输入缓存键，阻止迟到写入复活。
     discarded_input_caches: Mutex<HashSet<String>>,
     pub config: CoreConfigProvider,
-    /// MCP 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具（动态 MCP 工具
-    /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
-    /// set_enabled/probe/health）。
-    /// bot 移动端控制配置存储（读写 `~/.tiangong/bots/bots.json`）。
-    pub bot_store: std::sync::Arc<tiangong_bots::BotStore>,
-    /// bot 运行时——制品下载、进程监督与启停。
-    pub bot_runtime: std::sync::Arc<tiangong_bots::BotRuntime>,
-    /// Desktop 运行检测锁（CLI 据此拒绝写操作，方案第八节）。
-    pub desktop_lock: Option<std::fs::File>,
     /// 内嵌 HTTP 的等待者按稳定用户消息 ID 绑定。终态由唯一的桌面流消费者完成，
     /// 不能按“当前最后一轮”唤醒，否则同会话排队消息会串答。
     remote_turn_waiters: Mutex<HashMap<(String, String), Vec<RemoteTurnWaiter>>>,
@@ -160,16 +151,6 @@ impl TiangongApp {
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
 
         let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
-        let bot_store = std::sync::Arc::new(
-            tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(
-                |error| panic!("加载 Bot 配置失败，请修正 bots.json 后重试：{error:#}"),
-            ),
-        );
-        let bot_runtime = std::sync::Arc::new(
-            tiangong_bots::BotRuntime::new(bot_store.clone()).expect("构造 bot runtime 失败"),
-        );
-        // 获取 Desktop 运行检测锁（CLI 据此判断 Desktop 是否运行）。
-        let desktop_lock = tiangong_config::desktop_lock::acquire();
         let desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
             app_handle: app_handle.clone(),
             config: config.clone(),
@@ -187,9 +168,6 @@ impl TiangongApp {
             input_send_claims: Mutex::new(HashMap::new()),
             discarded_input_caches: Mutex::new(HashSet::new()),
             config,
-            bot_store,
-            bot_runtime,
-            desktop_lock,
             remote_turn_waiters: Mutex::new(HashMap::new()),
             remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),

@@ -336,100 +336,6 @@ export function hasMediaBlocks(msg: Message): boolean {
   );
 }
 
-// --- 通讯网关（bot）类型 ---
-
-export type FieldType =
-  | { kind: 'string' }
-  | { kind: 'secret' }
-  | { kind: 'boolean' }
-  | { kind: 'barcode' }
-  | { kind: 'select'; options: string[] };
-
-export interface ConfigFieldSchema {
-  key: string;
-  label: string;
-  field_type: FieldType;
-  required: boolean;
-  default?: unknown;
-  help?: string;
-}
-
-export interface BotConfig {
-  id: string;
-  artifact_id: string;
-  enabled: boolean;
-  config: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface RegisterBotRequest {
-  id: string;
-  artifact_id: string;
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}
-
-export interface UpdateBotRequest {
-  config?: Record<string, unknown>;
-}
-
-export interface BotArtifact {
-  url: string;
-  checksum: string;
-}
-
-export interface BotManifest {
-  id: string;
-  name: string;
-  version: string;
-  description: string;
-  config_schema: ConfigFieldSchema[];
-  platforms: Record<string, BotArtifact>;
-  min_app_version?: string;
-}
-
-export interface BotsIndex {
-  version: number;
-  bots: BotManifest[];
-}
-
-export interface LocalArtifact {
-  id: string;
-  name: string;
-  artifact_id: string;
-  version: string;
-  config_schema: ConfigFieldSchema[];
-  supports_mcp: boolean;
-}
-
-export interface BotPushTarget {
-  target_id: string;
-  label: string;
-  kind: 'direct' | 'group' | string;
-  enabled: boolean;
-  availability: 'ready' | 'reply_window' | 'unavailable' | 'unknown' | string;
-  last_seen_at: string;
-  limitation?: string;
-}
-
-export interface QrSession {
-  qr_url: string;
-  expires_at: number;
-  interval: number;
-  state: unknown;
-}
-
-export interface BotLog {
-  content: string;
-  truncated: boolean;
-}
-
-export interface BotTransferProgress {
-  downloaded: number;
-  total: number;
-}
-
 /// 插件安装/升级下载进度事件。
 export interface PluginInstallProgress {
   plugin_id: string;
@@ -605,18 +511,6 @@ export interface PluginEntryResource {
   data: number[];
   mime: string;
 }
-
-export type ProvisionStatus =
-  | { status: 'pending'; retry_after?: number }
-  | { status: 'success' }
-  | { status: 'expired' }
-  | { status: 'error'; message: string };
-
-export type BotHealth =
-  | 'running'
-  | 'stopped'
-  | 'missing_artifact'
-  | { error: { message: string } };
 
 export interface ServerConfig {
   host: string;
@@ -934,57 +828,6 @@ export const api = {
   setWorkspaceDir: (workspaceDir: string): Promise<void> =>
     invoke('set_workspace_dir', { workspaceDir }),
 
-  // ----------------------------------------------------------------
-  // 通讯网关（bot）管理
-  // ----------------------------------------------------------------
-  botList: (): Promise<BotConfig[]> =>
-    invoke('bot_list'),
-
-  botHealth: (id: string): Promise<BotHealth> =>
-    invoke('bot_health', { id }),
-
-  botLog: (id: string): Promise<BotLog> =>
-    invoke('bot_log', { id }),
-
-  botConfigSchema: (artifactId: string, botId?: string): Promise<ConfigFieldSchema[]> =>
-    invoke('bot_config_schema', { artifactId, botId: botId ?? null }),
-
-  botProvisionBegin: (botId: string): Promise<QrSession> =>
-    invoke('bot_provision_begin', { botId }),
-
-  botProvisionPoll: (botId: string, session: QrSession): Promise<ProvisionStatus> =>
-    invoke('bot_provision_poll', { botId, session }),
-
-  botAvailable: (): Promise<BotsIndex> =>
-    invoke('bot_available'),
-
-  botScanLocal: (): Promise<LocalArtifact[]> =>
-    invoke('bot_scan_local'),
-
-  botPushTargets: (id: string): Promise<BotPushTarget[]> =>
-    invoke('bot_push_targets', { id }),
-
-  botDeletePushTarget: (id: string, targetId: string): Promise<string> =>
-    invoke('bot_delete_push_target', { id, targetId }),
-
-  botRegisterMcp: (id: string): Promise<string> =>
-    invoke('bot_register_mcp', { id }),
-
-  botRegister: (request: RegisterBotRequest): Promise<BotConfig> =>
-    invoke('bot_register', { request }),
-
-  botUpdate: (id: string, request: UpdateBotRequest): Promise<BotConfig> =>
-    invoke('bot_update', { id, request }),
-
-  botRemove: (id: string): Promise<string> =>
-    invoke('bot_remove', { id }),
-
-  botInstall: (artifactId: string, destBotId: string): Promise<string> =>
-    invoke('bot_install', { artifactId, destBotId }),
-
-  onBotInstallProgress: (callback: (progress: BotTransferProgress) => void) =>
-    listen<BotTransferProgress>('bot_install_progress', (event) => callback(event.payload)),
-
   onPluginInstallProgress: (callback: (progress: PluginInstallProgress) => void) =>
     listen<PluginInstallProgress>('plugin_install_progress', (event) => callback(event.payload)),
 
@@ -995,18 +838,6 @@ export const api = {
   /** 模型配置保存后广播（会话区刷新可选模型）。 */
   onModelsConfigChanged: (callback: () => void) =>
     listen('models_config_changed', () => callback()),
-
-  botStart: (id: string): Promise<string> =>
-    invoke('bot_start', { id }),
-
-  botStop: (id: string): Promise<string> =>
-    invoke('bot_stop', { id }),
-
-  botCheckUpdate: (artifactId: string): Promise<BotManifest | null> =>
-    invoke('bot_check_update', { artifactId }),
-
-  botUpgrade: (botId: string): Promise<string> =>
-    invoke('bot_upgrade', { botId }),
 
   // ----------------------------------------------------------------
   // Server 管理

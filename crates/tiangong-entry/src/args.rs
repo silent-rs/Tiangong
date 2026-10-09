@@ -27,11 +27,7 @@ pub(crate) enum MainCommand {
     #[command(about = "启动 Server 模式")]
     Server(ServerArgs),
     #[command(
-        about = "在后台启动已配置的 Bot；安装、配置、停止、升级与日志请使用 `tiangong config`"
-    )]
-    Bot(BotArgs),
-    #[command(
-        about = "打开网页配置页（智能体 / 模型 / Server / Bot / 插件管理与插件配置）；配合 --host 可远程配置服务器"
+        about = "打开网页配置页（智能体 / 模型 / Server / 插件管理与插件配置）；配合 --host 可远程配置服务器"
     )]
     Config(ConfigArgs),
     #[command(about = "检查并安装天工更新")]
@@ -106,22 +102,6 @@ impl TrustModeArg {
     }
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct BotArgs {
-    #[command(subcommand)]
-    pub(crate) command: BotSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum BotSubcommand {
-    /// 在后台启动已配置的 bot（独立进程，不随 CLI 退出而停止）
-    #[command(about = "在后台启动已配置的 bot 进程")]
-    Start {
-        #[arg(help = "bot 实例 ID")]
-        id: String,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,22 +142,9 @@ mod tests {
         assert!(parse(&["server", "-d", "--port", "9000"]).is_ok());
     }
 
+    /// Bot 已改为插件（设置页管理），`tiangong bot` 子命令不再存在。
     #[test]
-    fn bot_only_keeps_start() {
-        assert!(parse(&["bot", "start", "feishu"]).is_ok());
-        for removed in [
-            &["bot", "configure", "feishu"][..],
-            &["bot", "list"],
-            &["bot", "available"],
-            &["bot", "install", "feishu"],
-            &["bot", "show", "feishu"],
-            &["bot", "stop", "feishu"],
-            &["bot", "upgrade", "feishu"],
-            &["bot", "check-update"],
-            &["bot", "remove", "feishu"],
-            &["bot", "log", "feishu"],
-        ] {
-            assert!(parse(removed).is_err(), "{removed:?} 应已移入配置页");
-        }
+    fn bot_subcommand_removed() {
+        assert!(parse(&["bot", "start", "feishu"]).is_err());
     }
 }
