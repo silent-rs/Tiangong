@@ -30,7 +30,9 @@ pub use message::{
     deserialize_messages, now_text, serialize_messages_flat,
 };
 pub use plugin_session::PluginSession;
-pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
+pub use remote::{
+    IncomingMessage, MessageAnnotations, MessageContent, OutgoingMessage, RemoteRole,
+};
 pub use session::Session;
 pub use status::RunStatus;
 pub use stream::{MemoryRecallHitSummary, SessionEvent, StreamEvent, StreamToolCall};

@@ -4,7 +4,9 @@ use anyhow::Result;
 use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::session::MessageRole;
 use tiangong_types::event::{EventSource, RuntimeEvent, RuntimeEventType};
-use tiangong_types::{IncomingMessage, MediaAsset, MediaKind, MessageContent, OutgoingMessage};
+use tiangong_types::{
+    IncomingMessage, MediaAsset, MediaKind, MessageAnnotations, MessageContent, OutgoingMessage,
+};
 use tokio::sync::Mutex;
 
 use super::backend::ServerCoreBackend;
@@ -54,7 +56,7 @@ impl MessageRouter {
         }
 
         self.event_bus
-            .publish(TiangongEvent::MessageReceived(msg.clone()));
+            .publish(TiangongEvent::MessageReceived(Box::new(msg.clone())));
 
         let text = extract_text(&msg);
         let media = extract_media(&msg);
@@ -82,6 +84,7 @@ impl MessageRouter {
                 Some(msg.id.clone()),
                 Some(msg.id.clone()),
                 media,
+                msg.annotations.clone(),
             )
             .await?
         else {
@@ -103,7 +106,7 @@ impl MessageRouter {
         event: RuntimeEvent,
     ) -> Result<Option<OutgoingMessage>> {
         Ok(self
-            .handle_runtime_event_with_reply(event, None, None, Vec::new())
+            .handle_runtime_event_with_reply(event, None, None, Vec::new(), Default::default())
             .await?
             .map(|(_, outgoing)| outgoing))
     }
@@ -133,6 +136,7 @@ impl MessageRouter {
         reply_to: Option<String>,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<Option<(String, OutgoingMessage)>> {
         match event.event_type {
             RuntimeEventType::UserMessage => {
@@ -156,7 +160,13 @@ impl MessageRouter {
                 let (actual_session_id, mut outgoing) =
                     if matches!(connector, "server-api" | "server-ws") {
                         self.core_backend
-                            .send_message_and_wait(&requested_session_id, text, message_id, media)
+                            .send_message_and_wait(
+                                &requested_session_id,
+                                text,
+                                message_id,
+                                media,
+                                annotations,
+                            )
                             .await?
                     } else {
                         self.core_backend
@@ -166,6 +176,7 @@ impl MessageRouter {
                                 text,
                                 message_id,
                                 media,
+                                annotations,
                             )
                             .await?
                     };
@@ -341,6 +352,7 @@ mod tests {
             media: vec![image("second"), image("third")],
             reply_to: None,
             timestamp: "now".to_string(),
+            annotations: Default::default(),
         };
 
         let media = extract_media(&message);
@@ -362,6 +374,7 @@ mod tests {
             media: vec![image("first"), image("second")],
             reply_to: None,
             timestamp: "now".to_string(),
+            annotations: Default::default(),
         };
 
         let media = extract_media(&message);

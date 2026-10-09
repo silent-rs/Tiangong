@@ -779,6 +779,7 @@ async fn send_message_inner(
             user_message_id.clone(),
             prepared.clone(),
             turn_model_ref.as_deref(),
+            None,
         )
         .await
     {
@@ -1184,6 +1185,8 @@ pub async fn edit_and_resend(
             prepared.clone(),
             // 编辑重发沿用会话已记录的模型选择，不改变模型。
             session_model_ref.as_deref(),
+            // 编辑后的正文由用户重新给出，原插件渲染声明不再适用。
+            None,
         )
         .await
     {

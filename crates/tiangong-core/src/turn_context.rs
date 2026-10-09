@@ -83,6 +83,7 @@ impl TurnContext {
         }
         let id = message.id.clone();
         let content = message.content.clone();
+        let render = message.meta.render.clone();
         if self
             .session
             .messages
@@ -128,6 +129,7 @@ impl TurnContext {
             content: tiangong_types::content_blocks_text(&content),
             content_blocks: tiangong_types::stable_content_blocks(&content),
             media: Vec::new(),
+            render,
         });
         Ok(())
     }

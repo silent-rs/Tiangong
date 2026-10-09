@@ -85,7 +85,7 @@ pub async fn execute_webhook(app_ctx: SharedAppContext, webhook: Webhook) {
     // 投递消息到 Core（直接经 ServerCoreBackend，不经 scheduler）
     let result = app_ctx
         .core_backend
-        .send_message_and_wait(&session_id, message, None, vec![])
+        .send_message_and_wait(&session_id, message, None, vec![], Default::default())
         .await;
 
     let finished_at = chrono::Local::now().naive_local().to_string();

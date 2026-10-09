@@ -1371,8 +1371,10 @@ async fn inject_user_message_interrupts_tools_and_restarts() {
             .expect("工具应已启动");
         inject_tx
             .send(Command::InjectUserMessage {
-                message_id: "injected-1".to_string(),
-                content: vec![tiangong_types::ContentBlock::text("改成先做另一件事")],
+                message: Box::new(tiangong_types::Message::user_prepared(
+                    "injected-1".to_string(),
+                    vec![tiangong_types::ContentBlock::text("改成先做另一件事")],
+                )),
             })
             .unwrap();
     });
@@ -1459,23 +1461,25 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
         let path = "/tmp/guidance-image.png";
         inject_tx
             .send(Command::InjectUserMessage {
-                message_id: scru128::new().to_string(),
-                content: vec![
-                    tiangong_types::ContentBlock::text("看这张新截图"),
-                    tiangong_types::ContentBlock::AssetReference {
-                        asset: tiangong_types::StoredAsset {
-                            asset_id: scru128::new().to_string(),
-                            local_path: path.into(),
-                            original_name: "guidance-image.png".into(),
-                            mime_type: "image/png".into(),
-                            size: 0,
-                            kind: tiangong_types::MediaKind::Image,
+                message: Box::new(tiangong_types::Message::user_prepared(
+                    scru128::new().to_string(),
+                    vec![
+                        tiangong_types::ContentBlock::text("看这张新截图"),
+                        tiangong_types::ContentBlock::AssetReference {
+                            asset: tiangong_types::StoredAsset {
+                                asset_id: scru128::new().to_string(),
+                                local_path: path.into(),
+                                original_name: "guidance-image.png".into(),
+                                mime_type: "image/png".into(),
+                                size: 0,
+                                kind: tiangong_types::MediaKind::Image,
+                            },
                         },
-                    },
-                    tiangong_types::ContentBlock::ModelInstruction {
-                        text: format!("请通过 images={} 分析新截图", serde_json::json!([path])),
-                    },
-                ],
+                        tiangong_types::ContentBlock::ModelInstruction {
+                            text: format!("请通过 images={} 分析新截图", serde_json::json!([path])),
+                        },
+                    ],
+                )),
             })
             .unwrap();
     });
@@ -1570,8 +1574,10 @@ async fn final_status_anchors_to_turn_start_message_after_injection() {
             .expect("工具应已启动");
         inject_tx
             .send(Command::InjectUserMessage {
-                message_id: "injected-anchor".to_string(),
-                content: vec![tiangong_types::ContentBlock::text("请改用另一方案")],
+                message: Box::new(tiangong_types::Message::user_prepared(
+                    "injected-anchor".to_string(),
+                    vec![tiangong_types::ContentBlock::text("请改用另一方案")],
+                )),
             })
             .unwrap();
     });
@@ -1688,8 +1694,10 @@ async fn inject_does_not_cancel_plugins_but_explicit_cancel_does() {
             .await
             .expect("第一个工具应已启动");
         tx.send(Command::InjectUserMessage {
-            message_id: "injected-cancel-probe".to_string(),
-            content: vec![tiangong_types::ContentBlock::text("换个方向")],
+            message: Box::new(tiangong_types::Message::user_prepared(
+                "injected-cancel-probe".to_string(),
+                vec![tiangong_types::ContentBlock::text("换个方向")],
+            )),
         })
         .unwrap();
         // 注入后引导阶段不触发 on_cancel（此刻计数必须为 0）。
@@ -1841,8 +1849,10 @@ async fn inject_during_compression_cancels_and_restarts_without_applying_summary
     }
     cmd_tx
         .send(Command::InjectUserMessage {
-            message_id: "injected-during-compression".to_string(),
-            content: vec![tiangong_types::ContentBlock::text("换个方向，不用压缩了")],
+            message: Box::new(tiangong_types::Message::user_prepared(
+                "injected-during-compression".to_string(),
+                vec![tiangong_types::ContentBlock::text("换个方向，不用压缩了")],
+            )),
         })
         .unwrap();
 
@@ -1905,8 +1915,10 @@ async fn consecutive_inject_then_cancel_terminates_in_order() {
             .expect("工具应已启动");
         // 两条命令背靠背投递：注入在前、取消在后。
         tx.send(Command::InjectUserMessage {
-            message_id: "injected-then-cancel".to_string(),
-            content: vec![tiangong_types::ContentBlock::text("先换个方向")],
+            message: Box::new(tiangong_types::Message::user_prepared(
+                "injected-then-cancel".to_string(),
+                vec![tiangong_types::ContentBlock::text("先换个方向")],
+            )),
         })
         .unwrap();
         tx.send(Command::Cancel).unwrap();
@@ -1981,8 +1993,10 @@ async fn consecutive_injects_are_all_saved_and_restart_in_order() {
                 .await
                 .expect("工具应已启动");
             tx.send(Command::InjectUserMessage {
-                message_id: format!("injected-chain-{n}"),
-                content: vec![tiangong_types::ContentBlock::text(format!("第 {n} 次调整"))],
+                message: Box::new(tiangong_types::Message::user_prepared(
+                    format!("injected-chain-{n}"),
+                    vec![tiangong_types::ContentBlock::text(format!("第 {n} 次调整"))],
+                )),
             })
             .unwrap();
         }
@@ -2088,8 +2102,10 @@ async fn command_storm_is_processed_in_order_without_panicking() {
         )))
         .unwrap();
         tx.send(Command::InjectUserMessage {
-            message_id: "storm-injected".to_string(),
-            content: vec![tiangong_types::ContentBlock::text("风暴中的引导")],
+            message: Box::new(tiangong_types::Message::user_prepared(
+                "storm-injected".to_string(),
+                vec![tiangong_types::ContentBlock::text("风暴中的引导")],
+            )),
         })
         .unwrap();
         tx.send(Command::Cancel).unwrap();

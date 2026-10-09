@@ -265,7 +265,7 @@ export interface AttachmentDataUrl {
 }
 
 export * from './message';
-import type { Message } from './message';
+import type { Message, MessageRender } from './message';
 
 /** Core 经 Desktop 按会话转发的单个流事件。 */
 export interface StreamEvent {
@@ -308,6 +308,8 @@ export interface StreamEvent {
   title?: string;
   /** model_switch_started / model_switched 携带的模型名（用于展示）。 */
   model_name?: string;
+  /** user_message 携带的插件渲染声明（写入消息 meta.render）。 */
+  render?: MessageRender | null;
 }
 
 export interface SessionStreamEvent {

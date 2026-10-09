@@ -367,6 +367,7 @@ fn user_message_event_preserves_content_blocks_without_serializing_image_data() 
             data: Some("SECRET_BASE64".into()),
         }],
         media: Vec::new(),
+        render: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("content_blocks"));
@@ -759,4 +760,50 @@ fn tool_result_injection_serde_locks_protocol_shape() {
             .unwrap()
             .contains("injected_assets")
     );
+}
+#[test]
+fn message_annotations_normalize_and_append_instruction() {
+    let annotations = MessageAnnotations {
+        instruction: Some("  经 Bot 回复  ".into()),
+        render: Some(MessageRender {
+            plugin: "bot".into(),
+            view: "im-message".into(),
+            data: serde_json::json!({ "platform": "weixin" }),
+        }),
+    }
+    .normalized()
+    .unwrap();
+    assert_eq!(annotations.instruction.as_deref(), Some("经 Bot 回复"));
+    let mut content = vec![ContentBlock::text("你好")];
+    annotations.append_instruction(&mut content);
+    assert!(matches!(
+        content.last(),
+        Some(ContentBlock::ModelInstruction { text }) if text == "经 Bot 回复"
+    ));
+
+    let blank = MessageAnnotations {
+        instruction: Some("   ".into()),
+        render: None,
+    }
+    .normalized()
+    .unwrap();
+    assert!(blank.is_empty());
+
+    let invalid = MessageAnnotations {
+        instruction: None,
+        render: Some(MessageRender {
+            plugin: " ".into(),
+            view: "v".into(),
+            data: serde_json::Value::Null,
+        }),
+    };
+    assert!(invalid.normalized().is_err());
+
+    // 旧版 IncomingMessage JSON 不带 annotations 仍可解析。
+    let legacy: IncomingMessage = serde_json::from_value(serde_json::json!({
+        "id": "m", "connector": "c", "channel_id": "ch", "sender_id": "s",
+        "content": { "Text": "hi" }, "reply_to": null, "timestamp": "now"
+    }))
+    .unwrap();
+    assert!(legacy.annotations.is_empty());
 }

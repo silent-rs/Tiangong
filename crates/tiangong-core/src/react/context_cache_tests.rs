@@ -472,8 +472,10 @@ async fn responses_steering_preserves_the_inflight_request_prefix() {
         .unwrap();
         cmd_tx
             .send(Command::InjectUserMessage {
-                message_id: scru128::new().to_string(),
-                content: vec![tiangong_types::ContentBlock::text("追加要求")],
+                message: Box::new(tiangong_types::Message::user_prepared(
+                    scru128::new().to_string(),
+                    vec![tiangong_types::ContentBlock::text("追加要求")],
+                )),
             })
             .unwrap();
     };

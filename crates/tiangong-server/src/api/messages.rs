@@ -4,7 +4,7 @@ use super::types::{ApiMessageContent, ConnectorMessageRequest, ConnectorMessageR
 use super::{AuthToken, SharedAppContext};
 use crate::auth::{check_auth, ensure_remote_action, extract_remote_access};
 use tiangong_core::session::now_text;
-use tiangong_types::IncomingMessage;
+use tiangong_types::{IncomingMessage, MessageAnnotations};
 
 /// POST /api/v1/messages — 外部 Bot / Connector 统一消息入口
 ///
@@ -42,6 +42,13 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
     }
 
     let content = resolve_content(body.message, body.content)?;
+    // 入口即校验：异步模式下后台失败只能写日志，调用方应当场拿到 400。
+    let annotations = MessageAnnotations {
+        instruction: body.instruction,
+        render: body.render,
+    }
+    .normalized()
+    .map_err(|error| SilentError::business_error(StatusCode::BAD_REQUEST, error))?;
     let media = body.media;
     let message_id = body
         .message_id
@@ -63,6 +70,7 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         media,
         reply_to: body.reply_to,
         timestamp: now_text(),
+        annotations,
     };
 
     if respond_async {

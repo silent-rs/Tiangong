@@ -8,7 +8,7 @@ use tiangong_core::session::MessageRole;
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
 use tiangong_server::remote::core::resolve_or_create_connector_session;
 use tiangong_server::remote::event::{EventBus, TiangongEvent};
-use tiangong_types::{MediaAsset, OutgoingMessage, TurnStatus};
+use tiangong_types::{MediaAsset, MessageAnnotations, OutgoingMessage, TurnStatus};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::TiangongApp;
@@ -36,6 +36,7 @@ enum EmbeddedCoreRequest {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
         reply: oneshot::Sender<MessageReply>,
     },
     SendSession {
@@ -43,6 +44,7 @@ enum EmbeddedCoreRequest {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
         reply: oneshot::Sender<MessageReply>,
     },
     DeleteSession {
@@ -93,6 +95,7 @@ impl ServerCoreBackend for DesktopServerCoreBridge {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)> {
         self.request_message(|reply| EmbeddedCoreRequest::SendConnector {
             connector: connector.to_string(),
@@ -100,6 +103,7 @@ impl ServerCoreBackend for DesktopServerCoreBridge {
             content,
             message_id,
             media,
+            annotations,
             reply,
         })
         .await
@@ -111,12 +115,14 @@ impl ServerCoreBackend for DesktopServerCoreBridge {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)> {
         self.request_message(|reply| EmbeddedCoreRequest::SendSession {
             session_id: session_id.to_string(),
             content,
             message_id,
             media,
+            annotations,
             reply,
         })
         .await
@@ -179,6 +185,7 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                         content,
                         message_id,
                         media,
+                        annotations,
                         reply,
                     } => {
                         let state = request_app.state::<TiangongApp>();
@@ -200,6 +207,7 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                                         content,
                                         message_id,
                                         media,
+                                        annotations,
                                     )
                                     .await;
                                     request_event_bus.publish(TiangongEvent::TurnCompleted {
@@ -217,6 +225,7 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                         content,
                         message_id,
                         media,
+                        annotations,
                         reply,
                     } => {
                         let state = request_app.state::<TiangongApp>();
@@ -228,6 +237,7 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                             content,
                             message_id,
                             media,
+                            annotations,
                         )
                         .await;
                         request_event_bus.publish(TiangongEvent::TurnCompleted {
@@ -306,6 +316,7 @@ async fn send_message_and_wait(
     content: String,
     message_id: Option<String>,
     media: Vec<MediaAsset>,
+    annotations: MessageAnnotations,
 ) -> MessageReply {
     use std::sync::mpsc as std_mpsc;
     use tiangong_types::StreamEvent;
@@ -314,6 +325,7 @@ async fn send_message_and_wait(
     if session_id.is_empty() {
         return Err("目标会话 ID 不能为空".to_string());
     }
+    let annotations = annotations.normalized()?;
     let message_id = message_id
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty())
@@ -415,7 +427,8 @@ async fn send_message_and_wait(
     })
     .await
     .map_err(|error| format!("附件准备任务失败：{error}"))??;
-    let (transaction, prepared) = prepared_batch;
+    let (transaction, mut prepared) = prepared_batch;
+    annotations.append_instruction(&mut prepared);
     let created_paths = transaction
         .newly_created_paths()
         .iter()
@@ -464,6 +477,7 @@ async fn send_message_and_wait(
             prepared,
             // 远端投递沿用会话已记录的模型选择。
             session_model_ref.as_deref(),
+            annotations.render,
         )
         .await
     {

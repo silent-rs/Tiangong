@@ -129,6 +129,9 @@ pub enum StreamEvent {
         /// 旧版消费者兼容字段；仅包含稳定媒体引用，不携带运行时 base64。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         media: Vec<crate::MediaAsset>,
+        /// 插件渲染声明（见 [`crate::MessageMeta::render`]）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render: Option<crate::MessageRender>,
     },
     /// Core 会话中的稳定消息快照，供宿主按 ID 更新本地镜像。
     SessionMessageUpsert {

@@ -404,6 +404,7 @@ impl CoreManager {
             prepared,
             message_id,
             model_ref,
+            render,
         }) = input
         else {
             return input;
@@ -419,6 +420,7 @@ impl CoreManager {
             prepared,
             message_id,
             model_ref,
+            render,
         })
     }
 

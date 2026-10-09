@@ -171,6 +171,7 @@ mod tests {
             _content: String,
             _message_id: Option<String>,
             _media: Vec<MediaAsset>,
+            _annotations: tiangong_types::MessageAnnotations,
         ) -> Result<(String, OutgoingMessage)> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok((
@@ -189,6 +190,7 @@ mod tests {
             _content: String,
             _message_id: Option<String>,
             _media: Vec<MediaAsset>,
+            _annotations: tiangong_types::MessageAnnotations,
         ) -> Result<(String, OutgoingMessage)> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Err(anyhow!("not used"))
@@ -245,6 +247,7 @@ mod tests {
                 media: Vec::new(),
                 reply_to: None,
                 timestamp: tiangong_core::session::now_text(),
+                annotations: Default::default(),
             })
             .await
             .unwrap();
