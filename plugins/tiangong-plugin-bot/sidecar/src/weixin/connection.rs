@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
 use super::{crypto, ilink, target_store};
-use crate::platform::StopSignal;
+use crate::platform::{InboundSource, StopSignal};
 #[cfg(test)]
 use crate::test_support;
 
@@ -78,6 +78,12 @@ struct ConnectorRequest {
     content: Option<ApiMessageContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
+    /// 只给模型看的来源标签。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction: Option<String>,
+    /// 界面渲染声明（本插件 `im-message` 视图）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,37 +163,15 @@ impl ApiMessageContent {
             Self::Text { .. } => None,
         }
     }
-
-    /// 在消息正文前附加来源说明；纯图片/视频附加到说明文字。
-    fn with_source(self, source: &str) -> Self {
-        let prefix = |text: Option<String>| match text.filter(|text| !text.trim().is_empty()) {
-            Some(text) => format!("{source}\n{text}"),
-            None => source.to_string(),
-        };
-        match self {
-            Self::Text { text } => Self::Text {
-                text: prefix(Some(text)),
-            },
-            Self::Image { url, caption } => Self::Image {
-                url,
-                caption: Some(prefix(caption)),
-            },
-            Self::Video { url, caption } => Self::Video {
-                url,
-                caption: Some(prefix(caption)),
-            },
-            other @ (Self::File { .. } | Self::Audio { .. }) => other,
-        }
-    }
 }
 
-fn message_source(target_kind: &str, push_target: Option<&str>) -> String {
+fn message_source(target_kind: &str, push_target: Option<&str>) -> InboundSource {
     let channel = if target_kind == "group" {
         "微信群聊"
     } else {
         "微信私聊"
     };
-    crate::platform::message_source(channel, push_target, true)
+    InboundSource::new("weixin", channel, push_target, true)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -417,10 +401,6 @@ async fn handle_message(
     }
     let push = target_id;
     let source = message_source(target_kind, push.as_deref());
-    let parsed = ParsedMessage {
-        content: parsed.content.with_source(&source),
-        media: parsed.media,
-    };
     tracing::info!(
         "转发微信消息 sender={sender_id} content_type={} images={}",
         parsed.content.kind(),
@@ -434,6 +414,7 @@ async fn handle_message(
         message_id,
         parsed.content,
         parsed.media,
+        &source,
     )
     .await?;
     if push.is_some() {
@@ -549,6 +530,7 @@ async fn forward_to_tiangong(
     message_id: Option<&str>,
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
+    source: &InboundSource,
 ) -> Result<BotReply> {
     let url = format!(
         "{}/api/v1/messages",
@@ -562,6 +544,8 @@ async fn forward_to_tiangong(
         message: None,
         content: Some(content),
         media,
+        instruction: Some(source.instruction()),
+        render: Some(source.render()),
     };
 
     let mut builder = state.tiangong_http.post(url);
@@ -652,6 +636,7 @@ mod tests {
                 text: "mock-request".to_string(),
             },
             Vec::new(),
+            &message_source("direct", None),
         )
         .await
         .expect("天工长任务响应不应在 120 秒时超时");
@@ -662,36 +647,18 @@ mod tests {
     }
 
     #[test]
-    fn source_is_prefixed_to_text_and_media_caption() {
-        let source = "[来源：微信私聊]";
-        let text = ApiMessageContent::Text {
-            text: "总结群聊".into(),
-        }
-        .with_source(source);
-        assert!(
-            matches!(text, ApiMessageContent::Text { ref text } if text == "[来源：微信私聊]\n总结群聊")
-        );
-
-        let image = ApiMessageContent::Image {
-            url: "data:image/png;base64,AA==".into(),
-            caption: None,
-        }
-        .with_source(source);
-        assert!(matches!(
-            image,
-            ApiMessageContent::Image { ref caption, .. } if caption.as_deref() == Some(source)
-        ));
-    }
-
-    #[test]
     fn source_requires_tool_reply_only_when_push_is_available() {
-        assert_eq!(message_source("group", None), "[来源：微信群聊]");
+        assert_eq!(
+            message_source("group", None).instruction(),
+            "[来源：微信群聊]"
+        );
 
         let with_push = message_source("direct", Some("target-1"));
         assert_eq!(
-            with_push,
+            with_push.instruction(),
             "[来源：微信私聊，经 Bot 推送工具回复 target_id=target-1，回复次数有限]"
         );
+        assert_eq!(with_push.render()["data"]["platform"], "weixin");
     }
 
     #[test]
@@ -746,6 +713,8 @@ mod tests {
                 "data:image/png;base64,AA==".into(),
                 "image/png".into(),
             )],
+            instruction: None,
+            render: None,
         };
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["message_id"], "42");

@@ -18,6 +18,7 @@ use std::pin::Pin;
 use tokio::sync::{Mutex, RwLock};
 
 use super::target_store;
+use crate::platform::InboundSource;
 #[cfg(test)]
 use crate::test_support;
 
@@ -133,6 +134,12 @@ struct ConnectorRequest {
     content: Option<ApiMessageContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
+    /// 只给模型看的来源标签。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction: Option<String>,
+    /// 界面渲染声明（本插件 `im-message` 视图）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render: Option<serde_json::Value>,
 }
 
 /// POST /api/v1/messages 响应体
@@ -209,37 +216,15 @@ impl ApiMessageContent {
             Self::Video { .. } => "video",
         }
     }
-
-    /// 在消息正文前附加来源说明；纯图片/视频附加到说明文字。
-    fn with_source(self, source: &str) -> Self {
-        let prefix = |text: Option<String>| match text.filter(|text| !text.trim().is_empty()) {
-            Some(text) => format!("{source}\n{text}"),
-            None => source.to_string(),
-        };
-        match self {
-            Self::Text { text } => Self::Text {
-                text: prefix(Some(text)),
-            },
-            Self::Image { url, caption } => Self::Image {
-                url,
-                caption: Some(prefix(caption)),
-            },
-            Self::Video { url, caption } => Self::Video {
-                url,
-                caption: Some(prefix(caption)),
-            },
-            other @ (Self::File { .. } | Self::Audio { .. }) => other,
-        }
-    }
 }
 
-fn message_source(target_kind: &str, push_target: Option<&str>) -> String {
+fn message_source(target_kind: &str, push_target: Option<&str>) -> InboundSource {
     let channel = if target_kind == "group" {
         "飞书群聊"
     } else {
         "飞书私聊"
     };
-    crate::platform::message_source(channel, push_target, false)
+    InboundSource::new("feishu", channel, push_target, false)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -660,7 +645,7 @@ async fn process_user_message(
     chat_id: &str,
     sender_id: &str,
     message_id: &Option<String>,
-    source: &str,
+    source: &InboundSource,
     reply_by_agent: bool,
 ) -> Result<MessageHandling> {
     let parsed = match message.msg_type.as_str() {
@@ -722,8 +707,9 @@ async fn process_user_message(
         chat_id,
         sender_id,
         message_id,
-        parsed.content.with_source(source),
+        parsed.content,
         parsed.media,
+        source,
     )
     .await
     {
@@ -983,6 +969,7 @@ async fn forward_to_tiangong(
     message_id: &Option<String>,
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
+    source: &InboundSource,
 ) -> Result<BotReply> {
     let url = format!(
         "{}/api/v1/messages",
@@ -997,6 +984,8 @@ async fn forward_to_tiangong(
         message: None,
         content: Some(content),
         media,
+        instruction: Some(source.instruction()),
+        render: Some(source.render()),
     };
 
     let mut req = state.tiangong_http.post(&url);
@@ -1449,22 +1438,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_is_prefixed_and_mentions_push_target_only_when_available() {
-        let text = ApiMessageContent::Text {
-            text: "你好".into(),
-        }
-        .with_source("[来源：飞书群聊]");
-        assert!(matches!(
-            text,
-            ApiMessageContent::Text { ref text } if text == "[来源：飞书群聊]\n你好"
-        ));
-
-        assert_eq!(message_source("group", None), "[来源：飞书群聊]");
+    fn source_mentions_push_target_only_when_available() {
+        assert_eq!(
+            message_source("group", None).instruction(),
+            "[来源：飞书群聊]"
+        );
         let with_push = message_source("direct", Some("target-1"));
         assert_eq!(
-            with_push,
+            with_push.instruction(),
             "[来源：飞书私聊，经 Bot 推送工具回复 target_id=target-1]"
         );
+        assert_eq!(with_push.render()["data"]["platform"], "feishu");
     }
 
     const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
@@ -1478,6 +1462,8 @@ mod tests {
             message: None,
             content: Some(parsed.content),
             media: parsed.media,
+            instruction: None,
+            render: None,
         }
     }
 
@@ -1620,6 +1606,7 @@ mod tests {
                 text: "mock-request".to_string(),
             },
             Vec::new(),
+            &message_source("direct", None),
         )
         .await
         .expect("天工长任务响应不应在 120 秒时超时");

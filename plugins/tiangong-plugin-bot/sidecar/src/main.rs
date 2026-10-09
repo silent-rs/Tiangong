@@ -22,6 +22,9 @@ mod test_support;
 mod tools;
 mod weixin;
 
+/// 插件 ID（与 plugin.json 一致），渲染声明与宿主事件使用。
+pub(crate) const PLUGIN_ID: &str = "bot";
+
 /// 插件支持的全部平台（设置页与工具按此顺序展示）。
 pub(crate) fn all_platforms() -> Vec<Arc<dyn platform::BotPlatform>> {
     vec![
@@ -46,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     feishu::install_rustls_provider();
-    let config = tiangong_plugin_sidecar::SidecarConfig::new("bot");
+    let config = tiangong_plugin_sidecar::SidecarConfig::new(PLUGIN_ID);
     tiangong_plugin_sidecar::run(config, || {
         let service = Arc::new(service::BotService::from_env()?);
         service.start();

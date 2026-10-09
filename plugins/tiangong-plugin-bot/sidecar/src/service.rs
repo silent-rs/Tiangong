@@ -26,7 +26,7 @@ use crate::delivery::{self, DeliveryResult};
 use crate::platform::{BotPlatform, ServerEndpoint, TargetView};
 use crate::tools::{SendLocalMediaInput, SendTextInput};
 
-const PLUGIN_ID: &str = "bot";
+use crate::PLUGIN_ID;
 const CONNECTION_LOCK_FILE: &str = "connection.lock";
 /// 平台停用标记：存在时不建立接收连接、不对外推送（设置页“停止”）。
 const DISABLED_MARKER: &str = "disabled";

@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Notify};
 use super::gateway::{DispatchEvent, GatewayRunner, INTENT_GROUP_AND_C2C_EVENT};
 use super::target_store;
 use super::token::AccessTokenCache;
-use crate::platform::StopSignal;
+use crate::platform::{InboundSource, StopSignal};
 #[cfg(test)]
 use crate::test_support;
 
@@ -85,6 +85,12 @@ struct ConnectorRequest {
     content: Option<ApiMessageContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
+    /// 只给模型看的来源标签。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction: Option<String>,
+    /// 界面渲染声明（本插件 `im-message` 视图）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,37 +170,15 @@ impl ApiMessageContent {
             Self::Text { .. } => None,
         }
     }
-
-    /// 在消息正文前附加来源说明；纯图片/视频附加到说明文字。
-    fn with_source(self, source: &str) -> Self {
-        let prefix = |text: Option<String>| match text.filter(|text| !text.trim().is_empty()) {
-            Some(text) => format!("{source}\n{text}"),
-            None => source.to_string(),
-        };
-        match self {
-            Self::Text { text } => Self::Text {
-                text: prefix(Some(text)),
-            },
-            Self::Image { url, caption } => Self::Image {
-                url,
-                caption: Some(prefix(caption)),
-            },
-            Self::Video { url, caption } => Self::Video {
-                url,
-                caption: Some(prefix(caption)),
-            },
-            other @ (Self::File { .. } | Self::Audio { .. }) => other,
-        }
-    }
 }
 
-fn message_source(target_kind: &str, push_target: Option<&str>) -> String {
+fn message_source(target_kind: &str, push_target: Option<&str>) -> InboundSource {
     let channel = if target_kind == "group" {
         "QQ 群聊"
     } else {
         "QQ 私聊"
     };
-    crate::platform::message_source(channel, push_target, true)
+    InboundSource::new("qq", channel, push_target, true)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,15 +208,6 @@ impl MediaAsset {
 struct ParsedMessage {
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
-}
-
-impl ParsedMessage {
-    fn with_source(self, source: &str) -> Self {
-        Self {
-            content: self.content.with_source(source),
-            media: self.media,
-        }
-    }
 }
 
 struct BotReply {
@@ -402,7 +377,7 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
         return Ok(());
     };
     let push = target_id;
-    let parsed = parsed.with_source(&message_source("group", push.as_deref()));
+    let source = message_source("group", push.as_deref());
 
     let _ = seq;
     tracing::info!(
@@ -412,18 +387,20 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
         parsed.media.len()
     );
     let group_openid = message.group_openid.clone();
-    let reply = match forward_to_tiangong(state, &channel_id, sender_id, message_id, parsed).await {
-        Ok(reply) => reply,
-        Err(error) => {
-            // 转发失败时释放去重占用，允许下次推送重试
-            state
-                .recent_messages
-                .lock()
-                .await
-                .release(&channel_id, message_id);
-            return Err(error);
-        }
-    };
+    let reply =
+        match forward_to_tiangong(state, &channel_id, sender_id, message_id, parsed, &source).await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                // 转发失败时释放去重占用，允许下次推送重试
+                state
+                    .recent_messages
+                    .lock()
+                    .await
+                    .release(&channel_id, message_id);
+                return Err(error);
+            }
+        };
     if push.is_some() {
         tracing::debug!("QQ 群聊回复由 Agent 经推送工具发送，忽略同步响应");
         return Ok(());
@@ -476,7 +453,7 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         return Ok(());
     }
     let push = target_id;
-    let parsed = parsed.with_source(&message_source("direct", push.as_deref()));
+    let source = message_source("direct", push.as_deref());
     let _ = seq;
     tracing::info!(
         "转发 QQ 私聊消息 user={} content_type={} images={}",
@@ -484,8 +461,15 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         parsed.content.kind(),
         parsed.media.len()
     );
-    let forward_result =
-        forward_to_tiangong(state, &channel_id, &user_openid, message_id, parsed).await;
+    let forward_result = forward_to_tiangong(
+        state,
+        &channel_id,
+        &user_openid,
+        message_id,
+        parsed,
+        &source,
+    )
+    .await;
     let reply = match forward_result {
         Ok(reply) => reply,
         Err(error) => {
@@ -557,6 +541,7 @@ async fn forward_to_tiangong(
     sender_id: &str,
     message_id: &str,
     parsed: ParsedMessage,
+    source: &InboundSource,
 ) -> Result<BotReply> {
     let url = format!(
         "{}/api/v1/messages",
@@ -570,6 +555,8 @@ async fn forward_to_tiangong(
         message: None,
         content: Some(parsed.content),
         media: parsed.media,
+        instruction: Some(source.instruction()),
+        render: Some(source.render()),
     };
 
     let mut builder = state.tiangong_http.post(url);
@@ -1010,25 +997,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_is_prefixed_and_mentions_push_target_only_when_available() {
-        let parsed = ParsedMessage {
-            content: ApiMessageContent::Text {
-                text: "你好".into(),
-            },
-            media: Vec::new(),
-        }
-        .with_source("[来源：QQ 群聊]");
-        assert!(matches!(
-            parsed.content,
-            ApiMessageContent::Text { ref text } if text == "[来源：QQ 群聊]\n你好"
-        ));
-
-        assert_eq!(message_source("group", None), "[来源：QQ 群聊]");
+    fn source_mentions_push_target_only_when_available() {
+        assert_eq!(
+            message_source("group", None).instruction(),
+            "[来源：QQ 群聊]"
+        );
         let with_push = message_source("direct", Some("target-1"));
         assert_eq!(
-            with_push,
+            with_push.instruction(),
             "[来源：QQ 私聊，经 Bot 推送工具回复 target_id=target-1，回复次数有限]"
         );
+        assert_eq!(with_push.render()["data"]["platform"], "qq");
     }
 
     const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
@@ -1071,6 +1050,7 @@ mod tests {
                 },
                 media: Vec::new(),
             },
+            &message_source("direct", None),
         )
         .await
         .expect("天工长任务响应不应在 120 秒时超时");
@@ -1120,8 +1100,18 @@ mod tests {
                 "data:image/png;base64,AA==".into(),
                 "image/png".into(),
             )],
+            instruction: Some(message_source("group", Some("t1")).instruction()),
+            render: Some(message_source("group", Some("t1")).render()),
         };
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["content"]["text"], "你好", "正文不再拼接来源标签");
+        assert!(
+            value["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("target_id=t1")
+        );
+        assert_eq!(value["render"]["view"], "im-message");
         assert_eq!(value["connector"], "qq-bot");
         assert_eq!(value["channel_id"], "group:abc");
         assert_eq!(value["message_id"], "msg-1");

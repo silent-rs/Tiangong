@@ -76,17 +76,69 @@ pub(crate) trait BotPlatform: Send + Sync + 'static {
     ) -> Result<DeliveryResult>;
 }
 
-/// 入站消息前附加的来源标签（issue #572）。
+/// 入站消息来源（issue #572）。
 ///
-/// 只携带本条消息特有的信息（渠道、推送目标、回复额度是否受限），保持
-/// 简短；“经推送工具回复、直接输出不会送达、幂等键”等通用规则由插件
-/// 清单 `prompt` 注入系统提示，不再逐条重复。
-pub(crate) fn message_source(channel: &str, push_target: Option<&str>, limited: bool) -> String {
-    let Some(target_id) = push_target else {
-        return format!("[来源：{channel}]");
-    };
-    let quota = if limited { "，回复次数有限" } else { "" };
-    format!("[来源：{channel}，经 Bot 推送工具回复 target_id={target_id}{quota}]")
+/// 转发时不再拼进正文：来源标签作为只给模型看的 `instruction`，界面经
+/// `render` 声明由本插件的 `im-message` 视图渲染为渠道卡片。标签只携带
+/// 本条消息特有的信息（渠道、推送目标、回复额度是否受限）；“经推送工具
+/// 回复、直接输出不会送达、幂等键”等通用规则由插件清单 `prompt` 注入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InboundSource {
+    /// 平台标识：`feishu` / `qq` / `weixin`。
+    pub(crate) platform: &'static str,
+    /// 渠道名，如「微信私聊」。
+    pub(crate) channel: &'static str,
+    /// 推送目标编号；有值时 Agent 需经推送工具回复。
+    pub(crate) target_id: Option<String>,
+    /// 回复次数是否受限（QQ / 微信）。
+    pub(crate) limited: bool,
+}
+
+/// 本插件渲染入站消息的 `session.message-item` 贡献 ID。
+pub(crate) const MESSAGE_VIEW: &str = "im-message";
+
+impl InboundSource {
+    pub(crate) fn new(
+        platform: &'static str,
+        channel: &'static str,
+        target_id: Option<&str>,
+        limited: bool,
+    ) -> Self {
+        Self {
+            platform,
+            channel,
+            target_id: target_id.map(str::to_string),
+            limited,
+        }
+    }
+
+    /// 只给模型看的来源标签。
+    pub(crate) fn instruction(&self) -> String {
+        let channel = self.channel;
+        let Some(target_id) = self.target_id.as_deref() else {
+            return format!("[来源：{channel}]");
+        };
+        let quota = if self.limited {
+            "，回复次数有限"
+        } else {
+            ""
+        };
+        format!("[来源：{channel}，经 Bot 推送工具回复 target_id={target_id}{quota}]")
+    }
+
+    /// 界面渲染声明（`POST /api/v1/messages` 的 `render` 字段）。
+    pub(crate) fn render(&self) -> Value {
+        serde_json::json!({
+            "plugin": crate::PLUGIN_ID,
+            "view": MESSAGE_VIEW,
+            "data": {
+                "platform": self.platform,
+                "channel": self.channel,
+                "target_id": self.target_id,
+                "limited": self.limited,
+            },
+        })
+    }
 }
 
 /// 读取平台数据目录下的 JSON 凭据文件。
@@ -161,15 +213,31 @@ mod tests {
 
     #[test]
     fn source_tag_is_short_and_carries_target() {
-        assert_eq!(message_source("飞书群聊", None, false), "[来源：飞书群聊]");
         assert_eq!(
-            message_source("飞书私聊", Some("t1"), false),
+            InboundSource::new("feishu", "飞书群聊", None, false).instruction(),
+            "[来源：飞书群聊]"
+        );
+        assert_eq!(
+            InboundSource::new("feishu", "飞书私聊", Some("t1"), false).instruction(),
             "[来源：飞书私聊，经 Bot 推送工具回复 target_id=t1]"
         );
         assert_eq!(
-            message_source("QQ 私聊", Some("t2"), true),
+            InboundSource::new("qq", "QQ 私聊", Some("t2"), true).instruction(),
             "[来源：QQ 私聊，经 Bot 推送工具回复 target_id=t2，回复次数有限]"
         );
+    }
+
+    #[test]
+    fn render_points_to_message_view() {
+        let render = InboundSource::new("weixin", "微信私聊", Some("t3"), true).render();
+        assert_eq!(render["plugin"], crate::PLUGIN_ID);
+        assert_eq!(render["view"], MESSAGE_VIEW);
+        assert_eq!(render["data"]["platform"], "weixin");
+        assert_eq!(render["data"]["channel"], "微信私聊");
+        assert_eq!(render["data"]["target_id"], "t3");
+        assert_eq!(render["data"]["limited"], true);
+        let group = InboundSource::new("qq", "QQ 群聊", None, true).render();
+        assert!(group["data"]["target_id"].is_null());
     }
 
     #[test]

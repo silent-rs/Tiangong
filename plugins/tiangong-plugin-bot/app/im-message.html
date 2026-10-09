@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>IM 消息</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器。 */
+    :host, .im-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    .im-root [hidden] { display: none !important; }
+    .im-root {
+      display: block; font-family: var(--host-font-family, inherit);
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    .im-card {
+      border: 1px solid hsl(var(--border, 214 18% 88%) / .6);
+      border-left: 3px solid var(--im-accent);
+      border-radius: 12px; overflow: hidden;
+      background: hsl(var(--card, 0 0% 100%));
+      box-shadow: 0 1px 2px rgb(0 0 0 / .05);
+    }
+    .im-card[data-platform="feishu"] { --im-accent: #3b82f6; }
+    .im-card[data-platform="qq"] { --im-accent: #0ea5e9; }
+    .im-card[data-platform="weixin"] { --im-accent: #10b981; }
+    .im-head {
+      display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+      border-bottom: 1px solid hsl(var(--border, 214 18% 88%) / .3);
+      background: hsl(var(--muted, 210 40% 96%) / .15);
+    }
+    .im-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 999px; flex-shrink: 0;
+      color: var(--im-accent);
+      background: color-mix(in srgb, var(--im-accent) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--im-accent) 20%, transparent);
+    }
+    .im-badge svg { width: 14px; height: 14px; display: block; }
+    .im-title { min-width: 0; flex: 1; font-size: 14px; }
+    .im-channel { font-weight: 600; }
+    .im-hint { margin-left: 8px; font-size: 11px; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .im-body {
+      padding: 10px 16px; font-size: 14px; line-height: 1.6;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+      color: hsl(var(--card-foreground, 222 47% 11%));
+    }
+    .im-media { display: flex; flex-direction: column; gap: 8px; padding: 0 16px 10px; }
+    .im-media img, .im-media video { display: block; max-width: 100%; max-height: 384px; border-radius: 6px; }
+    .im-media audio { display: block; width: 100%; }
+    .im-media a { font-size: 13px; color: hsl(var(--primary, 222.2 47.4% 11.2%)); text-decoration: underline; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <div class="im-root">
+    <div class="im-card" id="im-card">
+      <div class="im-head">
+        <span class="im-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
+        </span>
+        <div class="im-title">
+          <span class="im-channel" id="im-channel"></span><span class="im-hint" id="im-hint"></span>
+        </div>
+      </div>
+      <div class="im-body" id="im-body" hidden></div>
+      <div class="im-media" id="im-media" hidden></div>
+    </div>
+  </div>
+  <script>
+    // Bot 入站消息卡片（session.message-item，render=replace）：宿主按消息的渲染声明
+    // 挂载本视图。来源标签只给模型看（instruction），这里按 render.data 渲染渠道、
+    // 回复方式；正文取消息可见文本，图片 / 语音 / 文件等附件由本视图按
+    // message.attachments[].url 自行渲染（宿主接管显示时不再附加媒体）。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const card = uiRoot.getElementById('im-card');
+    const channelEl = uiRoot.getElementById('im-channel');
+    const hintEl = uiRoot.getElementById('im-hint');
+    const bodyEl = uiRoot.getElementById('im-body');
+    const mediaEl = uiRoot.getElementById('im-media');
+    const PLATFORM_LABEL = { feishu: '飞书', qq: 'QQ', weixin: '微信' };
+
+    function renderMedia(attachments) {
+      const items = (attachments || []).filter((item) => item && (item.url || item.path));
+      mediaEl.replaceChildren(...items.map((item) => {
+        const src = item.url || item.path;
+        const name = item.name || (item.path || '').split(/[\\/]/).pop() || '附件';
+        let el;
+        if (item.kind === 'image') {
+          el = document.createElement('img');
+          el.alt = name;
+          el.loading = 'lazy';
+        } else if (item.kind === 'audio' || item.kind === 'video') {
+          el = document.createElement(item.kind);
+          el.controls = true;
+          el.preload = 'metadata';
+        } else {
+          el = document.createElement('a');
+          el.href = src;
+          el.target = '_blank';
+          el.rel = 'noopener noreferrer';
+          el.textContent = name;
+          return el;
+        }
+        el.src = src;
+        el.title = name;
+        return el;
+      }));
+      mediaEl.hidden = items.length === 0;
+    }
+
+    function render(context) {
+      const message = (context && context.message) || {};
+      const data = (message.render && message.render.data) || {};
+      const platform = PLATFORM_LABEL[data.platform] ? data.platform : 'weixin';
+      card.dataset.platform = platform;
+      channelEl.textContent = data.channel || PLATFORM_LABEL[platform];
+      hintEl.textContent = data.target_id
+        ? `经 Bot 推送回复${data.limited ? ' · 回复次数有限' : ''}`
+        : '直接回复';
+      hintEl.title = data.target_id ? `target_id=${data.target_id}` : '';
+      const text = (message.text || '').trim();
+      bodyEl.textContent = text;
+      bodyEl.hidden = text.length === 0;
+      renderMedia(message.attachments);
+    }
+
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange(render);
+    } else {
+      render(typeof hostContext !== 'undefined' ? hostContext : null);
+    }
+  </script>
+</body>
+</html>

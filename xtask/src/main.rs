@@ -373,7 +373,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "coding" => &["app/index.html"],
         "computer-use" => &["app/restore-window.html"],
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
-        "bot" => &["app/settings.html"],
+        "bot" => &["app/im-message.html", "app/settings.html"],
         "volcengine" => &[
             "app/settings.html",
             "app/voice-input.html",
