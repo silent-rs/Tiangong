@@ -140,17 +140,31 @@ impl BotService {
         })
     }
 
-    /// 主进程为每个平台启动接收连接监管任务；非主进程只处理请求。
+    /// 主进程迁移旧版 Bot 数据后为每个平台启动接收连接监管任务；
+    /// 非主进程只处理请求。
     pub(crate) fn start(self: &Arc<Self>) {
         if !self.primary {
             tracing::info!("Bot 插件以辅助实例运行，不建立接收连接");
             return;
         }
+        self.migrate_legacy();
         for slot in &self.slots {
             let slot = Arc::clone(slot);
             let server = self.server.clone();
             tokio::spawn(async move { supervise(slot, server).await });
         }
+    }
+
+    /// 从旧版 Bot（`<存储根>/bots/`）复制凭据与推送目标，见 [`crate::legacy`]。
+    fn migrate_legacy(&self) {
+        let Some(storage_root) = crate::local_media::storage_root() else {
+            return;
+        };
+        let Some(data_dir) = self.slots.first().and_then(|slot| slot.dir.parent()) else {
+            return;
+        };
+        let platforms: Vec<&str> = self.slots.iter().map(|slot| slot.platform.id()).collect();
+        crate::legacy::migrate_all(&storage_root, data_dir, &platforms);
     }
 
     fn slot(&self, platform: &str) -> Result<&Arc<PlatformSlot>> {
@@ -269,6 +283,7 @@ impl BotService {
                         "configured": account.is_some(),
                         "account": account,
                         "connection": slot.connection_state(),
+                        "migrated_from": crate::legacy::read_marker(&slot.dir),
                     }));
                 }
                 Ok(serde_json::json!({

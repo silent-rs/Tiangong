@@ -126,13 +126,17 @@ fn path_is_allowed(path: &Path, workspace: Option<&Path>) -> bool {
         .is_some_and(|media| path.starts_with(media))
 }
 
-/// 天工媒体目录：优先宿主注入的存储根，否则 `~/.tiangong/media`。
+/// 天工媒体目录：`<存储根>/media`。
 fn media_directory() -> Option<PathBuf> {
+    storage_root().map(|root| root.join("media"))
+}
+
+/// 天工存储根：优先宿主注入的 `TIANGONG_STORAGE_ROOT`，否则 `~/.tiangong`。
+pub(crate) fn storage_root() -> Option<PathBuf> {
     std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| home_directory().map(|home| home.join(".tiangong")))
-        .map(|root| root.join("media"))
 }
 
 fn home_directory() -> Option<PathBuf> {

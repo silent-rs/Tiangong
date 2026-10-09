@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 mod delivery;
 mod feishu;
+mod legacy;
 mod local_media;
 mod platform;
 mod qq;

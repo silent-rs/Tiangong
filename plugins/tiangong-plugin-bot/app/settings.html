@@ -307,6 +307,7 @@ function buildPlatformCard(platform) {
         el("span", { id: `account-${platform.id}`, class: "badge", text: "未配置" }),
         clearButton,
       ]),
+      el("p", { id: `migrated-${platform.id}`, class: "hint", hidden: true }),
       el("div", { class: "row" }, [
         scanButton,
         el("span", { id: `qr-status-${platform.id}`, class: "hint" }),
@@ -329,7 +330,23 @@ function renderPlatforms(platforms) {
     $(`clear-btn-${platform.id}`).hidden = !platform.configured;
     $(`connection-${platform.id}`).textContent =
       CONNECTION_TEXT[platform.connection] || platform.connection;
+    const migrated = $(`migrated-${platform.id}`);
+    migrated.textContent = migrationText(platform.migrated_from);
+    migrated.hidden = !platform.migrated_from;
   }
+}
+
+// 旧版 Bot 迁移说明：来源实例、凭据来源与未迁移的同平台实例。
+function migrationText(marker) {
+  if (!marker) return "";
+  const source = marker.credentials === "manual" ? "手工配置" : "扫码凭据";
+  const parts = [`已从旧版 Bot「${marker.source}」迁移${source}`];
+  parts.push(marker.targets ? "及推送目标" : "（无推送目标）");
+  let text = parts.join("");
+  if (marker.skipped && marker.skipped.length > 0) {
+    text += `；同平台的其他旧实例未迁移：${marker.skipped.join("、")}`;
+  }
+  return text;
 }
 
 function renderTargets(targets) {
