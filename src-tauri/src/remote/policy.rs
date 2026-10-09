@@ -122,7 +122,6 @@ pub fn decide(command: &str, args: &Value, scope: &dyn PluginScope) -> Decision 
         "request_desktop_notification_permission" | "send_desktop_notification" => {
             Decision::Stub(json!(false))
         }
-        "get_mcp_servers" => Decision::Stub(json!([])),
         // 退订不下发：桌面端界面共用同一订阅表，避免手机端退订影响桌面端。
         "bridge_unsubscribe" => Decision::Stub(Value::Null),
         "list_slot_contributions" => {

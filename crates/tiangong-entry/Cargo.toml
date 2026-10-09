@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { workspace = true }
-tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-cli = { workspace = true }

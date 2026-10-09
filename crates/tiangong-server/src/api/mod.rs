@@ -1,11 +1,9 @@
 mod chat;
 mod health;
 mod jobs;
-mod mcp;
 mod messages;
 mod server_ctrl;
 mod sessions;
-mod skills;
 mod types;
 mod webhook;
 pub mod ws;
@@ -110,8 +108,6 @@ pub fn build_routes(
                     .delete(sessions::delete_session),
             ),
         )
-        .append(Route::new("mcp").get(mcp::list_mcp))
-        .append(Route::new("skills").get(skills::list_skills))
         .append(
             Route::new("jobs")
                 .get(jobs::list_jobs)

@@ -362,48 +362,6 @@ export function hasMediaBlocks(msg: Message): boolean {
   );
 }
 
-export interface McpServer {
-  name: string;
-  transport: 'auto' | 'stdio' | 'http';
-  command: string;
-  args: string[];
-  endpoint: string;
-  auth_header: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
-  enabled: boolean;
-}
-
-export interface RegisterMcpServerInput {
-  name: string;
-  transport?: 'auto' | 'stdio' | 'http' | 'sse';
-  command?: string;
-  args?: string[];
-  endpoint?: string;
-  authHeader?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
-}
-
-export interface UpdateMcpServerInput {
-  name: string;
-  transport?: 'auto' | 'stdio' | 'http' | 'sse';
-  command?: string;
-  args?: string[];
-  endpoint?: string;
-  authHeader?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
-}
-
-export interface McpHealthStatus {
-  name: string;
-  healthy: boolean;
-  tool_count: number;
-  last_error?: string;
-  server_version?: string;
-}
-
 // --- 通讯网关（bot）类型 ---
 
 export type FieldType =
@@ -994,48 +952,6 @@ export const api = {
 
   setWorkspaceDir: (workspaceDir: string): Promise<void> =>
     invoke('set_workspace_dir', { workspaceDir }),
-
-  // ----------------------------------------------------------------
-  // MCP 管理
-  // ----------------------------------------------------------------
-  getMcpServers: (): Promise<McpServer[]> =>
-    invoke('get_mcp_servers'),
-
-  getMcpHealth: (): Promise<McpHealthStatus[]> =>
-    invoke('get_mcp_health'),
-
-  probeMcpServer: (name: string): Promise<void> =>
-    invoke('probe_mcp_server', { name }),
-
-  registerMcpServer: (input: RegisterMcpServerInput): Promise<string> =>
-    invoke('register_mcp_server', {
-      name: input.name,
-      command: input.command ?? '',
-      args: input.args ?? [],
-      transport: input.transport,
-      endpoint: input.endpoint,
-      authHeader: input.authHeader,
-      headers: input.headers,
-      env: input.env,
-    }),
-
-  updateMcpServer: (name: string, input: UpdateMcpServerInput): Promise<string> =>
-    invoke('update_mcp_server', {
-      name,
-      command: input.command ?? '',
-      args: input.args ?? [],
-      transport: input.transport,
-      endpoint: input.endpoint,
-      authHeader: input.authHeader,
-      headers: input.headers,
-      env: input.env,
-    }),
-
-  removeMcpServer: (name: string): Promise<string> =>
-    invoke('remove_mcp_server', { name }),
-
-  setMcpServerEnabled: (name: string, enabled: boolean): Promise<string> =>
-    invoke('set_mcp_server_enabled', { name, enabled }),
 
   // ----------------------------------------------------------------
   // 通讯网关（bot）管理

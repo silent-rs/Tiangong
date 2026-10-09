@@ -33,6 +33,17 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     tracing::info!("正在初始化应用状态...");
     let mut app_state = tiangong_app_state::app_state::TiangongState::new();
     let storage_root = app_state.config.storage_root.clone();
+    // 与桌面端/CLI 一致：已安装插件由 runtime 统一预加载（后台进行，不阻塞
+    // 监听）。会话 Core 的 runtime 聚合桥每次调用都按注册表取插件，加载
+    // 完成后的请求即可用到全部插件工具。
+    {
+        let storage_root = storage_root.clone();
+        std::thread::spawn(move || {
+            let loaded =
+                tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
+            tracing::info!(loaded, "已预加载插件");
+        });
+    }
     app_state.config.default_trust_mode = TrustMode::FullTrust;
     let core_manager = app_state.core_manager.clone();
     core_manager
