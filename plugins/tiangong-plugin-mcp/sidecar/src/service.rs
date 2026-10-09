@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -46,6 +47,9 @@ pub struct McpService {
     config_load_error: RwLock<Option<String>>,
     /// 当前会话工作目录（由 reconfigure 注入，stdio MCP 子进程用）。
     workspace: RwLock<Option<PathBuf>>,
+    /// 内存配置对应的磁盘文件修改时间；与磁盘不一致说明 mcp.json 被外部
+    /// 改写（如宿主为 Bot 直接写入配置），处理请求前重新加载。
+    config_disk_mtime: RwLock<Option<SystemTime>>,
 }
 
 impl McpService {
@@ -58,6 +62,7 @@ impl McpService {
     }
 
     pub fn with_paths(mcp_config_path: PathBuf, capability_cache_path: PathBuf) -> Result<Self> {
+        let config_disk_mtime = config_file_mtime(&mcp_config_path);
         let (mcp_config, config_load_error) = load_mcp_config_from_path(&mcp_config_path);
         let capability = McpCapabilityIndex::new();
         let _ = capability.load_cache(&capability_cache_path);
@@ -69,7 +74,46 @@ impl McpService {
             mcp_config_path,
             config_load_error: RwLock::new(config_load_error),
             workspace: RwLock::new(None),
+            config_disk_mtime: RwLock::new(config_disk_mtime),
         })
+    }
+
+    fn remember_disk_mtime(&self) {
+        if let Ok(mut guard) = self.config_disk_mtime.write() {
+            *guard = config_file_mtime(&self.mcp_config_path);
+        }
+    }
+
+    /// mcp.json 被外部改写时重新加载并刷新能力探测。
+    ///
+    /// 外部写入者（宿主为 Bot 直接写配置、用户手改）不经本服务，内存快照会
+    /// 过期。按文件修改时间判断：未变化时零开销；读取或解析失败时保留当前
+    /// 内存配置并记录加载失败（拒绝写回），避免半写入的文件覆盖有效配置。
+    fn reload_if_changed_on_disk(&self) {
+        let current = config_file_mtime(&self.mcp_config_path);
+        let known = self.config_disk_mtime.read().ok().and_then(|guard| *guard);
+        if current == known {
+            return;
+        }
+        if let Ok(mut guard) = self.config_disk_mtime.write() {
+            *guard = current;
+        }
+        let (config, load_error) = load_mcp_config_from_path(&self.mcp_config_path);
+        if let Some(error) = load_error {
+            tracing::warn!("mcp.json 外部变更后加载失败，保留当前配置：{error}");
+            if let Ok(mut guard) = self.config_load_error.write() {
+                *guard = Some(error);
+            }
+            return;
+        }
+        if let Ok(mut guard) = self.config_load_error.write() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.mcp_config.write() {
+            *guard = config;
+        }
+        tracing::info!("检测到 mcp.json 外部变更，已重新加载");
+        self.reconfigure();
     }
 
     fn config_snapshot(&self) -> McpConfig {
@@ -161,6 +205,9 @@ impl McpService {
         operation: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        if operation != HANDSHAKE_OPERATION {
+            self.reload_if_changed_on_disk();
+        }
         match operation {
             HANDSHAKE_OPERATION => serde_json::to_value(HandshakeResponse {
                 plugin_id: PLUGIN_ID.to_string(),
@@ -342,6 +389,7 @@ impl McpService {
         } else {
             return Err(anyhow!("MCP 配置锁中毒"));
         }
+        self.remember_disk_mtime();
         // 写回内容来自内存快照序列化，必然可解析，清除加载失败状态。
         if let Ok(mut guard) = self.config_load_error.write() {
             *guard = None;
@@ -574,6 +622,13 @@ fn load_mcp_config_from_path(path: &std::path::Path) -> (McpConfig, Option<Strin
     }
 }
 
+/// 配置文件修改时间（不存在或无法读取时为 None）。
+fn config_file_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 fn write_mcp_config_to_path(path: &std::path::Path, config: &McpConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -789,5 +844,78 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("\"existing\""));
         assert!(content.contains("\"added\""));
+    }
+
+    /// 让文件修改时间确定地变化（部分文件系统 mtime 精度为秒）。
+    fn bump_mtime(path: &std::path::Path, seconds: u64) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_edit_is_reloaded_before_next_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        let service =
+            McpService::with_paths(config_path.clone(), dir.path().join("cache.json")).unwrap();
+        service.register_server(register_request("first")).unwrap();
+
+        // 外部写入者（宿主为 Bot 写配置）直接追加一条 server。
+        let mut on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        on_disk["servers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name": "bot-feishu", "command": "/path/bot"}));
+        std::fs::write(&config_path, on_disk.to_string()).unwrap();
+        bump_mtime(&config_path, 5);
+
+        let listed = service
+            .dispatch_operation(
+                tiangong_plugin_mcp_protocol::query::SERVER_LIST_OPERATION,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let names: Vec<_> = listed["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|server| server["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["first", "bot-feishu"]);
+
+        // 之后经服务的写入基于新快照，不会丢掉外部新增的条目。
+        service.register_server(register_request("second")).unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("\"bot-feishu\""));
+        assert!(content.contains("\"second\""));
+    }
+
+    #[tokio::test]
+    async fn broken_external_edit_keeps_memory_config_and_blocks_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        let service =
+            McpService::with_paths(config_path.clone(), dir.path().join("cache.json")).unwrap();
+        service.register_server(register_request("first")).unwrap();
+
+        std::fs::write(&config_path, "{ 半写入").unwrap();
+        bump_mtime(&config_path, 5);
+
+        let listed = service
+            .dispatch_operation(
+                tiangong_plugin_mcp_protocol::query::SERVER_LIST_OPERATION,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed["servers"][0]["name"], "first");
+        let error = service
+            .register_server(register_request("second"))
+            .unwrap_err();
+        assert!(error.to_string().contains("拒绝写回"), "{error}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "{ 半写入");
     }
 }

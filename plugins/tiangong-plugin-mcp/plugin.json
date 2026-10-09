@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "mcp",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "wasm": {
     "binary": "tiangong_plugin_mcp_wasm.wasm"
   },

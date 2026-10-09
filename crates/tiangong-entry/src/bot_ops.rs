@@ -74,24 +74,24 @@ pub async fn unregister_mcp(runtime: &BotRuntime, id: &BotId) -> Result<bool> {
     Ok(mcp::unregister(&generated)?.is_some())
 }
 
-/// Bot ↔ MCP 插件的底层操作（CLI、配置页与桌面端共用）。
+/// Bot ↔ MCP 配置的底层操作（CLI、配置页与桌面端共用）。
 ///
-/// 经 runtime sidecar 通道以 JSON 调用 MCP 插件，只声明本处用到的字段，
-/// 不在编译期依赖插件协议 crate；插件新增字段不影响这里的解析。
+/// 直接读写 MCP 配置文件 `~/.tiangong/mcp.json`，不调用 MCP 插件：宿主与插件
+/// 之间只约定这份文件格式。MCP 插件处理请求前会按修改时间重新加载外部改动，
+/// 写入后无需通知插件。
+///
+/// 只增删改 Bot 自己的那一条 server，文件里的其他内容（含未知字段）原样保留；
+/// 文件存在但无法解析时拒绝写入，避免覆盖用户配置。
 pub mod mcp {
     use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
 
-    use anyhow::{Result, anyhow};
+    use anyhow::{Context, Result, anyhow};
     use serde::Deserialize;
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value, json};
     use tiangong_bots::BotMcpConfig;
 
-    const SERVER_LIST: &str = "mcp.server.list";
-    const SERVER_REGISTER: &str = "mcp.server.register";
-    const SERVER_REMOVE: &str = "mcp.server.remove";
-    const SERVER_SET_ENABLED: &str = "mcp.server.set_enabled";
-
-    /// MCP 插件 `mcp.server.list` 返回的 server 配置（仅取连接判定所需字段）。
+    /// MCP 配置文件中的一条 server（仅取连接判定所需字段）。
     #[derive(Debug, Clone, Deserialize)]
     pub struct McpServer {
         pub name: String,
@@ -160,76 +160,151 @@ pub mod mcp {
         Registered,
     }
 
-    fn invoke(operation: &str, payload: Value) -> Result<Value> {
-        tiangong_plugin_runtime::registry::invoke_sidecar(
-            &tiangong_config::io::storage_root(),
-            "mcp",
-            operation,
-            payload,
-        )
+    /// MCP 配置文件路径。
+    pub fn config_path() -> PathBuf {
+        tiangong_config::io::storage_root().join("mcp.json")
     }
 
-    /// 写操作统一返回 `{ "message": ... }`。
-    fn invoke_message(operation: &str, payload: Value) -> Result<String> {
-        #[derive(Deserialize)]
-        struct MessageResponse {
-            message: String,
+    /// 读取配置文件为 JSON 对象；文件不存在视为空配置。
+    fn load(path: &Path) -> Result<Map<String, Value>> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Map::new());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取 MCP 配置失败：{}", path.display()));
+            }
+        };
+        match serde_json::from_str::<Value>(&content)
+            .with_context(|| format!("MCP 配置无法解析，拒绝修改：{}", path.display()))?
+        {
+            Value::Object(map) => Ok(map),
+            _ => Err(anyhow!(
+                "MCP 配置格式错误（顶层应为对象），拒绝修改：{}",
+                path.display()
+            )),
         }
-        let response: MessageResponse = serde_json::from_value(invoke(operation, payload)?)
-            .map_err(|error| anyhow!("解析 {operation} 响应失败: {error}"))?;
-        Ok(response.message)
     }
 
-    /// 查询当前所有 MCP server 配置。
-    pub fn list_servers() -> Result<Vec<McpServer>> {
-        #[derive(Deserialize)]
-        struct ServersResponse {
-            servers: Vec<McpServer>,
+    /// 原子写回：先写同目录临时文件再改名，读者不会看到半写入的内容。
+    fn save(path: &Path, config: &Map<String, Value>) -> Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("MCP 配置路径无效：{}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建 MCP 配置目录失败：{}", parent.display()))?;
+        let content = serde_json::to_string_pretty(config).context("序列化 MCP 配置失败")?;
+        let temp = parent.join(format!(".mcp.json.{}.tmp", std::process::id()));
+        std::fs::write(&temp, content)
+            .with_context(|| format!("写入 MCP 配置失败：{}", temp.display()))?;
+        std::fs::rename(&temp, path).with_context(|| {
+            let _ = std::fs::remove_file(&temp);
+            format!("替换 MCP 配置失败：{}", path.display())
+        })
+    }
+
+    /// 取 `servers` 数组（缺省时创建）。
+    fn servers_mut(config: &mut Map<String, Value>) -> Result<&mut Vec<Value>> {
+        match config
+            .entry("servers")
+            .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            Value::Array(servers) => Ok(servers),
+            _ => Err(anyhow!("MCP 配置中 servers 不是数组，拒绝修改")),
         }
-        let response: ServersResponse = serde_json::from_value(invoke(SERVER_LIST, json!({}))?)
-            .map_err(|error| anyhow!("解析 MCP server 列表失败: {error}"))?;
-        Ok(response.servers)
+    }
+
+    fn position(servers: &[Value], name: &str) -> Option<usize> {
+        servers
+            .iter()
+            .position(|server| server.get("name").and_then(Value::as_str) == Some(name))
+    }
+
+    fn parse_server(value: &Value) -> Result<McpServer> {
+        serde_json::from_value(value.clone()).context("解析 MCP server 配置失败")
+    }
+
+    fn server_entry(generated: &BotMcpConfig, enabled: bool) -> Value {
+        json!({
+            "name": generated.name,
+            "transport": "stdio",
+            "command": generated.command,
+            "args": generated.args,
+            "enabled": enabled,
+            "tags": generated.tags,
+        })
     }
 
     /// 查找与 Bot 同名的 MCP server。
     pub fn find(generated: &BotMcpConfig) -> Result<Option<McpServer>> {
-        Ok(list_servers()?
-            .into_iter()
-            .find(|server| server.name == generated.name))
+        find_at(&config_path(), generated)
     }
 
-    /// 以 stdio 方式注册 Bot 的 MCP，返回插件给出的说明。
+    fn find_at(path: &Path, generated: &BotMcpConfig) -> Result<Option<McpServer>> {
+        let mut config = load(path)?;
+        let servers = servers_mut(&mut config)?;
+        position(servers, &generated.name)
+            .map(|index| parse_server(&servers[index]))
+            .transpose()
+    }
+
+    /// 以 stdio 方式注册 Bot 的 MCP；同名已存在时报错。返回说明文字。
     pub fn register(generated: &BotMcpConfig, enabled: bool) -> Result<String> {
-        invoke_message(
-            SERVER_REGISTER,
-            json!({
-                "name": generated.name,
-                "command": generated.command,
-                "args": generated.args,
-                "tags": generated.tags,
-                "enabled": enabled,
-                "options": { "transport": "stdio" },
-            }),
-        )
+        register_at(&config_path(), generated, enabled)
     }
 
-    /// 移除指定名称的 MCP server，返回插件给出的说明。
+    fn register_at(path: &Path, generated: &BotMcpConfig, enabled: bool) -> Result<String> {
+        let mut config = load(path)?;
+        let servers = servers_mut(&mut config)?;
+        if position(servers, &generated.name).is_some() {
+            return Err(anyhow!("MCP server 已存在：{}", generated.name));
+        }
+        servers.push(server_entry(generated, enabled));
+        save(path, &config)?;
+        Ok(format!("MCP server 已注册：{}", generated.name))
+    }
+
+    /// 移除指定名称的 MCP server。返回说明文字。
     pub fn remove(name: &str) -> Result<String> {
-        invoke_message(SERVER_REMOVE, json!({ "name": name }))
+        remove_at(&config_path(), name)
     }
 
-    /// 设置指定 MCP server 的启用状态，返回插件给出的说明。
+    fn remove_at(path: &Path, name: &str) -> Result<String> {
+        let mut config = load(path)?;
+        let servers = servers_mut(&mut config)?;
+        let index = position(servers, name).ok_or_else(|| anyhow!("未找到 MCP server：{name}"))?;
+        servers.remove(index);
+        save(path, &config)?;
+        Ok(format!("MCP server 已删除：{name}"))
+    }
+
+    /// 设置指定 MCP server 的启用状态。返回说明文字。
     pub fn set_enabled(name: &str, enabled: bool) -> Result<String> {
-        invoke_message(
-            SERVER_SET_ENABLED,
-            json!({ "name": name, "enabled": enabled }),
-        )
+        set_enabled_at(&config_path(), name, enabled)
+    }
+
+    fn set_enabled_at(path: &Path, name: &str, enabled: bool) -> Result<String> {
+        let mut config = load(path)?;
+        let servers = servers_mut(&mut config)?;
+        let index = position(servers, name).ok_or_else(|| anyhow!("未找到 MCP server：{name}"))?;
+        let Value::Object(server) = &mut servers[index] else {
+            return Err(anyhow!("MCP server 配置格式错误：{name}"));
+        };
+        server.insert("enabled".to_string(), Value::Bool(enabled));
+        save(path, &config)?;
+        Ok(format!("MCP server 状态已更新：{name} enabled={enabled}"))
     }
 
     /// 确保 Bot 的 MCP 已注册并启用；同名但连接不一致时报错，不覆盖用户配置。
     pub fn ensure_registered(generated: &BotMcpConfig) -> Result<EnsureOutcome> {
-        let Some(existing) = find(generated)? else {
-            register(generated, generated.enabled)?;
+        ensure_registered_at(&config_path(), generated)
+    }
+
+    fn ensure_registered_at(path: &Path, generated: &BotMcpConfig) -> Result<EnsureOutcome> {
+        let Some(existing) = find_at(path, generated)? else {
+            register_at(path, generated, generated.enabled)?;
             return Ok(EnsureOutcome::Registered);
         };
         if !existing.matches(generated) {
@@ -241,7 +316,7 @@ pub mod mcp {
         if existing.enabled {
             return Ok(EnsureOutcome::AlreadyRegistered);
         }
-        set_enabled(&generated.name, true)?;
+        set_enabled_at(path, &generated.name, true)?;
         Ok(EnsureOutcome::Enabled)
     }
 
@@ -249,14 +324,135 @@ pub mod mcp {
     ///
     /// 返回被移除的原配置（供调用方失败回滚时按原启用状态恢复），未移除返回 `None`。
     pub fn unregister(generated: &BotMcpConfig) -> Result<Option<McpServer>> {
-        let Some(existing) = find(generated)? else {
+        unregister_at(&config_path(), generated)
+    }
+
+    fn unregister_at(path: &Path, generated: &BotMcpConfig) -> Result<Option<McpServer>> {
+        let Some(existing) = find_at(path, generated)? else {
             return Ok(None);
         };
         if !existing.matches(generated) {
             return Ok(None);
         }
-        remove(&generated.name)?;
+        remove_at(path, &generated.name)?;
         Ok(Some(existing))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn bot() -> BotMcpConfig {
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "name": "bot-feishu",
+                "transport": "stdio",
+                "command": "/path/bot",
+                "args": ["--mcp"],
+                "tags": ["bot-outbound"],
+            }))
+            .unwrap()
+        }
+
+        fn read(path: &Path) -> Value {
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        }
+
+        #[test]
+        fn ensure_creates_file_and_is_idempotent() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mcp.json");
+            let generated = bot();
+            assert_eq!(
+                ensure_registered_at(&path, &generated).unwrap(),
+                EnsureOutcome::Registered
+            );
+            let saved = read(&path);
+            assert_eq!(saved["servers"][0]["name"], "bot-feishu");
+            assert_eq!(saved["servers"][0]["transport"], "stdio");
+            assert_eq!(saved["servers"][0]["args"], json!(["--mcp"]));
+            assert_eq!(
+                ensure_registered_at(&path, &generated).unwrap(),
+                EnsureOutcome::AlreadyRegistered
+            );
+            assert_eq!(read(&path)["servers"].as_array().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn ensure_preserves_other_content_and_enables_disabled_entry() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mcp.json");
+            std::fs::write(
+                &path,
+                json!({
+                    "enabled": true,
+                    "timeout_ms": 30000,
+                    "future_field": {"keep": 1},
+                    "servers": [
+                        {"name": "user", "command": "npx", "args": ["x"], "env": {"K": "V"}},
+                        {"name": "bot-feishu", "transport": "stdio", "command": "/path/bot",
+                         "args": ["--mcp"], "tags": ["bot-outbound"], "enabled": false}
+                    ]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                ensure_registered_at(&path, &bot()).unwrap(),
+                EnsureOutcome::Enabled
+            );
+            let saved = read(&path);
+            assert_eq!(saved["timeout_ms"], 30000);
+            assert_eq!(saved["future_field"], json!({"keep": 1}));
+            assert_eq!(saved["servers"][0]["env"], json!({"K": "V"}));
+            assert_eq!(saved["servers"][1]["enabled"], true);
+        }
+
+        #[test]
+        fn ensure_refuses_to_overwrite_conflicting_entry() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mcp.json");
+            let original = json!({"servers": [{"name": "bot-feishu", "command": "/other"}]});
+            std::fs::write(&path, original.to_string()).unwrap();
+            let error = ensure_registered_at(&path, &bot()).unwrap_err();
+            assert!(error.to_string().contains("已被其他配置占用"), "{error}");
+            assert_eq!(read(&path), original);
+            // 不匹配的同名配置也不会被注销。
+            assert!(unregister_at(&path, &bot()).unwrap().is_none());
+            assert_eq!(read(&path), original);
+        }
+
+        #[test]
+        fn unparsable_file_is_never_overwritten() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mcp.json");
+            std::fs::write(&path, "{ 损坏").unwrap();
+            assert!(ensure_registered_at(&path, &bot()).is_err());
+            assert!(unregister_at(&path, &bot()).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ 损坏");
+        }
+
+        #[test]
+        fn unregister_removes_only_matching_entry() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mcp.json");
+            std::fs::write(
+                &path,
+                json!({"servers": [
+                    {"name": "user", "command": "npx"},
+                    {"name": "bot-feishu", "transport": "stdio", "command": "/path/bot",
+                     "args": ["--mcp"], "tags": ["bot-outbound"], "enabled": false}
+                ]})
+                .to_string(),
+            )
+            .unwrap();
+            let removed = unregister_at(&path, &bot()).unwrap().unwrap();
+            assert!(!removed.enabled);
+            let saved = read(&path);
+            assert_eq!(saved["servers"].as_array().unwrap().len(), 1);
+            assert_eq!(saved["servers"][0]["name"], "user");
+            assert!(unregister_at(&path, &bot()).unwrap().is_none());
+        }
     }
 }
 
