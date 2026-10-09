@@ -13,6 +13,8 @@ interface MessageRenderHostProps {
   message: HostMessageContext;
   /** 插件缺失、停用或未声明该视图时的默认显示。 */
   fallback: ReactNode;
+  /** 插件接管时由宿主继续渲染在插件视图之后的内容（如媒体附件）。 */
+  hostContent?: ReactNode;
   className?: string;
 }
 
@@ -20,8 +22,9 @@ interface MessageRenderHostProps {
  * 插件接管的消息显示：按 `render.plugin` / `render.view` 找到声明
  * `render: "replace"` 的 `session.message-item` 贡献并挂载，替换默认显示；
  * 找不到时原样渲染 `fallback`。渲染数据经消息上下文的 `render.data` 交给插件。
+ * 插件只接管正文与外观；媒体附件等宿主资源经 `hostContent` 仍由宿主渲染。
  */
-function MessageRenderHostView({ render, message, fallback, className }: MessageRenderHostProps) {
+function MessageRenderHostView({ render, message, fallback, hostContent, className }: MessageRenderHostProps) {
   const items = useSlotContributions(MESSAGE_ITEM_SLOT);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const item = items.find((candidate) =>
@@ -37,15 +40,18 @@ function MessageRenderHostView({ render, message, fallback, className }: Message
   );
   if (!item) return <>{fallback}</>;
   return (
-    <PluginSandbox
-      pluginId={item.plugin_id}
-      contributionId={item.contribution_id}
-      sandbox={item.sandbox}
-      html={item.html}
-      sessionId={activeSessionId ?? null}
-      message={context}
-      className={className ?? 'block w-full'}
-    />
+    <div className={className ?? 'block w-full'}>
+      <PluginSandbox
+        pluginId={item.plugin_id}
+        contributionId={item.contribution_id}
+        sandbox={item.sandbox}
+        html={item.html}
+        sessionId={activeSessionId ?? null}
+        message={context}
+        className="block w-full"
+      />
+      {hostContent}
+    </div>
   );
 }
 

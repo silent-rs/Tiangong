@@ -304,6 +304,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
         render={render}
         message={pluginMessage}
         fallback={fallback}
+        hostContent={<ContentMedia message={message} />}
         className="block w-full max-w-[92%] sm:max-w-[85%]"
       />
     )
@@ -541,7 +542,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
       )}
       {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && !voiceMessage && (
         <div className="flex justify-end">
-          <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook} onStartEdit={onStartEdit} />
+          <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook && !render} onStartEdit={onStartEdit} />
         </div>
       )}
     </div>
