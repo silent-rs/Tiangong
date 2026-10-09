@@ -11521,7 +11521,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-mcp-protocol"
-version = "0.2.5"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -11529,7 +11529,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-mcp-sidecar"
-version = "0.2.5"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
