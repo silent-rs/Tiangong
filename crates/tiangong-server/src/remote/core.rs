@@ -1075,6 +1075,7 @@ mod tests {
 
     use tiangong_core::config::core::CoreConfig;
     use tiangong_core::core::Plugin;
+    use tiangong_core::session::Message;
     use tiangong_types::ContentBlock;
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
@@ -1334,8 +1335,12 @@ mod tests {
             "user-1".to_string(),
             vec![ContentBlock::text("first")],
         );
-        session.append_worker_message(MessageRole::User, "worker input", "agent:dev:one");
-        session.append_worker_message(MessageRole::Assistant, "worker output", "agent:dev:one");
+        let mut worker_input = Message::new(MessageRole::User, "worker input");
+        worker_input.worker_id = Some("agent:dev:one".to_string());
+        session.messages.push(worker_input);
+        let mut worker_output = Message::new(MessageRole::Assistant, "worker output");
+        worker_output.worker_id = Some("agent:dev:one".to_string());
+        session.messages.push(worker_output);
         session.append_message(MessageRole::Assistant, "first reply");
         session.append_prepared_user_message_with_id(
             "user-2".to_string(),

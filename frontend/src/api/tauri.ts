@@ -313,10 +313,7 @@ export interface StreamEvent {
   context_limit_tokens?: number | null;
   source?: string;
   agent_id?: string | null;
-  agent_role?: string;
   role?: string;
-  agent_label?: string;
-  messages?: Message[];
   args_summary?: string;
   attempt?: number;
   max_attempts?: number;

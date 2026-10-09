@@ -252,7 +252,6 @@ enum ActiveStream {
     Idle,
     Reasoning { message_id: String },
     Assistant { message_id: String },
-    Worker { worker_id: String },
 }
 
 impl ResponseState {
@@ -348,32 +347,6 @@ impl ResponseState {
                 output::warn(&format!("重试 ({attempt}/{max_attempts})：{message}"));
             }
 
-            StreamEvent::WorkerStarted {
-                worker_id: _,
-                worker_label,
-            } => {
-                self.end_active_stream();
-                output::worker_started(worker_label);
-            }
-
-            StreamEvent::WorkerChunk {
-                worker_id,
-                worker_label,
-                content,
-            } => {
-                self.ensure_worker_stream(worker_id, worker_label);
-                output::worker_stream_delta(content);
-            }
-
-            StreamEvent::WorkerCompleted {
-                worker_id: _,
-                worker_label,
-                success,
-            } => {
-                self.end_active_stream();
-                output::worker_completed(worker_label, *success);
-            }
-
             StreamEvent::MemoryRecallStart { strategy } => {
                 self.end_active_stream();
                 output::status(&format!("记忆检索 (策略: {strategy})..."));
@@ -428,15 +401,6 @@ impl ResponseState {
                 output::status(&format!(
                     "[{from_agent_label} → {to_agent_label}] {content}"
                 ));
-            }
-
-            StreamEvent::AgentOutput {
-                agent_label,
-                messages,
-                ..
-            } => {
-                self.end_active_stream();
-                output::status(&format!("[{agent_label}] 输出 {} 条消息", messages.len()));
             }
 
             StreamEvent::FileLockChanged {
@@ -527,27 +491,11 @@ impl ResponseState {
         }
     }
 
-    fn ensure_worker_stream(&mut self, worker_id: &str, worker_label: &str) {
-        if !matches!(
-            &self.active_stream,
-            ActiveStream::Worker {
-                worker_id: current_worker_id
-            } if current_worker_id == worker_id
-        ) {
-            self.end_active_stream();
-            output::worker_stream_start(worker_label);
-            self.active_stream = ActiveStream::Worker {
-                worker_id: worker_id.to_string(),
-            };
-        }
-    }
-
     fn end_active_stream(&mut self) {
         match self.active_stream {
             ActiveStream::Idle => {}
             ActiveStream::Reasoning { .. } => output::explanation_end(),
             ActiveStream::Assistant { .. } => output::delta_end(),
-            ActiveStream::Worker { .. } => output::worker_stream_end(),
         }
         self.active_stream = ActiveStream::Idle;
     }

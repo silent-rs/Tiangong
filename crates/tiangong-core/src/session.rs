@@ -519,45 +519,6 @@ impl Session {
             .push(DeferredToolInjection { tool_name, payload });
     }
 
-    pub fn append_worker_message(
-        &mut self,
-        role: MessageRole,
-        content: impl Into<String>,
-        worker_id: &str,
-    ) {
-        self.append_worker_message_with_reasoning(role, content, String::new(), worker_id);
-    }
-
-    pub fn append_worker_message_with_reasoning(
-        &mut self,
-        role: MessageRole,
-        content: impl Into<String>,
-        reasoning_content: impl Into<String>,
-        worker_id: &str,
-    ) {
-        self.messages.push(Message {
-            id: new_id(),
-            role,
-            content: vec![ContentBlock::text(content.into())],
-            reasoning_content: reasoning_content.into(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: Some(worker_id.to_string()),
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: crate::session::MessagePhase::Normal,
-            created_at: now_text(),
-        });
-    }
-
     /// 计算当前会话所有任务的累计 token 用量
     pub fn total_usage(&self) -> TokenUsage {
         self.token_usage.clone()

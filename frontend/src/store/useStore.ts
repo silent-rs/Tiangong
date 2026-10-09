@@ -419,38 +419,6 @@ function applyToolResult(messages: Message[], event: StreamEvent): Message[] {
   return next;
 }
 
-function applyAgentOutput(messages: Message[], event: StreamEvent): Message[] {
-  if (!event.agent_id || !event.agent_role || !event.agent_label || !event.messages) {
-    return messages;
-  }
-  const workerId = `agent:${event.agent_role}:${event.agent_id}`;
-  let next = messages;
-  const headerId = `agent:${event.agent_id}:header`;
-  if (!next.some((message) => message.id === headerId && message.worker_id === workerId)) {
-    next = [...next, {
-      id: headerId,
-      role: 'system',
-      content: [{ type: 'text', text: `Worker: ${event.agent_label} (@${event.agent_role})` }],
-      reasoning_content: '',
-      worker_id: workerId,
-      created_at: new Date().toISOString(),
-    }];
-  }
-  for (const message of event.messages) {
-    const role = message.role === 'tool' || message.role === 'system' ? 'system' : message.role;
-    const workerMessage = { ...message, role, worker_id: workerId } as Message;
-    const index = next.findIndex((item) => item.id === message.id && item.worker_id === workerId);
-    if (index < 0) {
-      next = [...next, workerMessage];
-    } else {
-      const updated = [...next];
-      updated[index] = workerMessage;
-      next = updated;
-    }
-  }
-  return next;
-}
-
 function applyAgentLifecycle(messages: Message[], event: StreamEvent): Message[] {
   if (!event.agent_id || !event.label) return messages;
   const isCreated = event.type === 'agent_created';
@@ -751,10 +719,6 @@ function applyEventToSessionView(
       runSummary = event.type === 'agent_created'
         ? `Agent ${event.label || ''} 已加入团队`
         : `Agent ${event.label || ''}: ${event.status || ''}`;
-      break;
-    case 'agent_output':
-      messages = applyAgentOutput(messages, event);
-      runSummary = `Agent ${event.agent_label || ''} 输出已更新`;
       break;
     case 'memory_recall_start':
       runSummary = '正在检索记忆...';
@@ -2359,7 +2323,6 @@ export const useStore = create<AppState>((set, get) => ({
         refreshCurrentAgents = refreshCurrentAgents
           || event.type === 'agent_created'
           || event.type === 'agent_status_changed'
-          || event.type === 'agent_output'
           || (event.type === 'session_message_upsert'
             && !!event.message
             && typeof event.message !== 'string'
