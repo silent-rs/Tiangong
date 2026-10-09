@@ -179,7 +179,7 @@ mod tests {
         }
     }
 
-    /// 只有已启用、已验证的原生常驻 sidecar 纳入保活（不看 require_server）；
+    /// 只有已启用、已验证的原生常驻 sidecar 纳入保活；
     /// 存活判定只认未停止且有运行端点的连接。
     #[test]
     #[serial_test::serial]

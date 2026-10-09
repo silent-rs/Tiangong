@@ -155,24 +155,23 @@ struct SidecarConnectionKey {
     workspace: Option<PathBuf>,
 }
 
-/// 全局 server 连接信息（可覆盖更新），供需要回调 host 的 sidecar 使用。
+/// 全局 server 连接信息（可覆盖更新），spawn 时注入所有 sidecar。
 ///
 /// Server 启停、端口或令牌变化时，入口层调 [`set_server_endpoint`] /
-/// [`clear_server_endpoint`] 更新此值，并重启依赖 server 的 sidecar。
+/// [`clear_server_endpoint`] 更新此值，并重启所有 sidecar 以拿到新值。
 static SERVER_ENDPOINT: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
 
 /// 设置或更新本机 server 的连接信息。
 ///
-/// 与上一次值不同时重启依赖 server 的 sidecar（见 [`restarts_on_server_change`]），
-/// 让它们用新的地址/令牌重新连接。
+/// 与上一次值不同时重启所有 sidecar，让它们用新的地址/令牌重新连接。
 pub fn set_server_endpoint(url: String, token: Option<String>) {
     replace_server_endpoint(Some((url, token)));
 }
 
 /// 清除本机 server 的连接信息（嵌入式 server 停止时调用）。
 ///
-/// 依赖 server 的 sidecar 以无 server 环境重启：需要 server 的调用由插件
-/// 自行报错，用户重新开启 Server 后再次重启即可恢复。
+/// sidecar 以无 server 环境重启：需要 server 的调用由插件自行报错，
+/// 用户重新开启 Server 后再次重启即可恢复。
 pub fn clear_server_endpoint() {
     replace_server_endpoint(None);
 }
@@ -188,7 +187,7 @@ fn replace_server_endpoint(endpoint: Option<(String, Option<String>)>) {
         changed
     };
     if restart_needed {
-        restart_server_dependent_sidecars();
+        restart_sidecars_for_server_change();
     }
 }
 
@@ -205,25 +204,11 @@ fn current_server_endpoint() -> Option<(String, Option<String>)> {
     SERVER_ENDPOINT.lock().ok().and_then(|guard| guard.clone())
 }
 
-/// server 连接信息变化时是否需要重启该插件的 sidecar。
+/// Server 连接信息变化（含启停）后重启所有已加载插件的 sidecar。
 ///
-/// spawn 时注入的 server env 是快照：清单声明 `require_server`、旧版
-/// scheduler（经 HTTP 回调 server，清单未声明），以及常驻 sidecar（如 Bot
-/// 的 IM 长连接，可能先于 server 启动）都需重启拿到新值。terminal 等按需
-/// 或会话驱动的 sidecar 不受影响，避免中断用户终端。
-pub(crate) fn restarts_on_server_change(manifest: &crate::manifest::PluginManifest) -> bool {
-    manifest.sidecar.is_some()
-        && (manifest.require_server
-            || SERVER_DEPENDENT_PLUGINS.contains(&manifest.id.as_str())
-            || manifest.should_preload_sidecar())
-}
-
-/// 重启依赖 server 的已加载插件 sidecar（见 [`restarts_on_server_change`]）。
-///
-/// Server 地址/令牌变化（含启停）后，旧 sidecar 进程持有的 env 已过期，必须
-/// 重启才能拿到新值。停止后常驻 sidecar 立即在后台按新配置重新拉起，按需
-/// sidecar 在下次调用时启动。
-fn restart_server_dependent_sidecars() {
+/// 旧 sidecar 进程持有的 env 已过期，必须重启才能拿到新值。停止后常驻
+/// sidecar 立即在后台按新配置重新拉起，按需 sidecar 在下次调用时启动。
+fn restart_sidecars_for_server_change() {
     if sidecars_shutting_down() {
         return;
     }
@@ -232,7 +217,7 @@ fn restart_server_dependent_sidecars() {
         .map(|plugins| {
             plugins
                 .values()
-                .filter(|loaded| restarts_on_server_change(&loaded.manifest))
+                .filter(|loaded| loaded.manifest.sidecar.is_some())
                 .map(|loaded| {
                     (
                         loaded.manifest.id.clone(),
@@ -247,42 +232,15 @@ fn restart_server_dependent_sidecars() {
         if let Err(error) =
             stop_loaded_sidecar(&plugin_id).and_then(|()| stop_connection_for_directory(&directory))
         {
-            tracing::warn!(plugin_id, %error, "重启 server 依赖 sidecar 时停止失败");
+            tracing::warn!(plugin_id, %error, "server 连接信息变化后停止 sidecar 失败");
             continue;
         }
-        tracing::info!(
-            plugin_id,
-            "server 连接信息变化，已停止 sidecar，将以新配置重启"
-        );
+        tracing::info!(plugin_id, "server 连接信息变化，已停止 sidecar");
         if resident && let Some(storage_root) = storage_root_of(&directory) {
             prewarm_plugin_sidecar(&storage_root, &plugin_id);
         }
     }
 }
-
-/// 列出声明 `require_server` 且已启用的插件（id, name）：宿主在关闭
-/// Server 时据此提示用户受影响的插件。声明只描述依赖，不触发重启
-/// 或状态广播。
-pub fn server_dependent_enabled_plugins() -> Vec<(String, String)> {
-    let Ok(plugins) = loaded_plugins().lock() else {
-        return Vec::new();
-    };
-    plugins
-        .iter()
-        .filter(|(_, loaded)| loaded.enabled && loaded.manifest.require_server)
-        .map(|(id, loaded)| {
-            let name = loaded
-                .descriptor
-                .as_ref()
-                .map(|value| value.name.clone())
-                .unwrap_or_else(|| id.clone());
-            (id.clone(), name)
-        })
-        .collect()
-}
-
-/// 未在清单声明 `require_server`、但会经 HTTP 回调本机 server 的旧版插件。
-const SERVER_DEPENDENT_PLUGINS: &[&str] = &["scheduler"];
 
 const DISABLED_MARKER: &str = ".disabled";
 const ROLLBACK_DIR: &str = ".rollback";

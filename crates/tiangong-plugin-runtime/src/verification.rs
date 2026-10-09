@@ -392,7 +392,6 @@ mod tests {
     fn manifest(id: &str, version: &str) -> PluginManifest {
         PluginManifest {
             schema_version: 2,
-            require_server: false,
             name: None,
             description: None,
             id: id.into(),

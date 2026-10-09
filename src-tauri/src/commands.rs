@@ -2978,23 +2978,6 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
     stop_server_with_intent(state.inner()).await
 }
 
-/// 停止结果附带依赖提示：清单声明 `require_server` 且已启用的插件在
-/// Server 关闭期间调用会失败（声明依赖只用于提示，不触发自动处理）。
-fn stop_server_summary(base: &str) -> String {
-    let dependents = tiangong_plugin_runtime::registry::server_dependent_enabled_plugins();
-    if dependents.is_empty() {
-        return base.to_string();
-    }
-    let names: Vec<String> = dependents
-        .iter()
-        .map(|(_, name)| format!("「{name}」"))
-        .collect();
-    format!(
-        "{base}；以下插件依赖 Server，关闭期间其功能将不可用：{}",
-        names.join("、")
-    )
-}
-
 /// 停止服务并清除持续开启意图；异常状态下没有存活服务时也可正常关闭。
 pub async fn stop_server_with_intent(state: &TiangongApp) -> Result<String, String> {
     let config = state
@@ -3010,7 +2993,7 @@ pub async fn stop_server_with_intent(state: &TiangongApp) -> Result<String, Stri
         config.enabled = false;
         save_server_config_to_state(state, config).await?;
 
-        return Ok(stop_server_summary("Server 已停止"));
+        return Ok("Server 已停止".to_string());
     }
 
     // 兜底：检查是否有外部 server 进程
@@ -3021,7 +3004,7 @@ pub async fn stop_server_with_intent(state: &TiangongApp) -> Result<String, Stri
         let mut config = config;
         config.enabled = false;
         save_server_config_to_state(state, config).await?;
-        return Ok(stop_server_summary("Server 已关闭"));
+        return Ok("Server 已关闭".to_string());
     }
     if running_by_health && !running_by_pid {
         cleanup_dead_server_pid();
@@ -3035,7 +3018,7 @@ pub async fn stop_server_with_intent(state: &TiangongApp) -> Result<String, Stri
     config.enabled = false;
     save_server_config_to_state(state, config).await?;
 
-    Ok(stop_server_summary("Server 已停止"))
+    Ok("Server 已停止".to_string())
 }
 
 async fn save_server_config_to_state(

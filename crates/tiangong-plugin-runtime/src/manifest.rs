@@ -29,11 +29,6 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub version: String,
-    /// 声明插件运行依赖本机 Server（如 subagent 的消息总线回调）。
-    /// 宿主据此在关闭 Server 时提示受影响插件；Server 不可用时插件
-    /// 调用失败按普通错误反馈，不因此自动重启或广播恢复。
-    #[serde(default)]
-    pub require_server: bool,
     /// 逻辑层 WASM 制品。schema v2 可省略——纯 UI 插件（无工具/生命周期等
     /// 逻辑能力）经宿主桥接（storage.* 等）即可工作，见设计文档 9.1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
