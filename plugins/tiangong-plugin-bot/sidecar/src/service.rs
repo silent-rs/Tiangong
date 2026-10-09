@@ -593,7 +593,49 @@ fn read_log_tail(path: &Path, limit: u64) -> Result<(String, bool)> {
             content.drain(..=index);
         }
     }
-    Ok((content, truncated))
+    Ok((sanitize_log(&content), truncated))
+}
+
+/// 设置页展示前清理日志：去掉终端颜色控制符，并脱敏 URL 中的凭据参数
+///（旧版本曾在 INFO 日志写出带 access_key / ticket 的飞书 wss 地址）。
+fn sanitize_log(content: &str) -> String {
+    const SECRET_PARAMS: [&str; 2] = ["access_key=", "ticket="];
+    let mut plain = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push(ch);
+    }
+    let mut output = String::with_capacity(plain.len());
+    let mut rest = plain.as_str();
+    while !rest.is_empty() {
+        let found = SECRET_PARAMS
+            .iter()
+            .filter_map(|param| rest.find(param).map(|index| (index, param.len())))
+            .min_by_key(|(index, _)| *index);
+        let Some((index, length)) = found else {
+            output.push_str(rest);
+            break;
+        };
+        let value_start = index + length;
+        output.push_str(&rest[..value_start]);
+        let value_length = rest[value_start..]
+            .find(|ch: char| ch == '&' || ch.is_whitespace())
+            .unwrap_or(rest.len() - value_start);
+        if value_length > 0 {
+            output.push_str("***");
+        }
+        rest = &rest[value_start + value_length..];
+    }
+    output
 }
 
 /// 扫码地址渲染为 SVG 二维码。
@@ -802,6 +844,15 @@ mod tests {
             .unwrap();
         assert_eq!(status["platforms"][0]["enabled"], true);
         assert_eq!(status["platforms"][0]["connection"], "auxiliary");
+    }
+
+    #[test]
+    fn log_sanitizer_strips_ansi_and_masks_credentials() {
+        let raw = "\u{1b}[2m2026\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m connected to wss://x/ws?fpid=1&access_key=abc123&service_id=9&ticket=t-1\nnext ticket=\n";
+        assert_eq!(
+            sanitize_log(raw),
+            "2026  INFO connected to wss://x/ws?fpid=1&access_key=***&service_id=9&ticket=***\nnext ticket=\n"
+        );
     }
 
     #[test]

@@ -35,6 +35,8 @@ pub(crate) fn all_platforms() -> Vec<Arc<dyn platform::BotPlatform>> {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        // stderr 由宿主重定向到 logs/sidecar.log（设置页可查看），不写颜色控制符。
+        .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 // openlark_client 在 INFO 级别会输出带 access_key / ticket 的
