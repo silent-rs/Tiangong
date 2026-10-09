@@ -9,8 +9,6 @@ tiangong-app-state = { workspace = true }
 tiangong-core = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
-tiangong-plugin-skill-protocol = { workspace = true }
-tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-types = { workspace = true }
 tracing = { workspace = true }
@@ -18,7 +16,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 anyhow = { workspace = true }
 scru128 = { workspace = true }
-serde_json = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
 termimad = { workspace = true }

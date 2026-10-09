@@ -625,8 +625,9 @@ impl StdioSidecarConnection {
                 &self.config.storage_root,
             );
             // mcp.json 由 mcp 插件自管（官方身份经宿主验证后才置位
-            // mcp_config）：开放其写权限，否则 bot 注册 MCP server 时
-            // sidecar 无法落盘配置；其余敏感配置仍由宿主写入、插件只读。
+            // mcp_config）：开放其写权限，否则用户在 MCP 设置页增删
+            // server 时 sidecar 无法落盘配置；其余敏感配置仍由宿主写入、
+            // 插件只读。
             if self.config.sensitive_storage.mcp_config {
                 exempt_mcp_config_write(&mut policy, &self.config.storage_root);
             }

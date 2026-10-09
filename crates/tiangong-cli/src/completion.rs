@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::Path;
+use tiangong_types::{MentionGroup, MentionRequest, MentionTarget};
 
 /// 补全候选项
 #[derive(Debug, Clone)]
@@ -108,16 +108,23 @@ pub fn detect_trigger(input: &str, cursor: usize) -> Option<(CompletionTrigger, 
 }
 
 /// 生成补全候选列表
+///
+/// `@` 提及与桌面端同一通道：由宿主注入的 `query_mentions`（CoreManager +
+/// runtime 插件来源）返回候选，CLI 不再自行枚举文件/Skill/MCP。
 pub fn complete(
     trigger: CompletionTrigger,
     prefix: &str,
-    storage_root: &std::path::Path,
+    target: &MentionTarget,
+    query_mentions: &dyn Fn(MentionRequest) -> Result<Vec<MentionGroup>, String>,
 ) -> Vec<CompletionCandidate> {
     match trigger {
         CompletionTrigger::SlashCommand => complete_slash_commands(prefix),
-        CompletionTrigger::AtMention => complete_at_mentions(prefix, storage_root),
+        CompletionTrigger::AtMention => complete_at_mentions(prefix, target, query_mentions),
     }
 }
+
+/// 单次 `@` 补全每组最多取的候选数（终端只展示前 10 条）。
+const MENTION_MAX_PER_GROUP: usize = 20;
 
 fn complete_slash_commands(prefix: &str) -> Vec<CompletionCandidate> {
     SLASH_COMMANDS
@@ -131,207 +138,59 @@ fn complete_slash_commands(prefix: &str) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-fn complete_at_mentions(prefix: &str, storage_root: &std::path::Path) -> Vec<CompletionCandidate> {
-    let mut candidates = Vec::new();
-
-    // @file: 提及补全 - 列出当前目录文件
-    candidates.extend(complete_files(prefix));
-
-    // @skill: 提及补全（skill 数据经 sidecar 通道查询）
-    let skills = list_enabled_skills(storage_root);
-    for skill in &skills {
-        let label = format!("skill:{}", skill.id);
-        if label.starts_with(prefix) || skill.id.starts_with(prefix) || prefix.is_empty() {
-            candidates.push(CompletionCandidate {
-                value: format!("@skill:{}", skill.id),
-                label: format!("@skill:{}", skill.id),
-                hint: format!("Skill - {}@{}", skill.name, skill.version),
-            });
+fn complete_at_mentions(
+    prefix: &str,
+    target: &MentionTarget,
+    query_mentions: &dyn Fn(MentionRequest) -> Result<Vec<MentionGroup>, String>,
+) -> Vec<CompletionCandidate> {
+    let request = mention_request(prefix, target);
+    let empty_query = request.query.trim().is_empty() && request.allowed_kinds.is_empty();
+    let groups = match query_mentions(request) {
+        Ok(groups) => groups,
+        Err(error) => {
+            tracing::debug!(%error, "mention 候选查询失败");
+            return Vec::new();
         }
-    }
-
-    // @mcp: 提及补全（MCP servers 经 sidecar 通道拉取）
-    if let Ok(servers) = tiangong_plugin_runtime::registry::invoke_sidecar(
-        storage_root,
-        "mcp",
-        "mcp.server.list",
-        serde_json::json!({}),
-    )
-    .and_then(|v| {
-        let resp: tiangong_plugin_mcp_protocol::management::ServersResponse =
-            serde_json::from_value(v)?;
-        Ok(resp.servers)
-    }) {
-        for server in servers {
-            if !server.enabled {
-                continue;
-            }
-            let label = format!("mcp:{}", server.name);
-            if label.starts_with(prefix) || server.name.starts_with(prefix) || prefix.is_empty() {
-                candidates.push(CompletionCandidate {
-                    value: format!("@mcp:{}", server.name),
-                    label: format!("@mcp:{}", server.name),
-                    hint: format!("MCP - {}", server.name),
-                });
-            }
-        }
-    }
-
-    candidates
-}
-
-/// 经 sidecar 通道列出已启用的 skill（供 @提及补全）。
-fn list_enabled_skills(
-    storage_root: &std::path::Path,
-) -> Vec<tiangong_plugin_skill_protocol::InstalledSkillConfig> {
-    tiangong_plugin_runtime::registry::invoke_sidecar(
-        storage_root,
-        "skill",
-        tiangong_plugin_skill_protocol::LIST_SKILLS_OPERATION,
-        serde_json::to_value(tiangong_plugin_skill_protocol::Empty {}).unwrap_or_default(),
-    )
-    .ok()
-    .and_then(|v| {
-        serde_json::from_value::<tiangong_plugin_skill_protocol::ListSkillsResponse>(v).ok()
-    })
-    .map(|r| r.skills)
-    .unwrap_or_default()
-}
-
-fn complete_files(prefix: &str) -> Vec<CompletionCandidate> {
-    let file_prefix = prefix.strip_prefix("file:").unwrap_or(prefix);
-    let query = file_prefix.to_lowercase();
-
-    // 如果包含 /，从指定目录搜索
-    let (search_dir, name_query) = if file_prefix.contains('/') {
-        let path = Path::new(file_prefix);
-        let parent = path.parent().unwrap_or(Path::new("."));
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        (parent.to_path_buf(), name)
-    } else {
-        (
-            std::env::current_dir().unwrap_or_else(|_| ".".into()),
-            query.clone(),
-        )
     };
-
-    let mut candidates = Vec::new();
-
-    // 当前目录文件（前缀匹配 + 模糊匹配）
-    collect_files_from_dir(&search_dir, &name_query, "", &mut candidates, 30);
-
-    // 如果没有 /，递归子目录模糊搜索（限制深度 2）
-    if !file_prefix.contains('/') && !name_query.is_empty() {
-        collect_files_recursive(&search_dir, &name_query, "", &mut candidates, 30, 0, 2);
-    }
-
-    candidates
-}
-
-/// 从目录收集匹配的文件（前缀 + 模糊）
-fn collect_files_from_dir(
-    dir: &Path,
-    query: &str,
-    rel_prefix: &str,
-    candidates: &mut Vec<CompletionCandidate>,
-    max: usize,
-) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        if candidates.len() >= max {
-            break;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-
-        let name_lower = name.to_lowercase();
-        // 模糊匹配：包含子串
-        if !query.is_empty() && !name_lower.contains(query) {
-            continue;
-        }
-
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let rel_path = if rel_prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{rel_prefix}/{name}")
-        };
-        let display = if is_dir {
-            format!("{rel_path}/")
-        } else {
-            rel_path.clone()
-        };
-
-        candidates.push(CompletionCandidate {
-            value: format!("@file:{rel_path}"),
-            label: format!("@file:{display}"),
-            hint: if is_dir {
-                "目录".into()
-            } else {
-                "文件".into()
+    groups
+        .into_iter()
+        // 与桌面端一致：未输入任何字符时不罗列文件（量大且无意义）。
+        .filter(|group| !(empty_query && group.kind == "file"))
+        .flat_map(|group| group.candidates)
+        // value 为空的是状态占位（如「索引创建中…」），终端里不可选中，跳过。
+        .filter(|candidate| !candidate.value.is_empty())
+        .map(|candidate| CompletionCandidate {
+            hint: match (candidate.label.is_empty(), candidate.hint.is_empty()) {
+                (false, false) if candidate.label != candidate.hint => {
+                    format!("{} - {}", candidate.label, candidate.hint)
+                }
+                (false, _) => candidate.label,
+                (true, _) => candidate.hint,
             },
-        });
-    }
+            label: candidate.value.clone(),
+            value: candidate.value,
+        })
+        .collect()
 }
 
-/// 递归搜索子目录（模糊匹配文件名）
-fn collect_files_recursive(
-    dir: &Path,
-    query: &str,
-    rel_prefix: &str,
-    candidates: &mut Vec<CompletionCandidate>,
-    max: usize,
-    depth: usize,
-    max_depth: usize,
-) {
-    if depth >= max_depth || candidates.len() >= max {
-        return;
-    }
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+/// 把 `@` 后的输入转成查询：`kind:rest` 限定分组并以 rest 作查询词。
+fn mention_request(prefix: &str, target: &MentionTarget) -> MentionRequest {
+    let (allowed_kinds, query) = match prefix.split_once(':') {
+        Some((kind, rest))
+            if !kind.is_empty()
+                && kind
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+        {
+            (vec![kind.to_string()], rest.to_string())
+        }
+        _ => (Vec::new(), prefix.to_string()),
     };
-
-    for entry in entries.flatten() {
-        if candidates.len() >= max {
-            break;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-
-        let rel_path = if rel_prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{rel_prefix}/{name}")
-        };
-
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            // 先检查子目录中的文件
-            collect_files_from_dir(&entry.path(), query, &rel_path, candidates, max);
-            // 递归
-            collect_files_recursive(
-                &entry.path(),
-                query,
-                &rel_path,
-                candidates,
-                max,
-                depth + 1,
-                max_depth,
-            );
-        }
+    MentionRequest {
+        target: target.clone(),
+        query,
+        allowed_kinds,
+        max_per_group: MENTION_MAX_PER_GROUP,
     }
 }
 
@@ -343,8 +202,110 @@ pub fn help_text() -> String {
     }
     lines.push(String::new());
     lines.push("@ 提及：".to_string());
-    lines.push("  @file:<路径>       引用文件".to_string());
-    lines.push("  @skill:<id>       引用 Skill".to_string());
-    lines.push("  @mcp:<名称>       引用 MCP server".to_string());
+    lines.push("  @<关键词>          搜索插件提供的提及（文件、Skill、MCP 等）".to_string());
+    lines.push("  @<类型>:<关键词>   只搜索指定类型，如 @file:main、@skill:review".to_string());
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use tiangong_types::MentionCandidate;
+
+    use super::*;
+
+    fn candidate(kind: &str, value: &str, label: &str, hint: &str) -> MentionCandidate {
+        MentionCandidate {
+            value: value.to_string(),
+            label: label.to_string(),
+            kind: kind.to_string(),
+            hint: hint.to_string(),
+            mark: String::new(),
+        }
+    }
+
+    fn groups() -> Vec<MentionGroup> {
+        vec![
+            MentionGroup {
+                kind: "file".into(),
+                label: "file".into(),
+                candidates: vec![
+                    candidate("file", "@file:src/main.rs", "main.rs", "src/main.rs"),
+                    candidate("file", "", "索引创建中…", "正在扫描工作区文件，请稍候"),
+                ],
+            },
+            MentionGroup {
+                kind: "skill".into(),
+                label: "skill".into(),
+                candidates: vec![candidate("skill", "@skill:review", "Review", "代码审查")],
+            },
+        ]
+    }
+
+    #[test]
+    fn mention_request_splits_kind_prefix() {
+        let target = MentionTarget::Draft {
+            workspace: "/tmp/ws".into(),
+        };
+        let request = mention_request("file:main", &target);
+        assert_eq!(request.allowed_kinds, vec!["file".to_string()]);
+        assert_eq!(request.query, "main");
+        assert_eq!(request.target, target);
+
+        let request = mention_request("rev", &target);
+        assert!(request.allowed_kinds.is_empty());
+        assert_eq!(request.query, "rev");
+
+        // 非法 kind（含空格/路径符号）不当作分组限定。
+        let request = mention_request("a/b:c", &target);
+        assert!(request.allowed_kinds.is_empty());
+        assert_eq!(request.query, "a/b:c");
+    }
+
+    #[test]
+    fn at_mention_uses_injected_source_and_hides_placeholders() {
+        let seen = RefCell::new(None);
+        let query = |request: MentionRequest| {
+            *seen.borrow_mut() = Some(request);
+            Ok(groups())
+        };
+        let result = complete(
+            CompletionTrigger::AtMention,
+            "ma",
+            &MentionTarget::Global,
+            &query,
+        );
+        assert_eq!(seen.borrow().as_ref().unwrap().query, "ma");
+        let values: Vec<_> = result.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["@file:src/main.rs", "@skill:review"]);
+        assert_eq!(result[0].hint, "main.rs - src/main.rs");
+    }
+
+    #[test]
+    fn empty_at_mention_skips_file_group() {
+        let query = |_: MentionRequest| Ok(groups());
+        let result = complete(
+            CompletionTrigger::AtMention,
+            "",
+            &MentionTarget::Global,
+            &query,
+        );
+        let values: Vec<_> = result.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["@skill:review"]);
+    }
+
+    #[test]
+    fn mention_source_error_yields_no_candidates() {
+        let query = |_: MentionRequest| Err("boom".to_string());
+        assert!(
+            complete(
+                CompletionTrigger::AtMention,
+                "x",
+                &MentionTarget::Global,
+                &query
+            )
+            .is_empty()
+        );
+    }
 }

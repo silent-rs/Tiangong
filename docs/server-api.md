@@ -301,33 +301,6 @@ DELETE /api/v1/sessions/{id}
 { "status": "deleted", "id": "会话 ID" }
 ```
 
-### MCP 服务列表
-
-```
-GET /api/v1/mcp
-```
-
-列出已配置的 MCP 服务。
-
-### Skill 列表
-
-```
-GET /api/v1/skills
-```
-
-列出已配置的 Skill。
-
-**响应**：
-
-```json
-{
-  "total": 10,
-  "items": [
-    { "id": "skill_id", "name": "skill 名称", "enabled": true }
-  ]
-}
-```
-
 ### 关闭 Server
 
 ```

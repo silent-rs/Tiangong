@@ -3,7 +3,6 @@ import { api, textContent } from '../api/tauri';
 import type {
   ContentBlock,
   LoadedSession,
-  McpServer,
   Message,
   RawAttachment,
   SandboxUpdateState,
@@ -961,7 +960,6 @@ export interface AppState {
   toolCallFinished: Record<string, ToolCallFinished>;
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
-  mcpServers: McpServer[] | null;
 
   // 尚未首次发送的新对话
   isNewConversation: boolean;
@@ -1092,7 +1090,6 @@ export interface AppState {
   loadSandboxState: (force?: boolean) => Promise<void>;
   setSandboxState: (state: SandboxUpdateState) => void;
 
-  loadMcpServers: () => Promise<void>;
 
   beginContextManagement: (summary: string) => void;
   endContextManagement: () => void;
@@ -1131,7 +1128,6 @@ export const useStore = create<AppState>((set, get) => ({
   toolCallFinished: {},
   lastUsage: null,
   tokenStats: null,
-  mcpServers: null,
   isNewConversation: true,
   updateAvailable: null,
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
@@ -2255,15 +2251,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // 加载 MCP 服务器
-  loadMcpServers: async () => {
-    try {
-      const servers = await api.getMcpServers();
-      set({ mcpServers: servers });
-    } catch (error) {
-      console.error('加载 MCP 服务器失败:', error);
-    }
-  },
+
 
   beginContextManagement: (summary: string) => {
     const state = get();

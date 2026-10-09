@@ -31,9 +31,10 @@ pub(super) fn exempt_authorized_reads(
         .retain(|path| !exemptions.contains(path));
 }
 
-/// mcp.json 的写豁免：它是 MCP 配置的权威存储，唯一合法写者是 mcp
-/// 插件自身（宿主已验证官方签名身份）。从写保护清单移除后，写权限
-/// 随存储根整体可写恢复；其他插件对 mcp.json 的写保护不变。
+/// mcp.json 的写豁免：它是 MCP 配置的权威存储，插件中唯一合法写者是
+/// mcp 插件自身（宿主已验证官方签名身份；宿主进程为 Bot 登记 MCP 时也
+/// 直接写入，不受沙箱约束）。从写保护清单移除后，写权限随存储根整体
+/// 可写恢复；其他插件对 mcp.json 的写保护不变。
 pub(super) fn exempt_mcp_config_write(
     policy: &mut tiangong_sandbox::SandboxPolicy,
     storage_root: &std::path::Path,

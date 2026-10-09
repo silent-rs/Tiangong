@@ -30,9 +30,17 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     state.workspace_dir = std::env::current_dir()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
-    // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具 spec +
-    // 执行分发），CLI 侧经 mcp_plugin 做管理（modal 里的 add/remove/toggle、
-    // /config set mcp.*、@mcp 补全、skill 删除后的孤儿 MCP 清理）。
+    // 与桌面端一致：已安装插件由 runtime 统一预加载，Core 工具与 @提及都从
+    // 同一份注册表取。预加载含 WASM 编译、耗时较长，放到后台进行，不阻塞
+    // 进入输入；首次建 Core 前等待其完成，保证本轮工具齐全。
+    let mut plugin_preload = Some({
+        let storage_root = storage_root.clone();
+        let core_manager = state.core_manager.clone();
+        std::thread::spawn(move || {
+            tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
+            core_manager.set_mention_sources(tiangong_plugin_runtime::registry::mention_sources());
+        })
+    });
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     // 对齐 server 入口（tiangong-server/src/lib.rs）：多线程 runtime + enter()，
     // 让主线程在整个 REPL 生命周期内持有 reactor guard。这样主循环里同步执行的
@@ -56,10 +64,13 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let prompt = format!("\x1b[2m{short_id}\x1b[0m \x1b[1;36m❯\x1b[0m ");
 
         let input = {
-            let storage_root = storage_root.clone();
+            let mention_target = mention_target(&state);
+            let core_manager = state.core_manager.clone();
+            let query_mentions =
+                move |request: tiangong_types::MentionRequest| core_manager.query_mentions(request);
             reader.read_line(&prompt, move |buf, cursor| {
                 if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, &storage_root)
+                    completion::complete(trigger, &prefix, &mention_target, &query_mentions)
                 } else {
                     Vec::new()
                 }
@@ -106,6 +117,11 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             session_config.trust_mode = default_trust_mode;
             state.workspace_dir.clone()
         };
+        if let Some(preload) = plugin_preload.take()
+            && preload.join().is_err()
+        {
+            tracing::warn!("插件预加载线程异常退出");
+        }
         runtime
             .block_on(state.core_manager.ensure_core(
                 &session_id,
@@ -144,7 +160,32 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             tracing::warn!(%session_id, %error, "终止 Core 失败");
         }
     }
+    // CLI 进程拉起的插件 sidecar 随进程退出一并停止。
+    tiangong_plugin_runtime::registry::shutdown_all_sidecars();
     Ok(())
+}
+
+/// 当前输入对应的 @提及目标（与桌面端规则一致）：会话已落盘用会话目标，
+/// 否则用草稿工作区，都没有时查全局候选。
+fn mention_target(
+    state: &tiangong_app_state::app_state::TiangongState,
+) -> tiangong_types::MentionTarget {
+    if state
+        .core_manager
+        .load_session(&state.active_session_id)
+        .is_ok()
+    {
+        return tiangong_types::MentionTarget::Session {
+            session_id: state.active_session_id.clone(),
+        };
+    }
+    if state.workspace_dir.trim().is_empty() {
+        tiangong_types::MentionTarget::Global
+    } else {
+        tiangong_types::MentionTarget::Draft {
+            workspace: state.workspace_dir.clone(),
+        }
+    }
 }
 
 /// 构造 CLI 会话 Core 的插件集合：与桌面端/Server 一致，只含为该会话

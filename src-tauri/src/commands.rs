@@ -2913,222 +2913,6 @@ pub async fn set_session_cwd(
 }
 
 // ============================================================================
-// MCP 管理
-// ============================================================================
-
-/// 经运行时 sidecar 通道调用 MCP 插件操作（Desktop 入口）。
-fn mcp_invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
-    let storage_root = tiangong_config::io::storage_root();
-    tiangong_plugin_runtime::registry::invoke_sidecar(&storage_root, "mcp", operation, payload)
-        .map_err(|e| e.to_string())
-}
-
-/// 获取 MCP 服务器列表
-#[tauri::command]
-pub async fn get_mcp_servers(_state: State<'_, TiangongApp>) -> Result<Vec<McpServerView>, String> {
-    let servers: Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig> =
-        serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(
-            mcp_invoke("mcp.server.list", serde_json::json!({}))?,
-        )
-        .map_err(|e: serde_json::Error| e.to_string())?
-        .servers;
-    Ok(servers.iter().map(McpServerView::from_core).collect())
-}
-
-/// 获取 MCP 服务器健康状态
-#[tauri::command]
-pub async fn get_mcp_health(
-    _state: State<'_, TiangongApp>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let response: tiangong_plugin_mcp_protocol::query::HealthResponse =
-        serde_json::from_value(mcp_invoke("mcp.server.health", serde_json::json!({}))?)
-            .map_err(|e: serde_json::Error| e.to_string())?;
-    response
-        .statuses
-        .into_iter()
-        .map(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
-        .collect()
-}
-
-/// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
-#[tauri::command]
-pub async fn probe_mcp_server(name: String, _state: State<'_, TiangongApp>) -> Result<(), String> {
-    mcp_invoke(
-        "mcp.server.probe",
-        serde_json::to_value(tiangong_plugin_mcp_protocol::query::ServerNameRequest { name })
-            .map_err(|e| e.to_string())?,
-    )?;
-    Ok(())
-}
-
-/// 注册 MCP 服务器
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn register_mcp_server(
-    name: String,
-    command: String,
-    args: Vec<String>,
-    transport: Option<String>,
-    endpoint: Option<String>,
-    auth_header: Option<String>,
-    headers: Option<std::collections::HashMap<String, String>>,
-    env: Option<std::collections::HashMap<String, String>>,
-    state: State<'_, TiangongApp>,
-) -> Result<String, String> {
-    use tiangong_plugin_mcp_protocol::config::{
-        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
-    };
-
-    let transport = match transport
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => match value.to_ascii_lowercase().as_str() {
-            "auto" => Some(McpTransportMode::Auto),
-            "stdio" => Some(McpTransportMode::Stdio),
-            "http" | "sse" | "streamablehttp" | "streamable_http" | "streamable-http" => {
-                Some(McpTransportMode::Http)
-            }
-            other => {
-                return Err(format!(
-                    "不支持的 MCP transport：{other}，支持 auto/stdio/http/sse"
-                ));
-            }
-        },
-        None => None,
-    };
-
-    let header_vec = headers.unwrap_or_default().into_iter().collect();
-    let env_vec = env.unwrap_or_default().into_iter().collect();
-    let request = RegisterMcpServerRequest {
-        name,
-        command,
-        args,
-        tags: vec![],
-        enabled: true,
-        options: RegisterMcpServerOptions {
-            transport,
-            endpoint,
-            auth_header,
-            headers: header_vec,
-            env: env_vec,
-        },
-    };
-    let response: tiangong_plugin_mcp_protocol::MessageResponse =
-        serde_json::from_value(mcp_invoke(
-            "mcp.server.register",
-            serde_json::to_value(&request).map_err(|e| e.to_string())?,
-        )?)
-        .map_err(|e: serde_json::Error| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(response.message)
-}
-
-/// 编辑 MCP 服务器（按 name 定位，name 自身不可改）
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn update_mcp_server(
-    name: String,
-    command: String,
-    args: Vec<String>,
-    transport: Option<String>,
-    endpoint: Option<String>,
-    auth_header: Option<String>,
-    headers: Option<std::collections::HashMap<String, String>>,
-    env: Option<std::collections::HashMap<String, String>>,
-    state: State<'_, TiangongApp>,
-) -> Result<String, String> {
-    use tiangong_plugin_mcp_protocol::config::{
-        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
-    };
-    use tiangong_plugin_mcp_protocol::management::UpdateServerRequest;
-
-    let transport = match transport
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => match value.to_ascii_lowercase().as_str() {
-            "auto" => Some(McpTransportMode::Auto),
-            "stdio" => Some(McpTransportMode::Stdio),
-            "http" | "sse" | "streamablehttp" | "streamable_http" | "streamable-http" => {
-                Some(McpTransportMode::Http)
-            }
-            other => {
-                return Err(format!(
-                    "不支持的 MCP transport：{other}，支持 auto/stdio/http/sse"
-                ));
-            }
-        },
-        None => None,
-    };
-
-    let header_vec = headers.unwrap_or_default().into_iter().collect();
-    let env_vec = env.unwrap_or_default().into_iter().collect();
-    let request = UpdateServerRequest {
-        name: name.clone(),
-        request: RegisterMcpServerRequest {
-            name: name.clone(),
-            command,
-            args,
-            tags: vec![],
-            enabled: true,
-            options: RegisterMcpServerOptions {
-                transport,
-                endpoint,
-                auth_header,
-                headers: header_vec,
-                env: env_vec,
-            },
-        },
-    };
-    let response: tiangong_plugin_mcp_protocol::MessageResponse =
-        serde_json::from_value(mcp_invoke(
-            "mcp.server.update",
-            serde_json::to_value(&request).map_err(|e| e.to_string())?,
-        )?)
-        .map_err(|e: serde_json::Error| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(response.message)
-}
-
-/// 移除 MCP 服务器
-#[tauri::command]
-pub async fn remove_mcp_server(
-    name: String,
-    state: State<'_, TiangongApp>,
-) -> Result<String, String> {
-    use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
-    let response: tiangong_plugin_mcp_protocol::MessageResponse =
-        serde_json::from_value(mcp_invoke(
-            "mcp.server.remove",
-            serde_json::to_value(RemoveServerRequest { name }).map_err(|e| e.to_string())?,
-        )?)
-        .map_err(|e: serde_json::Error| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(response.message)
-}
-
-/// 设置 MCP 服务器启用状态
-#[tauri::command]
-pub async fn set_mcp_server_enabled(
-    name: String,
-    enabled: bool,
-    state: State<'_, TiangongApp>,
-) -> Result<String, String> {
-    use tiangong_plugin_mcp_protocol::management::SetEnabledRequest;
-    let response: tiangong_plugin_mcp_protocol::MessageResponse =
-        serde_json::from_value(mcp_invoke(
-            "mcp.server.set_enabled",
-            serde_json::to_value(SetEnabledRequest { name, enabled }).map_err(|e| e.to_string())?,
-        )?)
-        .map_err(|e: serde_json::Error| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(response.message)
-}
-
-// ============================================================================
 // 移动端控制（bot）管理
 // ============================================================================
 
@@ -3312,72 +3096,15 @@ pub async fn bot_delete_push_target(
     Ok("推送授权已删除".to_string())
 }
 
-fn bot_mcp_connection_matches(
-    existing: &tiangong_plugin_mcp_protocol::config::McpServerConfig,
-    generated: &tiangong_bots::BotMcpConfig,
-) -> bool {
-    use tiangong_plugin_mcp_protocol::config::ResolvedMcpTransport;
-
-    existing.resolved_transport() == ResolvedMcpTransport::Stdio
-        && existing.command == generated.command
-        && existing.args == generated.args
-        && existing.endpoint.is_empty()
-        && existing.auth_header.is_empty()
-        && existing.headers.is_empty()
-        && existing.env.is_empty()
-        && existing.tags == generated.tags
-}
-
-fn bot_mcp_registration_request(
-    generated: &tiangong_bots::BotMcpConfig,
-    enabled: bool,
-) -> tiangong_plugin_mcp_protocol::config::RegisterMcpServerRequest {
-    use tiangong_plugin_mcp_protocol::config::{
-        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
-    };
-
-    RegisterMcpServerRequest {
-        name: generated.name.clone(),
-        command: generated.command.clone(),
-        args: generated.args.clone(),
-        tags: generated.tags.clone(),
-        enabled,
-        options: RegisterMcpServerOptions {
-            transport: Some(McpTransportMode::Stdio),
-            ..Default::default()
-        },
-    }
-}
-
-/// 查询当前 MCP server 列表（经 sidecar 通道）。
-fn list_mcp_servers_via_sidecar(
-    _state: &TiangongApp,
-) -> Result<Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig>, String> {
-    serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(mcp_invoke(
-        "mcp.server.list",
-        serde_json::json!({}),
-    )?)
-    .map_err(|e: serde_json::Error| e.to_string())
-    .map(|r| r.servers)
-}
-
-/// 经运行时 sidecar 通道调用 MCP 插件操作（&TiangongApp 重载，复用 mcp_invoke）。
-fn mcp_invoke_state(
-    _state: &TiangongApp,
-    operation: &str,
-    payload: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    mcp_invoke(operation, payload)
-}
-
 /// 为支持 MCP 的 Bot 确保对应普通 MCP 已注册并启用。
+///
+/// 判定与 CLI/配置页共用 `bot_ops::mcp`；桌面端额外同步 Core 配置，失败时回滚。
 pub async fn ensure_bot_mcp_registered(
     id: &tiangong_bots::BotId,
     state: &TiangongApp,
 ) -> Result<Option<String>, String> {
-    use tiangong_plugin_mcp_protocol::management::{
-        SetEnabledRequest, SERVER_SET_ENABLED_OPERATION,
-    };
+    use tiangong_entry::bot_ops::mcp;
+
     let supports_mcp = state
         .bot_runtime
         .supports_mcp(id)
@@ -3386,7 +3113,6 @@ pub async fn ensure_bot_mcp_registered(
     if !supports_mcp {
         return Ok(None);
     }
-
     let generated = state
         .bot_runtime
         .generate_mcp_config(id)
@@ -3394,71 +3120,39 @@ pub async fn ensure_bot_mcp_registered(
         .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
     let name = generated.name.clone();
 
-    if let Some(existing) = list_mcp_servers_via_sidecar(state)?
-        .into_iter()
-        .find(|server| server.name == name)
-    {
-        if !bot_mcp_connection_matches(&existing, &generated) {
+    if let Some(existing) = mcp::find(&generated).map_err(|e| e.to_string())? {
+        if !existing.matches(&generated) {
             return Err(format!("MCP 名称 {name} 已被其他配置占用，未自动覆盖"));
         }
-        if !existing.enabled {
-            let response: tiangong_plugin_mcp_protocol::MessageResponse =
-                serde_json::from_value(mcp_invoke_state(
-                    state,
-                    SERVER_SET_ENABLED_OPERATION,
-                    serde_json::to_value(SetEnabledRequest {
-                        name: name.clone(),
-                        enabled: true,
-                    })
-                    .map_err(|e| e.to_string())?,
-                )?)
-                .map_err(|e: serde_json::Error| e.to_string())?;
-            if let Err(sync_error) = state.sync_core_config_from_state().await {
-                let rollback = mcp_invoke_state(
-                    state,
-                    SERVER_SET_ENABLED_OPERATION,
-                    serde_json::to_value(SetEnabledRequest {
-                        name: name.clone(),
-                        enabled: false,
-                    })
-                    .unwrap_or_default(),
-                )
+        if existing.enabled {
+            return Ok(Some(format!("MCP 已注册：{name}")));
+        }
+        let message = mcp::set_enabled(&name, true).map_err(|e| e.to_string())?;
+        if let Err(sync_error) = state.sync_core_config_from_state().await {
+            let rollback = mcp::set_enabled(&name, false)
                 .map(|_| "已恢复为停用".to_string())
                 .unwrap_or_else(|error| format!("恢复停用失败：{error}"));
-                return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
-            }
-            return Ok(Some(response.message));
+            return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
         }
-        return Ok(Some(format!("MCP 已注册：{name}")));
+        return Ok(Some(message));
     }
 
-    let request = bot_mcp_registration_request(&generated, generated.enabled);
-    let response: tiangong_plugin_mcp_protocol::MessageResponse =
-        serde_json::from_value(mcp_invoke_state(
-            state,
-            "mcp.server.register",
-            serde_json::to_value(&request).map_err(|e| e.to_string())?,
-        )?)
-        .map_err(|e: serde_json::Error| e.to_string())?;
+    let message = mcp::register(&generated, generated.enabled).map_err(|e| e.to_string())?;
     if let Err(sync_error) = state.sync_core_config_from_state().await {
-        use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
-        let rollback = mcp_invoke_state(
-            state,
-            "mcp.server.remove",
-            serde_json::to_value(RemoveServerRequest { name: name.clone() }).unwrap_or_default(),
-        )
-        .map(|_| "已撤销 MCP 注册".to_string())
-        .unwrap_or_else(|error| format!("撤销 MCP 注册失败：{error}"));
+        let rollback = mcp::remove(&name)
+            .map(|_| "已撤销 MCP 注册".to_string())
+            .unwrap_or_else(|error| format!("撤销 MCP 注册失败：{error}"));
         return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
     }
-    Ok(Some(response.message))
+    Ok(Some(message))
 }
 
 async fn unregister_bot_mcp(
     id: &tiangong_bots::BotId,
     state: &TiangongApp,
 ) -> Result<bool, String> {
-    use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
+    use tiangong_entry::bot_ops::mcp;
+
     let supports_mcp = state
         .bot_runtime
         .supports_mcp(id)
@@ -3467,41 +3161,18 @@ async fn unregister_bot_mcp(
     if !supports_mcp {
         return Ok(false);
     }
-
     let generated = state
         .bot_runtime
         .generate_mcp_config(id)
         .await
         .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
-    let Some(existing) = list_mcp_servers_via_sidecar(state)?
-        .into_iter()
-        .find(|server| server.name == generated.name)
-    else {
+    let Some(existing) = mcp::unregister(&generated).map_err(|e| e.to_string())? else {
         return Ok(false);
     };
-    if !bot_mcp_connection_matches(&existing, &generated) {
-        return Ok(false);
-    }
-
-    let _: tiangong_plugin_mcp_protocol::MessageResponse =
-        serde_json::from_value(mcp_invoke_state(
-            state,
-            "mcp.server.remove",
-            serde_json::to_value(RemoveServerRequest {
-                name: generated.name.clone(),
-            })
-            .map_err(|e| e.to_string())?,
-        )?)
-        .map_err(|e: serde_json::Error| e.to_string())?;
     if let Err(sync_error) = state.sync_core_config_from_state().await {
-        let request = bot_mcp_registration_request(&generated, existing.enabled);
-        let rollback = mcp_invoke_state(
-            state,
-            "mcp.server.register",
-            serde_json::to_value(&request).unwrap_or_default(),
-        )
-        .map(|_| "已恢复 MCP 注册".to_string())
-        .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"));
+        let rollback = mcp::register(&generated, existing.enabled)
+            .map(|_| "已恢复 MCP 注册".to_string())
+            .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"));
         return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
     }
     Ok(true)
@@ -4307,15 +3978,11 @@ pub async fn set_models_config(
 #[tauri::command]
 pub async fn prewarm_workspace_index(root: String) -> Result<(), String> {
     let storage_root = tiangong_config::io::storage_root();
-    let payload = serde_json::to_value(
-        tiangong_plugin_index_protocol::management::PrewarmWorkspaceIndexRequest { root },
-    )
-    .map_err(|e| e.to_string())?;
     tiangong_plugin_runtime::registry::invoke_sidecar(
         &storage_root,
         "index",
-        tiangong_plugin_index_protocol::management::PREWARM_WORKSPACE_INDEX_OPERATION,
-        payload,
+        "index.prewarm_workspace_index",
+        serde_json::json!({ "root": root }),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
