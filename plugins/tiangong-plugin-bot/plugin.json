@@ -3,7 +3,7 @@
   "id": "bot",
   "name": "Bot",
   "description": "飞书 / QQ / 微信机器人：接收 IM 消息转发到天工，并提供主动推送工具\n需要天工 Server 运行（桌面开启 Server 或 tiangong server）；在插件设置中扫码或填写凭据即可启用对应平台。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "entrypoints": [
     "desktop",
     "server"
@@ -14,8 +14,12 @@
     "bridge.call"
   ],
   "capabilities": {
-    "tools": true
+    "tools": true,
+    "prompt": true
   },
+  "prompt": [
+    "## Bot 消息回复规则\n来自飞书 / QQ / 微信的消息以 `[来源：…，经 Bot 推送工具回复 target_id=…]` 开头。带 target_id 时，IM 用户只能收到你经 Bot 推送工具发送的内容，直接输出的文本不会送达：\n- 最终答复用 `bot__send_text_message`（target_id 取自来源标签）；图片、文件用 `bot__send_image_message` / `bot__send_file_message`。\n- 标签含“回复次数有限”（QQ / 微信）时：最终答复设 `is_final=true`；耗时任务可先发一两条 `is_final=false` 的简短进展，不要频繁发送。\n- 每次发送使用不同的 `idempotency_key`。\n- 移动端阅读：回复简洁直接，先给结论；少用表格与多级标题，避免整段代码，本地路径或长内容改为发送文件。\n- 来源标签不带 target_id 时，直接正常回复即可。"
+  ],
   "tools": [
     {
       "name": "list_push_targets",

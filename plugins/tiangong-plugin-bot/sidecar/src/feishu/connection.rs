@@ -1461,10 +1461,10 @@ mod tests {
 
         assert_eq!(message_source("group", None), "[来源：飞书群聊]");
         let with_push = message_source("direct", Some("target-1"));
-        assert!(with_push.starts_with("[来源：飞书私聊"));
-        assert!(with_push.contains("bot__send_text_message（target_id=target-1）"));
-        assert!(with_push.starts_with("[来源：飞书私聊"));
-        assert!(with_push.contains("直接输出的文本不会送达"));
+        assert_eq!(
+            with_push,
+            "[来源：飞书私聊，经 Bot 推送工具回复 target_id=target-1]"
+        );
     }
 
     const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);

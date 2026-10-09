@@ -76,36 +76,17 @@ pub(crate) trait BotPlatform: Send + Sync + 'static {
     ) -> Result<DeliveryResult>;
 }
 
-/// 推送工具名（运行时以 `{插件 id}__{工具名}` 暴露给模型）。
-pub(crate) const SEND_TEXT_TOOL: &str = "bot__send_text_message";
-pub(crate) const SEND_IMAGE_TOOL: &str = "bot__send_image_message";
-pub(crate) const SEND_FILE_TOOL: &str = "bot__send_file_message";
-
-/// 入站消息前附加的来源说明（issue #572）。
+/// 入站消息前附加的来源标签（issue #572）。
 ///
-/// 推送目标可用时要求 Agent 经本插件的推送工具发送全部回复（含最终答复），
-/// 直接输出的文本不会送达移动端；`limited` 平台每条消息回复次数有限，需要
-/// 区分进展与最终答复。目标不可用时由 Bot 转发同步响应。
+/// 只携带本条消息特有的信息（渠道、推送目标、回复额度是否受限），保持
+/// 简短；“经推送工具回复、直接输出不会送达、幂等键”等通用规则由插件
+/// 清单 `prompt` 注入系统提示，不再逐条重复。
 pub(crate) fn message_source(channel: &str, push_target: Option<&str>, limited: bool) -> String {
     let Some(target_id) = push_target else {
         return format!("[来源：{channel}]");
     };
-    if limited {
-        format!(
-            "[来源：{channel}。用户只能收到你经 Bot 插件工具发送的消息，直接输出的文本不会送达：\
-             请用 {SEND_TEXT_TOOL}（target_id={target_id}，is_final=true）发送最终答复，图片/文件用 \
-             {SEND_IMAGE_TOOL} / {SEND_FILE_TOOL}；任务耗时较长时可先用 is_final=false 发送简短进展。\
-             本条消息的回复次数有限，插件会合并过频的进展并为最终答复保留额度。\
-             每次发送使用不同的 idempotency_key]"
-        )
-    } else {
-        format!(
-            "[来源：{channel}。用户只能收到你经 Bot 插件工具发送的消息，直接输出的文本不会送达：\
-             请用 {SEND_TEXT_TOOL}（target_id={target_id}）发送最终答复，图片/文件用 \
-             {SEND_IMAGE_TOOL} / {SEND_FILE_TOOL}；任务耗时较长时可先发送简短进展。\
-             每次发送使用不同的 idempotency_key]"
-        )
-    }
+    let quota = if limited { "，回复次数有限" } else { "" };
+    format!("[来源：{channel}，经 Bot 推送工具回复 target_id={target_id}{quota}]")
 }
 
 /// 读取平台数据目录下的 JSON 凭据文件。
@@ -179,14 +160,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_mentions_tools_only_with_push_target() {
+    fn source_tag_is_short_and_carries_target() {
         assert_eq!(message_source("飞书群聊", None, false), "[来源：飞书群聊]");
-        let plain = message_source("飞书私聊", Some("t1"), false);
-        assert!(plain.contains("bot__send_text_message（target_id=t1）"));
-        assert!(plain.contains("直接输出的文本不会送达"));
-        let limited = message_source("QQ 私聊", Some("t2"), true);
-        assert!(limited.contains("target_id=t2，is_final=true"));
-        assert!(limited.contains("回复次数有限"));
+        assert_eq!(
+            message_source("飞书私聊", Some("t1"), false),
+            "[来源：飞书私聊，经 Bot 推送工具回复 target_id=t1]"
+        );
+        assert_eq!(
+            message_source("QQ 私聊", Some("t2"), true),
+            "[来源：QQ 私聊，经 Bot 推送工具回复 target_id=t2，回复次数有限]"
+        );
     }
 
     #[test]

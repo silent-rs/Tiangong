@@ -688,10 +688,10 @@ mod tests {
         assert_eq!(message_source("group", None), "[来源：微信群聊]");
 
         let with_push = message_source("direct", Some("target-1"));
-        assert!(with_push.starts_with("[来源：微信私聊"));
-        assert!(with_push.contains("bot__send_text_message（target_id=target-1，is_final=true）"));
-        assert!(with_push.contains("直接输出的文本不会送达"));
-        assert!(with_push.contains("不同的 idempotency_key"));
+        assert_eq!(
+            with_push,
+            "[来源：微信私聊，经 Bot 推送工具回复 target_id=target-1，回复次数有限]"
+        );
     }
 
     #[test]
