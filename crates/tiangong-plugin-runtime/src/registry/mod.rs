@@ -44,6 +44,7 @@ use crate::ts_plugin::TsPluginAdapter;
 mod connections;
 mod discovery;
 mod inventory;
+mod keepalive;
 mod legacy;
 mod loader;
 mod migrations;
@@ -179,6 +180,14 @@ pub fn set_server_endpoint(url: String, token: Option<String>) {
     if restart_needed {
         restart_server_dependent_sidecars();
     }
+}
+
+/// 插件安装目录（`<storage_root>/plugins/<id>`）反推存储根。
+fn storage_root_of(directory: &Path) -> Option<PathBuf> {
+    directory
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
 }
 
 /// 取当前已设置的 server 连接信息（未设置返回 None）。
