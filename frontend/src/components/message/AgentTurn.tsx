@@ -8,6 +8,7 @@ import { ThinkingBlock } from "../ThinkingBlock";
 import { AgentReplyCard } from "./AgentReplyCard";
 import { useResolvedTheme } from "@/hooks/useTheme";
 import { hasMediaBlocks, textContent } from "@/api/tauri";
+import { elapsedMsOf, messageKind, reasoningElapsedMsOf, textElapsedMsOf, toolCallIdOf, toolCallsOf, turnStatusOf, usageOf, userSourceOf } from "@/api/message";
 import {
   formatMessageTime,
   formatDuration,
@@ -44,6 +45,8 @@ interface AgentTurnProps {
   turnElapsedMs?: number;
   /** 本轮最终状态（success/failed/cancelled）：失败/取消时轮次末尾展示状态行。 */
   turnStatus?: string;
+  /** 本轮最终答复的消息 ID：来自本轮起点用户消息的 final_reply。 */
+  finalReplyId?: string;
 }
 
 function AgentTurnView({
@@ -54,7 +57,12 @@ function AgentTurnView({
   isActive = false,
   turnElapsedMs,
   turnStatus,
+  finalReplyId,
 }: AgentTurnProps) {
+  // 最终答复：本轮起点用户消息 final_reply 指向的助手消息，其余助手文本都是
+  // 过程文本。final_reply 随收尾前的起点消息快照到达，执行中尚未定稿的文本
+  // 按过程文本展示（与原先 react 相位一致）。
+  const isFinalReply = (msg: MessageItem): boolean => msg.id === finalReplyId;
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
   const currentMatchStart = useSearchStore((s) => s.currentMatchStart);
@@ -106,8 +114,9 @@ function AgentTurnView({
     const toolCallArgs = new Map<string, { id: string; name: string; arguments?: unknown }>();
     const settledToolCallIds = new Set<string>();
     for (const msg of messages) {
-      for (const call of msg.tool_calls ?? []) toolCallArgs.set(call.id, call);
-      if (msg.role === "tool" && msg.tool_call_id) settledToolCallIds.add(msg.tool_call_id);
+      for (const call of toolCallsOf(msg)) toolCallArgs.set(call.id, call);
+      const settledId = toolCallIdOf(msg);
+      if (settledId) settledToolCallIds.add(settledId);
     }
 
     const fragments: Fragment[] = [];
@@ -133,13 +142,13 @@ function AgentTurnView({
     };
 
     for (const msg of messages) {
-      if (msg.role === "notice" && msg.usage) continue;
-      if (msg.role === "user" && msg.phase === "hostinjected") {
+      if (messageKind(msg) === "notice" && usageOf(msg)) continue;
+      if (userSourceOf(msg) === "host_injected") {
         // 宿主注入媒体（RFC 0017）：归助手轮次过程片段，媒体本体在
         // assistant 侧展示，provenance 文本不进 UI。
         flushTools();
         fragments.push({ type: "injected_media", msg });
-      } else if (msg.role === "user" && textOf(msg).startsWith("[Subagent·")) {
+      } else if (messageKind(msg) === "user" && textOf(msg).startsWith("[Subagent·")) {
         flushTools();
         const raw = textOf(msg);
         const match = raw.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
@@ -152,14 +161,14 @@ function AgentTurnView({
         } else {
           fragments.push({ type: "user", msg });
         }
-      } else if (msg.role === "user") {
+      } else if (messageKind(msg) === "user") {
         flushTools();
         fragments.push({ type: "user", msg });
-      } else if (msg.role === "system" && textOf(msg).startsWith("[记忆检索] 策略:")) {
+      } else if (messageKind(msg) === "system" && textOf(msg).startsWith("[记忆检索] 策略:")) {
         pendingTools.push(msg);
-      } else if (msg.role === "system" && textOf(msg).startsWith("[记忆检索]")) {
+      } else if (messageKind(msg) === "system" && textOf(msg).startsWith("[记忆检索]")) {
         pendingTools.push(msg);
-      } else if (msg.role === "system" && textOf(msg).startsWith("LLM 输出")) {
+      } else if (messageKind(msg) === "system" && textOf(msg).startsWith("LLM 输出")) {
         const reasoning = msgReasoning(msg);
         const explanation = extractLlmExplanation(textOf(msg));
         if (!reasoning && !explanation && llmOutputHasToolCalls(textOf(msg))) continue;
@@ -169,48 +178,48 @@ function AgentTurnView({
           fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
         }
         if (explanation) fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
-      } else if (msg.role === "system" && (textOf(msg).includes("tool_name:") || textOf(msg).includes("exit_code") || textOf(msg).startsWith("工具执行 ["))) {
+      } else if (messageKind(msg) === "system" && (textOf(msg).includes("tool_name:") || textOf(msg).includes("exit_code") || textOf(msg).startsWith("工具执行 ["))) {
         pendingTools.push(msg);
-      } else if (msg.role === "tool") {
+      } else if (messageKind(msg) === "tool") {
         pendingTools.push(msg);
         continue;
-      } else if (msg.role === "assistant") {
+      } else if (messageKind(msg) === "assistant") {
         const isStreaming = msg.id === streamingMessageId;
         const assistantReasoning = msgReasoning(msg);
-        const hasVisibleAssistantContent = isStreaming || textOf(msg).trim().length > 0 || assistantReasoning.length > 0 || !!msg.media?.length || hasMediaBlocks(msg);
+        const hasVisibleAssistantContent = isStreaming || textOf(msg).trim().length > 0 || assistantReasoning.length > 0 || hasMediaBlocks(msg);
         if (!hasVisibleAssistantContent) continue;
         flushTools();
         const prevFrag = fragments[fragments.length - 1];
         if (prevFrag?.type === "explanation" && prevFrag.text === textOf(msg).trim() && !isStreaming) fragments.pop();
         if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
           shownReasonings.add(assistantReasoning);
-          fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at, elapsedMs: msg.reasoning_elapsed_ms });
+          fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at, elapsedMs: reasoningElapsedMsOf(msg) });
         }
         // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
         // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
         if (isNeedMoreWorkMessage(msg)) {
           const needMoreWorkBody = stripSummaryStatusMarker(textOf(msg)).trim();
           if (needMoreWorkBody || isStreaming) {
-            fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at, elapsedMs: msg.text_elapsed_ms });
+            fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at, elapsedMs: textElapsedMsOf(msg) });
           }
           continue;
         }
         fragments.push({ type: "assistant", msg, isStreaming });
-      } else if ((msg.role === "notice" || msg.role === "system") && textOf(msg).startsWith("[错误]")) {
+      } else if ((messageKind(msg) === "notice" || messageKind(msg) === "system") && textOf(msg).startsWith("[错误]")) {
         flushTools();
         fragments.push({ type: "error_system", msg });
-      } else if (msg.role === "system" && textOf(msg).startsWith("[重试]")) {
+      } else if (messageKind(msg) === "system" && textOf(msg).startsWith("[重试]")) {
         flushTools();
         fragments.push({ type: "retry_system", msg });
-      } else if ((msg.role === "system" || msg.role === "notice") && textOf(msg).startsWith("[上下文管理]")) {
+      } else if ((messageKind(msg) === "system" || messageKind(msg) === "notice") && textOf(msg).startsWith("[上下文管理]")) {
         if (textOf(msg).includes("正在压缩")) continue;
         flushTools();
         fragments.push({ type: "context_management", msg });
-      } else if (msg.role === "system" && (textOf(msg).startsWith("[Agent]") || textOf(msg).startsWith("[文件锁]"))) {
+      } else if (messageKind(msg) === "system" && (textOf(msg).startsWith("[Agent]") || textOf(msg).startsWith("[文件锁]"))) {
         flushTools();
         const category = textOf(msg).startsWith("[文件锁]") ? "lock" : "info";
         fragments.push({ type: "agent_event", category, content: textOf(msg), agentRoles: extractAgentRoles(textOf(msg), agents) });
-      } else if (msg.role === "system" || msg.role === "notice") {
+      } else if (messageKind(msg) === "system" || messageKind(msg) === "notice") {
         flushTools();
         fragments.push({ type: "other_system", msg });
       }
@@ -258,7 +267,7 @@ function AgentTurnView({
         userFrag = frag;
       } else if (frag.type === "error_system") {
         errorFrags.push(frag);
-      } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
+      } else if (frag.type === "assistant" && frag.msg.id === finalReplyId) {
         flushSection();
         summaryFrags.push(frag);
         blocks.push({ kind: "summary", frag });
@@ -300,10 +309,13 @@ function AgentTurnView({
       usageAnchorId,
       lastToolGroupKey,
     };
-  }, [messages, streamingMessageId, agents]);
+  }, [messages, streamingMessageId, agents, finalReplyId]);
 
   const argsOfToolMessage = (msg: MessageItem): unknown =>
-    msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
+    (() => {
+      const id = toolCallIdOf(msg);
+      return id ? toolCallArgs.get(id)?.arguments : undefined;
+    })();
 
   const renderWithHighlight = (msgId: string, text: string) => {
     if (!searchQuery) return text;
@@ -362,7 +374,9 @@ function AgentTurnView({
           );
         }
         if (frag.type === "user") {
-          const statusMeta = frag.msg.turn_status ? TURN_STATUS_META[frag.msg.turn_status] : null;
+          const userTurnStatus = turnStatusOf(frag.msg);
+          const userElapsedMs = elapsedMsOf(frag.msg);
+          const statusMeta = userTurnStatus ? TURN_STATUS_META[userTurnStatus] : null;
           return (
             <div key={frag.msg.id} className="flex flex-col items-end gap-0.5" title={formatMessageTime(frag.msg.created_at)}>
               <div className="flex justify-end">
@@ -372,7 +386,7 @@ function AgentTurnView({
                   </CollapsibleUserText>
                 </div>
               </div>
-              {(frag.msg.elapsed_ms != null || statusMeta) && (
+              {(userElapsedMs != null || statusMeta) && (
                 <div className="flex items-center gap-1.5 pr-1 text-[11px] text-muted-foreground/80 tabular-nums">
                   {statusMeta && (
                     <span className={`inline-flex items-center gap-1 ${statusMeta.className}`}>
@@ -380,7 +394,7 @@ function AgentTurnView({
                       {statusMeta.label}
                     </span>
                   )}
-                  {frag.msg.elapsed_ms != null && <span>⏱ {formatDuration(frag.msg.elapsed_ms)}</span>}
+                  {userElapsedMs != null && <span>⏱ {formatDuration(userElapsedMs)}</span>}
                 </div>
               )}
             </div>
@@ -389,7 +403,7 @@ function AgentTurnView({
         if (frag.type === "assistant") {
           const { msg, isStreaming } = frag;
           const visibleText = displayTextContent(msg);
-          const isReactPhase = msg.phase === "react";
+          const isReactPhase = !isFinalReply(msg);
           // 流式输出无条件剥离状态标记（[DONE]/[NEED_MORE_WORK]），
           // 即使后端 phase 尚未传播到也兜底，避免标记泄漏到界面。
           const visibleStreamingContent = stripSummaryStatusMarker(streamingContent);
@@ -427,7 +441,7 @@ function AgentTurnView({
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
                 <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
-              ) : visibleText || (msg.media && msg.media.length > 0) || hasMediaBlocks(msg) ? (
+              ) : visibleText || hasMediaBlocks(msg) ? (
                 <div>
                   <ContentMedia message={msg} />
                   {searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0
@@ -440,7 +454,7 @@ function AgentTurnView({
                   <MessageActions
                     messageId={msg.id}
                     text={visibleText}
-                    durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
+                    durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? (userFrag ? elapsedMsOf(userFrag.msg) : undefined)) : undefined}
                     usageMessages={msg.id === usageAnchorId ? messages : undefined}
                   />
                 </div>
@@ -584,7 +598,7 @@ function AgentTurnView({
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
-  if (!sameMessageRefs(prev.messages, next.messages) || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
+  if (!sameMessageRefs(prev.messages, next.messages) || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus || prev.finalReplyId !== next.finalReplyId) return false;
   const touchesStreamingMessage = hasMessage(prev.messages, prev.streamingMessageId) || hasMessage(prev.messages, next.streamingMessageId);
   if (!touchesStreamingMessage) return true;
   return prev.streamingMessageId === next.streamingMessageId && prev.streamingContent === next.streamingContent && prev.streamingReasoningContent === next.streamingReasoningContent;

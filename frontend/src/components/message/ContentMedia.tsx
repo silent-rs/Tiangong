@@ -22,11 +22,8 @@ export function ContentMedia({ message }: { message: MessageItem }) {
     }
     return [];
   });
-  const legacyMedia = message.media || [];
-  const allMedia = [
-    ...mediaBlocks,
-    ...legacyMedia,
-  ];
+  // 旧版扁平 `media` 字段已在读取时由后端迁移为内容块。
+  const allMedia = mediaBlocks;
   if (allMedia.length === 0) return null;
   return (
     <div className="space-y-2 my-2">

@@ -2,21 +2,15 @@ import { describe, expect, it } from 'vitest';
 import type { Message } from '@/api/tauri';
 import { groupMessages } from '@/components/message';
 import { findSearchMatches } from '@/utils/search';
+import { legacyMessage } from './legacyMessage';
 
 function message(
   id: string,
-  role: Message['role'],
+  role: string,
   text: string,
-  phase: Message['phase'] = 'normal',
+  phase = 'normal',
 ): Message {
-  return {
-    id,
-    role,
-    content: [{ type: 'text', text }],
-    reasoning_content: '',
-    phase,
-    created_at: '2026-07-19 00:00:00',
-  };
+  return legacyMessage({ id, role, content: text, phase, created_at: '2026-07-19 00:00:00' });
 }
 
 describe('压缩续接消息可见性', () => {

@@ -1,4 +1,5 @@
 import { textContent } from "@/api/tauri";
+import { durationMsOf, messageKind, toolIsError, toolNameOf } from "@/api/message";
 import type { MessageItem } from "./types";
 
 /**
@@ -333,7 +334,7 @@ export function parseToolTrace(content: string): ToolTraceInfo | null {
  */
 export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDisplayModel {
   const content = textContent(msg);
-  const toolName = msg.tool_name || "";
+  const toolName = toolNameOf(msg) || "";
 
   // 插件注入消息（数据来源：xxx）
   if (content.startsWith("数据来源：")) {
@@ -379,7 +380,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 
   // 系统 trace 消息（工具执行 [...]）：按 trace 内的工具名分类，展开为终端卡物料。
   const trace = parseToolTrace(content);
-  if (trace && msg.role === "system") {
+  if (trace && messageKind(msg) === "system") {
     const variant = classifyToolName(trace.toolName);
     const fallbackSummary =
       trace.command ?? trace.summary ?? firstNonEmptyLine(content) ?? trace.toolName;
@@ -407,8 +408,8 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 
   // 工具结果消息（role:'tool'）或兜底。
   const variant = classifyToolName(toolName);
-  const isError = msg.tool_result_is_error === true;
-  const outputText = (msg.role === "tool" ? stripToolResultHeader(content) : content) || null;
+  const isError = toolIsError(msg);
+  const outputText = (messageKind(msg) === "tool" ? stripToolResultHeader(content) : content) || null;
   const argSummary = summaryFromArgs(variant, args);
 
   let summary: string;
@@ -452,7 +453,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
     outputText,
     terminal,
     filePath,
-    durationMs: msg.duration_ms ?? null,
+    durationMs: durationMsOf(msg),
   };
 }
 

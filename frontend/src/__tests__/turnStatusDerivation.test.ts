@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { useStore } from '@/store/useStore';
+import { turnStatusOf } from '@/api/message';
 
 let sessionId = '';
 
@@ -11,7 +12,8 @@ function apply(event: Record<string, unknown>) {
 }
 
 function statusOf(id: string) {
-  return useStore.getState().messages.find((message) => message.id === id)?.turn_status;
+  const message = useStore.getState().messages.find((item) => item.id === id);
+  return message ? turnStatusOf(message) : undefined;
 }
 
 describe('用户消息的轮次状态（与后端同一规则推导）', () => {
@@ -50,11 +52,9 @@ describe('用户消息的轮次状态（与后端同一规则推导）', () => {
       messages: [
         {
           id: 'crashed',
-          role: 'user',
+          role: { type: 'user', turn_status: 'processing' },
           content: [{ type: 'text', text: '中断的任务' }],
-          reasoning_content: '',
           created_at: '2026-01-01 00:00:00',
-          turn_status: 'processing',
         },
       ],
     });

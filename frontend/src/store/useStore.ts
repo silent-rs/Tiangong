@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
+import { isUserInput, messageKind, reasoningOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import type {
   ContentBlock,
   LoadedSession,
@@ -11,6 +12,7 @@ import type {
   InputCache,
   StreamEvent,
   TokenStats,
+  TurnStatus,
   UserOutlineItem,
 } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
@@ -186,7 +188,7 @@ export interface AgentInfo {
 export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
   const agents = new Map<string, AgentInfo>();
   for (const msg of messages) {
-    if (msg.role !== 'system') continue;
+    if (messageKind(msg) !== 'system') continue;
     const text = textContent(msg);
     // [Agent] {label} ({role}) 已加入团队
     const createMatch = text.match(/^\[Agent\] (.+?) \((.+?)\) 已加入团队.*?id=([^\s]+)/);
@@ -226,7 +228,7 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
 }
 
 function isAgentSystemMessage(message: Message): boolean {
-  if (message.role !== 'system') return false;
+  if (messageKind(message) !== 'system') return false;
   const text = textContent(message);
   return text.startsWith('[Agent]') || text.startsWith('[文件锁]');
 }
@@ -239,21 +241,10 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
 
 function sameMessage(left: Message, right: Message): boolean {
   return left.id === right.id
-    && left.role === right.role
-    && sameJsonValue(left.content, right.content)
-    && left.reasoning_content === right.reasoning_content
-    && sameJsonValue(left.usage, right.usage)
-    && left.worker_id === right.worker_id
-    && left.tool_call_id === right.tool_call_id
-    && left.tool_name === right.tool_name
-    && left.tool_result_is_error === right.tool_result_is_error
-    && left.compact === right.compact
-    && left.phase === right.phase
     && left.created_at === right.created_at
-    && sameJsonValue(left.media, right.media)
-    && sameJsonValue(left.tool_calls, right.tool_calls)
-    && left.elapsed_ms === right.elapsed_ms
-    && left.turn_status === right.turn_status;
+    && sameJsonValue(left.role, right.role)
+    && sameJsonValue(left.content, right.content)
+    && sameJsonValue(left.meta, right.meta);
 }
 
 function mergeLoadedWithStreamMessages(
@@ -268,16 +259,25 @@ function mergeLoadedWithStreamMessages(
     if (!streamed) return loaded;
     const loadedText = textContent(loaded);
     const streamedText = textContent(streamed);
-    return {
-      ...loaded,
-      content: streamedText.length >= loadedText.length ? streamed.content : loaded.content,
-      reasoning_content: streamed.reasoning_content.length >= loaded.reasoning_content.length
-        ? streamed.reasoning_content
-        : loaded.reasoning_content,
-      tool_calls: streamed.tool_calls?.length ? streamed.tool_calls : loaded.tool_calls,
-      usage: streamed.usage ?? loaded.usage,
-      phase: streamed.phase || loaded.phase,
-    };
+    const content = streamedText.length >= loadedText.length ? streamed.content : loaded.content;
+    if (loaded.role?.type === 'assistant' && streamed.role?.type === 'assistant') {
+      const loadedReasoning = loaded.role.reasoning_content ?? '';
+      const streamedReasoning = streamed.role.reasoning_content ?? '';
+      return {
+        ...loaded,
+        content,
+        role: {
+          ...loaded.role,
+          reasoning_content: streamedReasoning.length >= loadedReasoning.length
+            ? streamedReasoning
+            : loadedReasoning,
+          tool_calls: streamed.role.tool_calls?.length ? streamed.role.tool_calls : loaded.role.tool_calls,
+          usage: streamed.role.usage ?? loaded.role.usage,
+        },
+      };
+    }
+    // 用户锚点：流式快照可能带最新的 final_reply / 轮次状态，以流式为准。
+    return { ...loaded, content, role: streamed.role ?? loaded.role };
   });
   for (const streamed of streamMessages) {
     if (!loadedIds.has(streamed.id)) merged.push(streamed);
@@ -302,10 +302,8 @@ function updateAssistantMessage(
   const index = messages.findIndex((message) => message.id === messageId);
   const current: Message = index >= 0 ? messages[index] : {
     id: messageId,
-    role: 'assistant',
+    role: { type: 'assistant' },
     content: [],
-    reasoning_content: '',
-    phase: 'normal',
     created_at: new Date().toISOString(),
   };
   const nextMessage = update(current);
@@ -325,21 +323,22 @@ function appendAssistantText(messages: Message[], event: StreamEvent): Message[]
     } else if (event.content) {
       content.push({ type: 'text', text: event.content });
     }
-    const phase = event.type === 'react_text'
-      ? 'react'
-      : event.type === 'summary_text'
-        ? 'summary'
-        : message.phase;
-    return { ...message, content, phase };
+    return { ...message, content };
   });
 }
 
 function appendAssistantReasoning(messages: Message[], event: StreamEvent): Message[] {
   if (!event.message_id || event.content == null) return messages;
-  return updateAssistantMessage(messages, event.message_id, (message) => ({
-    ...message,
-    reasoning_content: `${message.reasoning_content || ''}${event.content}`,
-  }));
+  return updateAssistantMessage(messages, event.message_id, (message) => {
+    if (message.role?.type !== 'assistant') return message;
+    return {
+      ...message,
+      role: {
+        ...message.role,
+        reasoning_content: `${message.role.reasoning_content || ''}${event.content}`,
+      },
+    };
+  });
 }
 
 function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
@@ -359,56 +358,60 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
   const existingIndex = messages.findIndex((message) => message.id === event.message_id);
   const existing = existingIndex >= 0 ? messages[existingIndex] : undefined;
   const turnBase = existingIndex >= 0 ? messages.slice(0, existingIndex) : messages;
+  // 与后端同一规则：最近的起轮消息仍为 processing 时是引导消息（不带状态），
+  // 否则起新轮。已加载的同 ID 消息以其持久化状态为准。
+  const existingStatus = existing ? turnStatusOf(existing) : undefined;
+  const turnStatus = existingStatus != null
+    ? existingStatus
+    : latestTurnStatus(turnBase) === 'processing' ? undefined : 'processing' as const;
   return upsertStreamMessage(existingIndex >= 0 ? messages.slice(0, existingIndex + 1) : messages, {
     id: event.message_id,
-    role: 'user',
+    role: {
+      ...(existing?.role?.type === 'user' ? existing.role : { type: 'user' as const }),
+      ...(turnStatus != null ? { turn_status: turnStatus } : {}),
+    },
     content: blocks,
-    reasoning_content: '',
     created_at: existing?.created_at || new Date().toISOString(),
-    // 与后端同一规则：最近的起轮消息仍为 processing 时是引导消息（不带状态），
-    // 否则起新轮。已加载的同 ID 消息以其持久化状态为准。
-    ...(existing?.turn_status != null
-      ? { turn_status: existing.turn_status }
-      : latestTurnStatus(turnBase) === 'processing' ? {} : { turn_status: 'processing' as const }),
+    ...(existing?.meta ? { meta: existing.meta } : {}),
   });
 }
 
 /** 最近一个带轮次状态的用户消息（起轮消息）的状态。 */
-function latestTurnStatus(messages: Message[]): Message['turn_status'] {
+function latestTurnStatus(messages: Message[]): TurnStatus | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role === 'user' && message.turn_status != null) return message.turn_status;
+    const status = turnStatusOf(messages[index]);
+    if (status != null) return status;
   }
   return undefined;
 }
 
 function applyToolCalls(messages: Message[], event: StreamEvent): Message[] {
   if (!event.message_id) return messages;
-  return updateAssistantMessage(messages, event.message_id, (message) => ({
-    ...message,
-    tool_calls: event.calls || [],
-    phase: 'react',
-  }));
+  return updateAssistantMessage(messages, event.message_id, (message) => (
+    message.role?.type === 'assistant'
+      ? { ...message, role: { ...message.role, tool_calls: event.calls || [] } }
+      : message
+  ));
 }
 
 function applyToolResult(messages: Message[], event: StreamEvent): Message[] {
   const toolCallId = event.tool_call_id || undefined;
   const existingIndex = toolCallId
-    ? messages.findIndex((message) => message.role === 'tool' && message.tool_call_id === toolCallId)
+    ? messages.findIndex((message) => toolCallIdOf(message) === toolCallId)
     : -1;
   const id = existingIndex >= 0
     ? messages[existingIndex].id
     : `stream-tool-result:${toolCallId || `${event.name || 'tool'}:${messages.length}`}`;
   const message: Message = {
     id,
-    role: 'tool',
+    role: {
+      type: 'tool',
+      tool_call_id: toolCallId,
+      tool_name: event.name,
+      is_error: event.ok === false,
+      duration_ms: event.duration_ms ?? undefined,
+    },
     content: [{ type: 'text', text: event.output || '' }],
-    reasoning_content: '',
-    tool_call_id: toolCallId,
-    tool_name: event.name,
-    tool_result_is_error: event.ok === false,
-    phase: 'react',
-    duration_ms: event.duration_ms ?? undefined,
     created_at: existingIndex >= 0
       ? messages[existingIndex].created_at
       : new Date().toISOString(),
@@ -428,9 +431,8 @@ function applyAgentLifecycle(messages: Message[], event: StreamEvent): Message[]
     : `[Agent] ${event.label} 状态变更: ${event.status || ''} id=${event.agent_id}`;
   return upsertStreamMessage(messages, {
     id,
-    role: 'system',
+    role: { type: 'system' },
     content: [{ type: 'text', text }],
-    reasoning_content: '',
     created_at: new Date().toISOString(),
   });
 }
@@ -444,17 +446,22 @@ function updateProcessingTurn(
 ): Message[] {
   let index = -1;
   for (let candidate = messages.length - 1; candidate >= 0; candidate -= 1) {
-    if (messages[candidate].role === 'user' && messages[candidate].turn_status === 'processing') {
+    if (turnStatusOf(messages[candidate]) === 'processing') {
       index = candidate;
       break;
     }
   }
   if (index < 0) return messages;
   const next = [...messages];
+  const target = next[index];
+  if (target.role?.type !== 'user') return messages;
   next[index] = {
-    ...next[index],
-    turn_status: status,
-    elapsed_ms: elapsedMs ?? next[index].elapsed_ms,
+    ...target,
+    role: {
+      ...target.role,
+      turn_status: status,
+      elapsed_ms: elapsedMs ?? target.role.elapsed_ms,
+    },
   };
   return next;
 }
@@ -623,7 +630,7 @@ function applyEventToSessionView(
       if (streamingMessageId) {
         const message = messages.find((item) => item.id === streamingMessageId);
         streamingContent = message ? textContent(message) : streamingContent;
-        streamingReasoningContent = message?.reasoning_content || '';
+        streamingReasoningContent = message ? reasoningOf(message) : '';
       }
       runStatus = 'executing';
       runSummary = '正在回复...';
@@ -634,7 +641,7 @@ function applyEventToSessionView(
       if (streamingMessageId) {
         const message = messages.find((item) => item.id === streamingMessageId);
         streamingContent = message ? textContent(message) : streamingContent;
-        streamingReasoningContent = message?.reasoning_content || '';
+        streamingReasoningContent = message ? reasoningOf(message) : '';
       }
       runStatus = 'executing';
       runSummary = '正在思考...';
@@ -644,7 +651,7 @@ function applyEventToSessionView(
         messages = upsertStreamMessage(messages, event.message);
         if (streamingMessageId === event.message.id) {
           streamingContent = textContent(event.message);
-          streamingReasoningContent = event.message.reasoning_content || '';
+          streamingReasoningContent = reasoningOf(event.message);
         }
       }
       break;
@@ -845,10 +852,7 @@ function applyEventToSessionView(
 
 /** 是否为轮次锚点（真正的用户提问），与后端 `is_turn_anchor`、前端分组规则一致。 */
 export function isTurnAnchor(message: Message): boolean {
-  return message.role === 'user'
-    && !message.worker_id
-    && message.phase !== 'hostinjected'
-    && message.phase !== 'compressedresume';
+  return isUserInput(message);
 }
 
 /**

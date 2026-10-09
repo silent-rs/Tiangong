@@ -1,22 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '@/api/tauri';
 import { groupMessages, liveRunStartIndex } from '@/components/message';
+import { legacyMessage, type LegacyMessageFields } from './legacyMessage';
 
 function message(
   id: string,
-  role: Message['role'],
+  role: string,
   text: string,
-  extra: Partial<Message> = {},
+  extra: LegacyMessageFields = {},
 ): Message {
-  return {
-    id,
-    role,
-    content: [{ type: 'text', text }],
-    reasoning_content: '',
-    phase: 'normal',
-    created_at: '2026-09-20 00:00:00',
-    ...extra,
-  };
+  return legacyMessage({ id, role, content: text, created_at: '2026-09-20 00:00:00', ...extra });
 }
 
 describe('当前执行链起始组下标（引导消息不结束轮次）', () => {

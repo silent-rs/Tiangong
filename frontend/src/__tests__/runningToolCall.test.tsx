@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AgentTurn } from '@/components/message/AgentTurn';
 import type { MessageItem } from '@/components/message/types';
+import { legacyMessage, type LegacyMessageFields } from './legacyMessage';
 
 /**
  * 执行中的工具调用（tool_calls 已发出、结果未到达）必须在活跃轮次中可见，
@@ -11,13 +12,13 @@ import type { MessageItem } from '@/components/message/types';
  */
 
 let seq = 0;
-const msg = (role: string, content: string, extra: Partial<MessageItem> = {}): MessageItem => ({
+const msg = (role: string, content: string, extra: LegacyMessageFields = {}): MessageItem => legacyMessage({
   id: `m${++seq}`,
   role,
   content,
   created_at: new Date(2026, 0, 1, 0, 0, seq).toISOString(),
   ...extra,
-}) as MessageItem;
+});
 
 const call = (id: string, name: string, prompt = '太一大战花仙子') => ({ id, name, arguments: { prompt, path: prompt } });
 

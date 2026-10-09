@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Session } from '@/api/tauri';
+import { reasoningOf } from '@/api/message';
 
 const mocks = vi.hoisted(() => {
   const eventHandlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
@@ -506,7 +507,7 @@ describe('MainApp StrictMode 异步监听注册竞态', () => {
     act(() => emitStreamReasoning(messageId, 'thinking'));
     await advance(16);
     message = useStore.getState().messages.find((item) => item.id === messageId);
-    expect(message?.reasoning_content).toBe('thinking');
+    expect(message ? reasoningOf(message) : undefined).toBe('thinking');
   });
 
   it('卸载后所有迟到的 unlisten 都被调用，且再发事件不改变状态', async () => {

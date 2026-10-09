@@ -1,4 +1,5 @@
 import { textContent } from "@/api/tauri";
+import { reasoningOf, toolIsError, toolNameOf, turnStatusOf, userSourceOf } from "@/api/message";
 import { resolveAttachmentUrl } from "@/utils/attachments";
 import {
   Brain,
@@ -64,7 +65,7 @@ export function formatToolDuration(ms: number): string {
 }
 
 export function msgReasoning(message: MessageItem): string {
-  return (message.reasoning_content ?? "").trim();
+  return reasoningOf(message).trim();
 }
 
 /** 总结阶段的状态标记，需在前端展示时剥离。 */
@@ -91,7 +92,7 @@ export function isNeedMoreWorkMessage(message: MessageItem): boolean {
  *
  * `[DONE]`/`[NEED_MORE_WORK]` 是 summary 阶段提示词要求 LLM 首行输出的
  * 完成度信号，属于控制标记而非正文。后端不应为显示而篡改正文（否则会污染后续喂回 LLM
- * 的上下文），剥离职责落在显示层。不依赖 `message.phase`，保证任何情况下都正确显示。
+ * 的上下文），剥离职责落在显示层。不依赖最终答复标记，保证任何情况下都正确显示。
  *
  * 注意：`[NEED_MORE_WORK]` 在 AgentTurn 的分组逻辑中已被单独拦截为 thinking 片段，
  * 不会走到这里；此处主要处理 `[DONE]`。
@@ -211,7 +212,7 @@ export function toolItemSucceeded(tool: MessageItem): boolean {
   // 只用后端透传的结构化字段判断；不要扫描正文文本。
   // read_file 的正文是被读取文件的原始内容，若文件里恰好含 "ok=false"
   // 字样（配置/日志/源码），基于文本的启发式会把它误判为失败。
-  return !tool.tool_result_is_error;
+  return !toolIsError(tool);
 }
 
 export function summarizeToolGroup(tools: MessageItem[]): string {
@@ -221,7 +222,7 @@ export function summarizeToolGroup(tools: MessageItem[]): string {
   const names = Array.from(
     new Set(
       tools
-        .map((tool) => tool.tool_name || getToolMessageMeta(tool).toolName || "")
+        .map((tool) => toolNameOf(tool) || getToolMessageMeta(tool).toolName || "")
         .filter(Boolean),
     ),
   );
@@ -235,8 +236,8 @@ export function summarizeToolGroup(tools: MessageItem[]): string {
 /** 从 Tool result 消息提取元数据（不依赖 System 摘要格式）。 */
 export function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
   const content = textContent(msg);
-  const toolName = msg.tool_name || "";
-  const isError = msg.tool_result_is_error;
+  const toolName = toolNameOf(msg) || "";
+  const isError = toolIsError(msg);
 
   // 注入消息格式（数据来源：xxx）
   if (content.startsWith("数据来源：")) {
@@ -306,26 +307,17 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
   type PendingGroup = {
     key: string;
     type: MessageGroup["type"];
-    worker_id?: string;
     msgs: MessageItem[];
   };
   const pending: PendingGroup[] = [];
   let currentAgentTurn: PendingGroup | null = null;
 
   for (const msg of messages) {
-    if (msg.phase === "compressedresume") continue;
-    // 宿主注入消息（RFC 0017）：role=User 但属助手轮次的过程片段，
-    // 归 agent_turn 组在 assistant 侧展示，不单独成组、不作用户锚点。
-    const hostInjected = msg.phase === "hostinjected";
-    if (msg.worker_id && !hostInjected) {
-      if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
-      const previous = pending[pending.length - 1];
-      if (previous?.type === "worker" && previous.worker_id === msg.worker_id) {
-        previous.msgs.push(msg);
-      } else {
-        pending.push({ key: `worker-${msg.worker_id}-${msg.id}`, type: "worker", worker_id: msg.worker_id, msgs: [msg] });
-      }
-    } else if (msg.role === "user" && !hostInjected) {
+    const source = userSourceOf(msg);
+    if (source === "compressed_resume") continue;
+    // 非真人来源的用户消息（宿主注入 RFC 0017、Agent 协作等）属助手轮次的
+    // 过程片段，归 agent_turn 组在 assistant 侧展示，不单独成组、不作用户锚点。
+    if (source === "human") {
       if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
       pending.push({ key: msg.id, type: "user", msgs: [msg] });
     } else {
@@ -353,7 +345,6 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
     const group: MessageGroup = {
       key: p.key,
       type: p.type,
-      ...(p.type === "worker" ? { worker_id: p.worker_id } : {}),
       messages: p.msgs,
     };
     nextCache.set(p.key, { refs: p.msgs, group });
@@ -388,26 +379,12 @@ export function liveRunStartIndex(groups: MessageGroup[]): number {
   for (let i = groups.length - 1; i >= 0; i -= 1) {
     const group = groups[i];
     if (group.type !== "user") continue;
-    const status = group.messages[0]?.turn_status;
+    const first = group.messages[0];
+    const status = first ? turnStatusOf(first) : undefined;
     if (status === "processing") return i;
     if (status != null) break;
   }
   return groups.length;
-}
-
-export function workerContentMessages(messages: MessageItem[]): MessageItem[] {
-  return messages.filter((m) => m.worker_id);
-}
-
-export function workerBelongsToAgent(
-  workerId: string | undefined,
-  role: string,
-  agentId: string | undefined,
-): boolean {
-  if (!workerId) return false;
-  if (agentId) return workerId === `agent:${role}:${agentId}`;
-  // 兼容没有持久 Agent ID 的旧会话。
-  return workerId.startsWith(`agent:${role}:`);
 }
 
 export function sameMessageRefs(left: MessageItem[], right: MessageItem[]): boolean {

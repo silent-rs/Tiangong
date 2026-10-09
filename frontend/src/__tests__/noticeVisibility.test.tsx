@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { AgentTurn } from '@/components/message/AgentTurn';
 import type { MessageItem } from '@/components/message/types';
+import { legacyMessage, type LegacyMessageFields } from './legacyMessage';
 
 /**
  * 通知（Notice）在消息列表的可见性与时序。
@@ -14,13 +15,13 @@ import type { MessageItem } from '@/components/message/types';
  */
 
 let seq = 0;
-const msg = (role: string, content: string, extra: Partial<MessageItem> = {}): MessageItem => ({
+const msg = (role: string, content: string, extra: LegacyMessageFields = {}): MessageItem => legacyMessage({
   id: `m${++seq}`,
   role,
   content,
   created_at: new Date(2026, 0, 1, 0, 0, seq).toISOString(),
   ...extra,
-}) as MessageItem;
+});
 
 describe('通知在消息列表中的可见性', () => {
   let container: HTMLDivElement;
@@ -40,7 +41,9 @@ describe('通知在消息列表中的可见性', () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  /** 模拟已成功收尾的轮次：最终答复为本轮最后一条助手消息（起点用户消息的 final_reply）。 */
   const render = async (messages: MessageItem[], isActive: boolean) => {
+    const finalReplyId = [...messages].reverse().find((item) => item.role.type === 'assistant')?.id;
     await act(async () => {
       root.render(
         <AgentTurn
@@ -49,6 +52,7 @@ describe('通知在消息列表中的可见性', () => {
           streamingContent=""
           streamingReasoningContent=""
           isActive={isActive}
+          finalReplyId={finalReplyId}
         />,
       );
     });
