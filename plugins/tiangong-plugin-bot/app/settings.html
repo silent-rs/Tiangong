@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bot</title>
+  <style>
+:root {
+  color-scheme: light;
+  --bg: hsl(var(--host-background, 210 20% 98%));
+  --surface: hsl(var(--host-card, 0 0% 100%));
+  --text: hsl(var(--host-foreground, 222 47% 11%));
+  --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
+  --border: hsl(var(--host-border, 214 18% 88%));
+  --primary: hsl(var(--host-primary, 222 47% 11%));
+  --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+  --accent: hsl(var(--host-accent, 210 40% 96%));
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.page { max-width: 960px; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.header h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+.desc, .hint { margin: 0; color: var(--muted); font-size: 12px; }
+.hint.error { color: hsl(0 84% 60%); }
+.card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.card-head { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.card-title { margin: 0; font-size: 14px; font-weight: 600; }
+.card-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.label { font-size: 13px; font-weight: 500; }
+.input {
+  height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); font: inherit;
+}
+.btn {
+  height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); font: inherit; cursor: pointer;
+}
+.btn-primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+.btn:disabled { opacity: .5; cursor: default; }
+.badge { padding: 2px 8px; border-radius: 999px; background: var(--accent); font-size: 12px; }
+.qr { width: 220px; height: 220px; background: #fff; border-radius: 6px; padding: 6px; }
+.qr svg { width: 100%; height: 100%; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+details summary { cursor: pointer; font-size: 13px; }
+.platform-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="header">
+      <h2>Bot</h2>
+      <p class="desc">一个插件对接飞书、QQ、微信：接收 IM 消息交给天工处理，Agent 可用插件工具向已授权的会话主动推送。需要天工 Server 运行。</p>
+      <p id="status-hint" class="hint"></p>
+    </div>
+    <div id="platforms"></div>
+    <section class="card">
+      <div class="card-head">
+        <p class="card-title">推送目标</p>
+        <p class="desc">与 Bot 对话过的私聊/群聊会自动授权为推送目标；删除后需再次对话才会恢复。QQ / 微信只能在最近一条入站消息的回复窗口内发送。</p>
+      </div>
+      <div class="card-body">
+        <table>
+          <thead><tr><th>平台</th><th>类型</th><th>状态</th><th>最近使用</th><th>编号</th><th></th></tr></thead>
+          <tbody id="targets"></tbody>
+        </table>
+        <p id="targets-empty" class="hint">暂无推送目标</p>
+        <div class="row"><button id="refresh-btn" class="btn" type="button">刷新</button></div>
+      </div>
+    </section>
+    <p id="message" class="hint"></p>
+  </main>
+  <script>
+const HOST_TIMEOUT_MS = 60000;
+let hostChannel = null;
+let hostReadyResolve = null;
+const hostReady = new Promise((resolve) => { hostReadyResolve = resolve; });
+let requestSequence = 0;
+const pollTimers = {};
+
+function applyHostContext(context) {
+  if (hostChannel && context.channel !== hostChannel) return;
+  hostChannel = context.channel;
+  const root = document.documentElement;
+  root.dataset.theme = context.theme === "dark" ? "dark" : "light";
+  Object.entries(context.tokens || {}).forEach(([name, value]) => {
+    if (typeof value === "string" && value) root.style.setProperty(`--host-${name}`, value);
+  });
+  if (typeof context.fontFamily === "string" && context.fontFamily) {
+    root.style.setProperty("--host-font-family", context.fontFamily);
+  }
+  hostReadyResolve?.();
+  hostReadyResolve = null;
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent || !event.data) return;
+  if (event.data.type === "tiangong_host_context" && typeof event.data.channel === "string") {
+    applyHostContext(event.data);
+  }
+});
+window.parent.postMessage({ type: "plugin_host_ready" }, "*");
+
+async function callSidecar(operation, payload = {}) {
+  if (!hostChannel) await hostReady;
+  const raw = await new Promise((resolve, reject) => {
+    const id = `bot-${Date.now()}-${++requestSequence}`;
+    const channel = hostChannel;
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", handler);
+      reject(new Error("插件请求超时"));
+    }, HOST_TIMEOUT_MS);
+    const handler = (event) => {
+      if (event.source !== window.parent || !event.data || event.data.id !== id || event.data.channel !== channel) return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", handler);
+      if (event.data.error) reject(new Error(String(event.data.error)));
+      else resolve(event.data.result ?? "");
+    };
+    window.addEventListener("message", handler);
+    window.parent.postMessage({
+      type: "plugin_call", channel, id,
+      method: `sidecar.${operation}`,
+      payload: JSON.stringify(payload),
+    }, "*");
+  });
+  return typeof raw === "string" && raw ? JSON.parse(raw) : raw;
+}
+
+const $ = (id) => document.getElementById(id);
+const CONNECTION_TEXT = {
+  running: "运行中",
+  no_server: "等待天工 Server",
+  unconfigured: "未配置",
+  standby: "待命（其他天工实例已持有连接）",
+  auxiliary: "未运行（宿主尚未启动主进程）",
+};
+// 各平台手工凭据字段与扫码提示。
+const PLATFORM_FORMS = {
+  feishu: {
+    scan: "请使用飞书扫码，并在手机上确认创建应用",
+    manual: "手工填写已有应用的 App ID / App Secret",
+    fields: [
+      { key: "app_id", label: "App ID" },
+      { key: "app_secret", label: "App Secret", secret: true },
+    ],
+  },
+  qq: {
+    scan: "请使用手机 QQ 扫码，并确认绑定机器人",
+    manual: "手工填写 QQ 机器人 AppID / ClientSecret",
+    fields: [
+      { key: "app_id", label: "AppID" },
+      { key: "app_secret", label: "ClientSecret", secret: true },
+    ],
+  },
+  weixin: {
+    scan: "请使用微信扫码，并在手机上确认授权",
+    manual: "手工填写 Bot Token",
+    fields: [{ key: "bot_token", label: "Bot Token", secret: true }],
+  },
+};
+const platformNames = {};
+
+function setMessage(text, error = false) {
+  $("message").textContent = text;
+  $("message").className = `hint${error ? " error" : ""}`;
+}
+
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "text") node.textContent = value;
+    else if (key === "hidden") node.hidden = Boolean(value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children) node.appendChild(child);
+  return node;
+}
+
+function stopPolling(platform) {
+  if (pollTimers[platform]) window.clearTimeout(pollTimers[platform]);
+  delete pollTimers[platform];
+}
+
+async function poll(platform, session) {
+  const qr = $(`qr-${platform}`);
+  const status = $(`qr-status-${platform}`);
+  const button = $(`qr-btn-${platform}`);
+  try {
+    const result = await callSidecar("provision_poll", { platform, session });
+    if (result.status === "pending") {
+      const wait = (result.retry_after || session.interval || 5) * 1000;
+      pollTimers[platform] = window.setTimeout(() => poll(platform, session), wait);
+      return;
+    }
+    qr.hidden = true;
+    button.disabled = false;
+    if (result.status === "success") {
+      status.textContent = "绑定成功";
+      await refresh();
+    } else if (result.status === "expired") {
+      status.textContent = "二维码已过期，请重新生成";
+    } else {
+      status.textContent = result.message || "授权失败";
+    }
+  } catch (error) {
+    button.disabled = false;
+    status.textContent = `轮询失败：${error.message || error}`;
+  }
+}
+
+async function beginScan(platform) {
+  stopPolling(platform);
+  const qr = $(`qr-${platform}`);
+  const status = $(`qr-status-${platform}`);
+  const button = $(`qr-btn-${platform}`);
+  button.disabled = true;
+  status.textContent = "正在生成二维码…";
+  try {
+    const session = await callSidecar("provision_begin", { platform });
+    qr.innerHTML = session.qr_svg;
+    qr.hidden = false;
+    status.textContent = PLATFORM_FORMS[platform]?.scan || "请扫码授权";
+    delete session.qr_svg;
+    pollTimers[platform] = window.setTimeout(
+      () => poll(platform, session),
+      (session.interval || 5) * 1000,
+    );
+  } catch (error) {
+    button.disabled = false;
+    status.textContent = `生成二维码失败：${error.message || error}`;
+  }
+}
+
+async function saveCredentials(platform) {
+  const form = PLATFORM_FORMS[platform];
+  const credentials = {};
+  for (const field of form.fields) {
+    const value = $(`field-${platform}-${field.key}`).value.trim();
+    if (!value) {
+      setMessage(`请填写 ${form.fields.map((item) => item.label).join(" 与 ")}`, true);
+      return;
+    }
+    credentials[field.key] = value;
+  }
+  try {
+    await callSidecar("save_credentials", { platform, credentials });
+    for (const field of form.fields) {
+      if (field.secret) $(`field-${platform}-${field.key}`).value = "";
+    }
+    setMessage(`${platformNames[platform] || platform} 凭据已保存`);
+    await refresh();
+  } catch (error) {
+    setMessage(`保存失败：${error.message || error}`, true);
+  }
+}
+
+async function clearCredentials(platform) {
+  try {
+    stopPolling(platform);
+    await callSidecar("clear_credentials", { platform });
+    setMessage(`已解除 ${platformNames[platform] || platform} 绑定`);
+    await refresh();
+  } catch (error) {
+    setMessage(`解除绑定失败：${error.message || error}`, true);
+  }
+}
+
+function buildPlatformCard(platform) {
+  const form = PLATFORM_FORMS[platform.id] || { manual: "手工填写凭据", fields: [] };
+  const clearButton = el("button", { id: `clear-btn-${platform.id}`, class: "btn", type: "button", text: "解除绑定" });
+  clearButton.onclick = () => clearCredentials(platform.id);
+  const scanButton = el("button", { id: `qr-btn-${platform.id}`, class: "btn btn-primary", type: "button", text: "扫码绑定" });
+  scanButton.onclick = () => beginScan(platform.id);
+  const saveButton = el("button", { class: "btn", type: "button", text: "保存" });
+  saveButton.onclick = () => saveCredentials(platform.id);
+  const fields = form.fields.map((field) =>
+    el("label", { class: "field" }, [
+      el("span", { class: "label", text: field.label }),
+      el("input", {
+        id: `field-${platform.id}-${field.key}`,
+        class: "input",
+        autocomplete: "off",
+        ...(field.secret ? { type: "password" } : {}),
+      }),
+    ]),
+  );
+  return el("section", { class: "card", id: `card-${platform.id}` }, [
+    el("div", { class: "card-head platform-head" }, [
+      el("p", { class: "card-title", text: platform.name }),
+      el("span", { id: `connection-${platform.id}`, class: "badge", text: "—" }),
+    ]),
+    el("div", { class: "card-body" }, [
+      el("div", { class: "row" }, [
+        el("span", { text: "账号：" }),
+        el("span", { id: `account-${platform.id}`, class: "badge", text: "未配置" }),
+        clearButton,
+      ]),
+      el("div", { class: "row" }, [
+        scanButton,
+        el("span", { id: `qr-status-${platform.id}`, class: "hint" }),
+      ]),
+      el("div", { id: `qr-${platform.id}`, class: "qr", hidden: true }),
+      el("details", {}, [
+        el("summary", { text: form.manual }),
+        el("div", { class: "card-body" }, [...fields, el("div", { class: "row" }, [saveButton])]),
+      ]),
+    ]),
+  ]);
+}
+
+function renderPlatforms(platforms) {
+  const container = $("platforms");
+  for (const platform of platforms) {
+    platformNames[platform.id] = platform.name;
+    if (!$(`card-${platform.id}`)) container.appendChild(buildPlatformCard(platform));
+    $(`account-${platform.id}`).textContent = platform.configured ? platform.account : "未配置";
+    $(`clear-btn-${platform.id}`).hidden = !platform.configured;
+    $(`connection-${platform.id}`).textContent =
+      CONNECTION_TEXT[platform.connection] || platform.connection;
+  }
+}
+
+function renderTargets(targets) {
+  const body = $("targets");
+  body.replaceChildren();
+  $("targets-empty").hidden = targets.length > 0;
+  for (const target of targets) {
+    const row = document.createElement("tr");
+    const kind = target.kind === "group" ? "群聊" : "私聊";
+    const cells = [
+      platformNames[target.platform] || target.platform,
+      kind,
+      target.limitation || target.availability || "",
+      target.last_seen_at,
+      target.target_id,
+    ];
+    for (const text of cells) row.appendChild(el("td", { text: text || "" }));
+    const button = el("button", { class: "btn", type: "button", text: "删除" });
+    button.onclick = async () => {
+      try {
+        await callSidecar("delete_push_target", { target_id: target.target_id });
+        await refresh();
+      } catch (error) {
+        setMessage(String(error.message || error), true);
+      }
+    };
+    row.appendChild(el("td", {}, [button]));
+    body.appendChild(row);
+  }
+}
+
+async function refresh() {
+  try {
+    const status = await callSidecar("status");
+    $("status-hint").textContent = status.server_available
+      ? ""
+      : "天工 Server 未运行：请在设置中开启 Server（或运行 tiangong server），Bot 才能接收消息。";
+    renderPlatforms(status.platforms || []);
+    renderTargets(status.targets || []);
+  } catch (error) {
+    setMessage(`读取状态失败：${error.message || error}`, true);
+  }
+}
+
+$("refresh-btn").onclick = refresh;
+refresh();
+  </script>
+</body>
+</html>

@@ -348,6 +348,20 @@ const SUBAGENT: PluginConfig = PluginConfig {
     protocol_manifest: Some("plugins/tiangong-plugin-subagent/protocol/Cargo.toml"),
 };
 
+const BOT: PluginConfig = PluginConfig {
+    id: "bot",
+    name: "Bot",
+    description: "飞书 / QQ / 微信机器人：接收消息转发到天工，并提供主动推送工具",
+    protocol_crate: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: Some("tiangong-plugin-bot-sidecar"),
+    sidecar_artifact: Some("tiangong-bot-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-bot",
+    plugin_manifest: "plugins/tiangong-plugin-bot/plugin.json",
+    protocol_manifest: None,
+};
+
 fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
         "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator" => {
@@ -359,6 +373,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "coding" => &["app/index.html"],
         "computer-use" => &["app/restore-window.html"],
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
+        "bot" => &["app/settings.html"],
         "volcengine" => &[
             "app/settings.html",
             "app/voice-input.html",
@@ -393,6 +408,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "browser" => Ok(&BROWSER),
         "terminal" => Ok(&TERMINAL),
         "subagent" => Ok(&SUBAGENT),
+        "bot" => Ok(&BOT),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }

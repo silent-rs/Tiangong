@@ -1,0 +1,55 @@
+[package]
+name = "tiangong-plugin-bot-sidecar"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Bot 插件 sidecar：对接飞书 / QQ / 微信，接收消息转发到天工并提供主动推送工具"
+publish = false
+
+[[bin]]
+name = "tiangong-bot-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+chrono = { workspace = true, features = ["clock", "std"] }
+scru128 = { workspace = true }
+fs2 = { workspace = true }
+# 飞书 IM 长连接 SDK（只用 websocket 收事件；发送走 HTTP API）
+openlark = { version = "0.18", default-features = false, features = ["auth", "communication", "websocket"] }
+openlark-client = { version = "0.18", default-features = false, features = ["websocket"] }
+# openlark 内部使用 reqwest 0.12；本 crate 的 HTTP 调用统一走 workspace 的 reqwest 0.13
+reqwest = { workspace = true, features = ["json", "multipart", "rustls", "form", "query"] }
+# 飞书图片 data URI 编解码
+base64 = { workspace = true }
+# 推送幂等记录文件名摘要
+sha2 = { workspace = true }
+# 扫码授权二维码渲染为 SVG（设置页直接展示，无需前端二维码库）
+qrcode = { workspace = true }
+# openlark websocket 依赖 rustls，需要进程内安装 ring 加密后端
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+# QQ 开放平台 WebSocket 网关
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { workspace = true }
+url = { workspace = true }
+# QQ 扫码凭据解密（AES-256-GCM）与富媒体分片上传摘要（MD5 / SHA1）
+aes-gcm = "0.10"
+md-5 = "0.10"
+sha1 = "0.10"
+hex = { workspace = true }
+# 微信 iLink 请求随机 UIN 与媒体 AES-128-ECB 加解密
+rand = "0.8"
+aes = "0.8"
+ecb = "0.1"
+cipher = "0.4"
+
+[dev-dependencies]
+tempfile = { workspace = true }
