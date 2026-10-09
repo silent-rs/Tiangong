@@ -15,6 +15,9 @@
   --primary: hsl(var(--host-primary, 222 47% 11%));
   --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
   --accent: hsl(var(--host-accent, 210 40% 96%));
+  --secondary: hsl(var(--host-muted, 210 40% 96%));
+  --destructive: hsl(var(--host-destructive, 0 84% 60%));
+  --success: hsl(var(--host-status-success, 142 71% 35%));
 }
 :root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -27,67 +30,203 @@ body {
   font-size: 14px;
   line-height: 1.5;
 }
-.page { max-width: 960px; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-.header h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
-.desc, .hint { margin: 0; color: var(--muted); font-size: 12px; }
-.hint.error { color: hsl(0 84% 60%); }
-.card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.card-head { padding: 14px 16px; border-bottom: 1px solid var(--border); }
-.card-title { margin: 0; font-size: 14px; font-weight: 600; }
-.card-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+svg.icon { width: 14px; height: 14px; flex-shrink: 0; }
+.page { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.toolbar h3 { margin: 0; font-size: 18px; font-weight: 500; }
+.hint { margin: 0; color: var(--muted); font-size: 12px; }
+.alert {
+  display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; font-size: 13px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 40%, transparent);
+  background: color-mix(in srgb, var(--destructive) 6%, transparent); color: var(--destructive);
+}
+.alert.info {
+  border-color: var(--border); background: var(--accent); color: var(--text);
+}
+.list { display: flex; flex-direction: column; gap: 8px; }
+.card {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: 8px 12px; padding: 12px 16px;
+}
+.card .bot-icon { width: 20px; height: 20px; color: var(--muted); }
+.card-main { min-width: 0; }
+.card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.card-name { font-weight: 500; }
+.card-desc {
+  margin-top: 2px; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+@media (max-width: 720px) {
+  .card { grid-template-columns: auto minmax(0, 1fr); }
+  .actions { grid-column: span 2; }
+}
+.badge {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 500; white-space: nowrap;
+  background: var(--secondary); color: var(--text); border: 1px solid transparent;
+}
+.badge.outline { background: transparent; border-color: var(--border); }
+.badge.success { background: #16a34a; color: #fff; }
+.badge.danger { background: var(--destructive); color: #fff; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  height: 28px; padding: 0 8px; border-radius: 6px; font: inherit; font-size: 12px;
+  border: 1px solid transparent; background: transparent; color: var(--text); cursor: pointer;
+}
+.btn:hover { background: var(--accent); }
+.btn.outline { border-color: var(--border); background: var(--surface); }
+.btn.outline:hover { background: var(--accent); }
+.btn.primary { background: var(--primary); color: var(--primary-foreground); }
+.btn.primary:hover { opacity: .9; background: var(--primary); }
+.btn.start { color: #10b981; }
+.btn.start:hover { background: rgba(16, 185, 129, .1); }
+.btn.stop { color: #ef4444; }
+.btn.stop:hover { background: rgba(239, 68, 68, .1); }
+.btn.danger:hover { background: color-mix(in srgb, var(--destructive) 20%, transparent); color: var(--destructive); }
+.btn:disabled { opacity: .5; cursor: default; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+dialog {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text);
+  padding: 20px; width: min(520px, calc(100vw - 32px)); max-height: 85vh;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .3);
+}
+dialog.wide { width: min(880px, calc(100vw - 32px)); }
+dialog.medium { width: min(640px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog[open] { display: flex; flex-direction: column; gap: 16px; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog-title { margin: 0; font-size: 16px; font-weight: 600; }
+.dialog-foot { display: flex; justify-content: flex-end; gap: 8px; }
+.section { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 16px 0; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .label { font-size: 13px; font-weight: 500; }
+.required { color: var(--destructive); margin-left: 4px; }
 .input {
   height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--text); font: inherit;
+  background: transparent; color: var(--text); font: inherit;
 }
-.btn {
-  height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--surface); color: var(--text); font: inherit; cursor: pointer;
-}
-.btn-primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
-.btn:disabled { opacity: .5; cursor: default; }
-.badge { padding: 2px 8px; border-radius: 999px; background: var(--accent); font-size: 12px; }
-.qr { width: 220px; height: 220px; background: #fff; border-radius: 6px; padding: 6px; }
+.qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding-top: 4px; }
+.qr { width: 208px; height: 208px; background: #fff; border-radius: 6px; padding: 8px; }
 .qr svg { width: 100%; height: 100%; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
-details summary { cursor: pointer; font-size: 13px; }
-.platform-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.status-line { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.status-line.error { justify-content: flex-start; color: var(--destructive); font-size: 13px; }
+.log {
+  margin: 0; height: min(60vh, 520px); overflow: auto; padding: 16px; border-radius: 6px;
+  border: 1px solid var(--border); background: #09090b; color: #f4f4f5;
+  font: 12px/20px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word;
+}
+.targets { max-height: min(55vh, 480px); overflow: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.target {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px;
+  padding: 14px 4px; border-bottom: 1px solid var(--border);
+}
+.target:last-child { border-bottom: none; }
+.target-label { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { min-height: 200px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; }
+#toast {
+  position: fixed; right: 16px; bottom: 16px; max-width: 360px; padding: 10px 14px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface); box-shadow: 0 6px 20px rgba(0, 0, 0, .25);
+  font-size: 13px;
+}
+#toast.error { border-color: var(--destructive); color: var(--destructive); }
   </style>
 </head>
 <body>
   <main class="page">
-    <div class="header">
-      <h2>Bot</h2>
-      <p class="desc">一个插件对接飞书、QQ、微信：接收 IM 消息交给天工处理，Agent 可用插件工具向已授权的会话主动推送。需要天工 Server 运行。</p>
-      <p id="status-hint" class="hint"></p>
+    <div class="toolbar">
+      <h3>移动端控制</h3>
+      <button id="refresh-btn" class="btn outline" type="button" aria-label="刷新 Bot 列表"></button>
     </div>
-    <div id="platforms"></div>
-    <section class="card">
-      <div class="card-head">
-        <p class="card-title">推送目标</p>
-        <p class="desc">与 Bot 对话过的私聊/群聊会自动授权为推送目标；删除后需再次对话才会恢复。QQ / 微信只能在最近一条入站消息的回复窗口内发送。</p>
-      </div>
-      <div class="card-body">
-        <table>
-          <thead><tr><th>平台</th><th>类型</th><th>状态</th><th>最近使用</th><th>编号</th><th></th></tr></thead>
-          <tbody id="targets"></tbody>
-        </table>
-        <p id="targets-empty" class="hint">暂无推送目标</p>
-        <div class="row"><button id="refresh-btn" class="btn" type="button">刷新</button></div>
-      </div>
+    <p class="hint">一个插件对接飞书、QQ、微信：接收 IM 消息交给天工处理，Agent 可用插件工具向已授权的会话主动推送。</p>
+    <div id="server-alert" class="alert" role="alert" hidden></div>
+    <div id="load-error" class="alert" role="alert" hidden></div>
+    <section class="list" id="platforms">
+      <div class="card"><div></div><div class="hint">加载中...</div></div>
     </section>
-    <p id="message" class="hint"></p>
   </main>
+
+  <!-- 配置对话框：扫码 / 手工填写 -->
+  <dialog id="config-dialog">
+    <div class="dialog-head">
+      <p class="dialog-title" id="config-title"></p>
+    </div>
+    <p id="config-migrated" class="hint" hidden></p>
+    <div class="section">
+      <div class="section-head">
+        <div>
+          <div class="label">扫码配置</div>
+          <div class="hint">扫码后由 Bot 自动保存配置并连接</div>
+        </div>
+        <div class="row actions">
+          <button id="manual-btn" class="btn" type="button" hidden>手动输入</button>
+          <button id="scan-btn" class="btn primary" type="button"></button>
+        </div>
+      </div>
+      <div id="qr-wrap" class="qr-wrap" hidden>
+        <div id="qr" class="qr"></div>
+        <div class="status-line"><span data-icon="loader" class="spin-holder"></span><span id="scan-hint"></span></div>
+      </div>
+      <div id="scan-busy" class="status-line" style="padding: 24px 0" hidden></div>
+      <div id="scan-error" class="status-line error" hidden></div>
+    </div>
+    <div id="manual-fields" class="list"></div>
+    <div class="dialog-foot">
+      <button id="config-cancel" class="btn outline" type="button" style="padding: 0 12px">取消</button>
+      <button id="config-save" class="btn primary" type="button" style="padding: 0 12px">保存</button>
+    </div>
+  </dialog>
+
+  <!-- 日志对话框 -->
+  <dialog id="log-dialog" class="wide">
+    <div class="dialog-head">
+      <p class="dialog-title">Bot 日志</p>
+      <div class="actions">
+        <span id="log-truncated" class="hint" style="align-self: center" hidden>仅显示最近内容</span>
+        <button id="log-refresh" class="btn" type="button" aria-label="刷新日志"></button>
+        <button class="btn" type="button" data-close>关闭</button>
+      </div>
+    </div>
+    <pre id="log-content" class="log"></pre>
+  </dialog>
+
+  <!-- 推送授权对话框 -->
+  <dialog id="targets-dialog" class="medium">
+    <div class="dialog-head">
+      <p class="dialog-title" id="targets-title"></p>
+      <div class="actions">
+        <button id="targets-refresh" class="btn" type="button" aria-label="刷新推送目标"></button>
+        <button class="btn" type="button" data-close>关闭</button>
+      </div>
+    </div>
+    <p class="hint">与 Bot 对话过的私聊/群聊会自动授权为推送目标；删除后需再次对话才会恢复。QQ / 微信只能在最近一条入站消息的回复窗口内发送。</p>
+    <div id="targets-error" class="alert" role="alert" hidden></div>
+    <div id="targets" class="targets"></div>
+  </dialog>
+
+  <!-- 确认对话框（iframe 沙箱不允许 window.confirm） -->
+  <dialog id="confirm-dialog">
+    <p class="dialog-title">请确认</p>
+    <p id="confirm-text" style="margin: 0; font-size: 13px"></p>
+    <div class="dialog-foot">
+      <button id="confirm-no" class="btn outline" type="button" style="padding: 0 12px">取消</button>
+      <button id="confirm-yes" class="btn primary" type="button" style="padding: 0 12px">确定</button>
+    </div>
+  </dialog>
+
+  <div id="toast" hidden></div>
+
   <script>
+// ── 宿主桥接 ──
 const HOST_TIMEOUT_MS = 60000;
 let hostChannel = null;
 let hostReadyResolve = null;
 const hostReady = new Promise((resolve) => { hostReadyResolve = resolve; });
 let requestSequence = 0;
-const pollTimers = {};
 
 function applyHostContext(context) {
   if (hostChannel && context.channel !== hostChannel) return;
@@ -138,43 +277,31 @@ async function callSidecar(operation, payload = {}) {
   return typeof raw === "string" && raw ? JSON.parse(raw) : raw;
 }
 
+// ── 小工具 ──
 const $ = (id) => document.getElementById(id);
-const CONNECTION_TEXT = {
-  running: "运行中",
-  no_server: "等待天工 Server",
-  unconfigured: "未配置",
-  standby: "待命（其他天工实例已持有连接）",
-  auxiliary: "未运行（宿主尚未启动主进程）",
-};
-// 各平台手工凭据字段与扫码提示。
-const PLATFORM_FORMS = {
-  feishu: {
-    scan: "请使用飞书扫码，并在手机上确认创建应用",
-    manual: "手工填写已有应用的 App ID / App Secret",
-    fields: [
-      { key: "app_id", label: "App ID" },
-      { key: "app_secret", label: "App Secret", secret: true },
-    ],
-  },
-  qq: {
-    scan: "请使用手机 QQ 扫码，并确认绑定机器人",
-    manual: "手工填写 QQ 机器人 AppID / ClientSecret",
-    fields: [
-      { key: "app_id", label: "AppID" },
-      { key: "app_secret", label: "ClientSecret", secret: true },
-    ],
-  },
-  weixin: {
-    scan: "请使用微信扫码，并在手机上确认授权",
-    manual: "手工填写 Bot Token",
-    fields: [{ key: "bot_token", label: "Bot Token", secret: true }],
-  },
-};
-const platformNames = {};
+const errorText = (error) => String(error?.message || error);
 
-function setMessage(text, error = false) {
-  $("message").textContent = text;
-  $("message").className = `hint${error ? " error" : ""}`;
+// lucide 图标（与宿主旧版 Bot 页一致）。
+const ICON_PATHS = {
+  bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  play: '<polygon points="6 3 20 12 6 21 6 3" fill="currentColor"/>',
+  square: '<rect width="18" height="18" x="3" y="3" rx="2" fill="currentColor"/>',
+  file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  message: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M13 8H7"/><path d="M17 12H7"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+  unlink: '<path d="m18.84 12.25 1.72-1.71h-.02a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a5.004 5.004 0 0 0 .12 7.07 5.006 5.006 0 0 0 6.95 0l1.71-1.71"/><line x1="8" x2="8" y1="2" y2="5"/><line x1="2" x2="5" y1="8" y2="8"/><line x1="16" x2="16" y1="19" y2="22"/><line x1="19" x2="22" y1="16" y2="16"/>',
+  qr: '<rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/>',
+  loader: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+  alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+};
+
+function icon(name, extraClass = "") {
+  const span = document.createElement("span");
+  span.style.display = "inline-flex";
+  span.innerHTML = `<svg class="icon ${extraClass}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name]}</svg>`;
+  return span.firstElementChild;
 }
 
 function el(tag, attrs = {}, children = []) {
@@ -182,215 +309,442 @@ function el(tag, attrs = {}, children = []) {
   for (const [key, value] of Object.entries(attrs)) {
     if (key === "text") node.textContent = value;
     else if (key === "hidden") node.hidden = Boolean(value);
+    else if (key === "onclick") node.onclick = value;
+    else if (key === "disabled") node.disabled = Boolean(value);
     else node.setAttribute(key, value);
   }
-  for (const child of children) node.appendChild(child);
+  for (const child of children) {
+    if (child) node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+  }
   return node;
 }
 
-function stopPolling(platform) {
-  if (pollTimers[platform]) window.clearTimeout(pollTimers[platform]);
-  delete pollTimers[platform];
+function button(label, iconName, className, onclick, title) {
+  return el("button", {
+    class: `btn ${className}`, type: "button", onclick,
+    ...(title ? { title, "aria-label": title } : {}),
+  }, [iconName ? icon(iconName) : null, label]);
 }
 
-async function poll(platform, session) {
-  const qr = $(`qr-${platform}`);
-  const status = $(`qr-status-${platform}`);
-  const button = $(`qr-btn-${platform}`);
-  try {
-    const result = await callSidecar("provision_poll", { platform, session });
-    if (result.status === "pending") {
-      const wait = (result.retry_after || session.interval || 5) * 1000;
-      pollTimers[platform] = window.setTimeout(() => poll(platform, session), wait);
-      return;
-    }
-    qr.hidden = true;
-    button.disabled = false;
-    if (result.status === "success") {
-      status.textContent = "绑定成功";
-      await refresh();
-    } else if (result.status === "expired") {
-      status.textContent = "二维码已过期，请重新生成";
-    } else {
-      status.textContent = result.message || "授权失败";
-    }
-  } catch (error) {
-    button.disabled = false;
-    status.textContent = `轮询失败：${error.message || error}`;
-  }
+function setButtonContent(node, iconName, label, spinning = false) {
+  node.replaceChildren(icon(iconName, spinning ? "spin" : ""), document.createTextNode(label));
 }
 
-async function beginScan(platform) {
-  stopPolling(platform);
-  const qr = $(`qr-${platform}`);
-  const status = $(`qr-status-${platform}`);
-  const button = $(`qr-btn-${platform}`);
-  button.disabled = true;
-  status.textContent = "正在生成二维码…";
-  try {
-    const session = await callSidecar("provision_begin", { platform });
-    qr.innerHTML = session.qr_svg;
-    qr.hidden = false;
-    status.textContent = PLATFORM_FORMS[platform]?.scan || "请扫码授权";
-    delete session.qr_svg;
-    pollTimers[platform] = window.setTimeout(
-      () => poll(platform, session),
-      (session.interval || 5) * 1000,
-    );
-  } catch (error) {
-    button.disabled = false;
-    status.textContent = `生成二维码失败：${error.message || error}`;
-  }
+let toastTimer = null;
+function toast(text, error = false) {
+  const node = $("toast");
+  node.textContent = text;
+  node.className = error ? "error" : "";
+  node.hidden = false;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => { node.hidden = true; }, error ? 6000 : 3000);
 }
 
-async function saveCredentials(platform) {
-  const form = PLATFORM_FORMS[platform];
-  const credentials = {};
-  for (const field of form.fields) {
-    const value = $(`field-${platform}-${field.key}`).value.trim();
-    if (!value) {
-      setMessage(`请填写 ${form.fields.map((item) => item.label).join(" 与 ")}`, true);
-      return;
-    }
-    credentials[field.key] = value;
-  }
-  try {
-    await callSidecar("save_credentials", { platform, credentials });
-    for (const field of form.fields) {
-      if (field.secret) $(`field-${platform}-${field.key}`).value = "";
-    }
-    setMessage(`${platformNames[platform] || platform} 凭据已保存`);
-    await refresh();
-  } catch (error) {
-    setMessage(`保存失败：${error.message || error}`, true);
-  }
+function confirmAction(text) {
+  const dialog = $("confirm-dialog");
+  $("confirm-text").textContent = text;
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      dialog.removeEventListener("close", onClose);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onClose = () => finish(false);
+    $("confirm-yes").onclick = () => finish(true);
+    $("confirm-no").onclick = () => finish(false);
+    dialog.addEventListener("close", onClose);
+    dialog.showModal();
+  });
 }
 
-async function clearCredentials(platform) {
-  try {
-    stopPolling(platform);
-    await callSidecar("clear_credentials", { platform });
-    setMessage(`已解除 ${platformNames[platform] || platform} 绑定`);
-    await refresh();
-  } catch (error) {
-    setMessage(`解除绑定失败：${error.message || error}`, true);
-  }
+function showAlert(node, text) {
+  node.replaceChildren(icon("alert"), el("span", { text }));
+  node.hidden = !text;
 }
 
-function buildPlatformCard(platform) {
-  const form = PLATFORM_FORMS[platform.id] || { manual: "手工填写凭据", fields: [] };
-  const clearButton = el("button", { id: `clear-btn-${platform.id}`, class: "btn", type: "button", text: "解除绑定" });
-  clearButton.onclick = () => clearCredentials(platform.id);
-  const scanButton = el("button", { id: `qr-btn-${platform.id}`, class: "btn btn-primary", type: "button", text: "扫码绑定" });
-  scanButton.onclick = () => beginScan(platform.id);
-  const saveButton = el("button", { class: "btn", type: "button", text: "保存" });
-  saveButton.onclick = () => saveCredentials(platform.id);
-  const fields = form.fields.map((field) =>
-    el("label", { class: "field" }, [
-      el("span", { class: "label", text: field.label }),
-      el("input", {
-        id: `field-${platform.id}-${field.key}`,
-        class: "input",
-        autocomplete: "off",
-        ...(field.secret ? { type: "password" } : {}),
-      }),
-    ]),
-  );
-  return el("section", { class: "card", id: `card-${platform.id}` }, [
-    el("div", { class: "card-head platform-head" }, [
-      el("p", { class: "card-title", text: platform.name }),
-      el("span", { id: `connection-${platform.id}`, class: "badge", text: "—" }),
-    ]),
-    el("div", { class: "card-body" }, [
-      el("div", { class: "row" }, [
-        el("span", { text: "账号：" }),
-        el("span", { id: `account-${platform.id}`, class: "badge", text: "未配置" }),
-        clearButton,
-      ]),
-      el("p", { id: `migrated-${platform.id}`, class: "hint", hidden: true }),
-      el("div", { class: "row" }, [
-        scanButton,
-        el("span", { id: `qr-status-${platform.id}`, class: "hint" }),
-      ]),
-      el("div", { id: `qr-${platform.id}`, class: "qr", hidden: true }),
-      el("details", {}, [
-        el("summary", { text: form.manual }),
-        el("div", { class: "card-body" }, [...fields, el("div", { class: "row" }, [saveButton])]),
-      ]),
-    ]),
-  ]);
-}
+// ── 平台定义 ──
+const CONNECTION_BADGE = {
+  running: ["运行中", "success"],
+  stopped: ["已停止", ""],
+  no_server: ["等待 Server", ""],
+  unconfigured: ["待配置", "outline"],
+  standby: ["待命", ""],
+  auxiliary: ["未运行", ""],
+};
+const CONNECTION_DESC = {
+  no_server: "天工 Server 未运行，开启后自动连接",
+  standby: "另一个天工实例已持有该平台连接",
+  auxiliary: "宿主尚未启动 Bot 主进程",
+};
+const PLATFORM_FORMS = {
+  feishu: {
+    scan: "请使用飞书扫码，并在手机上确认创建应用",
+    fields: [
+      { key: "app_id", label: "App ID" },
+      { key: "app_secret", label: "App Secret", secret: true },
+    ],
+  },
+  qq: {
+    scan: "请使用手机 QQ 扫码，并确认绑定机器人",
+    fields: [
+      { key: "app_id", label: "AppID" },
+      { key: "app_secret", label: "ClientSecret", secret: true },
+    ],
+  },
+  weixin: {
+    scan: "请使用微信扫码，并在手机上确认授权",
+    fields: [{ key: "bot_token", label: "Bot Token", secret: true }],
+  },
+};
 
-function renderPlatforms(platforms) {
-  const container = $("platforms");
-  for (const platform of platforms) {
-    platformNames[platform.id] = platform.name;
-    if (!$(`card-${platform.id}`)) container.appendChild(buildPlatformCard(platform));
-    $(`account-${platform.id}`).textContent = platform.configured ? platform.account : "未配置";
-    $(`clear-btn-${platform.id}`).hidden = !platform.configured;
-    $(`connection-${platform.id}`).textContent =
-      CONNECTION_TEXT[platform.connection] || platform.connection;
-    const migrated = $(`migrated-${platform.id}`);
-    migrated.textContent = migrationText(platform.migrated_from);
-    migrated.hidden = !platform.migrated_from;
-  }
+let platforms = [];
+let targets = [];
+let loading = false;
+
+function platformName(id) {
+  return platforms.find((item) => item.id === id)?.name || id;
 }
 
 // 旧版 Bot 迁移说明：来源实例、凭据来源与未迁移的同平台实例。
 function migrationText(marker) {
   if (!marker) return "";
   const source = marker.credentials === "manual" ? "手工配置" : "扫码凭据";
-  const parts = [`已从旧版 Bot「${marker.source}」迁移${source}`];
-  parts.push(marker.targets ? "及推送目标" : "（无推送目标）");
-  let text = parts.join("");
+  let text = `已从旧版 Bot「${marker.source}」迁移${source}${marker.targets ? "及推送目标" : "（无推送目标）"}`;
   if (marker.skipped && marker.skipped.length > 0) {
     text += `；同平台的其他旧实例未迁移：${marker.skipped.join("、")}`;
   }
   return text;
 }
 
-function renderTargets(targets) {
-  const body = $("targets");
-  body.replaceChildren();
-  $("targets-empty").hidden = targets.length > 0;
-  for (const target of targets) {
-    const row = document.createElement("tr");
-    const kind = target.kind === "group" ? "群聊" : "私聊";
-    const cells = [
-      platformNames[target.platform] || target.platform,
-      kind,
-      target.limitation || target.availability || "",
-      target.last_seen_at,
-      target.target_id,
-    ];
-    for (const text of cells) row.appendChild(el("td", { text: text || "" }));
-    const button = el("button", { class: "btn", type: "button", text: "删除" });
-    button.onclick = async () => {
-      try {
-        await callSidecar("delete_push_target", { target_id: target.target_id });
-        await refresh();
-      } catch (error) {
-        setMessage(String(error.message || error), true);
-      }
-    };
-    row.appendChild(el("td", {}, [button]));
-    body.appendChild(row);
+// ── 列表 ──
+function renderPlatforms() {
+  const container = $("platforms");
+  container.replaceChildren();
+  for (const platform of platforms) {
+    const [badgeText, badgeClass] = CONNECTION_BADGE[platform.connection] || [platform.connection, ""];
+    const targetCount = targets.filter((item) => item.platform === platform.id).length;
+    const description = !platform.configured
+      ? "尚未配置，点击“配置”扫码或填写凭据"
+      : CONNECTION_DESC[platform.connection]
+        || `账号 ${platform.account} · ${targetCount} 个推送目标`;
+    const actions = [];
+    if (!platform.configured) {
+      actions.push(button("配置", "settings", "outline", () => openConfig(platform)));
+    } else {
+      actions.push(platform.enabled
+        ? button("停止", "square", "stop", () => setEnabled(platform, false), `停止 ${platform.name}`)
+        : button("启动", "play", "start", () => setEnabled(platform, true), `启动 ${platform.name}`));
+      actions.push(button("日志", "file", "", openLog, "查看日志"));
+      actions.push(button("推送授权", "message", "", () => openTargets(platform), "管理推送授权"));
+      actions.push(button("配置", "settings", "", () => openConfig(platform), "编辑配置"));
+      actions.push(button("解除绑定", "unlink", "danger", () => clearCredentials(platform), "解除绑定"));
+    }
+    container.appendChild(el("div", { class: "card" }, [
+      icon("bot", "bot-icon"),
+      el("div", { class: "card-main" }, [
+        el("div", { class: "card-line" }, [
+          el("span", { class: "card-name", text: platform.name }),
+          el("span", { class: "badge outline", text: platform.id }),
+          el("span", { class: `badge ${badgeClass}`, text: badgeText }),
+        ]),
+        el("div", { class: "card-desc", text: description, title: description }),
+      ]),
+      el("div", { class: "actions" }, actions),
+    ]));
   }
 }
 
 async function refresh() {
+  loading = true;
+  setButtonContent($("refresh-btn"), "refresh", "刷新", true);
+  $("refresh-btn").disabled = true;
   try {
     const status = await callSidecar("status");
-    $("status-hint").textContent = status.server_available
+    platforms = status.platforms || [];
+    targets = status.targets || [];
+    showAlert($("server-alert"), status.server_available
       ? ""
-      : "天工 Server 未运行：请在设置中开启 Server（或运行 tiangong server），Bot 才能接收消息。";
-    renderPlatforms(status.platforms || []);
-    renderTargets(status.targets || []);
+      : "天工 Server 未运行：请在设置中开启 Server（或运行 tiangong server），Bot 才能接收消息。");
+    showAlert($("load-error"), "");
+    renderPlatforms();
+    if ($("targets-dialog").open) renderTargets();
   } catch (error) {
-    setMessage(`读取状态失败：${error.message || error}`, true);
+    showAlert($("load-error"), `加载 Bot 失败：${errorText(error)}`);
+  } finally {
+    loading = false;
+    setButtonContent($("refresh-btn"), "refresh", "刷新");
+    $("refresh-btn").disabled = false;
   }
 }
 
+async function setEnabled(platform, enabled) {
+  try {
+    await callSidecar("set_enabled", { platform: platform.id, enabled });
+    toast(`“${platform.name}”已${enabled ? "启动" : "停止"}`);
+  } catch (error) {
+    toast(`${enabled ? "启动" : "停止"}失败：${errorText(error)}`, true);
+  }
+  await refresh();
+}
+
+async function clearCredentials(platform) {
+  if (!await confirmAction(`确定解除“${platform.name}”的绑定？凭据会被删除，推送目标保留。`)) return;
+  try {
+    await callSidecar("clear_credentials", { platform: platform.id });
+    toast(`已解除“${platform.name}”绑定`);
+  } catch (error) {
+    toast(`解除绑定失败：${errorText(error)}`, true);
+  }
+  await refresh();
+}
+
+// ── 配置对话框 ──
+const config = { platform: null, session: null, timer: null, state: "idle" };
+
+function stopScan() {
+  if (config.timer) window.clearTimeout(config.timer);
+  config.timer = null;
+  config.session = null;
+}
+
+function renderConfig() {
+  const state = config.state;
+  const scanMode = state !== "idle";
+  const busy = state === "starting" || state === "saving";
+  $("manual-btn").hidden = !scanMode || busy;
+  $("manual-fields").hidden = scanMode;
+  $("config-save").hidden = scanMode;
+  $("config-cancel").disabled = state === "saving";
+  const scan = $("scan-btn");
+  scan.disabled = busy;
+  scan.className = `btn ${scanMode ? "outline" : "primary"}`;
+  const label = state === "starting" ? "生成中..." : state === "saving" ? "连接中..." : scanMode ? "重新生成" : "扫码配置";
+  setButtonContent(scan, busy ? "loader" : scanMode ? "refresh" : "qr", label, busy);
+  $("qr-wrap").hidden = state !== "pending";
+  const busyLine = $("scan-busy");
+  busyLine.hidden = state !== "saving";
+  if (state === "saving") {
+    busyLine.replaceChildren(icon("loader", "spin"), document.createTextNode("扫码成功，正在保存配置并连接"));
+  }
+  const errorLine = $("scan-error");
+  errorLine.hidden = !(state === "expired" || state === "error");
+  if (!errorLine.hidden) {
+    errorLine.replaceChildren(icon("alert"), el("span", {
+      text: state === "expired" ? "二维码已过期，请重新生成" : config.error,
+    }));
+  }
+}
+
+function openConfig(platform) {
+  stopScan();
+  config.platform = platform;
+  config.state = "idle";
+  const form = PLATFORM_FORMS[platform.id] || { fields: [] };
+  $("config-title").textContent = platform.configured ? `编辑 ${platform.name} Bot` : `配置 ${platform.name} Bot`;
+  const migrated = migrationText(platform.migrated_from);
+  $("config-migrated").textContent = migrated;
+  $("config-migrated").hidden = !migrated;
+  $("manual-fields").replaceChildren(...form.fields.map((field) =>
+    el("label", { class: "field" }, [
+      el("span", { class: "label" }, [field.label, el("span", { class: "required", text: "*" })]),
+      el("input", {
+        id: `field-${field.key}`, class: "input", autocomplete: "off",
+        ...(field.secret ? { type: "password" } : {}),
+        ...(platform.configured ? { placeholder: field.secret ? "已保存，重新填写以替换" : `当前：${platform.account}` } : {}),
+      }),
+    ])));
+  $("config-save").textContent = platform.configured ? "更新" : "保存";
+  renderConfig();
+  $("config-dialog").showModal();
+}
+
+function closeConfig() {
+  stopScan();
+  config.state = "idle";
+  $("config-dialog").close();
+}
+
+async function beginScan() {
+  stopScan();
+  const platform = config.platform;
+  config.state = "starting";
+  renderConfig();
+  try {
+    const session = await callSidecar("provision_begin", { platform: platform.id });
+    if (config.platform !== platform || !$("config-dialog").open) return;
+    $("qr").innerHTML = session.qr_svg;
+    delete session.qr_svg;
+    $("scan-hint").textContent = PLATFORM_FORMS[platform.id]?.scan || "等待扫码授权";
+    config.session = session;
+    config.state = "pending";
+    renderConfig();
+    config.timer = window.setTimeout(() => pollScan(session), (session.interval || 5) * 1000);
+  } catch (error) {
+    config.state = "error";
+    config.error = `生成二维码失败：${errorText(error)}`;
+    renderConfig();
+  }
+}
+
+async function pollScan(session) {
+  if (config.session !== session) return;
+  const platform = config.platform;
+  try {
+    const result = await callSidecar("provision_poll", { platform: platform.id, session });
+    if (config.session !== session) return;
+    if (result.status === "pending") {
+      const wait = (result.retry_after || session.interval || 5) * 1000;
+      config.timer = window.setTimeout(() => pollScan(session), wait);
+      return;
+    }
+    stopScan();
+    if (result.status === "success") {
+      config.state = "saving";
+      renderConfig();
+      await refresh();
+      toast(`“${platform.name}”扫码配置完成，已连接并启动`);
+      closeConfig();
+      return;
+    }
+    config.state = result.status === "expired" ? "expired" : "error";
+    config.error = result.message || "授权失败";
+    renderConfig();
+  } catch (error) {
+    if (config.session !== session) return;
+    stopScan();
+    config.state = "error";
+    config.error = `轮询失败：${errorText(error)}`;
+    renderConfig();
+  }
+}
+
+async function saveManual() {
+  const platform = config.platform;
+  const form = PLATFORM_FORMS[platform.id];
+  const credentials = {};
+  for (const field of form.fields) {
+    const value = $(`field-${field.key}`).value.trim();
+    if (!value) {
+      toast(`配置不完整：请填写 ${field.label}`, true);
+      return;
+    }
+    credentials[field.key] = value;
+  }
+  const save = $("config-save");
+  save.disabled = true;
+  try {
+    await callSidecar("save_credentials", { platform: platform.id, credentials });
+    toast(`“${platform.name}”配置已${platform.configured ? "更新" : "保存"}`);
+    closeConfig();
+    await refresh();
+  } catch (error) {
+    toast(`保存失败：${errorText(error)}`, true);
+  } finally {
+    save.disabled = false;
+  }
+}
+
+$("scan-btn").onclick = beginScan;
+$("manual-btn").onclick = () => { stopScan(); config.state = "idle"; renderConfig(); };
+$("config-cancel").onclick = closeConfig;
+$("config-save").onclick = saveManual;
+$("config-dialog").addEventListener("cancel", (event) => {
+  if (config.state === "saving") event.preventDefault();
+  else stopScan();
+});
+
+// ── 日志对话框 ──
+async function loadLog() {
+  const refreshButton = $("log-refresh");
+  setButtonContent(refreshButton, "refresh", "刷新", true);
+  refreshButton.disabled = true;
+  const content = $("log-content");
+  try {
+    const log = await callSidecar("read_log");
+    content.textContent = log.content || "暂无日志";
+    $("log-truncated").hidden = !log.truncated;
+  } catch (error) {
+    content.textContent = `读取日志失败：${errorText(error)}`;
+  } finally {
+    setButtonContent(refreshButton, "refresh", "刷新");
+    refreshButton.disabled = false;
+    window.requestAnimationFrame(() => { content.scrollTop = content.scrollHeight; });
+  }
+}
+
+function openLog() {
+  $("log-content").textContent = "正在加载日志";
+  $("log-dialog").showModal();
+  loadLog();
+}
+$("log-refresh").onclick = loadLog;
+
+// ── 推送授权对话框 ──
+let targetsPlatform = null;
+
+function renderTargets() {
+  const list = $("targets");
+  const own = targets.filter((item) => item.platform === targetsPlatform.id);
+  if (own.length === 0) {
+    list.replaceChildren(el("div", { class: "empty", text: "暂无已发现的推送目标" }));
+    return;
+  }
+  list.replaceChildren(...own.map((target) => {
+    const badges = [el("span", { class: "badge outline", text: target.kind === "group" ? "群聊" : "私聊" })];
+    if (target.availability === "reply_window") badges.push(el("span", { class: "badge", text: "回复窗口" }));
+    else if (target.availability && target.availability !== "ready") badges.push(el("span", { class: "badge", text: "暂不可用" }));
+    const label = target.label || target.target_id;
+    const remove = button("删除", "trash", "danger", () => deleteTarget(target, remove), "删除推送授权");
+    return el("div", { class: "target" }, [
+      el("div", { style: "min-width: 0" }, [
+        el("div", { class: "card-line" }, [el("span", { class: "target-label", text: label, title: label }), ...badges]),
+        el("div", { class: "card-desc", text: `最近使用：${target.last_seen_at || "—"}${target.limitation ? ` · ${target.limitation}` : ""}` }),
+      ]),
+      remove,
+    ]);
+  }));
+}
+
+async function deleteTarget(target, node) {
+  if (!await confirmAction(`确定删除“${target.label || target.target_id}”的推送授权？`)) return;
+  setButtonContent(node, "loader", "删除中", true);
+  node.disabled = true;
+  showAlert($("targets-error"), "");
+  try {
+    await callSidecar("delete_push_target", { target_id: target.target_id });
+    await refresh();
+  } catch (error) {
+    showAlert($("targets-error"), errorText(error));
+    setButtonContent(node, "trash", "删除");
+    node.disabled = false;
+  }
+}
+
+function openTargets(platform) {
+  targetsPlatform = platform;
+  $("targets-title").textContent = `${platform.name} 推送授权`;
+  showAlert($("targets-error"), "");
+  renderTargets();
+  $("targets-dialog").showModal();
+}
+
+async function refreshTargets() {
+  const node = $("targets-refresh");
+  setButtonContent(node, "refresh", "刷新", true);
+  node.disabled = true;
+  await refresh();
+  setButtonContent(node, "refresh", "刷新");
+  node.disabled = false;
+}
+$("targets-refresh").onclick = refreshTargets;
+
+// ── 初始化 ──
+document.querySelectorAll("[data-close]").forEach((node) => {
+  node.onclick = () => node.closest("dialog").close();
+});
+setButtonContent($("refresh-btn"), "refresh", "刷新");
+setButtonContent($("log-refresh"), "refresh", "刷新");
+setButtonContent($("targets-refresh"), "refresh", "刷新");
 $("refresh-btn").onclick = refresh;
 refresh();
   </script>

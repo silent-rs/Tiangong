@@ -28,6 +28,10 @@ use crate::tools::{SendLocalMediaInput, SendTextInput};
 
 const PLUGIN_ID: &str = "bot";
 const CONNECTION_LOCK_FILE: &str = "connection.lock";
+/// 平台停用标记：存在时不建立接收连接、不对外推送（设置页“停止”）。
+const DISABLED_MARKER: &str = "disabled";
+/// 设置页日志查看读取的 sidecar 日志尾部上限。
+const LOG_TAIL_BYTES: u64 = 256 * 1024;
 /// 连接任务异常结束后的重试间隔。
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 /// 单连接平台等待文件锁的轮询间隔。
@@ -55,6 +59,8 @@ pub(crate) enum ConnectionState {
     Standby,
     /// 接收连接运行中（含断线重连）。
     Running,
+    /// 已配置但被用户停止。
+    Stopped,
 }
 
 struct PlatformSlot {
@@ -78,10 +84,32 @@ impl PlatformSlot {
             .map(|state| state.clone())
             .unwrap_or(ConnectionState::Unconfigured)
     }
+
+    fn enabled(&self) -> bool {
+        !self.dir.join(DISABLED_MARKER).exists()
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<()> {
+        let marker = self.dir.join(DISABLED_MARKER);
+        if enabled {
+            match std::fs::remove_file(&marker) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => {
+                    Err(error).with_context(|| format!("删除停用标记失败：{}", marker.display()))
+                }
+            }
+        } else {
+            std::fs::write(&marker, b"")
+                .with_context(|| format!("写入停用标记失败：{}", marker.display()))
+        }
+    }
 }
 
 pub(crate) struct BotService {
     primary: bool,
+    /// sidecar 日志（`<插件目录>/logs/sidecar.log`），设置页日志查看读取。
+    log_path: Option<PathBuf>,
     server: Option<ServerEndpoint>,
     slots: Vec<Arc<PlatformSlot>>,
 }
@@ -135,6 +163,9 @@ impl BotService {
         }
         Ok(Self {
             primary,
+            log_path: data_dir
+                .parent()
+                .map(|plugin_dir| plugin_dir.join("logs").join("sidecar.log")),
             server,
             slots,
         })
@@ -186,6 +217,9 @@ impl BotService {
     fn all_targets(&self, enabled_only: bool) -> Result<Vec<TargetView>> {
         let mut targets = Vec::new();
         for slot in &self.slots {
+            if enabled_only && !slot.enabled() {
+                continue;
+            }
             targets.extend(
                 slot.platform
                     .list_targets(&slot.dir)?
@@ -209,6 +243,9 @@ impl BotService {
         let Some(slot) = self.slot_of_target(input.target_id.trim())? else {
             return Ok(delivery::rejected("推送目标不存在或尚未授权"));
         };
+        if !slot.enabled() {
+            return Ok(delivery::rejected(&stopped_message(slot)));
+        }
         slot.platform.send_text(&slot.dir, &input).await
     }
 
@@ -224,6 +261,9 @@ impl BotService {
         let Some(slot) = self.slot_of_target(input.target_id.trim())? else {
             return Ok(delivery::rejected("推送目标不存在或尚未授权"));
         };
+        if !slot.enabled() {
+            return Ok(delivery::rejected(&stopped_message(slot)));
+        }
         slot.platform
             .send_media(&slot.dir, &input, workspace, image)
             .await
@@ -277,12 +317,19 @@ impl BotService {
                 let mut platforms = Vec::new();
                 for slot in &self.slots {
                     let account = slot.platform.configured_account(&slot.dir)?;
+                    let enabled = slot.enabled();
+                    let connection = if account.is_some() && !enabled {
+                        ConnectionState::Stopped
+                    } else {
+                        slot.connection_state()
+                    };
                     platforms.push(serde_json::json!({
                         "id": slot.platform.id(),
                         "name": slot.platform.name(),
                         "configured": account.is_some(),
+                        "enabled": enabled,
                         "account": account,
-                        "connection": slot.connection_state(),
+                        "connection": connection,
                         "migrated_from": crate::legacy::read_marker(&slot.dir),
                     }));
                 }
@@ -315,6 +362,8 @@ impl BotService {
                 let slot = self.slot(&platform)?;
                 let status = slot.platform.provision_poll(&slot.dir, session).await?;
                 if status["status"] == "success" {
+                    // 与旧版一致：扫码绑定成功后自动启动。
+                    slot.set_enabled(true)?;
                     self.credentials_changed(slot).await;
                 }
                 Ok(status)
@@ -331,6 +380,7 @@ impl BotService {
                 } = serde_json::from_value(payload).context("凭据参数无效")?;
                 let slot = self.slot(&platform)?;
                 slot.platform.save_credentials(&slot.dir, credentials)?;
+                slot.set_enabled(true)?;
                 self.credentials_changed(slot).await;
                 Ok(serde_json::json!({ "saved": true }))
             }
@@ -339,6 +389,7 @@ impl BotService {
                     serde_json::from_value(payload).context("缺少平台参数")?;
                 let slot = self.slot(&platform)?;
                 slot.platform.clear_credentials(&slot.dir)?;
+                slot.set_enabled(true)?;
                 self.credentials_changed(slot).await;
                 Ok(serde_json::json!({ "cleared": true }))
             }
@@ -354,6 +405,24 @@ impl BotService {
                     .with_context(|| format!("未找到推送目标：{target_id}"))?;
                 slot.platform.delete_target(&slot.dir, &target_id)?;
                 Ok(serde_json::json!({ "target_id": target_id, "deleted": true }))
+            }
+            "set_enabled" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    platform: String,
+                    enabled: bool,
+                }
+                let Args { platform, enabled } =
+                    serde_json::from_value(payload).context("启停参数无效")?;
+                let slot = self.slot(&platform)?;
+                slot.set_enabled(enabled)?;
+                self.credentials_changed(slot).await;
+                Ok(serde_json::json!({ "platform": platform, "enabled": enabled }))
+            }
+            "read_log" => {
+                let path = self.log_path.as_deref().context("未找到 Bot 日志位置")?;
+                let (content, truncated) = read_log_tail(path, LOG_TAIL_BYTES)?;
+                Ok(serde_json::json!({ "content": content, "truncated": truncated }))
             }
             other => bail!("Bot 插件不支持操作 {other}"),
         }
@@ -427,6 +496,9 @@ async fn supervise(slot: Arc<PlatformSlot>, server: Option<ServerEndpoint>) {
         if !configured {
             lock = None;
             slot.set_connection(ConnectionState::Unconfigured);
+        } else if !slot.enabled() {
+            lock = None;
+            slot.set_connection(ConnectionState::Stopped);
         } else if let Some(server) = server.clone() {
             if slot.platform.exclusive_connection() && lock.is_none() {
                 match try_lock_connection(&slot.dir) {
@@ -485,6 +557,43 @@ fn try_lock_connection(dir: &Path) -> Result<Option<File>> {
         Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
         Err(error) => Err(error).with_context(|| format!("锁定连接锁失败：{}", path.display())),
     }
+}
+
+/// 平台被停止时推送工具的拒绝说明。
+fn stopped_message(slot: &PlatformSlot) -> String {
+    format!(
+        "{} Bot 已在设置中停止，请先在 Bot 设置页启动",
+        slot.platform.name()
+    )
+}
+
+/// 读取日志尾部（最多 `limit` 字节），返回内容与是否截断。
+fn read_log_tail(path: &Path, limit: u64) -> Result<(String, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((String::new(), false));
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取 Bot 日志失败：{}", path.display()));
+        }
+    };
+    let length = file.metadata()?.len();
+    let truncated = length > limit;
+    if truncated {
+        file.seek(SeekFrom::Start(length - limit))?;
+    }
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw)?;
+    let mut content = String::from_utf8_lossy(&raw).into_owned();
+    if truncated {
+        // 丢弃截断处的半行。
+        if let Some(index) = content.find('\n') {
+            content.drain(..=index);
+        }
+    }
+    Ok((content, truncated))
 }
 
 /// 扫码地址渲染为 SVG 二维码。
@@ -650,6 +759,65 @@ mod tests {
         )
         .await;
         assert!(!unknown.success);
+    }
+
+    #[tokio::test]
+    async fn stopped_platform_reports_stopped_and_hides_targets() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let service = service(data_dir.path());
+        let saved = call(
+            &service,
+            "save_credentials",
+            serde_json::json!({"platform": "feishu", "credentials": {"app_id":"cli_x","app_secret":"s"}}),
+        )
+        .await;
+        assert!(saved.success);
+
+        let stopped = call(
+            &service,
+            "set_enabled",
+            serde_json::json!({"platform": "feishu", "enabled": false}),
+        )
+        .await;
+        assert!(stopped.success, "{:?}", stopped.error_message);
+        let status = call(&service, "status", serde_json::json!({}))
+            .await
+            .payload
+            .unwrap();
+        assert_eq!(status["platforms"][0]["enabled"], false);
+        assert_eq!(status["platforms"][0]["connection"], "stopped");
+        // 未配置的平台不显示停止态。
+        assert_eq!(status["platforms"][1]["enabled"], true);
+
+        let started = call(
+            &service,
+            "set_enabled",
+            serde_json::json!({"platform": "feishu", "enabled": true}),
+        )
+        .await;
+        assert!(started.success);
+        let status = call(&service, "status", serde_json::json!({}))
+            .await
+            .payload
+            .unwrap();
+        assert_eq!(status["platforms"][0]["enabled"], true);
+        assert_eq!(status["platforms"][0]["connection"], "auxiliary");
+    }
+
+    #[test]
+    fn log_tail_drops_partial_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidecar.log");
+        assert_eq!(read_log_tail(&path, 16).unwrap(), (String::new(), false));
+        std::fs::write(&path, "first line\nsecond\nthird\n").unwrap();
+        assert_eq!(
+            read_log_tail(&path, 1024).unwrap(),
+            ("first line\nsecond\nthird\n".to_string(), false)
+        );
+        assert_eq!(
+            read_log_tail(&path, 10).unwrap(),
+            ("third\n".to_string(), true)
+        );
     }
 
     #[test]
