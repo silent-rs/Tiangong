@@ -102,6 +102,9 @@ fn preload_installed_plugins_inner(
             .insert(installed.manifest.id.clone(), loaded);
     }
     drop(_operation);
+    // 插件登记完成即开始保活：此后常驻 sidecar 意外退出或启动预热失败，
+    // 都由运行时在后台重新拉起，各入口无需单独处理。
+    super::keepalive::ensure_keepalive_started();
     if wait_for_ready {
         if let Err(error) = crate::verification::reverify_installed_sidecars_blocking(
             storage_root,
