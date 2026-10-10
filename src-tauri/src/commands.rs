@@ -521,37 +521,9 @@ struct UserMessageDeliveryRequest {
     initial_model_ref: Option<String>,
     delivery_kind: UserMessageDeliveryKind,
     requires_input_claim: bool,
-    /// 插件渲染声明：仅来自插件输入桥接（`session.input.sendText`），
-    /// 宿主在桥接入口已绑定调用方与其声明的 replace 视图。
+    /// 插件渲染声明：来自插件输入桥接（`session.input.sendText`），
+    /// 宿主在桥接入口已绑定调用方；视图不存在时前端按默认样式显示。
     render: Option<tiangong_types::MessageRender>,
-}
-
-/// 前端回传的插件渲染声明再校验一次：目标视图必须仍是该插件已启用的
-/// `session.message-item` replace 贡献（声明在插件输入桥接入口已绑定调用方，
-/// 此处防止前端或远程调用伪造任意插件的视图），并做大小校验。
-fn verified_plugin_render(
-    render: Option<tiangong_types::MessageRender>,
-) -> Result<Option<tiangong_types::MessageRender>, String> {
-    let Some(render) = render else {
-        return Ok(None);
-    };
-    render.validate()?;
-    let declared = tiangong_plugin_runtime::registry::plugin_manifest(&render.plugin).is_some_and(
-        |manifest| {
-            manifest.ui_contributions().iter().any(|item| {
-                item.slot == crate::session_input::MESSAGE_ITEM_SLOT
-                    && item.id == render.view
-                    && item.render == tiangong_plugin_runtime::MessageItemRender::Replace
-            })
-        },
-    );
-    if !declared {
-        return Err(format!(
-            "插件 {} 未声明 session.message-item 的 replace 视图 {}",
-            render.plugin, render.view
-        ));
-    }
-    Ok(Some(render))
 }
 
 /// 发送消息并执行
@@ -571,7 +543,6 @@ pub async fn send_message(
     _window: Window,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let render = verified_plugin_render(render)?;
     send_message_inner(
         UserMessageDeliveryRequest {
             session_id,
@@ -1430,7 +1401,6 @@ pub async fn append_message(
     if session_id.trim().is_empty() {
         return Err("当前会话 ID 不能为空".to_string());
     }
-    let render = verified_plugin_render(render)?;
 
     let is_running = state
         .with_state_read(|core_state| {

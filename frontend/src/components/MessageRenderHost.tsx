@@ -3,9 +3,15 @@ import type { MessageRender } from '@/api/message';
 import { useStore } from '@/store/useStore';
 import { useSlotContributions } from '@/hooks/useSlotContributions';
 import { PluginSandbox } from './PluginSandbox';
+import { cn } from '@/lib/utils';
 import type { HostMessageContext } from './pluginHostContext';
 
 const MESSAGE_ITEM_SLOT = 'session.message-item' as const;
+/**
+ * 插件接管消息的统一上下留白：插件视图只负责卡片本身，与相邻消息的间距
+ * 由宿主统一给出（虚拟列表里每条消息单独包裹，`first:mt-0` 类间距不生效）。
+ */
+export const MESSAGE_RENDER_SPACING = 'py-3';
 
 interface MessageRenderHostProps {
   /** 消息的插件渲染声明（`meta.render`）。 */
@@ -15,6 +21,7 @@ interface MessageRenderHostProps {
   fallback: ReactNode;
   /** 插件接管时由宿主继续渲染在插件视图之后的内容（如媒体附件）。 */
   hostContent?: ReactNode;
+  /** 容器宽度等布局类；上下留白由宿主统一追加，插件与调用方无需处理。 */
   className?: string;
 }
 
@@ -40,7 +47,7 @@ function MessageRenderHostView({ render, message, fallback, hostContent, classNa
   );
   if (!item) return <>{fallback}</>;
   return (
-    <div className={className ?? 'block w-full'}>
+    <div className={cn(className ?? 'block w-full', MESSAGE_RENDER_SPACING)} data-message-render={`${item.plugin_id}:${item.contribution_id}`}>
       <PluginSandbox
         pluginId={item.plugin_id}
         contributionId={item.contribution_id}

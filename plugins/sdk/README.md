@@ -152,8 +152,8 @@ Desktop TS 工具插件。
    ```
 
    界面内由插件发起的输入（`session.input.sendText`，需 `session.write` 权限）同样可带
-   渲染声明，只填 `view` 与 `data`——`plugin` 由宿主固定为调用方，`view` 必须是调用方
-   自己声明的 replace 贡献：
+   渲染声明，只填 `view` 与 `data`——`plugin` 由宿主固定为调用方；`view` 应是调用方
+   自己声明的 replace 贡献，找不到时消息按默认样式显示：
 
    ```ts
    await bridge.call('session.input.sendText', JSON.stringify({

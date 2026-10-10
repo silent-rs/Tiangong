@@ -59,7 +59,7 @@ vi.mock('@/components/PluginSandbox', () => ({
   ),
 }));
 
-const { MessageRenderHost } = await import('@/components/MessageRenderHost');
+const { MessageRenderHost, MESSAGE_RENDER_SPACING } = await import('@/components/MessageRenderHost');
 const { MessagePluginHost } = await import('@/components/MessagePluginHost');
 const { resetSlotContributionCache } = await import('@/hooks/useSlotContributions');
 
@@ -107,6 +107,9 @@ describe('消息渲染声明接管显示', () => {
       data: { platform: 'weixin' },
     });
     expect(container.querySelector('[data-testid="fallback"]')).toBeNull();
+    // 上下留白由宿主统一给出，不依赖插件视图或调用方。
+    const wrapper = container.querySelector('[data-message-render="bot:im-message"]');
+    expect(wrapper?.classList.contains(MESSAGE_RENDER_SPACING)).toBe(true);
   });
 
   it('插件或视图不存在、或贡献不是 replace 时回退默认显示', async () => {
