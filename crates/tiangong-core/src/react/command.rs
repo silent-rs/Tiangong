@@ -19,11 +19,10 @@ use super::helpers::record_plugin_usage;
 use super::interrupt::interrupt_active_work;
 
 /// 校验并事务性保存运行中注入的用户消息；成功才向界面确认接收，并重置为新用户
-/// 意图（ALR-102：重置阶段预算与工具去重记录，保留物理 turn 累计用量）。
+/// 意图（ALR-102：重置阶段预算，保留物理 turn 累计用量）。
 /// 调用前须先 interrupt_active_work；成功后由调用方安装 `NeedModel`。
 pub(super) fn save_user_message_and_restart(
     ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
     message_id: String,
     content: Vec<tiangong_types::ContentBlock>,
 ) -> Result<(), String> {
@@ -32,7 +31,6 @@ pub(super) fn save_user_message_and_restart(
         session_id = %ctx.session.id,
         "运行中注入用户消息：中断当前执行并追加新消息"
     );
-    state.reset_tool_history();
     Ok(())
 }
 
@@ -95,7 +93,7 @@ pub(super) async fn handle_command(
             // 引导消息：中断主循环直接拥有的活动（Summary 降级 ALR-104），
             // 校验并保存，成功才确认，然后从新意图重启（ALR-101/102）。
             interrupt_active_work(ctx, state, injections, stream_tx, context_limit, true).await;
-            match save_user_message_and_restart(ctx, state, message_id, content) {
+            match save_user_message_and_restart(ctx, message_id, content) {
                 Ok(()) => CommandEffect::ToPhase(ExecutionPhase::NeedModel),
                 Err(error) => {
                     tracing::warn!(

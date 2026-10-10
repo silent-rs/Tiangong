@@ -2395,7 +2395,7 @@ async fn tool_finished_is_emitted_on_completion_while_results_stay_ordered() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn continues_after_tool_failure_with_recovery_context() {
+async fn continues_after_tool_failure() {
     let server = MockServer::builder().start().await;
     mount_sse(
         &server,
@@ -2424,12 +2424,13 @@ async fn continues_after_tool_failure_with_recovery_context() {
     );
     assert_eq!(result.usage.total_tokens, 25);
     assert!(
-        harness
+        !harness
             .ctx
             .session
             .messages
             .iter()
-            .any(|message| { message.tool_name.as_deref() == Some("react_failed_tool_recovery") })
+            .any(|message| { message.tool_name.as_deref() == Some("react_failed_tool_recovery") }),
+        "工具失败后不再追加恢复提示消息"
     );
     assert!(harness.ctx.session.messages.iter().any(|message| {
         message.role == MessageRole::Tool
@@ -2566,7 +2567,7 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
 /// 不进模型上下文。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_tool_call_does_not_inject_images() {
-    use crate::react::execute::{CompletedToolCall, ToolCallHistory, record_completed_tool_call};
+    use crate::react::execute::{CompletedToolCall, record_completed_tool_call};
     use crate::tools::result::ToolResult;
     use tiangong_llm::tool::ToolCall;
 
@@ -2624,9 +2625,8 @@ async fn failed_tool_call_does_not_inject_images() {
         exit_code: 1,
         execution: None,
     };
-    let mut history = ToolCallHistory::default();
     let mut pending = Vec::new();
-    let needs_recovery = record_completed_tool_call(
+    record_completed_tool_call(
         &mut ctx,
         CompletedToolCall {
             call: &call,
@@ -2634,10 +2634,8 @@ async fn failed_tool_call_does_not_inject_images() {
             result: &failed,
             duration_ms: 5,
         },
-        &mut history,
         &mut pending,
     );
-    assert!(needs_recovery, "失败结果应要求恢复提示");
     assert!(pending.is_empty(), "失败的工具不得注入图片");
 
     // 同一份 stdout、成功结果：正常注入。
@@ -2657,7 +2655,6 @@ async fn failed_tool_call_does_not_inject_images() {
             result: &ok_result,
             duration_ms: 5,
         },
-        &mut history,
         &mut pending,
     );
     assert_eq!(pending.len(), 1, "成功结果应注入图片");
