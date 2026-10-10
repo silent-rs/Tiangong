@@ -21,8 +21,8 @@ use super::command::Deferred;
 use super::compression::observed_total_tokens;
 use super::execute::{
     AgentLoopState, CompletedToolCall, ToolInjectionBuffer, ToolPreflightOutcome,
-    append_failure_recovery_prompt, append_invalid_tool_calls_context, prepare_tool_call,
-    record_completed_tool_call, set_runtime_trust_mode,
+    append_invalid_tool_calls_context, prepare_tool_call, record_completed_tool_call,
+    set_runtime_trust_mode,
 };
 use super::helpers::record_plugin_usage;
 use super::message::append_tool_result_message;
@@ -81,9 +81,8 @@ pub(super) async fn execute_tool_batch(
     'pipeline: loop {
         // ── 准备：逐个弹出待处理调用（参数校验）──
         while let Some((index, call)) = batch.calls.pop_front() {
-            match prepare_tool_call(ctx, &call, &mut state.tool_history) {
-                ToolPreflightOutcome::Skip { needs_recovery } => {
-                    batch.needs_failure_recovery |= needs_recovery;
+            match prepare_tool_call(ctx, &call) {
+                ToolPreflightOutcome::Skip => {
                     ctx.session.persist_to_disk();
                 }
                 ToolPreflightOutcome::Execute { args_summary } => {
@@ -101,14 +100,7 @@ pub(super) async fn execute_tool_batch(
         pending_ready.extend(std::mem::take(&mut batch.ready_tools));
         launch_ready_tools(ctx, &mut pending_ready, &mut tasks, &mut running);
         if tasks.is_empty() {
-            flush_ordered_results(
-                ctx,
-                state,
-                &mut batch,
-                &mut completed_buffer,
-                usize::MAX,
-                &mut pending_images,
-            );
+            flush_ordered_results(ctx, &mut completed_buffer, usize::MAX, &mut pending_images);
             break 'pipeline;
         }
         let joined = tokio::select! {
@@ -119,8 +111,6 @@ pub(super) async fn execute_tool_batch(
                     None => {
                         flush_ordered_results(
                             ctx,
-                            state,
-                            &mut batch,
                             &mut completed_buffer,
                             usize::MAX,
                             &mut pending_images,
@@ -134,8 +124,6 @@ pub(super) async fn execute_tool_batch(
                 if is_interrupting(&command) {
                     flush_ordered_results(
                         ctx,
-                        state,
-                        &mut batch,
                         &mut completed_buffer,
                         usize::MAX,
                         &mut pending_images,
@@ -204,8 +192,6 @@ pub(super) async fn execute_tool_batch(
             .unwrap_or(usize::MAX);
         flush_ordered_results(
             ctx,
-            state,
-            &mut batch,
             &mut completed_buffer,
             inflight_min,
             &mut pending_images,
@@ -213,16 +199,11 @@ pub(super) async fn execute_tool_batch(
         launch_ready_tools(ctx, &mut pending_ready, &mut tasks, &mut running);
     }
 
-    // ── 收尾：无效调用上下文、失败恢复提示、观测压力记录 ──
+    // ── 收尾：无效调用上下文、观测压力记录 ──
     append_invalid_tool_calls_context(ctx, &batch.invalid_tool_calls);
-    if batch.needs_failure_recovery {
-        let request_tools = ctx.tools.clone();
-        append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
-    } else {
-        ctx.session.persist_to_disk();
-    }
-    // 图片注入消息位于失败恢复提示之前还是之后无协议影响；放在收尾最末，
-    // 保证它出现在本批全部工具结果与恢复提示之后、下一次模型请求之前。
+    ctx.session.persist_to_disk();
+    // 图片注入放在收尾最末，保证它出现在本批全部工具结果之后、
+    // 下一次模型请求之前。
     commit_image_injections(ctx, &mut pending_images);
     let observed_tokens = observed_total_tokens(&batch.response_usage);
     state.last_observed_tokens = observed_tokens;
@@ -336,20 +317,17 @@ fn launch_ready_tools(
 /// `pending_images` 收集工具产物中声明的待注入图片，由批次闭合处统一落地。
 fn flush_ordered_results(
     ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
-    batch: &mut ToolBatchState,
     completed_buffer: &mut Vec<(usize, RunningToolCall, ToolTaskOutput)>,
     boundary: usize,
     pending_images: &mut Vec<super::message::PendingImageInjection>,
 ) {
     completed_buffer.sort_by_key(|(index, _, _)| *index);
-    let mut needs_recovery = false;
     while completed_buffer
         .first()
         .is_some_and(|(index, _, _)| *index < boundary)
     {
         let (_, running_record, task_output) = completed_buffer.remove(0);
-        needs_recovery |= record_completed_tool_call(
+        record_completed_tool_call(
             ctx,
             CompletedToolCall {
                 call: &running_record.tool.call,
@@ -357,11 +335,9 @@ fn flush_ordered_results(
                 result: &task_output.result,
                 duration_ms: task_output.duration_ms,
             },
-            &mut state.tool_history,
             pending_images,
         );
     }
-    batch.needs_failure_recovery |= needs_recovery;
 }
 
 /// 启动一个已就绪的工具任务（ToolStart 事件 + JoinSet 注册）。

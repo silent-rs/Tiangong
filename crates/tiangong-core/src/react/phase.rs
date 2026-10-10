@@ -68,7 +68,6 @@ pub(super) struct ToolBatchState {
     pub(super) ready_tools: Vec<PreparedToolCall>,
     pub(super) invalid_tool_calls: Vec<InvalidToolCall>,
     pub(super) response_usage: TokenUsage,
-    pub(super) needs_failure_recovery: bool,
 }
 
 /// 模型请求的用途。

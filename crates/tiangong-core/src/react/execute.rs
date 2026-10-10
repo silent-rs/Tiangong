@@ -3,7 +3,7 @@
 //! 本模块只负责从已构建的 TurnContext 执行模型请求、工具调用与总结阶段；
 //! turn 的插件生命周期、状态提交和最终持久化由 react/turn.rs 负责。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -16,11 +16,11 @@ use crate::permission::TrustMode;
 use crate::react::context::{emit_token_usage, persist_error, select_client_for_request};
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
-use crate::session::{Message, MessagePhase, MessageRole};
+use crate::session::MessagePhase;
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
-use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
+use tiangong_llm::tool::{ToolCall, ToolChoice};
 use tiangong_llm::{InvalidToolCall, ModelRequest, ModelResponse};
 use tiangong_types::TokenUsage;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
@@ -33,19 +33,6 @@ use super::phase::{
 };
 use super::request;
 use super::tools;
-
-#[derive(Default)]
-pub(super) struct ToolCallHistory {
-    /// 本轮失败过的工具名（恢复提示引导用，非硬拦截——见
-    /// `append_failure_recovery_prompt`）。
-    failed_names: HashSet<String>,
-}
-
-impl ToolCallHistory {
-    pub(super) fn clear(&mut self) {
-        self.failed_names.clear();
-    }
-}
 
 pub(super) struct ToolInjectionBuffer {
     session_deferred: Vec<DeferredToolInjection>,
@@ -213,14 +200,10 @@ pub(super) fn append_invalid_tool_calls_context(
 
 pub(super) enum ToolPreflightOutcome {
     Execute { args_summary: String },
-    Skip { needs_recovery: bool },
+    Skip,
 }
 
-pub(super) fn prepare_tool_call(
-    ctx: &mut TurnContext,
-    call: &ToolCall,
-    history: &mut ToolCallHistory,
-) -> ToolPreflightOutcome {
+pub(super) fn prepare_tool_call(ctx: &mut TurnContext, call: &ToolCall) -> ToolPreflightOutcome {
     if let Some(parse_error) = call
         .arguments
         .get("__parse_error")
@@ -255,10 +238,7 @@ pub(super) fn prepare_tool_call(
             &call.name,
             format!("工具参数无效 [{}]\n{provider_text}", call.name),
         );
-        history.failed_names.insert(call.name.clone());
-        return ToolPreflightOutcome::Skip {
-            needs_recovery: true,
-        };
+        return ToolPreflightOutcome::Skip;
     }
 
     // 不做「本轮已成功/已失败的完全相同调用」拦截：有副作用的操作
@@ -266,8 +246,8 @@ pub(super) fn prepare_tool_call(
     // 合法意图（改源码 → 重新构建/安装的迭代闭环）；模型自身的历史
     // 中已包含先前调用的结果。防无限重复不设硬性轮次上限（任务 15
     // 已移除 max_outer_iterations，ExecutionBudget 仅剩日志编号），
-    // 只靠失败恢复提示引导模型转向——这是有意的选择：宁可重跑有副
-    // 作用的合法操作，也不拦截「改了外部世界后必要的重试」。
+    // 失败信息由结构化的 `[tool_failure]` 工具结果交给模型自行判断——
+    // 宁可重跑有副作用的合法操作，也不拦截「改了外部世界后必要的重试」。
     let args_summary = format_tool_args_summary(call);
 
     ToolPreflightOutcome::Execute { args_summary }
@@ -326,9 +306,8 @@ pub(super) struct CompletedToolCall<'a> {
 pub(super) fn record_completed_tool_call(
     ctx: &mut TurnContext,
     completion: CompletedToolCall<'_>,
-    history: &mut ToolCallHistory,
     pending_images: &mut Vec<super::message::PendingImageInjection>,
-) -> bool {
+) {
     let CompletedToolCall {
         call,
         args_summary,
@@ -388,13 +367,6 @@ pub(super) fn record_completed_tool_call(
         format_tool_trace_message(result),
     );
 
-    let needs_recovery = if result.ok {
-        history.failed_names.remove(&call.name);
-        false
-    } else {
-        history.failed_names.insert(call.name.clone());
-        true
-    };
     ctx.session.persist_to_disk();
     let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: call.name.clone(),
@@ -404,51 +376,16 @@ pub(super) fn record_completed_tool_call(
         full_output: Some(tool_result_full_output(result)),
         duration_ms: Some(duration_ms),
     });
-    needs_recovery
-}
-
-pub(super) fn append_failure_recovery_prompt(
-    ctx: &mut TurnContext,
-    history: &ToolCallHistory,
-    request_tools: &[ToolSpec],
-) {
-    let mut failed_tools = history.failed_names.iter().cloned().collect::<Vec<_>>();
-    failed_tools.sort();
-    let collaboration_hint = "如果当前执行单元无法继续推进，请优先使用当前已注册工具中合适的协作或替代能力；仍无法解决时，再向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。";
-    // 插件工具以 `{插件id}__{工具名}` 暴露，按原名后缀查找并提示实际名称。
-    let recall_hint = request_tools
-        .iter()
-        .find(|tool| tool.name == "recall_memory" || tool.name.ends_with("__recall_memory"))
-        .map(|tool| {
-            format!(
-                "优先调用 {}，充分查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、使用其他已注册协作能力或请求用户协作。",
-                tool.name
-            )
-        })
-        .unwrap_or_default();
-    let mut reminder = Message::new(
-        MessageRole::Tool,
-        format!(
-            "<system-reminder>\n以下工具调用在本轮出现失败，暂时不要重复调用相同工具和相同参数：\n{}\n请重新规划：{}{}\n</system-reminder>",
-            failed_tools.join("\n"),
-            recall_hint,
-            collaboration_hint
-        ),
-    );
-    reminder.tool_name = Some("react_failed_tool_recovery".to_string());
-    ctx.session.messages.push(reminder);
-    ctx.session.persist_to_disk();
 }
 
 /// Agent Loop 状态：单一 `ExecutionPhase`（take/install 所有权模式，见 design.md
-/// 3.1）+ 预算 + 累计用量 + 工具去重记录 + 工具义务契约。阶段持有的活动资源
+/// 3.1）+ 预算 + 累计用量 + 工具义务契约。阶段持有的活动资源
 /// （模型请求/工具任务/压缩）都在 phase 变体内，不再有并列活动 `Option`
 /// （ALR-001）。
 pub(super) struct AgentLoopState {
     pub(super) phase: Option<ExecutionPhase>,
     pub(super) budget: ExecutionBudget,
     pub(super) accumulated_usage: TokenUsage,
-    pub(super) tool_history: ToolCallHistory,
     /// 最近一次模型响应/工具批次的观测 token 总量（请求前压力检查的信号）。
     pub(super) last_observed_tokens: usize,
     /// 待处理的上下文溢出恢复（请求错误策略在下次请求前消费，ALR-304）。
@@ -464,7 +401,6 @@ impl AgentLoopState {
             phase: Some(ExecutionPhase::NeedModel),
             budget: ExecutionBudget::default(),
             accumulated_usage: TokenUsage::default(),
-            tool_history: ToolCallHistory::default(),
             last_observed_tokens: ctx.session.current_tokens,
             pending_context_recovery: None,
             pending_summary_msg_id: None,
@@ -483,11 +419,6 @@ impl AgentLoopState {
             "install_phase 前必须先 take，避免双阶段并存"
         );
         self.phase = Some(phase);
-    }
-
-    /// 新用户意图（steer 注入）：清工具去重记录。
-    pub(super) fn reset_tool_history(&mut self) {
-        self.tool_history.clear();
     }
 }
 
@@ -1078,7 +1009,6 @@ fn complete_llm_request(
                     ready_tools: Vec::new(),
                     invalid_tool_calls: response.invalid_tool_calls,
                     response_usage: response.usage.clone(),
-                    needs_failure_recovery: false,
                 })
             };
             super::context::record_call_usage(
