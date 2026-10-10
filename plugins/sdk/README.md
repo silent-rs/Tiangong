@@ -132,6 +132,38 @@ tools.onClosed((closed) => console.log(closed.invocation_id, closed.status));
 默认交互处理器见 `plugins/tiangong-plugin-interaction`，它只是在这套通用协议上实现的一个
 Desktop TS 工具插件。
 
+## 接管消息显示（`session.message-item` + `render: "replace"`）
+
+插件可为自己投递的消息声明渲染方式，由插件视图替换宿主默认的消息显示：
+
+1. manifest 声明替换贡献（`render` 仅对 `session.message-item` 合法）：
+
+   ```json
+   { "slot": "session.message-item", "id": "im-message", "entry": "app/im-message.html",
+     "sandbox": "shadow", "context": ["session", "message"], "render": "replace" }
+   ```
+
+2. 投递消息时携带渲染声明（`POST /api/v1/messages`）：
+
+   ```json
+   { "connector": "server-api", "channel_id": "<session_id>", "message": "用户原话",
+     "instruction": "只给模型看的说明（界面不显示）",
+     "render": { "plugin": "<插件 id>", "view": "im-message", "data": { "channel": "微信私聊" } } }
+   ```
+
+3. 视图从 `context.message` 读取正文与 `render.data`：
+
+   ```ts
+   runtime?.onContextChange((context) => {
+     const data = context.message?.render?.data;
+     // 按 data 渲染卡片；正文用 context.message?.text
+   });
+   ```
+
+约定：`render.data` 序列化后不超过 16KB；插件缺失、停用或未声明该视图时宿主按
+默认方式显示正文，因此正文应保持可读。图片等媒体附件仍由宿主在插件视图下方渲染。
+带渲染声明的用户消息不可编辑。
+
 ## 主题
 
 iframe 容器在挂载及主题、会话切换时通过 `tiangong_host_context` postMessage
