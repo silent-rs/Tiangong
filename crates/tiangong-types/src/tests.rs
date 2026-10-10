@@ -12,7 +12,7 @@ fn message_new() {
 #[test]
 fn message_with_reasoning() {
     let msg = Message::with_reasoning(MessageRole::Assistant, "回复", "思考过程");
-    assert_eq!(msg.reasoning_content, "思考过程");
+    assert_eq!(msg.reasoning_content(), "思考过程");
 }
 
 #[test]
@@ -40,8 +40,8 @@ fn message_turn_metadata_backward_compatible() {
     }"#;
     let msg: Message = serde_json::from_str(legacy).unwrap();
     assert_eq!(msg.role, MessageRole::User);
-    assert_eq!(msg.elapsed_ms, None);
-    assert_eq!(msg.turn_status, None);
+    assert_eq!(msg.elapsed_ms(), None);
+    assert_eq!(msg.turn_status(), None);
 }
 
 #[test]
@@ -240,7 +240,7 @@ fn session_append() {
     session.append_message(MessageRole::User, "你好");
     session.append_message_with_reasoning(MessageRole::Assistant, "回复", "思考");
     assert_eq!(session.messages.len(), 2);
-    assert_eq!(session.messages[1].reasoning_content, "思考");
+    assert_eq!(session.messages[1].reasoning_content(), "思考");
 }
 
 #[test]
@@ -438,53 +438,194 @@ fn message_role_serde() {
 }
 
 #[test]
-fn message_phase_serde() {
+fn user_source_serde_and_forward_compat() {
     assert_eq!(
-        serde_json::to_string(&MessagePhase::Normal).unwrap(),
-        r#""normal""#
+        serde_json::to_string(&UserSource::HostInjected).unwrap(),
+        r#""host_injected""#
     );
     assert_eq!(
-        serde_json::to_string(&MessagePhase::React).unwrap(),
-        r#""react""#
+        serde_json::from_str::<UserSource>(r#""compressed_resume""#).unwrap(),
+        UserSource::CompressedResume
     );
+    // 前向兼容：未知来源降级为 Human，不得导致会话打不开。
     assert_eq!(
-        serde_json::to_string(&MessagePhase::Summary).unwrap(),
-        r#""summary""#
+        serde_json::from_str::<UserSource>(r#""some_future_source""#).unwrap(),
+        UserSource::Human
     );
-    assert_eq!(
-        serde_json::to_string(&MessagePhase::CompressedResume).unwrap(),
-        r#""compressedresume""#
-    );
-    assert_eq!(
-        serde_json::to_string(&MessagePhase::HostInjected).unwrap(),
-        r#""hostinjected""#
-    );
-    assert_eq!(
-        serde_json::from_str::<MessagePhase>(r#""hostinjected""#).unwrap(),
-        MessagePhase::HostInjected
-    );
-    // 前向兼容：未知阶段值（更高版本写入的新变体）降级为 Normal，
-    // 不得反序列化失败导致整个会话打不开。
-    assert_eq!(
-        serde_json::from_str::<MessagePhase>(r#""somefuturephase""#).unwrap(),
-        MessagePhase::Normal
-    );
+    assert!(UserSource::Human.is_user_input());
+    assert!(!UserSource::HostInjected.is_user_input());
+    assert!(!UserSource::CompressedResume.is_user_input());
+    assert!(!UserSource::Agent.is_user_input());
 }
 
 #[test]
-fn message_phase_defaults_to_normal_for_legacy_messages() {
-    // 旧 session 持久化的消息没有 phase 字段，反序列化时应默认为 Normal。
-    // 这里手动构造一条缺失 phase 字段的旧格式消息 JSON。
-    let legacy_json = r#"{
-        "id": "legacy-1",
-        "role": "assistant",
-        "content": "旧消息",
-        "reasoning_content": "",
-        "created_at": "2026-01-01 00:00:00"
-    }"#;
-    let msg: Message = serde_json::from_str(legacy_json).unwrap();
-    assert_eq!(msg.phase, MessagePhase::Normal);
-    assert_eq!(msg.text_content(), "旧消息");
+fn new_format_roundtrip_keeps_role_fields_and_meta() {
+    let mut assistant = Message::with_reasoning(MessageRole::Assistant, "回复", "思考");
+    if let Role::Assistant {
+        tool_calls,
+        reasoning_signature,
+        text_elapsed_ms,
+        ..
+    } = &mut assistant.role
+    {
+        tool_calls.push(MessageToolCall {
+            id: "call-1".into(),
+            name: "fs__read_file".into(),
+            arguments: serde_json::json!({"path": "a"}),
+        });
+        *reasoning_signature = Some("sig".into());
+        *text_elapsed_ms = Some(12);
+    }
+    let tool = Message::tool_result("call-1", "fs__read_file", "内容", true).with_duration_ms(5);
+    let mut user = Message::user_prepared("u1", vec![ContentBlock::text("你好")]);
+    user.set_turn_result(100, TurnStatus::Success);
+    user.set_final_reply(Some(assistant.id.clone()));
+
+    for original in [user, assistant, tool] {
+        let json = serde_json::to_value(&original).unwrap();
+        assert!(json["role"].is_object(), "新格式 role 为对象：{json}");
+        assert!(json.get("phase").is_none());
+        let parsed: Message = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
+    }
+}
+
+#[test]
+fn new_format_json_shape() {
+    let tool = Message::tool_result("call-1", "fs__read_file", "内容", false).with_duration_ms(5);
+    let json = serde_json::to_value(&tool).unwrap();
+    assert_eq!(
+        json["role"],
+        serde_json::json!({"type": "tool", "tool_call_id": "call-1", "tool_name": "fs__read_file", "duration_ms": 5})
+    );
+    // 空 meta 不落盘。
+    assert!(json.get("meta").is_none());
+}
+
+#[test]
+fn legacy_flat_messages_migrate_into_roles() {
+    let legacy = serde_json::json!([
+        {"id": "u1", "role": "user", "content": "问题", "created_at": "t",
+         "turn_status": "success", "elapsed_ms": 30},
+        {"id": "a1", "role": "assistant", "content": "", "created_at": "t", "phase": "react",
+         "reasoning_content": "想", "reasoning_signature": "sig",
+         "tool_calls": [{"id": "c1", "name": "tool", "arguments": {}}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                   "model": "m", "agent_id": "s", "turn_id": "u1", "source": "react", "status": "success"},
+         "reasoning_elapsed_ms": 7},
+        {"id": "t1", "role": "tool", "content": "结果", "created_at": "t", "phase": "react",
+         "tool_call_id": "c1", "tool_name": "tool", "tool_result_is_error": true, "duration_ms": 9},
+        {"id": "i1", "role": "user", "content": "", "created_at": "t", "phase": "hostinjected"},
+        {"id": "a2", "role": "assistant", "content": "最终答复", "created_at": "t", "phase": "summary"},
+        {"id": "n1", "role": "notice", "content": "[调用用量] x", "created_at": "t", "compact": true,
+         "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                   "model": "m", "agent_id": "s", "turn_id": null, "source": "x", "status": "success"}},
+        {"id": "r1", "role": "user", "content": "恢复", "created_at": "t", "phase": "compressedresume"},
+        {"id": "w1", "role": "user", "content": "worker 输入", "created_at": "t", "worker_id": "agent:dev:1"}
+    ]);
+    let session: Session = serde_json::from_value(serde_json::json!({
+        "id": "s", "title": "t", "messages": legacy, "created_at": "t", "updated_at": "t"
+    }))
+    .unwrap();
+    let m = &session.messages;
+
+    assert_eq!(m[0].turn_status(), Some(TurnStatus::Success));
+    assert_eq!(m[0].elapsed_ms(), Some(30));
+    assert!(m[0].is_user_input());
+    // summary 相位的助手消息迁移为起轮用户消息的 final_reply。
+    assert_eq!(m[0].final_reply(), Some("a2"));
+
+    assert_eq!(m[1].reasoning_content(), "想");
+    assert_eq!(m[1].reasoning_signature(), Some("sig"));
+    assert_eq!(m[1].tool_calls().len(), 1);
+    assert_eq!(m[1].usage().map(|usage| usage.tokens.total_tokens), Some(3));
+    assert_eq!(m[1].reasoning_elapsed_ms(), Some(7));
+
+    assert_eq!(m[2].tool_call_id(), Some("c1"));
+    assert_eq!(m[2].tool_name(), Some("tool"));
+    assert!(m[2].tool_is_error());
+    assert_eq!(m[2].duration_ms(), Some(9));
+
+    assert_eq!(m[3].user_source(), Some(UserSource::HostInjected));
+    assert!(!m[3].is_user_input());
+
+    assert_eq!(m[5].kind(), MessageRole::Notice);
+    assert!(m[5].meta.compact);
+    assert!(m[5].usage().is_some());
+
+    assert_eq!(m[6].user_source(), Some(UserSource::CompressedResume));
+    // 旧 worker 输入不作轮次锚点。
+    assert_eq!(m[7].user_source(), Some(UserSource::Agent));
+
+    // 保存即为新格式：再读回语义不变。
+    let saved = serde_json::to_value(&session).unwrap();
+    assert!(
+        saved["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|msg| msg["role"].is_object())
+    );
+    let reloaded: Session = serde_json::from_value(saved).unwrap();
+    assert_eq!(reloaded.messages[0].final_reply(), Some("a2"));
+    assert_eq!(reloaded.messages[2].duration_ms(), Some(9));
+}
+
+#[test]
+fn legacy_final_reply_falls_back_to_plain_assistant_text() {
+    // 早期会话没有 phase：取本轮最后一条无工具调用的助手正文作最终答复；
+    // 过程消息（react）与只有工具调用的助手消息不算。
+    let session: Session = serde_json::from_value(serde_json::json!({
+        "id": "s", "title": "t", "created_at": "t", "updated_at": "t",
+        "messages": [
+            {"id": "u1", "role": "user", "content": "一", "created_at": "t"},
+            {"id": "a1", "role": "assistant", "content": "", "created_at": "t",
+             "tool_calls": [{"id": "c", "name": "x"}]},
+            {"id": "t1", "role": "tool", "content": "r", "created_at": "t", "tool_call_id": "c", "tool_name": "x"},
+            {"id": "a2", "role": "assistant", "content": "回答一", "created_at": "t"},
+            {"id": "u2", "role": "user", "content": "二", "created_at": "t"},
+            {"id": "a3", "role": "assistant", "content": "过程", "created_at": "t", "phase": "react"}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(session.messages[0].final_reply(), Some("a2"));
+    assert_eq!(session.messages[4].final_reply(), None);
+}
+
+#[test]
+fn plugin_session_messages_use_flat_format_and_accept_both() {
+    let mut assistant = Message::with_reasoning(MessageRole::Assistant, "回复", "思考");
+    if let Role::Assistant { tool_calls, .. } = &mut assistant.role {
+        tool_calls.push(MessageToolCall {
+            id: "c1".into(),
+            name: "x".into(),
+            arguments: serde_json::Value::Null,
+        });
+    }
+    let injected = Message::new(MessageRole::User, "").with_source(UserSource::HostInjected);
+    let snapshot = PluginSession {
+        id: "s".into(),
+        title: "t".into(),
+        cwd: "/tmp".into(),
+        workspace_id: "w".into(),
+        reasoning_effort: None,
+        messages: vec![assistant, injected],
+        context_summary: None,
+        created_at: "t".into(),
+        updated_at: "t".into(),
+    };
+    let json = serde_json::to_value(&snapshot).unwrap();
+    // 旧版插件按扁平格式解析：role 为字符串，字段平铺。
+    assert_eq!(json["messages"][0]["role"], "assistant");
+    assert_eq!(json["messages"][0]["reasoning_content"], "思考");
+    assert_eq!(json["messages"][0]["tool_calls"][0]["id"], "c1");
+    assert_eq!(json["messages"][1]["phase"], "hostinjected");
+    let parsed: PluginSession = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.messages[0].tool_calls().len(), 1);
+    assert_eq!(
+        parsed.messages[1].user_source(),
+        Some(UserSource::HostInjected)
+    );
 }
 
 #[test]

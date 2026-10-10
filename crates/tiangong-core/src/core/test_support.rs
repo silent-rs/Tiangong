@@ -1190,7 +1190,7 @@ pub async fn wait_turn_status(env: &TestEnv, sid: &str, message_id: &str) -> Tur
                     .messages
                     .iter()
                     .find(|m| m.id == message_id)
-                    .and_then(|m| m.turn_status)
+                    .and_then(|m| m.turn_status())
                     .filter(|status| status.is_terminal())
             })
         {

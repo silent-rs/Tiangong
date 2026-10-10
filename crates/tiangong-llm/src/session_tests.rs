@@ -506,20 +506,22 @@ async fn streamed_reasoning_is_replayed_verbatim_after_message_reload() {
             assert_eq!(message["reasoning_content"], reasoning);
         }
         prefix = messages.clone();
-        let mut assistant = Message::with_reasoning(
+        let assistant = Message::with_reasoning(
             MessageRole::Assistant,
             response.text,
             response.reasoning_content,
+        )
+        .with_tool_calls(
+            response
+                .tool_calls
+                .into_iter()
+                .map(|call| tiangong_types::MessageToolCall {
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.arguments,
+                })
+                .collect(),
         );
-        assistant.tool_calls = response
-            .tool_calls
-            .into_iter()
-            .map(|call| tiangong_types::MessageToolCall {
-                id: call.id,
-                name: call.name,
-                arguments: call.arguments,
-            })
-            .collect();
         req.context.push(assistant);
         req.context
             .push(Message::tool_result("probe", "read_probe", "OK", false));
@@ -696,32 +698,35 @@ async fn live_session_routing_smoke() {
                 response.usage.prompt_cache_hit_tokens,
                 response.reasoning_content.len()
             );
-            let mut assistant = Message::with_reasoning(
+            let assistant = Message::with_reasoning(
                 MessageRole::Assistant,
                 response.text,
                 response.reasoning_content,
+            )
+            .with_tool_calls(
+                response
+                    .tool_calls
+                    .iter()
+                    .map(|call| tiangong_types::MessageToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    })
+                    .collect(),
             );
-            assistant.tool_calls = response
-                .tool_calls
-                .iter()
-                .map(|call| tiangong_types::MessageToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                })
-                .collect();
             req.context.push(assistant);
             for call in response.tool_calls {
                 req.context
                     .push(Message::tool_result(call.id, call.name, "OK", false));
             }
             if round == 1 {
-                let mut injection = Message::new(MessageRole::Assistant, "");
-                injection.tool_calls.push(tiangong_types::MessageToolCall {
-                    id: "internal_probe".into(),
-                    name: "plugin_injection".into(),
-                    arguments: json!({}),
-                });
+                let injection = Message::new(MessageRole::Assistant, "").with_tool_calls(vec![
+                    tiangong_types::MessageToolCall {
+                        id: "internal_probe".into(),
+                        name: "plugin_injection".into(),
+                        arguments: json!({}),
+                    },
+                ]);
                 req.context.push(injection);
                 req.context.push(Message::tool_result(
                     "internal_probe",

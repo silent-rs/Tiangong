@@ -478,7 +478,7 @@ fn forward_turn_rumination(session_json: &str) -> Result<(), PluginError> {
         .iter()
         .filter(|message| {
             !matches!(
-                message.role,
+                message.kind(),
                 tiangong_types::MessageRole::System | tiangong_types::MessageRole::Notice
             )
         })
@@ -486,7 +486,7 @@ fn forward_turn_rumination(session_json: &str) -> Result<(), PluginError> {
     let turn_status = messages
         .iter()
         .rev()
-        .find_map(|message| match message.turn_status? {
+        .find_map(|message| match message.turn_status()? {
             tiangong_types::TurnStatus::Success => Some(TurnStatus::Completed),
             tiangong_types::TurnStatus::Failed => Some(TurnStatus::Failed),
             tiangong_types::TurnStatus::Cancelled => Some(TurnStatus::Cancelled),
@@ -518,19 +518,16 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
 /// 取本轮起始消息（on_turn_finished 反刍路径）。
 ///
 /// 宿主快照只含本轮消息，起点即首条。起点必须是用户真实输入——
-/// `MessagePhase::is_user_input` 排除宿主注入的 role=User 消息
-///（`HostInjected` 图片注入、`CompressedResume` 压缩恢复锚点），它们不是
+/// `Message::is_user_input` 排除非真人来源的用户消息（`HostInjected` 图片
+/// 注入、`CompressedResume` 压缩恢复锚点、`Agent` 协作消息），它们不是
 /// 用户意图，作为锚点会产生空 user_input 的异常反刍数据。
 fn turn_start(session: &tiangong_types::PluginSession) -> Option<&tiangong_types::Message> {
-    session
-        .messages
-        .first()
-        .filter(|m| matches!(m.role, tiangong_types::MessageRole::User) && m.phase.is_user_input())
+    session.messages.first().filter(|m| m.is_user_input())
 }
 
 /// 提取最近一条用户真实输入文本，作为 recall_memory 缺省查询兜底。
 ///
-/// 从后往前找 role=User 且 `phase.is_user_input()` 的消息，并跳过无文本的
+/// 从后往前找 `is_user_input()` 的用户消息，并跳过无文本的
 /// 消息（如仅含插件反馈图片的 HostInjected 注入消息、纯图片用户输入），
 /// 避免把空字符串当成兜底查询。
 fn latest_user_query(session: &tiangong_types::PluginSession) -> String {
@@ -538,10 +535,7 @@ fn latest_user_query(session: &tiangong_types::PluginSession) -> String {
         .messages
         .iter()
         .rev()
-        .filter(|message| {
-            matches!(message.role, tiangong_types::MessageRole::User)
-                && message.phase.is_user_input()
-        })
+        .filter(|message| message.is_user_input())
         .find_map(|message| {
             let text = extract_message_text(message);
             (!text.trim().is_empty()).then_some(text)
@@ -589,12 +583,12 @@ fn build_recall_context(session: &tiangong_types::PluginSession) -> Vec<String> 
         .iter()
         .rev()
         .filter_map(|message| {
-            let role = match message.role {
+            let role = match message.kind() {
                 tiangong_types::MessageRole::User => "user",
                 tiangong_types::MessageRole::Assistant => "assistant",
                 tiangong_types::MessageRole::System => return None,
                 tiangong_types::MessageRole::Notice => return None,
-                tiangong_types::MessageRole::Tool => message.tool_name.as_deref().unwrap_or("tool"),
+                tiangong_types::MessageRole::Tool => message.tool_name().unwrap_or("tool"),
             };
             let content = compact_memory_text(&message.text_content(), 900);
             (!content.is_empty()).then(|| format!("{role}: {content}"))
@@ -733,7 +727,7 @@ mod tests {
                 None,
             ),
         ];
-        message.with_phase(tiangong_types::MessagePhase::HostInjected)
+        message.with_source(tiangong_types::UserSource::HostInjected)
     }
 
     #[test]
@@ -768,7 +762,7 @@ mod tests {
     fn turn_start_still_rejects_compressed_resume() {
         let resume =
             tiangong_types::Message::new(tiangong_types::MessageRole::User, "压缩恢复锚点")
-                .with_phase(tiangong_types::MessagePhase::CompressedResume);
+                .with_source(tiangong_types::UserSource::CompressedResume);
         let session = test_session(vec![resume]);
         assert!(turn_start(&session).is_none());
     }

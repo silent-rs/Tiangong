@@ -4,7 +4,7 @@
 //! 产品身份、回复风格、多媒体能力说明等文案由各插件经 `PromptSectionProvider`
 //! 注入（产品基础文案见 `tiangong-plugin-prompt`，能力说明见对应能力插件）。
 
-use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
+use crate::session::{Message, MessageRole, Session};
 
 /// 构建 system prompt 所需的动态配置数据快照
 ///
@@ -74,27 +74,7 @@ fn collect_summary_part(session: &Session) -> Vec<String> {
 
 /// 组装最终的 System Message
 fn assemble_system_message(parts: Vec<String>) -> Message {
-    Message {
-        id: scru128::new().to_string(),
-        role: MessageRole::System,
-        content: vec![crate::session::ContentBlock::text(parts.join("\n\n"))],
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        usage: None,
-        worker_id: None,
-        elapsed_ms: None,
-        turn_status: None,
-        reasoning_elapsed_ms: None,
-        text_elapsed_ms: None,
-        duration_ms: None,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: None,
-        tool_result_is_error: false,
-        compact: false,
-        phase: MessagePhase::Normal,
-        created_at: now_text(),
-    }
+    Message::new(MessageRole::System, parts.join("\n\n"))
 }
 
 #[cfg(test)]

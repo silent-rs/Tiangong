@@ -16,7 +16,7 @@ pub(crate) fn build_turn_memory_result(
     let mut path_by_call_id = HashMap::new();
     for message in messages {
         if message.role == MessageRole::Assistant {
-            for call in &message.tool_calls {
+            for call in message.tool_calls() {
                 if let Some(path) = call
                     .arguments
                     .get("path")
@@ -31,14 +31,14 @@ pub(crate) fn build_turn_memory_result(
         if message.role != MessageRole::Tool {
             continue;
         }
-        let tool_name = message.tool_name.as_deref().unwrap_or("");
+        let tool_name = message.tool_name().unwrap_or("");
         let summary = message.text_content();
         let file_path = path_by_call_id
-            .get(message.tool_call_id.as_deref().unwrap_or_default())
+            .get(message.tool_call_id().unwrap_or_default())
             .copied();
         if let Some(candidate) = evaluate_tool_result_for_memory(
             tool_name,
-            !message.tool_result_is_error,
+            !message.tool_is_error(),
             &summary,
             file_path,
             step_index,
@@ -54,16 +54,16 @@ pub(crate) fn build_turn_memory_result(
     let turn_messages = messages
         .iter()
         .filter_map(|message| {
-            let role = match message.role {
+            let role = match message.kind() {
                 MessageRole::User => "user",
                 MessageRole::Assistant => "assistant",
                 MessageRole::System => return None,
                 MessageRole::Notice => return None,
                 MessageRole::Tool => "tool",
             };
-            // 宿主注入消息（插件反馈图片 HostInjected、压缩恢复锚点
-            // CompressedResume）不是用户意图，不进入反刍轮次消息。
-            if !message.phase.is_user_input() {
+            // 非真人输入的用户消息（插件反馈图片 HostInjected、压缩恢复锚点
+            // CompressedResume、Agent 协作消息）不是用户意图，不进入反刍轮次消息。
+            if message.kind() == MessageRole::User && !message.is_user_input() {
                 return None;
             }
             let content = compact_single_memory_text(&message.text_content(), 400);
@@ -369,7 +369,7 @@ fn should_record_tool_result(tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_types::MessagePhase;
+    use tiangong_types::UserSource;
 
     fn test_session(messages: Vec<Message>) -> PluginSession {
         PluginSession {
@@ -403,7 +403,7 @@ mod tests {
                 None,
             ),
         ];
-        message.with_phase(MessagePhase::HostInjected)
+        message.with_source(UserSource::HostInjected)
     }
 
     #[test]
@@ -432,11 +432,12 @@ mod tests {
 
     #[test]
     fn tool_names_are_unique_and_exclude_recall() {
-        let mut message = Message::new(
-            MessageRole::Tool,
+        let message = Message::tool_result(
+            "",
+            "read_file",
             "tool_calls: read_file, recall_memory, read_file",
+            false,
         );
-        message.tool_name = Some("read_file".to_string());
         let names = extract_turn_tool_calls(&[&message]);
         assert_eq!(names, vec!["read_file"]);
     }

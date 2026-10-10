@@ -36,9 +36,8 @@ impl TurnExecutionOutcome {
 pub(super) struct TurnExecutionResult {
     pub(super) usage: TokenUsage,
     pub(super) outcome: TurnExecutionOutcome,
-    /// 成功路径本轮候选答复（已标记 Summary）的消息 ID：run_turn 收尾降级时
-    /// 按 ID 精确回收，不依赖倒序查找——插件在 on_turn_finished 中追加或修改
-    /// Summary 相位时也不会误伤。
+    /// 成功路径本轮最终答复候选的消息 ID：run_turn 收尾成功时写入起点用户消息的
+    /// `final_reply`，降级为失败时不写入（或按 ID 精确回收）。
     pub(super) finalized_candidate_id: Option<String>,
 }
 

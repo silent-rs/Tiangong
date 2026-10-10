@@ -15,12 +15,12 @@ fn is_inline_data_reference(value: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
 }
 
-/// 消息角色
+/// 消息角色标签（不带角色数据），用于比较、匹配与分派。
 ///
 /// [`Notice`](MessageRole::Notice) 是系统发给用户的通知（如轮次失败原因），
 /// 仅前端可见：按角色在上下文构建、压缩与 provider 转换处整体排除，
 /// 不进模型上下文，也不与 [`System`](MessageRole::System)（系统提示通道）混用。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     System,
@@ -35,8 +35,6 @@ pub enum MessageRole {
 /// 起轮时写入 `Processing`，收尾改为终态；进程意外退出时会残留
 /// `Processing`，下一条用户消息到来时由 Core 接续该轮。引导消息等
 /// 非起轮的用户消息始终为 None。
-///
-/// 向后兼容：旧 session 反序列化时缺失该字段默认为 None，前端不展示状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnStatus {
@@ -72,67 +70,168 @@ pub struct DeferredToolInjection {
     pub payload: Value,
 }
 
-/// 消息所属的执行阶段。
+/// 用户消息的来源：决定是否作为轮次锚点、能否被压缩等运行语义。
 ///
-/// 用于前端区分 ReAct 工具执行阶段的过程消息与总结阶段的最终回复，
-/// 实现消息分层展示。向后兼容：旧 session 缺失该字段时默认为 `Normal`。
-///
-/// 前向兼容：未知阶段值（更高版本写入的新变体）降级为 `Normal`，
-/// 而不是反序列化失败导致整个会话无法打开（曾发生于：开发版会话
-/// 携带 `hostinjected` 消息，正式版无该变体，会话打不开）。序列化
-/// 仍由 derive 生成小写标签；`Deserialize` 为手写实现。
+/// 前向兼容：未知值（更高版本写入的新变体）降级为 `Human`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum MessagePhase {
-    /// 默认值：旧消息或未标记阶段的消息；也是未知阶段值的降级目标。
+#[serde(rename_all = "snake_case")]
+pub enum UserSource {
+    /// 用户真实输入（含 IM、Server API、定时任务等外部入口）。
     #[default]
-    Normal,
-    /// ReAct 工具执行阶段的消息（工具调用、工具结果、过程文本）。
-    React,
-    /// 总结阶段的最终回复（可复制）。
-    Summary,
-    /// 压缩后注入的「当前任务状态」合成消息。
-    ///
-    /// 上下文压缩隐藏早期模型上下文后，为避免正在进行的 turn 失忆，
-    /// 由 core 持久化一条承载「最近用户提问 + 已完成结果 + 进行中工具」
-    /// 的 User 消息。该消息始终发送给模型，前端不展示、搜索或编辑。
-    CompressedResume,
-    /// 宿主注入的媒体消息（RFC 0017）。
-    ///
-    /// 工具产物图片等宿主注入内容：以原生视觉部件发送给模型（像素直达，
-    /// 而非文本提及路径），前端把它作为助手轮次内的过程片段在 assistant
-    /// 侧展示（不进搜索、不可编辑），会话检查器可审计。它不是用户
-    /// 意图，不作轮次锚点；与 CompressedResume 一样随压缩边界降级，
-    /// 但不要求「始终发送」。
+    Human,
+    /// 宿主注入的媒体消息（RFC 0017）：工具产物图片等以原生视觉部件发送给
+    /// 模型。不是用户意图，不作轮次锚点；随压缩边界降级。
     HostInjected,
+    /// 压缩后注入的「当前任务状态」恢复锚点：始终发送给模型、不再被压缩，
+    /// 不作轮次锚点。
+    CompressedResume,
+    /// 由其他 Agent 产生的输入（历史 Agent Team 的 worker 消息）。不作轮次锚点。
+    Agent,
 }
 
-impl<'de> Deserialize<'de> for MessagePhase {
+impl<'de> Deserialize<'de> for UserSource {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
-        let phase = String::deserialize(deserializer)?;
-        Ok(match phase.as_str() {
-            "react" => Self::React,
-            "summary" => Self::Summary,
-            "compressedresume" => Self::CompressedResume,
-            "hostinjected" => Self::HostInjected,
-            _ => Self::Normal,
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "host_injected" => Self::HostInjected,
+            "compressed_resume" => Self::CompressedResume,
+            "agent" => Self::Agent,
+            _ => Self::Human,
         })
     }
 }
 
-impl MessagePhase {
-    /// 是否为用户真实输入。
-    ///
-    /// 宿主注入的 role=User 消息（图片注入 `HostInjected`、压缩恢复锚点
-    /// `CompressedResume`）是模型上下文的载体，不代表一次用户意图，
-    /// 不得作为轮次锚点（`elapsed_ms` / `turn_status` 的落点）。
-    /// UI 可见性与本判据正交：React/Summary 过程消息属于用户发起的
-    /// 轮次，仍视为真实输入。
-    pub fn is_user_input(&self) -> bool {
-        !matches!(self, Self::HostInjected | Self::CompressedResume)
+impl UserSource {
+    /// 是否为用户真实输入（可作轮次锚点）。
+    pub fn is_user_input(self) -> bool {
+        self == Self::Human
+    }
+}
+
+/// 角色及其必带字段。
+///
+/// 只放「某角色才有」的结构化字段；与角色无关、仅供界面使用的数据放
+/// [`MessageMeta`]。JSON 形态：`{"type": "assistant", "tool_calls": [...], ...}`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Role {
+    /// 系统提示通道。
+    System,
+    /// 用户消息。
+    User {
+        #[serde(default, skip_serializing_if = "is_default")]
+        source: UserSource,
+        /// 本轮执行状态（仅起轮锚点）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_status: Option<TurnStatus>,
+        /// 本轮执行时长（毫秒，仅起轮锚点）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+        /// 本轮最终答复的消息 ID（成功完成时写入，失败回收时清空）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_reply: Option<String>,
+    },
+    /// 助手消息。
+    Assistant {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reasoning_content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_signature: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<MessageToolCall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Box<crate::token::MessageUsage>>,
+        /// 思考阶段耗时（毫秒）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_elapsed_ms: Option<u64>,
+        /// 正文生成阶段耗时（毫秒）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_elapsed_ms: Option<u64>,
+    },
+    /// 工具结果。`tool_call_id` 为空表示无配对调用的运行时上下文
+    /// （provider 映射为 `<tool-context>` 用户文本）。
+    Tool {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        tool_call_id: String,
+        #[serde(default)]
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+        /// 单次工具调用执行耗时（毫秒）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    /// 系统发给用户的通知（不进模型上下文）。
+    Notice {
+        /// 无正文模型调用的用量记录。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Box<crate::token::MessageUsage>>,
+    },
+}
+
+impl Role {
+    /// 以角色标签构造空角色数据。
+    pub fn from_kind(kind: MessageRole) -> Self {
+        match kind {
+            MessageRole::System => Self::System,
+            MessageRole::User => Self::user(),
+            MessageRole::Assistant => Self::assistant(),
+            MessageRole::Tool => Self::Tool {
+                tool_call_id: String::new(),
+                tool_name: String::new(),
+                is_error: false,
+                duration_ms: None,
+            },
+            MessageRole::Notice => Self::Notice { usage: None },
+        }
+    }
+
+    pub fn user() -> Self {
+        Self::User {
+            source: UserSource::Human,
+            turn_status: None,
+            elapsed_ms: None,
+            final_reply: None,
+        }
+    }
+
+    pub fn assistant() -> Self {
+        Self::Assistant {
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            tool_calls: Vec::new(),
+            usage: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
+        }
+    }
+
+    /// 角色标签。
+    pub fn kind(&self) -> MessageRole {
+        match self {
+            Self::System => MessageRole::System,
+            Self::User { .. } => MessageRole::User,
+            Self::Assistant { .. } => MessageRole::Assistant,
+            Self::Tool { .. } => MessageRole::Tool,
+            Self::Notice { .. } => MessageRole::Notice,
+        }
+    }
+}
+
+/// 与角色无关的消息结构化字段。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MessageMeta {
+    /// 表示从当前消息及以前的历史已被压缩摘要覆盖。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compact: bool,
+}
+
+impl MessageMeta {
+    pub fn is_empty(&self) -> bool {
+        !self.compact
     }
 }
 
@@ -293,57 +392,35 @@ impl MediaAsset {
     }
 }
 
-/// 对话消息
+/// 对话消息。
+///
+/// - `role`：角色及其必带字段（见 [`Role`]）；
+/// - `content`：可直接提交给模型的内容块；
+/// - `meta`：与角色无关的结构化字段（压缩标记、插件渲染）。
+///
+/// 序列化为新格式；反序列化同时接受旧的扁平格式（`role` 为字符串、角色
+/// 字段平铺在顶层），读入后按新结构归位，下次保存即写为新格式。
 #[derive(Debug, Clone, Serialize)]
 pub struct Message {
     pub id: String,
-    pub role: MessageRole,
-    /// 消息内容，支持文本、图片、视频、音频、文件等多种类型混合排列。
-    /// 向后兼容：旧格式 content 为 String 时自动包装为 `vec![ContentBlock::Text(string)]`。
-    pub content: Vec<ContentBlock>,
-    #[serde(default)]
-    pub reasoning_content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_signature: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Box<crate::token::MessageUsage>>,
-    /// 多 Worker 模式下标识消息所属 Worker
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<MessageToolCall>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub tool_result_is_error: bool,
-    /// 表示从当前消息及以前的历史已被压缩摘要覆盖。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub compact: bool,
-    /// 消息所属的执行阶段，用于前端消息分层展示。
-    #[serde(default)]
-    pub phase: MessagePhase,
     pub created_at: String,
-    /// 该用户消息所属轮次的执行时长（毫秒）。仅持久化到用户消息（turn 锚点），
-    /// 前端据此展示「执行总时长」，历史会话重新打开同样可见。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u64>,
-    /// 该轮次的最终状态。仅持久化到用户消息，便于前端直观区分成功/失败/取消。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_status: Option<TurnStatus>,
-    /// 本次模型输出中思考（reasoning）阶段的耗时（毫秒）：首个 reasoning 增量
-    /// 到最后一个增量的时长。仅持久化到 assistant 消息。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_elapsed_ms: Option<u64>,
-    /// 本次模型输出中正文生成阶段的耗时（毫秒）：首个文本增量到最后一个增量
-    /// 的时长。仅持久化到 assistant 消息。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_elapsed_ms: Option<u64>,
-    /// 单次工具调用的执行耗时（毫秒）。仅持久化到 tool 结果消息，
-    /// 历史 tool_calls 调用耗时展示；未测量（拒绝/重复跳过等）为 None。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
+    pub role: Role,
+    /// 消息内容，支持文本、图片、视频、音频、文件等多种类型混合排列。
+    pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "MessageMeta::is_empty")]
+    pub meta: MessageMeta,
+}
+
+impl PartialEq<MessageRole> for Role {
+    fn eq(&self, other: &MessageRole) -> bool {
+        self.kind() == *other
+    }
+}
+
+impl PartialEq<Role> for MessageRole {
+    fn eq(&self, other: &Role) -> bool {
+        *self == other.kind()
+    }
 }
 
 #[derive(Deserialize)]
@@ -603,76 +680,222 @@ fn legacy_resource_instruction(
     ))
 }
 
-/// 向后兼容的 Message 反序列化：
-/// - content 同时支持旧 String 格式与新 content blocks 数组（见 deserialize_content）；
-/// - 旧 session 的顶层 `media` 数组在反序列化时直接并入 content 末尾（不再保留为独立字段）。
+/// 消息反序列化的原始形态：同时容纳新格式（`role` 为对象、`meta`）与旧的
+/// 扁平格式（`role` 为字符串、角色字段平铺在顶层），由 [`MessageRaw::decode`]
+/// 归位到新结构。
+#[derive(Deserialize)]
+pub struct MessageRaw {
+    id: String,
+    role: Value,
+    content: Value,
+    created_at: String,
+    #[serde(default)]
+    meta: Option<MessageMeta>,
+    // ── 以下为旧扁平格式字段 ──
+    #[serde(default)]
+    reasoning_content: String,
+    reasoning_signature: Option<String>,
+    usage: Option<Box<crate::token::MessageUsage>>,
+    worker_id: Option<String>,
+    /// 更早格式的顶层 media：并入 content。
+    #[serde(default)]
+    media: Vec<MediaAsset>,
+    #[serde(default)]
+    tool_calls: Vec<MessageToolCall>,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_result_is_error: bool,
+    #[serde(default)]
+    compact: bool,
+    phase: Option<String>,
+    elapsed_ms: Option<u64>,
+    turn_status: Option<TurnStatus>,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
+    duration_ms: Option<u64>,
+}
+
+/// 旧格式助手消息的阶段，供会话级迁移推导 `final_reply`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyAssistantPhase {
+    Normal,
+    React,
+    Summary,
+}
+
+/// 旧格式迁移所需、但不属于新结构的信息。
+#[derive(Debug, Clone, Copy)]
+struct LegacyHint {
+    assistant_phase: Option<LegacyAssistantPhase>,
+    from_worker: bool,
+}
+
+impl MessageRaw {
+    /// 归位为新结构；旧格式返回迁移提示。
+    fn decode(self) -> Result<(Message, Option<LegacyHint>), String> {
+        if !self.role.is_string() {
+            let role: Role = serde_json::from_value(self.role)
+                .map_err(|error| format!("消息 role 无效：{error}"))?;
+            let content =
+                deserialize_message_content(self.content, role.kind(), &self.id, self.media)?;
+            let message = Message {
+                id: self.id,
+                created_at: self.created_at,
+                role,
+                content,
+                meta: self.meta.unwrap_or_default(),
+            };
+            return Ok((message, None));
+        }
+
+        let kind: MessageRole = serde_json::from_value(self.role)
+            .map_err(|error| format!("消息 role 无效：{error}"))?;
+        let content = deserialize_message_content(self.content, kind, &self.id, self.media)?;
+        let phase = self.phase.as_deref().unwrap_or("normal");
+        let from_worker = self.worker_id.is_some();
+        let mut assistant_phase = None;
+        let role = match kind {
+            MessageRole::System => Role::System,
+            MessageRole::User => Role::User {
+                source: match phase {
+                    "hostinjected" => UserSource::HostInjected,
+                    "compressedresume" => UserSource::CompressedResume,
+                    _ if from_worker => UserSource::Agent,
+                    _ => UserSource::Human,
+                },
+                turn_status: self.turn_status,
+                elapsed_ms: self.elapsed_ms,
+                final_reply: None,
+            },
+            MessageRole::Assistant => {
+                assistant_phase = Some(match phase {
+                    "summary" => LegacyAssistantPhase::Summary,
+                    "react" => LegacyAssistantPhase::React,
+                    _ => LegacyAssistantPhase::Normal,
+                });
+                Role::Assistant {
+                    reasoning_content: self.reasoning_content,
+                    reasoning_signature: self.reasoning_signature,
+                    tool_calls: self.tool_calls,
+                    usage: self.usage,
+                    reasoning_elapsed_ms: self.reasoning_elapsed_ms,
+                    text_elapsed_ms: self.text_elapsed_ms,
+                }
+            }
+            MessageRole::Tool => Role::Tool {
+                tool_call_id: self.tool_call_id.unwrap_or_default(),
+                tool_name: self.tool_name.unwrap_or_default(),
+                is_error: self.tool_result_is_error,
+                duration_ms: self.duration_ms,
+            },
+            MessageRole::Notice => Role::Notice { usage: self.usage },
+        };
+        let message = Message {
+            id: self.id,
+            created_at: self.created_at,
+            role,
+            content,
+            meta: MessageMeta {
+                compact: self.compact,
+            },
+        };
+        Ok((
+            message,
+            Some(LegacyHint {
+                assistant_phase,
+                from_worker,
+            }),
+        ))
+    }
+}
+
 impl<'de> Deserialize<'de> for Message {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        // 与 origin/main 的 derive 行为保持一致：id/role/content/created_at 为必填，
-        // 缺失时反序列化失败（而非静默生成空消息）。其余字段按需 default。
-        #[derive(Deserialize)]
-        struct MessageRaw {
-            id: String,
-            role: MessageRole,
-            content: Value,
-            #[serde(default)]
-            reasoning_content: String,
-            reasoning_signature: Option<String>,
-            usage: Option<Box<crate::token::MessageUsage>>,
-            worker_id: Option<String>,
-            /// 旧格式 media 字段：反序列化时捕获，随即并入 content，不保留为结构字段。
-            #[serde(default)]
-            media: Vec<MediaAsset>,
-            #[serde(default)]
-            tool_calls: Vec<MessageToolCall>,
-            tool_call_id: Option<String>,
-            tool_name: Option<String>,
-            #[serde(default)]
-            tool_result_is_error: bool,
-            #[serde(default)]
-            compact: bool,
-            #[serde(default)]
-            phase: MessagePhase,
-            created_at: String,
-            elapsed_ms: Option<u64>,
-            turn_status: Option<TurnStatus>,
-            #[serde(default)]
-            reasoning_elapsed_ms: Option<u64>,
-            #[serde(default)]
-            text_elapsed_ms: Option<u64>,
-            #[serde(default)]
-            duration_ms: Option<u64>,
-        }
-
         let raw = MessageRaw::deserialize(deserializer)?;
-        let content = deserialize_message_content(raw.content, raw.role, &raw.id, raw.media)
-            .map_err(de::Error::custom)?;
-
-        Ok(Message {
-            id: raw.id,
-            role: raw.role,
-            content,
-            reasoning_content: raw.reasoning_content,
-            reasoning_signature: raw.reasoning_signature,
-            usage: raw.usage,
-            worker_id: raw.worker_id,
-            tool_calls: raw.tool_calls,
-            tool_call_id: raw.tool_call_id,
-            tool_name: raw.tool_name,
-            tool_result_is_error: raw.tool_result_is_error,
-            compact: raw.compact,
-            phase: raw.phase,
-            created_at: raw.created_at,
-            elapsed_ms: raw.elapsed_ms,
-            turn_status: raw.turn_status,
-            reasoning_elapsed_ms: raw.reasoning_elapsed_ms,
-            text_elapsed_ms: raw.text_elapsed_ms,
-            duration_ms: raw.duration_ms,
-        })
+        raw.decode()
+            .map(|(message, _)| message)
+            .map_err(de::Error::custom)
     }
+}
+
+/// 会话消息列表的反序列化：逐条归位，并为旧格式补齐轮次级信息。
+///
+/// 旧格式以助手消息 `phase=summary` 标记最终答复（更早的会话没有 phase，
+/// 以非过程的助手正文作最终答复）；新结构把最终答复记在本轮起轮的用户
+/// 消息 `final_reply` 上。供 `#[serde(deserialize_with)]` 使用。
+pub fn deserialize_messages<'de, D>(deserializer: D) -> Result<Vec<Message>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raws = Vec::<MessageRaw>::deserialize(deserializer)?;
+    let mut messages = Vec::with_capacity(raws.len());
+    let mut hints = Vec::with_capacity(raws.len());
+    for raw in raws {
+        let (message, hint) = raw.decode().map_err(de::Error::custom)?;
+        messages.push(message);
+        hints.push(hint);
+    }
+    assign_legacy_final_replies(&mut messages, &hints);
+    Ok(messages)
+}
+
+fn assign_legacy_final_replies(messages: &mut [Message], hints: &[Option<LegacyHint>]) {
+    fn commit(messages: &mut [Message], anchor: Option<usize>, reply: Option<String>) {
+        if let (Some(anchor), Some(reply)) = (anchor, reply)
+            && let Role::User { final_reply, .. } = &mut messages[anchor].role
+            && final_reply.is_none()
+        {
+            *final_reply = Some(reply);
+        }
+    }
+
+    let mut anchor = None;
+    let mut summary = None;
+    let mut normal = None;
+    for index in 0..messages.len() {
+        if messages[index].is_user_input() {
+            commit(messages, anchor, summary.take().or(normal.take()));
+            anchor = Some(index);
+            continue;
+        }
+        let Some(hint) = hints[index] else {
+            continue;
+        };
+        if hint.from_worker {
+            continue;
+        }
+        match hint.assistant_phase {
+            Some(LegacyAssistantPhase::Summary) => summary = Some(messages[index].id.clone()),
+            Some(LegacyAssistantPhase::Normal)
+                if messages[index].tool_calls().is_empty()
+                    && !messages[index].text_content().trim().is_empty() =>
+            {
+                normal = Some(messages[index].id.clone());
+            }
+            _ => {}
+        }
+    }
+    commit(messages, anchor, summary.or(normal));
+}
+
+/// 以旧的扁平格式序列化消息列表（插件会话快照边界使用）。
+///
+/// 已安装的旧版 WASM 插件按扁平格式解析 `PluginSession.messages`；新版插件
+/// 的反序列化两种格式都接受。供 `#[serde(serialize_with)]` 使用。
+pub fn serialize_messages_flat<S>(messages: &[Message], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(messages.len()))?;
+    for message in messages {
+        seq.serialize_element(&message.to_flat_value())?;
+    }
+    seq.end()
 }
 
 impl Message {
@@ -685,72 +908,47 @@ impl Message {
         Self::new(MessageRole::Notice, format!("[{category}] {content}"))
     }
 
-    pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
+    /// 以角色标签和文本构造消息（角色字段取空值）。
+    pub fn new(kind: MessageRole, content: impl Into<String>) -> Self {
+        Self::with_role(
+            Role::from_kind(kind),
+            vec![ContentBlock::text(content.into())],
+        )
+    }
+
+    /// 以完整角色数据和内容块构造消息。
+    pub fn with_role(role: Role, content: Vec<ContentBlock>) -> Self {
         Self {
             id: scru128::new().to_string(),
-            role,
-            content: vec![ContentBlock::text(content.into())],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: MessagePhase::Normal,
             created_at: now_text(),
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
+            role,
+            content,
+            meta: MessageMeta::default(),
         }
     }
 
-    /// 构造带推理内容的消息。`reasoning` 通常仅对 Assistant 有意义。
+    /// 构造带推理内容的消息。`reasoning` 仅对 Assistant 生效。
     pub fn with_reasoning(
-        role: MessageRole,
+        kind: MessageRole,
         content: impl Into<String>,
         reasoning: impl Into<String>,
     ) -> Self {
-        Self {
-            id: scru128::new().to_string(),
-            role,
-            content: vec![ContentBlock::text(content.into())],
-            reasoning_content: reasoning.into(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: MessagePhase::Normal,
-            created_at: now_text(),
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
+        let mut message = Self::new(kind, content);
+        if let Role::Assistant {
+            reasoning_content, ..
+        } = &mut message.role
+        {
+            *reasoning_content = reasoning.into();
         }
+        message
     }
 
-    /// 设置消息的执行阶段标记（链式调用）。
-    pub fn with_phase(mut self, phase: MessagePhase) -> Self {
-        self.phase = phase;
-        self
+    /// 构造宿主准备好的用户消息（稳定 ID + 内容块）。
+    pub fn user_prepared(id: impl Into<String>, content: Vec<ContentBlock>) -> Self {
+        let mut message = Self::with_role(Role::user(), content);
+        message.id = id.into();
+        message
     }
-
-    /// 写入单次工具调用的执行耗时（链式调用）。仅对 tool 结果消息有意义。
-    pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
-        self.duration_ms = Some(duration_ms);
-        self
-    }
-
-    // ── 语义构造器：按角色表达专属字段，减少非法组合 ──
 
     /// 构造 Tool 结果消息，一次性写入 tool 专属字段。
     pub fn tool_result(
@@ -759,25 +957,203 @@ impl Message {
         content: impl Into<String>,
         is_error: bool,
     ) -> Self {
-        let mut msg = Self::new(MessageRole::Tool, content);
-        msg.tool_call_id = Some(tool_call_id.into());
-        msg.tool_name = Some(tool_name.into());
-        msg.tool_result_is_error = is_error;
-        msg
+        Self::with_role(
+            Role::Tool {
+                tool_call_id: tool_call_id.into(),
+                tool_name: tool_name.into(),
+                is_error,
+                duration_ms: None,
+            },
+            vec![ContentBlock::text(content.into())],
+        )
+    }
+
+    /// 设置用户消息来源（链式调用）；非用户消息不受影响。
+    pub fn with_source(mut self, source: UserSource) -> Self {
+        if let Role::User { source: slot, .. } = &mut self.role {
+            *slot = source;
+        }
+        self
+    }
+
+    /// 写入单次工具调用的执行耗时（链式调用）；非工具消息不受影响。
+    pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        if let Role::Tool {
+            duration_ms: slot, ..
+        } = &mut self.role
+        {
+            *slot = Some(duration_ms);
+        }
+        self
+    }
+
+    /// 写入助手发起的工具调用（链式调用）；非助手消息不受影响。
+    pub fn with_tool_calls(mut self, calls: Vec<MessageToolCall>) -> Self {
+        if let Role::Assistant { tool_calls, .. } = &mut self.role {
+            *tool_calls = calls;
+        }
+        self
     }
 
     /// 在 User 消息上写入该轮次的执行时长与最终状态（turn 锚点）。
-    /// 仅 User 消息会写入；debug 构建下非 User 调用会触发断言，release 下为空操作。
-    pub fn set_turn_result(&mut self, elapsed_ms: u64, status: TurnStatus) {
+    /// 非 User 消息为空操作（debug 构建下触发断言）。
+    pub fn set_turn_result(&mut self, elapsed: u64, status: TurnStatus) {
         debug_assert_eq!(
-            self.role,
+            self.role.kind(),
             MessageRole::User,
             "set_turn_result should only be called on user messages"
         );
-        if self.role == MessageRole::User {
-            self.elapsed_ms = Some(elapsed_ms);
-            self.turn_status = Some(status);
+        if let Role::User {
+            turn_status,
+            elapsed_ms,
+            ..
+        } = &mut self.role
+        {
+            *elapsed_ms = Some(elapsed);
+            *turn_status = Some(status);
         }
+    }
+
+    /// 设置轮次状态（仅用户消息生效）。
+    pub fn set_turn_status(&mut self, status: TurnStatus) {
+        if let Role::User { turn_status, .. } = &mut self.role {
+            *turn_status = Some(status);
+        }
+    }
+
+    /// 设置本轮最终答复（仅用户锚点消息生效）。
+    pub fn set_final_reply(&mut self, reply: Option<String>) {
+        if let Role::User { final_reply, .. } = &mut self.role {
+            *final_reply = reply;
+        }
+    }
+
+    /// 记录模型调用用量（Assistant / Notice 生效）。
+    pub fn set_usage(&mut self, record: crate::token::MessageUsage) {
+        match &mut self.role {
+            Role::Assistant { usage, .. } | Role::Notice { usage } => {
+                *usage = Some(Box::new(record));
+            }
+            _ => {}
+        }
+    }
+
+    // ── 只读访问：按角色取字段，其他角色返回空值 ──
+
+    pub fn kind(&self) -> MessageRole {
+        self.role.kind()
+    }
+
+    pub fn reasoning_content(&self) -> &str {
+        match &self.role {
+            Role::Assistant {
+                reasoning_content, ..
+            } => reasoning_content,
+            _ => "",
+        }
+    }
+
+    pub fn reasoning_signature(&self) -> Option<&str> {
+        match &self.role {
+            Role::Assistant {
+                reasoning_signature,
+                ..
+            } => reasoning_signature.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn tool_calls(&self) -> &[MessageToolCall] {
+        match &self.role {
+            Role::Assistant { tool_calls, .. } => tool_calls,
+            _ => &[],
+        }
+    }
+
+    /// 工具结果配对的调用 ID（无配对调用或非工具消息时为 None）。
+    pub fn tool_call_id(&self) -> Option<&str> {
+        match &self.role {
+            Role::Tool { tool_call_id, .. } if !tool_call_id.is_empty() => Some(tool_call_id),
+            _ => None,
+        }
+    }
+
+    pub fn tool_name(&self) -> Option<&str> {
+        match &self.role {
+            Role::Tool { tool_name, .. } if !tool_name.is_empty() => Some(tool_name),
+            _ => None,
+        }
+    }
+
+    pub fn tool_is_error(&self) -> bool {
+        matches!(self.role, Role::Tool { is_error: true, .. })
+    }
+
+    pub fn duration_ms(&self) -> Option<u64> {
+        match &self.role {
+            Role::Tool { duration_ms, .. } => *duration_ms,
+            _ => None,
+        }
+    }
+
+    pub fn usage(&self) -> Option<&crate::token::MessageUsage> {
+        match &self.role {
+            Role::Assistant { usage, .. } | Role::Notice { usage } => usage.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn reasoning_elapsed_ms(&self) -> Option<u64> {
+        match &self.role {
+            Role::Assistant {
+                reasoning_elapsed_ms,
+                ..
+            } => *reasoning_elapsed_ms,
+            _ => None,
+        }
+    }
+
+    pub fn text_elapsed_ms(&self) -> Option<u64> {
+        match &self.role {
+            Role::Assistant {
+                text_elapsed_ms, ..
+            } => *text_elapsed_ms,
+            _ => None,
+        }
+    }
+
+    pub fn turn_status(&self) -> Option<TurnStatus> {
+        match &self.role {
+            Role::User { turn_status, .. } => *turn_status,
+            _ => None,
+        }
+    }
+
+    pub fn elapsed_ms(&self) -> Option<u64> {
+        match &self.role {
+            Role::User { elapsed_ms, .. } => *elapsed_ms,
+            _ => None,
+        }
+    }
+
+    pub fn final_reply(&self) -> Option<&str> {
+        match &self.role {
+            Role::User { final_reply, .. } => final_reply.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// 用户消息来源；非用户消息为 None。
+    pub fn user_source(&self) -> Option<UserSource> {
+        match &self.role {
+            Role::User { source, .. } => Some(*source),
+            _ => None,
+        }
+    }
+
+    /// 是否为用户真实输入（轮次锚点候选）。
+    pub fn is_user_input(&self) -> bool {
+        self.user_source().is_some_and(UserSource::is_user_input)
     }
 
     /// 获取纯文本内容（拼接所有 Text 块）
@@ -808,9 +1184,6 @@ impl Message {
     }
 
     /// 从 content blocks 提取媒体资产（content blocks 是媒体的唯一真相源）。
-    ///
-    /// `append_message_with_*_media` 把附件存进 `content` 的 `ContentBlock::Media`，
-    /// 不再保留独立的 media 字段。任何需要 media 列表的地方都必须经此提取。
     pub fn extract_media_assets(&self) -> Vec<MediaAsset> {
         self.content
             .iter()
@@ -844,9 +1217,7 @@ impl Message {
     /// 返回移除瞬时图片数据后的稳定消息副本。
     pub fn stable(&self) -> Self {
         let mut stable = self.clone();
-        for block in &mut stable.content {
-            block.clear_transient_data();
-        }
+        stable.clear_transient_data();
         stable
     }
 
@@ -856,6 +1227,109 @@ impl Message {
             block.clear_transient_data();
         }
     }
+
+    /// 旧的扁平 JSON 形态（插件会话快照兼容边界使用）。
+    pub fn to_flat_value(&self) -> Value {
+        let mut value = serde_json::json!({
+            "id": self.id,
+            "role": self.role.kind(),
+            "content": self.content,
+            "created_at": self.created_at,
+        });
+        let object = value.as_object_mut().expect("json! 对象");
+        let mut put = |key: &str, field: Value| {
+            if !field.is_null() {
+                object.insert(key.to_string(), field);
+            }
+        };
+        let phase = match &self.role {
+            Role::User { source, .. } => match source {
+                UserSource::HostInjected => "hostinjected",
+                UserSource::CompressedResume => "compressedresume",
+                UserSource::Human | UserSource::Agent => "normal",
+            },
+            Role::Assistant { .. } | Role::Tool { .. } => "react",
+            Role::System | Role::Notice { .. } => "normal",
+        };
+        put("phase", Value::from(phase));
+        if self.meta.compact {
+            put("compact", Value::Bool(true));
+        }
+        match &self.role {
+            Role::System => {}
+            Role::User {
+                turn_status,
+                elapsed_ms,
+                ..
+            } => {
+                put(
+                    "turn_status",
+                    serde_json::to_value(turn_status).unwrap_or_default(),
+                );
+                put(
+                    "elapsed_ms",
+                    serde_json::to_value(elapsed_ms).unwrap_or_default(),
+                );
+            }
+            Role::Assistant {
+                reasoning_content,
+                reasoning_signature,
+                tool_calls,
+                usage,
+                reasoning_elapsed_ms,
+                text_elapsed_ms,
+            } => {
+                put("reasoning_content", Value::from(reasoning_content.as_str()));
+                put(
+                    "reasoning_signature",
+                    serde_json::to_value(reasoning_signature).unwrap_or_default(),
+                );
+                if !tool_calls.is_empty() {
+                    put(
+                        "tool_calls",
+                        serde_json::to_value(tool_calls).unwrap_or_default(),
+                    );
+                }
+                put("usage", serde_json::to_value(usage).unwrap_or_default());
+                put(
+                    "reasoning_elapsed_ms",
+                    serde_json::to_value(reasoning_elapsed_ms).unwrap_or_default(),
+                );
+                put(
+                    "text_elapsed_ms",
+                    serde_json::to_value(text_elapsed_ms).unwrap_or_default(),
+                );
+            }
+            Role::Tool {
+                tool_call_id,
+                tool_name,
+                is_error,
+                duration_ms,
+            } => {
+                if !tool_call_id.is_empty() {
+                    put("tool_call_id", Value::from(tool_call_id.as_str()));
+                }
+                if !tool_name.is_empty() {
+                    put("tool_name", Value::from(tool_name.as_str()));
+                }
+                if *is_error {
+                    put("tool_result_is_error", Value::Bool(true));
+                }
+                put(
+                    "duration_ms",
+                    serde_json::to_value(duration_ms).unwrap_or_default(),
+                );
+            }
+            Role::Notice { usage } => {
+                put("usage", serde_json::to_value(usage).unwrap_or_default());
+            }
+        }
+        value
+    }
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 fn is_false(value: &bool) -> bool {

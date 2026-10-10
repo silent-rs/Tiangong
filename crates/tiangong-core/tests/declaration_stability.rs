@@ -333,7 +333,7 @@ async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedbac
         session
             .messages
             .iter()
-            .flat_map(|message| &message.tool_calls)
+            .flat_map(|message| message.tool_calls())
             .filter(|call| call.arguments["source"] == "plugin_availability")
             .count(),
         0

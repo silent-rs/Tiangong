@@ -362,8 +362,11 @@ impl TestHarness {
         session.bind_storage_root(root.path());
         session.append_message(MessageRole::User, "你好");
         // 同生产起轮：起轮消息带 Processing，本轮用户消息在起轮时即已知。
-        session.messages.last_mut().unwrap().turn_status =
-            Some(tiangong_types::TurnStatus::Processing);
+        session
+            .messages
+            .last_mut()
+            .unwrap()
+            .set_turn_status(tiangong_types::TurnStatus::Processing);
         session.rebuild_system_prompt(&SystemPromptConfig::from_plugin_sections(Vec::new()));
         // 暴露 storage_root 供 turn 级测试磁盘重载验证。
         let storage_root = root.path().to_path_buf();
@@ -434,7 +437,7 @@ impl TestHarness {
         }
         self.ctx.session.append_message(MessageRole::User, content);
         let message = self.ctx.session.messages.last_mut().unwrap();
-        message.turn_status = Some(tiangong_types::TurnStatus::Processing);
+        message.set_turn_status(tiangong_types::TurnStatus::Processing);
         self.ctx.turn_id = Some(message.id.clone());
     }
 }
@@ -498,13 +501,15 @@ async fn need_more_work_marker_continues_model_loop() {
         .iter()
         .filter(|message| message.role == MessageRole::Assistant)
         .collect::<Vec<_>>();
+    let final_id = result
+        .finalized_candidate_id
+        .clone()
+        .expect("应有最终答复候选");
     assert!(assistant_messages.iter().any(|message| {
-        message.phase == crate::session::MessagePhase::React
-            && message.text_content().contains("[need_more_work]")
+        message.id != final_id && message.text_content().contains("[need_more_work]")
     }));
     assert!(assistant_messages.iter().any(|message| {
-        message.phase == crate::session::MessagePhase::Summary
-            && message.text_content() == "所有检查均已完成。"
+        message.id == final_id && message.text_content() == "所有检查均已完成。"
     }));
 }
 
@@ -556,12 +561,9 @@ async fn compression_persists_summary_and_keeps_recent_interaction() {
     assert_eq!(context[0].role, MessageRole::System);
     assert_eq!(context[1].text_content(), "继续提出新问题");
     assert!(
-        harness
-            .ctx
-            .session
-            .messages
-            .iter()
-            .all(|message| message.phase != crate::session::MessagePhase::CompressedResume),
+        harness.ctx.session.messages.iter().all(|message| {
+            message.user_source() != Some(crate::session::UserSource::CompressedResume)
+        }),
         "压缩不注入合成续接消息"
     );
 
@@ -615,12 +617,12 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
         .session
         .append_message(MessageRole::Assistant, "较早回答");
     harness.start_turn_with("处理 latest.txt");
-    let mut assistant = Message::new(MessageRole::Assistant, "");
-    assistant.tool_calls = vec![MessageToolCall {
-        id: "latest-call".to_string(),
-        name: "read_file".to_string(),
-        arguments: serde_json::json!({"path": "latest.txt"}),
-    }];
+    let assistant =
+        Message::new(MessageRole::Assistant, "").with_tool_calls(vec![MessageToolCall {
+            id: "latest-call".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "latest.txt"}),
+        }]);
     harness.ctx.session.messages.push(assistant);
     harness.ctx.session.messages.push(Message::tool_result(
         "latest-call",
@@ -644,8 +646,8 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
     // 随后是完整保留的最近工具批次。
     assert_eq!(context[1].role, MessageRole::User);
     assert_eq!(
-        context[1].phase,
-        crate::session::MessagePhase::CompressedResume
+        context[1].user_source(),
+        Some(crate::session::UserSource::CompressedResume)
     );
     assert!(matches!(
         &context[1].content[0],
@@ -654,7 +656,7 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
     ));
     assert_eq!(context[2].role, MessageRole::Assistant);
     assert!(context.iter().any(|message| {
-        message.tool_call_id.as_deref() == Some("latest-call")
+        message.tool_call_id() == Some("latest-call")
             && message.text_content() == "recent-tool-output"
     }));
 
@@ -1160,11 +1162,77 @@ async fn run_turn_emits_single_done_and_anchors_status_to_latest_user_message() 
         .iter()
         .rev()
         .find(|m| m.role == MessageRole::User)
-        .is_some_and(|m| m.turn_status.is_some());
+        .is_some_and(|m| m.turn_status().is_some());
     assert!(
         latest_has_status,
         "最新用户消息应写入 turn_status（ALR-107）"
     );
+    // 最终答复记在起点用户消息上，并随终态前的用户消息快照送达界面。
+    let anchor = reloaded
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::User)
+        .expect("起点用户消息");
+    let final_id = anchor.final_reply().expect("成功轮次应写入 final_reply");
+    assert!(reloaded.messages.iter().any(|m| {
+        m.id == final_id
+            && m.role == MessageRole::Assistant
+            && m.text_content() == "你好,我是测试助手。"
+    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::SessionMessageUpsert { message, .. }
+            if message.id == anchor.id && message.final_reply() == Some(final_id)
+    )));
+}
+
+/// 最终落盘失败降级为 Failed 时，本轮候选不得保留最终答复身份：
+/// 起点用户消息的 `final_reply` 必须为空（内存、补偿落盘与终态快照一致）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_persistence_failure_clears_final_reply() {
+    use super::super::turn::run_turn;
+
+    let server = MockServer::builder().start().await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("候选答复。"), usage_chunk(10, 5)],
+    )
+    .await;
+    let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    let storage_root = harness.storage_root.clone();
+    let session_id = harness.ctx.session.id.clone();
+    let anchor_id = harness.ctx.turn_id.clone().unwrap();
+    let (_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+    let stream_rx = harness.stream_rx;
+    let mut barrier = crate::core::test_support::arm_turn_finish(&session_id);
+    let turn = tokio::spawn(async move { run_turn(harness.ctx, &mut cmd_rx).await });
+    tokio::task::block_in_place(|| barrier.wait_frozen());
+    // 屏障之后的第一次落盘就是最终落盘。
+    crate::core::test_support::fail_next_persistence_for_session(&session_id);
+    barrier.release();
+    let terminal = turn.await.unwrap();
+
+    assert!(
+        matches!(terminal, StreamEvent::Error { .. }),
+        "{terminal:?}"
+    );
+    let reloaded = Session::load_from_storage(&storage_root, &session_id).expect("重载 session");
+    let anchor = reloaded
+        .messages
+        .iter()
+        .find(|m| m.id == anchor_id)
+        .expect("起点用户消息");
+    assert_eq!(
+        anchor.turn_status(),
+        Some(tiangong_types::TurnStatus::Failed)
+    );
+    assert_eq!(anchor.final_reply(), None, "失败轮次不得保留最终答复");
+    let events: Vec<StreamEvent> = stream_rx.try_iter().collect();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        StreamEvent::SessionMessageUpsert { message, .. } if message.final_reply().is_some()
+    )));
 }
 
 /// 计数 on_turn_started / on_turn_finished 调用次数的插件，用于验证生命周期唯一性；
@@ -1333,7 +1401,7 @@ async fn inject_user_message_interrupts_tools_and_restarts() {
         .session
         .messages
         .iter()
-        .any(|m| m.tool_call_id.as_deref() == Some("call_1") && m.tool_result_is_error);
+        .any(|m| m.tool_call_id() == Some("call_1") && m.tool_is_error());
     assert!(call_closed, "被中断的工具调用应有失败结果（ALR-110）");
 }
 
@@ -1519,14 +1587,14 @@ async fn final_status_anchors_to_turn_start_message_after_injection() {
         .find(|m| m.role == MessageRole::User)
         .expect("应有用户消息");
     assert_eq!(latest.id, "injected-anchor", "最新用户消息应为注入的消息");
-    assert!(latest.turn_status.is_none(), "引导消息不承载轮次状态");
+    assert!(latest.turn_status().is_none(), "引导消息不承载轮次状态");
     let first = reloaded
         .messages
         .iter()
         .find(|m| m.role == MessageRole::User)
         .expect("应有原始用户消息");
     assert_eq!(first.text_content(), "你好", "原始用户消息应保持");
-    assert!(first.turn_status.is_some(), "最终状态应写入起轮消息");
+    assert!(first.turn_status().is_some(), "最终状态应写入起轮消息");
     // 唯一终态保持（ALR-109）。
     let terminal: Vec<String> = stream_rx
         .try_iter()
@@ -1705,7 +1773,7 @@ async fn parallel_tool_batch_executes_both_and_closes_protocol() {
             .session
             .messages
             .iter()
-            .any(|m| m.tool_call_id.as_deref() == Some(call_id));
+            .any(|m| m.tool_call_id() == Some(call_id));
         assert!(has_result, "{call_id} 应有对应工具结果（协议闭合）");
     }
     harness.drain_stream();
@@ -2301,7 +2369,7 @@ async fn returns_cancelled_when_tool_execution_is_cancelled() {
         .filter(|message| {
             message.role == MessageRole::Tool && message.text_content().contains("中断")
         })
-        .filter_map(|message| message.tool_call_id.as_deref())
+        .filter_map(|message| message.tool_call_id())
         .collect::<Vec<_>>();
     assert_eq!(interrupted_ids, vec!["call_block_1", "call_block_2"]);
     let app_results = harness
@@ -2429,12 +2497,12 @@ async fn continues_after_tool_failure() {
             .session
             .messages
             .iter()
-            .any(|message| { message.tool_name.as_deref() == Some("react_failed_tool_recovery") }),
+            .any(|message| { message.tool_name() == Some("react_failed_tool_recovery") }),
         "工具失败后不再追加恢复提示消息"
     );
     assert!(harness.ctx.session.messages.iter().any(|message| {
         message.role == MessageRole::Tool
-            && message.tool_name.as_deref() == Some("failing")
+            && message.tool_name() == Some("failing")
             && message.text_content().contains("test failure")
     }));
 }
@@ -2502,7 +2570,7 @@ async fn all_invalid_tool_calls_are_filtered_then_regenerated() {
     assert!(second_body_text.contains("required"));
     assert!(harness.ctx.session.messages.iter().all(|message| {
         !message
-            .tool_calls
+            .tool_calls()
             .iter()
             .any(|call| call.id == "call_invalid")
     }));

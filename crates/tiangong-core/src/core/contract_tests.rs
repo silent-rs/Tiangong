@@ -128,7 +128,7 @@ async fn steer_during_manual_compression_cancels_and_starts_turn() {
             .messages
             .iter()
             .find(|message| message.id == message_id)
-            .and_then(|message| message.turn_status)
+            .and_then(|message| message.turn_status())
             .filter(|status| status.is_terminal());
         if let Some(status) = status {
             break status;

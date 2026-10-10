@@ -1224,14 +1224,20 @@ fn validate_editable_message(
     if message.role != tiangong_core::session::MessageRole::User {
         return Err(anyhow::anyhow!("只能编辑用户消息"));
     }
-    if message.compact || message_index < session.summary_up_to {
+    if message.meta.compact || message_index < session.summary_up_to {
         return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
     }
-    if message.phase == tiangong_core::session::MessagePhase::CompressedResume {
-        return Err(anyhow::anyhow!("该消息为压缩恢复消息，无法编辑"));
-    }
-    if message.phase == tiangong_core::session::MessagePhase::HostInjected {
-        return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
+    match message.user_source() {
+        Some(tiangong_core::session::UserSource::CompressedResume) => {
+            return Err(anyhow::anyhow!("该消息为压缩恢复消息，无法编辑"));
+        }
+        Some(tiangong_core::session::UserSource::HostInjected) => {
+            return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
+        }
+        Some(tiangong_core::session::UserSource::Agent) => {
+            return Err(anyhow::anyhow!("该消息为 Agent 协作消息，无法编辑"));
+        }
+        _ => {}
     }
     if message.content != base_content {
         return Err(anyhow::anyhow!("消息已被更新，请基于最新内容重新编辑"));

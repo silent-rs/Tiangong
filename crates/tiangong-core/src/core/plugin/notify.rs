@@ -130,7 +130,7 @@ mod tests {
     use super::turn_snapshot;
     use crate::session::Session;
     use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
-    use tiangong_types::{Message, MessagePhase, MessageRole};
+    use tiangong_types::{Message, MessageRole, UserSource};
 
     #[test]
     fn 快照携带会话元信息() {
@@ -153,8 +153,8 @@ mod tests {
         let anchor_id = session.messages[3].id.clone();
         session.append_message(MessageRole::Notice, "本轮通知");
         session.append_message(MessageRole::User, "运行中引导");
-        let mut injected = Message::new(MessageRole::User, "[injected-images]");
-        injected.phase = MessagePhase::HostInjected;
+        let injected = Message::new(MessageRole::User, "[injected-images]")
+            .with_source(UserSource::HostInjected);
         session.messages.push(injected);
         session.append_message(MessageRole::Assistant, "本轮回复");
 

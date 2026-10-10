@@ -464,32 +464,13 @@ fn test_session() -> Session {
 
 /// 构造一个有用户消息的测试 Session（供 turn_finished 测试用）。
 fn test_session_with_user_message() -> Session {
-    use tiangong_types::{ContentBlock, Message, MessageRole};
+    use tiangong_types::{Message, MessageRole};
     let mut session = Session::new("test-session");
     session.cwd = "/tmp/test-workspace".to_string();
-    session.messages.push(Message {
-        id: "msg-1".to_string(),
-        role: MessageRole::User,
-        content: vec![ContentBlock::Text {
-            text: "测试用户输入".to_string(),
-        }],
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        usage: None,
-        worker_id: None,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: None,
-        tool_result_is_error: false,
-        compact: false,
-        phase: tiangong_types::MessagePhase::Normal,
-        created_at: "2026-08-01T00:00:00".to_string(),
-        elapsed_ms: None,
-        turn_status: None,
-        reasoning_elapsed_ms: None,
-        text_elapsed_ms: None,
-        duration_ms: None,
-    });
+    let mut message = Message::new(MessageRole::User, "测试用户输入");
+    message.id = "msg-1".to_string();
+    message.created_at = "2026-08-01T00:00:00".to_string();
+    session.messages.push(message);
     session
 }
 

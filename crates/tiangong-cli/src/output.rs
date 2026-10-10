@@ -249,7 +249,7 @@ pub fn print_system_message(msg: &tiangong_core::session::Message) {
 #[allow(dead_code)]
 pub fn print_session_messages(messages: &[tiangong_core::session::Message]) {
     for msg in messages {
-        match msg.role {
+        match msg.kind() {
             tiangong_core::session::MessageRole::User => print_user_message(&msg.text_content()),
             tiangong_core::session::MessageRole::Assistant => print_assistant_message(msg),
             tiangong_core::session::MessageRole::System => print_system_message(msg),

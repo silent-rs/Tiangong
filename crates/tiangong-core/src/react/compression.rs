@@ -8,7 +8,7 @@ use crate::context::compressor::{
 };
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
-use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session};
+use crate::session::{ContentBlock, Message, MessageRole, Role, Session, UserSource};
 use crate::turn_context::TurnContext;
 use tiangong_types::TokenUsage;
 use tiangong_types::{StreamEvent, stream::ContextCompressAction};
@@ -400,14 +400,13 @@ fn compression_split_point(session: &Session) -> Option<usize> {
     let last_message = &session.messages[last_visible];
     let recent_start = if last_message.role == MessageRole::Tool {
         last_message
-            .tool_call_id
-            .as_deref()
+            .tool_call_id()
             .and_then(|tool_call_id| {
                 (start..last_visible).rev().find(|&index| {
                     let message = &session.messages[index];
                     message.role == MessageRole::Assistant
                         && message
-                            .tool_calls
+                            .tool_calls()
                             .iter()
                             .any(|call| call.id == tool_call_id)
                 })
@@ -424,31 +423,29 @@ fn compression_split_point(session: &Session) -> Option<usize> {
 }
 
 /// 构造 LLM 可见、用户不可见的锚点消息：`User` 角色（满足 Provider 首条
-/// 约束）+ `CompressedResume` 阶段（前端不展示/搜索/编辑）+ `ModelInstruction`
+/// 约束）+ `CompressedResume` 来源（前端不展示/搜索/编辑）+ `ModelInstruction`
 /// 内容块（进入模型请求，不属于用户可见文本）。内容是被折叠锚点的原文，
 /// 由程序直接复制，不经过 LLM 提取。
 fn build_anchor_resume_message(anchor_text: &str) -> Message {
-    let mut message = Message::new(MessageRole::User, "");
-    message.content = vec![ContentBlock::model_instruction(format!(
-        "用户当前请求（压缩后原文保留）：\n\n{anchor_text}"
-    ))];
-    message.phase = MessagePhase::CompressedResume;
-    message
+    Message::with_role(
+        Role::user(),
+        vec![ContentBlock::model_instruction(format!(
+            "用户当前请求（压缩后原文保留）：\n\n{anchor_text}"
+        ))],
+    )
+    .with_source(UserSource::CompressedResume)
 }
 
 /// 被折叠区间内最后一条可见用户消息的文本（锚点原文）。
 ///
-/// 宿主注入消息（图片注入/压缩恢复锚点）role=User 但不是真实用户输入，
+/// 非真人来源的用户消息（图片注入/压缩恢复锚点/Agent 协作）不是真实用户输入，
 /// 其 text_content 为空，必须排除——否则折叠区间末尾恰是注入消息时
 /// 锚点取到空文本被过滤，用户原始请求丢失（评审问题 3）。
 fn folded_anchor_text(session: &Session, folded_end: usize) -> Option<String> {
     let start = session.summary_up_to.min(folded_end);
     (start..folded_end)
         .rev()
-        .find(|index| {
-            let message = &session.messages[*index];
-            message.role == MessageRole::User && message.phase.is_user_input()
-        })
+        .find(|index| session.messages[*index].is_user_input())
         .map(|index| session.messages[index].text_content())
         .filter(|text| !text.trim().is_empty())
 }
@@ -691,7 +688,6 @@ mod tests {
     use crate::observe::Observer;
     use crate::permission::TrustMode;
     use crate::session::Message;
-    use crate::session::MessagePhase;
     use crate::session::MessageToolCall;
     use tiangong_llm::SingleProviderClient;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
@@ -708,12 +704,12 @@ mod tests {
         session
             .messages
             .push(Message::new(MessageRole::Assistant, "收到"));
-        // 宿主注入消息：role=User、phase=HostInjected、无普通文本。
-        let mut injected = Message::new(MessageRole::User, "");
+        // 宿主注入消息：role=User、source=HostInjected、无普通文本。
+        let mut injected =
+            Message::new(MessageRole::User, "").with_source(UserSource::HostInjected);
         injected.content = vec![tiangong_types::ContentBlock::model_instruction(
             "[injected-images provenance]\n- 工具 desktop_screenshot 产出图片",
         )];
-        injected.phase = MessagePhase::HostInjected;
         session.messages.push(injected);
 
         let anchor = folded_anchor_text(&session, session.messages.len());
@@ -801,12 +797,12 @@ mod tests {
         session.append_message(MessageRole::Assistant, "较早回答");
         session.append_message(MessageRole::User, "锚点问题");
 
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.tool_calls = vec![MessageToolCall {
-            id: "latest-call".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({"path": "latest.txt"}),
-        }];
+        let assistant =
+            Message::new(MessageRole::Assistant, "").with_tool_calls(vec![MessageToolCall {
+                id: "latest-call".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "latest.txt"}),
+            }]);
         session.messages.push(assistant);
         session.messages.push(Message::tool_result(
             "latest-call",
@@ -871,7 +867,7 @@ mod tests {
             ctx.session
                 .messages
                 .iter()
-                .all(|message| message.phase != MessagePhase::CompressedResume),
+                .all(|message| message.user_source() != Some(UserSource::CompressedResume)),
             "压缩不注入合成续接消息"
         );
     }
@@ -1200,11 +1196,8 @@ mod tests {
             .find(|message| message.id == call_id)
             .unwrap();
         assert_eq!(message.role, MessageRole::Notice);
-        assert_eq!(message.usage.as_ref().unwrap().source, "context_summary");
-        assert_eq!(
-            message.usage.as_ref().unwrap().tokens.cache_hit_rate(),
-            Some(0.8)
-        );
+        assert_eq!(message.usage().unwrap().source, "context_summary");
+        assert_eq!(message.usage().unwrap().tokens.cache_hit_rate(), Some(0.8));
         assert!(!loaded.context().iter().any(|message| message.id == call_id));
     }
 
@@ -1249,8 +1242,7 @@ mod tests {
             .iter()
             .find(|message| message.id == call_id)
             .unwrap()
-            .usage
-            .as_ref()
+            .usage()
             .unwrap();
         assert_eq!(record.status, tiangong_types::TurnStatus::Cancelled);
         assert_eq!(record.tokens.total_tokens, 120);

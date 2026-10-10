@@ -1,4 +1,4 @@
-use crate::session::{Message, MessagePhase, MessageRole, Session};
+use crate::session::{Message, MessageRole, Session, UserSource};
 use tiangong_llm::tool::ToolSpec;
 use tiangong_llm::{ModelRequest, ReasoningEffort, SingleProviderClient, StopReason};
 use tiangong_types::TokenUsage;
@@ -10,7 +10,7 @@ pub(crate) fn is_compressible(message: &Message) -> bool {
         // CompressedResume 是压缩阶段生成的恢复锚点，不能再次纳入摘要；
         // HostInjected 只是轮次记账与展示位语义，仍属于模型上下文，
         // 必须可被压缩覆盖。
-        && message.phase != MessagePhase::CompressedResume
+        && message.user_source() != Some(UserSource::CompressedResume)
 }
 
 /// 使用 Session 和客户端快照生成上下文摘要，不负责任务调度、持久化或通知。
@@ -191,7 +191,7 @@ impl ContextCompressor {
             message.role != MessageRole::System && message.role != MessageRole::Notice
         }).map(|message| {
             let tail: String = message.text_content().chars().rev().take(512).collect::<Vec<_>>().into_iter().rev().collect();
-            serde_json::json!({"role":message.role,"tool_call_id":message.tool_call_id,"tool_call_ids":message.tool_calls.iter().map(|call|&call.id).collect::<Vec<_>>(),"text_end":tail})
+            serde_json::json!({"role":message.kind(),"tool_call_id":message.tool_call_id(),"tool_call_ids":message.tool_calls().iter().map(|call|&call.id).collect::<Vec<_>>(),"text_end":tail})
         }).unwrap_or(serde_json::Value::Null);
         format!(
             "请压缩以上对话历史。{merge_hint}\
@@ -225,13 +225,13 @@ impl ContextCompressor {
 
 pub fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
     for message in messages.iter_mut() {
-        message.compact = false;
+        message.meta.compact = false;
     }
     if let Some(boundary) = split_point
         .checked_sub(1)
         .and_then(|index| messages.get_mut(index))
     {
-        boundary.compact = true;
+        boundary.meta.compact = true;
     }
 }
 
@@ -273,8 +273,15 @@ mod tests {
         let mut session = Session::new("thinking-history");
         session.system_prompt_message = Some(Message::new(MessageRole::System, "固定系统提示"));
         let mut reply = assistant("已完成核对");
-        reply.reasoning_content = "  保留原始思考\n及空白  ".into();
-        reply.reasoning_signature = Some("original-signature".into());
+        if let crate::session::Role::Assistant {
+            reasoning_content,
+            reasoning_signature,
+            ..
+        } = &mut reply.role
+        {
+            *reasoning_content = "  保留原始思考\n及空白  ".into();
+            *reasoning_signature = Some("original-signature".into());
+        }
         session.messages = vec![user("核对记录"), reply, user("后续问题")];
         let original = serde_json::to_value(&session).unwrap();
         let history = serde_json::to_value(session.context()).unwrap();
@@ -314,15 +321,17 @@ mod tests {
     fn summary_request_keeps_legacy_resume_messages() {
         let mut session = Session::new("test");
         session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
-        let mut resume = user("上一轮续接状态");
-        resume.phase = MessagePhase::CompressedResume;
+        let resume = user("上一轮续接状态").with_source(UserSource::CompressedResume);
         session.messages = vec![resume, assistant("后续交互")];
 
         let request =
             ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::None);
 
         assert_eq!(request.context[1].role, MessageRole::User);
-        assert_eq!(request.context[1].phase, MessagePhase::CompressedResume);
+        assert_eq!(
+            request.context[1].user_source(),
+            Some(UserSource::CompressedResume)
+        );
         assert_eq!(request.context[1].text_content(), "上一轮续接状态");
         assert_eq!(request.context[2].text_content(), "后续交互");
     }
@@ -334,14 +343,16 @@ mod tests {
     fn summary_request_includes_host_injected_messages() {
         let mut session = Session::new("test-model-only");
         session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
-        let mut image = user("截图 provenance");
-        image.phase = MessagePhase::HostInjected;
+        let image = user("截图 provenance").with_source(UserSource::HostInjected);
         session.messages = vec![image, assistant("基于截图的后续回答")];
 
         let request =
             ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::None);
         assert_eq!(request.context.len(), 4);
-        assert_eq!(request.context[1].phase, MessagePhase::HostInjected);
+        assert_eq!(
+            request.context[1].user_source(),
+            Some(UserSource::HostInjected)
+        );
         assert_eq!(request.context[1].text_content(), "截图 provenance");
         assert_eq!(request.context[2].text_content(), "基于截图的后续回答");
     }
