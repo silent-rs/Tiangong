@@ -4,7 +4,7 @@ import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
 import { MentionChip } from "../MentionChip";
 import { MentionEditor, type MentionEditorHandle } from "../MentionEditor";
-import { Clock3, Mic, Webhook as WebhookIcon, X, Paperclip } from "lucide-react";
+import { Clock3, Webhook as WebhookIcon, X, Paperclip } from "lucide-react";
 import { resolveAttachmentUrl, type Attachment } from "@/utils/attachments";
 import { parseScheduledTaskMessage } from "@/utils/scheduledTaskMessage";
 import { parseWebhookMessage } from "@/utils/webhookMessage";
@@ -224,48 +224,6 @@ function SubagentReportCard({ agentName, status, content, contentOffset, time, o
   );
 }
 
-/// 语音输入消息卡片（录音附件 + 识别文本）：与 Subagent 回报卡片同一视觉
-/// 语言。录音播放由插件经 session.message-item 注入，宿主不再渲染原生
-/// 音频控件；识别文本与录音绑定，不提供编辑重发（编辑会丢失录音）。
-function VoiceMessageCard({ time, onCopy, plugin, children }: {
-  time: string; onCopy: () => void; plugin: React.ReactNode; children: React.ReactNode;
-}) {
-  return (
-    <div className="w-full max-w-[92%] sm:max-w-[80%]">
-      <div className="rounded-xl border border-border/60 border-l-[3px] border-l-primary/60 bg-card shadow-sm overflow-hidden">
-        <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border/30 bg-muted/[0.15]">
-          <div className="flex items-center justify-center w-7 h-7 rounded-full border shrink-0 bg-primary/10 text-primary border-primary/20">
-            <Mic className="w-3.5 h-3.5" aria-hidden="true" />
-          </div>
-          <span className="min-w-0 flex-1 text-sm font-semibold text-foreground">语音输入</span>
-          <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
-          <button type="button" aria-label="复制" title="复制识别文本" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-          </button>
-        </div>
-        <div className="px-4 py-2.5">
-          {plugin}
-          <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-            {children}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/// 语音输入消息：带插件录音附件（发送时命名「语音消息」或录音文件前缀
-/// stt_rec_）的用户消息。与语音插件的消息附加区识别规则一致。
-function isVoiceMessage(message: MessageItem): boolean {
-  const content = Array.isArray(message.content) ? message.content : [];
-  return content.some((block) => {
-    if (block.type !== "asset_reference" || block.asset.kind !== "audio") return false;
-    const name = block.asset.original_name ?? "";
-    const file = (block.asset.local_path ?? "").split(/[\\/]/).pop() ?? "";
-    return name.startsWith("语音消息") || file.startsWith("stt_rec_");
-  });
-}
-
 export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
   runStatus: string;
@@ -295,8 +253,9 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   const subagentReportMessageMatch = messageText.match(/^【Subagent 回报】来自(.+?)：\n?([\s\S]*)$/);
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const pluginMessage = userMessageContext(message, messageText);
-  // 插件渲染声明（meta.render）：由声明 render=replace 的贡献接管显示，
-  // 插件缺失时按下方默认规则渲染。
+  // 插件渲染声明（meta.render）：由声明 render=replace 的贡献接管整条消息的
+  // 显示（含附件，插件从消息上下文读取）；插件缺失时按下方默认规则渲染，
+  // 附件与用户上传的同类文件一致显示。
   const render = message.meta?.render;
   const withPluginRender = (fallback: React.ReactNode) => render
     ? (
@@ -304,13 +263,10 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
         render={render}
         message={pluginMessage}
         fallback={fallback}
-        hostContent={<ContentMedia message={message} />}
         className="block w-full max-w-[92%] sm:max-w-[85%]"
       />
     )
     : fallback;
-  const voiceMessage = !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch
-    && !scheduledTask && !webhook && isVoiceMessage(message);
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
   const currentMatchStart = useSearchStore((s) => s.currentMatchStart);
@@ -508,18 +464,10 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
                 </div>
               );
             })()
-          ) : voiceMessage ? (
-            <VoiceMessageCard
-              time={formatMessageTime(message.created_at)}
-              onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
-              plugin={<MessagePluginHost slot="session.message-item" message={pluginMessage} />}
-            >
-              {renderUserText(messageText)}
-            </VoiceMessageCard>
           ) : (
             <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-foreground">
                 <div>
-                  {/* 插件消息附加区（如语音消息播放）：由插件经 session.message-item 注入 */}
+                  {/* 插件消息附加区：由插件经 session.message-item 注入 */}
                   <MessagePluginHost slot="session.message-item" message={pluginMessage} />
                   <ContentMedia message={message} />
                   {messageText && (
@@ -540,7 +488,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
           ))}
         </div>
       )}
-      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && !voiceMessage && (
+      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && (
         <div className="flex justify-end">
           <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook && !render} onStartEdit={onStartEdit} />
         </div>

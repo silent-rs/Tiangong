@@ -95,11 +95,9 @@ describe('消息渲染声明接管显示', () => {
         render={{ plugin: 'bot', view: 'im-message', data: { platform: 'weixin' } }}
         message={message}
         fallback={<p data-testid="fallback">默认</p>}
-        hostContent={<p data-testid="host-media">媒体</p>}
       />,
     ));
     await flush();
-    expect(container.querySelector('[data-testid="host-media"]')).not.toBeNull();
     const sandbox = container.querySelector('[data-testid="plugin-sandbox"]');
     expect(sandbox?.getAttribute('data-contribution-id')).toBe('im-message');
     expect(JSON.parse(sandbox?.getAttribute('data-render') ?? 'null')).toEqual({
