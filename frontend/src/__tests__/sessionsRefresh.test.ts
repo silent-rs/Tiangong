@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { LoadedSession, Session } from '@/api/tauri';
+import { usageOf } from '@/api/message';
 
 vi.mock('@/api/tauri', () => {
   const api = {
@@ -46,9 +47,8 @@ function loadedSession(id: string): LoadedSession {
     id,
     messages: [{
       id: `${id}-message`,
-      role: 'assistant',
+      role: { type: 'assistant' },
       content: [{ type: 'text', text: `message from ${id}` }],
-      reasoning_content: '',
       created_at: '2026-07-21 00:00:00',
     }],
     token_stats: {
@@ -94,10 +94,10 @@ describe('loadSessions refresh contract', () => {
       prompt_cache_hit_tokens: 80, prompt_cache_miss_tokens: 20, cache_hit_rate: 0.8,
       model: 'test-model', agent_id: 'usage-live', turn_id: 'turn-1', source: 'react', status: 'success' as const };
     useStore.getState().applyStreamEvents([{ session_id: 'usage-live', event: {
-      type: 'session_message_upsert', message: { ...original, usage },
+      type: 'session_message_upsert', message: { ...original, role: { type: 'assistant', usage } },
     } }]);
     expect(useStore.getState().messages).toHaveLength(1);
-    expect(useStore.getState().messages[0].usage).toEqual(usage);
+    expect(usageOf(useStore.getState().messages[0])).toEqual(usage);
     expect(useStore.getState().messages[0].content).toEqual(original.content);
   });
 
@@ -165,9 +165,8 @@ describe('loadSessions refresh contract', () => {
       activeSessionId: 'a',
       messages: [{
         id: 'old-message',
-        role: 'assistant',
+        role: { type: 'assistant' },
         content: [{ type: 'text', text: 'old message' }],
-        reasoning_content: '',
         created_at: '2026-07-21 00:00:00',
       }],
       sessionCwd: '/workspace/a',

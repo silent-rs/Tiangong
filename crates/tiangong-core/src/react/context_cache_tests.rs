@@ -352,7 +352,7 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
             .session
             .messages
             .iter()
-            .filter_map(|message| message.usage.as_ref())
+            .filter_map(|message| message.usage())
             .filter(|usage| usage.turn_id.as_deref() == Some(turn_id.as_str()))
             .collect();
         assert_eq!(calls.len(), 3, "一次模型调用只保存一条用量");
@@ -374,8 +374,8 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
                 .session
                 .messages
                 .iter()
-                .filter(|message| matches!(message.role, MessageRole::User | MessageRole::Tool))
-                .all(|message| message.usage.is_none())
+                .filter(|message| matches!(message.kind(), MessageRole::User | MessageRole::Tool))
+                .all(|message| message.usage().is_none())
         );
         let after = serde_json::to_value(harness.ctx.session.context()).unwrap();
         assert!(
@@ -554,14 +554,14 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
         .session
         .messages
         .iter()
-        .filter(|message| message.usage.is_some())
+        .filter(|message| message.usage().is_some())
         .collect();
     assert_eq!(records.len(), 1);
     // 流内失败定稿为空响应（issue #551）：turn 因无效输出失败，用量随空
     // assistant 消息保留，不再走 Notice 通道。
     assert_eq!(records[0].role, MessageRole::Assistant);
     let record_id = records[0].id.clone();
-    let usage = records[0].usage.as_ref().unwrap();
+    let usage = records[0].usage().unwrap();
     assert_eq!(usage.tokens.cache_hit_rate(), Some(0.8));
     // 空消息留在 session 消息列表中，但空内容在 provider 映射层被跳过、
     // 不进入模型请求（下方下一轮请求断言覆盖）。
@@ -573,7 +573,7 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
             .iter()
             .find(|message| message.id == record_id)
             .unwrap()
-            .usage
+            .usage()
             .as_ref()
             .unwrap()
             .tokens
@@ -670,10 +670,10 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
         .unwrap();
     assert_eq!(recorded.role, MessageRole::Notice);
     assert_eq!(
-        recorded.usage.as_ref().unwrap().status,
+        recorded.usage().unwrap().status,
         tiangong_types::TurnStatus::Cancelled
     );
-    assert_eq!(recorded.usage.as_ref().unwrap().tokens.total_tokens, 110);
+    assert_eq!(recorded.usage().unwrap().tokens.total_tokens, 110);
     assert!(
         !harness
             .ctx

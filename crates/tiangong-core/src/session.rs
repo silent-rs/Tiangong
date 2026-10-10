@@ -9,8 +9,8 @@ use crate::permission::TrustMode;
 use tiangong_types::TokenUsage;
 
 pub use tiangong_types::{
-    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
-    MessageToolCall, StoredAsset, now_text,
+    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessageMeta, MessageRole,
+    MessageToolCall, Role, StoredAsset, UserSource, now_text,
 };
 
 /// 同一进程内的持久化写入共用此锁，避免 Core 与宿主同时替换会话文件。
@@ -54,6 +54,7 @@ pub enum SessionCwdMode {
 pub struct Session {
     pub id: String,
     pub title: String,
+    #[serde(deserialize_with = "tiangong_types::deserialize_messages")]
     pub messages: Vec<Message>,
     /// 当前会话累计 token 用量。
     ///
@@ -291,89 +292,22 @@ impl Session {
         content: impl Into<String>,
         reasoning_content: impl Into<String>,
     ) {
-        self.messages.push(Message {
-            id: new_id(),
-            role,
-            content: vec![ContentBlock::text(content.into())],
-            reasoning_content: reasoning_content.into(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: crate::session::MessagePhase::Normal,
-            created_at: now_text(),
-        });
+        self.messages
+            .push(Message::with_reasoning(role, content, reasoning_content));
     }
 
-    /// 使用预生成的 ID 追加带结构化媒体的消息。
-    pub fn append_message_with_id_and_media(
-        &mut self,
-        id: String,
-        role: MessageRole,
-        content: impl Into<String>,
-        reasoning_content: impl Into<String>,
-        media: Vec<tiangong_types::MediaAsset>,
-    ) {
-        let mut blocks = vec![ContentBlock::text(content.into())];
-        for asset in &media {
-            blocks.push(asset.to_content_block());
-        }
-        self.messages.push(Message {
-            id,
-            role,
-            content: blocks,
-            reasoning_content: reasoning_content.into(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: crate::session::MessagePhase::Normal,
-            created_at: now_text(),
-        });
-    }
-
-    /// 使用预生成 ID 原样追加宿主准备好的用户消息。
-    pub fn append_prepared_user_message_with_id(&mut self, id: String, content: Vec<ContentBlock>) {
-        self.messages.push(Message {
-            id,
-            role: MessageRole::User,
-            content,
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: crate::session::MessagePhase::Normal,
-            created_at: now_text(),
-        });
+    /// 原样追加宿主准备好的用户消息（ID、内容块、来源与元数据由调用方决定）。
+    pub fn append_prepared_user_message(&mut self, message: Message) {
+        debug_assert_eq!(message.kind(), MessageRole::User);
+        self.messages.push(message);
         self.updated_at = now_text();
+    }
+
+    /// 指定消息是否为某一轮的最终答复（被某条用户锚点的 `final_reply` 指向）。
+    pub fn is_final_reply(&self, message_id: &str) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.final_reply() == Some(message_id))
     }
 
     /// 补齐未完成工具调用的失败结果，并在有变更时立即落盘。
@@ -390,16 +324,16 @@ impl Session {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, message)| !message.tool_calls.is_empty())
+            .find(|(_, message)| !message.tool_calls().is_empty())
         else {
             return Vec::new();
         };
         let completed = self.messages[assistant_index + 1..]
             .iter()
-            .filter_map(|message| message.tool_call_id.as_deref())
+            .filter_map(Message::tool_call_id)
             .collect::<std::collections::HashSet<_>>();
         let unfinished = assistant
-            .tool_calls
+            .tool_calls()
             .iter()
             .filter(|call| !completed.contains(call.id.as_str()))
             .map(|call| (call.id.clone(), call.name.clone()))
@@ -413,10 +347,12 @@ impl Session {
             .into_iter()
             .map(|(tool_call_id, tool_name)| {
                 let output = reason.to_string();
-                self.messages.push(
-                    Message::tool_result(&tool_call_id, &tool_name, &output, true)
-                        .with_phase(MessagePhase::React),
-                );
+                self.messages.push(Message::tool_result(
+                    &tool_call_id,
+                    &tool_name,
+                    &output,
+                    true,
+                ));
                 (tool_call_id, tool_name, output)
             })
             .collect::<Vec<_>>();
@@ -427,9 +363,9 @@ impl Session {
                 .iter()
                 .map(|(tool_call_id, _, _)| tool_call_id.as_str())
                 .collect::<std::collections::HashSet<_>>();
-            self.messages[assistant_index]
-                .tool_calls
-                .retain(|call| !interrupted_ids.contains(call.id.as_str()));
+            if let Role::Assistant { tool_calls, .. } = &mut self.messages[assistant_index].role {
+                tool_calls.retain(|call| !interrupted_ids.contains(call.id.as_str()));
+            }
             self.updated_at = now_text();
 
             if let Err(remove_error) = self.try_persist_to_disk() {
@@ -463,16 +399,16 @@ impl Session {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, message)| !message.tool_calls.is_empty())
+            .find(|(_, message)| !message.tool_calls().is_empty())
         else {
             return Vec::new();
         };
         let completed = self.messages[assistant_index + 1..]
             .iter()
-            .filter_map(|message| message.tool_call_id.as_deref())
+            .filter_map(Message::tool_call_id)
             .collect::<std::collections::HashSet<_>>();
         assistant
-            .tool_calls
+            .tool_calls()
             .iter()
             .filter(|call| !completed.contains(call.id.as_str()))
             .map(|call| (call.id.clone(), call.name.clone()))
@@ -517,45 +453,6 @@ impl Session {
     pub(crate) fn defer_tool_injection(&mut self, tool_name: String, payload: serde_json::Value) {
         self.deferred_tool_injections
             .push(DeferredToolInjection { tool_name, payload });
-    }
-
-    pub fn append_worker_message(
-        &mut self,
-        role: MessageRole,
-        content: impl Into<String>,
-        worker_id: &str,
-    ) {
-        self.append_worker_message_with_reasoning(role, content, String::new(), worker_id);
-    }
-
-    pub fn append_worker_message_with_reasoning(
-        &mut self,
-        role: MessageRole,
-        content: impl Into<String>,
-        reasoning_content: impl Into<String>,
-        worker_id: &str,
-    ) {
-        self.messages.push(Message {
-            id: new_id(),
-            role,
-            content: vec![ContentBlock::text(content.into())],
-            reasoning_content: reasoning_content.into(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: Some(worker_id.to_string()),
-            elapsed_ms: None,
-            turn_status: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: crate::session::MessagePhase::Normal,
-            created_at: now_text(),
-        });
     }
 
     /// 计算当前会话所有任务的累计 token 用量
@@ -666,8 +563,7 @@ mod persistence_tests {
     #[test]
     fn close_fallback_removes_only_unfinished_tool_calls() {
         let mut session = Session::new("tool-call-fallback");
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.tool_calls = vec![
+        let assistant = Message::new(MessageRole::Assistant, "").with_tool_calls(vec![
             MessageToolCall {
                 id: "completed-call".to_string(),
                 name: "read_file".to_string(),
@@ -678,7 +574,7 @@ mod persistence_tests {
                 name: "write_file".to_string(),
                 arguments: serde_json::json!({}),
             },
-        ];
+        ]);
         session.messages.push(assistant);
         session.messages.push(Message::tool_result(
             "completed-call",
@@ -689,7 +585,7 @@ mod persistence_tests {
 
         let interrupted = session.close_unfinished_tool_calls_with_reason("interrupted");
 
-        let remaining_calls = &session.messages[0].tool_calls;
+        let remaining_calls = session.messages[0].tool_calls();
         assert!(interrupted.is_empty());
         assert_eq!(remaining_calls.len(), 1);
         assert_eq!(remaining_calls[0].id, "completed-call");
@@ -698,7 +594,7 @@ mod persistence_tests {
             session
                 .messages
                 .iter()
-                .all(|message| message.tool_call_id.as_deref() != Some("unfinished-call"))
+                .all(|message| message.tool_call_id() != Some("unfinished-call"))
         );
     }
 
@@ -814,10 +710,10 @@ mod ready_content_tests {
     fn transient_image_data_is_available_to_context_but_never_serialized() {
         let secret_data = "data:image/png;base64,THIS_MUST_NOT_PERSIST";
         let mut session = Session::new("ready-content");
-        session.append_prepared_user_message_with_id(
-            "message-1".to_string(),
+        session.append_prepared_user_message(Message::user_prepared(
+            "message-1",
             prepared_message(secret_data),
-        );
+        ));
 
         let json = serde_json::to_string(&session).unwrap();
         assert!(!json.contains("THIS_MUST_NOT_PERSIST"));

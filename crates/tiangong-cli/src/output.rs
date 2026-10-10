@@ -99,23 +99,6 @@ pub fn delta_end() {
     println!();
 }
 
-/// Worker 输出流开始
-pub fn worker_stream_start(label: &str) {
-    print!("\n{CYAN_BOLD}⚙ {label}: {RESET}");
-    let _ = std::io::stdout().flush();
-}
-
-/// Worker 输出增量
-pub fn worker_stream_delta(text: &str) {
-    print!("{text}");
-    let _ = std::io::stdout().flush();
-}
-
-/// Worker 输出流结束
-pub fn worker_stream_end() {
-    println!();
-}
-
 /// 打印工具调用意图
 pub fn tool_calls(names: &[String]) {
     println!();
@@ -164,20 +147,6 @@ pub fn error(msg: &str) {
 #[allow(dead_code)]
 pub fn done() {
     // 静默，不需要额外标记
-}
-
-/// Worker 开始执行
-pub fn worker_started(label: &str) {
-    println!("{CYAN_BOLD}⚙ Worker 启动：{label}{RESET}");
-}
-
-/// Worker 执行完成
-pub fn worker_completed(label: &str, success: bool) {
-    if success {
-        println!("{GREEN_BOLD}✓ Worker 完成：{label}{RESET}");
-    } else {
-        println!("{RED_BOLD}✗ Worker 失败：{label}{RESET}");
-    }
 }
 
 /// 打印状态信息
@@ -280,7 +249,7 @@ pub fn print_system_message(msg: &tiangong_core::session::Message) {
 #[allow(dead_code)]
 pub fn print_session_messages(messages: &[tiangong_core::session::Message]) {
     for msg in messages {
-        match msg.role {
+        match msg.kind() {
             tiangong_core::session::MessageRole::User => print_user_message(&msg.text_content()),
             tiangong_core::session::MessageRole::Assistant => print_assistant_message(msg),
             tiangong_core::session::MessageRole::System => print_system_message(msg),

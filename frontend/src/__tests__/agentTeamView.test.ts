@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Message } from '@/api/tauri';
-import { hasMessage, workerBelongsToAgent } from '@/components/message/utils';
+import { finalReplyOf } from '@/api/message';
+import { hasMessage } from '@/components/message/utils';
 import { parseAgentsFromMessages, useStore } from '@/store/useStore';
 
 function systemMessage(id: string, text: string): Message {
   return {
     id,
-    role: 'system',
+    role: { type: 'system' },
     content: [{ type: 'text', text }],
-    reasoning_content: '',
     created_at: '2026-07-12 00:00:00',
   };
 }
@@ -41,26 +41,27 @@ describe('agent team view routing', () => {
     expect(terminated.map((agent) => agent.agentId)).toEqual(['agent-dev']);
   });
 
-  it('does not mix a recreated role with the dismissed agent history', () => {
-    expect(workerBelongsToAgent('agent:dev:old-agent', 'dev', 'new-agent')).toBe(false);
-    expect(workerBelongsToAgent('agent:dev:new-agent', 'dev', 'new-agent')).toBe(true);
-    expect(workerBelongsToAgent('agent:test:new-agent', 'dev', 'new-agent')).toBe(false);
-  });
-
-  it('replaces a react message with the summary result when only phase changes', () => {
-    const reactMessage: Message = {
+  it('replaces the anchor user message when only final_reply changes', () => {
+    const anchor: Message = {
+      id: 'main-anchor',
+      role: { type: 'user', turn_status: 'processing' },
+      content: [{ type: 'text', text: '请审查' }],
+      created_at: '2026-07-12 00:00:00',
+    };
+    const reply: Message = {
       id: 'main-result',
-      role: 'assistant',
+      role: { type: 'assistant' },
       content: [{ type: 'text', text: '最终审查结果' }],
-      reasoning_content: '',
-      phase: 'react',
       created_at: '2026-07-12 00:00:01',
     };
-    const summaryMessage: Message = { ...reactMessage, phase: 'summary' };
+    const finished: Message = {
+      ...anchor,
+      role: { type: 'user', turn_status: 'success', final_reply: 'main-result' },
+    };
     useStore.setState({
       activeSessionId: 'session-main',
       isNewConversation: false,
-      messages: [reactMessage],
+      messages: [anchor, reply],
       runStatus: 'idle',
       streamingMessageId: null,
       streamingContent: '',
@@ -68,18 +69,19 @@ describe('agent team view routing', () => {
     });
     useStore.getState().applyStreamEvents([{
       session_id: 'session-main',
-      event: { type: 'session_message_upsert', message: summaryMessage },
+      event: { type: 'session_message_upsert', message: finished },
     }]);
 
-    const [result] = useStore.getState().messages;
-    expect(result).not.toBe(reactMessage);
-    expect(result.phase).toBe('summary');
+    const [result, untouched] = useStore.getState().messages;
+    expect(result).not.toBe(anchor);
+    expect(finalReplyOf(result)).toBe('main-result');
+    expect(untouched).toBe(reply);
   });
 
   it('keeps message content changes and checks the requested streaming id', () => {
     const sessionId = 'session-model-exclusion';
     const visible = systemMessage('agent-process', '执行过程');
-    const excluded = { ...visible, content: [{ type: 'text', text: '执行过程（更新）' }] };
+    const excluded = { ...visible, content: [{ type: 'text' as const, text: '执行过程（更新）' }] };
 
     useStore.setState({
       activeSessionId: sessionId,

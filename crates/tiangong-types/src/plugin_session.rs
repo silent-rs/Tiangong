@@ -27,7 +27,13 @@ pub struct PluginSession {
     ///
     /// 只有 `on_turn_finished` 交付会话快照：首条为本轮用户输入，其后为运行中
     /// 引导消息、工具调用与结果、插件注入消息、最终回复。
-    #[serde(default)]
+    ///
+    /// 以旧的扁平消息格式序列化，兼容已安装的旧版插件；反序列化两种格式都接受。
+    #[serde(
+        default,
+        serialize_with = "crate::message::serialize_messages_flat",
+        deserialize_with = "crate::message::deserialize_messages"
+    )]
     pub messages: Vec<Message>,
     /// 上下文摘要。
     #[serde(default, skip_serializing_if = "Option::is_none")]

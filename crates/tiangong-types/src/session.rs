@@ -9,6 +9,7 @@ use crate::message::{Message, MessageRole, now_text};
 pub struct Session {
     pub id: String,
     pub title: String,
+    #[serde(deserialize_with = "crate::message::deserialize_messages")]
     pub messages: Vec<Message>,
     pub created_at: String,
     pub updated_at: String,

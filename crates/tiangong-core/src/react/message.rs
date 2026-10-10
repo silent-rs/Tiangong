@@ -1,8 +1,8 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
-use crate::session::{Message, MessageRole, MessageToolCall, Session};
-#[cfg(test)]
-use tiangong_types::ContentBlock;
+use crate::session::{
+    ContentBlock, Message, MessageRole, MessageToolCall, Role, Session, UserSource,
+};
 use tiangong_types::StreamEvent;
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
@@ -83,17 +83,18 @@ pub(crate) fn append_assistant_tool_call_message(
         return;
     }
 
-    let mut message = Message::with_reasoning(
-        MessageRole::Assistant,
-        text.trim().to_string(),
-        reasoning_content.to_string(),
-    )
-    .with_phase(crate::session::MessagePhase::React);
+    let mut message = Message::with_role(
+        Role::Assistant {
+            reasoning_content: reasoning_content.to_string(),
+            reasoning_signature,
+            tool_calls,
+            usage: None,
+            reasoning_elapsed_ms,
+            text_elapsed_ms,
+        },
+        vec![ContentBlock::text(text.trim())],
+    );
     message.id = message_id;
-    message.reasoning_signature = reasoning_signature;
-    message.tool_calls = tool_calls;
-    message.reasoning_elapsed_ms = reasoning_elapsed_ms;
-    message.text_elapsed_ms = text_elapsed_ms;
     if let Some(existing) = session
         .messages
         .iter_mut()
@@ -110,19 +111,22 @@ pub(crate) fn upsert_assistant_text_message(
     message_id: &str,
     text: &str,
     reasoning_content: &str,
-    phase: crate::session::MessagePhase,
+    reasoning_signature: Option<String>,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
 ) {
-    let mut message = Message::with_reasoning(
-        MessageRole::Assistant,
-        text.to_string(),
-        reasoning_content.to_string(),
-    )
-    .with_phase(phase);
+    let mut message = Message::with_role(
+        Role::Assistant {
+            reasoning_content: reasoning_content.to_string(),
+            reasoning_signature,
+            tool_calls: Vec::new(),
+            usage: None,
+            reasoning_elapsed_ms,
+            text_elapsed_ms,
+        },
+        vec![ContentBlock::text(text)],
+    );
     message.id = message_id.to_string();
-    message.reasoning_elapsed_ms = reasoning_elapsed_ms;
-    message.text_elapsed_ms = text_elapsed_ms;
     if let Some(existing) = session
         .messages
         .iter_mut()
@@ -141,8 +145,7 @@ pub(crate) fn append_tool_result_message(
     text: String,
     is_error: bool,
 ) {
-    let message = Message::tool_result(tool_call_id, tool_name, text, is_error)
-        .with_phase(crate::session::MessagePhase::React);
+    let message = Message::tool_result(tool_call_id, tool_name, text, is_error);
     session.messages.push(message);
 }
 
@@ -156,9 +159,8 @@ pub(crate) fn append_tool_result_message_with_duration(
     is_error: bool,
     duration_ms: u64,
 ) {
-    let message = Message::tool_result(tool_call_id, tool_name, text, is_error)
-        .with_phase(crate::session::MessagePhase::React)
-        .with_duration_ms(duration_ms);
+    let message =
+        Message::tool_result(tool_call_id, tool_name, text, is_error).with_duration_ms(duration_ms);
     session.messages.push(message);
 }
 
@@ -177,14 +179,13 @@ pub(crate) struct PendingImageInjection {
     pub asset: tiangong_types::StoredAsset,
 }
 
-/// 把待注入图片落成 `MessagePhase::HostInjected` 的 User 消息（RFC 0017）。
+/// 把待注入图片落成来源为 `UserSource::HostInjected` 的 User 消息（RFC 0017）。
 ///
 /// 调用时机：工具批次闭合后、下一次模型请求组装前——保证同批工具结果
 /// 在消息序列中保持连续（Provider 工具协议要求），图片消息紧随其后。
 /// 像素数据不在此填充：请求组装时 provider 层按 `asset.local_path` 读取，
 /// 持久化侧由既有 `clear_transient_data` 机制兜底剥离。
 pub(crate) fn append_host_injected_images(session: &mut Session, images: &[PendingImageInjection]) {
-    use tiangong_types::ContentBlock;
     if images.is_empty() {
         return;
     }
@@ -213,9 +214,7 @@ pub(crate) fn append_host_injected_images(session: &mut Session, images: &[Pendi
             data: None,
         });
     }
-    let mut message = Message::new(crate::session::MessageRole::User, String::new());
-    message.content = content;
-    let message = message.with_phase(crate::session::MessagePhase::HostInjected);
+    let message = Message::with_role(Role::user(), content).with_source(UserSource::HostInjected);
     session.messages.push(message);
 }
 
@@ -646,9 +645,7 @@ pub fn inject_tool_to_messages(
     let is_dup = session.messages[visible_from..]
         .iter()
         .rev()
-        .find(|msg| {
-            msg.role == MessageRole::Tool && msg.tool_name.as_deref() == Some(INJECTION_TOOL_NAME)
-        })
+        .find(|msg| msg.role == MessageRole::Tool && msg.tool_name() == Some(INJECTION_TOOL_NAME))
         .is_some_and(|msg| msg.text_content() == output);
     if is_dup {
         tracing::debug!(session_id = %session.id, tool_name, "skip tool injection: identical to previous");
@@ -656,12 +653,13 @@ pub fn inject_tool_to_messages(
     }
     let tool_call_id = format!("inj_{}", scru128::new());
     // assistant 消息只承载 tool_call，text 留空（前端不显示空 text 的 assistant 消息）
-    let mut assistant_msg = Message::new(MessageRole::Assistant, String::new());
-    assistant_msg.tool_calls = vec![MessageToolCall {
-        id: tool_call_id.clone(),
-        name: INJECTION_TOOL_NAME.to_string(),
-        arguments: full_payload,
-    }];
+    let assistant_msg = Message::new(MessageRole::Assistant, String::new()).with_tool_calls(vec![
+        MessageToolCall {
+            id: tool_call_id.clone(),
+            name: INJECTION_TOOL_NAME.to_string(),
+            arguments: full_payload,
+        },
+    ]);
     session.messages.push(assistant_msg);
     append_tool_result_message(session, &tool_call_id, INJECTION_TOOL_NAME, output, false);
     tracing::info!(session_id = %session.id, tool_name, "tool content injected into session");
@@ -687,7 +685,7 @@ pub fn inject_tool_to_session(
         .rev()
         .nth(1)
         .and_then(|assistant| {
-            assistant.tool_calls.first().map(|tool_call| {
+            assistant.tool_calls().first().map(|tool_call| {
                 let tool_result_id = ctx
                     .session
                     .messages
@@ -783,10 +781,9 @@ fn format_payload_value(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::MessagePhase;
 
     /// RFC 0017：图片注入消息必须是「宿主注入的 User 消息」——role=User、
-    /// phase=HostInjected、content 含 provenance（ModelInstruction）与 Image 块，
+    /// source=HostInjected、content 含 provenance（ModelInstruction）与 Image 块，
     /// 且 Image 不携带内联 data（持久层稳定引用，请求时由 provider 填充）。
     #[test]
     fn host_injected_image_message_shape() {
@@ -810,7 +807,7 @@ mod tests {
         );
         let message = session.messages.last().expect("注入消息必须存在");
         assert_eq!(message.role, crate::session::MessageRole::User);
-        assert_eq!(message.phase, crate::session::MessagePhase::HostInjected);
+        assert_eq!(message.user_source(), Some(UserSource::HostInjected));
         assert!(matches!(
             message.content.first(),
             Some(tiangong_types::ContentBlock::ModelInstruction { text }) if text.contains("desktop_screenshot")
@@ -1085,7 +1082,7 @@ mod tests {
         append_host_injected_images(&mut session, &images);
         let message = session.messages.last().expect("HostInjected 消息必须存在");
         assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.phase, MessagePhase::HostInjected);
+        assert_eq!(message.user_source(), Some(UserSource::HostInjected));
         assert!(matches!(
             message.content.first(),
             Some(tiangong_types::ContentBlock::ModelInstruction { text })
@@ -1151,7 +1148,7 @@ mod tests {
         let new_injection_at = session.messages.len() - 1;
         assert!(new_injection_at >= session.summary_up_to);
         assert_eq!(
-            session.messages[new_injection_at].tool_name.as_deref(),
+            session.messages[new_injection_at].tool_name(),
             Some(INJECTION_TOOL_NAME)
         );
     }
@@ -1160,8 +1157,7 @@ mod tests {
     fn turn_finalization_closes_every_unfinished_tool_call_before_next_user() {
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("tool-interruption").with_storage_root(storage.path());
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.tool_calls = vec![
+        let assistant = Message::new(MessageRole::Assistant, "").with_tool_calls(vec![
             MessageToolCall {
                 id: "call-1".to_string(),
                 name: "read_file".to_string(),
@@ -1172,7 +1168,7 @@ mod tests {
                 name: "write_file".to_string(),
                 arguments: serde_json::json!({}),
             },
-        ];
+        ]);
         session.messages.push(assistant);
         append_tool_result_message(
             &mut session,
@@ -1188,14 +1184,14 @@ mod tests {
         assert_eq!(interrupted[0].0, "call-2");
         assert!(!session.has_unfinished_tool_calls());
 
-        session.append_prepared_user_message_with_id(
-            "next-user".to_string(),
+        session.append_prepared_user_message(Message::user_prepared(
+            "next-user",
             vec![ContentBlock::text("continue")],
-        );
+        ));
         let call_2_result = session
             .messages
             .iter()
-            .position(|message| message.tool_call_id.as_deref() == Some("call-2"))
+            .position(|message| message.tool_call_id() == Some("call-2"))
             .unwrap();
         let next_user = session
             .messages
@@ -1208,12 +1204,12 @@ mod tests {
     #[test]
     fn unfinished_tool_call_is_detected_before_context_injection() {
         let mut session = Session::new("deferred-injection");
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.tool_calls = vec![MessageToolCall {
-            id: "call-pending".to_string(),
-            name: "write_file".to_string(),
-            arguments: serde_json::json!({}),
-        }];
+        let assistant =
+            Message::new(MessageRole::Assistant, "").with_tool_calls(vec![MessageToolCall {
+                id: "call-pending".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({}),
+            }]);
         session.messages.push(assistant);
 
         assert!(session.has_unfinished_tool_calls());
@@ -1232,12 +1228,12 @@ mod tests {
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("reused-tool-id").with_storage_root(storage.path());
         for completed in [true, false] {
-            let mut assistant = Message::new(MessageRole::Assistant, "");
-            assistant.tool_calls = vec![MessageToolCall {
-                id: "call-1".to_string(),
-                name: "read_file".to_string(),
-                arguments: serde_json::json!({}),
-            }];
+            let assistant =
+                Message::new(MessageRole::Assistant, "").with_tool_calls(vec![MessageToolCall {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({}),
+                }]);
             session.messages.push(assistant);
             if completed {
                 append_tool_result_message(

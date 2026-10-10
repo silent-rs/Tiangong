@@ -117,24 +117,6 @@ pub enum StreamEvent {
         max_attempts: u32,
     },
 
-    // ===== 多 Worker 并行执行事件 =====
-    /// Worker 开始执行
-    WorkerStarted {
-        worker_id: String,
-        worker_label: String,
-    },
-    /// Worker 流式输出（带 Worker 标识的 Delta）
-    WorkerChunk {
-        worker_id: String,
-        worker_label: String,
-        content: String,
-    },
-    /// Worker 执行完成
-    WorkerCompleted {
-        worker_id: String,
-        worker_label: String,
-        success: bool,
-    },
     /// 用户消息（Core 收到用户输入后回传，供前端统一渲染）
     UserMessage {
         /// 该用户消息在 session 中的 ID
@@ -206,13 +188,6 @@ pub enum StreamEvent {
         to_agent_id: String,
         to_agent_label: String,
         content: String,
-    },
-    /// Agent 执行输出快照
-    AgentOutput {
-        agent_id: String,
-        agent_role: String,
-        agent_label: String,
-        messages: Vec<crate::Message>,
     },
     /// 文件锁变更
     FileLockChanged {

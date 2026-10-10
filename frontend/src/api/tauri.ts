@@ -122,7 +122,6 @@ export interface TabState {
 
 /** notice：系统发给用户的通知（如轮次失败原因），仅前端可见，不进模型上下文。 */
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool' | 'notice';
-export type MessagePhase = 'normal' | 'react' | 'summary' | 'compressedresume' | 'hostinjected';
 
 /** 单个对话轮次的执行状态（持久化在起轮的用户消息上，历史会话同样可见）。
  *  processing：已起轮尚未收尾；引导消息不携带状态。 */
@@ -265,32 +264,8 @@ export interface AttachmentDataUrl {
   base64_size: number;
 }
 
-export interface Message {
-  id: string;
-  role: MessageRole;
-  content: ContentBlock[];
-  reasoning_content: string;
-  usage?: MessageUsage | null;
-  worker_id?: string;
-  media?: MediaAsset[];
-  tool_calls?: { id: string; name: string; arguments?: unknown }[];
-  tool_call_id?: string;
-  tool_name?: string;
-  tool_result_is_error?: boolean;
-  compact?: boolean;
-  phase?: MessagePhase;
-  created_at: string;
-  /** 该用户消息所属轮次的执行时长（毫秒）。仅用户消息携带，前端展示「执行总时长」。 */
-  elapsed_ms?: number;
-  /** 该轮次的最终状态。仅用户消息携带，便于区分成功/失败/取消。 */
-  turn_status?: TurnStatus;
-  /** 本次模型输出思考阶段的耗时（毫秒）。仅 assistant 消息携带。 */
-  reasoning_elapsed_ms?: number | null;
-  /** 本次模型输出正文生成阶段的耗时（毫秒）。仅 assistant 消息携带。 */
-  text_elapsed_ms?: number | null;
-  /** 单次工具调用耗时（毫秒）。由 ToolResult 流式事件写入工具消息，历史消息无此字段。 */
-  duration_ms?: number | null;
-}
+export * from './message';
+import type { Message } from './message';
 
 /** Core 经 Desktop 按会话转发的单个流事件。 */
 export interface StreamEvent {
@@ -313,10 +288,7 @@ export interface StreamEvent {
   context_limit_tokens?: number | null;
   source?: string;
   agent_id?: string | null;
-  agent_role?: string;
   role?: string;
-  agent_label?: string;
-  messages?: Message[];
   args_summary?: string;
   attempt?: number;
   max_attempts?: number;

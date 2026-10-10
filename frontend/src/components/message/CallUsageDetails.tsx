@@ -1,5 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowUp, ArrowDown, Database, X } from "lucide-react";
+import { usageOf } from "@/api/message";
 import type { MessageItem } from "./types";
 import { cacheHitRate, sumUsage } from "./usage";
 
@@ -9,9 +10,9 @@ const rateText = (rate: number | null) => rate == null ? "未知" : `${(rate * 1
 const statuses = { processing: "进行中", success: "完成", failed: "失败", cancelled: "中断" };
 
 export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
-  const calls = messages.filter((message) => message.usage != null);
+  const calls = messages.filter((message) => usageOf(message) != null);
   if (calls.length === 0) return null;
-  const usage = sumUsage(calls.map((message) => message.usage!));
+  const usage = sumUsage(calls.map((message) => usageOf(message)!));
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
@@ -49,7 +50,7 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
                 {["模型 / 调用", "状态", "输入", "输出", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
               </tr></thead>
               <tbody>{calls.map((message) => {
-                const entry = message.usage!;
+                const entry = usageOf(message)!;
                 return <tr key={message.id} className="border-b border-border/30">
                   <td className="max-w-48 break-all px-2 py-1" title={message.created_at}>{entry.model}<span className="block whitespace-nowrap opacity-70">{entry.source === "context_summary" ? "压缩" : "对话"}</span></td>
                   <td className="whitespace-nowrap px-2 py-1">{statuses[entry.status]}</td>

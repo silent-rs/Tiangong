@@ -352,8 +352,8 @@ async fn send_message_and_wait(
             .find(|message| message.id == message_id)
             .map(|message| {
                 (
-                    message.role,
-                    message.turn_status.filter(|status| status.is_terminal()),
+                    message.kind(),
+                    message.turn_status().filter(|status| status.is_terminal()),
                 )
             })
     } else {

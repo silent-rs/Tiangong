@@ -36,7 +36,7 @@ function usage(input: number, hit: number | null): TokenUsage {
 
 function message(id: string, tokens: TokenUsage): MessageItem {
   const call: MessageUsage = { ...tokens, model: 'test-model', agent_id: 'agent-1', turn_id: 'turn-1', source: 'react', status: 'success' };
-  return { id, role: 'assistant', content: [{ type: 'text', text: '回复' }], reasoning_content: '', created_at: new Date().toISOString(), usage: call };
+  return { id, role: { type: 'assistant', usage: call }, content: [{ type: 'text', text: '回复' }], created_at: new Date().toISOString() };
 }
 
 describe('模型调用用量', () => {
@@ -67,7 +67,7 @@ describe('模型调用用量', () => {
 
   it('旧消息不补造用量，未知缓存数据不展示为零', async () => {
     const old = message('old', usage(100, 80));
-    delete old.usage;
+    if (old.role.type === 'assistant') delete old.role.usage;
     expect(renderToStaticMarkup(<CallUsageDetails messages={[old]} />)).toBe('');
     const html = (await openUsage([message('new', usage(100, null))])).innerHTML;
     expect(html).toContain('未知');

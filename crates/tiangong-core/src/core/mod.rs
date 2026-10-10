@@ -412,8 +412,8 @@ impl TiangongCore {
             .messages
             .iter()
             .rev()
-            .find(|message| message.role == MessageRole::User && message.turn_status.is_some())
-            .filter(|message| message.turn_status == Some(tiangong_types::TurnStatus::Processing))
+            .find(|message| message.turn_status().is_some())
+            .filter(|message| message.turn_status() == Some(tiangong_types::TurnStatus::Processing))
             .map(|message| message.id.clone());
 
         Ok(TurnContext::builder()
@@ -464,11 +464,13 @@ impl TiangongCore {
     ) -> Result<(), CoreError> {
         let mut ctx = self.build_turn_context()?;
         // 保存成功才确认（ALR-202）；失败向调用方返回明确错误，不虚报成功。
-        ctx.try_append_prepared_user_message_with_id(message_id, content)
-            .map_err(|error| {
-                tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
-                CoreError::WorkerStopped
-            })?;
+        ctx.try_append_prepared_user_message(tiangong_types::Message::user_prepared(
+            message_id, content,
+        ))
+        .map_err(|error| {
+            tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
+            CoreError::WorkerStopped
+        })?;
         let session_ready = self.session_ready.clone();
         let core = self.clone();
         crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
@@ -538,7 +540,10 @@ impl TiangongCore {
             session
                 .messages
                 .retain(|message| &message.id != message_id || message.role != MessageRole::User);
-            session.append_prepared_user_message_with_id(message_id.clone(), content.clone());
+            session.append_prepared_user_message(tiangong_types::Message::user_prepared(
+                message_id.clone(),
+                content.clone(),
+            ));
         }
         if let Err(error) = session.try_persist_to_disk() {
             tracing::warn!(%error, session_id = %self.session_id, "排队消息落盘失败");

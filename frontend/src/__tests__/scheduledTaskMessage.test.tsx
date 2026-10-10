@@ -22,10 +22,8 @@ const UNIX_MESSAGE = [
 function message(text: string): Message {
   return {
     id: 'scheduled-message',
-    role: 'user',
+    role: { type: 'user' },
     content: [{ type: 'text', text }],
-    reasoning_content: '',
-    phase: 'normal',
     created_at: '2026-07-28 22:00:00',
   };
 }

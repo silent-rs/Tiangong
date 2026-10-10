@@ -16,7 +16,6 @@ use crate::permission::TrustMode;
 use crate::react::context::{emit_token_usage, persist_error, select_client_for_request};
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
-use crate::session::MessagePhase;
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
@@ -486,7 +485,7 @@ pub(super) fn persist_streamed_react_message(
         pending_msg_id,
         streamed_text,
         streamed_reasoning,
-        MessagePhase::React,
+        None,
         reasoning_elapsed_ms,
         text_elapsed_ms,
     );
@@ -529,18 +528,10 @@ fn handle_react_text_response(
         pending_msg_id,
         &response.text,
         &response.reasoning_content,
-        MessagePhase::React,
+        response.reasoning_signature.clone(),
         reasoning_elapsed_ms,
         text_elapsed_ms,
     );
-    if let Some(message) = ctx
-        .session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == pending_msg_id)
-    {
-        message.reasoning_signature = response.reasoning_signature.clone();
-    }
     emit_session_message_upsert(ctx, pending_msg_id);
     append_runtime_tool_message_with_reasoning(
         &mut ctx.session,
@@ -752,13 +743,14 @@ pub(super) async fn execute_turn(
                     result.outcome,
                     super::outcome::TurnExecutionOutcome::Success
                 ) && let Some(msg_id) = state.pending_summary_msg_id.take()
-                    && let Some(message) = ctx
+                    && ctx
                         .session
                         .messages
-                        .iter_mut()
-                        .find(|message| message.id == msg_id)
+                        .iter()
+                        .any(|message| message.id == msg_id)
                 {
-                    message.phase = MessagePhase::Summary;
+                    // 只报告候选；最终答复由 turn 收尾与轮次状态一并写到起点用户消息上，
+                    // 执行期间不改动已发出的历史消息。
                     result.finalized_candidate_id = Some(msg_id);
                 }
                 result.usage = state.accumulated_usage.clone();

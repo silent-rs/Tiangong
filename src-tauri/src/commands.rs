@@ -23,40 +23,6 @@ fn done_event_keeps_turn_running(
     matches!(event, tiangong_types::StreamEvent::Done { .. }) && has_pending_turn
 }
 
-fn merge_agent_worker_messages(
-    messages: &mut Vec<tiangong_types::Message>,
-    cached: &[tiangong_types::Message],
-) {
-    let mut indices = messages
-        .iter()
-        .enumerate()
-        .filter_map(|(index, message)| {
-            let worker_id = message.worker_id.as_deref()?;
-            worker_id
-                .starts_with("agent:")
-                .then(|| ((worker_id.to_string(), message.id.clone()), index))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-
-    for message in cached {
-        let Some(worker_id) = message
-            .worker_id
-            .as_deref()
-            .filter(|worker_id| worker_id.starts_with("agent:"))
-        else {
-            continue;
-        };
-        let key = (worker_id.to_string(), message.id.clone());
-        if let Some(index) = indices.get(&key).copied() {
-            messages[index] = message.clone();
-        } else {
-            let index = messages.len();
-            messages.push(message.clone());
-            indices.insert(key, index);
-        }
-    }
-}
-
 #[derive(Debug, serde::Serialize)]
 pub struct AttachmentDataUrl {
     pub data_url: String,
@@ -308,10 +274,6 @@ pub async fn load_session(
         context_limit,
         &default_reasoning_effort,
     );
-    merge_agent_worker_messages(
-        &mut view.messages,
-        &state.agent_worker_view_messages(&session_id),
-    );
     view.total = view.messages.len();
     if paged.unwrap_or(false) {
         let start = crate::view::page_start(
@@ -341,10 +303,6 @@ pub async fn load_session_messages(
         .await
         .map_err(|error| format!("等待会话加载失败：{error}"))??;
     let mut messages = session.messages;
-    merge_agent_worker_messages(
-        &mut messages,
-        &state.agent_worker_view_messages(&session_id),
-    );
     let total = messages.len();
     let end = messages
         .iter()
@@ -408,7 +366,6 @@ pub async fn delete_session(
         })
         .await?;
     let _ = state.release_any_input_send_claim(&deleted_id);
-    state.clear_agent_worker_view(&deleted_id);
     state.remove_session_send_lock(&deleted_id);
     state.config_handoff_store.forget(&deleted_id);
     Ok(())
@@ -487,7 +444,6 @@ pub async fn delete_sessions_by_cwd(
         .await?;
     for id in &succeeded_ids {
         let _ = state.release_any_input_send_claim(id);
-        state.clear_agent_worker_view(id);
         state.remove_session_send_lock(id);
         // 交接记账随会话一并清理（与单删路径一致），否则定档指纹泄漏。
         state.config_handoff_store.forget(id);
@@ -1021,22 +977,6 @@ pub(crate) fn start_stream_consumer(
             let event = session_event;
             let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
-            if let StreamEvent::AgentOutput {
-                agent_id,
-                agent_role,
-                agent_label,
-                messages,
-            } = &event
-            {
-                app_state.merge_agent_output_view(
-                    &sid,
-                    agent_id,
-                    agent_role,
-                    agent_label,
-                    messages,
-                );
-            }
-
             // App 只维护投递边界；正文、Thinking、工具和计时事件不触碰应用状态锁。
             let accepted_message_id = match &event {
                 StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
@@ -1284,14 +1224,17 @@ fn validate_editable_message(
     if message.role != tiangong_core::session::MessageRole::User {
         return Err(anyhow::anyhow!("只能编辑用户消息"));
     }
-    if message.compact || message_index < session.summary_up_to {
+    if message.meta.compact || message_index < session.summary_up_to {
         return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
     }
-    if message.phase == tiangong_core::session::MessagePhase::CompressedResume {
-        return Err(anyhow::anyhow!("该消息为压缩恢复消息，无法编辑"));
-    }
-    if message.phase == tiangong_core::session::MessagePhase::HostInjected {
-        return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
+    match message.user_source() {
+        Some(tiangong_core::session::UserSource::CompressedResume) => {
+            return Err(anyhow::anyhow!("该消息为压缩恢复消息，无法编辑"));
+        }
+        Some(tiangong_core::session::UserSource::HostInjected) => {
+            return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
+        }
+        _ => {}
     }
     if message.content != base_content {
         return Err(anyhow::anyhow!("消息已被更新，请基于最新内容重新编辑"));
@@ -4231,9 +4174,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        cancel_after_session_send_boundary, done_event_keeps_turn_running,
-        merge_agent_worker_messages, normalize_path_list, save_started_bot_state,
-        stop_bot_with_state,
+        cancel_after_session_send_boundary, done_event_keeps_turn_running, normalize_path_list,
+        save_started_bot_state, stop_bot_with_state,
     };
 
     #[test]
@@ -4316,64 +4258,6 @@ mod tests {
             message: "failed".to_string(),
         };
         assert!(!done_event_keeps_turn_running(&event, true));
-    }
-
-    #[test]
-    fn agent_worker_merge_is_scoped_by_worker_and_message_id() {
-        use tiangong_core::session::{Message, MessageRole, Session};
-
-        fn worker_message(id: &str, worker_id: &str, content: &str) -> Message {
-            let mut message = Message::new(MessageRole::Assistant, content);
-            message.id = id.to_string();
-            message.worker_id = Some(worker_id.to_string());
-            message
-        }
-
-        let mut session = Session::new("desktop-agent-workers");
-        let mut main = Message::new(MessageRole::Assistant, "main");
-        main.id = "shared".to_string();
-        session.messages.push(main);
-
-        let cached = vec![
-            worker_message("shared", "agent:dev:agent-dev", "latest"),
-            worker_message("next", "agent:dev:agent-dev", "next"),
-            worker_message("shared", "agent:test:agent-test", "tester"),
-            worker_message("ignored", "background:worker", "ignored"),
-        ];
-        let authoritative_messages = session.messages.clone();
-        let mut snapshot_messages = authoritative_messages.clone();
-        snapshot_messages.push(worker_message("shared", "agent:dev:agent-dev", "stale"));
-        merge_agent_worker_messages(&mut snapshot_messages, &cached);
-
-        assert_eq!(session.messages.len(), authoritative_messages.len());
-        assert_eq!(session.messages[0].id, authoritative_messages[0].id);
-        assert_eq!(session.messages[0].text_content(), "main");
-        assert!(session
-            .messages
-            .iter()
-            .all(|message| message.worker_id.is_none()));
-        assert_eq!(snapshot_messages[0].text_content(), "main");
-        let workers = snapshot_messages
-            .iter()
-            .filter(|message| {
-                message
-                    .worker_id
-                    .as_deref()
-                    .is_some_and(|worker_id| worker_id.starts_with("agent:"))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(workers.len(), 3);
-        assert!(workers.iter().any(|message| {
-            message.id == "shared"
-                && message.worker_id.as_deref() == Some("agent:dev:agent-dev")
-                && message.text_content() == "latest"
-        }));
-        assert!(workers.iter().any(|message| {
-            message.id == "shared"
-                && message.worker_id.as_deref() == Some("agent:test:agent-test")
-                && message.text_content() == "tester"
-        }));
-        assert!(workers.iter().any(|message| message.id == "next"));
     }
 
     fn bot_store(enabled: bool) -> (tempfile::TempDir, tiangong_bots::BotStore) {

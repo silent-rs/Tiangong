@@ -69,7 +69,12 @@ pub(crate) async fn run_turn(
     }
     if had_interrupted_tools && matches!(outcome, TurnExecutionOutcome::Success) {
         outcome = TurnExecutionOutcome::Failed("本轮仍有未完成的工具调用，已安全中断".to_string());
-        demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
+        demote_finalized_candidate(
+            &mut ctx.session,
+            &stream_tx,
+            &turn_id,
+            finalized_candidate_id.take(),
+        );
     }
 
     // ── 提交轮次状态 ──
@@ -82,6 +87,14 @@ pub(crate) async fn run_turn(
     let status = outcome.status();
     if let Some(message) = current_user_message(&mut ctx) {
         message.set_turn_result(elapsed_ms, status);
+    }
+    // 成功轮次把最终答复记在起点用户消息上（与终态同次落盘）；失败或已回收
+    // 的候选在此之前已被 take，不会写入。
+    if matches!(outcome, TurnExecutionOutcome::Success)
+        && let Some(candidate_id) = finalized_candidate_id.clone()
+        && let Some(message) = current_user_message(&mut ctx)
+    {
+        message.set_final_reply(Some(candidate_id));
     }
 
     // ── 失败轮次追加用户可见的错误消息 ──
@@ -114,7 +127,12 @@ pub(crate) async fn run_turn(
         let was_success = matches!(outcome, TurnExecutionOutcome::Success);
         outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
         if was_success {
-            demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
+            demote_finalized_candidate(
+                &mut ctx.session,
+                &stream_tx,
+                &turn_id,
+                finalized_candidate_id.take(),
+            );
         }
         if let Some(message) = current_user_message(&mut ctx) {
             message.set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
@@ -122,27 +140,8 @@ pub(crate) async fn run_turn(
         let _ = ctx.session.try_persist_to_disk();
     }
 
-    // ── 成功终态发布最终答复快照 ──
-    // 放在最终落盘之后：落盘失败降级路径已回收相位并发布 React 快照，
-    // 此处只剩成功路径——失败终态不得发布 Summary 快照。
-    // 按**本轮候选 ID** 查找（与失败回收同一 ID）：插件在 on_turn_finished
-    // 追加 Summary 相位消息时，发布的仍是模型候选而非插件消息。
-    if matches!(outcome, TurnExecutionOutcome::Success)
-        && let Some(message_id) = finalized_candidate_id.as_ref()
-        && let Some(message) = ctx
-            .session
-            .messages
-            .iter()
-            .find(|message| &message.id == message_id)
-        && message.phase == crate::session::MessagePhase::Summary
-    {
-        let mut snapshot = message.clone();
-        snapshot.clear_transient_data();
-        let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
-            message: snapshot,
-            deferred_tool_injections: None,
-        });
-    }
+    // 最终答复记在本轮起点用户消息的 `final_reply` 上，随下方终态前的
+    // 用户消息快照一并发布；失败路径已在上方回收，不会发布未验证的候选。
 
     // ── 生成终态 ──
     // 每轮独立终态：turn 收尾完成即发布（连续轮次各自拥有自己的终态事件）。
@@ -156,8 +155,9 @@ pub(crate) async fn run_turn(
     }
     // ── 终态前发布用户消息快照 ──
     // set_turn_result 只更新后端 Session；前端轮次总时长依赖秒级 TurnElapsed
-    // 事件累计，事件链路波动时会缺失。终态前补发含最终 elapsed_ms/turn_status
-    // 的用户消息快照，回复底部与用户消息旁的「执行总时长」始终有精确值。
+    // 事件累计，事件链路波动时会缺失。终态前补发含最终 elapsed_ms/turn_status/
+    // final_reply 的用户消息快照，回复底部与用户消息旁的「执行总时长」始终有
+    // 精确值，最终答复标记也随之送达。
     if let Some(message) = current_user_message(&mut ctx) {
         let mut snapshot = message.clone();
         snapshot.clear_transient_data();
@@ -210,37 +210,32 @@ const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 #[cfg(test)]
 const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的
-/// assistant 候选退回 React 过程相位——失败终态下未验证的候选不得保持
-/// 最终答复身份（run_turn 收尾晚于 execute 的提交标记，需在此回收）。
-/// 按**本轮候选 ID** 精确回收最终答复相位（不使用倒序查找）：插件在
-/// on_turn_finished 中追加或修改 Summary 时，回收仍只作用于本轮候选。
+/// 收尾降级为 Failed 时回收本轮已定格的最终答复：清空本轮起点用户消息上
+/// 指向该候选的 `final_reply`——失败终态下未验证的候选不得保持最终答复身份
+/// （run_turn 收尾晚于 execute 的提交标记，需在此回收）。只在 `final_reply`
+/// 仍指向**本轮候选 ID** 时回收：插件在 on_turn_finished 中改写的答复不受影响。
 fn demote_finalized_candidate(
     session: &mut crate::session::Session,
     stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    anchor_id: &str,
     candidate_id: Option<String>,
 ) {
-    let Some(message_id) = candidate_id else {
+    let Some(candidate_id) = candidate_id else {
         return;
     };
-    let Some(message) = session
+    let Some(anchor) = session
         .messages
         .iter_mut()
-        .find(|message| message.id == message_id)
+        .find(|message| message.id == anchor_id)
     else {
         return;
     };
-    if message.phase != crate::session::MessagePhase::Summary {
+    if anchor.final_reply() != Some(candidate_id.as_str()) {
         return;
     }
-    message.phase = crate::session::MessagePhase::React;
+    anchor.set_final_reply(None);
     let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
-        message: session
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-            .cloned()
-            .expect("刚降级的消息必然存在"),
+        message: anchor.stable(),
         deferred_tool_injections: None,
     });
 }

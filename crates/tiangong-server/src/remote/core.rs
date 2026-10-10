@@ -450,16 +450,14 @@ pub fn assistant_outgoing_after_user(session: &Session, user_message_id: &str) -
     else {
         return text_outgoing("处理完成");
     };
-    // 仅聚合主 Agent 回复（worker_id 为空）；子 Agent 过程消息不落盘（桌面端
-    // 走内存视图），磁盘会话中不存在需要聚合的 worker 回复。
+    // 本轮范围到下一条真人输入为止；宿主注入、Agent 协作等非真人来源的
+    // 用户消息属于本轮过程，不截断范围。
     let selected = session
         .messages
         .iter()
         .skip(user_index + 1)
-        .take_while(|message| {
-            message.role != MessageRole::User || message.worker_id.as_deref().is_some()
-        })
-        .filter(|message| message.role == MessageRole::Assistant && message.worker_id.is_none());
+        .take_while(|message| !message.is_user_input())
+        .filter(|message| message.role == MessageRole::Assistant);
     let mut texts = Vec::new();
     let mut media_items = Vec::new();
     for message in selected {
@@ -1075,6 +1073,7 @@ mod tests {
 
     use tiangong_core::config::core::CoreConfig;
     use tiangong_core::core::Plugin;
+    use tiangong_core::session::Message;
     use tiangong_types::ContentBlock;
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
@@ -1330,17 +1329,20 @@ mod tests {
     #[test]
     fn outgoing_is_correlated_to_the_requested_user_message_id() {
         let mut session = Session::new("correlated-outgoing");
-        session.append_prepared_user_message_with_id(
-            "user-1".to_string(),
+        session.append_prepared_user_message(Message::user_prepared(
+            "user-1",
             vec![ContentBlock::text("first")],
+        ));
+        // 非真人来源的用户消息不截断本轮范围。
+        session.messages.push(
+            Message::new(MessageRole::User, "injected input")
+                .with_source(tiangong_types::UserSource::HostInjected),
         );
-        session.append_worker_message(MessageRole::User, "worker input", "agent:dev:one");
-        session.append_worker_message(MessageRole::Assistant, "worker output", "agent:dev:one");
         session.append_message(MessageRole::Assistant, "first reply");
-        session.append_prepared_user_message_with_id(
-            "user-2".to_string(),
+        session.append_prepared_user_message(Message::user_prepared(
+            "user-2",
             vec![ContentBlock::text("second")],
-        );
+        ));
         session.append_message(MessageRole::Assistant, "second reply");
 
         let first = assistant_outgoing_after_user(&session, "user-1");
@@ -1365,10 +1367,10 @@ mod tests {
 
         let mut session = Session::new("local-files").with_storage_root(root.path());
         session.cwd = workspace.to_string_lossy().to_string();
-        session.append_prepared_user_message_with_id(
-            "user-local-files".to_string(),
+        session.append_prepared_user_message(Message::user_prepared(
+            "user-local-files",
             vec![ContentBlock::text("生成文件")],
-        );
+        ));
         session.append_message(
             MessageRole::Assistant,
             format!(
@@ -1411,10 +1413,10 @@ mod tests {
 
         let mut session = Session::new("workspace-file").with_storage_root(root.path());
         session.cwd = workspace.to_string_lossy().to_string();
-        session.append_prepared_user_message_with_id(
-            "user-workspace-file".to_string(),
+        session.append_prepared_user_message(Message::user_prepared(
+            "user-workspace-file",
             vec![ContentBlock::text("生成报告")],
-        );
+        ));
         session.append_message(
             MessageRole::Assistant,
             format!("报告已经生成：\n\n[下载报告]({})", report.display()),

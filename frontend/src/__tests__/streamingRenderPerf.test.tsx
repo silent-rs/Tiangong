@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '@/api/tauri';
 import { groupMessages } from '@/components/message';
 import { StreamingMessage } from '@/components/message/StreamingMessage';
+import { legacyMessage, type LegacyMessageFields } from './legacyMessage';
 
 vi.mock('md-editor-rt', () => ({
   MdPreview: ({ modelValue }: { modelValue: string }) => (
@@ -13,19 +14,11 @@ vi.mock('md-editor-rt', () => ({
 
 function message(
   id: string,
-  role: Message['role'],
+  role: string,
   text: string,
-  extra: Partial<Message> = {},
+  extra: LegacyMessageFields = {},
 ): Message {
-  return {
-    id,
-    role,
-    content: [{ type: 'text', text }],
-    reasoning_content: '',
-    phase: 'normal',
-    created_at: '2026-09-13 00:00:00',
-    ...extra,
-  };
+  return legacyMessage({ id, role, content: text, created_at: '2026-09-13 00:00:00', ...extra });
 }
 
 describe('groupMessages 引用复用（流式期间历史组保持稳定）', () => {
@@ -85,22 +78,21 @@ describe('groupMessages 引用复用（流式期间历史组保持稳定）', ()
     expect(back[0].messages[0].content).toEqual(sessionA[0].content);
   });
 
-  it('worker 连续消息聚合进同组、compressedresume 仍被跳过', () => {
-    const w1 = message('w1', 'tool', '一', { worker_id: 'agent:x:1' } as Partial<Message>);
-    const w2 = message('w2', 'tool', '二', { worker_id: 'agent:x:1' } as Partial<Message>);
+  it('非真人来源的用户消息归入助手轮次、compressedresume 仍被跳过', () => {
+    const u1 = message('u1', 'user', '提问');
+    const i1 = message('i1', 'user', '', { phase: 'hostinjected' });
     const groups = groupMessages([
-      w1,
-      w2,
-      message('r1', 'assistant', '续接', { phase: 'compressedresume' }),
+      u1,
+      i1,
+      message('r1', 'user', '续接', { phase: 'compressedresume' }),
     ]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].type).toBe('worker');
-    expect(groups[0].messages).toHaveLength(2);
+    expect(groups.map((group) => group.type)).toEqual(['user', 'agent_turn']);
+    expect(groups[1].messages.map((item) => item.id)).toEqual(['i1']);
     // 追加消息后同 key 组重建，聚合规则不变。
-    const w3 = message('w3', 'tool', '三', { worker_id: 'agent:x:1' } as Partial<Message>);
-    const next = groupMessages([w1, w2, w3]);
-    expect(next[0].messages).toHaveLength(3);
-    expect(next[0].key).toBe(groups[0].key);
+    const a2 = message('a2', 'assistant', '回复');
+    const next = groupMessages([u1, i1, a2]);
+    expect(next[1].messages).toHaveLength(2);
+    expect(next[1].key).toBe(groups[1].key);
   });
 });
 

@@ -34,7 +34,7 @@ pub(super) fn record_call_usage(
         .iter_mut()
         .find(|message| message.id == message_id)
     {
-        message.usage = Some(Box::new(record));
+        message.set_usage(record);
     } else {
         // 无正文调用的用量不会进入模型历史。
         let mut message = crate::session::Message::new(
@@ -42,7 +42,7 @@ pub(super) fn record_call_usage(
             format!("[调用用量] {source}"),
         );
         message.id = message_id.to_string();
-        message.usage = Some(Box::new(record));
+        message.set_usage(record);
         ctx.session.messages.push(message);
     }
     crate::react::message::emit_session_message_upsert(ctx, message_id);

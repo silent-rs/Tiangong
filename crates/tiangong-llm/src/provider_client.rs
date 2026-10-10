@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tiangong_types::{ContentBlock, Message, MessageRole, StoredAsset};
+use tiangong_types::{ContentBlock, Message, MessageRole, Role, StoredAsset};
 
 use crate::endpoint::ModelEndpoint;
 use crate::message::{
@@ -883,45 +883,53 @@ fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessag
 }
 
 fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
-    let role = match msg.role {
-        MessageRole::User => LlmMessageRole::User,
-        MessageRole::Assistant => LlmMessageRole::Assistant,
-        MessageRole::Tool => LlmMessageRole::Tool,
-        MessageRole::System => return Ok(None),
+    let role = match &msg.role {
+        Role::User { .. } => LlmMessageRole::User,
+        Role::Assistant { .. } => LlmMessageRole::Assistant,
+        Role::Tool {
+            tool_call_id,
+            tool_name,
+            is_error,
+            ..
+        } => {
+            let text = msg.text_content();
+            if tool_call_id.is_empty() {
+                if text.trim().is_empty() {
+                    return Ok(None);
+                }
+                let tool_name = if tool_name.is_empty() {
+                    "runtime_context"
+                } else {
+                    tool_name.as_str()
+                };
+                return Ok(Some(ChatMessage::text(
+                    LlmMessageRole::User,
+                    format!(
+                        "<tool-context name=\"{tool_name}\">\n{}\n</tool-context>",
+                        text.trim()
+                    ),
+                )));
+            }
+            return Ok(Some(ChatMessage::new(
+                LlmMessageRole::Tool,
+                vec![LlmMessageContent::ToolResult(LlmToolResult {
+                    tool_call_id: tool_call_id.clone(),
+                    content: LlmToolResultContent::Text(text),
+                    is_error: *is_error,
+                })],
+            )));
+        }
+        Role::System => return Ok(None),
         // Notice 是系统发给用户的通知，任何路径都不得进入模型请求。
-        MessageRole::Notice => return Ok(None),
+        Role::Notice { .. } => return Ok(None),
     };
 
-    if msg.role == MessageRole::Tool {
-        let text = msg.text_content();
-        let Some(tool_call_id) = msg.tool_call_id.as_ref() else {
-            if text.trim().is_empty() {
-                return Ok(None);
-            }
-            let tool_name = msg.tool_name.as_deref().unwrap_or("runtime_context");
-            return Ok(Some(ChatMessage::text(
-                LlmMessageRole::User,
-                format!(
-                    "<tool-context name=\"{tool_name}\">\n{}\n</tool-context>",
-                    text.trim()
-                ),
-            )));
-        };
-        return Ok(Some(ChatMessage::new(
-            role,
-            vec![LlmMessageContent::ToolResult(LlmToolResult {
-                tool_call_id: tool_call_id.clone(),
-                content: LlmToolResultContent::Text(text),
-                is_error: msg.tool_result_is_error,
-            })],
-        )));
-    }
-
     let mut content = Vec::new();
-    if !msg.reasoning_content.trim().is_empty() {
+    let reasoning = msg.reasoning_content();
+    if !reasoning.trim().is_empty() {
         content.push(LlmMessageContent::Thinking(LlmThinkingContent {
-            thinking: msg.reasoning_content.clone(),
-            signature: msg.reasoning_signature.clone(),
+            thinking: reasoning.to_string(),
+            signature: msg.reasoning_signature().map(str::to_string),
         }));
     }
 
@@ -936,28 +944,21 @@ fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
             ContentBlock::Image { asset, data } => {
                 match image_content_from_ready_image(asset, data.as_deref()) {
                     Some(img_content) => content.push(LlmMessageContent::Image(img_content)),
-                    None => {
-                        if msg.phase == tiangong_types::MessagePhase::HostInjected {
-                            // 评审问题 2：宿主注入消息的图片文件缺失（被清理/
-                            // 声明失效）时降级为文字说明，不让整个请求失败——
-                            // 否则该会话之后每一轮请求都会报错。路径为工具
-                            // 可控字段，净化后拼接（复评小问题 3）。
-                            content.push(LlmMessageContent::Text(format!(
-                                "[injected-image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
-                                asset.asset_id,
-                                escape_asset_text(&asset.local_path)
-                            )));
-                        } else {
-                            return Err(anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id));
-                        }
-                    }
+                    // 图片文件缺失（被清理/声明失效）时降级为文字说明，不让整个
+                    // 请求失败——否则该会话之后每一轮请求都会报错。路径可能来自
+                    // 工具可控字段，净化后拼接。
+                    None => content.push(LlmMessageContent::Text(format!(
+                        "[image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
+                        asset.asset_id,
+                        escape_asset_text(&asset.local_path)
+                    ))),
                 }
             }
             ContentBlock::Media { .. } | ContentBlock::AssetReference { .. } => {}
         }
     }
 
-    content.extend(msg.tool_calls.iter().map(|call| {
+    content.extend(msg.tool_calls().iter().map(|call| {
         LlmMessageContent::ToolCall(LlmToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
@@ -1588,7 +1589,7 @@ mod tests {
         assert_eq!(absent.prompt_cache_miss_tokens, None);
     }
     use tiangong_types::{
-        ContentBlock, MediaKind, Message, MessagePhase, MessageRole, StoredAsset,
+        ContentBlock, MediaKind, Message, MessageRole, Role, StoredAsset, UserSource,
     };
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1627,24 +1628,7 @@ mod tests {
         // 防止调用方遗漏 system prompt 注入。
         let user_msg = Message {
             id: "u".to_string(),
-            role: MessageRole::User,
-            content: vec![ContentBlock::text("你好")],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: MessagePhase::Normal,
-            created_at: String::new(),
-            elapsed_ms: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            turn_status: None,
+            ..Message::with_role(Role::user(), vec![ContentBlock::text("你好")])
         };
         let req = ModelRequest {
             session_id: None,
@@ -2378,8 +2362,7 @@ mod tests {
                 data: None,
             },
         ]);
-        msg.role = MessageRole::User;
-        msg.phase = tiangong_types::MessagePhase::HostInjected;
+        msg = msg.with_source(UserSource::HostInjected);
 
         let result = provider_message_from_session(&msg)
             .expect("映射不得失败")
@@ -2387,7 +2370,7 @@ mod tests {
         assert!(
             result.content.iter().any(|content| matches!(
                 content,
-                LlmMessageContent::Text(text) if text.contains("injected-image unavailable")
+                LlmMessageContent::Text(text) if text.contains("[image unavailable]")
             )),
             "缺失图片应降级为文字说明"
         );
@@ -2449,8 +2432,7 @@ mod tests {
                 data: None,
             },
         ]);
-        injected.role = MessageRole::User;
-        injected.phase = tiangong_types::MessagePhase::HostInjected;
+        injected = injected.with_source(UserSource::HostInjected);
         let request = ModelRequest {
             session_id: None,
             user_input: String::new(),
@@ -2498,41 +2480,25 @@ mod tests {
 
         let system_msg = Message {
             id: "sys".to_string(),
-            role: MessageRole::System,
-            content: vec![ContentBlock::text("你是通用助手。")],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: MessagePhase::Normal,
-            created_at: String::new(),
-            elapsed_ms: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            turn_status: None,
+            ..Message::with_role(Role::System, vec![ContentBlock::text("你是通用助手。")])
         };
-        let mut anchor_user = test_message(vec![ContentBlock::text("看看屏幕")]);
-        anchor_user.role = MessageRole::User;
+        let anchor_user = test_message(vec![ContentBlock::text("看看屏幕")]);
 
-        let mut assistant = test_message(Vec::new());
-        assistant.role = MessageRole::Assistant;
-        assistant.tool_calls = vec![tiangong_types::MessageToolCall {
-            id: "call-1".to_string(),
-            name: "desktop_screenshot".to_string(),
-            arguments: serde_json::json!({}),
-        }];
+        let mut assistant = Message::with_role(Role::assistant(), Vec::new());
+        if let Role::Assistant { tool_calls, .. } = &mut assistant.role {
+            *tool_calls = vec![tiangong_types::MessageToolCall {
+                id: "call-1".to_string(),
+                name: "desktop_screenshot".to_string(),
+                arguments: serde_json::json!({}),
+            }];
+        }
 
-        let mut tool_result =
-            test_message(vec![ContentBlock::text("{\"path\": \"/tmp/shot.png\"}")]);
-        tool_result.role = MessageRole::Tool;
-        tool_result.tool_call_id = Some("call-1".to_string());
-        tool_result.tool_name = Some("desktop_screenshot".to_string());
+        let tool_result = Message::tool_result(
+            "call-1",
+            "desktop_screenshot",
+            "{\"path\": \"/tmp/shot.png\"}",
+            false,
+        );
 
         let mut injected = test_message(vec![
             ContentBlock::model_instruction(
@@ -2543,8 +2509,7 @@ mod tests {
                 data: None,
             },
         ]);
-        injected.role = MessageRole::User;
-        injected.phase = tiangong_types::MessagePhase::HostInjected;
+        injected = injected.with_source(UserSource::HostInjected);
 
         let req = ModelRequest {
             session_id: None,
@@ -2613,13 +2578,26 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// 图片文件缺失的降级覆盖所有消息（不限 HostInjected）：普通用户
+    /// 消息的历史图片被清理后，请求仍可发出，图片位置换成文字说明。
     #[test]
-    fn missing_historical_ready_image_fails_the_request() {
+    fn missing_historical_ready_image_degrades_to_text() {
         let msg = test_user_message_with_ready_image("/path/that/does/not/exist-history.png", None);
 
-        let error = provider_message_from_session(&msg).unwrap_err();
-        assert!(error.to_string().contains("已就绪图片无法读取"));
-        assert!(error.to_string().contains("asset-ready"));
+        let result = provider_message_from_session(&msg)
+            .expect("映射不得失败")
+            .expect("应生成消息");
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            LlmMessageContent::Text(text)
+                if text.contains("[image unavailable]") && text.contains("asset-ready")
+        )));
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmMessageContent::Image(_)))
+        );
     }
 
     /// RFC 0017「看见而非知道」判据的回归保护：HostInjected 注入消息
@@ -2645,8 +2623,7 @@ mod tests {
                 data: None,
             },
         ]);
-        msg.role = MessageRole::User;
-        msg.phase = tiangong_types::MessagePhase::HostInjected;
+        msg = msg.with_source(UserSource::HostInjected);
 
         let result = provider_message_from_session(&msg)
             .expect("映射不应失败")
@@ -2745,24 +2722,7 @@ mod tests {
     fn test_message(content: Vec<ContentBlock>) -> Message {
         Message {
             id: "msg-ready".to_string(),
-            role: MessageRole::User,
-            content,
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: MessagePhase::Normal,
-            created_at: String::new(),
-            elapsed_ms: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            turn_status: None,
+            ..Message::with_role(Role::user(), content)
         }
     }
 
@@ -2779,24 +2739,7 @@ mod tests {
 
         let system_msg = Message {
             id: "sys".to_string(),
-            role: MessageRole::System,
-            content: vec![ContentBlock::text("你是通用助手。")],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            usage: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            phase: MessagePhase::Normal,
-            created_at: String::new(),
-            elapsed_ms: None,
-            reasoning_elapsed_ms: None,
-            text_elapsed_ms: None,
-            duration_ms: None,
-            turn_status: None,
+            ..Message::with_role(Role::System, vec![ContentBlock::text("你是通用助手。")])
         };
 
         let req = ModelRequest {

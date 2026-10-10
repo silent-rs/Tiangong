@@ -102,11 +102,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
     };
     let assert_totals = |expected_inputs: &[usize], expected_outputs: &[usize]| {
         let restored = env.load_session(&sid);
-        let calls: Vec<_> = restored
-            .messages
-            .iter()
-            .filter_map(|m| m.usage.as_ref())
-            .collect();
+        let calls: Vec<_> = restored.messages.iter().filter_map(|m| m.usage()).collect();
         assert_eq!(
             calls
                 .iter()
@@ -579,7 +575,7 @@ async fn steering_message_aborts_and_restarts_current_turn() {
     assert!(!session.messages.iter().any(|message| {
         message.role == MessageRole::Assistant
             && message.text_content().contains("长时间任务执行中")
-            && message.phase == crate::session::MessagePhase::Summary
+            && session.is_final_reply(&message.id)
     }));
     routes["slow-original"].assert_hits(1);
     routes["steered-answer"].assert_hits(1);
@@ -591,7 +587,7 @@ async fn steering_message_aborts_and_restarts_current_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn next_message_resumes_interrupted_turn() {
     use crate::core::plugin::Plugin;
-    use crate::session::{Message, MessagePhase};
+    use crate::session::Message;
     use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
     use std::sync::Mutex;
     use tiangong_types::{MessageToolCall, PluginSession};
@@ -636,13 +632,17 @@ async fn next_message_resumes_interrupted_turn() {
     let mut session = env.load_session(&sid);
     session.append_message(MessageRole::User, "RESUME-ORIGINAL 原始任务");
     let origin_id = session.messages.last().unwrap().id.clone();
-    session.messages.last_mut().unwrap().turn_status = Some(TurnStatus::Processing);
-    let mut assistant = Message::new(MessageRole::Assistant, "").with_phase(MessagePhase::React);
-    assistant.tool_calls = vec![MessageToolCall {
-        id: "crashed-call".to_string(),
-        name: "read_file".to_string(),
-        arguments: serde_json::json!({}),
-    }];
+    session
+        .messages
+        .last_mut()
+        .unwrap()
+        .set_turn_status(TurnStatus::Processing);
+    let assistant =
+        Message::new(MessageRole::Assistant, "").with_tool_calls(vec![MessageToolCall {
+            id: "crashed-call".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        }]);
     session.messages.push(assistant);
     session.try_persist_to_disk().unwrap();
 
@@ -661,15 +661,15 @@ async fn next_message_resumes_interrupted_turn() {
         .iter()
         .find(|message| message.id == "msg-next")
         .expect("新消息应已保存");
-    assert_eq!(next.turn_status, None, "接续时新消息是引导消息，不承载状态");
+    assert_eq!(
+        next.turn_status(),
+        None,
+        "接续时新消息是引导消息，不承载状态"
+    );
     assert!(
-        session
-            .messages
-            .iter()
-            .any(
-                |message| message.tool_call_id.as_deref() == Some("crashed-call")
-                    && message.tool_result_is_error
-            ),
+        session.messages.iter().any(
+            |message| message.tool_call_id() == Some("crashed-call") && message.tool_is_error()
+        ),
         "遗留工具调用应补齐失败结果"
     );
     // on_turn_finished 在后台线程投递，等它落地。
@@ -1097,7 +1097,7 @@ async fn multiple_messages_share_single_channel_without_busy() {
             .messages
             .iter()
             .find(|message| message.id == "msg-b")
-            .is_some_and(|message| message.turn_status.is_none()),
+            .is_some_and(|message| message.turn_status().is_none()),
         "同一活动 turn 中被后续消息引导时，B 保留为无独立终态的意图"
     );
     events.wait_done_count(2);
@@ -1164,7 +1164,7 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
         .expect("已接受未执行的 B 必须在关闭时保存");
     // B 已起轮但未执行：保留 Processing（非终态），下一条消息到来时接续执行。
     assert_eq!(
-        pending.turn_status,
+        pending.turn_status(),
         Some(TurnStatus::Processing),
         "未执行的 B 不应有最终状态"
     );
@@ -1222,7 +1222,7 @@ async fn queued_next_turn_runs_after_current_turn_completes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_message() {
     use crate::config::core::{CoreConfig, CoreConfigProvider};
-    use crate::session::{MessagePhase, Session};
+    use crate::session::{Session, UserSource};
     use crate::tools::extension::{ToolOverrideHandler, ToolSpecProvider};
     use serde_json::{Value, json};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1376,19 +1376,19 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
         .iter()
         .find(|m| m.id == "msg-shot")
         .expect("用户消息必须存在");
-    assert_eq!(user_message.turn_status, Some(TurnStatus::Success));
+    assert_eq!(user_message.turn_status(), Some(TurnStatus::Success));
     assert!(
-        user_message.elapsed_ms.is_some(),
+        user_message.elapsed_ms().is_some(),
         "轮次时长必须落在真实用户消息上"
     );
     let injected = restored
         .messages
         .iter()
-        .find(|m| m.phase == MessagePhase::HostInjected)
+        .find(|m| m.user_source() == Some(UserSource::HostInjected))
         .expect("图片注入消息必须存在");
     assert_eq!(injected.role, MessageRole::User);
     assert!(
-        injected.turn_status.is_none() && injected.elapsed_ms.is_none(),
+        injected.turn_status().is_none() && injected.elapsed_ms().is_none(),
         "注入消息不得携带轮次记账字段"
     );
     assert!(
@@ -1400,7 +1400,7 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
             < restored
                 .messages
                 .iter()
-                .position(|m| m.phase == MessagePhase::HostInjected)
+                .position(|m| m.user_source() == Some(UserSource::HostInjected))
                 .unwrap(),
         "注入消息应位于真实用户消息之后"
     );

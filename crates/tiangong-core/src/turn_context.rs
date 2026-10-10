@@ -12,11 +12,11 @@ use std::sync::mpsc::Sender;
 
 use crate::config::agent::AgentConfig;
 use crate::core::plugin::Plugin;
-use crate::session::{MessageRole, Session};
+use crate::session::{Message, MessageRole, Session};
 use crate::tools::extension::ToolOverrideHandler;
 use tiangong_llm::SingleProviderClient;
 use tiangong_llm::tool::ToolSpec;
-use tiangong_types::{ContentBlock, StreamEvent, TurnStatus};
+use tiangong_types::{StreamEvent, TurnStatus};
 
 use typed_builder::TypedBuilder;
 
@@ -70,12 +70,16 @@ impl TurnContext {
     /// - 否则新消息起轮，状态为 `Processing`。
     ///
     /// 成功后向界面确认接收（用户消息事件）；界面按同一规则推导轮次状态。
-    pub(crate) fn try_append_prepared_user_message_with_id(
+    pub(crate) fn try_append_prepared_user_message(
         &mut self,
-        id: String,
-        content: Vec<ContentBlock>,
+        mut message: Message,
     ) -> Result<(), String> {
-        tiangong_types::validate_ready_content_blocks(&content)?;
+        if message.kind() != MessageRole::User {
+            return Err("只能追加用户消息".to_string());
+        }
+        tiangong_types::validate_ready_content_blocks(&message.content)?;
+        let id = message.id.clone();
+        let content = message.content.clone();
         if self
             .session
             .messages
@@ -95,14 +99,11 @@ impl TurnContext {
         } else {
             Vec::new()
         };
-        self.session
-            .append_prepared_user_message_with_id(id.clone(), content.clone());
-        if self.turn_id.is_none()
-            && let Some(message) = self.session.messages.last_mut()
-        {
-            message.turn_status = Some(TurnStatus::Processing);
+        if self.turn_id.is_none() {
+            message.set_turn_status(TurnStatus::Processing);
             self.turn_id = Some(id.clone());
         }
+        self.session.append_prepared_user_message(message);
 
         if let Err(error) = self.session.try_persist_to_disk() {
             (self.session, self.turn_id) = before;

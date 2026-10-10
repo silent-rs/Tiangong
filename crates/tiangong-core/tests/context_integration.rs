@@ -8,7 +8,7 @@
 //! （见 tiangong-plugin-prompt），core 只负责组装，故本测试用模拟段落验证组装框架。
 
 use tiangong_core::prompt::SystemPromptConfig;
-use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session};
+use tiangong_core::session::{Message, MessageRole, MessageToolCall, Role, Session};
 
 // ── 辅助工具 ─────────────────────────────────────────────────
 
@@ -17,15 +17,17 @@ fn helper_session() -> Session {
 }
 
 fn tool_context_msg(name: &str, content: &str) -> Message {
-    let mut msg = Message::new(MessageRole::Tool, content);
-    msg.tool_name = Some(name.to_string());
-    msg
+    Message::tool_result("", name, content, false)
 }
 
-fn tool_result_msg(tool_call_id: &str, content: &str) -> Message {
-    let mut msg = Message::new(MessageRole::Tool, content);
-    msg.tool_call_id = Some(tool_call_id.to_string());
-    msg
+fn tool_result_msg(tool_call_id: &str, tool_name: &str, content: &str) -> Message {
+    Message::tool_result(tool_call_id, tool_name, content, false)
+}
+
+fn push_tool_call(message: &mut Message, call: MessageToolCall) {
+    if let Role::Assistant { tool_calls, .. } = &mut message.role {
+        tool_calls.push(call);
+    }
 }
 
 /// 多轮对话（3 轮 user-assistant-tool_result）
@@ -36,28 +38,32 @@ fn multi_turn_session() -> Session {
     session.append_message(MessageRole::Assistant, "我来读取 main.rs");
     {
         let last = session.messages.last_mut().unwrap();
-        last.tool_calls.push(MessageToolCall {
-            id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({"path": "main.rs"}),
-        });
+        push_tool_call(
+            last,
+            MessageToolCall {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "main.rs"}),
+            },
+        );
     }
-    let mut tr1 = tool_result_msg("call_1", "fn main() { println!(\"hello\"); }");
-    tr1.tool_name = Some("read_file".to_string());
+    let tr1 = tool_result_msg("call_1", "read_file", "fn main() { println!(\"hello\"); }");
     session.messages.push(tr1);
     // 第 2 轮
     session.append_message(MessageRole::User, "把 hello 改成 hi");
     session.append_message(MessageRole::Assistant, "已修改 main.rs");
     {
         let last = session.messages.last_mut().unwrap();
-        last.tool_calls.push(MessageToolCall {
-            id: "call_2".to_string(),
-            name: "write_file".to_string(),
-            arguments: serde_json::json!({"path": "main.rs", "content": "fn main() { println!(\"hi\"); }"}),
-        });
+        push_tool_call(
+            last,
+            MessageToolCall {
+                id: "call_2".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({"path": "main.rs", "content": "fn main() { println!(\"hi\"); }"}),
+            },
+        );
     }
-    let mut tr2 = tool_result_msg("call_2", "写入成功");
-    tr2.tool_name = Some("write_file".to_string());
+    let tr2 = tool_result_msg("call_2", "write_file", "写入成功");
     session.messages.push(tr2);
     // 第 3 轮
     session.append_message(MessageRole::User, "运行一下");
@@ -155,14 +161,16 @@ fn new_path_messages_increment_across_turns() {
     session.append_message(MessageRole::Assistant, "正在读取");
     {
         let last = session.messages.last_mut().unwrap();
-        last.tool_calls.push(MessageToolCall {
-            id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({"path": "test.rs"}),
-        });
+        push_tool_call(
+            last,
+            MessageToolCall {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "test.rs"}),
+            },
+        );
     }
-    let mut tr = tool_result_msg("call_1", "文件内容");
-    tr.tool_name = Some("read_file".to_string());
+    let tr = tool_result_msg("call_1", "read_file", "文件内容");
     session.messages.push(tr);
     let ctx3 = session.context();
     assert_eq!(ctx3.len(), 6); // system + 5 条消息
@@ -202,14 +210,16 @@ fn new_path_tool_calls_preserved_in_context() {
     session.append_message(MessageRole::Assistant, "我来读取");
     {
         let last = session.messages.last_mut().unwrap();
-        last.tool_calls.push(MessageToolCall {
-            id: "call_abc".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({"path": "main.rs"}),
-        });
+        push_tool_call(
+            last,
+            MessageToolCall {
+                id: "call_abc".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "main.rs"}),
+            },
+        );
     }
-    let mut tr = tool_result_msg("call_abc", "fn main() {}");
-    tr.tool_name = Some("read_file".to_string());
+    let tr = tool_result_msg("call_abc", "read_file", "fn main() {}");
     session.messages.push(tr);
     session.append_message(MessageRole::Assistant, "文件内容如上");
     rebuild_session(&mut session);
@@ -219,13 +229,13 @@ fn new_path_tool_calls_preserved_in_context() {
     // 验证 assistant 消息中的 tool_calls
     let assistant_msg = &context[2]; // system, user, assistant
     assert_eq!(assistant_msg.role, MessageRole::Assistant);
-    assert_eq!(assistant_msg.tool_calls.len(), 1);
-    assert_eq!(assistant_msg.tool_calls[0].id, "call_abc");
-    assert_eq!(assistant_msg.tool_calls[0].name, "read_file");
+    assert_eq!(assistant_msg.tool_calls().len(), 1);
+    assert_eq!(assistant_msg.tool_calls()[0].id, "call_abc");
+    assert_eq!(assistant_msg.tool_calls()[0].name, "read_file");
     // 验证 tool result
     let tool_result = &context[3];
     assert_eq!(tool_result.role, MessageRole::Tool);
-    assert_eq!(tool_result.tool_call_id.as_deref(), Some("call_abc"));
+    assert_eq!(tool_result.tool_call_id(), Some("call_abc"));
     assert_eq!(tool_result.text_content(), "fn main() {}");
 }
 
@@ -247,8 +257,8 @@ fn new_path_tool_context_messages_preserved() {
     // 第 3 条（index 3）应为 tool context
     let tc = &context[3];
     assert_eq!(tc.role, MessageRole::Tool);
-    assert!(tc.tool_call_id.is_none());
-    assert_eq!(tc.tool_name.as_deref(), Some("react_completion_check"));
+    assert!(tc.tool_call_id().is_none());
+    assert_eq!(tc.tool_name(), Some("react_completion_check"));
     assert!(tc.text_content().contains("未完成"));
 }
 

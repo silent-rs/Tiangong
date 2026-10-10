@@ -26,7 +26,9 @@ pub(super) fn save_user_message_and_restart(
     message_id: String,
     content: Vec<tiangong_types::ContentBlock>,
 ) -> Result<(), String> {
-    ctx.try_append_prepared_user_message_with_id(message_id, content)?;
+    ctx.try_append_prepared_user_message(tiangong_types::Message::user_prepared(
+        message_id, content,
+    ))?;
     tracing::info!(
         session_id = %ctx.session.id,
         "运行中注入用户消息：中断当前执行并追加新消息"

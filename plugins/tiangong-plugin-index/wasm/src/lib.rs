@@ -354,14 +354,14 @@ fn collect_turn_data(session: &PluginSession) -> Vec<TurnData> {
         .messages
         .iter()
         .filter_map(|msg| {
-            let role = match msg.role {
+            let role = match msg.kind() {
                 MessageRole::User => "user",
                 MessageRole::Assistant => "assistant",
                 MessageRole::Tool => "tool",
                 MessageRole::System => return None,
                 MessageRole::Notice => return None,
             };
-            if !msg.phase.is_user_input() {
+            if msg.kind() == MessageRole::User && !msg.is_user_input() {
                 return None;
             }
             let content = msg.text_content();
@@ -583,7 +583,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_types::{ContentBlock, Message, MessagePhase};
+    use tiangong_types::{ContentBlock, Message, UserSource};
 
     fn test_session(messages: Vec<Message>) -> PluginSession {
         PluginSession {
@@ -617,7 +617,7 @@ mod tests {
                 None,
             ),
         ];
-        message.with_phase(MessagePhase::HostInjected)
+        message.with_source(UserSource::HostInjected)
     }
 
     #[test]
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn collect_turn_data_skips_compressed_resume_message() {
         let resume = Message::new(MessageRole::User, "压缩恢复锚点")
-            .with_phase(MessagePhase::CompressedResume);
+            .with_source(UserSource::CompressedResume);
         let session = test_session(vec![resume, Message::new(MessageRole::User, "真实输入")]);
         let turns = collect_turn_data(&session);
         assert_eq!(turns.len(), 1);

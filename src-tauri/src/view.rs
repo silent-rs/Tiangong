@@ -92,16 +92,10 @@ pub const SESSION_PAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const OUTLINE_QUESTION_CHARS: usize = 160;
 const OUTLINE_ANSWER_CHARS: usize = 360;
 
-/// 是否为轮次锚点（真正的用户提问）：与前端分组规则一致——用户消息，且不属于
-/// Worker、不是宿主注入或压缩续写的合成消息。
+/// 是否为轮次锚点（真正的用户提问）：与前端分组规则一致——来源为真人输入的
+/// 用户消息；宿主注入、压缩续写、Agent 协作等非真人来源不作为锚点。
 pub fn is_turn_anchor(message: &tiangong_types::Message) -> bool {
-    use tiangong_types::{MessagePhase, MessageRole};
-    message.role == MessageRole::User
-        && message.worker_id.is_none()
-        && !matches!(
-            message.phase,
-            MessagePhase::HostInjected | MessagePhase::CompressedResume
-        )
+    message.is_user_input()
 }
 
 /// 粗略估计单条消息序列化后的字节数（用于分段上限，不要求精确）。
@@ -115,11 +109,11 @@ fn approx_message_bytes(message: &tiangong_types::Message) -> usize {
         })
         .sum();
     let tool_calls: usize = message
-        .tool_calls
+        .tool_calls()
         .iter()
         .map(|call| call.name.len() + call.arguments.to_string().len())
         .sum();
-    content + message.reasoning_content.len() + tool_calls + 256
+    content + message.reasoning_content().len() + tool_calls + 256
 }
 
 /// 计算 `[.., end)` 这一段的起点：从 `end` 向前收集，至少 `min_messages` 条，
@@ -158,7 +152,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 pub fn user_outline(messages: &[tiangong_types::Message]) -> Vec<UserOutlineItem> {
     let mut outline: Vec<UserOutlineItem> = Vec::new();
     for message in messages {
-        if message.phase == tiangong_types::MessagePhase::CompressedResume {
+        if message.user_source() == Some(tiangong_types::UserSource::CompressedResume) {
             continue;
         }
         if is_turn_anchor(message) {
@@ -199,7 +193,7 @@ impl LoadedSessionView {
                 .messages
                 .iter()
                 .rev()
-                .find_map(|message| message.elapsed_ms),
+                .find_map(|message| message.elapsed_ms()),
             last_usage: (usage.total_tokens > 0).then_some(usage),
             cwd: session.cwd.clone(),
             reasoning_effort: session
@@ -480,7 +474,7 @@ impl ModelsConfigView {
 #[cfg(test)]
 mod paging_tests {
     use super::*;
-    use tiangong_types::{Message, MessagePhase, MessageRole};
+    use tiangong_types::{Message, MessageRole, UserSource};
 
     /// 构造 `turns` 轮对话：每轮 1 条用户提问 + `replies` 条助手/工具消息。
     fn conversation(turns: usize, replies: usize) -> Vec<Message> {
@@ -543,23 +537,20 @@ mod paging_tests {
 
     #[test]
     fn synthetic_user_messages_are_not_anchors() {
-        let mut injected = Message::new(MessageRole::User, "宿主注入");
-        injected.phase = MessagePhase::HostInjected;
-        let mut resume = Message::new(MessageRole::User, "压缩续写");
-        resume.phase = MessagePhase::CompressedResume;
-        let mut worker = Message::new(MessageRole::User, "worker");
-        worker.worker_id = Some("agent:x".into());
+        let injected =
+            Message::new(MessageRole::User, "宿主注入").with_source(UserSource::HostInjected);
+        let resume =
+            Message::new(MessageRole::User, "压缩续写").with_source(UserSource::CompressedResume);
         assert!(!is_turn_anchor(&injected));
         assert!(!is_turn_anchor(&resume));
-        assert!(!is_turn_anchor(&worker));
         assert!(is_turn_anchor(&Message::new(MessageRole::User, "提问")));
     }
 
     #[test]
     fn outline_lists_every_question_with_first_reply() {
         let mut messages = conversation(3, 2);
-        let mut resume = Message::new(MessageRole::User, "压缩续写");
-        resume.phase = MessagePhase::CompressedResume;
+        let resume =
+            Message::new(MessageRole::User, "压缩续写").with_source(UserSource::CompressedResume);
         messages.insert(1, resume);
         messages.push(Message::new(MessageRole::User, "x".repeat(500)));
 

@@ -14,7 +14,8 @@ import {
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
 import { isRemoteHost, listen } from '@/api/host';
-import { hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
+import { hasMediaBlocks, textContent, type ContentBlock, type Message } from "@/api/tauri";
+import { elapsedMsOf, finalReplyOf, isCompact, messageKind, turnStatusOf } from "@/api/message";
 import {
   type Attachment,
   attachmentKindFromMime,
@@ -32,7 +33,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } fr
 import {
   groupMessages,
   liveRunStartIndex,
-  workerContentMessages,
   UserMessageGroup,
   AgentTurn,
 } from "./message";
@@ -49,6 +49,24 @@ interface SessionScrollAnchor {
   atBottom: boolean;
 }
 const sessionScrollAnchors = new Map<string, SessionScrollAnchor>();
+
+/** 一轮的终态：起轮用户消息上的执行时长、状态与最终答复。 */
+interface TurnResult {
+  elapsedMs?: number;
+  status?: string;
+  finalReplyId?: string;
+}
+
+/** 起轮用户消息（带 turn_status）的终态；引导消息不带状态，返回 undefined。 */
+function turnResultOf(message: Message): TurnResult | undefined {
+  const status = turnStatusOf(message);
+  if (status == null) return undefined;
+  return {
+    elapsedMs: elapsedMsOf(message),
+    status,
+    finalReplyId: finalReplyOf(message),
+  };
+}
 
 /** 取路径最后 1-2 级目录用于简短展示，例如 /a/b/tiangong -> b/tiangong */
 function shortDir(path: string): string {
@@ -231,14 +249,13 @@ export function MessageList() {
   // 最近一个带 turn_status 的 user 组；引导消息不带状态，沿用所属轮次）的
   // elapsed_ms/turn_status；回复底部与轮次末尾状态行据此展示。
   const turnResultByGroupKey = useMemo(() => {
-    const map = new Map<string, { elapsedMs?: number; status?: string }>();
-    let current: { elapsedMs?: number; status?: string } | undefined;
+    const map = new Map<string, TurnResult>();
+    let current: TurnResult | undefined;
     for (const group of filteredGroups) {
       if (group.type === 'user') {
         const msg = group.messages[0];
-        if (msg?.turn_status != null) {
-          current = { elapsedMs: msg.elapsed_ms ?? undefined, status: msg.turn_status };
-        }
+        const result = msg ? turnResultOf(msg) : undefined;
+        if (result) current = result;
       } else if (group.type === 'agent_turn') {
         map.set(group.key, current ?? {});
       }
@@ -260,12 +277,8 @@ export function MessageList() {
   const streamingTurnResult = useMemo(() => {
     if (!streamingGroup) return undefined;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i].role === 'user' && messages[i].turn_status != null) {
-        return {
-          elapsedMs: messages[i].elapsed_ms ?? undefined,
-          status: messages[i].turn_status ?? undefined,
-        };
-      }
+      const result = turnResultOf(messages[i]);
+      if (result) return result;
     }
     return undefined;
   }, [streamingGroup, messages]);
@@ -274,7 +287,7 @@ export function MessageList() {
   const nonEditableIds = useMemo(() => {
     const ids = new Set<string>();
     for (const msg of messages) {
-      if (msg.compact) {
+      if (isCompact(msg)) {
         ids.add(msg.id);
         break;
       }
@@ -305,7 +318,7 @@ export function MessageList() {
       const group = completedGroups[index];
       if (group.type === "user") {
         const msg = group.messages[0];
-        const hasMedia = msg.media?.length || hasMediaBlocks(msg);
+        const hasMedia = hasMediaBlocks(msg);
         const scheduledTask = parseScheduledTaskMessage(textContent(msg));
         const webhook = parseWebhookMessage(textContent(msg));
         const structured = scheduledTask ?? webhook;
@@ -322,11 +335,10 @@ export function MessageList() {
         }
         return hasMedia ? 300 : 80;
       }
-      if (group.type === "worker") return 120;
       // agent_turn: 根据消息数量、工具调用和内容长度启发式估算
       const msgCount = group.messages.length;
       const hasTools = group.messages.some(m =>
-        m.role === "system" && (textContent(m).includes("tool_name:") || textContent(m).includes("exit_code"))
+        messageKind(m) === "system" && (textContent(m).includes("tool_name:") || textContent(m).includes("exit_code"))
       );
       const totalTextLen = group.messages.reduce((sum, m) => sum + textContent(m).length, 0);
       const textBonus = Math.min(Math.floor(totalTextLen / 200) * 30, 400);
@@ -498,7 +510,7 @@ export function MessageList() {
     const newMessageArrived = messages.length > prevMessagesLengthRef.current
       && lastMsg?.id !== prevLastMessageIdRef.current;
     const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
-    const isUserSelfSent = newMessageArrived && lastMsg?.role === 'user';
+    const isUserSelfSent = newMessageArrived && !!lastMsg && messageKind(lastMsg) === 'user';
     // 回复完成（流式 id 清空且运行态归位 idle，含出错/取消中止）：不再
     // 强制拉底，保留用户当前阅读位置。工具执行阶段流式 id 同样会暂时
     // 清空，但运行态仍为 executing，不受此判定影响，跟随照常
@@ -1126,31 +1138,6 @@ export function MessageList() {
                     );
                   }
 
-                  if (group.type === "worker") {
-                    const contentMessages = workerContentMessages(group.messages);
-                    return (
-                      <div
-                        key={virtualItem.key}
-                        data-index={virtualItem.index}
-                        ref={virtualizer.measureElement}
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          width: "100%",
-                          transform: `translateY(${virtualItem.start}px)`,
-                        }}
-                      >
-                        <AgentTurn
-                          messages={contentMessages}
-                          streamingMessageId={null}
-                          streamingContent=""
-                          streamingReasoningContent=""
-                        />
-                      </div>
-                    );
-                  }
-
                   // agent_turn
                   // 当前执行链内的轮次视为同一活跃执行（含引导消息前的过程）：
                   // 执行期间过程保持展开，全部完成后统一收缩。
@@ -1181,6 +1168,7 @@ export function MessageList() {
                         isActive={isLiveTurn}
                         turnElapsedMs={turnResultByGroupKey.get(group.key)?.elapsedMs}
                         turnStatus={turnResultByGroupKey.get(group.key)?.status}
+                        finalReplyId={turnResultByGroupKey.get(group.key)?.finalReplyId}
                       />
                     </div>
                   );
@@ -1199,6 +1187,7 @@ export function MessageList() {
                     isActive={isThinking}
                     turnElapsedMs={streamingTurnResult?.elapsedMs}
                     turnStatus={streamingTurnResult?.status}
+                    finalReplyId={streamingTurnResult?.finalReplyId}
                   />
                 </div>
               )}
@@ -1207,7 +1196,7 @@ export function MessageList() {
               {!streamingGroup && isThinking && (
                 isContextCompressing ||
                 (!streamingMessageId && !streamingContent &&
-                  !(messages.length > 0 && messages[messages.length - 1].role === "assistant"))
+                  !(messages.length > 0 && messageKind(messages[messages.length - 1]) === "assistant"))
               ) && (
                 <div className="flex justify-start mt-3">
                   <div className="text-foreground">
