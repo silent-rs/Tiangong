@@ -43,7 +43,7 @@ describe('通知在消息列表中的可见性', () => {
 
   /** 模拟已成功收尾的轮次：最终答复为本轮最后一条助手消息（起点用户消息的 final_reply）。 */
   const render = async (messages: MessageItem[], isActive: boolean) => {
-    const finalReplyId = [...messages].reverse().find((item) => item.role.type === 'assistant')?.id;
+    const finalReplyId = [...messages].reverse().find((item) => item.role === 'assistant')?.id;
     await act(async () => {
       root.render(
         <AgentTurn

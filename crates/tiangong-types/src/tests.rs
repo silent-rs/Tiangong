@@ -488,8 +488,9 @@ fn new_format_roundtrip_keeps_role_fields_and_meta() {
 
     for original in [user, assistant, tool] {
         let json = serde_json::to_value(&original).unwrap();
-        assert!(json["role"].is_object(), "新格式 role 为对象：{json}");
+        assert!(json["role"].is_string(), "role 展开为字符串：{json}");
         assert!(json.get("phase").is_none());
+        assert!(json.get("type").is_none());
         let parsed: Message = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
     }
@@ -499,12 +500,89 @@ fn new_format_roundtrip_keeps_role_fields_and_meta() {
 fn new_format_json_shape() {
     let tool = Message::tool_result("call-1", "fs__read_file", "内容", false).with_duration_ms(5);
     let json = serde_json::to_value(&tool).unwrap();
+    // 角色字段展开到消息顶层，与 id / content 平级。
     assert_eq!(
-        json["role"],
-        serde_json::json!({"type": "tool", "tool_call_id": "call-1", "tool_name": "fs__read_file", "duration_ms": 5})
+        json,
+        serde_json::json!({
+            "id": tool.id,
+            "created_at": tool.created_at,
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "tool_name": "fs__read_file",
+            "duration_ms": 5,
+            "content": [{"type": "text", "text": "内容"}]
+        })
     );
     // 空 meta 不落盘。
     assert!(json.get("meta").is_none());
+
+    let mut user = Message::user_prepared("u1", vec![ContentBlock::text("你好")]);
+    user.set_turn_result(100, TurnStatus::Failed);
+    let json = serde_json::to_value(&user).unwrap();
+    assert_eq!(json["role"], "user");
+    assert_eq!(json["turn_status"], "failed");
+    assert_eq!(json["elapsed_ms"], 100);
+    assert!(json.get("source").is_none(), "默认来源不落盘：{json}");
+}
+
+#[test]
+fn flat_format_session_keeps_role_fields_without_legacy_inference() {
+    // 当前格式：失败轮次没有 final_reply，读回后不得按旧格式推导。
+    let mut failed = Message::user_prepared("u1", vec![ContentBlock::text("一")]);
+    failed.set_turn_result(10, TurnStatus::Failed);
+    let process = Message::with_reasoning(MessageRole::Assistant, "过程正文", "想");
+    let mut done = Message::user_prepared("u2", vec![ContentBlock::text("二")]);
+    let reply = Message::new(MessageRole::Assistant, "回答二");
+    done.set_turn_result(20, TurnStatus::Success);
+    done.set_final_reply(Some(reply.id.clone()));
+    let tool = Message::tool_result("c1", "x", "失败", true);
+    let injected = Message::new(MessageRole::User, "").with_source(UserSource::HostInjected);
+    let mut compacted = Message::notice("上下文管理", "压缩");
+    compacted.meta.compact = true;
+
+    let mut session = Session::new("t");
+    session.messages = vec![failed, process, done, reply, tool, injected, compacted];
+    let saved = serde_json::to_value(&session).unwrap();
+    for message in saved["messages"].as_array().unwrap() {
+        assert!(message["role"].is_string(), "{message}");
+    }
+    let reloaded: Session = serde_json::from_value(saved.clone()).unwrap();
+    let m = &reloaded.messages;
+    assert_eq!(m[0].turn_status(), Some(TurnStatus::Failed));
+    assert_eq!(m[0].final_reply(), None);
+    assert_eq!(m[1].reasoning_content(), "想");
+    assert_eq!(m[2].final_reply(), Some(m[3].id.as_str()));
+    assert!(m[4].tool_is_error());
+    assert_eq!(m[5].user_source(), Some(UserSource::HostInjected));
+    assert!(m[6].meta.compact);
+    assert_eq!(serde_json::to_value(&reloaded).unwrap(), saved);
+}
+
+#[test]
+fn nested_role_format_still_loads() {
+    // 过渡期写出的嵌套格式（role 为对象）照常读取，保存后转为展开格式。
+    let session: Session = serde_json::from_value(serde_json::json!({
+        "id": "s", "title": "t", "created_at": "t", "updated_at": "t",
+        "messages": [
+            {"id": "u1", "created_at": "t", "content": [{"type": "text", "text": "一"}],
+             "role": {"type": "user", "turn_status": "failed", "elapsed_ms": 3}},
+            {"id": "a1", "created_at": "t", "content": [{"type": "text", "text": "回答"}],
+             "role": {"type": "assistant", "reasoning_content": "想"},
+             "meta": {"compact": true}},
+            {"id": "t1", "created_at": "t", "content": [{"type": "text", "text": "r"}],
+             "role": {"type": "tool", "tool_call_id": "c", "tool_name": "x", "is_error": true}}
+        ]
+    }))
+    .unwrap();
+    let m = &session.messages;
+    assert_eq!(m[0].turn_status(), Some(TurnStatus::Failed));
+    assert_eq!(m[0].final_reply(), None);
+    assert_eq!(m[1].reasoning_content(), "想");
+    assert!(m[1].meta.compact);
+    assert!(m[2].tool_is_error());
+    let saved = serde_json::to_value(&session).unwrap();
+    assert_eq!(saved["messages"][2]["role"], "tool");
+    assert_eq!(saved["messages"][2]["is_error"], true);
 }
 
 #[test]
@@ -569,7 +647,7 @@ fn legacy_flat_messages_migrate_into_roles() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|msg| msg["role"].is_object())
+            .all(|msg| msg.get("phase").is_none() && msg.get("tool_result_is_error").is_none())
     );
     let reloaded: Session = serde_json::from_value(saved).unwrap();
     assert_eq!(reloaded.messages[0].final_reply(), Some("a2"));

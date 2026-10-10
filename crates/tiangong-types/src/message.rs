@@ -111,9 +111,10 @@ impl UserSource {
 /// 角色及其必带字段。
 ///
 /// 只放「某角色才有」的结构化字段；与角色无关、仅供界面使用的数据放
-/// [`MessageMeta`]。JSON 形态：`{"type": "assistant", "tool_calls": [...], ...}`。
+/// [`MessageMeta`]。在 [`Message`] 中展开（flatten）到消息顶层：
+/// `{"id": ..., "role": "assistant", "tool_calls": [...], "content": [...], ...}`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Role {
     /// 系统提示通道。
     System,
@@ -434,16 +435,19 @@ impl MediaAsset {
 
 /// 对话消息。
 ///
-/// - `role`：角色及其必带字段（见 [`Role`]）；
+/// - `role`：角色及其必带字段（见 [`Role`]），序列化时展开到消息顶层，
+///   `role` 为角色字符串、角色字段与 `id` / `content` 等平级；
 /// - `content`：可直接提交给模型的内容块；
 /// - `meta`：与角色无关的结构化字段（压缩标记、插件渲染）。
 ///
-/// 序列化为新格式；反序列化同时接受旧的扁平格式（`role` 为字符串、角色
-/// 字段平铺在顶层），读入后按新结构归位，下次保存即写为新格式。
+/// 反序列化同时接受旧格式（`phase` / `tool_result_is_error` / 顶层
+/// `compact` 等旧字段）与过渡期的嵌套格式（`role` 为对象），读入后按新
+/// 结构归位，下次保存即写为当前格式。
 #[derive(Debug, Clone, Serialize)]
 pub struct Message {
     pub id: String,
     pub created_at: String,
+    #[serde(flatten)]
     pub role: Role,
     /// 消息内容，支持文本、图片、视频、音频、文件等多种类型混合排列。
     pub content: Vec<ContentBlock>,
@@ -720,9 +724,9 @@ fn legacy_resource_instruction(
     ))
 }
 
-/// 消息反序列化的原始形态：同时容纳新格式（`role` 为对象、`meta`）与旧的
-/// 扁平格式（`role` 为字符串、角色字段平铺在顶层），由 [`MessageRaw::decode`]
-/// 归位到新结构。
+/// 消息反序列化的原始形态：同时容纳当前格式（`role` 为字符串、角色字段
+/// 展开在顶层、`meta`）、旧格式（同为扁平，但以 `phase` 等旧字段表达）与
+/// 过渡期的嵌套格式（`role` 为对象），由 [`MessageRaw::decode`] 归位到新结构。
 #[derive(Deserialize)]
 pub struct MessageRaw {
     id: String,
@@ -731,29 +735,35 @@ pub struct MessageRaw {
     created_at: String,
     #[serde(default)]
     meta: Option<MessageMeta>,
-    // ── 以下为旧扁平格式字段 ──
-    #[serde(default)]
-    reasoning_content: String,
+    // ── 扁平格式的角色字段（当前格式与旧格式共用） ──
+    /// 旧格式对所有角色都写出（含空串），当前格式仅助手消息非空时写出。
+    reasoning_content: Option<String>,
     reasoning_signature: Option<String>,
     usage: Option<Box<crate::token::MessageUsage>>,
-    worker_id: Option<String>,
-    /// 更早格式的顶层 media：并入 content。
-    #[serde(default)]
-    media: Vec<MediaAsset>,
     #[serde(default)]
     tool_calls: Vec<MessageToolCall>,
     tool_call_id: Option<String>,
     tool_name: Option<String>,
-    #[serde(default)]
-    tool_result_is_error: bool,
-    #[serde(default)]
-    compact: bool,
-    phase: Option<String>,
     elapsed_ms: Option<u64>,
     turn_status: Option<TurnStatus>,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
     duration_ms: Option<u64>,
+    // ── 当前格式独有 ──
+    source: Option<UserSource>,
+    final_reply: Option<String>,
+    #[serde(default)]
+    is_error: bool,
+    // ── 旧格式独有 ──
+    worker_id: Option<String>,
+    /// 更早格式的顶层 media：并入 content。
+    #[serde(default)]
+    media: Vec<MediaAsset>,
+    #[serde(default)]
+    tool_result_is_error: bool,
+    #[serde(default)]
+    compact: bool,
+    phase: Option<String>,
 }
 
 /// 旧格式助手消息的阶段，供会话级迁移推导 `final_reply`。
@@ -769,13 +779,36 @@ enum LegacyAssistantPhase {
 struct LegacyHint {
     assistant_phase: Option<LegacyAssistantPhase>,
     from_worker: bool,
+    /// 本条带有只在旧格式出现的字段，可据此认定所在会话为旧格式。
+    legacy_marker: bool,
 }
 
 impl MessageRaw {
-    /// 归位为新结构；旧格式返回迁移提示。
+    /// 是否带有只在旧格式出现的字段。
+    ///
+    /// 旧格式始终写出 `phase`（更早的版本没有 `phase`，但对所有角色都写出
+    /// `reasoning_content`，含空串）；当前格式从不写 `phase` / `worker_id` /
+    /// `tool_result_is_error` / 顶层 `compact`，`reasoning_content` 只出现在
+    /// 非空的助手消息上。
+    fn has_legacy_marker(&self, kind: MessageRole) -> bool {
+        self.phase.is_some()
+            || self.worker_id.is_some()
+            || self.tool_result_is_error
+            || self.compact
+            || self
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| kind != MessageRole::Assistant || text.is_empty())
+    }
+
+    /// 归位为新结构；扁平格式返回迁移提示（是否旧格式由会话级判定）。
     fn decode(self) -> Result<(Message, Option<LegacyHint>), String> {
-        if !self.role.is_string() {
-            let role: Role = serde_json::from_value(self.role)
+        if let Value::Object(mut nested) = self.role {
+            // 过渡期嵌套格式：`role` 为 `{"type": "assistant", ...}`。
+            if let Some(kind) = nested.remove("type") {
+                nested.insert("role".to_string(), kind);
+            }
+            let role: Role = serde_json::from_value(Value::Object(nested))
                 .map_err(|error| format!("消息 role 无效：{error}"))?;
             let content =
                 deserialize_message_content(self.content, role.kind(), &self.id, self.media)?;
@@ -789,8 +822,9 @@ impl MessageRaw {
             return Ok((message, None));
         }
 
-        let kind: MessageRole = serde_json::from_value(self.role)
+        let kind = MessageRole::deserialize(&self.role)
             .map_err(|error| format!("消息 role 无效：{error}"))?;
+        let legacy_marker = self.has_legacy_marker(kind);
         let content = deserialize_message_content(self.content, kind, &self.id, self.media)?;
         let phase = self.phase.as_deref().unwrap_or("normal");
         let from_worker = self.worker_id.is_some();
@@ -798,14 +832,14 @@ impl MessageRaw {
         let role = match kind {
             MessageRole::System => Role::System,
             MessageRole::User => Role::User {
-                source: match phase {
+                source: self.source.unwrap_or(match phase {
                     "hostinjected" => UserSource::HostInjected,
                     "compressedresume" => UserSource::CompressedResume,
                     _ => UserSource::Human,
-                },
+                }),
                 turn_status: self.turn_status,
                 elapsed_ms: self.elapsed_ms,
-                final_reply: None,
+                final_reply: self.final_reply,
             },
             MessageRole::Assistant => {
                 assistant_phase = Some(match phase {
@@ -814,7 +848,7 @@ impl MessageRaw {
                     _ => LegacyAssistantPhase::Normal,
                 });
                 Role::Assistant {
-                    reasoning_content: self.reasoning_content,
+                    reasoning_content: self.reasoning_content.unwrap_or_default(),
                     reasoning_signature: self.reasoning_signature,
                     tool_calls: self.tool_calls,
                     usage: self.usage,
@@ -825,7 +859,7 @@ impl MessageRaw {
             MessageRole::Tool => Role::Tool {
                 tool_call_id: self.tool_call_id.unwrap_or_default(),
                 tool_name: self.tool_name.unwrap_or_default(),
-                is_error: self.tool_result_is_error,
+                is_error: self.is_error || self.tool_result_is_error,
                 duration_ms: self.duration_ms,
             },
             MessageRole::Notice => Role::Notice { usage: self.usage },
@@ -835,9 +869,10 @@ impl MessageRaw {
             created_at: self.created_at,
             role,
             content,
-            meta: MessageMeta {
-                compact: self.compact,
-                render: None,
+            meta: {
+                let mut meta = self.meta.unwrap_or_default();
+                meta.compact |= self.compact;
+                meta
             },
         };
         Ok((
@@ -845,6 +880,7 @@ impl MessageRaw {
             Some(LegacyHint {
                 assistant_phase,
                 from_worker,
+                legacy_marker,
             }),
         ))
     }
@@ -866,7 +902,9 @@ impl<'de> Deserialize<'de> for Message {
 ///
 /// 旧格式以助手消息 `phase=summary` 标记最终答复（更早的会话没有 phase，
 /// 以非过程的助手正文作最终答复）；新结构把最终答复记在本轮起轮的用户
-/// 消息 `final_reply` 上。供 `#[serde(deserialize_with)]` 使用。
+/// 消息 `final_reply` 上。会话整体保存，格式整份一致：任一消息带旧格式
+/// 字段即按旧格式补齐，当前格式的会话不做推导（失败轮次的 `final_reply`
+/// 本就为空）。供 `#[serde(deserialize_with)]` 使用。
 pub fn deserialize_messages<'de, D>(deserializer: D) -> Result<Vec<Message>, D::Error>
 where
     D: Deserializer<'de>,
@@ -879,7 +917,9 @@ where
         messages.push(message);
         hints.push(hint);
     }
-    assign_legacy_final_replies(&mut messages, &hints);
+    if hints.iter().flatten().any(|hint| hint.legacy_marker) {
+        assign_legacy_final_replies(&mut messages, &hints);
+    }
     Ok(messages)
 }
 

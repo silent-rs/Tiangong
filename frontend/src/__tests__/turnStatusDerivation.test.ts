@@ -52,7 +52,7 @@ describe('用户消息的轮次状态（与后端同一规则推导）', () => {
       messages: [
         {
           id: 'crashed',
-          role: { type: 'user', turn_status: 'processing' },
+          role: 'user', turn_status: 'processing',
           content: [{ type: 'text', text: '中断的任务' }],
           created_at: '2026-01-01 00:00:00',
         },

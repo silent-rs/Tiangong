@@ -8,7 +8,7 @@ import { parseAgentsFromMessages, useStore } from '@/store/useStore';
 function systemMessage(id: string, text: string): Message {
   return {
     id,
-    role: { type: 'system' },
+    role: 'system',
     content: [{ type: 'text', text }],
     created_at: '2026-07-12 00:00:00',
   };
@@ -44,19 +44,19 @@ describe('agent team view routing', () => {
   it('replaces the anchor user message when only final_reply changes', () => {
     const anchor: Message = {
       id: 'main-anchor',
-      role: { type: 'user', turn_status: 'processing' },
+      role: 'user', turn_status: 'processing',
       content: [{ type: 'text', text: '请审查' }],
       created_at: '2026-07-12 00:00:00',
     };
     const reply: Message = {
       id: 'main-result',
-      role: { type: 'assistant' },
+      role: 'assistant',
       content: [{ type: 'text', text: '最终审查结果' }],
       created_at: '2026-07-12 00:00:01',
     };
     const finished: Message = {
       ...anchor,
-      role: { type: 'user', turn_status: 'success', final_reply: 'main-result' },
+      role: 'user', turn_status: 'success', final_reply: 'main-result',
     };
     useStore.setState({
       activeSessionId: 'session-main',

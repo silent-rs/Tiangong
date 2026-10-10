@@ -240,11 +240,7 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
 }
 
 function sameMessage(left: Message, right: Message): boolean {
-  return left.id === right.id
-    && left.created_at === right.created_at
-    && sameJsonValue(left.role, right.role)
-    && sameJsonValue(left.content, right.content)
-    && sameJsonValue(left.meta, right.meta);
+  return left.id === right.id && sameJsonValue(left, right);
 }
 
 function mergeLoadedWithStreamMessages(
@@ -260,24 +256,27 @@ function mergeLoadedWithStreamMessages(
     const loadedText = textContent(loaded);
     const streamedText = textContent(streamed);
     const content = streamedText.length >= loadedText.length ? streamed.content : loaded.content;
-    if (loaded.role?.type === 'assistant' && streamed.role?.type === 'assistant') {
-      const loadedReasoning = loaded.role.reasoning_content ?? '';
-      const streamedReasoning = streamed.role.reasoning_content ?? '';
+    if (loaded.role === 'assistant' && streamed.role === 'assistant') {
+      const loadedReasoning = loaded.reasoning_content ?? '';
+      const streamedReasoning = streamed.reasoning_content ?? '';
       return {
         ...loaded,
         content,
-        role: {
-          ...loaded.role,
-          reasoning_content: streamedReasoning.length >= loadedReasoning.length
-            ? streamedReasoning
-            : loadedReasoning,
-          tool_calls: streamed.role.tool_calls?.length ? streamed.role.tool_calls : loaded.role.tool_calls,
-          usage: streamed.role.usage ?? loaded.role.usage,
-        },
+        reasoning_content: streamedReasoning.length >= loadedReasoning.length
+          ? streamedReasoning
+          : loadedReasoning,
+        tool_calls: streamed.tool_calls?.length ? streamed.tool_calls : loaded.tool_calls,
+        usage: streamed.usage ?? loaded.usage,
       };
     }
-    // 用户锚点：流式快照可能带最新的 final_reply / 轮次状态，以流式为准。
-    return { ...loaded, content, role: streamed.role ?? loaded.role };
+    // 用户锚点：流式快照可能带最新的 final_reply / 轮次状态，角色字段以流式为准。
+    return {
+      ...streamed,
+      id: loaded.id,
+      created_at: loaded.created_at,
+      content,
+      meta: loaded.meta,
+    };
   });
   for (const streamed of streamMessages) {
     if (!loadedIds.has(streamed.id)) merged.push(streamed);
@@ -302,7 +301,7 @@ function updateAssistantMessage(
   const index = messages.findIndex((message) => message.id === messageId);
   const current: Message = index >= 0 ? messages[index] : {
     id: messageId,
-    role: { type: 'assistant' },
+    role: 'assistant',
     content: [],
     created_at: new Date().toISOString(),
   };
@@ -330,13 +329,10 @@ function appendAssistantText(messages: Message[], event: StreamEvent): Message[]
 function appendAssistantReasoning(messages: Message[], event: StreamEvent): Message[] {
   if (!event.message_id || event.content == null) return messages;
   return updateAssistantMessage(messages, event.message_id, (message) => {
-    if (message.role?.type !== 'assistant') return message;
+    if (message.role !== 'assistant') return message;
     return {
       ...message,
-      role: {
-        ...message.role,
-        reasoning_content: `${message.role.reasoning_content || ''}${event.content}`,
-      },
+      reasoning_content: `${message.reasoning_content || ''}${event.content}`,
     };
   });
 }
@@ -365,11 +361,10 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
     ? existingStatus
     : latestTurnStatus(turnBase) === 'processing' ? undefined : 'processing' as const;
   return upsertStreamMessage(existingIndex >= 0 ? messages.slice(0, existingIndex + 1) : messages, {
+    ...(existing?.role === 'user' ? existing : {}),
     id: event.message_id,
-    role: {
-      ...(existing?.role?.type === 'user' ? existing.role : { type: 'user' as const }),
-      ...(turnStatus != null ? { turn_status: turnStatus } : {}),
-    },
+    role: 'user',
+    ...(turnStatus != null ? { turn_status: turnStatus } : {}),
     content: blocks,
     created_at: existing?.created_at || new Date().toISOString(),
     ...withRender(existing?.meta, event.render),
@@ -394,8 +389,8 @@ function latestTurnStatus(messages: Message[]): TurnStatus | undefined {
 function applyToolCalls(messages: Message[], event: StreamEvent): Message[] {
   if (!event.message_id) return messages;
   return updateAssistantMessage(messages, event.message_id, (message) => (
-    message.role?.type === 'assistant'
-      ? { ...message, role: { ...message.role, tool_calls: event.calls || [] } }
+    message.role === 'assistant'
+      ? { ...message, tool_calls: event.calls || [] }
       : message
   ));
 }
@@ -410,13 +405,11 @@ function applyToolResult(messages: Message[], event: StreamEvent): Message[] {
     : `stream-tool-result:${toolCallId || `${event.name || 'tool'}:${messages.length}`}`;
   const message: Message = {
     id,
-    role: {
-      type: 'tool',
-      tool_call_id: toolCallId,
-      tool_name: event.name,
-      is_error: event.ok === false,
-      duration_ms: event.duration_ms ?? undefined,
-    },
+    role: 'tool',
+    tool_call_id: toolCallId,
+    tool_name: event.name,
+    is_error: event.ok === false,
+    duration_ms: event.duration_ms ?? undefined,
     content: [{ type: 'text', text: event.output || '' }],
     created_at: existingIndex >= 0
       ? messages[existingIndex].created_at
@@ -437,7 +430,7 @@ function applyAgentLifecycle(messages: Message[], event: StreamEvent): Message[]
     : `[Agent] ${event.label} 状态变更: ${event.status || ''} id=${event.agent_id}`;
   return upsertStreamMessage(messages, {
     id,
-    role: { type: 'system' },
+    role: 'system',
     content: [{ type: 'text', text }],
     created_at: new Date().toISOString(),
   });
@@ -460,14 +453,11 @@ function updateProcessingTurn(
   if (index < 0) return messages;
   const next = [...messages];
   const target = next[index];
-  if (target.role?.type !== 'user') return messages;
+  if (target.role !== 'user') return messages;
   next[index] = {
     ...target,
-    role: {
-      ...target.role,
-      turn_status: status,
-      elapsed_ms: elapsedMs ?? target.role.elapsed_ms,
-    },
+    turn_status: status,
+    elapsed_ms: elapsedMs ?? target.elapsed_ms,
   };
   return next;
 }
