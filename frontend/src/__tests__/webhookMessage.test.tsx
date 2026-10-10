@@ -22,7 +22,7 @@ const UNIX_MESSAGE = [
 function message(text: string): Message {
   return {
     id: 'webhook-message',
-    role: { type: 'user' },
+    role: 'user',
     content: [{ type: 'text', text }],
     created_at: '2026-07-29 09:00:00',
   };

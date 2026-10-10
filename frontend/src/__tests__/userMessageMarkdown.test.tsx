@@ -17,7 +17,7 @@ vi.mock('md-editor-rt', () => ({
 function message(text: string): Message {
   return {
     id: 'user-message',
-    role: { type: 'user' },
+    role: 'user',
     content: [{ type: 'text', text }],
     created_at: '2026-09-15 12:00:00',
   };

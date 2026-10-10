@@ -47,7 +47,7 @@ function loadedSession(id: string): LoadedSession {
     id,
     messages: [{
       id: `${id}-message`,
-      role: { type: 'assistant' },
+      role: 'assistant',
       content: [{ type: 'text', text: `message from ${id}` }],
       created_at: '2026-07-21 00:00:00',
     }],
@@ -94,7 +94,7 @@ describe('loadSessions refresh contract', () => {
       prompt_cache_hit_tokens: 80, prompt_cache_miss_tokens: 20, cache_hit_rate: 0.8,
       model: 'test-model', agent_id: 'usage-live', turn_id: 'turn-1', source: 'react', status: 'success' as const };
     useStore.getState().applyStreamEvents([{ session_id: 'usage-live', event: {
-      type: 'session_message_upsert', message: { ...original, role: { type: 'assistant', usage } },
+      type: 'session_message_upsert', message: { ...original, role: 'assistant', usage },
     } }]);
     expect(useStore.getState().messages).toHaveLength(1);
     expect(usageOf(useStore.getState().messages[0])).toEqual(usage);
@@ -165,7 +165,7 @@ describe('loadSessions refresh contract', () => {
       activeSessionId: 'a',
       messages: [{
         id: 'old-message',
-        role: { type: 'assistant' },
+        role: 'assistant',
         content: [{ type: 'text', text: 'old message' }],
         created_at: '2026-07-21 00:00:00',
       }],

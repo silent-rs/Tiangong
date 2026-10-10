@@ -42,7 +42,7 @@ export function legacyMessage(fields: LegacyMessageFields): Message {
           ? 'compressed_resume'
           : 'human';
       role = {
-        type: 'user',
+        role: 'user',
         ...(source !== 'human' ? { source } : {}),
         ...(fields.turn_status != null ? { turn_status: fields.turn_status } : {}),
         ...(fields.elapsed_ms != null ? { elapsed_ms: fields.elapsed_ms } : {}),
@@ -52,7 +52,7 @@ export function legacyMessage(fields: LegacyMessageFields): Message {
     }
     case 'assistant':
       role = {
-        type: 'assistant',
+        role: 'assistant',
         ...(fields.reasoning_content ? { reasoning_content: fields.reasoning_content } : {}),
         ...(fields.tool_calls ? { tool_calls: fields.tool_calls } : {}),
         ...(fields.usage ? { usage: fields.usage } : {}),
@@ -62,7 +62,7 @@ export function legacyMessage(fields: LegacyMessageFields): Message {
       break;
     case 'tool':
       role = {
-        type: 'tool',
+        role: 'tool',
         ...(fields.tool_call_id ? { tool_call_id: fields.tool_call_id } : {}),
         ...(fields.tool_name ? { tool_name: fields.tool_name } : {}),
         ...(fields.tool_result_is_error ? { is_error: true } : {}),
@@ -70,10 +70,10 @@ export function legacyMessage(fields: LegacyMessageFields): Message {
       };
       break;
     case 'notice':
-      role = { type: 'notice', ...(fields.usage ? { usage: fields.usage } : {}) };
+      role = { role: 'notice', ...(fields.usage ? { usage: fields.usage } : {}) };
       break;
     default:
-      role = { type: 'system' };
+      role = { role: 'system' };
   }
   const content = typeof fields.content === 'string'
     ? [{ type: 'text' as const, text: fields.content }]
@@ -81,7 +81,7 @@ export function legacyMessage(fields: LegacyMessageFields): Message {
   return {
     id: fields.id ?? `legacy-${++legacySeq}`,
     created_at: fields.created_at ?? '2026-01-01 00:00:00',
-    role,
+    ...role,
     content,
     ...(fields.compact ? { meta: { compact: true } } : {}),
   };
@@ -98,17 +98,14 @@ export function withLegacyFinalReplies(
   let anchor: number | null = null;
   entries.forEach((entry, index) => {
     const message = messages[index];
-    if (message.role.type === 'user' && (message.role.source ?? 'human') === 'human') {
+    if (message.role === 'user' && (message.source ?? 'human') === 'human') {
       anchor = index;
       return;
     }
     if (entry.phase === 'summary' && anchor != null) {
       const anchorMessage = messages[anchor];
-      if (anchorMessage.role.type === 'user') {
-        messages[anchor] = {
-          ...anchorMessage,
-          role: { ...anchorMessage.role, final_reply: message.id },
-        };
+      if (anchorMessage.role === 'user') {
+        messages[anchor] = { ...anchorMessage, final_reply: message.id };
       }
     }
   });

@@ -14,11 +14,14 @@ export interface MessageToolCall {
   arguments?: unknown;
 }
 
-/** 角色及其必带字段（与后端 `Role` 一致，按 `type` 区分）。 */
+/**
+ * 角色及其必带字段（与后端 `Role` 一致，按 `role` 区分）。
+ * 后端以 flatten 展开到消息顶层，角色字段与 `id` / `content` 平级。
+ */
 export type Role =
-  | { type: 'system' }
+  | { role: 'system' }
   | {
-      type: 'user';
+      role: 'user';
       source?: UserSource;
       /** 该用户消息发起的轮次状态。仅起轮消息携带，引导消息为空。 */
       turn_status?: TurnStatus;
@@ -28,7 +31,7 @@ export type Role =
       final_reply?: string;
     }
   | {
-      type: 'assistant';
+      role: 'assistant';
       reasoning_content?: string;
       reasoning_signature?: string;
       tool_calls?: MessageToolCall[];
@@ -39,7 +42,7 @@ export type Role =
       text_elapsed_ms?: number | null;
     }
   | {
-      type: 'tool';
+      role: 'tool';
       /** 为空表示无配对调用的运行时上下文。 */
       tool_call_id?: string;
       tool_name?: string;
@@ -47,7 +50,7 @@ export type Role =
       /** 单次工具调用耗时（毫秒）。 */
       duration_ms?: number | null;
     }
-  | { type: 'notice'; usage?: MessageUsage | null };
+  | { role: 'notice'; usage?: MessageUsage | null };
 
 /** 插件渲染声明：只影响显示，插件缺失时按角色默认渲染。 */
 export interface MessageRender {
@@ -62,24 +65,27 @@ export interface MessageMeta {
   render?: MessageRender;
 }
 
-export interface Message {
+/** 与角色无关的消息字段。 */
+export interface MessageBase {
   id: string;
   created_at: string;
-  role: Role;
   content: ContentBlock[];
   meta?: MessageMeta;
 }
 
+/** 对话消息：公共字段与角色字段平级（按 `role` 区分）。 */
+export type Message = MessageBase & Role;
+
 // ── 只读访问：按角色取字段，其他角色返回空值（与后端访问器一致）──
 
-type RoleOf<T extends Role['type']> = Extract<Role, { type: T }>;
+type RoleOf<T extends Role['role']> = Extract<Message, { role: T }>;
 
-function roleAs<T extends Role['type']>(message: Message, type: T): RoleOf<T> | undefined {
-  return message.role?.type === type ? (message.role as RoleOf<T>) : undefined;
+function roleAs<T extends Role['role']>(message: Message, role: T): RoleOf<T> | undefined {
+  return message.role === role ? (message as RoleOf<T>) : undefined;
 }
 
 export function messageKind(message: Message): MessageRole {
-  return message.role?.type;
+  return message.role;
 }
 
 export function reasoningOf(message: Message): string {
@@ -108,8 +114,7 @@ export function durationMsOf(message: Message): number | null {
 }
 
 export function usageOf(message: Message): MessageUsage | null {
-  const role = message.role;
-  if (role?.type === 'assistant' || role?.type === 'notice') return role.usage ?? null;
+  if (message.role === 'assistant' || message.role === 'notice') return message.usage ?? null;
   return null;
 }
 

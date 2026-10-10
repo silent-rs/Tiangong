@@ -27,7 +27,7 @@ describe("工具结果抬头与插件前缀", () => {
   it("工具卡片展示去掉抬头后的输出", () => {
     const msg = {
       id: "t1",
-      role: { type: "tool", tool_name: "read_file" },
+      role: "tool", tool_name: "read_file",
       content: [{ type: "text", text: "调用工具 read_file：成功\nhello" }],
     } as unknown as MessageItem;
     const model = buildToolDisplayModel(msg, { path: "a.txt" });
