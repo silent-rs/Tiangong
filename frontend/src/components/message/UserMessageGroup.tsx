@@ -497,7 +497,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   );
 }
 
-/** 用户消息的插件上下文：文本与引用的本地媒体附件。 */
+/** 用户消息的插件上下文：文本与引用的本地媒体附件（附可显示地址）。 */
 function userMessageContext(message: MessageItem, text: string): HostMessageContext {
   const content = Array.isArray(message.content) ? message.content : [];
   const attachments = content.flatMap((block) =>
@@ -505,6 +505,7 @@ function userMessageContext(message: MessageItem, text: string): HostMessageCont
       ? [{
           kind: block.asset.kind,
           path: block.asset.local_path,
+          url: resolveAttachmentUrl(block.asset.local_path),
           mime_type: block.asset.mime_type,
           name: block.asset.original_name,
         }]
