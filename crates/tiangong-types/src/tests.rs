@@ -475,6 +475,11 @@ fn new_format_roundtrip_keeps_role_fields_and_meta() {
         *reasoning_signature = Some("sig".into());
         *text_elapsed_ms = Some(12);
     }
+    let assistant = assistant.with_render(Some(MessageRender {
+        plugin: "bot".into(),
+        view: "card".into(),
+        data: serde_json::json!({"channel": "微信私聊"}),
+    }));
     let tool = Message::tool_result("call-1", "fs__read_file", "内容", true).with_duration_ms(5);
     let mut user = Message::user_prepared("u1", vec![ContentBlock::text("你好")]);
     user.set_turn_result(100, TurnStatus::Success);
@@ -624,6 +629,36 @@ fn plugin_session_messages_use_flat_format_and_accept_both() {
     assert_eq!(
         parsed.messages[1].user_source(),
         Some(UserSource::HostInjected)
+    );
+}
+
+#[test]
+fn message_render_validation() {
+    let render = |plugin: &str, view: &str, data: serde_json::Value| MessageRender {
+        plugin: plugin.into(),
+        view: view.into(),
+        data,
+    };
+    assert!(
+        render("bot", "card", serde_json::Value::Null)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        render(" ", "card", serde_json::Value::Null)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        render("bot", "", serde_json::Value::Null)
+            .validate()
+            .is_err()
+    );
+    let big = "x".repeat(MESSAGE_RENDER_MAX_BYTES);
+    assert!(
+        render("bot", "card", serde_json::json!(big))
+            .validate()
+            .is_err()
     );
 }
 
