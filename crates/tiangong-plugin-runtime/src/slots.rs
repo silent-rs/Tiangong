@@ -69,7 +69,7 @@ pub const BUILTIN_SLOTS: &[SlotDescriptor] = &[
         id: "session.message-item",
         instances: SlotInstances::Multiple,
         context: &[SlotContextKey::Session, SlotContextKey::Message],
-        description: "每条消息的附加区（附件渲染、结构化卡片）",
+        description: "每条消息的附加区（附件渲染、结构化卡片）；声明 render=replace 时按消息渲染声明接管整条消息的显示",
     },
     SlotDescriptor {
         id: "session.message-action",
@@ -279,7 +279,31 @@ pub struct UiContribution {
     /// 实例是否持有后端资源（宿主接管实例生命周期，见 manifest 同名字段）。
     #[serde(default)]
     pub instance_resources: bool,
+    /// 渲染方式（仅 `session.message-item`）：缺省为附加区，`replace` 时只在
+    /// 消息的渲染声明指向本贡献时挂载，并替换该消息的默认显示。
+    #[serde(default, skip_serializing_if = "MessageItemRender::is_append")]
+    pub render: MessageItemRender,
 }
+
+/// `session.message-item` 贡献的渲染方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageItemRender {
+    /// 附加区：挂载在每条消息下方（默认）。
+    #[default]
+    Append,
+    /// 替换：仅在消息 `meta.render` 指向本贡献时挂载，替换默认显示。
+    Replace,
+}
+
+impl MessageItemRender {
+    pub fn is_append(&self) -> bool {
+        matches!(self, Self::Append)
+    }
+}
+
+/// `render` 仅生效的 Slot。
+pub const MESSAGE_ITEM_SLOT: &str = "session.message-item";
 
 /// App 打开模式。仅对 `extension.tab` 生效。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -424,6 +448,7 @@ mod tests {
             context: vec!["session".to_string()],
             sandbox: SandboxKind::Shadow,
             instance_resources: false,
+            render: MessageItemRender::Append,
         };
         let json = serde_json::to_string(&contribution).unwrap();
         assert!(json.contains("\"open_mode\":\"multi\""));

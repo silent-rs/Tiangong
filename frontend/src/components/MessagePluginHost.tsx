@@ -14,7 +14,7 @@ interface MessagePluginHostProps {
  * `message` 上下文告知插件当前是哪条消息。宿主不解析插件行为。
  */
 function MessagePluginHostView({ slot, message }: MessagePluginHostProps) {
-  const items = useSlotContributions(slot);
+  const items = useSlotContributions(slot).filter((item) => item.render !== 'replace');
   const activeSessionId = useStore((s) => s.activeSessionId);
   // 上下文对象保持稳定引用：内容不变时不触发插件上下文更新。
   const context = useMemo(

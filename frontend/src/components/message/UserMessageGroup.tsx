@@ -15,6 +15,7 @@ import type { MessageGroup, MessageItem } from "./types";
 import { UserMessageActions } from "./UserMessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { MessagePluginHost } from "../MessagePluginHost";
+import { MessageRenderHost } from "../MessageRenderHost";
 import type { HostMessageContext } from "../pluginHostContext";
 import { CollapsibleMarkdownText, CollapsibleUserText } from "./CollapsibleUserText";
 
@@ -294,6 +295,19 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   const subagentReportMessageMatch = messageText.match(/^【Subagent 回报】来自(.+?)：\n?([\s\S]*)$/);
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const pluginMessage = userMessageContext(message, messageText);
+  // 插件渲染声明（meta.render）：由声明 render=replace 的贡献接管显示，
+  // 插件缺失时按下方默认规则渲染。
+  const render = message.meta?.render;
+  const withPluginRender = (fallback: React.ReactNode) => render
+    ? (
+      <MessageRenderHost
+        render={render}
+        message={pluginMessage}
+        fallback={fallback}
+        className="block w-full max-w-[92%] sm:max-w-[85%]"
+      />
+    )
+    : fallback;
   const voiceMessage = !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch
     && !scheduledTask && !webhook && isVoiceMessage(message);
   const searchQuery = useSearchStore((s) => s.searchQuery);
@@ -409,7 +423,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
         </div>
       ) : (
         <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
-          {subagentTaskMatch ? (() => {
+          {withPluginRender(subagentTaskMatch ? (() => {
             const [, kind, source, body] = subagentTaskMatch;
             return (
               <SubagentTaskCard
@@ -522,7 +536,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
                   )}
                 </div>
             </div>
-          )}
+          ))}
         </div>
       )}
       {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && !voiceMessage && (

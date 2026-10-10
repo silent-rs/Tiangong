@@ -67,6 +67,7 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     open_mode: contribution.open_mode,
                     sandbox: contribution.sandbox,
                     source: ContributionSource::Manifest,
+                    render: contribution.render,
                 });
             }
         }
@@ -90,6 +91,7 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     open_mode: crate::slots::OpenMode::Singleton,
                     sandbox: crate::slots::SandboxKind::Iframe,
                     source: ContributionSource::Wasm,
+                    render: crate::slots::MessageItemRender::Append,
                 });
             }
         }
@@ -283,6 +285,8 @@ pub struct SlotContribution {
     pub sandbox: crate::slots::SandboxKind,
     /// 贡献来源：WASM 运行时声明（v1）或 manifest 声明（v2）。
     pub source: ContributionSource,
+    /// `session.message-item` 的渲染方式（附加区或替换默认显示）。
+    pub render: crate::slots::MessageItemRender,
 }
 
 /// UI 贡献的声明来源。

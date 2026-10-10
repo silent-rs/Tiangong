@@ -286,7 +286,8 @@ function ShadowContainer({
           || currentContext.app?.instance_id !== context.app?.instance_id
           || currentContext.app?.visible !== context.app?.visible
           || currentContext.message?.id !== context.message?.id
-          || currentContext.message?.text !== context.message?.text;
+          || currentContext.message?.text !== context.message?.text
+          || JSON.stringify(currentContext.message?.render) !== JSON.stringify(context.message?.render);
         currentContext = context;
         if (!contextChanged) return;
         contextHandlers.forEach((handler) => handler(context));

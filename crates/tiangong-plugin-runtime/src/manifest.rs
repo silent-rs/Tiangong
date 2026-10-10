@@ -6,7 +6,10 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::slots::{OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotRegistry, UiContribution};
+use crate::slots::{
+    MESSAGE_ITEM_SLOT, MessageItemRender, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotRegistry,
+    UiContribution,
+};
 
 pub const MANIFEST_FILE: &str = "plugin.json";
 /// schema v1：现有清单，无 `ui`/`capabilities`，设置页贡献由 WASM 运行时声明。
@@ -185,6 +188,11 @@ pub struct UiContributionDecl {
     /// sidecar，`webview` 沙箱时为宿主 webview 容器。
     #[serde(default)]
     pub instance_resources: bool,
+    /// 渲染方式（仅 `session.message-item`）：缺省 `append` 为附加区；
+    /// `replace` 时仅在消息渲染声明（`meta.render`）指向本贡献时挂载，
+    /// 替换该消息的默认显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<MessageItemRender>,
 }
 
 /// 单项模型能力需求。
@@ -601,6 +609,14 @@ impl PluginManifest {
                     decl.slot
                 );
             }
+            if decl.render.is_some() && decl.slot != MESSAGE_ITEM_SLOT {
+                bail!(
+                    "插件 {} 贡献 {} 的 render 仅对 {MESSAGE_ITEM_SLOT} 生效，{} 不支持",
+                    self.id,
+                    decl.id,
+                    decl.slot
+                );
+            }
             if decl.instance_resources {
                 if decl.slot != OPEN_MODE_SLOT {
                     bail!(
@@ -777,6 +793,7 @@ impl PluginManifest {
                 context: decl.context.clone(),
                 sandbox: decl.sandbox.unwrap_or(default_sandbox),
                 instance_resources: decl.instance_resources,
+                render: decl.render.unwrap_or_default(),
             })
             .collect()
     }
@@ -1081,6 +1098,25 @@ mod tests {
         assert!(tab.instance_resources);
     }
 
+    #[test]
+    fn v2_render_仅对_message_item_生效() {
+        let json = v2_json().replace(
+            "\"entry\": \"settings.html\"",
+            "\"entry\": \"settings.html\",\n                        \"render\": \"replace\"",
+        );
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("render"));
+        assert!(error.to_string().contains("session.message-item"));
+
+        let item = json.replace("\"settings.plugin-page\"", "\"session.message-item\"");
+        let manifest = parse(&item).unwrap();
+        let contribution = manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|contribution| contribution.slot == "session.message-item")
+            .unwrap();
+        assert_eq!(contribution.render, MessageItemRender::Replace);
+    }
     #[test]
     fn v2_未声明_instance_resources_缺省为假() {
         let manifest = parse(&v2_json()).unwrap();
