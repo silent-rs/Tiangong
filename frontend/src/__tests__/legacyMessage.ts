@@ -4,7 +4,7 @@ import type { Message, MessageUsage, Role, UserSource } from '@/api/tauri';
  * 测试夹具：以旧扁平字段描述消息，转换为按角色区分的新结构。
  *
  * 规则与后端读取旧格式时的迁移一致：
- * - phase=hostinjected/compressedresume → user.source；worker_id → source=agent；
+ * - phase=hostinjected/compressedresume → user.source；
  * - phase=summary 在消息结构上不再体现（最终答复由起点用户消息的 final_reply 指向，
  *   需要时用 `final_reply` 字段在用户消息上显式声明）。
  */
@@ -15,7 +15,6 @@ export interface LegacyMessageFields {
   created_at?: string;
   reasoning_content?: string;
   usage?: MessageUsage | null;
-  worker_id?: string;
   tool_calls?: { id: string; name: string; arguments?: unknown }[];
   tool_call_id?: string;
   tool_name?: string;
@@ -37,13 +36,11 @@ export function legacyMessage(fields: LegacyMessageFields): Message {
   let role: Role;
   switch (kind) {
     case 'user': {
-      const source: UserSource = fields.worker_id
-        ? 'agent'
-        : fields.phase === 'hostinjected'
-          ? 'host_injected'
-          : fields.phase === 'compressedresume'
-            ? 'compressed_resume'
-            : 'human';
+      const source: UserSource = fields.phase === 'hostinjected'
+        ? 'host_injected'
+        : fields.phase === 'compressedresume'
+          ? 'compressed_resume'
+          : 'human';
       role = {
         type: 'user',
         ...(source !== 'human' ? { source } : {}),

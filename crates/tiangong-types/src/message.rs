@@ -85,8 +85,6 @@ pub enum UserSource {
     /// 压缩后注入的「当前任务状态」恢复锚点：始终发送给模型、不再被压缩，
     /// 不作轮次锚点。
     CompressedResume,
-    /// 由其他 Agent 产生的输入（历史 Agent Team 的 worker 消息）。不作轮次锚点。
-    Agent,
 }
 
 impl<'de> Deserialize<'de> for UserSource {
@@ -98,7 +96,6 @@ impl<'de> Deserialize<'de> for UserSource {
         Ok(match value.as_str() {
             "host_injected" => Self::HostInjected,
             "compressed_resume" => Self::CompressedResume,
-            "agent" => Self::Agent,
             _ => Self::Human,
         })
     }
@@ -761,7 +758,6 @@ impl MessageRaw {
                 source: match phase {
                     "hostinjected" => UserSource::HostInjected,
                     "compressedresume" => UserSource::CompressedResume,
-                    _ if from_worker => UserSource::Agent,
                     _ => UserSource::Human,
                 },
                 turn_status: self.turn_status,
@@ -1246,7 +1242,7 @@ impl Message {
             Role::User { source, .. } => match source {
                 UserSource::HostInjected => "hostinjected",
                 UserSource::CompressedResume => "compressedresume",
-                UserSource::Human | UserSource::Agent => "normal",
+                UserSource::Human => "normal",
             },
             Role::Assistant { .. } | Role::Tool { .. } => "react",
             Role::System | Role::Notice { .. } => "normal",

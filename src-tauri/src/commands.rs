@@ -1234,9 +1234,6 @@ fn validate_editable_message(
         Some(tiangong_core::session::UserSource::HostInjected) => {
             return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
         }
-        Some(tiangong_core::session::UserSource::Agent) => {
-            return Err(anyhow::anyhow!("该消息为 Agent 协作消息，无法编辑"));
-        }
         _ => {}
     }
     if message.content != base_content {

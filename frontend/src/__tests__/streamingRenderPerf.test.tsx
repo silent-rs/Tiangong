@@ -80,20 +80,18 @@ describe('groupMessages 引用复用（流式期间历史组保持稳定）', ()
 
   it('非真人来源的用户消息归入助手轮次、compressedresume 仍被跳过', () => {
     const u1 = message('u1', 'user', '提问');
-    const a1 = message('a1', 'user', 'Agent 协作消息', { worker_id: 'agent:x:1' });
     const i1 = message('i1', 'user', '', { phase: 'hostinjected' });
     const groups = groupMessages([
       u1,
-      a1,
       i1,
       message('r1', 'user', '续接', { phase: 'compressedresume' }),
     ]);
     expect(groups.map((group) => group.type)).toEqual(['user', 'agent_turn']);
-    expect(groups[1].messages.map((item) => item.id)).toEqual(['a1', 'i1']);
+    expect(groups[1].messages.map((item) => item.id)).toEqual(['i1']);
     // 追加消息后同 key 组重建，聚合规则不变。
     const a2 = message('a2', 'assistant', '回复');
-    const next = groupMessages([u1, a1, i1, a2]);
-    expect(next[1].messages).toHaveLength(3);
+    const next = groupMessages([u1, i1, a2]);
+    expect(next[1].messages).toHaveLength(2);
     expect(next[1].key).toBe(groups[1].key);
   });
 });

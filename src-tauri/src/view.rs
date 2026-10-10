@@ -541,10 +541,8 @@ mod paging_tests {
             Message::new(MessageRole::User, "宿主注入").with_source(UserSource::HostInjected);
         let resume =
             Message::new(MessageRole::User, "压缩续写").with_source(UserSource::CompressedResume);
-        let agent = Message::new(MessageRole::User, "agent").with_source(UserSource::Agent);
         assert!(!is_turn_anchor(&injected));
         assert!(!is_turn_anchor(&resume));
-        assert!(!is_turn_anchor(&agent));
         assert!(is_turn_anchor(&Message::new(MessageRole::User, "提问")));
     }
 

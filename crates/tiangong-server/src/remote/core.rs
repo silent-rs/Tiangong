@@ -1335,8 +1335,8 @@ mod tests {
         ));
         // 非真人来源的用户消息不截断本轮范围。
         session.messages.push(
-            Message::new(MessageRole::User, "agent input")
-                .with_source(tiangong_types::UserSource::Agent),
+            Message::new(MessageRole::User, "injected input")
+                .with_source(tiangong_types::UserSource::HostInjected),
         );
         session.append_message(MessageRole::Assistant, "first reply");
         session.append_prepared_user_message(Message::user_prepared(

@@ -6,7 +6,7 @@
 import type { ContentBlock, MessageRole, MessageUsage, TurnStatus } from './tauri';
 
 /** 用户消息来源：只有 human（真人输入）作为轮次锚点。未知值按 human 处理。 */
-export type UserSource = 'human' | 'host_injected' | 'compressed_resume' | 'agent';
+export type UserSource = 'human' | 'host_injected' | 'compressed_resume';
 
 export interface MessageToolCall {
   id: string;
@@ -130,7 +130,7 @@ export function userSourceOf(message: Message): UserSource | undefined {
   const role = roleAs(message, 'user');
   if (!role) return undefined;
   const source = role.source;
-  return source === 'host_injected' || source === 'compressed_resume' || source === 'agent'
+  return source === 'host_injected' || source === 'compressed_resume'
     ? source
     : 'human';
 }

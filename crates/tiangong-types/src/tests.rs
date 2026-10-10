@@ -455,7 +455,6 @@ fn user_source_serde_and_forward_compat() {
     assert!(UserSource::Human.is_user_input());
     assert!(!UserSource::HostInjected.is_user_input());
     assert!(!UserSource::CompressedResume.is_user_input());
-    assert!(!UserSource::Agent.is_user_input());
 }
 
 #[test]
@@ -554,8 +553,8 @@ fn legacy_flat_messages_migrate_into_roles() {
     assert!(m[5].usage().is_some());
 
     assert_eq!(m[6].user_source(), Some(UserSource::CompressedResume));
-    // 旧 worker 输入不作轮次锚点。
-    assert_eq!(m[7].user_source(), Some(UserSource::Agent));
+    // 旧 worker 输入不再单独区分来源，按普通用户消息读取。
+    assert_eq!(m[7].user_source(), Some(UserSource::Human));
 
     // 保存即为新格式：再读回语义不变。
     let saved = serde_json::to_value(&session).unwrap();
