@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "volcengine",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "wasm": {
     "binary": "tiangong_plugin_volcengine_wasm.wasm"
   },
@@ -68,10 +68,11 @@
         "slot": "session.message-item",
         "id": "voice-bubble",
         "title": "语音消息",
-        "description": "语音输入消息的录音播放气泡",
+        "description": "语音输入消息卡片：录音播放与识别文本",
         "icon": "audio-lines",
         "entry": "app/voice-bubble.html",
-        "context": ["session", "message"]
+        "context": ["session", "message"],
+        "render": "replace"
       },
       {
         "slot": "global.status-item",

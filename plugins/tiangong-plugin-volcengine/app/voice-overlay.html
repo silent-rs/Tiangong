@@ -221,7 +221,9 @@
           toast('没有识别到语音内容', true);
           return;
         }
-        // 文本与录音一并发送：录音作为音频附件保留，宿主在消息中渲染语音气泡。
+        // 文本与录音一并发送：录音作为音频附件保留；渲染声明让消息以本插件的
+        // 语音消息卡片（voice-bubble，render=replace）显示，宿主绑定调用方插件。
+        const duration = Math.round(elapsed / 1000);
         await call('session.input.sendText', {
           text,
           attachments: [{
@@ -229,6 +231,7 @@
             mime_type: recorded.mime_type || 'audio/wav',
             original_name: '语音消息.wav',
           }],
+          render: { view: 'voice-bubble', data: { duration_s: duration } },
         });
       } catch (error) {
         toast(`语音识别失败：${(error && error.message) || error}`, true);

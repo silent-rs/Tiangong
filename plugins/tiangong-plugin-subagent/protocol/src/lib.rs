@@ -7,6 +7,7 @@
 pub mod config;
 pub mod hooks;
 pub mod ops;
+pub mod render;
 pub mod state;
 
 pub use config::{AdapterCapabilities, AgentConfig, BackendKind, WorkspacePolicy};

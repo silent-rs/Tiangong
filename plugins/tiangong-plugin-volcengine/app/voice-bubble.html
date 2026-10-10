@@ -9,9 +9,35 @@
     :host, .vb-root { all: initial; visibility: inherit; pointer-events: inherit; }
     /* 作者样式里的 display 会覆盖 UA 的 [hidden]{display:none}，显式保留隐藏语义。 */
     .vb-root [hidden] { display: none !important; }
-    .vb-root { display: block; font-family: var(--host-font-family, inherit); }
+    .vb-root { display: block; font-family: var(--host-font-family, inherit); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+    .vb-card {
+      overflow: hidden; border-radius: 12px;
+      border: 1px solid hsl(var(--border, 214 18% 88%) / .6);
+      border-left: 3px solid hsl(var(--primary, 222.2 47.4% 11.2%) / .6);
+      background: hsl(var(--card, 0 0% 100%));
+      box-shadow: 0 1px 2px rgb(0 0 0 / .05);
+    }
+    .vb-head {
+      display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+      border-bottom: 1px solid hsl(var(--border, 214 18% 88%) / .3);
+      background: hsl(var(--muted, 210 40% 96%) / .15);
+    }
+    .vb-badge {
+      display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+      width: 28px; height: 28px; border-radius: 999px;
+      color: hsl(var(--primary, 222.2 47.4% 11.2%));
+      background: hsl(var(--primary, 222.2 47.4% 11.2%) / .1);
+      border: 1px solid hsl(var(--primary, 222.2 47.4% 11.2%) / .2);
+    }
+    .vb-title { min-width: 0; flex: 1; font-size: 14px; font-weight: 600; }
+    .vb-copy {
+      all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; border-radius: 6px; flex-shrink: 0;
+      color: hsl(var(--muted-foreground, 215 16% 47%) / .6);
+    }
+    .vb-copy:hover { color: hsl(var(--foreground, 222 47% 11%)); background: hsl(var(--foreground, 222 47% 11%) / .05); }
+    .vb-body { padding: 10px 16px; }
     .vb-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
-    .vb-list[hidden] { display: none; }
     .vb-bubble {
       display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
       padding: 4px 12px 4px 8px; border: 0; border-radius: 999px; cursor: pointer; font: inherit; font-size: 12px;
@@ -24,28 +50,46 @@
     .vb-bars i:nth-child(2) { animation-delay: .1s; } .vb-bars i:nth-child(3) { animation-delay: .2s; }
     .vb-bars i:nth-child(4) { animation-delay: .3s; } .vb-bars i:nth-child(5) { animation-delay: .4s; }
     @keyframes vb-wave { 50% { transform: scaleY(.4); } }
+    .vb-text {
+      font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+      color: hsl(var(--card-foreground, 222 47% 11%));
+    }
     svg { width: 14px; height: 14px; display: block; }
   </style>
 </head>
 <body>
-  <div class="vb-root"><div class="vb-list" id="vb-list" hidden></div></div>
+  <div class="vb-root">
+    <div class="vb-card">
+      <div class="vb-head">
+        <span class="vb-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+        </span>
+        <span class="vb-title">语音输入</span>
+        <button type="button" class="vb-copy" id="vb-copy" title="复制识别文本" aria-label="复制">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        </button>
+      </div>
+      <div class="vb-body">
+        <div class="vb-list" id="vb-list" hidden></div>
+        <div class="vb-text" id="vb-text"></div>
+      </div>
+    </div>
+  </div>
   <script>
-    // 用户消息附加区（session.message-item）：为语音输入的录音附件渲染可播放的语音气泡。
-    // 仅识别本插件录音产生的附件（发送时命名为「语音消息」/ 录音文件前缀 stt_rec_），
-    // 其他音频附件仍由宿主的通用媒体渲染处理。
+    // 语音输入消息卡片（session.message-item，render=replace）：按住说话发送时
+    // 携带渲染声明，宿主据此以本视图替换默认显示——录音附件渲染为可播放的
+    // 语音气泡，正文为识别文本。本视图只挂在声明了 voice-bubble 的消息上，
+    // 消息内的音频附件即录音，不再按文件名识别；无渲染声明的消息由宿主按
+    // 普通附件显示。
     const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
     const list = uiRoot.getElementById('vb-list');
+    const textEl = uiRoot.getElementById('vb-text');
     let playingPath = null;
     let current = typeof hostContext !== 'undefined' ? hostContext : null;
 
     function voiceAttachments(context) {
       const attachments = (context && context.message && context.message.attachments) || [];
-      return attachments.filter((item) => {
-        if (item.kind !== 'audio') return false;
-        const name = item.name || '';
-        const file = (item.path || '').split(/[\\/]/).pop() || '';
-        return name.startsWith('语音消息') || file.startsWith('stt_rec_');
-      });
+      return attachments.filter((item) => item.kind === 'audio');
     }
 
     async function call(method, payload) {
@@ -79,6 +123,9 @@
     }
 
     function render(context) {
+      const message = (context && context.message) || {};
+      const data = (message.render && message.render.data) || {};
+      const duration = Number.isFinite(data.duration_s) && data.duration_s > 0 ? `${data.duration_s}″` : '';
       const items = voiceAttachments(context);
       list.replaceChildren(...items.map((item) => {
         const playing = playingPath === item.path;
@@ -90,12 +137,21 @@
           + (playing
             ? '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>'
             : '<path d="M8 5v14l11-7z"/>')
-          + '</svg><span class="vb-bars"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:7px"></i></span><span>' + (playing ? '播放中' : '播放录音') + '</span>';
+          + '</svg><span class="vb-bars"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:7px"></i></span>';
+        const label = document.createElement('span');
+        label.textContent = playing ? '播放中' : (duration || '播放录音');
+        bubble.append(label);
         bubble.addEventListener('click', () => toggle(item.path));
         return bubble;
       }));
       list.hidden = items.length === 0;
+      textEl.textContent = message.text || '';
     }
+
+    uiRoot.getElementById('vb-copy').addEventListener('click', () => {
+      const text = (current && current.message && current.message.text) || '';
+      navigator.clipboard?.writeText(text).catch(() => {});
+    });
 
     if (typeof onHostContextChange === 'function') {
       onHostContextChange((context) => { current = context; render(context); });

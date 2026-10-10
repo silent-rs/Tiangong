@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>定时任务消息</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器。 */
+    :host, .st-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    .st-root [hidden] { display: none !important; }
+    .st-root {
+      display: block; font-family: var(--host-font-family, inherit);
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    .st-card {
+      overflow: hidden; border-radius: 8px;
+      border: 1px solid hsl(var(--border, 214 18% 88%) / .7);
+      background: hsl(var(--card, 0 0% 100%));
+      box-shadow: 0 1px 2px rgb(0 0 0 / .05);
+    }
+    .st-head {
+      display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+      background: hsl(var(--muted, 210 40% 96%) / .35);
+    }
+    .st-icon { margin-top: 2px; width: 16px; height: 16px; flex-shrink: 0; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .st-icon svg { width: 16px; height: 16px; display: block; }
+    .st-info { min-width: 0; flex: 1; }
+    .st-label { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .st-schedule {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-weight: 400;
+      padding: 0 5px; border-radius: 4px; border: 1px solid hsl(var(--border, 214 18% 88%));
+    }
+    .st-name { margin-top: 2px; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+    .st-desc { margin-top: 4px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .st-copy {
+      all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; border-radius: 6px; flex-shrink: 0;
+      color: hsl(var(--muted-foreground, 215 16% 47%) / .6);
+    }
+    .st-copy:hover { color: hsl(var(--foreground, 222 47% 11%)); background: hsl(var(--foreground, 222 47% 11%) / .05); }
+    .st-copy svg { width: 14px; height: 14px; display: block; }
+    .st-body { border-top: 1px solid hsl(var(--border, 214 18% 88%) / .6); padding: 10px 12px; }
+    .st-body-label { margin-bottom: 4px; font-size: 11px; font-weight: 500; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .st-payload { font-size: 14px; line-height: 1.5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .st-empty { font-size: 14px; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .st-more {
+      all: unset; cursor: pointer; margin-top: 6px; display: inline-block; font-size: 12px;
+      color: hsl(var(--primary, 222.2 47.4% 11.2%));
+    }
+  </style>
+</head>
+<body>
+  <div class="st-root">
+    <div class="st-card">
+      <div class="st-head">
+        <span class="st-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        </span>
+        <div class="st-info">
+          <p class="st-label" style="margin:0">定时任务<span class="st-schedule" id="st-schedule" hidden></span></p>
+          <p class="st-name" id="st-name" style="margin:2px 0 0"></p>
+          <p class="st-desc" id="st-desc" style="margin:4px 0 0" hidden></p>
+        </div>
+        <button type="button" class="st-copy" id="st-copy" title="复制原文" aria-label="复制">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        </button>
+      </div>
+      <div class="st-body">
+        <p class="st-body-label" style="margin:0 0 4px">执行内容</p>
+        <div class="st-payload" id="st-payload"></div>
+        <p class="st-empty" id="st-empty" style="margin:0" hidden>无执行内容</p>
+        <button type="button" class="st-more" id="st-more" hidden></button>
+      </div>
+    </div>
+  </div>
+  <script>
+    // 定时任务触发消息卡片（session.message-item，render=replace）：调度器到点
+    // 投递时携带渲染声明，宿主据此挂载本视图。任务名称、描述与执行内容以
+    // 消息正文为唯一来源（与模型读到的内容一致）；render.data 提供 cron 表达式等元信息。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const $ = (id) => uiRoot.getElementById(id);
+    const MAX_LINES = 12;
+    const HEADER = '[定时任务触发]';
+    const NAME_PREFIX = '任务名称：';
+    const DESC_PREFIX = '任务描述：';
+    let rawText = '';
+    let payload = '';
+    let expanded = false;
+
+    // 与调度器正文格式一致：[定时任务触发]\n任务名称：…\n任务描述：…\n\n{payload}。
+    // 格式不符（理论上不会发生）时整段作为执行内容显示。
+    function parse(text) {
+      const lines = text.split('\n');
+      if (lines[0] === HEADER && lines[1]?.startsWith(NAME_PREFIX)
+        && lines[2]?.startsWith(DESC_PREFIX) && lines[3] === '') {
+        return {
+          name: lines[1].slice(NAME_PREFIX.length),
+          description: lines[2].slice(DESC_PREFIX.length),
+          payload: lines.slice(4).join('\n'),
+        };
+      }
+      return { name: '', description: '', payload: text };
+    }
+
+    function renderPayload() {
+      const lines = payload.split('\n');
+      const long = lines.length > MAX_LINES;
+      $('st-payload').textContent = expanded || !long ? payload : `${lines.slice(0, MAX_LINES).join('\n')}…`;
+      $('st-payload').hidden = payload.length === 0;
+      $('st-empty').hidden = payload.length > 0;
+      $('st-more').hidden = !long;
+      $('st-more').textContent = expanded ? '收起' : `展开全部（共 ${lines.length} 行）`;
+    }
+
+    function render(context) {
+      const message = (context && context.message) || {};
+      const data = (message.render && message.render.data) || {};
+      rawText = message.text || '';
+      const parsed = parse(rawText);
+      $('st-name').textContent = parsed.name || '未命名任务';
+      $('st-desc').textContent = parsed.description;
+      $('st-desc').hidden = !parsed.description;
+      $('st-schedule').textContent = data.schedule || '';
+      $('st-schedule').hidden = !data.schedule;
+      if (parsed.payload !== payload) expanded = false;
+      payload = parsed.payload;
+      renderPayload();
+    }
+
+    $('st-more').addEventListener('click', () => {
+      expanded = !expanded;
+      renderPayload();
+    });
+    $('st-copy').addEventListener('click', () => {
+      navigator.clipboard?.writeText(rawText).catch(() => {});
+    });
+
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange(render);
+    } else {
+      render(typeof hostContext !== 'undefined' ? hostContext : null);
+    }
+  </script>
+</body>
+</html>

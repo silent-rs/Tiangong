@@ -67,11 +67,18 @@ impl MessageDeliver {
     ///
     /// 用 `connector="server-api"` + `channel_id=session_id`，让 server 把 channel_id
     /// 直接当 session_id 用（与 `/api/v1/chat` 同路径，零改动 server 路由）。
+    /// `render` 为插件渲染声明：界面据此以本插件的定时任务卡片显示，正文
+    /// `message` 保持完整供模型读取与旧版宿主兜底。
     ///
     /// 请求带 `Prefer: respond-async` 头，server 收到后立即返回 202，整轮 turn 在后台
     /// 异步执行。因此本调用只需确认「消息已被 server 接收」，不等整轮完成。
     /// 仍然检查响应状态码：401/403/500 等服务端错误会被识别为投递失败。
-    async fn deliver(&self, session_id: &str, content: String) -> Result<()> {
+    async fn deliver(
+        &self,
+        session_id: &str,
+        content: String,
+        render: serde_json::Value,
+    ) -> Result<()> {
         let url = self
             .server_url
             .as_deref()
@@ -81,6 +88,7 @@ impl MessageDeliver {
             "connector": "server-api",
             "channel_id": session_id,
             "message": content,
+            "render": render,
         });
         let mut request = self
             .client
@@ -458,9 +466,10 @@ async fn execute_core(
         "[定时任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
         fresh.name, fresh.description, fresh.payload
     );
+    let render = scheduled_task_render(&fresh, &run_id);
 
     let finished_at = chrono::Local::now().naive_local().to_string();
-    match deliver.deliver(&session_id, message).await {
+    match deliver.deliver(&session_id, message, render).await {
         Ok(()) => {
             // 投递成功后才把新 session_id 写回 job
             if created_new {
@@ -495,6 +504,26 @@ async fn execute_core(
             tracing::error!(job_id = %fresh.id, %error, "触发发送失败");
         }
     }
+}
+
+/// 定时任务卡片的 `session.message-item` 贡献 ID（见 plugin.json）。
+const SCHEDULED_TASK_VIEW: &str = "scheduled-task";
+
+/// 触发消息的渲染声明（`POST /api/v1/messages` 的 `render` 字段）。
+///
+/// `data` 只带卡片头部所需的小字段；任务名称、描述与执行内容由视图从消息
+/// 正文读取（正文是唯一来源，搜索高亮也基于正文），避免大段文本重复携带
+/// （宿主限制 render 序列化后不超过 16KB，超限会拒绝整条消息）。
+fn scheduled_task_render(job: &tiangong_scheduler::model::Job, run_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "plugin": PLUGIN_ID,
+        "view": SCHEDULED_TASK_VIEW,
+        "data": {
+            "job_id": job.id,
+            "run_id": run_id,
+            "schedule": job.schedule,
+        },
+    })
 }
 
 /// 解析 session_id：有 session_id 且存储中存在则复用；否则生成新 id。
@@ -665,5 +694,34 @@ fn job_run_to_protocol(model: tiangong_scheduler::model::JobRun) -> JobRun {
         started_at: model.started_at,
         finished_at: model.finished_at,
         result_summary: model.result_summary,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 触发消息渲染声明指向本插件视图且不重复携带正文() {
+        let job = tiangong_scheduler::model::Job {
+            id: "job-1".into(),
+            name: "日报".into(),
+            description: "每天汇总".into(),
+            trigger_type: tiangong_scheduler::model::TriggerType::Cron,
+            schedule: Some("0 0 9 * * *".into()),
+            session_id: None,
+            payload: "很长的执行内容".repeat(4096),
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let render = scheduled_task_render(&job, "run-1");
+        assert_eq!(render["plugin"], PLUGIN_ID);
+        assert_eq!(render["view"], SCHEDULED_TASK_VIEW);
+        assert_eq!(render["data"]["job_id"], "job-1");
+        assert_eq!(render["data"]["run_id"], "run-1");
+        assert_eq!(render["data"]["schedule"], "0 0 9 * * *");
+        // 执行内容只在正文里，渲染声明保持小体积。
+        assert!(serde_json::to_vec(&render).unwrap().len() < 1024);
     }
 }

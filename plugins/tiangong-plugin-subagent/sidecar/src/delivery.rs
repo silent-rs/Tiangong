@@ -126,6 +126,7 @@ impl DeliveryWorker {
                 "connector": "server-api",
                 "channel_id": event.conversation_id,
                 "message": event.render_message(),
+                "render": event.render(),
             }));
         if let Some(token) = token {
             request = request.bearer_auth(token);
@@ -146,12 +147,15 @@ impl DeliveryWorker {
 /// `workspace`：消息期望的工作区——服务端创建会话时作为 cwd、已有会话
 /// 不一致时由宿主统一更新；None 表示不指定（Hook/控制通知等）。
 /// `media`：随消息携带的附件（本地路径），Server 端归档后进消息内容。
+/// `render`：插件渲染声明（见 `protocol::render`），界面据此渲染为卡片；
+/// 正文 `message` 保持完整，供模型读取与旧版宿主兜底显示。
 pub async fn deliver_message(
     client: &reqwest::Client,
     conversation_id: &str,
     message: &str,
     workspace: Option<&str>,
     media: &[AttachmentPayload],
+    render: serde_json::Value,
 ) -> Result<()> {
     let (url, token) = server_connection();
     let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
@@ -159,6 +163,7 @@ pub async fn deliver_message(
         "connector": "server-api",
         "channel_id": conversation_id,
         "message": message,
+        "render": render,
     });
     if let Some(workspace) = workspace.map(str::trim).filter(|value| !value.is_empty()) {
         payload["workspace"] = serde_json::Value::String(workspace.to_string());

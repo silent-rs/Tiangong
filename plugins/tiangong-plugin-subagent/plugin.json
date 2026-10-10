@@ -2,7 +2,7 @@
   "schema_version": 2,
   "require_server": true,
   "id": "subagent",
-  "version": "0.2.39",
+  "version": "0.2.40",
   "entrypoints": [
     "desktop"
   ],
@@ -31,6 +31,19 @@
           "session",
           "workspace"
         ]
+      },
+      {
+        "slot": "session.message-item",
+        "id": "agent-message",
+        "title": "Subagent 消息",
+        "description": "Subagent 任务、协作消息、回报与运行状态卡片",
+        "icon": "bot",
+        "entry": "app/agent-message.html",
+        "context": [
+          "session",
+          "message"
+        ],
+        "render": "replace"
       }
     ]
   },
