@@ -45,6 +45,7 @@ pub async fn chat(mut req: Request) -> Result<Response> {
             media: Vec::new(),
             reply_to: None,
             timestamp: now_text(),
+            annotations: Default::default(),
         })
         .await
         .map_err(|e| {

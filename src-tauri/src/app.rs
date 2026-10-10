@@ -951,6 +951,7 @@ impl TiangongApp {
         message_id: String,
         prepared: Vec<tiangong_types::ContentBlock>,
         model_ref: Option<&str>,
+        render: Option<tiangong_types::MessageRender>,
     ) -> Result<(), String> {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
@@ -961,7 +962,8 @@ impl TiangongApp {
             .deliver_user_message(
                 session_id,
                 AgentInputKind::prepared_with_id(message_id, prepared)
-                    .with_model_ref(model_ref.map(str::to_string)),
+                    .with_model_ref(model_ref.map(str::to_string))
+                    .with_render(render),
             )
             .await
     }

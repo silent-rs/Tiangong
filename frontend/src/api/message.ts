@@ -49,9 +49,17 @@ export type Role =
     }
   | { type: 'notice'; usage?: MessageUsage | null };
 
+/** 插件渲染声明：只影响显示，插件缺失时按角色默认渲染。 */
+export interface MessageRender {
+  plugin: string;
+  view: string;
+  data?: unknown;
+}
+
 /** 与角色无关的消息字段。 */
 export interface MessageMeta {
   compact?: boolean;
+  render?: MessageRender;
 }
 
 export interface Message {

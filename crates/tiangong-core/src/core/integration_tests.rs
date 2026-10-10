@@ -1216,6 +1216,76 @@ async fn queued_next_turn_runs_after_current_turn_completes() {
     core.shutdown_join().expect("关闭失败");
 }
 
+/// 插件渲染声明随用户消息保存（起轮与运行中排队两条路径），并随用户消息
+/// 事件下发；模型请求不受影响。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_message_render_is_persisted_and_emitted() {
+    let (env, sid) = TestEnv::new("user-render");
+    let server = MockServer::builder().start().await;
+    let routes = mount_prompt_router(
+        &server,
+        vec![
+            PromptRoute::new(
+                "second-answer",
+                latest_user_contains("RENDER-SECOND"),
+                MockReply::sse(stream_text_chunks(&["第二轮完成。"])),
+            ),
+            PromptRoute::new(
+                "first-answer",
+                latest_user_contains("RENDER-FIRST"),
+                MockReply::sse(stream_text_chunks(&["第一轮完成。"])),
+            ),
+        ],
+    )
+    .await;
+    let (core, mut events) = core_for(&env, &sid, &server.uri());
+    let mut finish = arm_turn_finish(&sid);
+    let render = |n: u32| tiangong_types::MessageRender {
+        plugin: "bot".to_string(),
+        view: "im-message".to_string(),
+        data: serde_json::json!({ "n": n }),
+    };
+    let deliver = |id: &str, text: &str, render| {
+        core.deliver(
+            AgentInputKind::prepared_with_id(id, vec![tiangong_types::ContentBlock::text(text)])
+                .with_render(Some(render)),
+        )
+        .expect("消息投递应被接受");
+    };
+
+    deliver("msg-r1", "RENDER-FIRST 第一条", render(1));
+    finish.wait_frozen();
+    deliver("msg-r2", "RENDER-SECOND 第二条", render(2));
+    finish.release();
+
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-r2").await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    events.wait_done();
+    let session = env.load_session(&sid);
+    for (id, n) in [("msg-r1", 1), ("msg-r2", 2)] {
+        let message = session
+            .messages
+            .iter()
+            .find(|message| message.id == id)
+            .expect("用户消息应已保存");
+        assert_eq!(
+            message.meta.render,
+            Some(render(n)),
+            "{id} 的渲染声明应保存"
+        );
+        assert!(events.seen().iter().any(|event| matches!(
+            event,
+            tiangong_types::StreamEvent::UserMessage { message_id, render: Some(r), .. }
+                if message_id == id && *r == render(n)
+        )));
+    }
+    routes["first-answer"].assert_hits(1);
+    routes["second-answer"].assert_hits(1);
+    core.shutdown_join().expect("关闭失败");
+}
 /// RFC 0017 端到端：工具批次产出图片注入后，注入消息必须以原生图片
 /// 内容进入下一次模型请求（「看见」），且不得劫持轮次锚点——
 /// elapsed_ms/turn_status 必须落在真实用户消息上（review 问题 2 回归）。

@@ -240,7 +240,7 @@ Slot 用点分层级的稳定字符串 ID 标识。宿主登记一份 Slot 目�
 | Slot | 位置 | 实例 | 上下文 | 说明 |
 | --- | --- | --- | --- | --- |
 | `session.turn-node` | 消息流中，作为独立节点插入 | 多 | session, turn | 在对话流中插入自定义卡片/进度条/结果块 |
-| `session.message-item` | 每条消息的附加区 | 多（按消息绑定） | session, message | 消息下方的自定义内容，如附件渲染、结构化卡片 |
+| `session.message-item` | 每条消息的附加区；`render: "replace"` 时按消息渲染声明接管显示 | 多（按消息绑定） | session, message | 消息下方的自定义内容，如附件渲染、结构化卡片；或替换整条消息的显示（6.5.1） |
 | `session.message-action` | 消息操作按钮区 | 多 | session, message | 在「复制/重试」旁新增动作按钮 |
 | `session.before-input` | 输入框上方 | 多 | session | 输入上下文提示、快捷操作条 |
 | `session.after-input` | 输入框下方 | 多 | session | 附加输入辅助区 |
@@ -388,11 +388,20 @@ Shadow 插件无需复制。后续可在这些 token 之上提供前端组件库
 会话区是「消息流 + 输入区」组成的对话主界面。插件可：
 
 - **`session.turn-node`**：在消息流中插入自定义节点。例如一个「看板」插件在每轮结束插入一个可交互的总结卡片；一个「图表」插件在工具执行后插入渲染结果。
-- **`session.message-item`**：渲染某类消息的自定义视图。例如媒体插件渲染音频波形、文件插件渲染表格预览。
+- **`session.message-item`**：渲染某类消息的自定义视图。例如媒体插件渲染音频波形、文件插件渲染表格预览。缺省作为附加区挂在每条消息下方；贡献声明 `"render": "replace"` 时改为「接管显示」，见 6.5.1。
 - **`session.message-action`**：给消息加自定义操作。例如「加入收藏」「转发到看板」。
 - **`session.before-input` / `session.after-input`**：输入区上下文 UI。例如快捷指令条、当前工具状态。
 
 普通会话区 Slot 的容器生命周期可与「当前会话 + 消息/轮次」绑定。需要跨会话保活的单例（如 `session.interaction`）切换会话时不重建，宿主只推送新上下文，使插件保留其他会话尚未结束的请求。宿主提供 `session.*` 桥接能力让插件读取消息、触发工具。
+
+#### 6.5.1 消息渲染声明（`meta.render`）
+
+消息可携带插件渲染声明 `meta.render = { plugin, view, data }`，表示该消息的显示由插件 `plugin` 的 `session.message-item` 贡献 `view` 接管。声明只影响显示：模型请求、轮次记账与压缩都不读取它；`data` 序列化后不超过 16KB。
+
+- **来源**：
+  - 外部消息入口 `POST /api/v1/messages` 的 `render` 字段（如 Bot 插件为 IM 消息声明卡片视图）；同一请求的 `instruction` 字段保存为只给模型看的指令块，界面不显示。
+- **贡献声明**：`{ "slot": "session.message-item", "id": "<view>", "entry": "...", "render": "replace" }`。`render` 仅对 `session.message-item` 合法；`replace` 贡献不再作为附加区挂到每条消息。
+- **渲染**：宿主按 `plugin` + `view` 找到 `replace` 贡献后挂载，消息上下文额外带 `message.render = { view, data }`；插件缺失、停用或未声明该视图时，按角色默认渲染（降级可读）。
 
 ### 6.6 拓展区扩展与「能力矩阵（App Matrix）」
 

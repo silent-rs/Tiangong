@@ -6,7 +6,10 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::slots::{OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotRegistry, UiContribution};
+use crate::slots::{
+    MESSAGE_ITEM_SLOT, MessageItemRender, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotRegistry,
+    UiContribution,
+};
 
 pub const MANIFEST_FILE: &str = "plugin.json";
 /// schema v1：现有清单，无 `ui`/`capabilities`，设置页贡献由 WASM 运行时声明。
@@ -185,6 +188,11 @@ pub struct UiContributionDecl {
     /// sidecar，`webview` 沙箱时为宿主 webview 容器。
     #[serde(default)]
     pub instance_resources: bool,
+    /// 渲染方式（仅 `session.message-item`）：缺省 `append` 为附加区；
+    /// `replace` 时仅在消息渲染声明（`meta.render`）指向本贡献时挂载，
+    /// 替换该消息的默认显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<MessageItemRender>,
 }
 
 /// 单项模型能力需求。
@@ -601,6 +609,14 @@ impl PluginManifest {
                     decl.slot
                 );
             }
+            if decl.render.is_some() && decl.slot != MESSAGE_ITEM_SLOT {
+                bail!(
+                    "插件 {} 贡献 {} 的 render 仅对 {MESSAGE_ITEM_SLOT} 生效，{} 不支持",
+                    self.id,
+                    decl.id,
+                    decl.slot
+                );
+            }
             if decl.instance_resources {
                 if decl.slot != OPEN_MODE_SLOT {
                     bail!(
@@ -649,10 +665,13 @@ impl PluginManifest {
                     self.id
                 );
             }
-            if !self
-                .entrypoints
-                .as_ref()
-                .is_some_and(|items| items.len() == 1 && items[0] == "desktop")
+            // 无 sidecar 的清单工具只能由桌面前端页面执行；声明 sidecar 时
+            // 工具可由 sidecar 承接，server/cli 入口是否注册由加载时按验证能力判定。
+            if self.sidecar.is_none()
+                && !self
+                    .entrypoints
+                    .as_ref()
+                    .is_some_and(|items| items.len() == 1 && items[0] == "desktop")
             {
                 bail!("纯 TypeScript 工具插件 {} 只能声明 desktop 入口", self.id);
             }
@@ -777,6 +796,7 @@ impl PluginManifest {
                 context: decl.context.clone(),
                 sandbox: decl.sandbox.unwrap_or(default_sandbox),
                 instance_resources: decl.instance_resources,
+                render: decl.render.unwrap_or_default(),
             })
             .collect()
     }
@@ -1082,6 +1102,25 @@ mod tests {
     }
 
     #[test]
+    fn v2_render_仅对_message_item_生效() {
+        let json = v2_json().replace(
+            "\"entry\": \"settings.html\"",
+            "\"entry\": \"settings.html\",\n                        \"render\": \"replace\"",
+        );
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("render"));
+        assert!(error.to_string().contains("session.message-item"));
+
+        let item = json.replace("\"settings.plugin-page\"", "\"session.message-item\"");
+        let manifest = parse(&item).unwrap();
+        let contribution = manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|contribution| contribution.slot == "session.message-item")
+            .unwrap();
+        assert_eq!(contribution.render, MessageItemRender::Replace);
+    }
+    #[test]
     fn v2_未声明_instance_resources_缺省为假() {
         let manifest = parse(&v2_json()).unwrap();
         assert!(
@@ -1218,6 +1257,19 @@ mod tests {
         )
         .unwrap();
         tool_only.validate().expect("无 UI 纯工具插件应通过校验");
+
+        // sidecar 承接的清单工具可声明 server 入口（如 bot 插件）；无 sidecar 时仍只允许 desktop。
+        let served = r#"{"schema_version":2,"id":"com.example.im","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}],"sidecar":{"binary":"im-sidecar","transport_protocol":"0.1.0","business_protocol":1}}"#;
+        serde_json::from_str::<PluginManifest>(served)
+            .unwrap()
+            .validate()
+            .expect("sidecar 承接的工具插件可声明 server 入口");
+        let page_only = r#"{"schema_version":2,"id":"com.example.page","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}]}"#;
+        let error = serde_json::from_str::<PluginManifest>(page_only)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("只能声明 desktop 入口"));
 
         // v2 + 无 UI 纯 prompt + mention：同样合法
         let prompt_only: PluginManifest = serde_json::from_str(

@@ -78,8 +78,12 @@ impl TurnContext {
             return Err("只能追加用户消息".to_string());
         }
         tiangong_types::validate_ready_content_blocks(&message.content)?;
+        if let Some(render) = &message.meta.render {
+            render.validate()?;
+        }
         let id = message.id.clone();
         let content = message.content.clone();
+        let render = message.meta.render.clone();
         if self
             .session
             .messages
@@ -125,6 +129,7 @@ impl TurnContext {
             content: tiangong_types::content_blocks_text(&content),
             content_blocks: tiangong_types::stable_content_blocks(&content),
             media: Vec::new(),
+            render,
         });
         Ok(())
     }

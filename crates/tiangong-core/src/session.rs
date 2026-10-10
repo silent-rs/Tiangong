@@ -9,8 +9,8 @@ use crate::permission::TrustMode;
 use tiangong_types::TokenUsage;
 
 pub use tiangong_types::{
-    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessageMeta, MessageRole,
-    MessageToolCall, Role, StoredAsset, UserSource, now_text,
+    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessageMeta,
+    MessageRender, MessageRole, MessageToolCall, Role, StoredAsset, UserSource, now_text,
 };
 
 /// 同一进程内的持久化写入共用此锁，避免 Core 与宿主同时替换会话文件。

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tiangong_types::{MediaAsset, OutgoingMessage};
+use tiangong_types::{MediaAsset, MessageAnnotations, OutgoingMessage};
 
 use super::core::ServerCoreManager;
 
@@ -25,6 +25,7 @@ pub trait ServerCoreBackend: Send + Sync {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)>;
 
     async fn send_message_and_wait(
@@ -33,6 +34,7 @@ pub trait ServerCoreBackend: Send + Sync {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)>;
 
     async fn delete_session(&self, session_id: &str) -> Result<bool>;
@@ -58,9 +60,16 @@ impl ServerCoreBackend for ServerCoreManager {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)> {
         ServerCoreManager::send_connector_message_and_wait(
-            self, connector, channel_id, content, message_id, media,
+            self,
+            connector,
+            channel_id,
+            content,
+            message_id,
+            media,
+            annotations,
         )
         .await
     }
@@ -71,8 +80,17 @@ impl ServerCoreBackend for ServerCoreManager {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)> {
-        ServerCoreManager::send_message_and_wait(self, session_id, content, message_id, media).await
+        ServerCoreManager::send_message_and_wait(
+            self,
+            session_id,
+            content,
+            message_id,
+            media,
+            annotations,
+        )
+        .await
     }
 
     async fn delete_session(&self, session_id: &str) -> Result<bool> {

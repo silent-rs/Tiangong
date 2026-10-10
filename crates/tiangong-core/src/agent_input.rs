@@ -61,6 +61,7 @@ impl AgentInputKind {
             prepared: vec![tiangong_types::ContentBlock::text(content)],
             message_id: None,
             model_ref: None,
+            render: None,
         })
     }
 
@@ -70,6 +71,7 @@ impl AgentInputKind {
             prepared,
             message_id: None,
             model_ref: None,
+            render: None,
         })
     }
 
@@ -82,6 +84,7 @@ impl AgentInputKind {
             prepared,
             message_id: Some(message_id.into()),
             model_ref: None,
+            render: None,
         })
     }
 
@@ -95,6 +98,15 @@ impl AgentInputKind {
         }) = &mut self
         {
             *slot = model_ref.filter(|key| !key.trim().is_empty());
+        }
+        self
+    }
+
+    /// 为用户消息附加插件渲染声明（见 `MessageMeta::render`，仅界面使用）。
+    /// 非用户消息不受影响。
+    pub fn with_render(mut self, render: Option<tiangong_types::MessageRender>) -> Self {
+        if let AgentInputKind::Message(MessageInput::UserMessage { render: slot, .. }) = &mut self {
+            *slot = render;
         }
         self
     }
@@ -129,6 +141,8 @@ pub enum MessageInput {
         /// `None` = 跟随当前 Chat 默认。由 `CoreManager` 在投递前解析成实际
         /// 端点并按需切换——宿主只需把用户的选择附在消息上，不参与编排。
         model_ref: Option<String>,
+        /// 插件渲染声明（随消息保存到 `meta.render`，不进模型请求）。
+        render: Option<tiangong_types::MessageRender>,
     },
 }
 

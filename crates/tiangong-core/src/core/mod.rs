@@ -457,20 +457,14 @@ impl TiangongCore {
     ///
     /// on_session_ready 仅在本 Core 实例的首次 turn 执行（会话级一次性初始化），
     /// 与系统提示重建、落盘一起在任务启动闭包内同步完成后再进入 Agent Loop。
-    fn start_user_turn(
-        &self,
-        message_id: String,
-        content: Vec<tiangong_types::ContentBlock>,
-    ) -> Result<(), CoreError> {
+    fn start_user_turn(&self, message: tiangong_types::Message) -> Result<(), CoreError> {
         let mut ctx = self.build_turn_context()?;
         // 保存成功才确认（ALR-202）；失败向调用方返回明确错误，不虚报成功。
-        ctx.try_append_prepared_user_message(tiangong_types::Message::user_prepared(
-            message_id, content,
-        ))
-        .map_err(|error| {
-            tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
-            CoreError::WorkerStopped
-        })?;
+        ctx.try_append_prepared_user_message(message)
+            .map_err(|error| {
+                tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
+                CoreError::WorkerStopped
+            })?;
         let session_ready = self.session_ready.clone();
         let core = self.clone();
         crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
@@ -504,20 +498,16 @@ impl TiangongCore {
                 // 与确认，不再重复落盘）。关闭（Cancel）路径同样经此保存。
                 let mut pending_user_messages = Vec::new();
                 while let Ok(command) = cmd_rx.try_recv() {
-                    if let Command::InjectUserMessage {
-                        message_id,
-                        content,
-                    } = command
-                    {
-                        pending_user_messages.push((message_id, content));
+                    if let Command::InjectUserMessage { message } = command {
+                        pending_user_messages.push(*message);
                     }
                 }
-                if let Some((message_id, content)) = pending_user_messages.pop() {
+                if let Some(message) = pending_user_messages.pop() {
                     if !pending_user_messages.is_empty() {
                         core.save_pending_user_messages(&pending_user_messages);
                     }
                     crate::shared_runtime::release_agent(&core.session_id);
-                    if let Err(error) = core.start_user_turn(message_id, content) {
+                    if let Err(error) = core.start_user_turn(message) {
                         tracing::warn!(%error, session_id = %core.session_id, "接续排队消息起轮失败");
                     }
                 }
@@ -526,24 +516,28 @@ impl TiangongCore {
     }
 
     /// 把未被消费的用户消息保存进会话并落盘（不丢）。
-    fn save_pending_user_messages(&self, messages: &[(String, Vec<tiangong_types::ContentBlock>)]) {
+    fn save_pending_user_messages(&self, messages: &[tiangong_types::Message]) {
         let Ok(mut session) = self.load_session() else {
             tracing::warn!(session_id = %self.session_id, "排队消息落盘前加载会话失败");
             return;
         };
-        for (message_id, content) in messages {
-            if let Err(error) = tiangong_types::validate_ready_content_blocks(content) {
-                tracing::warn!(%error, message_id, "排队消息保存失败");
+        for pending in messages {
+            let valid =
+                tiangong_types::validate_ready_content_blocks(&pending.content).and_then(|()| {
+                    match &pending.meta.render {
+                        Some(render) => render.validate(),
+                        None => Ok(()),
+                    }
+                });
+            if let Err(error) = valid {
+                tracing::warn!(%error, message_id = %pending.id, "排队消息保存失败");
                 continue;
             }
             // 同 ID 的宿主镜像消息先移除；排队消息不起轮，不带轮次状态。
             session
                 .messages
-                .retain(|message| &message.id != message_id || message.role != MessageRole::User);
-            session.append_prepared_user_message(tiangong_types::Message::user_prepared(
-                message_id.clone(),
-                content.clone(),
-            ));
+                .retain(|message| message.id != pending.id || message.role != MessageRole::User);
+            session.append_prepared_user_message(pending.clone());
         }
         if let Err(error) = session.try_persist_to_disk() {
             tracing::warn!(%error, session_id = %self.session_id, "排队消息落盘失败");
@@ -641,16 +635,13 @@ impl TiangongCore {
                 }
                 if let Outcome::Interrupted(
                     crate::react::compression::CompressionInterrupt::Command(
-                        Command::InjectUserMessage {
-                            message_id,
-                            content,
-                        },
+                        Command::InjectUserMessage { message },
                     ),
                 ) = outcome
                 {
                     // 压缩已被引导消息终止且未应用任何结果；槽位已腾出，
                     // 直接起新轮。取消类终止无需接续。
-                    if let Err(error) = core.start_user_turn(message_id, content) {
+                    if let Err(error) = core.start_user_turn(*message) {
                         tracing::warn!(%error, session_id = %session_id, "压缩中断后起新轮失败");
                     }
                 }
@@ -722,14 +713,16 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 // 模型选择由 CoreManager 在投递前消费（解析并按需切换），
                 // Core 只负责执行；到这里已无需再看。
                 model_ref: _,
+                render,
             }) => {
                 let message_id = message_id.unwrap_or_else(scru128::new_string);
+                let message = tiangong_types::Message::user_prepared(message_id, prepared)
+                    .with_render(render);
                 if self.is_busy() {
                     return if crate::shared_runtime::send_command(
                         &self.session_id,
                         Command::InjectUserMessage {
-                            message_id,
-                            content: prepared,
+                            message: Box::new(message),
                         },
                     ) {
                         Ok(())
@@ -737,7 +730,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         Err(CoreError::WorkerStopped)
                     };
                 }
-                self.start_user_turn(message_id, prepared)
+                self.start_user_turn(message)
             }
             AgentInputKind::Tool(tool) => self.deliver_to_turn(
                 Command::InjectTool {

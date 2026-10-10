@@ -107,6 +107,8 @@ impl EmbeddedServerHandle {
         // 等待 server 线程退出
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+            // server 已不可回调：清除连接信息并重启依赖 server 的 sidecar。
+            tiangong_plugin_runtime::registry::clear_server_endpoint();
         }
     }
 }

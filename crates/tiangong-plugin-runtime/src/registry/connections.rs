@@ -333,6 +333,7 @@ fn sidecar_connection_inner(
     // 统一写域：宿主会话工作区 + 存储根（敏感清单双禁由传输层施加）。
     // 没有会话上下文的全局调用才使用应用默认工作区；带会话上下文时
     // 不采信插件 payload，也不允许默认工作区覆盖当前对话。
+    let session_workspace_is_default = session_workspace.is_none();
     if host_policy.sandbox {
         let workspace = session_workspace.or_else(|| {
             let configured = tiangong_config::registry::config().workspace_dir.clone();
@@ -374,6 +375,11 @@ fn sidecar_connection_inner(
         directory: installed.directory.clone(),
         workspace: config.sandbox_workspace.clone(),
     };
+    // 常驻插件的共享连接是唯一主进程：独占外部资源（IM 长连接等）只在
+    // 主进程建立；会话工作区连接与临时连接均为辅助进程。
+    config = config.with_primary_instance(
+        installed.manifest.should_preload_sidecar() && session_workspace_is_default,
+    );
     let mut connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;

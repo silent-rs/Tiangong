@@ -159,6 +159,7 @@ async fn on_receive(msg: Message, parts: Arc<RwLock<WebSocketParts>>) -> Result<
                 media: Vec::new(),
                 reply_to: None,
                 timestamp: now_text(),
+                annotations: Default::default(),
             };
 
             if let Err(e) = app.router.handle_incoming(incoming).await {

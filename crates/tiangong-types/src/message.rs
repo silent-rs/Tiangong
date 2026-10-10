@@ -218,17 +218,60 @@ impl Role {
     }
 }
 
+/// 插件渲染声明：界面据此把整条消息交给插件的 `session.message-item`
+/// 贡献（render=replace）渲染。
+///
+/// 只影响显示：模型请求与轮次记账不读取本字段；插件缺失、停用或未声明
+/// 该视图时，界面按角色默认渲染。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageRender {
+    /// 插件 ID。
+    pub plugin: String,
+    /// 插件的 `session.message-item` 贡献 ID。
+    pub view: String,
+    /// 插件自定义数据。
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub data: Value,
+}
+
+/// 渲染数据序列化上限（字节）：只承载渲染所需的小型结构。
+pub const MESSAGE_RENDER_MAX_BYTES: usize = 16 * 1024;
+
+impl MessageRender {
+    /// 校验：`plugin` / `view` 非空，整体序列化不超过 [`MESSAGE_RENDER_MAX_BYTES`]。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.plugin.trim().is_empty() {
+            return Err("render.plugin 不能为空".to_string());
+        }
+        if self.view.trim().is_empty() {
+            return Err("render.view 不能为空".to_string());
+        }
+        let size = serde_json::to_vec(self)
+            .map_err(|error| format!("render 序列化失败：{error}"))?
+            .len();
+        if size > MESSAGE_RENDER_MAX_BYTES {
+            return Err(format!(
+                "render 过大（{size} 字节，上限 {MESSAGE_RENDER_MAX_BYTES} 字节）"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// 与角色无关的消息结构化字段。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageMeta {
     /// 表示从当前消息及以前的历史已被压缩摘要覆盖。
     #[serde(default, skip_serializing_if = "is_false")]
     pub compact: bool,
+    /// 插件渲染声明（仅界面使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<MessageRender>,
 }
 
 impl MessageMeta {
     pub fn is_empty(&self) -> bool {
-        !self.compact
+        !self.compact && self.render.is_none()
     }
 }
 
@@ -794,6 +837,7 @@ impl MessageRaw {
             content,
             meta: MessageMeta {
                 compact: self.compact,
+                render: None,
             },
         };
         Ok((
@@ -988,6 +1032,12 @@ impl Message {
         if let Role::Assistant { tool_calls, .. } = &mut self.role {
             *tool_calls = calls;
         }
+        self
+    }
+
+    /// 写入插件渲染声明（链式调用）。
+    pub fn with_render(mut self, render: Option<MessageRender>) -> Self {
+        self.meta.render = render;
         self
     }
 

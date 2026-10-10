@@ -23,12 +23,9 @@ use super::interrupt::interrupt_active_work;
 /// 调用前须先 interrupt_active_work；成功后由调用方安装 `NeedModel`。
 pub(super) fn save_user_message_and_restart(
     ctx: &mut TurnContext,
-    message_id: String,
-    content: Vec<tiangong_types::ContentBlock>,
+    message: tiangong_types::Message,
 ) -> Result<(), String> {
-    ctx.try_append_prepared_user_message(tiangong_types::Message::user_prepared(
-        message_id, content,
-    ))?;
+    ctx.try_append_prepared_user_message(message)?;
     tracing::info!(
         session_id = %ctx.session.id,
         "运行中注入用户消息：中断当前执行并追加新消息"
@@ -88,14 +85,11 @@ pub(super) async fn handle_command(
     match deferred_command {
         // 交互闭合在声明式插件的工具 Future 内完成（注册表唤醒），
         // 命令通道不再承载闭合结果。
-        Deferred::Command(Command::InjectUserMessage {
-            message_id,
-            content,
-        }) => {
+        Deferred::Command(Command::InjectUserMessage { message }) => {
             // 引导消息：中断主循环直接拥有的活动（Summary 降级 ALR-104），
             // 校验并保存，成功才确认，然后从新意图重启（ALR-101/102）。
             interrupt_active_work(ctx, state, injections, stream_tx, context_limit, true).await;
-            match save_user_message_and_restart(ctx, message_id, content) {
+            match save_user_message_and_restart(ctx, *message) {
                 Ok(()) => CommandEffect::ToPhase(ExecutionPhase::NeedModel),
                 Err(error) => {
                     tracing::warn!(

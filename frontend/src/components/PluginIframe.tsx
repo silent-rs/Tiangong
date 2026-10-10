@@ -15,7 +15,7 @@ const pluginCallQueues = new Map<string, Promise<void>>();
  * 订阅消息（plugin_subscribe/plugin_unsubscribe）对应宿主事件通道，
  * 宿主 bridge_event 经 onBridgeEvent 回推本 iframe。天工不解析业务负载。
  */
-const BRIDGE_METHOD_NAMESPACES = ['plugin.', 'storage.', 'session.', 'tool.'];
+const BRIDGE_METHOD_NAMESPACES = ['plugin.', 'storage.', 'session.', 'tool.', 'sidecar.'];
 
 /** 旧协议裸方法名补 plugin. 前缀；SDK 的完整命名空间方法透传。 */
 export function normalizeBridgeMethod(method: string): string {

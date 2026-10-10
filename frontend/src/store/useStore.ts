@@ -372,8 +372,14 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
     },
     content: blocks,
     created_at: existing?.created_at || new Date().toISOString(),
-    ...(existing?.meta ? { meta: existing.meta } : {}),
+    ...withRender(existing?.meta, event.render),
   });
+}
+
+/** 合入事件携带的渲染声明；事件未携带时保留已有 meta。 */
+function withRender(meta: Message['meta'], render: StreamEvent['render']): { meta?: Message['meta'] } {
+  if (render) return { meta: { ...(meta ?? {}), render } };
+  return meta ? { meta } : {};
 }
 
 /** 最近一个带轮次状态的用户消息（起轮消息）的状态。 */

@@ -749,6 +749,10 @@ impl StdioSidecarConnection {
             // stdio 模式无 endpoint 文件；保留路径占位以兼容读取方。
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
+            .env(
+                crate::sidecar::INSTANCE_ROLE_ENV,
+                self.config.instance_role(),
+            )
             .env(PROCESS_GROUP_ENV, "1");
         // 注入本机 server 连接信息（scheduler/subagent 等需回调 host 的 sidecar 使用；
         // 与 TCP 版 spawn 保持一致，endpoint 变化时由重启机制换代）。

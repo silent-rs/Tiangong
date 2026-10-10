@@ -779,6 +779,7 @@ async fn send_message_inner(
             user_message_id.clone(),
             prepared.clone(),
             turn_model_ref.as_deref(),
+            None,
         )
         .await
     {
@@ -1184,6 +1185,8 @@ pub async fn edit_and_resend(
             prepared.clone(),
             // 编辑重发沿用会话已记录的模型选择，不改变模型。
             session_model_ref.as_deref(),
+            // 编辑后的正文由用户重新给出，原插件渲染声明不再适用。
+            None,
         )
         .await
     {
@@ -1235,6 +1238,10 @@ fn validate_editable_message(
             return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
         }
         _ => {}
+    }
+    if message.meta.render.is_some() {
+        // 插件渲染的外部消息（如 Bot 入站）附带只给模型的指令，编辑重发会丢失。
+        return Err(anyhow::anyhow!("该消息由插件渲染，无法编辑"));
     }
     if message.content != base_content {
         return Err(anyhow::anyhow!("消息已被更新，请基于最新内容重新编辑"));
@@ -4175,8 +4182,32 @@ mod tests {
 
     use super::{
         cancel_after_session_send_boundary, done_event_keeps_turn_running, normalize_path_list,
-        save_started_bot_state, stop_bot_with_state,
+        save_started_bot_state, stop_bot_with_state, validate_editable_message,
     };
+
+    #[test]
+    fn plugin_rendered_user_message_is_not_editable() {
+        let mut session = tiangong_core::session::Session::new("render-edit");
+        let content = vec![tiangong_types::ContentBlock::text("hi")];
+        session
+            .messages
+            .push(tiangong_types::Message::user_prepared(
+                "plain",
+                content.clone(),
+            ));
+        session.messages.push(
+            tiangong_types::Message::user_prepared("rendered", content.clone()).with_render(Some(
+                tiangong_types::MessageRender {
+                    plugin: "bot".into(),
+                    view: "im-message".into(),
+                    data: serde_json::Value::Null,
+                },
+            )),
+        );
+        assert!(validate_editable_message(&session, "plain", &content).is_ok());
+        let error = validate_editable_message(&session, "rendered", &content).unwrap_err();
+        assert!(error.to_string().contains("插件渲染"));
+    }
 
     #[test]
     fn sandbox_directory_allowlist_requires_existing_directories() {

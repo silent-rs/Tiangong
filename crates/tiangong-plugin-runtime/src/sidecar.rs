@@ -68,6 +68,15 @@ pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 /// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
 pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
 
+/// sidecar 实例角色：`primary` 为注册表持有的共享连接进程（常驻服务
+/// 只应在该进程内建立 IM 长连接等独占外部资源）；`auxiliary` 为安装
+/// 验证、按需直连等临时进程，只应完成握手与无副作用的请求。
+pub const INSTANCE_ROLE_ENV: &str = "TIANGONG_PLUGIN_INSTANCE_ROLE";
+/// 共享连接进程的角色值。
+pub const INSTANCE_ROLE_PRIMARY: &str = "primary";
+/// 临时进程的角色值。
+pub const INSTANCE_ROLE_AUXILIARY: &str = "auxiliary";
+
 /// 插件内容清单固定文件名（devkit 构建生成，本地信任与官方签名共用的信任锚）。
 pub const CONTENT_MANIFEST_FILE: &str = "content-manifest.json";
 
@@ -320,6 +329,8 @@ pub struct SidecarConfig {
     pub interpreter: Option<InterpreterLaunch>,
     /// 进程生命周期：按需（默认，每次调用独立进程即起即清）或常驻复用。
     pub lifecycle: crate::manifest::SidecarLifecycle,
+    /// 是否为注册表共享连接的主进程（见 [`INSTANCE_ROLE_ENV`]）。
+    pub primary_instance: bool,
     /// 内容哈希清单（本地信任解释器 sidecar 的 spawn 前复核锚）。
     pub integrity_manifest: Option<PathBuf>,
     // OS 沙箱字段为沙箱覆盖分支预留的配置面（本分支仅传输层，无消费方）。
@@ -382,6 +393,7 @@ impl SidecarConfig {
             server_token: None,
             interpreter: None,
             lifecycle: crate::manifest::SidecarLifecycle::OnDemand,
+            primary_instance: false,
             integrity_manifest: None,
             sandbox: false,
             sandbox_follows_user_switch: false,
@@ -430,6 +442,21 @@ impl SidecarConfig {
     pub fn with_lifecycle(mut self, lifecycle: crate::manifest::SidecarLifecycle) -> Self {
         self.lifecycle = lifecycle;
         self
+    }
+
+    /// 标记为注册表共享连接的主进程。
+    pub fn with_primary_instance(mut self, primary: bool) -> Self {
+        self.primary_instance = primary;
+        self
+    }
+
+    /// spawn 时注入的实例角色值。
+    pub(crate) fn instance_role(&self) -> &'static str {
+        if self.primary_instance {
+            INSTANCE_ROLE_PRIMARY
+        } else {
+            INSTANCE_ROLE_AUXILIARY
+        }
     }
 
     /// 设置内容哈希清单路径；spawn 前复核清单内全部文件防篡改。
@@ -998,7 +1025,8 @@ impl ProcessSidecarConnection {
             .env(PLUGIN_ID_ENV, &self.config.plugin_id)
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
-            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
+            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
+            .env(INSTANCE_ROLE_ENV, self.config.instance_role());
         // 免沙箱 sidecar（宿主策略直启以继承 TCC 等授权，本就持有完整
         // 文件系统访问）无条件注入存储根：这只是路径指针而非提权；缺省
         // 时其媒体产物（如 computer-use 截图）只能退回系统临时目录，

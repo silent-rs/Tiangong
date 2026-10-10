@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 /// Server 侧远程入口事件总线
 #[derive(Debug, Clone)]
 pub enum TiangongEvent {
-    MessageReceived(IncomingMessage),
+    MessageReceived(Box<IncomingMessage>),
     MessageSent {
         session_id: String,
         message: OutgoingMessage,

@@ -12,7 +12,8 @@ use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_media_archive::{AttachmentStore, AttachmentTransaction, RawAttachment};
 use tiangong_types::{
-    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, StreamEvent,
+    ContentBlock, MediaAsset, MediaKind, MessageAnnotations, MessageContent, MessageRender,
+    OutgoingMessage, StreamEvent,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -125,11 +126,12 @@ impl ServerCoreManager {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)> {
         let session_id = self
             .resolve_connector_session_id(connector, channel_id)
             .await?;
-        self.send_message_and_wait(&session_id, content, message_id, media)
+        self.send_message_and_wait(&session_id, content, message_id, media, annotations)
             .await
     }
 
@@ -143,7 +145,13 @@ impl ServerCoreManager {
         media: Vec<MediaAsset>,
     ) -> Result<()> {
         let _ = self
-            .send_message_and_wait(requested_session_id, content, message_id, media)
+            .send_message_and_wait(
+                requested_session_id,
+                content,
+                message_id,
+                media,
+                MessageAnnotations::default(),
+            )
             .await?;
         Ok(())
     }
@@ -154,7 +162,9 @@ impl ServerCoreManager {
         content: String,
         message_id: Option<String>,
         media: Vec<MediaAsset>,
+        annotations: MessageAnnotations,
     ) -> Result<(String, OutgoingMessage)> {
+        let annotations = annotations.normalized().map_err(|error| anyhow!(error))?;
         let requested_session_id = normalize_session_id(requested_session_id)?;
         // 一个 Core 执行可吸收运行中追加消息但只产生一个终态；等待型入口按会话
         // 串行到终态，确保每个调用拿到与自身消息对应的回复。DELETE 使用独立锁，
@@ -173,15 +183,18 @@ impl ServerCoreManager {
 
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
         // 附件准备成功后才登记 waiter，准备失败不会污染 tracker。
-        let (transaction, prepared) = self
+        let (transaction, mut prepared) = self
             .prepare_user_message(msg_id.clone(), content, media)
             .await?;
+        annotations.append_instruction(&mut prepared);
         let tracker = self.tracker_for(&session_id);
         let turn_id = tracker.start_turn(msg_id.clone());
         // fire-and-forget：enqueue 成功即提交附件。worker 在消息持久化失败时会发出
         // Error 终态，由下方 wait_for_turn 捕获并转为失败返回。
         let created_paths = commit_enqueued_attachment_transaction(transaction);
-        if let Err(error) = self.enqueue_prepared(&session_id, &msg_id, prepared) {
+        if let Err(error) =
+            self.enqueue_prepared(&session_id, &msg_id, prepared, annotations.render)
+        {
             cleanup_created_attachment_paths(&created_paths).ok();
             tracker.cancel_turn(turn_id);
             return Err(error);
@@ -275,11 +288,13 @@ impl ServerCoreManager {
         session_id: &str,
         message_id: &str,
         prepared: Vec<ContentBlock>,
+        render: Option<MessageRender>,
     ) -> Result<()> {
         self.core_manager
             .deliver_to_core_if_live(
                 session_id,
-                AgentInputKind::prepared_with_id(message_id.to_string(), prepared),
+                AgentInputKind::prepared_with_id(message_id.to_string(), prepared)
+                    .with_render(render),
             )
             .then_some(())
             .ok_or_else(|| anyhow!("消息投递失败：会话 Core 不存在或已关闭"))
@@ -1291,6 +1306,7 @@ mod tests {
             content: "second".to_string(),
             content_blocks: Vec::new(),
             media: Vec::new(),
+            render: None,
         });
         tracker.observe_event(&StreamEvent::Done { usage: None });
         assert!(matches!(
@@ -1312,6 +1328,7 @@ mod tests {
             content: "active".to_string(),
             content_blocks: Vec::new(),
             media: Vec::new(),
+            render: None,
         });
 
         tracker.fail_all("Core 事件流已关闭");

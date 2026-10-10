@@ -265,7 +265,7 @@ export interface AttachmentDataUrl {
 }
 
 export * from './message';
-import type { Message } from './message';
+import type { Message, MessageRender } from './message';
 
 /** Core 经 Desktop 按会话转发的单个流事件。 */
 export interface StreamEvent {
@@ -308,6 +308,8 @@ export interface StreamEvent {
   title?: string;
   /** model_switch_started / model_switched 携带的模型名（用于展示）。 */
   model_name?: string;
+  /** user_message 携带的插件渲染声明（写入消息 meta.render）。 */
+  render?: MessageRender | null;
 }
 
 export interface SessionStreamEvent {
@@ -562,6 +564,8 @@ export interface SlotContributionEntry {
   sandbox: SandboxKind;
   /** 贡献来源：wasm（v1 运行时声明）或 manifest（v2 清单声明）。 */
   source: 'wasm' | 'manifest';
+  /** session.message-item 的渲染方式：缺省附加区；replace 按消息渲染声明替换默认显示。 */
+  render?: 'append' | 'replace';
 }
 
 export interface SessionInputAttachmentPayload {

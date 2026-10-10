@@ -87,6 +87,34 @@ export interface HostContext {
     instance_id: string;
     visible: boolean;
   };
+  /** 消息级 Slot（session.message-item / session.message-action）当前绑定的消息。 */
+  message?: HostMessageContext;
+}
+
+/** 消息级 Slot 的消息上下文。 */
+export interface HostMessageContext {
+  id: string;
+  role: string;
+  /** 面向用户的可见文本（不含只给模型的指令块）。 */
+  text: string;
+  /** 消息引用的媒体附件（本地路径）。 */
+  attachments: Array<{ kind: string; path: string; mime_type?: string; name?: string }>;
+  /**
+   * 渲染声明：仅当消息 `meta.render` 指向本插件的 `render: "replace"` 贡献时
+   * 出现，`data` 为声明方写入的自定义数据（序列化后不超过 16KB）。
+   */
+  render?: { view: string; data?: unknown };
+}
+
+/**
+ * 消息渲染声明：随外部消息（`POST /api/v1/messages` 的 `render` 字段）写入
+ * 消息 `meta.render`，宿主据此把消息交给 `plugin` 的 `session.message-item`
+ * 贡献 `view`（须声明 `render: "replace"`）渲染。只影响显示，不进模型请求。
+ */
+export interface MessageRender {
+  plugin: string;
+  view: string;
+  data?: unknown;
 }
 
 // ── 运行时 ──

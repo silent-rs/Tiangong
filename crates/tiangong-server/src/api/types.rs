@@ -42,6 +42,12 @@ pub struct ConnectorMessageRequest {
     pub media: Vec<MediaAsset>,
     #[serde(default)]
     pub reply_to: Option<String>,
+    /// 只给模型看的附加指令（保存为模型指令块，界面不显示），如 Bot 回复通道说明。
+    #[serde(default)]
+    pub instruction: Option<String>,
+    /// 插件渲染声明（仅界面使用，不进模型请求）：由 `plugin` 的 `view` 贡献接管该消息的显示。
+    #[serde(default)]
+    pub render: Option<tiangong_types::MessageRender>,
 }
 
 /// 外部 Bot / Connector 消息入口响应体

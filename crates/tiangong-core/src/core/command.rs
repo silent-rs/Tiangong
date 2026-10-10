@@ -18,10 +18,9 @@ pub enum Command {
         tool_name: String,
         payload: serde_json::Value,
     },
-    /// 运行中注入用户消息。
+    /// 运行中注入用户消息（宿主准备完成的完整用户消息）。
     InjectUserMessage {
-        message_id: String,
-        content: Vec<tiangong_types::ContentBlock>,
+        message: Box<tiangong_types::Message>,
     },
     /// 插件投递的流事件。
     EmitStreamEvent(Box<tiangong_types::StreamEvent>),

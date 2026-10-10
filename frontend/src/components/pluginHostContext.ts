@@ -47,6 +47,8 @@ export interface HostMessageContext {
   text: string;
   /** 消息引用的媒体附件（本地路径）。 */
   attachments: Array<{ kind: string; path: string; mime_type?: string; name?: string }>;
+  /** 插件接管显示时的渲染声明（视图 ID 与插件自定义数据）。 */
+  render?: { view: string; data?: unknown };
 }
 
 /**

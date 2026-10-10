@@ -25,12 +25,14 @@ pub use mention::{
     MentionCandidate, MentionContext, MentionGroup, MentionQuery, MentionRequest, MentionTarget,
 };
 pub use message::{
-    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessageMeta, MessageRole,
-    MessageToolCall, Role, TurnStatus, UserSource, deserialize_messages, now_text,
-    serialize_messages_flat,
+    ContentBlock, DeferredToolInjection, MESSAGE_RENDER_MAX_BYTES, MediaAsset, MediaKind, Message,
+    MessageMeta, MessageRender, MessageRole, MessageToolCall, Role, TurnStatus, UserSource,
+    deserialize_messages, now_text, serialize_messages_flat,
 };
 pub use plugin_session::PluginSession;
-pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
+pub use remote::{
+    IncomingMessage, MessageAnnotations, MessageContent, OutgoingMessage, RemoteRole,
+};
 pub use session::Session;
 pub use status::RunStatus;
 pub use stream::{MemoryRecallHitSummary, SessionEvent, StreamEvent, StreamToolCall};

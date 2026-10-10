@@ -18,8 +18,9 @@ use tiangong_plugin_runtime::registry::{self, RuntimeKind};
 use crate::view::{ModelCapabilityInfo, ModelsConfigView, ServerConfigView};
 
 /// 插件配置页可用的桥接命名空间（与桌面 PluginIframe 一致；配置页没有会话，
-/// 不提供 sidecar/终端等依赖会话的宿主能力）。
-const PAGE_BRIDGE_NAMESPACES: &[&str] = &["plugin.", "storage.", "session.", "tool."];
+/// 不提供终端等依赖会话的宿主能力）。`sidecar.` 仍需插件声明
+/// `sidecar.invoke` 权限（bridge 层校验），只到达本插件自己的 sidecar。
+const PAGE_BRIDGE_NAMESPACES: &[&str] = &["plugin.", "storage.", "session.", "tool.", "sidecar."];
 
 /// 命令错误：HTTP 状态码 + 文本（前端按 Tauri 语义当作字符串错误抛出）。
 #[derive(Debug)]

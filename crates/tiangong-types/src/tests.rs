@@ -367,6 +367,7 @@ fn user_message_event_preserves_content_blocks_without_serializing_image_data() 
             data: Some("SECRET_BASE64".into()),
         }],
         media: Vec::new(),
+        render: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("content_blocks"));
@@ -475,6 +476,11 @@ fn new_format_roundtrip_keeps_role_fields_and_meta() {
         *reasoning_signature = Some("sig".into());
         *text_elapsed_ms = Some(12);
     }
+    let assistant = assistant.with_render(Some(MessageRender {
+        plugin: "bot".into(),
+        view: "card".into(),
+        data: serde_json::json!({"channel": "微信私聊"}),
+    }));
     let tool = Message::tool_result("call-1", "fs__read_file", "内容", true).with_duration_ms(5);
     let mut user = Message::user_prepared("u1", vec![ContentBlock::text("你好")]);
     user.set_turn_result(100, TurnStatus::Success);
@@ -628,6 +634,36 @@ fn plugin_session_messages_use_flat_format_and_accept_both() {
 }
 
 #[test]
+fn message_render_validation() {
+    let render = |plugin: &str, view: &str, data: serde_json::Value| MessageRender {
+        plugin: plugin.into(),
+        view: view.into(),
+        data,
+    };
+    assert!(
+        render("bot", "card", serde_json::Value::Null)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        render(" ", "card", serde_json::Value::Null)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        render("bot", "", serde_json::Value::Null)
+            .validate()
+            .is_err()
+    );
+    let big = "x".repeat(MESSAGE_RENDER_MAX_BYTES);
+    assert!(
+        render("bot", "card", serde_json::json!(big))
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
 fn session_serde_roundtrip() {
     let mut session = Session::new("测试会话");
     session.append_message(MessageRole::User, "你好");
@@ -724,4 +760,50 @@ fn tool_result_injection_serde_locks_protocol_shape() {
             .unwrap()
             .contains("injected_assets")
     );
+}
+#[test]
+fn message_annotations_normalize_and_append_instruction() {
+    let annotations = MessageAnnotations {
+        instruction: Some("  经 Bot 回复  ".into()),
+        render: Some(MessageRender {
+            plugin: "bot".into(),
+            view: "im-message".into(),
+            data: serde_json::json!({ "platform": "weixin" }),
+        }),
+    }
+    .normalized()
+    .unwrap();
+    assert_eq!(annotations.instruction.as_deref(), Some("经 Bot 回复"));
+    let mut content = vec![ContentBlock::text("你好")];
+    annotations.append_instruction(&mut content);
+    assert!(matches!(
+        content.last(),
+        Some(ContentBlock::ModelInstruction { text }) if text == "经 Bot 回复"
+    ));
+
+    let blank = MessageAnnotations {
+        instruction: Some("   ".into()),
+        render: None,
+    }
+    .normalized()
+    .unwrap();
+    assert!(blank.is_empty());
+
+    let invalid = MessageAnnotations {
+        instruction: None,
+        render: Some(MessageRender {
+            plugin: " ".into(),
+            view: "v".into(),
+            data: serde_json::Value::Null,
+        }),
+    };
+    assert!(invalid.normalized().is_err());
+
+    // 旧版 IncomingMessage JSON 不带 annotations 仍可解析。
+    let legacy: IncomingMessage = serde_json::from_value(serde_json::json!({
+        "id": "m", "connector": "c", "channel_id": "ch", "sender_id": "s",
+        "content": { "Text": "hi" }, "reply_to": null, "timestamp": "now"
+    }))
+    .unwrap();
+    assert!(legacy.annotations.is_empty());
 }
