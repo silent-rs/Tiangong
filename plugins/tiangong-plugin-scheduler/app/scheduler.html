@@ -1,4 +1,918 @@
-// 定时任务设置页脚本。
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>定时任务</title>
+  <style>/* 定时任务设置页样式。
+ *
+ * 与 memory.css / index.css 同一套宿主 token 体系（--host-*），视觉对齐主程序
+ * 原版 React 页面（JobPanel / JobFormDialog / RunHistoryDialog）：
+ * - 列表行：border + card 背景 + hover accent，左侧 Switch，右侧 ghost 按钮
+ * - 表单：Label + Input / Select / Textarea，Tabs 切换简单与 Cron 模式
+ * - 预览：有效/无效徽章 + 下次触发 + 接下来
+ * - 模态框：居中浮层 + 圆角卡片 + 阴影
+ */
+
+:root {
+  color-scheme: light;
+  --bg: hsl(var(--host-background, 210 20% 98%));
+  --surface: hsl(var(--host-card, 0 0% 100%));
+  --surface-subtle: hsl(var(--host-muted, 210 20% 96%));
+  --text: hsl(var(--host-foreground, 222 47% 11%));
+  --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
+  --border: hsl(var(--host-border, 214 18% 88%));
+  --border-strong: color-mix(in srgb, var(--text) 28%, var(--border));
+  --primary: hsl(var(--host-primary, 222 47% 11%));
+  --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+  --primary-hover: color-mix(in srgb, var(--primary) 88%, var(--text));
+  --accent: hsl(var(--host-accent, 210 20% 96%));
+  --accent-foreground: hsl(var(--host-accent-foreground, 222 47% 11%));
+  --danger: hsl(var(--host-destructive, 0 84% 60%));
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  --success: hsl(var(--host-status-success, 142 71% 45%));
+  --info: hsl(var(--host-status-info, 217 91% 60%));
+  --shadow: 0 10px 28px color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: 14px;
+  line-height: 1.45;
+  letter-spacing: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ── 页面骨架 ── */
+
+.page {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.loading-state {
+  color: var(--muted);
+}
+
+.job-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.job-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.job-count {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.job-toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.page-status.error {
+  color: var(--danger);
+}
+
+/* ── 空态 ── */
+
+.empty-state {
+  padding: 48px 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.empty-title {
+  margin: 0;
+  font-size: 18px;
+}
+
+.empty-sub {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+/* ── 任务列表 ── */
+
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  transition: background 0.15s;
+}
+
+.job-row:hover {
+  background: color-mix(in srgb, var(--accent) 50%, var(--surface));
+}
+
+.job-row-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.job-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.job-row-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row-desc {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Switch 开关 ── */
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex: 0 0 44px;
+  cursor: pointer;
+}
+
+.switch input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border: 2px solid transparent;
+  border-radius: 24px;
+  background: hsl(var(--host-input, 214 18% 88%));
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 24%, transparent);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.switch input:checked + .switch-track {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.switch input:checked + .switch-track .switch-thumb {
+  background: var(--primary-foreground);
+  transform: translateX(20px);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid color-mix(in srgb, var(--primary) 28%, transparent);
+  outline-offset: 1px;
+}
+
+/* ── 徽章 ── */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.badge-outline {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--host-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.badge-success {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.badge-failed {
+  background: var(--danger);
+  color: var(--primary-foreground);
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+.badge-running {
+  background: var(--surface-subtle);
+  color: var(--text);
+  border: 1px solid transparent;
+}
+
+.badge-neutral {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* ── 按钮 ── */
+
+.btn {
+  display: inline-flex;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  white-space: nowrap;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.btn-primary {
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 90%, transparent);
+}
+
+.btn-outline {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.btn-outline:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.btn-ghost {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.btn-sm {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.btn-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.spinable.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+.btn .danger,
+.btn.danger {
+  color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+/* ── 表单字段 ── */
+
+.field {
+  display: block;
+}
+
+.field-label {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.field-label.text-xs {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input[type="text"],
+input[type="number"],
+select,
+textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  background: var(--bg);
+}
+
+select {
+  padding: 8px 34px 8px 12px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23667085' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+  cursor: pointer;
+}
+
+textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  border-color: hsl(var(--host-ring, 222 47% 11%));
+  outline: 2px solid hsl(var(--host-ring, 222 47% 11%));
+  outline-offset: 2px;
+}
+
+.mono {
+  font-family: var(--host-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+/* ── Tabs（简单 / Cron）── */
+
+.tabs {
+  display: inline-flex;
+  height: 40px;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+
+.tab {
+  height: 32px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.tab.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.12);
+}
+
+.tab-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.simple-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.synthesized {
+  margin: 8px 0 0;
+  font-family: var(--host-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.synthesized code {
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  padding: 1px 4px;
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.hint code {
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  padding: 1px 4px;
+}
+
+/* ── 调度预览（对齐原版 SchedulePreview）── */
+
+.preview-box {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-subtle) 30%, var(--bg));
+}
+
+.preview-box.error {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+}
+
+.preview-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-row + .preview-row {
+  margin-top: 2px;
+}
+
+.preview-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ── 模态框 ── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.modal {
+  position: relative;
+  display: flex;
+  max-height: 90vh;
+  width: 100%;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+
+.modal-form {
+  max-width: 512px;
+}
+
+.modal-wide {
+  max-width: 672px;
+  max-height: 70vh;
+}
+
+.modal-header {
+  margin-bottom: 16px;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.modal-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.modal-close:hover {
+  color: var(--text);
+  opacity: 1;
+}
+
+.modal-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.modal-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.form-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+/* ── 执行历史 ── */
+
+.runs-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.runs-state {
+  padding: 32px 0;
+  margin: 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.runs-table {
+  width: 100%;
+  min-width: 600px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.runs-table th {
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 500;
+  text-align: left;
+}
+
+.runs-table td {
+  max-width: 300px;
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runs-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 720px) {
+  .job-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .job-row-actions {
+    width: calc(100% - 56px);
+    margin-left: 56px;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 520px) {
+  .page {
+    padding: 16px;
+  }
+
+  .job-toolbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .job-row-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-left: 0;
+  }
+
+  .simple-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    align-items: flex-start;
+    padding: 12px;
+  }
+
+  .modal {
+    max-height: calc(100vh - 24px);
+    padding: 20px;
+  }
+
+  .modal-wide {
+    max-height: calc(100vh - 24px);
+  }
+}
+</style>
+</head>
+<body>
+  <main class="page">
+    <div id="loading-state" class="loading-state">加载中...</div>
+
+    <section id="job-content" class="job-content" hidden>
+      <!-- 顶部：计数 + 操作按钮（对齐原版 JobPanel） -->
+      <div class="job-toolbar">
+        <p class="job-count">共 <span id="job-count-num">0</span> 个定时任务</p>
+        <div class="job-toolbar-actions">
+          <button id="refresh-btn" class="btn btn-outline btn-sm" type="button">
+            <svg id="refresh-icon" class="btn-icon spinable" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M8 16H3v5" />
+            </svg>
+            刷新
+          </button>
+          <button id="create-btn" class="btn btn-primary btn-sm" type="button">创建任务</button>
+        </div>
+      </div>
+
+      <p id="status" class="page-status" role="status" hidden></p>
+
+      <!-- 空态 -->
+      <div id="empty-state" class="empty-state" hidden>
+        <p class="empty-title">暂无定时任务</p>
+        <p class="empty-sub">点击「创建任务」添加一个新的 Cron 定时任务</p>
+      </div>
+
+      <!-- 任务列表 -->
+      <div id="list" class="job-list" hidden></div>
+    </section>
+
+    <template id="row-template">
+      <div class="job-row">
+        <label class="switch">
+          <input type="checkbox" class="toggle-checkbox" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+        <div class="job-row-info">
+          <div class="job-row-top">
+            <span class="job-row-name"></span>
+            <span class="badge badge-outline job-row-schedule"></span>
+          </div>
+          <p class="job-row-desc"></p>
+        </div>
+        <div class="job-row-actions">
+          <button class="btn btn-ghost btn-sm trigger-btn" type="button">触发</button>
+          <button class="btn btn-ghost btn-sm runs-btn" type="button">历史</button>
+          <button class="btn btn-ghost btn-sm edit-btn" type="button">编辑</button>
+          <button class="btn btn-ghost btn-sm danger delete-btn" type="button">删除</button>
+        </div>
+      </div>
+    </template>
+
+    <!-- 创建/编辑模态框（对齐原版 JobFormDialog） -->
+    <div id="form-modal" class="modal-overlay" hidden>
+      <div class="modal modal-form" role="dialog" aria-modal="true" aria-labelledby="form-title">
+        <button class="modal-close" type="button" id="form-close" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+        <div class="modal-header">
+          <h3 id="form-title">创建定时任务</h3>
+        </div>
+        <form id="job-form" class="modal-body" novalidate>
+          <input type="hidden" id="field-id" />
+
+          <div class="field">
+            <label class="field-label" for="field-name">名称</label>
+            <input type="text" id="field-name" maxlength="100" placeholder="每日站会提醒" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="field-description">描述</label>
+            <input type="text" id="field-description" maxlength="200" placeholder="任务描述" />
+          </div>
+
+          <!-- 定时设置：简单 / Cron 双模式 -->
+          <div class="field">
+            <span class="field-label">定时设置</span>
+            <div class="tabs">
+              <button type="button" class="tab tab-simple active" data-mode="simple">简单</button>
+              <button type="button" class="tab tab-cron" data-mode="cron">Cron 表达式</button>
+            </div>
+
+            <!-- 简单模式 -->
+            <div class="tab-panel" id="panel-simple">
+              <div class="simple-grid">
+                <div class="field">
+                  <label class="field-label text-xs" for="simple-minute">分钟</label>
+                  <input type="number" id="simple-minute" min="0" max="59" value="0" />
+                </div>
+                <div class="field">
+                  <label class="field-label text-xs" for="simple-hour">小时</label>
+                  <input type="number" id="simple-hour" min="0" max="23" value="9" />
+                </div>
+                <div class="field">
+                  <label class="field-label text-xs" for="simple-weekday">星期</label>
+                  <select id="simple-weekday"></select>
+                </div>
+              </div>
+              <p class="synthesized">合成表达式：<code id="simple-preview"></code></p>
+            </div>
+
+            <!-- Cron 表达式模式 -->
+            <div class="tab-panel" id="panel-cron" hidden>
+              <input type="text" id="field-cron" class="mono" placeholder="0 0 9 * * *" />
+              <p class="hint">格式：秒 分 时 日 月 周（6 字段）。例如每天 9 点：<code>0 0 9 * * *</code></p>
+            </div>
+
+            <!-- 校验状态 + 预览（两模式共用，对齐原版 SchedulePreview） -->
+            <div id="schedule-preview"></div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="field-session">关联会话（可选）</label>
+            <select id="field-session">
+              <option value="">不关联，自动创建新会话</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="field-payload">任务内容</label>
+            <textarea id="field-payload" rows="4" placeholder="触发时发送给 AI 的任务描述"></textarea>
+          </div>
+
+          <p id="form-error" class="form-error" role="alert" hidden></p>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline" id="form-cancel">取消</button>
+            <button type="button" class="btn btn-primary" id="form-submit" disabled>创建</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 执行历史模态框（对齐原版 RunHistoryDialog） -->
+    <div id="runs-modal" class="modal-overlay" hidden>
+      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="runs-title">
+        <button class="modal-close" type="button" id="runs-close" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+        <div class="modal-header">
+          <h3 id="runs-title">任务执行历史</h3>
+        </div>
+        <div class="runs-body">
+          <p id="runs-loading" class="runs-state">加载中...</p>
+          <table class="runs-table" id="runs-table" hidden>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>开始时间</th>
+                <th>结束时间</th>
+                <th>结果摘要</th>
+              </tr>
+            </thead>
+            <tbody id="runs-tbody"></tbody>
+          </table>
+          <div id="runs-empty" class="runs-state" hidden>暂无执行记录</div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script>// 定时任务设置页脚本。
 //
 // 与 index.js / memory.js 同构的 host context + callHost 桥接框架。
 // UI 对齐主程序原版 React 页面（JobPanel / JobFormDialog / RunHistoryDialog）。
@@ -694,3 +1608,6 @@ async function showRuns(jobId) {
 
 // 挂载即加载列表。
 loadJobs();
+</script>
+</body>
+</html>

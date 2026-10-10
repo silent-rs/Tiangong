@@ -382,42 +382,20 @@ fn job_summary(job: &Job) -> Value {
 
 // ── UI 能力（plugin-ui 接口）──
 
-/// 设置页模板（单文件内联，与 memory/index 设置页同构）。
-const SCHEDULER_PAGE_TEMPLATE: &str = include_str!("scheduler.html");
-const SCHEDULER_PAGE_CSS: &str = include_str!("scheduler.css");
-const SCHEDULER_PAGE_JS: &str = include_str!("scheduler.js");
-
-fn scheduler_settings_html() -> String {
-    SCHEDULER_PAGE_TEMPLATE
-        .replace("/*__SCHEDULER_CSS__*/", SCHEDULER_PAGE_CSS)
-        .replace("/*__SCHEDULER_JS__*/", SCHEDULER_PAGE_JS)
-}
-
 impl UiGuest for Component {
+    /// 设置页（app/scheduler.html）与定时任务消息卡片（app/scheduled-task.html）
+    /// 由 plugin.json 的 `ui.contributions` 声明：schema v2 插件的 WASM 贡献
+    /// 不会映射到设置页 Slot。
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
-        Ok(vec![Contribution {
-            id: "scheduler-settings".to_string(),
-            title: "定时任务".to_string(),
-            description: "创建和管理定时任务".to_string(),
-            icon: "clock".to_string(),
-            group: "plugins".to_string(),
-            has_view: true,
-        }])
+        Ok(Vec::new())
     }
 
-    fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
-        if contribution_id != "scheduler-settings" {
-            return Err(plugin_err(format!(
-                "未知的 contribution: {contribution_id}"
-            )));
-        }
-        Ok(ViewResponse {
-            html: scheduler_settings_html(),
-        })
+    fn open_view(_contribution_id: String) -> Result<ViewResponse, PluginError> {
+        Err(plugin_err("Scheduler 页面由 plugin.json 声明"))
     }
 
     fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {
-        Err(plugin_err("Scheduler 设置页无外部资源"))
+        Err(plugin_err("Scheduler 页面无外部资源"))
     }
 
     fn handle_view_message(

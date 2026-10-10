@@ -1,7 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "scheduler",
-  "version": "0.2.4",
+  "version": "0.2.5",
+  "require_server": true,
   "wasm": {
     "binary": "tiangong_plugin_scheduler_wasm.wasm"
   },
@@ -12,5 +13,39 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["app-storage.read", "sidecar.invoke"]
+  "permissions": [
+    "app-storage.read",
+    "sidecar.invoke",
+    "bridge.call"
+  ],
+  "capabilities": {
+    "tools": true
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "scheduler-settings",
+        "title": "定时任务",
+        "description": "创建和管理定时任务",
+        "icon": "clock",
+        "entry": "app/scheduler.html",
+        "sandbox": "iframe"
+      },
+      {
+        "slot": "session.message-item",
+        "id": "scheduled-task",
+        "title": "定时任务消息",
+        "description": "定时任务触发消息卡片",
+        "icon": "clock",
+        "entry": "app/scheduled-task.html",
+        "context": [
+          "session",
+          "message"
+        ],
+        "render": "replace"
+      }
+    ]
+  }
 }
