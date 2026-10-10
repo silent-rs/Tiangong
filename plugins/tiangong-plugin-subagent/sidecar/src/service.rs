@@ -1666,6 +1666,11 @@ impl SubagentService {
             &body,
             session_workspace,
             attachments,
+            tiangong_plugin_subagent_protocol::render::delivery(
+                task.is_some(),
+                origin_label,
+                run_tag,
+            ),
         )
         .await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
@@ -1864,7 +1869,15 @@ impl SubagentService {
             "【Subagent 控制】会话「{}」（{}）对刚才提交的请求发起{}：无需继续处理，若已在处理请尽快收尾并说明未完成的部分。",
             config.name, config.id, action
         );
-        crate::delivery::deliver_message(&self.http, source_session, &body, None, &[]).await
+        crate::delivery::deliver_message(
+            &self.http,
+            source_session,
+            &body,
+            None,
+            &[],
+            tiangong_plugin_subagent_protocol::render::control(&config.name, &config.id),
+        )
+        .await
     }
 
     /// 关联会话本轮完成（WASM on_turn_finished 转发）：
@@ -2800,7 +2813,15 @@ impl SubagentService {
         if let Some(marker) = marker {
             body.push_str(&format!("\n（运行标记 r-{marker}）"));
         }
-        crate::delivery::deliver_message(&self.http, to_session, &body, None, &[]).await?;
+        crate::delivery::deliver_message(
+            &self.http,
+            to_session,
+            &body,
+            None,
+            &[],
+            tiangong_plugin_subagent_protocol::render::report(&config.name, &config.id, marker),
+        )
+        .await?;
         // 诊断追踪：标记匹配到等待中的运行时追加一条投递事件（不动状态）。
         if let Some(marker) = marker
             && let Some(run) = self

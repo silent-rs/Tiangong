@@ -11803,7 +11803,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-protocol"
-version = "0.2.39"
+version = "0.2.40"
 dependencies = [
  "serde",
  "serde_json",
@@ -11811,7 +11811,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-sidecar"
-version = "0.2.39"
+version = "0.2.40"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11835,7 +11835,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-wasm"
-version = "0.2.39"
+version = "0.2.40"
 dependencies = [
  "serde",
  "serde_json",

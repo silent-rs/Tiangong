@@ -1,0 +1,305 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Subagent 消息</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器。 */
+    :host, .sa-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    .sa-root [hidden] { display: none !important; }
+    .sa-root {
+      display: block; font-family: var(--host-font-family, inherit);
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    .sa-card {
+      --sa-accent: hsl(var(--border, 214 18% 88%));
+      border: 1px solid hsl(var(--border, 214 18% 88%) / .6);
+      border-left: 3px solid var(--sa-accent);
+      border-radius: 12px; overflow: hidden;
+      background: hsl(var(--card, 0 0% 100%));
+      box-shadow: 0 1px 2px rgb(0 0 0 / .05);
+    }
+    .sa-card[data-tone="primary"] { --sa-accent: hsl(var(--primary, 222.2 47.4% 11.2%) / .6); }
+    .sa-card[data-tone="success"] { --sa-accent: #10b981; }
+    .sa-card[data-tone="danger"] { --sa-accent: #ef4444; }
+    .sa-card[data-tone="warning"] { --sa-accent: #f59e0b; }
+    .sa-card[data-tone="info"] { --sa-accent: #3b82f6; }
+    .sa-head {
+      display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+      border-bottom: 1px solid hsl(var(--border, 214 18% 88%) / .3);
+      background: hsl(var(--muted, 210 40% 96%) / .15);
+    }
+    .sa-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 999px; flex-shrink: 0;
+      color: var(--sa-accent);
+      background: color-mix(in srgb, var(--sa-accent) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--sa-accent) 25%, transparent);
+    }
+    .sa-badge svg { width: 14px; height: 14px; display: block; }
+    .sa-title { min-width: 0; flex: 1; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .sa-name { font-weight: 600; }
+    .sa-pill {
+      display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 4px;
+      font-size: 10px; font-weight: 500; color: var(--sa-accent);
+      background: color-mix(in srgb, var(--sa-accent) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--sa-accent) 20%, transparent);
+    }
+    .sa-hint { font-size: 11px; color: hsl(var(--muted-foreground, 215 16% 47%)); }
+    .sa-copy {
+      all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; border-radius: 6px; flex-shrink: 0;
+      color: hsl(var(--muted-foreground, 215 16% 47%) / .6);
+    }
+    .sa-copy:hover { color: hsl(var(--foreground, 222 47% 11%)); background: hsl(var(--foreground, 222 47% 11%) / .05); }
+    .sa-copy svg { width: 14px; height: 14px; display: block; }
+    .sa-body { padding: 10px 16px; }
+    .sa-text {
+      font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+      color: hsl(var(--card-foreground, 222 47% 11%));
+    }
+    .sa-more {
+      all: unset; cursor: pointer; margin-top: 8px; display: inline-block; font-size: 12px;
+      color: hsl(var(--primary, 222.2 47.4% 11.2%));
+    }
+    .sa-media { display: flex; flex-direction: column; gap: 8px; padding: 0 16px 10px; }
+    .sa-media img, .sa-media video { display: block; max-width: 100%; max-height: 384px; border-radius: 6px; }
+    .sa-media audio { display: block; width: 100%; }
+    .sa-media a { font-size: 13px; color: hsl(var(--primary, 222.2 47.4% 11.2%)); text-decoration: underline; overflow-wrap: anywhere; }
+    .sa-meta { border-top: 1px solid hsl(var(--border, 214 18% 88%) / .3); padding: 4px 0; }
+    .sa-row { border-bottom: 1px solid hsl(var(--border, 214 18% 88%) / .15); }
+    .sa-row:last-child { border-bottom: 0; }
+    .sa-row-head {
+      all: unset; cursor: pointer; box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+      width: 100%; padding: 6px 16px; font-size: 12px;
+      color: hsl(var(--muted-foreground, 215 16% 47%));
+    }
+    .sa-row-head:hover { color: hsl(var(--foreground, 222 47% 11%)); }
+    .sa-row-head svg { width: 12px; height: 12px; flex-shrink: 0; transition: transform .15s; }
+    .sa-row[data-open="true"] .sa-row-head svg { transform: rotate(90deg); }
+    .sa-row-title { font-weight: 500; }
+    .sa-row-preview { margin-left: auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; opacity: .5; }
+    .sa-row[data-open="true"] .sa-row-preview { display: none; }
+    .sa-row-body {
+      margin: 2px 16px 8px; padding: 8px 12px; border-radius: 6px; max-height: 144px; overflow-y: auto;
+      font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere;
+      color: hsl(var(--muted-foreground, 215 16% 47%));
+      background: hsl(var(--muted, 210 40% 96%) / .1);
+      border: 1px solid hsl(var(--border, 214 18% 88%) / .15);
+    }
+  </style>
+</head>
+<body>
+  <div class="sa-root">
+    <div class="sa-card" id="sa-card">
+      <div class="sa-head">
+        <span class="sa-badge" id="sa-badge" aria-hidden="true"></span>
+        <div class="sa-title">
+          <span class="sa-name" id="sa-name"></span>
+          <span class="sa-pill" id="sa-pill" hidden></span>
+          <span class="sa-hint" id="sa-hint"></span>
+        </div>
+        <button type="button" class="sa-copy" id="sa-copy" title="复制原文" aria-label="复制">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        </button>
+      </div>
+      <div class="sa-body" id="sa-body" hidden>
+        <div class="sa-text" id="sa-text"></div>
+        <button type="button" class="sa-more" id="sa-more" hidden></button>
+      </div>
+      <div class="sa-media" id="sa-media" hidden></div>
+      <div class="sa-meta" id="sa-meta" hidden></div>
+    </div>
+  </div>
+  <script>
+    // Subagent 投递消息卡片（session.message-item，render=replace）：sidecar 投递任务、
+    // 协作消息、成员回报、运行状态与控制通知时携带渲染声明，宿主据此挂载本视图。
+    // 卡片头部取 render.data（类型、来源、成员、状态）；正文取消息可见文本，
+    // 剥除首行投递标头后拆出核心内容与附加段落（【任务工作区】等，可折叠）。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const $ = (id) => uiRoot.getElementById(id);
+    const card = $('sa-card');
+    const badge = $('sa-badge');
+    const nameEl = $('sa-name');
+    const pillEl = $('sa-pill');
+    const hintEl = $('sa-hint');
+    const bodyEl = $('sa-body');
+    const textEl = $('sa-text');
+    const moreEl = $('sa-more');
+    const metaEl = $('sa-meta');
+    const mediaEl = $('sa-media');
+    const MAX_LINES = 5;
+    const ICONS = {
+      task: '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+      message: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+      completed: '<path d="M20 6 9 17l-5-5"/>',
+      failed: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+      blocked: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+      approval_required: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+      control: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
+    };
+    const HOOK_STATUS = {
+      message: { label: '消息', tone: 'neutral', icon: 'message' },
+      completed: { label: '任务完成', tone: 'success', icon: 'completed' },
+      failed: { label: '执行失败', tone: 'danger', icon: 'failed' },
+      blocked: { label: '运行阻塞', tone: 'warning', icon: 'blocked' },
+      approval_required: { label: '等待审批', tone: 'info', icon: 'approval_required' },
+    };
+    const SECTION_MARKERS = ['任务工作区', '回复地址', '长期指令', '长期记忆', '工作区状态', '成长约定', '随消息附件'];
+    const RUN_TAG = /\n*（运行标记 r-[^）]*）\s*$/;
+    let rawText = '';
+    let expanded = false;
+
+    function stripHeader(text, kind) {
+      if (kind === 'hook') {
+        return text
+          .replace(/^\[Subagent·[^\]]*\]\s*/, '')
+          .replace(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/, '');
+      }
+      if (kind === 'control') return text.replace(/^【Subagent 控制】/, '');
+      // 任务 / 消息 / 回报：首行「【Subagent …】来自…：」为投递标头。
+      return text.replace(/^【Subagent [^】]*】来自[^\n]*?[：。]\n?/, '');
+    }
+
+    function splitSections(text) {
+      const found = [];
+      for (const title of SECTION_MARKERS) {
+        const marker = `【${title}】`;
+        const index = text.indexOf(marker);
+        if (index >= 0) found.push({ title, start: index, end: index + marker.length });
+      }
+      found.sort((a, b) => a.start - b.start);
+      const core = (found.length ? text.slice(0, found[0].start) : text).replace(RUN_TAG, '').trim();
+      const sections = found.map((item, i) => ({
+        title: item.title,
+        content: text.slice(item.end, i + 1 < found.length ? found[i + 1].start : text.length)
+          .replace(RUN_TAG, '').trim(),
+      })).filter((item) => item.content);
+      return { core, sections };
+    }
+
+    function header(data) {
+      const kind = data.kind;
+      if (kind === 'task' || kind === 'message') {
+        return {
+          name: kind === 'task' ? '任务指派' : '协作消息',
+          hint: data.source ? `来自 ${data.source}` : '',
+          tone: 'primary', icon: kind, pill: '',
+        };
+      }
+      if (kind === 'report') {
+        return { name: data.agent_name || 'Subagent', hint: '', tone: 'primary', icon: 'message', pill: '回报' };
+      }
+      if (kind === 'control') {
+        return { name: data.agent_name || 'Subagent', hint: '运行控制', tone: 'warning', icon: 'control', pill: '' };
+      }
+      const status = HOOK_STATUS[data.status] || HOOK_STATUS.message;
+      return { name: data.agent_name || 'Subagent', hint: '', tone: status.tone, icon: status.icon, pill: status.label };
+    }
+
+    function renderCore(core) {
+      const lines = core.split('\n');
+      const long = lines.length > MAX_LINES;
+      textEl.textContent = expanded || !long ? core : `${lines.slice(0, MAX_LINES).join('\n')}…`;
+      moreEl.hidden = !long;
+      moreEl.textContent = expanded ? '收起' : `展开全部（共 ${lines.length} 行）`;
+      bodyEl.hidden = core.length === 0;
+    }
+
+    function renderSections(sections) {
+      metaEl.replaceChildren(...sections.map((section) => {
+        const row = document.createElement('div');
+        row.className = 'sa-row';
+        row.dataset.open = 'false';
+        const head = document.createElement('button');
+        head.type = 'button';
+        head.className = 'sa-row-head';
+        head.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>';
+        const title = document.createElement('span');
+        title.className = 'sa-row-title';
+        title.textContent = section.title;
+        const preview = document.createElement('span');
+        preview.className = 'sa-row-preview';
+        preview.textContent = `${section.content.slice(0, 40).replace(/\n/g, ' ')}…`;
+        head.append(title, preview);
+        const body = document.createElement('div');
+        body.className = 'sa-row-body';
+        body.textContent = section.content;
+        body.hidden = true;
+        head.addEventListener('click', () => {
+          const open = row.dataset.open !== 'true';
+          row.dataset.open = String(open);
+          body.hidden = !open;
+        });
+        row.append(head, body);
+        return row;
+      }));
+      metaEl.hidden = sections.length === 0;
+    }
+
+    // 附件由本视图自行显示（宿主接管显示时不再附加媒体）：url 为宿主解析好的可显示地址。
+    function renderMedia(attachments) {
+      const items = (attachments || []).filter((item) => item && (item.url || item.path));
+      mediaEl.replaceChildren(...items.map((item) => {
+        const src = item.url || item.path;
+        const name = item.name || (item.path || '').split(/[\\/]/).pop() || '附件';
+        let el;
+        if (item.kind === 'image') {
+          el = document.createElement('img');
+          el.alt = name;
+          el.loading = 'lazy';
+        } else if (item.kind === 'audio' || item.kind === 'video') {
+          el = document.createElement(item.kind);
+          el.controls = true;
+          el.preload = 'metadata';
+        } else {
+          el = document.createElement('a');
+          el.href = src;
+          el.target = '_blank';
+          el.rel = 'noopener noreferrer';
+          el.textContent = name;
+          return el;
+        }
+        el.src = src;
+        el.title = name;
+        return el;
+      }));
+      mediaEl.hidden = items.length === 0;
+    }
+    let currentCore = '';
+    function render(context) {
+      const message = (context && context.message) || {};
+      const data = (message.render && message.render.data) || {};
+      rawText = message.text || '';
+      const head = header(data);
+      card.dataset.tone = head.tone;
+      badge.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[head.icon] || ICONS.message}</svg>`;
+      nameEl.textContent = head.name;
+      pillEl.textContent = head.pill;
+      pillEl.hidden = !head.pill;
+      hintEl.textContent = head.hint;
+      hintEl.title = data.run_tag ? `运行标记 r-${data.run_tag}` : '';
+      const { core, sections } = splitSections(stripHeader(rawText, data.kind));
+      if (core !== currentCore) expanded = false;
+      currentCore = core;
+      renderCore(core);
+      renderSections(sections);
+      renderMedia(message.attachments);
+    }
+
+    moreEl.addEventListener('click', () => {
+      expanded = !expanded;
+      renderCore(currentCore);
+    });
+    $('sa-copy').addEventListener('click', () => {
+      navigator.clipboard?.writeText(rawText).catch(() => {});
+    });
+
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange(render);
+    } else {
+      render(typeof hostContext !== 'undefined' ? hostContext : null);
+    }
+  </script>
+</body>
+</html>
