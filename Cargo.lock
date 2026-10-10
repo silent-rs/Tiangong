@@ -11865,7 +11865,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -11873,7 +11873,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-sidecar"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11900,7 +11900,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-wasm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
