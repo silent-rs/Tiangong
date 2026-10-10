@@ -151,6 +151,17 @@ Desktop TS 工具插件。
      "render": { "plugin": "<插件 id>", "view": "im-message", "data": { "channel": "微信私聊" } } }
    ```
 
+   界面内由插件发起的输入（`session.input.sendText`，需 `session.write` 权限）同样可带
+   渲染声明，只填 `view` 与 `data`——`plugin` 由宿主固定为调用方，`view` 必须是调用方
+   自己声明的 replace 贡献：
+
+   ```ts
+   await bridge.call('session.input.sendText', JSON.stringify({
+     text: '识别文本',
+     render: { view: 'voice-bubble', data: { duration_s: 3 } },
+   }));
+   ```
+
 3. 视图从 `context.message` 读取正文与 `render.data`：
 
    ```ts

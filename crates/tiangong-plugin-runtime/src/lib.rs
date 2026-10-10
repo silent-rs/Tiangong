@@ -75,8 +75,8 @@ pub use sidecar::{
     set_sidecar_notification_forwarder,
 };
 pub use slots::{
-    BUILTIN_SLOTS, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey, SlotDescriptor,
-    SlotInstances, SlotRegistry, UiContribution,
+    BUILTIN_SLOTS, MessageItemRender, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey,
+    SlotDescriptor, SlotInstances, SlotRegistry, UiContribution,
 };
 pub use trust::{
     LOCAL_PUBLISHER, OFFICIAL_PUBLISHER, TrustedPublisher, ensure_user_signing_key,

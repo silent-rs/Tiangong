@@ -142,4 +142,26 @@ describe('submitExternalText（插件 sendText 的普通 Enter 语义）', () =>
     expect(cache.attachments).toEqual([audio]);
     expect(send.mock.calls[0][3]).toBe(cache.revision);
   });
+
+  it('携带渲染声明：空闲发送透传 render，运行中入队保留并在放行时投递', async () => {
+    const { send } = spyActions();
+    const render = { plugin: 'volcengine', view: 'voice-bubble', data: { duration_s: 3 } };
+    useStore.getState().submitExternalText(KEY, '你好', 'full_trust', [], render);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][6]).toEqual(render);
+
+    send.mockClear();
+    prepareSession({ running: true });
+    useStore.getState().submitExternalText(KEY, '排队的语音', 'full_trust', [], render);
+    expect(send).not.toHaveBeenCalled();
+    const queued = useStore.getState().inputQueues[KEY] ?? [];
+    expect(queued[0].render).toEqual(render);
+
+    // 空闲后放行：队列项按原样投递，渲染声明随之送达。
+    useStore.setState({ sessionRunStatuses: {} });
+    await useStore.getState().steerQueuedInputMessage(KEY, queued[0].id);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toBe('排队的语音');
+    expect(send.mock.calls[0][6]).toEqual(render);
+  });
 });

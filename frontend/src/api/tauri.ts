@@ -572,7 +572,8 @@ export interface SessionInputAttachmentPayload {
   plugin_id: string;
   /**
    * kind="text" 为插件文本（session.input.sendText / insertText）：
-   * mode="insert" 只写入草稿，否则发送，attachments 为随文本发送的音频附件。
+   * mode="insert" 只写入草稿，否则发送，attachments 为随文本发送的音频附件，
+   * render 为宿主已绑定调用方插件的渲染声明（消息以该插件视图显示）。
    * 其余 kind 同草稿附件（PNG 图片 / 媒体目录内音频）。
    */
   attachment: Omit<RawAttachment, 'kind'> & {
@@ -580,6 +581,7 @@ export interface SessionInputAttachmentPayload {
     text?: string;
     mode?: 'send' | 'insert';
     attachments?: RawAttachment[];
+    render?: MessageRender;
   };
 }
 
@@ -772,6 +774,7 @@ export const api = {
     trustMode?: string,
     reasoningEffort?: string,
     modelRef?: string | null,
+    render?: MessageRender,
   ): Promise<void> =>
     invoke('send_message', {
       sessionId,
@@ -782,6 +785,7 @@ export const api = {
       trustMode,
       reasoningEffort,
       modelRef,
+      render,
     }),
 
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
@@ -795,8 +799,9 @@ export const api = {
     content: string,
     attachments: RawAttachment[],
     revision: number,
+    render?: MessageRender,
   ): Promise<boolean> =>
-    invoke('append_message', { sessionId, content, attachments, revision }),
+    invoke('append_message', { sessionId, content, attachments, revision, render }),
 
   editAndResend: (
     sessionId: string,

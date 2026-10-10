@@ -4,7 +4,9 @@
 //! 本模块校验负载并经定向事件 `session_input_attachment` 交给当前输入框：
 //!
 //! - `addAttachment`：加入草稿附件（PNG data URL，或媒体目录内的音频文件）；
-//! - `sendText`：发送一段文本，可带媒体目录内的音频附件（如语音输入的录音）；
+//! - `sendText`：发送一段文本，可带媒体目录内的音频附件（如语音输入的录音），
+//!   以及可选的渲染声明 `render{view, data}`——`plugin` 由宿主填为调用方，
+//!   `view` 必须是调用方声明的 `session.message-item` replace 贡献，防止冒用；
 //! - `insertText`：把文本写入草稿，不发送；
 //! - `showOverlay` / `hideOverlay`：`session.input-overlay` 贡献申请接管 / 归还
 //!   输入区，事件 `session_input_overlay` 由前端覆盖层宿主消费。
@@ -25,6 +27,8 @@ pub const OVERLAY_EVENT: &str = "session_input_overlay";
 const MAX_OVERLAY_HINT_CHARS: usize = 60;
 /// 输入覆盖层 Slot。
 pub const OVERLAY_SLOT: &str = "session.input-overlay";
+/// 消息条目 Slot（渲染声明的目标视图须为其 replace 贡献）。
+pub const MESSAGE_ITEM_SLOT: &str = "session.message-item";
 
 const MAX_TEXT_BYTES: usize = 10_000;
 const MAX_IMAGE_BASE64_BYTES: u64 = 50 * 1024 * 1024;
@@ -42,6 +46,18 @@ struct TextInput {
     text: String,
     #[serde(default)]
     attachments: Vec<AttachmentInput>,
+    /// 插件渲染声明（仅 sendText）：消息以调用方的 replace 视图显示。
+    #[serde(default)]
+    render: Option<RenderInput>,
+}
+
+/// 插件提交的渲染声明：不含 `plugin`，由宿主按调用方填写。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenderInput {
+    view: String,
+    #[serde(default)]
+    data: Value,
 }
 
 #[derive(Deserialize)]
@@ -56,13 +72,16 @@ struct AttachmentInput {
 /// 解析并校验一次输入桥接调用。
 ///
 /// `media_root` 为宿主媒体目录（`<storage>/media`），音频附件必须位于其中；
-/// `overlay_owner` 判断调用方是否声明了 `session.input-overlay` 贡献。
+/// `overlay_owner` 判断调用方是否声明了 `session.input-overlay` 贡献；
+/// `replace_view_owner(plugin, view)` 判断调用方是否声明了该 ID 的
+/// `session.message-item` replace 贡献（渲染声明的目标视图）。
 pub fn handle(
     plugin_id: &str,
     method: &str,
     payload: &str,
     media_root: &Path,
     overlay_owner: impl Fn(&str) -> bool,
+    replace_view_owner: impl Fn(&str, &str) -> bool,
 ) -> Result<InputEvent> {
     match method {
         "session.input.sendText" | "session.input.insertText" => {
@@ -77,6 +96,13 @@ pub fn handle(
             if insert && !input.attachments.is_empty() {
                 bail!("insertText 不支持附件，请改用 addAttachment");
             }
+            if insert && input.render.is_some() {
+                bail!("insertText 不支持渲染声明（草稿由用户编辑后发送）");
+            }
+            let render = input
+                .render
+                .map(|render| message_render(plugin_id, render, &replace_view_owner))
+                .transpose()?;
             let attachments = input
                 .attachments
                 .into_iter()
@@ -90,6 +116,9 @@ pub fn handle(
             });
             if !attachments.is_empty() {
                 item["attachments"] = Value::Array(attachments);
+            }
+            if let Some(render) = render {
+                item["render"] = serde_json::to_value(render)?;
             }
             Ok(input_event(plugin_id, item))
         }
@@ -135,6 +164,26 @@ pub fn handle(
         }
         other => bail!("未知输入草稿方法 {other}"),
     }
+}
+
+/// 组装渲染声明：`plugin` 固定为调用方，`view` 须为调用方自己声明的
+/// replace 视图，整体按 [`tiangong_types::MessageRender::validate`] 校验大小。
+fn message_render(
+    plugin_id: &str,
+    render: RenderInput,
+    replace_view_owner: &impl Fn(&str, &str) -> bool,
+) -> Result<tiangong_types::MessageRender> {
+    let view = render.view.trim().to_string();
+    if !replace_view_owner(plugin_id, &view) {
+        bail!("插件 {plugin_id} 未声明 session.message-item 的 replace 视图 {view}");
+    }
+    let render = tiangong_types::MessageRender {
+        plugin: plugin_id.to_string(),
+        view,
+        data: render.data,
+    };
+    render.validate().map_err(anyhow::Error::msg)?;
+    Ok(render)
 }
 
 fn input_event(plugin_id: &str, attachment: Value) -> InputEvent {
@@ -225,9 +274,65 @@ mod tests {
     }
 
     fn call(method: &str, payload: Value, media: &Path) -> Result<InputEvent> {
-        handle("voice", method, &payload.to_string(), media, |id| {
-            id == "voice"
-        })
+        handle(
+            "voice",
+            method,
+            &payload.to_string(),
+            media,
+            |id| id == "voice",
+            |id, view| id == "voice" && view == "voice-card",
+        )
+    }
+
+    #[test]
+    fn send_text_render_is_bound_to_caller_and_declared_view() {
+        let (_dir, media) = media_root();
+        let event = call(
+            "session.input.sendText",
+            json!({ "text": "你好", "render": { "view": " voice-card ", "data": { "k": 1 } } }),
+            &media,
+        )
+        .unwrap();
+        let render = &event.payload["attachment"]["render"];
+        assert_eq!(render["plugin"], "voice");
+        assert_eq!(render["view"], "voice-card");
+        assert_eq!(render["data"]["k"], 1);
+
+        // 未声明的视图、冒用其他插件（plugin 字段不被接受）、insertText 携带渲染均拒绝。
+        let error = call(
+            "session.input.sendText",
+            json!({ "text": "你好", "render": { "view": "other" } }),
+            &media,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("replace 视图"));
+        assert!(call(
+            "session.input.sendText",
+            json!({ "text": "你好", "render": { "plugin": "bot", "view": "voice-card" } }),
+            &media,
+        )
+        .is_err());
+        let error = call(
+            "session.input.insertText",
+            json!({ "text": "草稿", "render": { "view": "voice-card" } }),
+            &media,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("渲染声明"));
+
+        // 超过上限的渲染数据被拒绝。
+        let big = "x".repeat(tiangong_types::MESSAGE_RENDER_MAX_BYTES);
+        let error = call(
+            "session.input.sendText",
+            json!({ "text": "你好", "render": { "view": "voice-card", "data": big } }),
+            &media,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("render 过大"));
+
+        // 不带渲染声明时行为不变。
+        let event = call("session.input.sendText", json!({ "text": "你好" }), &media).unwrap();
+        assert!(event.payload["attachment"].get("render").is_none());
     }
 
     #[test]
@@ -345,11 +450,24 @@ mod tests {
             long.payload["hint"].as_str().unwrap().chars().count(),
             MAX_OVERLAY_HINT_CHARS
         );
-        let hide = handle("voice", "session.input.hideOverlay", "", &media, |_| true).unwrap();
+        let hide = handle(
+            "voice",
+            "session.input.hideOverlay",
+            "",
+            &media,
+            |_| true,
+            |_, _| false,
+        )
+        .unwrap();
         assert_eq!(hide.payload["visible"], false);
-        let error = handle("other", "session.input.showOverlay", "{}", &media, |_| {
-            false
-        })
+        let error = handle(
+            "other",
+            "session.input.showOverlay",
+            "{}",
+            &media,
+            |_| false,
+            |_, _| false,
+        )
         .unwrap_err();
         assert!(error.to_string().contains(OVERLAY_SLOT));
     }

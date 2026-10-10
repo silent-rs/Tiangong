@@ -5,6 +5,7 @@ import type {
   ContentBlock,
   LoadedSession,
   Message,
+  MessageRender,
   RawAttachment,
   SandboxUpdateState,
   SessionStreamEvent,
@@ -78,6 +79,8 @@ export interface QueuedInputMessage {
   text: string;
   attachments: RawAttachment[];
   queuedAt: number;
+  /** 插件外部文本携带的渲染声明；回填草稿编辑后不再适用。 */
+  render?: MessageRender;
 }
 
 function newQueuedMessageId(): string {
@@ -86,12 +89,17 @@ function newQueuedMessageId(): string {
 
 /** 直接由文本构造一条队列消息（不触碰草稿——用于外部文本在发送事务
  *  或执行中投递：草稿可能属于进行中的提交，不得被再次入队或覆盖）。 */
-function queuedTextMessage(text: string, attachments: RawAttachment[] = []): QueuedInputMessage {
+function queuedTextMessage(
+  text: string,
+  attachments: RawAttachment[] = [],
+  render?: MessageRender,
+): QueuedInputMessage {
   return {
     id: newQueuedMessageId(),
     text,
     attachments: attachments.map((attachment) => ({ ...attachment })),
     queuedAt: Date.now(),
+    ...(render ? { render } : {}),
   };
 }
 
@@ -964,6 +972,7 @@ export interface AppState {
     content: string,
     trustMode: string,
     attachments?: RawAttachment[],
+    render?: MessageRender,
   ) => void;
 
   // 流式消息状态
@@ -1011,12 +1020,14 @@ export interface AppState {
     revision: number,
     trustMode?: string,
     modelRef?: string | null,
+    render?: MessageRender,
   ) => Promise<boolean>;
   appendMessage: (
     sessionId: string,
     content: string,
     attachments: RawAttachment[],
     revision: number,
+    render?: MessageRender,
   ) => Promise<boolean>;
   editAndResend: (
     sessionId: string,
@@ -1647,7 +1658,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 普通发送：新对话和已有会话都直接向目标 Core 投递。
-  sendMessage: async (cacheKey, content, attachments, revision, trustMode, modelRef) => {
+  sendMessage: async (cacheKey, content, attachments, revision, trustMode, modelRef, render) => {
     let deliveryAttachments = attachments.map((attachment) => ({ ...attachment }));
     const startsNewConversation = get().newConversationId === cacheKey;
     const initialCwd = get().sessionCwd || get().workspaceDir;
@@ -1695,6 +1706,7 @@ export const useStore = create<AppState>((set, get) => ({
         startsNewConversation ? trustMode : undefined,
         startsNewConversation ? initialReasoningEffort : undefined,
         modelRef ?? undefined,
+        render,
       );
 
       const shouldActivate = startsNewConversation
@@ -1763,7 +1775,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  appendMessage: async (sessionId, content, attachments, revision) => {
+  appendMessage: async (sessionId, content, attachments, revision, render) => {
     let deliveryAttachments = attachments.map((attachment) => ({ ...attachment }));
     let sendingCache: InputCache | undefined;
     set((state) => {
@@ -1789,6 +1801,7 @@ export const useStore = create<AppState>((set, get) => ({
         content,
         deliveryAttachments,
         revision,
+        render,
       );
       let settledCache: InputCache | undefined;
       set((state) => {
@@ -1839,7 +1852,7 @@ export const useStore = create<AppState>((set, get) => ({
     get().setInputCacheAttachments(cacheKey, []);
   },
 
-  submitExternalText: (cacheKey, content, trustMode, attachments = []) => {
+  submitExternalText: (cacheKey, content, trustMode, attachments = [], render) => {
     const text = content.trim();
     if (!text) return;
     const state = get();
@@ -1849,7 +1862,10 @@ export const useStore = create<AppState>((set, get) => ({
       set((current) => ({
         inputQueues: {
           ...current.inputQueues,
-          [cacheKey]: [...(current.inputQueues[cacheKey] ?? []), queuedTextMessage(text, attachments)],
+          [cacheKey]: [
+            ...(current.inputQueues[cacheKey] ?? []),
+            queuedTextMessage(text, attachments, render),
+          ],
         },
       }));
     };
@@ -1877,7 +1893,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (attachments.length > 0) get().setInputCacheAttachments(cacheKey, attachments);
     const fresh = get().inputCaches[cacheKey];
     if (!fresh) return;
-    void get().sendMessage(cacheKey, text, fresh.attachments, fresh.revision, trustMode);
+    void get().sendMessage(cacheKey, text, fresh.attachments, fresh.revision, trustMode, undefined, render);
   },
 
   removeQueuedInputMessage: (cacheKey, messageId) => {
@@ -1961,9 +1977,10 @@ export const useStore = create<AppState>((set, get) => ({
     const content = message.text.trim()
       || (message.attachments.length > 0 ? '请处理这些附件。' : message.text);
     const isIdle = !get().sessionRunStatuses[cacheKey];
+    // 队列项原样投递时保留插件渲染声明（未经用户编辑）。
     const delivered = isIdle
-      ? await get().sendMessage(cacheKey, content, latest.attachments, latest.revision)
-      : await get().appendMessage(cacheKey, content, latest.attachments, latest.revision);
+      ? await get().sendMessage(cacheKey, content, latest.attachments, latest.revision, undefined, undefined, message.render)
+      : await get().appendMessage(cacheKey, content, latest.attachments, latest.revision, message.render);
     if (!delivered) {
       // 失败回插队首并清空草稿（内容仍在队列，不丢失）。
       set((current) => {

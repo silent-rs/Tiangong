@@ -631,8 +631,15 @@ export function MessageInput({
           (item) => item.kind === 'audio',
         );
         // 「用户普通 Enter」语义：保护草稿、运行中入队、空闲发送、
-        // 信任模式用界面当前选择——是否立即引导由用户决定。
-        useStore.getState().submitExternalText(cacheKey, content, trustModeRef.current, extra);
+        // 信任模式用界面当前选择——是否立即引导由用户决定。渲染声明由宿主
+        // 桥接入口绑定调用方插件，随消息投递（插件接管该消息的显示）。
+        useStore.getState().submitExternalText(
+          cacheKey,
+          content,
+          trustModeRef.current,
+          extra,
+          attachment.render,
+        );
         editorRef.current?.focus();
         return;
       }
