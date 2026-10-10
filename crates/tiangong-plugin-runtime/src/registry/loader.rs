@@ -489,6 +489,29 @@ pub fn load_wasm_plugin_at(
     )))
 }
 /// 适配器。创建失败（纯 UI 插件、WASM 实例化失败）返回 `None`。
+/// 清单声明的工具是否全部由 sidecar 承接（无需桌面前端页面执行）。
+///
+/// Server/CLI 没有插件前端，只有满足该条件的清单工具插件才能在这些入口
+/// 注册工具：无界面直连形态天然满足；带界面的插件需握手能力覆盖全部工具。
+pub(crate) fn tools_served_by_sidecar(
+    manifest: &PluginManifest,
+    verified_capabilities: Option<&[String]>,
+) -> bool {
+    if manifest.sidecar.is_none() {
+        return false;
+    }
+    let tools = manifest.tools.as_deref().unwrap_or_default();
+    if manifest.ui_contributions().is_empty() {
+        return true;
+    }
+    !tools.is_empty()
+        && verified_capabilities.is_some_and(|capabilities| {
+            tools
+                .iter()
+                .all(|tool| crate::invocation::capabilities_handle_tool(capabilities, &tool.name))
+        })
+}
+
 pub fn load_core_plugin(
     plugin_id: &str,
     runtime: RuntimeKind,
@@ -520,7 +543,10 @@ pub fn load_core_plugin(
             .prompt
             .as_ref()
             .is_some_and(|prompts| !prompts.is_empty());
-    if runtime == RuntimeKind::Desktop && has_ts_contributions {
+    if has_ts_contributions
+        && (runtime == RuntimeKind::Desktop
+            || tools_served_by_sidecar(&manifest, verified_sidecar.as_deref()))
+    {
         let adapter = Arc::new(TsPluginAdapter::from_manifest(
             &manifest,
             enabled,

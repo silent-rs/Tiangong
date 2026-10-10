@@ -24,6 +24,7 @@ describe('iframe 桥接方法透传（审查问题 1 回归）', () => {
     expect(normalizeBridgeMethod('session.getMessages')).toBe('session.getMessages');
     expect(normalizeBridgeMethod('plugin.getConfig')).toBe('plugin.getConfig');
     expect(normalizeBridgeMethod('tool.resolve')).toBe('tool.resolve');
+    expect(normalizeBridgeMethod('sidecar.status')).toBe('sidecar.status');
   });
 
   it('旧协议裸方法名补 plugin. 前缀（v1 设置页兼容）', () => {

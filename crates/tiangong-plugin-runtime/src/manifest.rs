@@ -665,10 +665,13 @@ impl PluginManifest {
                     self.id
                 );
             }
-            if !self
-                .entrypoints
-                .as_ref()
-                .is_some_and(|items| items.len() == 1 && items[0] == "desktop")
+            // 无 sidecar 的清单工具只能由桌面前端页面执行；声明 sidecar 时
+            // 工具可由 sidecar 承接，server/cli 入口是否注册由加载时按验证能力判定。
+            if self.sidecar.is_none()
+                && !self
+                    .entrypoints
+                    .as_ref()
+                    .is_some_and(|items| items.len() == 1 && items[0] == "desktop")
             {
                 bail!("纯 TypeScript 工具插件 {} 只能声明 desktop 入口", self.id);
             }
@@ -1254,6 +1257,19 @@ mod tests {
         )
         .unwrap();
         tool_only.validate().expect("无 UI 纯工具插件应通过校验");
+
+        // sidecar 承接的清单工具可声明 server 入口（如 bot 插件）；无 sidecar 时仍只允许 desktop。
+        let served = r#"{"schema_version":2,"id":"com.example.im","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}],"sidecar":{"binary":"im-sidecar","transport_protocol":"0.1.0","business_protocol":1}}"#;
+        serde_json::from_str::<PluginManifest>(served)
+            .unwrap()
+            .validate()
+            .expect("sidecar 承接的工具插件可声明 server 入口");
+        let page_only = r#"{"schema_version":2,"id":"com.example.page","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}]}"#;
+        let error = serde_json::from_str::<PluginManifest>(page_only)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("只能声明 desktop 入口"));
 
         // v2 + 无 UI 纯 prompt + mention：同样合法
         let prompt_only: PluginManifest = serde_json::from_str(
