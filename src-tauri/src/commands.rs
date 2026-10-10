@@ -543,6 +543,7 @@ pub async fn send_message(
     _window: Window,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
+    let render = verified_plugin_render(render)?;
     send_message_inner(
         UserMessageDeliveryRequest {
             session_id,
@@ -1401,6 +1402,7 @@ pub async fn append_message(
     if session_id.trim().is_empty() {
         return Err("当前会话 ID 不能为空".to_string());
     }
+    let render = verified_plugin_render(render)?;
 
     let is_running = state
         .with_state_read(|core_state| {

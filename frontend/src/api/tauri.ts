@@ -572,9 +572,9 @@ export interface SessionInputAttachmentPayload {
   plugin_id: string;
   /**
    * kind="text" 为插件文本（session.input.sendText / insertText）：
-   * mode="insert" 只写入草稿，否则发送，attachments 为随文本发送的附件，
+   * mode="insert" 只写入草稿，否则发送，attachments 为随文本发送的音频附件，
    * render 为宿主已绑定调用方插件的渲染声明（消息以该插件视图显示）。
-   * 其余 kind 同草稿附件（PNG data URL / 媒体目录内文件，按 MIME 归类）。
+   * 其余 kind 同草稿附件（PNG 图片 / 媒体目录内音频）。
    */
   attachment: Omit<RawAttachment, 'kind'> & {
     kind: RawAttachment['kind'] | 'text';

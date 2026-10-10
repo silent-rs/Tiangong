@@ -726,6 +726,18 @@ fn run_gui() {
                                         })
                                     })
                             },
+                            |plugin_id, view| {
+                                tiangong_plugin_runtime::registry::plugin_manifest(plugin_id)
+                                    .is_some_and(|manifest| {
+                                        manifest.ui_contributions().iter().any(|item| {
+                                            item.slot
+                                                == tiangong_app::session_input::MESSAGE_ITEM_SLOT
+                                                && item.id == view
+                                                && item.render
+                                                    == tiangong_plugin_runtime::MessageItemRender::Replace
+                                        })
+                                    })
+                            },
                         )?;
                         app_handle
                             .emit(event.name, event.payload)
