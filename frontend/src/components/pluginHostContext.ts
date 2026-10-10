@@ -45,8 +45,11 @@ export interface HostMessageContext {
   role: string;
   /** 面向用户的可见文本（助手消息为最终回复正文）。 */
   text: string;
-  /** 消息引用的媒体附件（本地路径）。 */
-  attachments: Array<{ kind: string; path: string; mime_type?: string; name?: string }>;
+  /**
+   * 消息引用的媒体附件：`path` 为本地路径，`url` 为宿主解析好的可显示地址
+   * （可直接用于 img / audio / video 的 src），供接管显示的插件自行渲染。
+   */
+  attachments: Array<{ kind: string; path: string; url?: string; mime_type?: string; name?: string }>;
   /** 插件接管显示时的渲染声明（视图 ID 与插件自定义数据）。 */
   render?: { view: string; data?: unknown };
 }

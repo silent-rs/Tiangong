@@ -151,6 +151,17 @@ Desktop TS 工具插件。
      "render": { "plugin": "<插件 id>", "view": "im-message", "data": { "channel": "微信私聊" } } }
    ```
 
+   界面内由插件发起的输入（`session.input.sendText`，需 `session.write` 权限）同样可带
+   渲染声明，只填 `view` 与 `data`——`plugin` 由宿主固定为调用方；`view` 应是调用方
+   自己声明的 replace 贡献，找不到时消息按默认样式显示：
+
+   ```ts
+   await bridge.call('session.input.sendText', JSON.stringify({
+     text: '识别文本',
+     render: { view: 'voice-bubble', data: { duration_s: 3 } },
+   }));
+   ```
+
 3. 视图从 `context.message` 读取正文与 `render.data`：
 
    ```ts
@@ -161,7 +172,10 @@ Desktop TS 工具插件。
    ```
 
 约定：`render.data` 序列化后不超过 16KB；插件缺失、停用或未声明该视图时宿主按
-默认方式显示正文，因此正文应保持可读。图片等媒体附件仍由宿主在插件视图下方渲染。
+默认方式显示正文，因此正文应保持可读。插件接管整条消息的显示：附件（含随
+sendText 发送的录音等）由插件从 `context.message.attachments` 读取并自行渲染
+（`url` 为宿主解析好的可显示地址），宿主不再在插件视图下方附加媒体；回退默认
+显示时附件按普通文件显示。
 带渲染声明的用户消息不可编辑。
 
 ## 主题

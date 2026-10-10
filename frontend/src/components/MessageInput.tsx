@@ -616,7 +616,7 @@ export function MessageInput({
       if (disposed || !cacheKey) return;
       // 文本输入项：mode=insert 写入草稿不发送（如语音转写后编辑）；否则
       // 直接发送给当前会话的 Agent（如创作页「开始创建」、语音输入，可携带
-      // 音频附件）。经 store 层读写（事件回调里组件闭包可能是旧快照）。
+      // 宿主已校验的媒体目录内附件）。经 store 层读写（事件回调里组件闭包可能是旧快照）。
       if (attachment.kind === 'text') {
         const content = (attachment.text ?? '').trim();
         if (!content) return;
@@ -627,21 +627,22 @@ export function MessageInput({
           editorRef.current?.focus();
           return;
         }
-        const extra: RawAttachment[] = (attachment.attachments ?? []).filter(
-          (item) => item.kind === 'audio',
-        );
+        const extra: RawAttachment[] = attachment.attachments ?? [];
         // 「用户普通 Enter」语义：保护草稿、运行中入队、空闲发送、
-        // 信任模式用界面当前选择——是否立即引导由用户决定。
-        useStore.getState().submitExternalText(cacheKey, content, trustModeRef.current, extra);
+        // 信任模式用界面当前选择——是否立即引导由用户决定。渲染声明由宿主
+        // 桥接入口绑定调用方插件，随消息投递（插件接管该消息的显示）。
+        useStore.getState().submitExternalText(
+          cacheKey,
+          content,
+          trustModeRef.current,
+          extra,
+          attachment.render,
+        );
         editorRef.current?.focus();
         return;
       }
-      if (attachment.kind === 'audio') {
-        addAttachments([attachment as Attachment]);
-        editorRef.current?.focus();
-        return;
-      }
-      if (attachment.kind !== 'image' || attachment.mime_type !== 'image/png') return;
+      // 其余为普通草稿附件（宿主已校验：PNG data URL 或媒体目录内文件），
+      // 与用户上传的同类附件一致处理。
       addAttachments([attachment as Attachment]);
       editorRef.current?.focus();
     }).then((stop) => {

@@ -521,6 +521,9 @@ struct UserMessageDeliveryRequest {
     initial_model_ref: Option<String>,
     delivery_kind: UserMessageDeliveryKind,
     requires_input_claim: bool,
+    /// 插件渲染声明：来自插件输入桥接（`session.input.sendText`），
+    /// 宿主在桥接入口已绑定调用方；视图不存在时前端按默认样式显示。
+    render: Option<tiangong_types::MessageRender>,
 }
 
 /// 发送消息并执行
@@ -535,6 +538,7 @@ pub async fn send_message(
     trust_mode: Option<tiangong_types::TrustMode>,
     reasoning_effort: Option<String>,
     model_ref: Option<String>,
+    render: Option<tiangong_types::MessageRender>,
     app: AppHandle,
     _window: Window,
     state: State<'_, TiangongApp>,
@@ -553,6 +557,7 @@ pub async fn send_message(
             initial_model_ref: model_ref,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: true,
+            render,
         },
         app,
         state.inner(),
@@ -597,6 +602,7 @@ pub async fn send_message_with_media(
             initial_model_ref: None,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: false,
+            render: None,
         },
         app,
         state.inner(),
@@ -623,6 +629,7 @@ async fn send_message_inner(
         initial_model_ref,
         delivery_kind,
         requires_input_claim,
+        render,
     } = request;
 
     if session_id.trim().is_empty() {
@@ -779,7 +786,7 @@ async fn send_message_inner(
             user_message_id.clone(),
             prepared.clone(),
             turn_model_ref.as_deref(),
-            None,
+            render,
         )
         .await
     {
@@ -1387,6 +1394,7 @@ pub async fn append_message(
     content: String,
     attachments: Vec<tiangong_media_archive::RawAttachment>,
     revision: u64,
+    render: Option<tiangong_types::MessageRender>,
     app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
@@ -1416,6 +1424,7 @@ pub async fn append_message(
             initial_model_ref: None,
             delivery_kind: UserMessageDeliveryKind::Append,
             requires_input_claim: true,
+            render,
         },
         app,
         state.inner(),

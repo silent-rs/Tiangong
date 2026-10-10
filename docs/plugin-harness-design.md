@@ -400,8 +400,9 @@ Shadow 插件无需复制。后续可在这些 token 之上提供前端组件库
 
 - **来源**：
   - 外部消息入口 `POST /api/v1/messages` 的 `render` 字段（如 Bot 插件为 IM 消息声明卡片视图）；同一请求的 `instruction` 字段保存为只给模型看的指令块，界面不显示。
+  - 插件输入桥接 `session.input.sendText` 的 `render{view, data}`：`plugin` 由宿主固定为调用方（如语音插件把录音消息声明为自己的语音卡片）。
 - **贡献声明**：`{ "slot": "session.message-item", "id": "<view>", "entry": "...", "render": "replace" }`。`render` 仅对 `session.message-item` 合法；`replace` 贡献不再作为附加区挂到每条消息。
-- **渲染**：宿主按 `plugin` + `view` 找到 `replace` 贡献后挂载，消息上下文额外带 `message.render = { view, data }`；插件缺失、停用或未声明该视图时，按角色默认渲染（降级可读）。
+- **渲染**：宿主按 `plugin` + `view` 找到 `replace` 贡献后挂载，消息上下文额外带 `message.render = { view, data }`；插件接管整条消息（附件从 `message.attachments` 读取并自行渲染），宿主只提供容器与统一的上下留白。插件缺失、停用或未声明该视图时，按角色默认渲染（降级可读），附件按普通文件显示。
 
 ### 6.6 拓展区扩展与「能力矩阵（App Matrix）」
 

@@ -433,8 +433,8 @@ pub fn set_session_input_handler(handler: SessionInputHandler) {
 
 fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
     // 方法白名单：新增输入方法须在此放行（宿主 handler 负责各自校验）。
-    // - addAttachment：向当前输入草稿加入附件（PNG 图片 / 媒体目录内音频）；
-    // - sendText：把一段文本（可带音频附件）作为用户消息发送；
+    // - addAttachment：向当前输入草稿加入附件（PNG 图片 / 媒体目录内文件）；
+    // - sendText：把一段文本（可带媒体目录内文件附件）作为用户消息发送；
     // - insertText：把文本写入输入草稿，不发送；
     // - showOverlay / hideOverlay：`session.input-overlay` 贡献申请接管 / 归还输入区。
     if !matches!(
