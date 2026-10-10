@@ -659,3 +659,48 @@ fn sidecar_instance_role_defaults_to_auxiliary() {
         crate::sidecar::INSTANCE_ROLE_PRIMARY
     );
 }
+
+/// server 连接信息变化时：声明 require_server、旧版 scheduler 与常驻原生
+/// sidecar 需重启；terminal（会话驱动）与按需 sidecar 不重启。
+#[test]
+fn server_change_restarts_dependent_and_resident_sidecars() {
+    let parse = |json: &str| serde_json::from_str::<PluginManifest>(json).unwrap();
+    let sidecar = |lifecycle: &str| {
+        format!(
+            r#""sidecar":{{"binary":"s","transport_protocol":"0.1.0","business_protocol":1,"lifecycle":"{lifecycle}"}}"#
+        )
+    };
+    let resident = sidecar("resident");
+    let on_demand = sidecar("on_demand");
+    let bot = parse(&format!(
+        r#"{{"schema_version":2,"id":"bot","version":"0.1.0",{resident}}}"#
+    ));
+    let terminal = parse(&format!(
+        r#"{{"schema_version":2,"id":"terminal","version":"0.1.0",{resident}}}"#
+    ));
+    let dependent = parse(&format!(
+        r#"{{"schema_version":2,"id":"subagent","version":"0.1.0","require_server":true,{on_demand}}}"#
+    ));
+    let scheduler = parse(&format!(
+        r#"{{"schema_version":1,"id":"scheduler","version":"0.2.4","wasm":{{"binary":"s.wasm"}},{on_demand}}}"#
+    ));
+    let plain = parse(&format!(
+        r#"{{"schema_version":2,"id":"fs","version":"0.1.0",{on_demand}}}"#
+    ));
+    let no_sidecar =
+        parse(r#"{"schema_version":2,"id":"ui","version":"0.1.0","require_server":true}"#);
+    assert!(restarts_on_server_change(&bot));
+    assert!(restarts_on_server_change(&dependent));
+    assert!(restarts_on_server_change(&scheduler));
+    assert!(!restarts_on_server_change(&terminal));
+    assert!(!restarts_on_server_change(&plain));
+    assert!(!restarts_on_server_change(&no_sidecar));
+
+    set_server_endpoint("http://127.0.0.1:1".into(), Some("token".into()));
+    assert_eq!(
+        current_server_endpoint(),
+        Some(("http://127.0.0.1:1".into(), Some("token".into())))
+    );
+    clear_server_endpoint();
+    assert!(current_server_endpoint().is_none());
+}
