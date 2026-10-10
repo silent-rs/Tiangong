@@ -28,8 +28,6 @@ pub const OVERLAY_EVENT: &str = "session_input_overlay";
 const MAX_OVERLAY_HINT_CHARS: usize = 60;
 /// 输入覆盖层 Slot。
 pub const OVERLAY_SLOT: &str = "session.input-overlay";
-/// 消息条目 Slot（渲染声明的目标视图须为其 replace 贡献）。
-pub const MESSAGE_ITEM_SLOT: &str = "session.message-item";
 
 const MAX_TEXT_BYTES: usize = 10_000;
 const MAX_IMAGE_BASE64_BYTES: u64 = 50 * 1024 * 1024;
@@ -80,7 +78,6 @@ pub fn handle(
     payload: &str,
     media_root: &Path,
     overlay_owner: impl Fn(&str) -> bool,
-    replace_view_owner: impl Fn(&str, &str) -> bool,
 ) -> Result<InputEvent> {
     match method {
         "session.input.sendText" | "session.input.insertText" => {
@@ -464,24 +461,11 @@ mod tests {
             long.payload["hint"].as_str().unwrap().chars().count(),
             MAX_OVERLAY_HINT_CHARS
         );
-        let hide = handle(
-            "voice",
-            "session.input.hideOverlay",
-            "",
-            &media,
-            |_| true,
-            |_, _| false,
-        )
-        .unwrap();
+        let hide = handle("voice", "session.input.hideOverlay", "", &media, |_| true).unwrap();
         assert_eq!(hide.payload["visible"], false);
-        let error = handle(
-            "other",
-            "session.input.showOverlay",
-            "{}",
-            &media,
-            |_| false,
-            |_, _| false,
-        )
+        let error = handle("other", "session.input.showOverlay", "{}", &media, |_| {
+            false
+        })
         .unwrap_err();
         assert!(error.to_string().contains(OVERLAY_SLOT));
     }
