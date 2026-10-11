@@ -46,3 +46,39 @@ export function shouldCompensateItemResize(input: ScrollAdjustInput): boolean {
   if (input.isFirstMeasure) return input.itemStart < input.scrollOffset;
   return input.itemStart + input.prevSize <= input.scrollOffset && !input.scrollingBackward;
 }
+
+/** 视口内无任何条目（空白）时的恢复定位方向。 */
+export type BlankViewportRecovery =
+  | { kind: 'none' }
+  | { kind: 'end' }
+  | { kind: 'index'; index: number };
+
+/**
+ * 判定视口是否落入空白区并给出恢复定位。
+ *
+ * 轮次结束时流式区并回虚拟列表、过程收缩，总高与条目位置在数帧内剧烈
+ * 变化；若视口最终停在没有任何条目的区域（页面空白），按已渲染条目相对
+ * 视口的位置恢复：全部在视口之上（滚过了内容末尾）或列表非空却没有任何
+ * 已渲染条目 → 回到末尾；全部在视口之下 → 对齐到最靠上的已渲染条目。
+ * 有条目与视口相交（含列表为空）时不处理。
+ *
+ * @param viewport 视口相对自身的可见区间（top/bottom，px）
+ * @param items 已渲染条目的下标与相对视口顶部的区间
+ * @param count 列表条目总数
+ */
+export function blankViewportRecovery(
+  viewport: { top: number; bottom: number },
+  items: { index: number; top: number; bottom: number }[],
+  count: number,
+): BlankViewportRecovery {
+  if (count === 0) return { kind: 'none' };
+  if (items.length === 0) return { kind: 'end' };
+  if (items.some((item) => item.bottom > viewport.top && item.top < viewport.bottom)) {
+    return { kind: 'none' };
+  }
+  if (items.every((item) => item.top >= viewport.bottom)) {
+    const first = items.reduce((a, b) => (a.index <= b.index ? a : b));
+    return { kind: 'index', index: first.index };
+  }
+  return { kind: 'end' };
+}

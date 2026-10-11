@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldCompensateItemResize, type ScrollAdjustInput } from '@/components/message/virtualScrollAdjust';
+import { blankViewportRecovery, shouldCompensateItemResize, type ScrollAdjustInput } from '@/components/message/virtualScrollAdjust';
 
 const base: ScrollAdjustInput = {
   isLast: false,
@@ -39,5 +39,33 @@ describe('虚拟列表尺寸变化滚动补偿判定', () => {
     expect(shouldCompensateItemResize({ ...base, itemStart: 0, prevSize: 500, scrollOffset: 600 })).toBe(true);
     expect(shouldCompensateItemResize({ ...base, itemStart: 0, prevSize: 500, scrollOffset: 300 })).toBe(false);
     expect(shouldCompensateItemResize({ ...base, isFirstMeasure: true, itemStart: 100, scrollOffset: 300 })).toBe(true);
+  });
+});
+
+describe('空白视口恢复判定', () => {
+  const viewport = { top: 0, bottom: 600 };
+
+  it('有条目与视口相交时不处理', () => {
+    expect(blankViewportRecovery(viewport, [{ index: 3, top: -100, bottom: 50 }], 5)).toEqual({ kind: 'none' });
+    expect(blankViewportRecovery(viewport, [{ index: 3, top: 590, bottom: 900 }], 5)).toEqual({ kind: 'none' });
+  });
+
+  it('条目全部在视口之上（滚过内容末尾，页面空白）时回到末尾', () => {
+    expect(blankViewportRecovery(viewport, [
+      { index: 3, top: -2400, bottom: -1800 },
+      { index: 4, top: -1800, bottom: -700 },
+    ], 5)).toEqual({ kind: 'end' });
+  });
+
+  it('条目全部在视口之下时对齐到最靠上的已渲染条目', () => {
+    expect(blankViewportRecovery(viewport, [
+      { index: 5, top: 1200, bottom: 1500 },
+      { index: 4, top: 700, bottom: 1200 },
+    ], 8)).toEqual({ kind: 'index', index: 4 });
+  });
+
+  it('列表非空却没有渲染任何条目时回到末尾；空列表不处理', () => {
+    expect(blankViewportRecovery(viewport, [], 6)).toEqual({ kind: 'end' });
+    expect(blankViewportRecovery(viewport, [], 0)).toEqual({ kind: 'none' });
   });
 });

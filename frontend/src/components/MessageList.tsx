@@ -36,7 +36,7 @@ import {
   UserMessageGroup,
   AgentTurn,
 } from "./message";
-import { shouldCompensateItemResize } from "./message/virtualScrollAdjust";
+import { blankViewportRecovery, shouldCompensateItemResize } from "./message/virtualScrollAdjust";
 import { type MentionEditorHandle } from "./MentionEditor";
 
 /** 每个会话的阅读位置锚点：视口顶部对齐的分组索引 + 离开时是否贴底。
@@ -306,9 +306,17 @@ export function MessageList() {
   const completedGroupsRef = useRef(completedGroups);
   completedGroupsRef.current = completedGroups;
   // 以分组 key 标识条目：分段加载前插历史后，已测量的高度仍跟随原分组。
+  // agent_turn 的活跃（过程展开）与完成（过程收缩）两态高度相差悬殊，按态分开
+  // 缓存：轮次完成后以新 key 重新进入列表，首次挂载即按 DOM 实际尺寸测量，
+  // 不会沿用执行阶段展开态的旧尺寸把总高撑大、把视口定位到内容之外的空白区。
   const getGroupKey = useCallback(
-    (index: number) => completedGroups[index]?.key ?? index,
-    [completedGroups],
+    (index: number) => {
+      const group = completedGroups[index];
+      if (!group) return index;
+      if (group.type !== 'agent_turn') return group.key;
+      return isThinking && index >= liveRunStart ? `${group.key}:active` : `${group.key}:done`;
+    },
+    [completedGroups, isThinking, liveRunStart],
   );
   const virtualizer = useVirtualizer({
     count: completedGroups.length,
@@ -561,6 +569,54 @@ export function MessageList() {
       cancelled = true;
     };
   }, [messages.length, lastMessageId, streamingMessageId, completedGroups.length, streamingGroup, runStatus, activeSessionId]);
+
+  // 空白视口兜底：轮次结束（运行态回 idle）后的数帧内总高与条目位置剧烈
+  // 变化（流式区并回列表、过程收缩、库按估算补偿/补滚），视口可能停在没有
+  // 任何条目的区域，表现为消息页空白。结束后按帧检查约 1 秒，一旦落入空白
+  // 即按条目位置重新定位（见 blankViewportRecovery）。
+  const prevIdleRef = useRef(runStatus === 'idle');
+  useEffect(() => {
+    const becameIdle = runStatus === 'idle' && !prevIdleRef.current;
+    prevIdleRef.current = runStatus === 'idle';
+    if (!becameIdle) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    let rafId = 0;
+    let timer = 0;
+    const deadline = performance.now() + 1000;
+    const check = () => {
+      const viewportRect = el.getBoundingClientRect();
+      const items = Array.from(el.querySelectorAll<HTMLElement>('[data-index]')).map((node) => {
+        const rect = node.getBoundingClientRect();
+        return {
+          index: Number(node.dataset.index),
+          top: rect.top - viewportRect.top,
+          bottom: rect.bottom - viewportRect.top,
+        };
+      });
+      const recovery = blankViewportRecovery(
+        { top: 0, bottom: el.clientHeight },
+        items,
+        completedGroupsRef.current.length,
+      );
+      if (recovery.kind === 'end') {
+        el.scrollTop = el.scrollHeight;
+      } else if (recovery.kind === 'index') {
+        virtualizer.scrollToIndex(recovery.index, { align: 'start', behavior: 'auto' });
+      }
+    };
+    const loop = () => {
+      check();
+      if (performance.now() < deadline) rafId = requestAnimationFrame(loop);
+    };
+    rafId = requestAnimationFrame(loop);
+    // 窗口在后台时 rAF 暂停，回到前台的首帧仍会检查；另以定时器兜底一次
+    timer = window.setTimeout(check, 1000);
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.clearTimeout(timer);
+    };
+  }, [runStatus, virtualizer]);
 
   // 头部前插更早历史后保持阅读位置：原视口顶部分组仍停在原来的位置。
   const prevFirstGroupKeyRef = useRef<string | undefined>(undefined);
