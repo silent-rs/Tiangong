@@ -208,8 +208,8 @@ jobs:
                 exit 1
               fi
             fi
-            if [[ "$has_protocol" != "true" && "$has_ui" != "true" ]]; then
-              echo "Plugin $id has no checkable WASM or UI" >&2
+            if [[ "$has_protocol" != "true" && "$has_ui" != "true" && "$has_sidecar" != "true" ]]; then
+              echo "Plugin $id has no checkable WASM, UI or sidecar" >&2
               exit 1
             fi
 
@@ -218,6 +218,12 @@ jobs:
             sidecar=''
             core=''
             ui_test=false
+            # 纯 Sidecar 形态（无 protocol/WASM/UI 工程，如 bot）：Sidecar 由 sidecar 作业
+            # 检查，这里只补充 xtask 配置校验。
+            sidecar_only=false
+            if [[ "$has_protocol" != "true" && "$has_sidecar" == "true" ]]; then
+              sidecar_only=true
+            fi
             if [[ "$has_protocol" == "true" ]]; then
               protocol="$(package_name "$protocol_manifest")"
               wasm="$(package_name "$wasm_manifest")"
@@ -245,7 +251,8 @@ jobs:
               --argjson rust "$has_protocol" \
               --argjson ui "$has_ui" \
               --argjson ui_test "$ui_test" \
-              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,core:$core,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
+              --argjson sidecar_only "$sidecar_only" \
+              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,core:$core,rust:$rust,sidecar_only:$sidecar_only,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
             if [[ "$plugin_selected" == "true" ]]; then
               append_plugin "$item"
             fi
@@ -269,7 +276,7 @@ jobs:
               --arg id "$id" \
               --arg root "$root" \
               --arg package "$package" \
-              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",core:"",rust:false,ui:false,ui_test:false,native:true,native_package:$package}')"
+              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",core:"",rust:false,sidecar_only:false,ui:false,ui_test:false,native:true,native_package:$package}')"
             append_plugin "$item"
           done
 
@@ -293,7 +300,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Rust for plugin protocol
-        if: matrix.plugin.rust
+        if: matrix.plugin.rust || matrix.plugin.sidecar_only
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -320,7 +327,7 @@ jobs:
             patchelf
 
       - name: Cache Rust artifacts
-        if: matrix.plugin.rust || matrix.plugin.native || matrix.plugin.core != ''
+        if: matrix.plugin.rust || matrix.plugin.sidecar_only || matrix.plugin.native || matrix.plugin.core != ''
         uses: Swatinem/rust-cache@v2
         with:
           key: plugin-${{ matrix.plugin.id }}
@@ -340,7 +347,7 @@ jobs:
         run: jq -e --arg id "$PLUGIN_ID" '.id == $id and (.version | type == "string")' "$PLUGIN_MANIFEST"
 
       - name: Validate Rust plugin configuration
-        if: matrix.plugin.rust
+        if: matrix.plugin.rust || matrix.plugin.sidecar_only
         env:
           PLUGIN_ID: ${{ matrix.plugin.id }}
         run: cargo run --locked -p xtask -- validate-plugin "$PLUGIN_ID"
