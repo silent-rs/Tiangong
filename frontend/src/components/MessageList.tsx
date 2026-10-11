@@ -599,8 +599,9 @@ export function MessageList() {
   // 内容之上，位置不受收缩影响，因此：
   // 1. 执行期间持续记录锚点相对视口的偏移与是否贴底（收缩前的状态）；
   // 2. 完成后先等收缩完成、条目尺寸稳定（按 DOM 实际尺寸校正缓存）；
-  // 3. 再按锚点定位：原先贴底 → 回到底部；锚点原在视口内 → 保持原偏移；
-  //    锚点原在视口之上（正在阅读本次执行的内容）→ 锚点对齐视口顶部。
+  // 3. 再按锚点定位：原先贴底（自动跟随中）或锚点原在视口之上（正在阅读本次
+  //    执行的内容）→ 锚点对齐视口顶部，从本次提问开始阅读执行汇报；锚点原
+  //    在视口内 → 保持原偏移。
   // 定位后的剩余时间仍检查空白视口作为兜底（见 blankViewportRecovery）。
   const liveRunAnchorKeyRef = useRef<string | null>(null);
   const runAnchorRef = useRef<{ sessionId: string | null; key: string; offset: number; atBottom: boolean } | null>(null);
@@ -681,15 +682,16 @@ export function MessageList() {
     const positionByAnchor = () => {
       positioned = true;
       if (!anchor) return;
-      if (anchor.atBottom) {
-        el.scrollTop = el.scrollHeight;
-        isAtBottomRef.current = true;
-        return;
-      }
       const index = completedGroupsRef.current.findIndex((group) => group.key === anchor.key);
       const start = index >= 0 ? virtualizer.measurementsCache[index]?.start : undefined;
-      if (start === undefined) return;
-      if (anchor.offset < 0) {
+      if (start === undefined) {
+        // 锚点已不在列表（被删除/压缩）：自动跟随中退回底部
+        if (anchor.atBottom) el.scrollTop = el.scrollHeight;
+        return;
+      }
+      if (anchor.atBottom || anchor.offset < 0) {
+        // 定位到本次提问后离开底部，不再自动跟随（拉回底部时由滚动事件重新开启）
+        isAtBottomRef.current = false;
         virtualizer.scrollToIndex(index, { align: 'start', behavior: 'auto' });
       } else {
         el.scrollTop = start - anchor.offset;
