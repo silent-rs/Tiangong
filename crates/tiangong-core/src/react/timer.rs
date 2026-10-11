@@ -14,7 +14,12 @@ pub(super) struct TurnElapsedTimer {
 }
 
 impl TurnElapsedTimer {
-    pub(super) fn start(started_at: Instant, stream_tx: Sender<StreamEvent>) -> Self {
+    /// 从已累计的时长 `offset` 起计时（接续失败轮次时累计整轮时长；新轮为零）。
+    pub(super) fn start(
+        started_at: Instant,
+        offset: Duration,
+        stream_tx: Sender<StreamEvent>,
+    ) -> Self {
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -26,7 +31,7 @@ impl TurnElapsedTimer {
                     biased;
                     _ = &mut stop_rx => break,
                     _ = ticker.tick() => {
-                        let seconds = started_at.elapsed().as_secs();
+                        let seconds = (offset + started_at.elapsed()).as_secs();
                         if stream_tx.send(StreamEvent::TurnElapsed { seconds }).is_err() {
                             break;
                         }
@@ -66,7 +71,7 @@ mod tests {
     #[tokio::test]
     async fn emits_elapsed_seconds_through_stream() {
         let (stream_tx, stream_rx) = std::sync::mpsc::channel();
-        let timer = TurnElapsedTimer::start(Instant::now(), stream_tx);
+        let timer = TurnElapsedTimer::start(Instant::now(), Duration::ZERO, stream_tx);
         let event =
             tokio::task::spawn_blocking(move || stream_rx.recv_timeout(Duration::from_secs(3)))
                 .await

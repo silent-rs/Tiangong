@@ -64,4 +64,22 @@ describe('用户消息的轮次状态（与后端同一规则推导）', () => {
     apply({ type: 'error', message: '执行失败' });
     expect(statusOf('crashed')).toBe('failed');
   });
+  it('上一轮失败：新消息作为引导消息接续该轮，起轮消息改回 processing', () => {
+    apply({ type: 'user_message', message_id: 'f1', content: '任务' });
+    apply({ type: 'error', message: '模型请求失败' });
+    expect(statusOf('f1')).toBe('failed');
+    apply({ type: 'user_message', message_id: 'f2', content: '继续' });
+    expect(statusOf('f2')).toBeUndefined();
+    expect(statusOf('f1')).toBe('processing');
+    apply({ type: 'done' });
+    expect(statusOf('f1')).toBe('success');
+  });
+  it('用户取消后的新消息另起一轮', () => {
+    apply({ type: 'user_message', message_id: 'c1', content: '任务' });
+    apply({ type: 'error', message: '已取消' });
+    expect(statusOf('c1')).toBe('cancelled');
+    apply({ type: 'user_message', message_id: 'c2', content: '新任务' });
+    expect(statusOf('c2')).toBe('processing');
+    expect(statusOf('c1')).toBe('cancelled');
+  });
 });

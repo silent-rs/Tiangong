@@ -35,7 +35,9 @@ pub(crate) async fn run_turn(
         let _ = stream_tx.send(event.clone());
         return event;
     };
-    let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
+    // 接续失败轮次时，执行时长从此前已累计的时长继续累计（整轮总时长）。
+    let resumed_elapsed = std::time::Duration::from_millis(ctx.resumed_elapsed_ms);
+    let elapsed_timer = TurnElapsedTimer::start(turn_started, resumed_elapsed, stream_tx.clone());
 
     // ── 启动插件生命周期 ──
     for plugin in &ctx.plugins {
@@ -83,7 +85,7 @@ pub(crate) async fn run_turn(
     crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
     // 结果写入本轮起轮的用户消息（turn_id）。
     elapsed_timer.stop().await;
-    let elapsed_ms = turn_started.elapsed().as_millis() as u64;
+    let elapsed_ms = (resumed_elapsed + turn_started.elapsed()).as_millis() as u64;
     let status = outcome.status();
     if let Some(message) = current_user_message(&mut ctx) {
         message.set_turn_result(elapsed_ms, status);

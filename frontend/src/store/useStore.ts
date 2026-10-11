@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
-import { isUserInput, messageKind, reasoningOf, toolCallIdOf, turnStatusOf } from '../api/message';
+import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import type {
   ContentBlock,
   LoadedSession,
@@ -364,10 +364,16 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
   const turnBase = existingIndex >= 0 ? messages.slice(0, existingIndex) : messages;
   // 与后端同一规则：最近的起轮消息仍为 processing 时是引导消息（不带状态），
   // 否则起新轮。已加载的同 ID 消息以其持久化状态为准。
+  // 上一轮失败（用户取消除外）时同样作为引导消息接续该轮：起轮消息改回
+  // processing（后端随后推送的起轮消息快照以持久化状态为准）。
   const existingStatus = existing ? turnStatusOf(existing) : undefined;
+  const latestStatus = latestTurnStatus(turnBase);
   const turnStatus = existingStatus != null
     ? existingStatus
-    : latestTurnStatus(turnBase) === 'processing' ? undefined : 'processing' as const;
+    : latestStatus === 'processing' || latestStatus === 'failed' ? undefined : 'processing' as const;
+  if (existingStatus == null && latestStatus === 'failed') {
+    messages = resumeFailedTurn(messages);
+  }
   return upsertStreamMessage(existingIndex >= 0 ? messages.slice(0, existingIndex + 1) : messages, {
     ...(existing?.role === 'user' ? existing : {}),
     id: event.message_id,
@@ -383,6 +389,20 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
 function withRender(meta: Message['meta'], render: StreamEvent['render']): { meta?: Message['meta'] } {
   if (render) return { meta: { ...(meta ?? {}), render } };
   return meta ? { meta } : {};
+}
+
+/** 接续失败轮次：最近一个带状态的用户消息（失败轮次的状态承载者）改回 processing。 */
+function resumeFailedTurn(messages: Message[]): Message[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const status = turnStatusOf(message);
+    if (status == null) continue;
+    if (status !== 'failed' || message.role !== 'user') return messages;
+    const next = [...messages];
+    next[index] = { ...message, turn_status: 'processing', final_reply: undefined };
+    return next;
+  }
+  return messages;
 }
 
 /** 最近一个带轮次状态的用户消息（起轮消息）的状态。 */
@@ -854,10 +874,6 @@ function applyEventToSessionView(
   };
 }
 
-/** 是否为轮次锚点（真正的用户提问），与后端 `is_turn_anchor`、前端分组规则一致。 */
-export function isTurnAnchor(message: Message): boolean {
-  return isUserInput(message);
-}
 
 /**
  * 流式事件追加新消息后同步提问目录：新增的用户提问追加到末尾；目录中最后一条
@@ -872,13 +888,8 @@ function syncUserOutline(
   messages: Message[],
 ): UserOutlineItem[] | null {
   if (!outline || previous === messages) return outline;
-  let anchorIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (isTurnAnchor(messages[i])) {
-      anchorIndex = i;
-      break;
-    }
-  }
+  // 目录只收起轮消息（与后端 `user_outline` 同一规则），引导消息不进目录。
+  const anchorIndex = latestTurnAnchorIndex(messages);
   if (anchorIndex < 0) return outline;
   const anchor = messages[anchorIndex];
   let next = outline;
@@ -896,6 +907,8 @@ function syncUserOutline(
   const tail = next[next.length - 1];
   if (!tail.answer) {
     for (let i = anchorIndex + 1; i < messages.length; i += 1) {
+      // 引导消息不作回复预览
+      if (isUserInput(messages[i])) continue;
       const text = textContent(messages[i]).trim();
       if (text) {
         if (next === outline) next = [...outline];

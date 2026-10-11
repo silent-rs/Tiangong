@@ -153,6 +153,58 @@ export function isUserInput(message: Message): boolean {
   return userSourceOf(message) === 'human';
 }
 
+/**
+ * 轮次锚点（起轮用户消息）的 ID 集合，与后端 `view::turn_anchor_flags` 同一规则。
+ *
+ * 只有发起一次执行的用户消息是锚点；引导消息（执行中追加、或接续失败轮次
+ * 的消息）不是锚点。按时序逐条判定真人用户消息：
+ * - 带轮次状态：上一个带状态的用户消息为 `failed` 时，属失败轮次的接续
+ *   （历史数据按引导处理），否则是锚点；
+ * - 不带状态：此前没有任何带状态的用户消息（轮次状态出现前的旧数据）时是
+ *   锚点，否则是所属轮次的引导消息。
+ * 用户取消（`cancelled`）后的消息照常起新轮。
+ */
+export function turnAnchorIds(messages: Message[]): Set<string> {
+  const anchors = new Set<string>();
+  let previousStatus: TurnStatus | undefined;
+  for (const message of messages) {
+    if (!isUserInput(message)) continue;
+    const status = turnStatusOf(message);
+    if (status == null) {
+      if (previousStatus == null) anchors.add(message.id);
+      continue;
+    }
+    if (previousStatus !== 'failed') anchors.add(message.id);
+    previousStatus = status;
+  }
+  return anchors;
+}
+
+/** 最后一个轮次锚点的下标（规则同 {@link turnAnchorIds}），没有返回 -1。
+ * 从末尾向前扫描，只走到确定结论为止，供流式事件频繁调用。 */
+export function latestTurnAnchorIndex(messages: Message[]): number {
+  let latestUser = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isUserInput(message)) continue;
+    if (latestUser < 0) latestUser = index;
+    if (turnStatusOf(message) == null) continue;
+    // 最近一个带状态的用户消息：向前跳过接续失败轮次的链节，取链首
+    let anchor = index;
+    for (let prev = index - 1; prev >= 0; prev -= 1) {
+      const prevMessage = messages[prev];
+      if (!isUserInput(prevMessage)) continue;
+      const prevStatus = turnStatusOf(prevMessage);
+      if (prevStatus == null) continue;
+      if (prevStatus !== 'failed') break;
+      anchor = prev;
+    }
+    return anchor;
+  }
+  // 全部不带状态（旧数据）：每条都是锚点
+  return latestUser;
+}
+
 export function isCompact(message: Message): boolean {
   return message.meta?.compact === true;
 }

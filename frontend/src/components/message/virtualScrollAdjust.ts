@@ -47,6 +47,9 @@ export function shouldCompensateItemResize(input: ScrollAdjustInput): boolean {
   return input.itemStart + input.prevSize <= input.scrollOffset && !input.scrollingBackward;
 }
 
+/** 末条目下方允许的留白（列表底部内边距、滚动锚点等），超出视为尾部空白。 */
+const TRAILING_BLANK_TOLERANCE = 96;
+
 /** 视口内无任何条目（空白）时的恢复定位方向。 */
 export type BlankViewportRecovery =
   | { kind: 'none' }
@@ -60,20 +63,28 @@ export type BlankViewportRecovery =
  * 变化；若视口最终停在没有任何条目的区域（页面空白），按已渲染条目相对
  * 视口的位置恢复：全部在视口之上（滚过了内容末尾）或列表非空却没有任何
  * 已渲染条目 → 回到末尾；全部在视口之下 → 对齐到最靠上的已渲染条目。
- * 有条目与视口相交（含列表为空）时不处理。
+ * 末条目已渲染且其底部远高于视口底部（下方留出大片空白）、视口仍可向上
+ * 滚动时同样回到末尾，把空白收回。
+ * 有条目与视口相交且无尾部空白（含列表为空）时不处理。
  *
  * @param viewport 视口相对自身的可见区间（top/bottom，px）
  * @param items 已渲染条目的下标与相对视口顶部的区间
  * @param count 列表条目总数
+ * @param canScrollUp 视口是否还能向上滚动（scrollTop > 0）
  */
 export function blankViewportRecovery(
   viewport: { top: number; bottom: number },
   items: { index: number; top: number; bottom: number }[],
   count: number,
+  canScrollUp = false,
 ): BlankViewportRecovery {
   if (count === 0) return { kind: 'none' };
   if (items.length === 0) return { kind: 'end' };
   if (items.some((item) => item.bottom > viewport.top && item.top < viewport.bottom)) {
+    const last = items.find((item) => item.index === count - 1);
+    if (canScrollUp && last && viewport.bottom - last.bottom > TRAILING_BLANK_TOLERANCE) {
+      return { kind: 'end' };
+    }
     return { kind: 'none' };
   }
   if (items.every((item) => item.top >= viewport.bottom)) {

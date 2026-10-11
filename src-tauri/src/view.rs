@@ -117,7 +117,7 @@ fn approx_message_bytes(message: &tiangong_types::Message) -> usize {
 }
 
 /// 计算 `[.., end)` 这一段的起点：从 `end` 向前收集，至少 `min_messages` 条，
-/// 累计超过 `max_bytes` 后停止；起点总落在轮次锚点上（不拆开一轮），
+/// 累计超过 `max_bytes` 后停止；起点总落在起轮消息上（不拆开一轮），
 /// 找不到锚点时一直退到 0。
 pub fn page_start(
     messages: &[tiangong_types::Message],
@@ -126,17 +126,46 @@ pub fn page_start(
     max_bytes: usize,
 ) -> usize {
     let end = end.min(messages.len());
+    // 起点只落在起轮消息上：引导消息与其所属轮次同段，不拆开一次执行。
+    let anchors = turn_anchor_flags(messages);
     let mut bytes = 0usize;
     let mut index = end;
     while index > 0 {
         index -= 1;
         bytes += approx_message_bytes(&messages[index]);
         let enough = end - index >= min_messages || bytes >= max_bytes;
-        if enough && is_turn_anchor(&messages[index]) {
+        if enough && anchors[index] {
             return index;
         }
     }
     0
+}
+
+/// 每条消息是否为起轮用户消息（目录锚点），与前端 `turnAnchorIds` 同一规则。
+///
+/// 引导消息（执行中追加、或接续失败轮次的消息）不是锚点。按时序判定真人
+/// 用户消息：带轮次状态时，上一个带状态的用户消息为 `Failed` 则属失败轮次
+/// 的接续（历史数据按引导处理），否则是锚点；不带状态时，此前没有任何带
+/// 状态的用户消息（轮次状态出现前的旧数据）才是锚点。用户取消后的消息照常
+/// 起新轮。
+pub fn turn_anchor_flags(messages: &[tiangong_types::Message]) -> Vec<bool> {
+    let mut previous_status: Option<tiangong_types::TurnStatus> = None;
+    messages
+        .iter()
+        .map(|message| {
+            if !is_turn_anchor(message) {
+                return false;
+            }
+            match message.turn_status() {
+                None => previous_status.is_none(),
+                Some(status) => {
+                    let anchor = previous_status != Some(tiangong_types::TurnStatus::Failed);
+                    previous_status = Some(status);
+                    anchor
+                }
+            }
+        })
+        .collect()
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -147,15 +176,19 @@ fn truncate_chars(text: &str, max: usize) -> String {
     }
 }
 
-/// 完整的用户提问目录：每条用户提问及其后第一段非空文本作为回复预览
-/// （与前端刻度条预览卡的取值规则一致）。
+/// 完整的用户提问目录：每个起轮用户消息及其后第一段非空回复作为预览
+/// （与前端刻度条预览卡的取值规则一致）。引导消息不进目录，也不作为预览。
 pub fn user_outline(messages: &[tiangong_types::Message]) -> Vec<UserOutlineItem> {
+    let anchors = turn_anchor_flags(messages);
     let mut outline: Vec<UserOutlineItem> = Vec::new();
-    for message in messages {
+    for (message, is_anchor) in messages.iter().zip(anchors) {
         if message.user_source() == Some(tiangong_types::UserSource::CompressedResume) {
             continue;
         }
-        if is_turn_anchor(message) {
+        if is_turn_anchor(message) && !is_anchor {
+            continue;
+        }
+        if is_anchor {
             outline.push(UserOutlineItem {
                 id: message.id.clone(),
                 question: truncate_chars(&message.text_content(), OUTLINE_QUESTION_CHARS),
@@ -474,7 +507,7 @@ impl ModelsConfigView {
 #[cfg(test)]
 mod paging_tests {
     use super::*;
-    use tiangong_types::{Message, MessageRole, UserSource};
+    use tiangong_types::{Message, MessageRole, TurnStatus, UserSource};
 
     /// 构造 `turns` 轮对话：每轮 1 条用户提问 + `replies` 条助手/工具消息。
     fn conversation(turns: usize, replies: usize) -> Vec<Message> {
@@ -561,5 +594,52 @@ mod paging_tests {
         assert_eq!(outline[2].id, messages[messages.len() - 4].id);
         assert_eq!(outline[3].question.chars().count(), OUTLINE_QUESTION_CHARS);
         assert!(outline[3].answer.is_empty());
+    }
+
+    fn user_with_status(text: &str, status: Option<TurnStatus>) -> Message {
+        let mut message = Message::new(MessageRole::User, text);
+        if let Some(status) = status {
+            message.set_turn_result(10, status);
+        }
+        message
+    }
+
+    #[test]
+    fn guide_messages_and_failed_continuations_are_not_anchors() {
+        let messages = vec![
+            user_with_status("起轮一", Some(TurnStatus::Success)),
+            Message::new(MessageRole::Assistant, "回答一"),
+            // 执行中追加的引导消息
+            user_with_status("引导", None),
+            Message::new(MessageRole::Assistant, "回答一续"),
+            user_with_status("起轮二", Some(TurnStatus::Failed)),
+            Message::new(MessageRole::Assistant, "失败过程"),
+            // 失败后的新消息接续失败轮次（历史数据也按引导处理）
+            user_with_status("失败后再发", Some(TurnStatus::Cancelled)),
+            Message::new(MessageRole::Assistant, "接续过程"),
+            // 用户取消后的消息另起一轮
+            user_with_status("取消后再发", Some(TurnStatus::Success)),
+            Message::new(MessageRole::Assistant, "回答三"),
+        ];
+        assert_eq!(
+            turn_anchor_flags(&messages),
+            vec![true, false, false, false, true, false, false, false, true, false]
+        );
+        let outline = user_outline(&messages);
+        let questions: Vec<_> = outline.iter().map(|item| item.question.as_str()).collect();
+        assert_eq!(questions, vec!["起轮一", "起轮二", "取消后再发"]);
+        assert_eq!(outline[1].answer, "失败过程");
+        // 分页起点不会落在引导消息或接续消息上
+        assert_eq!(page_start(&messages, messages.len(), 3, usize::MAX), 4);
+        assert_eq!(page_start(&messages, 4, 1, usize::MAX), 0);
+    }
+
+    #[test]
+    fn legacy_messages_without_status_are_all_anchors() {
+        let messages = conversation(3, 1);
+        assert_eq!(
+            turn_anchor_flags(&messages),
+            vec![true, false, true, false, true, false]
+        );
     }
 }

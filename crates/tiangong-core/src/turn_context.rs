@@ -36,6 +36,10 @@ pub struct TurnContext {
     /// 未收尾的轮次），否则为 None，由首条用户消息起轮时设置。
     #[builder(default)]
     pub(crate) turn_id: Option<String>,
+    /// 接续的轮次此前已累计的执行时长（毫秒）。失败轮次被新消息接续时，本轮
+    /// 计时从该值起累计，最终写回起轮消息的是整轮（失败前 + 接续后）的总时长。
+    #[builder(default)]
+    pub(crate) resumed_elapsed_ms: u64,
     /// 模型请求客户端
     pub client: SingleProviderClient,
     /// 本轮会话（turn 期间独占,turn 结束时取回落盘）

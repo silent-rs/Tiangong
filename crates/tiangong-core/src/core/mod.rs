@@ -459,12 +459,20 @@ impl TiangongCore {
     /// 与系统提示重建、落盘一起在任务启动闭包内同步完成后再进入 Agent Loop。
     fn start_user_turn(&self, message: tiangong_types::Message) -> Result<(), CoreError> {
         let mut ctx = self.build_turn_context()?;
+        // 上一轮以失败收尾：新消息作为引导消息接续该轮（用户取消的轮次除外，
+        // 取消后的新消息另起一轮）。起轮消息改回 `Processing`，与新消息同次
+        // 落盘；执行时长从失败前已累计的时长继续累计。
+        let resumed_anchor = resume_failed_turn(&mut ctx);
         // 保存成功才确认（ALR-202）；失败向调用方返回明确错误，不虚报成功。
         ctx.try_append_prepared_user_message(message)
             .map_err(|error| {
                 tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
                 CoreError::WorkerStopped
             })?;
+        if let Some(anchor_id) = resumed_anchor {
+            // 起轮消息的状态已改回执行中：同步给界面（终态时间与状态随之刷新）。
+            crate::react::message::emit_session_message_upsert(&ctx, &anchor_id);
+        }
         let session_ready = self.session_ready.clone();
         let core = self.clone();
         crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
@@ -698,6 +706,32 @@ impl TiangongCore {
         crate::core::plugin::notify_session_ended(&self.plugin_instances());
         Ok(session)
     }
+}
+
+/// 上一轮以失败收尾时接续该轮：返回被接续的起轮消息 ID。
+///
+/// 最近一个带状态的起轮消息为 `Failed` 时，把它改回 `Processing`、清空最终
+/// 答复，并以它为本轮锚点（`turn_id`），之后追加的新消息即成为引导消息；
+/// 已累计的执行时长记入 `resumed_elapsed_ms`，收尾时累加。用户取消
+/// （`Cancelled`）或成功的轮次不接续。只修改内存中的会话，随新消息同次落盘。
+fn resume_failed_turn(ctx: &mut TurnContext) -> Option<String> {
+    if ctx.turn_id.is_some() {
+        return None;
+    }
+    let anchor = ctx
+        .session
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.turn_status().is_some())
+        .filter(|message| message.turn_status() == Some(tiangong_types::TurnStatus::Failed))?;
+    let elapsed_ms = anchor.elapsed_ms().unwrap_or(0);
+    anchor.set_turn_status(tiangong_types::TurnStatus::Processing);
+    anchor.set_final_reply(None);
+    let anchor_id = anchor.id.clone();
+    ctx.turn_id = Some(anchor_id.clone());
+    ctx.resumed_elapsed_ms = elapsed_ms;
+    Some(anchor_id)
 }
 
 impl crate::agent_input::AgentInput for TiangongCore {

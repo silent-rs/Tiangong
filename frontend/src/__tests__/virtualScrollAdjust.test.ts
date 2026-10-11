@@ -68,4 +68,14 @@ describe('空白视口恢复判定', () => {
     expect(blankViewportRecovery(viewport, [], 6)).toEqual({ kind: 'end' });
     expect(blankViewportRecovery(viewport, [], 0)).toEqual({ kind: 'none' });
   });
+  it('末条目底部远高于视口底部（尾部大片空白）且可向上滚动时回到末尾', () => {
+    // 截图场景：回复底部操作栏之下是半屏空白
+    expect(blankViewportRecovery(viewport, [{ index: 4, top: -900, bottom: 300 }], 5, true)).toEqual({ kind: 'end' });
+    // 已在顶部（内容不足一屏）不处理
+    expect(blankViewportRecovery(viewport, [{ index: 4, top: 0, bottom: 300 }], 5, false)).toEqual({ kind: 'none' });
+    // 末条目下方仅底部内边距的少量留白不处理
+    expect(blankViewportRecovery(viewport, [{ index: 4, top: -900, bottom: 560 }], 5, true)).toEqual({ kind: 'none' });
+    // 非末条目不判定尾部空白
+    expect(blankViewportRecovery(viewport, [{ index: 3, top: -900, bottom: 300 }], 5, true)).toEqual({ kind: 'none' });
+  });
 });

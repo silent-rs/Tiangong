@@ -941,6 +941,122 @@ async fn llm_failure_propagates_failed_status() {
     core.shutdown_join().expect("关闭失败");
 }
 
+/// 上一轮失败后的新消息作为引导消息接续失败轮次：起轮消息改回执行中并以
+/// 本次结果收尾，执行时长在失败前的基础上累计；新消息不承载状态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn message_after_failure_resumes_failed_turn() {
+    let (env, sid) = TestEnv::new("failed-resume");
+    let server = MockServer::builder().start().await;
+    let routes = mount_prompt_router(
+        &server,
+        vec![
+            PromptRoute::new(
+                "resumed",
+                latest_user_contains("AFTER-FAILURE"),
+                MockReply::sse(stream_text_chunks(&["接续", "完成。"])),
+            ),
+            PromptRoute::new(
+                "forced-failure",
+                latest_user_contains("FORCE-LLM-FAILURE"),
+                MockReply::error(400, "integration test force fail"),
+            ),
+        ],
+    )
+    .await;
+    let (core, mut events) = core_for(&env, &sid, &server.uri());
+    send_message(&core, "msg-1", "FORCE-LLM-FAILURE");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-1").await,
+        TurnStatus::Failed
+    );
+    wait_idle(&sid).await;
+    events.wait_error_containing("fail");
+    // 失败轮次已记录的时长放大，验证接续后累计而非重新计时。
+    let mut session = env.load_session(&sid);
+    session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == "msg-1")
+        .unwrap()
+        .set_turn_result(60_000, TurnStatus::Failed);
+    session.try_persist_to_disk().unwrap();
+
+    send_message(&core, "msg-2", "AFTER-FAILURE 继续");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-1").await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    events.wait_done();
+    let session = env.load_session(&sid);
+    let origin = session
+        .messages
+        .iter()
+        .find(|message| message.id == "msg-1")
+        .unwrap();
+    assert!(
+        origin.elapsed_ms().unwrap() >= 60_000,
+        "执行时长应在失败前的基础上累计"
+    );
+    let next = session
+        .messages
+        .iter()
+        .find(|message| message.id == "msg-2")
+        .expect("新消息应已保存");
+    assert_eq!(next.turn_status(), None, "接续消息是引导消息，不承载状态");
+    routes["resumed"].assert_hits(1);
+    core.shutdown_join().expect("关闭失败");
+}
+
+/// 用户取消后的新消息另起一轮，不接续被取消的轮次。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn message_after_cancel_starts_new_turn() {
+    let (env, sid) = TestEnv::new("cancel-new-turn");
+    let server = MockServer::builder().start().await;
+    let routes = mount_prompt_router(
+        &server,
+        vec![
+            PromptRoute::new(
+                "after-cancel",
+                latest_user_contains("AFTER-CANCEL"),
+                MockReply::sse(stream_text_chunks(&["新一轮", "完成。"])),
+            ),
+            PromptRoute::new(
+                "cancel-slow",
+                latest_user_contains("CANCEL-SLOW"),
+                MockReply::delayed_sse(stream_text_chunks(&["长任务"]), Duration::from_secs(3)),
+            ),
+        ],
+    )
+    .await;
+    let (core, mut events) = core_for(&env, &sid, &server.uri());
+    send_message(&core, "msg-1", "CANCEL-SLOW 开始一个长任务");
+    wait_requests(&server, 1).await;
+    core.deliver(AgentInputKind::cancel())
+        .expect("取消投递应成功");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-1").await,
+        TurnStatus::Cancelled
+    );
+    wait_idle(&sid).await;
+    events.wait_cancelled();
+    send_message(&core, "msg-2", "AFTER-CANCEL 新任务");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-2").await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    let session = env.load_session(&sid);
+    let origin = session
+        .messages
+        .iter()
+        .find(|message| message.id == "msg-1")
+        .unwrap();
+    assert_eq!(origin.turn_status(), Some(TurnStatus::Cancelled));
+    routes["after-cancel"].assert_hits(1);
+    core.shutdown_join().expect("关闭失败");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn next_turn_reads_latest_session() {
     let (env, sid) = TestEnv::new("next-latest");

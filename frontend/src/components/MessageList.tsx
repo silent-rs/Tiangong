@@ -15,7 +15,7 @@ import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
 import { isRemoteHost, listen } from '@/api/host';
 import { hasMediaBlocks, textContent, type ContentBlock, type Message } from "@/api/tauri";
-import { elapsedMsOf, finalReplyOf, isCompact, messageKind, turnStatusOf } from "@/api/message";
+import { elapsedMsOf, finalReplyOf, isCompact, messageKind, turnAnchorIds, turnStatusOf } from "@/api/message";
 import {
   type Attachment,
   attachmentKindFromMime,
@@ -236,32 +236,59 @@ export function MessageList() {
     return { completedGroups: filteredGroups, streamingGroup: null };
   }, [filteredGroups, streamingMessageId]);
 
-  // 提取用户消息分组的索引列表，用于"滚动到上一条/下一条用户提问"
+  // 轮次锚点：只有发起执行的用户消息（起轮消息）是锚点；引导消息（执行中
+  // 追加、或接续失败轮次的消息）不是。右侧刻度条、上下跳转与完成后的定位
+  // 都以锚点为准（规则见 turnAnchorIds，与后端目录一致）。
+  const turnAnchors = useMemo(() => turnAnchorIds(messages), [messages]);
+
+  // 起轮消息分组的索引列表，用于"滚动到上一条/下一条用户提问"
   const userGroupIndices = useMemo(() => {
     const indices: number[] = [];
     completedGroups.forEach((g, i) => {
-      if (g.type === 'user') indices.push(i);
+      if (g.type === 'user' && g.messages[0] && turnAnchors.has(g.messages[0].id)) indices.push(i);
     });
     return indices;
-  }, [completedGroups]);
+  }, [completedGroups, turnAnchors]);
 
-  // 每轮 agent_turn 的终态（总时长 + 最终状态）：取该轮起轮用户消息（前置
-  // 最近一个带 turn_status 的 user 组；引导消息不带状态，沿用所属轮次）的
-  // elapsed_ms/turn_status；回复底部与轮次末尾状态行据此展示。
+  // 每轮 agent_turn 的终态（总时长 + 最终状态）：同一次执行（起轮消息及其
+  // 引导消息、失败后接续的消息）共用一个结果——状态取链上最后一个带状态的
+  // 用户消息，时长累加链上各段（历史数据里失败轮次与其接续分别记录了时长），
+  // 最终答复取最后写入的一条。回复底部与轮次末尾状态行据此展示。
   const turnResultByGroupKey = useMemo(() => {
-    const map = new Map<string, TurnResult>();
-    let current: TurnResult | undefined;
+    const chainOfGroup: number[] = [];
+    const chains: TurnResult[] = [];
+    let chain = -1;
     for (const group of filteredGroups) {
       if (group.type === 'user') {
         const msg = group.messages[0];
         const result = msg ? turnResultOf(msg) : undefined;
-        if (result) current = result;
-      } else if (group.type === 'agent_turn') {
-        map.set(group.key, current ?? {});
+        if (msg && turnAnchors.has(msg.id)) {
+          chains.push({ ...(result ?? {}) });
+          chain = chains.length - 1;
+        } else if (result && chain >= 0) {
+          const current = chains[chain];
+          chains[chain] = {
+            status: result.status ?? current.status,
+            elapsedMs: result.elapsedMs != null
+              ? (current.elapsedMs ?? 0) + result.elapsedMs
+              : current.elapsedMs,
+            finalReplyId: result.finalReplyId ?? current.finalReplyId,
+          };
+        } else if (result) {
+          chains.push({ ...result });
+          chain = chains.length - 1;
+        }
       }
+      chainOfGroup.push(chain);
     }
+    const map = new Map<string, TurnResult>();
+    filteredGroups.forEach((group, index) => {
+      if (group.type !== 'agent_turn') return;
+      const chainIndex = chainOfGroup[index];
+      map.set(group.key, chainIndex >= 0 ? chains[chainIndex] : {});
+    });
     return map;
-  }, [filteredGroups]);
+  }, [filteredGroups, turnAnchors]);
 
   // 当前执行链的起始组下标：引导消息注入不结束轮次，执行中发送的引导
   // 消息与先前过程同属一次执行。执行期间该链上的 agent_turn 全部保持
@@ -272,16 +299,11 @@ export function MessageList() {
     [isThinking, completedGroups],
   );
 
-  // 流式轮的终态：本轮起轮用户消息（最近一个带 turn_status 的用户消息）的
-  // elapsed_ms/turn_status。
-  const streamingTurnResult = useMemo(() => {
-    if (!streamingGroup) return undefined;
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const result = turnResultOf(messages[i]);
-      if (result) return result;
-    }
-    return undefined;
-  }, [streamingGroup, messages]);
+  // 流式轮的终态：与其所属执行链共用（见 turnResultByGroupKey）。
+  const streamingTurnResult = useMemo(
+    () => (streamingGroup ? turnResultByGroupKey.get(streamingGroup.key) : undefined),
+    [streamingGroup, turnResultByGroupKey],
+  );
 
   // 计算 compact 边界
   const nonEditableIds = useMemo(() => {
@@ -570,21 +592,111 @@ export function MessageList() {
     };
   }, [messages.length, lastMessageId, streamingMessageId, completedGroups.length, streamingGroup, runStatus, activeSessionId]);
 
-  // 空白视口兜底：轮次结束（运行态回 idle）后的数帧内总高与条目位置剧烈
-  // 变化（流式区并回列表、过程收缩、库按估算补偿/补滚），视口可能停在没有
-  // 任何条目的区域，表现为消息页空白。结束后按帧检查约 1 秒，一旦落入空白
-  // 即按条目位置重新定位（见 blankViewportRecovery）。
-  const prevIdleRef = useRef(runStatus === 'idle');
+  // 执行完成后的定位：以本次执行发起的用户消息为锚点。
+  // 执行链内的轮次在运行态回 idle 时一次性收缩过程（含引导消息前的轮次），
+  // 总高在数帧内大幅缩短；若在收缩、测量尚未稳定时就定位（或任由库按旧
+  // 尺寸补偿），视口会落到内容之外的空白区。锚点用户消息位于全部收缩
+  // 内容之上，位置不受收缩影响，因此：
+  // 1. 执行期间持续记录锚点相对视口的偏移与是否贴底（收缩前的状态）；
+  // 2. 完成后先等收缩完成、条目尺寸稳定（按 DOM 实际尺寸校正缓存）；
+  // 3. 再按锚点定位：原先贴底 → 回到底部；锚点原在视口内 → 保持原偏移；
+  //    锚点原在视口之上（正在阅读本次执行的内容）→ 锚点对齐视口顶部。
+  // 定位后的剩余时间仍检查空白视口作为兜底（见 blankViewportRecovery）。
+  const liveRunAnchorKeyRef = useRef<string | null>(null);
+  const runAnchorRef = useRef<{ sessionId: string | null; key: string; offset: number; atBottom: boolean } | null>(null);
+  if (isThinking) {
+    // 锚点是本次执行的起轮消息：执行链起点及其之前最近的起轮消息（接续
+    // 失败轮次的历史数据里，链起点可能是接续消息）；执行链尚未建立（状态
+    // 字段尚未下发）时取最后一条起轮消息。
+    let anchorGroup: number | undefined;
+    for (const index of userGroupIndices) {
+      if (index <= liveRunStart) anchorGroup = index;
+      else break;
+    }
+    const key = anchorGroup !== undefined ? completedGroups[anchorGroup]?.key : undefined;
+    if (key) liveRunAnchorKeyRef.current = key;
+  }
+  const captureRunAnchor = useCallback(() => {
+    const el = viewportRef.current;
+    const key = liveRunAnchorKeyRef.current;
+    if (!el || !key) return;
+    const index = completedGroupsRef.current.findIndex((group) => group.key === key);
+    const start = index >= 0 ? virtualizer.measurementsCache[index]?.start : undefined;
+    if (start === undefined) return;
+    runAnchorRef.current = {
+      sessionId: activeSessionId,
+      key,
+      offset: start - el.scrollTop,
+      atBottom: isAtBottomRef.current,
+    };
+  }, [virtualizer, activeSessionId]);
+  // 执行期间每次提交后记录（收缩发生在运行态回 idle 的那次提交，届时不再记录）
+  useLayoutEffect(() => {
+    if (isThinking) captureRunAnchor();
+  });
+  // 执行期间滚动时同步记录，保证完成瞬间的锚点是最新的
   useEffect(() => {
+    const el = viewportRef.current;
+    if (!el || !isThinking) return;
+    // 收缩引起的滚动事件可能在清理前到达，此时运行态已回 idle，不再记录
+    const onScroll = () => {
+      if (useStore.getState().runStatus !== 'idle') captureRunAnchor();
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [isThinking, captureRunAnchor]);
+
+  const prevIdleRef = useRef(runStatus === 'idle');
+  useLayoutEffect(() => {
     const becameIdle = runStatus === 'idle' && !prevIdleRef.current;
     prevIdleRef.current = runStatus === 'idle';
     if (!becameIdle) return;
+    // 切换会话导致的运行态变化不属于本会话的执行完成，锚点作废
+    const anchor = runAnchorRef.current?.sessionId === activeSessionId ? runAnchorRef.current : null;
+    runAnchorRef.current = null;
+    liveRunAnchorKeyRef.current = null;
     const el = viewportRef.current;
     if (!el) return;
     let rafId = 0;
     let timer = 0;
-    const deadline = performance.now() + 1000;
+    let positioned = false;
+    let lastSignature = '';
+    let stableFrames = 0;
+    const startedAt = performance.now();
+    const settleDeadline = startedAt + 800;
+    const deadline = startedAt + 1500;
+    // 用户在稳定前主动滚动：交还控制权，不再定位，仅保留空白兜底
+    const onUserScroll = () => { positioned = true; };
+    el.addEventListener('wheel', onUserScroll, { passive: true });
+    el.addEventListener('touchstart', onUserScroll, { passive: true });
+    el.addEventListener('keydown', onUserScroll);
+    // 以 DOM 实际尺寸校正已渲染条目的缓存（收缩后的尺寸），避免沿用旧尺寸撑大总高
+    const syncRenderedSizes = () => {
+      el.querySelectorAll<HTMLElement>('[data-index]').forEach((node) => {
+        const index = Number(node.dataset.index);
+        if (Number.isNaN(index)) return;
+        virtualizer.resizeItem(index, Math.round(node.getBoundingClientRect().height));
+      });
+    };
+    const positionByAnchor = () => {
+      positioned = true;
+      if (!anchor) return;
+      if (anchor.atBottom) {
+        el.scrollTop = el.scrollHeight;
+        isAtBottomRef.current = true;
+        return;
+      }
+      const index = completedGroupsRef.current.findIndex((group) => group.key === anchor.key);
+      const start = index >= 0 ? virtualizer.measurementsCache[index]?.start : undefined;
+      if (start === undefined) return;
+      if (anchor.offset < 0) {
+        virtualizer.scrollToIndex(index, { align: 'start', behavior: 'auto' });
+      } else {
+        el.scrollTop = start - anchor.offset;
+      }
+    };
     const check = () => {
+      syncRenderedSizes();
       const viewportRect = el.getBoundingClientRect();
       const items = Array.from(el.querySelectorAll<HTMLElement>('[data-index]')).map((node) => {
         const rect = node.getBoundingClientRect();
@@ -598,6 +710,7 @@ export function MessageList() {
         { top: 0, bottom: el.clientHeight },
         items,
         completedGroupsRef.current.length,
+        el.scrollTop > 0,
       );
       if (recovery.kind === 'end') {
         el.scrollTop = el.scrollHeight;
@@ -606,17 +719,35 @@ export function MessageList() {
       }
     };
     const loop = () => {
-      check();
+      if (!positioned) {
+        // 先等收缩完成：总高与滚动高度连续两帧不变才定位
+        syncRenderedSizes();
+        const signature = `${virtualizer.getTotalSize()}:${el.scrollHeight}`;
+        stableFrames = signature === lastSignature ? stableFrames + 1 : 0;
+        lastSignature = signature;
+        if (stableFrames >= 2 || performance.now() >= settleDeadline) positionByAnchor();
+      } else {
+        check();
+      }
       if (performance.now() < deadline) rafId = requestAnimationFrame(loop);
     };
     rafId = requestAnimationFrame(loop);
-    // 窗口在后台时 rAF 暂停，回到前台的首帧仍会检查；另以定时器兜底一次
-    timer = window.setTimeout(check, 1000);
+    // 窗口在后台时 rAF 暂停；以定时器兜底完成定位与空白检查
+    timer = window.setTimeout(() => {
+      if (!positioned) {
+        syncRenderedSizes();
+        positionByAnchor();
+      }
+      check();
+    }, 1200);
     return () => {
       cancelAnimationFrame(rafId);
       window.clearTimeout(timer);
+      el.removeEventListener('wheel', onUserScroll);
+      el.removeEventListener('touchstart', onUserScroll);
+      el.removeEventListener('keydown', onUserScroll);
     };
-  }, [runStatus, virtualizer]);
+  }, [runStatus, activeSessionId, virtualizer]);
 
   // 头部前插更早历史后保持阅读位置：原视口顶部分组仍停在原来的位置。
   const prevFirstGroupKeyRef = useRef<string | undefined>(undefined);
@@ -944,7 +1075,12 @@ export function MessageList() {
     const fromGroup = (groupIndex: number) => {
       let answer = '';
       for (let j = groupIndex + 1; j < completedGroups.length; j++) {
-        if (completedGroups[j].type === 'user') break;
+        // 引导消息属于本轮，跳过继续找回复；遇到下一个起轮消息才停止
+        if (completedGroups[j].type === 'user') {
+          const first = completedGroups[j].messages[0];
+          if (first && turnAnchors.has(first.id)) break;
+          continue;
+        }
         const text = completedGroups[j].messages.map(m => textContent(m)).join('\n').trim();
         if (text) { answer = text; break; }
       }
@@ -967,7 +1103,7 @@ export function MessageList() {
       if (groupIndex !== undefined) return { pos, ...fromGroup(groupIndex) };
       return { pos, id: item.id, groupIndex: -1, question: describe(item.question), answer: item.answer };
     });
-  }, [userOutline, userGroupIndices, completedGroups]);
+  }, [userOutline, userGroupIndices, completedGroups, turnAnchors]);
 
   // 已加载的第一个回合在完整目录中的序号（未加载的更早回合数）。
   const firstLoadedTurnPos = useMemo(
