@@ -485,12 +485,12 @@ pub struct OpenAppResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<crate::Bounds>,
     pub summary: String,
-    /// 自动分屏结果（天工窗口靠左、目标窗口占右侧）；平台不支持时为 None。
+    /// 自动分屏结果（目标窗口占左侧、天工窗口靠右）；平台不支持时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SplitOutcome>,
 }
 
-// ── 自动分屏：天工窗口靠左固定宽度，被操作应用占右侧剩余区域 ─────────
+// ── 自动分屏：被操作应用占左侧剩余区域，天工窗口靠右固定宽度 ─────────
 
 /// 分屏时天工窗口的宽度（逻辑单位：macOS points，Windows 按显示器 DPI 换算）。
 pub const SPLIT_HOST_WIDTH: f64 = 400.0;
@@ -567,8 +567,8 @@ impl ComputerUseOperation for RestoreHostWindow {
 
 /// 按工作区与宿主窗口宽度计算分屏布局：返回（天工窗口, 目标窗口）。
 ///
-/// 工作区宽度不足以同时容纳天工窗口与可用的右侧区域（至少与天工等宽）
-/// 时返回 None，调用方跳过分屏。
+/// 目标窗口占左侧剩余区域，天工窗口贴右边缘。工作区宽度不足以同时容纳
+/// 天工窗口与可用的左侧区域（至少与天工等宽）时返回 None，调用方跳过分屏。
 pub fn split_layout(
     work_area: crate::Bounds,
     host_width: f64,
@@ -576,16 +576,17 @@ pub fn split_layout(
     if host_width <= 0.0 || work_area.height <= 0.0 || work_area.width < host_width * 2.0 {
         return None;
     }
-    let host = crate::Bounds {
+    let target_width = work_area.width - host_width;
+    let target = crate::Bounds {
         x: work_area.x,
         y: work_area.y,
-        width: host_width,
+        width: target_width,
         height: work_area.height,
     };
-    let target = crate::Bounds {
-        x: work_area.x + host_width,
+    let host = crate::Bounds {
+        x: work_area.x + target_width,
         y: work_area.y,
-        width: work_area.width - host_width,
+        width: host_width,
         height: work_area.height,
     };
     Some((host, target))

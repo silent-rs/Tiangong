@@ -823,7 +823,7 @@ impl Backend for WindowsBackend {
 
     async fn open_app(&self, req: &OpenAppRequest) -> DesktopResult<OpenAppResponse> {
         let mut result = super::win_desktop::open_app(req).await;
-        // 应用窗口出现后自动分屏：天工靠左、目标占右侧。
+        // 应用窗口出现后自动分屏：目标占左侧、天工靠右。
         if let DesktopResult::Ok(resp) = &mut result
             && resp.window.is_some()
             && let Some(window) = super::win_desktop::find_app_window(Some(resp.pid), None)

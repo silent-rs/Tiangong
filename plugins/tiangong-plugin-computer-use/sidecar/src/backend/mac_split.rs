@@ -1,4 +1,4 @@
-//! macOS 自动分屏：天工窗口靠左固定宽度，目标应用窗口铺满右侧（AX 设置 frame）。
+//! macOS 自动分屏：目标应用窗口铺满左侧，天工窗口靠右固定宽度（AX 设置 frame）。
 //!
 //! 系统 Split View / 窗口平铺没有公开 API 且只支持固定比例，这里直接用
 //! `AXPosition` / `AXSize` 摆放两个窗口，坐标均为 AX 全局坐标（主屏左上
@@ -149,10 +149,10 @@ pub async fn split_with_host(target_pid: i32) -> SplitOutcome {
     let host_ok = close_to(host_actual, host_frame);
     let target_ok = target_actual.is_some_and(|actual| close_to(actual, target_frame));
     let detail = match (&target_result, host_ok && target_ok) {
-        (Err(reason), _) => format!("天工已移到左侧，但目标窗口{reason}"),
-        (Ok(_), true) => "已分屏：天工在左侧，目标应用在右侧".to_string(),
+        (Err(reason), _) => format!("天工已移到右侧，但目标窗口{reason}"),
+        (Ok(_), true) => "已分屏：目标应用在左侧，天工在右侧".to_string(),
         (Ok(_), false) => {
-            "已分屏，但目标应用限制了窗口尺寸，已移到右侧区域并保持其尺寸".to_string()
+            "已分屏，但目标应用限制了窗口尺寸，已移到左侧区域并保持其尺寸".to_string()
         }
     };
     SplitOutcome {
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn close_to_allows_small_alignment_drift() {
         let expected = Bounds {
-            x: 400.0,
+            x: 0.0,
             y: 25.0,
             width: 1112.0,
             height: 920.0,

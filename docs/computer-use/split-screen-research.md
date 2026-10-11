@@ -1,7 +1,7 @@
 # Computer Use 自动分屏：调研与实现
 
 - 分支：`feature/computer-use-split-screen`（基于 `origin/main` 5aeb5159）
-- 目标：执行 computer use 打开应用时，天工窗口固定在屏幕左侧、宽 400；被操作的应用铺满右侧剩余区域，方便同时看会话和操作过程。
+- 目标：执行 computer use 打开应用时，被操作的应用铺满屏幕左侧剩余区域；天工窗口固定在屏幕右侧、宽 400，方便同时看会话和操作过程（0.4.2 起由「天工左、应用右」调整为「应用左、天工右」）。
 - 状态：macOS / Windows 已实现（第 4 节），Linux 不在范围内。验证情况见第 6 节。
 
 ## 1. 结论速览
@@ -123,7 +123,7 @@ computer-use 插件在 `plugins/tiangong-plugin-computer-use/`，sidecar 为独�
 
 ## 5. 已知限制
 
-- 窗口不可缩放（如计算器）时，只移动到右侧区域左上角、保持原尺寸，summary 说明原因；有最小尺寸时按实际读回位置返回。
+- 窗口不可缩放（如计算器）时，只移动到左侧区域左上角、保持原尺寸，summary 说明原因；有最小尺寸时按实际读回位置返回。
 - Windows 目标以管理员身份运行时 `SetWindowPos` 会失败（UIPI），summary 说明原因。
 - 分屏状态保存在 sidecar 进程内存中：天工或 sidecar 重启后按钮不再出现，窗口保持当前位置。
 - 天工前端在 400px 宽度下的布局需要单独检查。

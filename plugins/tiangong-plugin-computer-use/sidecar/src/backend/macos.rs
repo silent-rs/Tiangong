@@ -813,7 +813,7 @@ impl Backend for MacosBackend {
         req: &tiangong_plugin_computer_use_protocol::ops::OpenAppRequest,
     ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ops::OpenAppResponse> {
         let mut result = super::app_launch::open_app(req).await;
-        // 应用窗口出现后自动分屏：天工靠左、目标占右侧。
+        // 应用窗口出现后自动分屏：目标占左侧、天工靠右。
         if let DesktopResult::Ok(resp) = &mut result
             && resp.window.is_some()
             && let Ok(pid) = i32::try_from(resp.pid)

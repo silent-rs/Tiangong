@@ -308,7 +308,7 @@ mod tests {
     use crate::ops::*;
 
     #[test]
-    fn split_layout_places_host_left_and_target_right() {
+    fn split_layout_places_target_left_and_host_right() {
         let work = Bounds {
             x: 0.0,
             y: 25.0,
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(
             host,
             Bounds {
-                x: 0.0,
+                x: 1112.0,
                 y: 25.0,
                 width: 400.0,
                 height: 920.0
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(
             target,
             Bounds {
-                x: 400.0,
+                x: 0.0,
                 y: 25.0,
                 width: 1112.0,
                 height: 920.0
@@ -345,8 +345,8 @@ mod tests {
             height: 1040.0,
         };
         let (host, target) = split_layout(work, 400.0).unwrap();
-        assert_eq!(host.x, -1920.0);
-        assert_eq!(target.x, -1520.0);
+        assert_eq!(target.x, -1920.0);
+        assert_eq!(host.x, -400.0);
         assert_eq!(target.width, 1520.0);
     }
 

@@ -1,4 +1,4 @@
-//! Windows 自动分屏：天工窗口靠左固定宽度，目标应用窗口铺满右侧（SetWindowPos）。
+//! Windows 自动分屏：目标应用窗口铺满左侧，天工窗口靠右固定宽度（SetWindowPos）。
 //!
 //! 坐标为虚拟桌面物理像素（进程 Per-Monitor-V2 DPI 感知）。「400」按逻辑
 //! 像素处理，乘以天工窗口所在显示器的缩放比例。Win10/11 窗口带透明的
@@ -165,8 +165,8 @@ pub(crate) fn split_with_host(target_hwnd: HWND, target_pid: u32) -> SplitOutcom
     let all_ok = close_to(host_actual, host_frame)
         && target_actual.is_some_and(|actual| close_to(actual, target_frame));
     let detail = match (&target_result, all_ok) {
-        (Err(reason), _) => format!("天工已移到左侧，但目标窗口{reason}"),
-        (Ok(_), true) => "已分屏：天工在左侧，目标应用在右侧".to_string(),
+        (Err(reason), _) => format!("天工已移到右侧，但目标窗口{reason}"),
+        (Ok(_), true) => "已分屏：目标应用在左侧，天工在右侧".to_string(),
         (Ok(_), false) => "已分屏，但应用限制了窗口尺寸，实际位置与目标略有差异".to_string(),
     };
     SplitOutcome {
