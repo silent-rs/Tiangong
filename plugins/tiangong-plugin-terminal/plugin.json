@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terminal",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "entrypoints": [
     "desktop"
   ],
@@ -94,6 +94,10 @@
             "type": "integer",
             "description": "发送后等待秒数，默认 3",
             "minimum": 1
+          },
+          "enter": {
+            "type": "boolean",
+            "description": "是否在输入后自动补发回车执行，默认 false。执行 shell/SSH 命令时设为 true（input 末尾无需再带 \\r 或 \\n）；向 vi 等编辑器写入纯文本或发送控制按键时保持 false，原样写入"
           }
         },
         "required": [
@@ -145,7 +149,7 @@
     }
   ],
   "prompt": [
-    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，关闭该终端时用 terminal_close 并传 terminal_id。仅主动打开空终端时使用 terminal_open。需要了解终端现状（有哪些终端、忙闲、是否可复用）或回看某终端最近输出时用 terminal_status。长命令只在有明确时间边界时设置 timeout（秒）。Windows 默认使用 PowerShell，run_shell 应使用 PowerShell 语法；CMD 脚本可用 run_command 调用 cmd.exe，并传入 /d、/c 和脚本参数。显式选择其他 Shell 时以实际终端为准。"
+    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，需要执行命令（包括 SSH 远端命令）时设 enter=true 由插件单独补发回车，向 vi 等编辑器写入纯文本或发送控制按键时不设 enter；关闭该终端时用 terminal_close 并传 terminal_id。仅主动打开空终端时使用 terminal_open。需要了解终端现状（有哪些终端、忙闲、是否可复用）或回看某终端最近输出时用 terminal_status。长命令只在有明确时间边界时设置 timeout（秒）。Windows 默认使用 PowerShell，run_shell 应使用 PowerShell 语法；CMD 脚本可用 run_command 调用 cmd.exe，并传入 /d、/c 和脚本参数。显式选择其他 Shell 时以实际终端为准。"
   ],
   "ui": {
     "sandbox": "shadow",

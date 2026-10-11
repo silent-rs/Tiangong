@@ -40,6 +40,9 @@ const OUTPUT_FLUSH_INTERVAL_MS: u64 = 16;
 const HISTORY_LIMIT_BYTES: usize = 128 * 1024;
 /// 轮询 PTY 输出的间隔。
 const COMMAND_POLL_INTERVAL_MS: u64 = 50;
+/// terminal_send 自动回车：正文写入后、单独补发回车前的间隔。SSH 等远端
+/// 行编辑器在正文与回车同包到达时偶发吞掉回车，分开写入可稳定触发执行。
+const SEND_ENTER_DELAY_MS: u64 = 80;
 /// 登录 shell 清理残留输入并确认重新接管终端的最长等待时间。
 const SHELL_READY_TIMEOUT_SECS: u64 = 3;
 /// 最后一个 PTY 会话结束后保留短暂窗口，让关闭响应完成并容纳紧邻的新建请求。
@@ -472,6 +475,10 @@ struct SendRequest {
     input: String,
     #[serde(default)]
     wait: Option<u64>,
+    /// 为 true 时去掉输入末尾的换行，正文写入后单独补发一次回车（`\r`）；
+    /// 缺省 false 原样写入，供 vi 等编辑场景保留纯文本。
+    #[serde(default)]
+    enter: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1287,7 +1294,12 @@ impl TerminalService {
     }
 
     async fn send_to_session(&self, request: SendRequest) -> Result<SendResponse> {
-        let data = decode_terminal_escapes(&request.input);
+        let decoded = decode_terminal_escapes(&request.input);
+        let data = if request.enter {
+            strip_trailing_line_ending(&decoded)
+        } else {
+            decoded.as_str()
+        };
         let (session_id, start_offset, baseline_updates) = {
             let mut sessions = self.sessions.lock().expect("会话表锁损坏");
             let selected = sessions
@@ -1305,6 +1317,18 @@ impl TerminalService {
             session.writer.flush().context("刷新交互输入失败")?;
             (selected, start_offset, baseline_updates)
         };
+        if request.enter {
+            if !data.is_empty() {
+                tokio::time::sleep(Duration::from_millis(SEND_ENTER_DELAY_MS)).await;
+            }
+            self.with_session(&session_id, |session| {
+                if session.scope_id.as_deref() != Some(request.scope_id.as_str()) {
+                    anyhow::bail!("目标终端不存在或不属于当前会话");
+                }
+                session.writer.write_all(b"\r").context("写入回车失败")?;
+                session.writer.flush().context("刷新回车失败")
+            })?;
+        }
 
         let deadline = Instant::now() + Duration::from_secs(request.wait.unwrap_or(3).max(1));
         let stable_window = Duration::from_millis(300);
@@ -2484,6 +2508,15 @@ fn decode_terminal_escapes(input: &str) -> String {
     output
 }
 
+/// 去掉末尾一个行结束符（`\r\n`、`\n` 或 `\r`），避免与自动回车叠加成两次执行。
+fn strip_trailing_line_ending(input: &str) -> &str {
+    input
+        .strip_suffix("\r\n")
+        .or_else(|| input.strip_suffix('\n'))
+        .or_else(|| input.strip_suffix('\r'))
+        .unwrap_or(input)
+}
+
 fn visible_text_from_raw(raw: &[u8]) -> String {
     let mut processor = persist::TerminalLineProcessor::new();
     let mut lines = processor.process(&String::from_utf8_lossy(raw));
@@ -2790,6 +2823,8 @@ struct TerminalSendArgs {
     terminal_id: String,
     #[serde(default)]
     wait: Option<u64>,
+    #[serde(default)]
+    enter: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3135,6 +3170,7 @@ impl TerminalService {
                 session_id: target,
                 input: parsed.input,
                 wait: parsed.wait,
+                enter: parsed.enter,
             })
             .await;
         match sent {
@@ -4853,6 +4889,121 @@ mod tests {
             "回显应包含发送的命令输出: {}",
             sent["stdout"]
         );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[test]
+    fn 自动回车只去掉末尾一个换行() {
+        assert_eq!(strip_trailing_line_ending("ls -la"), "ls -la");
+        assert_eq!(strip_trailing_line_ending("ls\n"), "ls");
+        assert_eq!(strip_trailing_line_ending("ls\r"), "ls");
+        assert_eq!(strip_trailing_line_ending("ls\r\n"), "ls");
+        assert_eq!(strip_trailing_line_ending("a\n\n"), "a\n");
+        assert_eq!(strip_trailing_line_ending(""), "");
+    }
+
+    /// enter=true 单独补发回车让命令执行；缺省原样写入，不额外追加回车，
+    /// 保证 vi 插入模式等纯文本场景不被注入换行。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_send_自动回车执行且缺省保持纯文本() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        let first = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["ready"]}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(first["ok"], true);
+        let terminal = first["summary"]
+            .as_str()
+            .and_then(|summary| {
+                summary
+                    .split("终端 ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('（').next())
+            })
+            .expect("summary 应含终端编号")
+            .to_string();
+
+        // 缺省：原样写入，不补回车——命令停留在输入行，不会执行。
+        let typed = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_send",
+                    serde_json::json!({
+                        "terminal_id": terminal,
+                        "input": "echo plain-$((40+2))",
+                        "wait": 1,
+                    }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(typed["ok"], true, "terminal_send 结果: {typed}");
+        assert!(
+            !typed["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("plain-42"),
+            "缺省不应自动执行: {}",
+            typed["stdout"]
+        );
+
+        // enter=true 且只发空输入：补发回车，执行上一步停留在输入行的命令。
+        let entered = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_send",
+                    serde_json::json!({
+                        "terminal_id": terminal,
+                        "input": "",
+                        "enter": true,
+                        "wait": 3,
+                    }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(entered["ok"], true, "terminal_send 结果: {entered}");
+        assert!(
+            entered["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("plain-42"),
+            "补发回车后应执行命令: {}",
+            entered["stdout"]
+        );
+
+        // enter=true 且输入自带换行：只执行一次，不叠加空回车。
+        let once = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_send",
+                    serde_json::json!({
+                        "terminal_id": terminal,
+                        "input": "echo auto-$((1+1))\\n",
+                        "enter": true,
+                        "wait": 3,
+                    }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(once["ok"], true, "terminal_send 结果: {once}");
+        let stdout = once["stdout"].as_str().unwrap_or_default();
+        assert!(stdout.contains("auto-2"), "应执行命令: {stdout}");
 
         service
             .kill_session(SessionIdRequest {
