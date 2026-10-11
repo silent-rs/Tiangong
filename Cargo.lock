@@ -11314,7 +11314,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-computer-use-protocol"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -11323,7 +11323,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-computer-use-sidecar"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-trait",
