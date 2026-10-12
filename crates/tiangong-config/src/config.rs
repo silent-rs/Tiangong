@@ -127,7 +127,7 @@ pub struct SandboxUserPolicy {
 ///
 /// 包含 Core 所需的配置（models/trust_mode）以及应用层配置（server）。
 ///
-/// MCP 配置已脱离（由 tiangong-plugin-mcp 自管 ~/.tiangong/mcp.json）。
+/// MCP 配置已脱离（由 tiangong-plugin-mcp 自管 ~/.tiangong/data/mcp/mcp.json）。
 #[derive(Debug, Clone)]
 pub struct TiangongConfig {
     /// 本配置对应的数据根目录。只参与运行时定位，不写入配置文件。

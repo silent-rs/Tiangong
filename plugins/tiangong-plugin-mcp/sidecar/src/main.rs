@@ -14,6 +14,7 @@
 mod capability;
 mod client;
 mod execution;
+mod migration;
 mod paths;
 mod service;
 mod validate;

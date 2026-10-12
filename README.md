@@ -389,11 +389,11 @@ tiangong bot start feishu                         # 在后台启动已配置的 
   server.json           Server 监听配置（host/port/auth_token）
   custom-prompt.md      自定义 Prompt（独立文件，CLI 可直接编辑）
   skills.json           Skill 配置
-  mcp.json              MCP 配置
   sessions/             会话持久化
   logs/                 运行日志
   media/                生成或归档的媒体文件
   memory/               长期记忆数据（含独立 config.json）
+  data/<插件 id>/        插件自有数据（如 data/mcp/mcp.json 为 MCP 配置）
   auth/                 账号登录凭据（如 ChatGPT OAuth 令牌，默认禁止插件读取）
   plugins-dev/          自建插件开发目录
   sandbox/              Sandbox Launcher 与伴生签名

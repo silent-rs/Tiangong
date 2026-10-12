@@ -44,6 +44,8 @@ pub struct McpService {
     mcp_config_path: PathBuf,
     /// 启动时配置文件加载失败的原因；存在期间拒绝任何写回，防止默认空配置覆盖磁盘上的真实配置。
     config_load_error: RwLock<Option<String>>,
+    /// 旧配置迁移失败的原因；存在期间拒绝写回，防止空配置抢先落盘后旧配置被永久跳过。
+    legacy_migration_error: Option<String>,
     /// 当前会话工作目录（由 reconfigure 注入，stdio MCP 子进程用）。
     workspace: RwLock<Option<PathBuf>>,
 }
@@ -51,10 +53,21 @@ pub struct McpService {
 impl McpService {
     /// 用默认存储路径构造。
     pub fn new() -> Result<Self> {
-        Self::with_paths(
+        // 迁移失败不阻断启动，但禁止写回：否则新目录里的空配置会先落盘，
+        // 下次迁移见到同名文件就跳过，旧配置被永久忽略。未写完成标记，
+        // 下次启动会重试。
+        let migration_error = crate::paths::migrate_legacy().err().map(|error| {
+            tracing::warn!("MCP 旧数据迁移失败，将在下次启动重试: {error:#}");
+            format!("旧配置迁移失败：{error:#}")
+        });
+        let service = Self::with_paths(
             default_mcp_config_path(),
             default_mcp_capability_cache_path(),
-        )
+        )?;
+        Ok(Self {
+            legacy_migration_error: migration_error,
+            ..service
+        })
     }
 
     pub fn with_paths(mcp_config_path: PathBuf, capability_cache_path: PathBuf) -> Result<Self> {
@@ -68,6 +81,7 @@ impl McpService {
             capability_cache_path,
             mcp_config_path,
             config_load_error: RwLock::new(config_load_error),
+            legacy_migration_error: None,
             workspace: RwLock::new(None),
         })
     }
@@ -310,6 +324,12 @@ impl McpService {
     }
 
     fn apply_config(&self, next: McpConfig, affected_server: Option<&str>) -> Result<()> {
+        if let Some(error) = &self.legacy_migration_error {
+            return Err(anyhow!(
+                "MCP 旧配置迁移未完成，拒绝写回以防旧配置被覆盖：{}（{error}）",
+                self.mcp_config_path.display()
+            ));
+        }
         // 启动时配置加载失败（文件损坏/不可读）：内存里是兜底默认配置，一旦
         // 写回会把磁盘上的真实配置整体抹掉，必须拒绝。只有明确确认文件已
         // 不在磁盘上（NotFound，用户删除后重建）才放行；状态无法确认时同样
@@ -748,6 +768,25 @@ mod tests {
         );
         // 原文件仍在且未被默认空配置覆盖。
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), existing);
+    }
+
+    #[test]
+    fn register_rejected_when_legacy_migration_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        let service = McpService {
+            legacy_migration_error: Some("旧配置迁移失败：模拟".to_string()),
+            ..McpService::with_paths(config_path.clone(), dir.path().join("cache.json")).unwrap()
+        };
+        let error = service
+            .register_server(register_request("new-server"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("迁移未完成"),
+            "迁移失败时注册应拒绝写回，实际：{error}"
+        );
+        // 空配置未抢先落盘，下次启动迁移仍可复制旧配置。
+        assert!(!config_path.exists());
     }
 
     #[test]

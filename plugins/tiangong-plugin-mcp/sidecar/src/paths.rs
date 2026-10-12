@@ -1,54 +1,44 @@
-//! MCP 存储路径自管（对齐 skill plugin 的自治模式）。
+//! MCP 存储路径自管。
 //!
-//! plugin 从 App 注入的存储根目录计算 MCP 相关路径，不依赖 core 的
-//! `app_state::default_mcp_*` 路径函数——MCP 概念已从 core 彻底迁出。
-
+//! 配置与能力缓存放在插件自有数据目录 `~/.tiangong/data/mcp/`（沙箱内存储根
+//! 只有该目录可写）。早期版本放在存储根下，首次启动时由 [`migrate_legacy`]
+//! 复制进新目录（见 [`crate::migration`]），旧文件保留。
 use std::path::PathBuf;
 
-/// 用户主目录（兼容 HOME / USERPROFILE / HOMEDRIVE+HOMEPATH）。
-fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
-    }
+use tiangong_plugin_sidecar::storage::{storage_data_dir, storage_root};
+
+use crate::migration::migrate_legacy_files;
+
+const PLUGIN_ID: &str = "mcp";
+const CONFIG_FILE: &str = "mcp.json";
+const CAPABILITY_CACHE_FILE: &str = "mcp-tools-cache.json";
+
+fn data_dir() -> PathBuf {
+    storage_data_dir(PLUGIN_ID)
 }
 
-/// 天工存储根目录：优先使用 App 注入值，否则回退 `~/.tiangong/`。
-fn storage_root() -> PathBuf {
-    if let Some(root) = std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(root);
-    }
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
-}
-
-/// MCP 配置文件路径：`~/.tiangong/mcp.json`。
+/// MCP 配置文件路径：`~/.tiangong/data/mcp/mcp.json`。
 pub fn default_mcp_config_path() -> PathBuf {
-    storage_root().join("mcp.json")
+    data_dir().join(CONFIG_FILE)
 }
 
-/// MCP tools 缓存路径：`~/.tiangong/mcp-tools-cache.json`。
+/// MCP tools 缓存路径：`~/.tiangong/data/mcp/mcp-tools-cache.json`。
 pub fn default_mcp_capability_cache_path() -> PathBuf {
-    storage_root().join("mcp-tools-cache.json")
+    data_dir().join(CAPABILITY_CACHE_FILE)
 }
 
-/// MCP 依赖锁路径：`~/.tiangong/skills/mcp-lock.json`（与 skills 存储同目录）。
-#[allow(dead_code)]
-pub fn default_mcp_lock_path() -> PathBuf {
-    storage_root().join("skills").join("mcp-lock.json")
+/// 把存储根下的旧 `mcp.json` 与能力缓存复制进插件自有数据目录（幂等）。
+pub fn migrate_legacy() -> anyhow::Result<()> {
+    let root = storage_root();
+    let result = migrate_legacy_files(
+        &data_dir(),
+        &[
+            (root.join(CONFIG_FILE), CONFIG_FILE),
+            (root.join(CAPABILITY_CACHE_FILE), CAPABILITY_CACHE_FILE),
+        ],
+    )?;
+    if result.performed {
+        tracing::info!(copied = result.copied.len(), "MCP 旧数据迁移完成");
+    }
+    Ok(())
 }

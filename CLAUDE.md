@@ -161,10 +161,9 @@ fn load_session(&self, id: &str) -> Result<Session> {
 ```
 ~/.tiangong/
   skills.json           # Skill 配置
-  mcp.json              # MCP 配置
   skills-lock.json      # Skill 依赖锁文件
   mcp-lock.json         # MCP 依赖锁文件
-  mcp-tools-cache.json  # MCP 能力缓存
+  data/mcp/             # MCP 插件数据（mcp.json 配置、mcp-tools-cache.json 能力缓存）
   sessions/             # 会话持久化目录
 ```
 

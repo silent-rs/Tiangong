@@ -637,7 +637,7 @@ impl StdioSidecarConnection {
                 self.config.sensitive_storage,
                 &self.config.storage_root,
             );
-            // mcp.json 由 mcp 插件自管（官方身份经宿主验证后才置位
+            // data/mcp/mcp.json 由 mcp 插件自管（官方身份经宿主验证后才置位
             // mcp_config）：开放其写权限，否则用户在 MCP 设置页增删
             // server 时 sidecar 无法落盘配置；其余敏感配置仍由宿主写入、
             // 插件只读。

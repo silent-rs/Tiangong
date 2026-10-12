@@ -37,6 +37,9 @@ pub fn apply_tiangong(policy: &mut SandboxPolicy, storage_root: &Path) {
             "keys",
             "trust.db",
             "mcp.json",
+            // MCP 配置（含 server 鉴权头与环境变量）迁入 mcp 插件数据目录后
+            // 仍对其他插件禁读。
+            "data/mcp/mcp.json",
             "models.json",
             "auth",
             "server.json",

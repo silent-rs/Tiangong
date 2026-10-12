@@ -9,6 +9,7 @@
 //! - [`endpoint`]：运行时目录解析、endpoint 文件发布/读取/清理、TCP 可达性探测
 //! - [`server`]：通用 IPC server（TCP loopback + 动态端口 + token 鉴权 + JSON Lines 帧）
 //! - [`shutdown`]：跨平台退出信号（Ctrl+C / SIGTERM）
+//! - [`storage`]：插件存储根与自有数据目录 `data/<插件 id>` 定位
 //!
 //! # 不包含
 //! 任何插件编号、业务操作名、tantivy/模型等业务依赖、App/CLI/Server 类型、
@@ -38,6 +39,7 @@ pub mod server;
 pub mod shutdown;
 pub mod singleton;
 pub mod stdio;
+pub mod storage;
 
 pub use identity::{SidecarConfig, SidecarIdentity};
 pub use model::{ModelInfo, mask_sensitive};
