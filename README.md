@@ -267,7 +267,6 @@ crates/
   tiangong-app-state/      进程内应用状态聚合
   tiangong-media-archive/  输入附件本地归档
   tiangong-bots/           移动端控制：Bot 制品下载、配置、启停和监控
-  tiangong-scheduler/      定时任务（Cron）与 Webhook 触发
   tiangong-relay/          手机远程访问中继（纯转发，独立部署或由桌面端内嵌于局域网）
   tiangong-cli/            CLI / TUI 前端
   tiangong-entry/          统一命令入口
