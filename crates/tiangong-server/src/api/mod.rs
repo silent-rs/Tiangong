@@ -1,6 +1,5 @@
 mod chat;
 mod health;
-mod jobs;
 mod messages;
 mod server_ctrl;
 mod sessions;
@@ -107,19 +106,6 @@ pub fn build_routes(
                     .append(Route::new("cancel").post(sessions::cancel_session_turn))
                     .delete(sessions::delete_session),
             ),
-        )
-        .append(
-            Route::new("jobs")
-                .get(jobs::list_jobs)
-                .post(jobs::create_job)
-                .append(
-                    Route::new("<id>")
-                        .get(jobs::get_job)
-                        .put(jobs::update_job)
-                        .delete(jobs::delete_job)
-                        .append(Route::new("runs").get(jobs::list_job_runs))
-                        .append(Route::new("trigger").post(jobs::trigger_job)),
-                ),
         )
         .append(
             Route::new("webhooks")

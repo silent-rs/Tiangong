@@ -12,7 +12,6 @@ tiangong-plugin-runtime = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
-tiangong-scheduler = { workspace = true }
 async-trait = { workspace = true }
 silent = { workspace = true, features = ["upgrade", "scheduler"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "fs", "time"] }

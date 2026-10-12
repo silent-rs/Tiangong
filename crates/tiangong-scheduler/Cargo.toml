@@ -12,7 +12,6 @@ scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

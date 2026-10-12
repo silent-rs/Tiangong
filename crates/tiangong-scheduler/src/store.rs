@@ -15,11 +15,6 @@ pub struct JobStore {
 }
 
 impl JobStore {
-    /// 打开或创建存储目录
-    pub fn open() -> Result<Self> {
-        Self::open_at(scheduler_dir())
-    }
-
     /// 在指定目录打开或创建存储
     pub fn open_at(base: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&base)
@@ -198,11 +193,6 @@ impl JobStore {
         atomic_write(&path, &content).with_context(|| format!("写入 {} 失败", path.display()))?;
         Ok(())
     }
-}
-
-fn scheduler_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".tiangong").join("scheduler")
 }
 
 /// 原子写入：先写临时文件再 rename，防止写入中断导致文件损坏
