@@ -5,6 +5,12 @@
 //! 新目录并写完成标记，之后直接跳过（幂等）。旧目录原样保留，由用户确认
 //! 无误后自行清理。
 //!
+//! 内置模型（`models/`，约 1.2G）不在启动时迁移：整树复制在非 APFS 文件系统
+//! 上耗时可能超过 sidecar 启动超时，被中断后会反复重来。模型改由下载流程
+//! 按需获取——先尝试从旧目录逐文件复制并做 sha256 校验，复制失败（如 Windows
+//! 沙箱无旧目录读权限）或校验不符时自动走网络下载（见
+//! [`crate::local_model`] 的下载模块）。
+//!
 //! 安全约束：
 //! - 旧目录仍有存活 Leader（旧版本进程还在写库）时拒绝迁移，避免复制到写
 //!   了一半的 SQLite / LanceDB；
@@ -106,11 +112,19 @@ fn migrate_legacy_dir(legacy: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 进程运行态条目：不迁移（新目录由新进程重新生成）。
+/// 旧模型目录名（不随启动迁移，由下载流程按需复用）。
+pub(crate) const LEGACY_MODELS_DIR: &str = "models";
+
+/// 不迁移的条目：进程运行态（新目录由新进程重新生成）与内置模型（按需复用）。
 fn is_runtime_entry(name: &str) -> bool {
     matches!(
         name,
-        "leader.json" | "leader.lock" | "runtime" | "daemon.json" | LEGACY_MIGRATION_MARKER
+        "leader.json"
+            | "leader.lock"
+            | "runtime"
+            | "daemon.json"
+            | LEGACY_MODELS_DIR
+            | LEGACY_MIGRATION_MARKER
     ) || name.starts_with(".leader.json.")
         || name.starts_with(STAGING_PREFIX)
 }
@@ -169,6 +183,8 @@ mod tests {
         let legacy = root.join("memory");
         std::fs::create_dir_all(legacy.join("lancedb").join("t.lance")).unwrap();
         std::fs::create_dir_all(legacy.join("runtime")).unwrap();
+        std::fs::create_dir_all(legacy.join("models").join("bge-m3")).unwrap();
+        std::fs::write(legacy.join("models").join("bge-m3").join("m.onnx"), b"m").unwrap();
         std::fs::write(legacy.join("metadata.db"), b"db").unwrap();
         std::fs::write(legacy.join("metadata.db-wal"), b"wal").unwrap();
         std::fs::write(legacy.join("config.json"), b"{}").unwrap();
@@ -192,6 +208,7 @@ mod tests {
         assert!(target.join("lancedb").join("t.lance").join("v1").is_file());
         assert!(!target.join("leader.lock").exists());
         assert!(!target.join("runtime").exists());
+        assert!(!target.join("models").exists(), "模型由下载流程按需复用");
         assert!(target.join(LEGACY_MIGRATION_MARKER).is_file());
         assert!(legacy.join("metadata.db").is_file(), "旧数据保留");
 

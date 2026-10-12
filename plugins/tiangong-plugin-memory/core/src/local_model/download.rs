@@ -1,6 +1,6 @@
 //! 内置模型下载：分文件断点续传 + 大小/sha256 校验 + 原子落盘。
 //!
-//! 目录布局（`<storage>/memory/models/`）：
+//! 目录布局（`<storage>/data/memory/models/`）：
 //!
 //! ```text
 //! models/
@@ -19,6 +19,10 @@
 //! 3. ModelScope（国内 CDN，同名仓库）；
 //! 4. hf-mirror.com；
 //! 5. huggingface.co。
+//!
+//! 网络下载前先尝试复用旧版目录（`<storage>/memory/models/`）中的同名文件：
+//! 逐文件复制后与网络下载走同一套大小 + sha256 校验，读取或复制失败（如
+//! Windows 沙箱没有旧目录读权限）、校验不符时静默回落到网络下载。
 //!
 //! 基地址形式的源按 HuggingFace 路径拼接 `<base>/<repo>/resolve/<revision>/<path>`；
 //! 含 `{repo}` 占位符的源按模板展开（支持 `{repo}` `{revision}` `{path}`）。
@@ -220,12 +224,87 @@ pub(crate) async fn ensure_model(
     spec: &LocalModelSpec,
     cancel: &CancelToken,
 ) -> std::result::Result<PathBuf, DownloadError> {
-    ensure_model_from(root, spec, &sources(), Duration::from_secs(1), cancel).await
+    let legacy = legacy_models_dir();
+    ensure_model_from(
+        root,
+        legacy.as_deref(),
+        spec,
+        &sources(),
+        Duration::from_secs(1),
+        cancel,
+    )
+    .await
+}
+
+/// 旧版模型目录 `<存储根>/memory/models`（与当前目录相同时返回 `None`）。
+fn legacy_models_dir() -> Option<PathBuf> {
+    let legacy = crate::paths::storage_root()
+        .join("memory")
+        .join(crate::migration::LEGACY_MODELS_DIR);
+    (legacy != models_dir()).then_some(legacy)
+}
+
+/// 尝试把旧目录中的同名文件复制到 `target`，供随后的校验直接命中。
+///
+/// 只做尽力而为：旧文件不存在、大小或 sha256 不符、无读权限或复制失败都
+/// 返回 `false`，由调用方继续走网络下载。复制到临时文件并校验通过后才改名
+/// 为目标文件，旧目录无需被信任，中断也不会留下半截或错误的目标文件。
+fn seed_from_legacy(legacy: &Path, target: &Path, file: &ModelFile) -> bool {
+    if std::fs::metadata(target)
+        .map(|meta| meta.len() == file.size)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    match std::fs::symlink_metadata(legacy) {
+        Ok(meta) if meta.is_file() && meta.len() == file.size => {}
+        Ok(_) => return false,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    legacy = %legacy.display(),
+                    %error,
+                    "无法读取旧模型文件，改为网络下载"
+                );
+            }
+            return false;
+        }
+    }
+    let staged = target.with_file_name(format!(
+        "{}.seeding",
+        target
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let copied = std::fs::copy(legacy, &staged).map(|_| ());
+    let verified = copied.and_then(|()| match sha256_file(&staged) {
+        Ok(actual) if actual == file.sha256 => Ok(()),
+        Ok(actual) => Err(std::io::Error::other(format!(
+            "sha256 {actual} ≠ {}",
+            file.sha256
+        ))),
+        Err(error) => Err(std::io::Error::other(format!("{error:#}"))),
+    });
+    let result = verified.and_then(|()| std::fs::rename(&staged, target));
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let _ = std::fs::remove_file(&staged);
+            tracing::debug!(
+                legacy = %legacy.display(),
+                %error,
+                "复制旧模型文件失败，改为网络下载"
+            );
+            false
+        }
+    }
 }
 
 /// 指定下载源与重试基准间隔（测试注入本地源、缩短等待）。
 async fn ensure_model_from(
     root: &Path,
+    legacy: Option<&Path>,
     spec: &LocalModelSpec,
     sources: &[String],
     retry_base: Duration,
@@ -246,19 +325,20 @@ async fn ensure_model_from(
     if is_installed(root, spec) {
         return Ok(dir);
     }
-    ensure_model_locked(root, spec, sources, retry_base, cancel, dir).await
+    ensure_model_locked(root, legacy, spec, sources, retry_base, cancel, dir).await
 }
 
 /// 持锁后的实际下载流程（错误统一归类为 Failed / Cancelled）。
 async fn ensure_model_locked(
     root: &Path,
+    legacy: Option<&Path>,
     spec: &LocalModelSpec,
     sources: &[String],
     retry_base: Duration,
     cancel: &CancelToken,
     dir: PathBuf,
 ) -> std::result::Result<PathBuf, DownloadError> {
-    match download_all(root, spec, sources, retry_base, cancel, &dir).await {
+    match download_all(root, legacy, spec, sources, retry_base, cancel, &dir).await {
         Ok(()) => Ok(dir),
         Err(error) if cancel.is_cancelled() => {
             tracing::debug!(model = spec.id, "Memory 内置模型下载已取消: {error:#}");
@@ -270,6 +350,7 @@ async fn ensure_model_locked(
 
 async fn download_all(
     root: &Path,
+    legacy: Option<&Path>,
     spec: &LocalModelSpec,
     sources: &[String],
     retry_base: Duration,
@@ -287,6 +368,15 @@ async fn download_all(
     for file in spec.files() {
         if cancel.is_cancelled() {
             bail!("下载已取消");
+        }
+        if let Some(legacy) = legacy {
+            // 复用成功也要经 fetch_verified 的 sha256 校验；不符时它会删除
+            // 后重新下载。
+            seed_from_legacy(
+                &model_dir(legacy, spec).join(file.local_name()),
+                &partial.join(file.local_name()),
+                &file,
+            );
         }
         download_file(&client, sources, spec, &file, &partial, retry_base, cancel).await?;
     }
@@ -417,8 +507,10 @@ pub(crate) async fn ensure_runtime_library(
     library: &super::runtime::RuntimeLibrary,
     cancel: &CancelToken,
 ) -> std::result::Result<PathBuf, DownloadError> {
+    let legacy = legacy_models_dir();
     ensure_runtime_library_from(
         root,
+        legacy.as_deref(),
         library,
         &runtime_sources(),
         Duration::from_secs(1),
@@ -430,6 +522,7 @@ pub(crate) async fn ensure_runtime_library(
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 async fn ensure_runtime_library_from(
     root: &Path,
+    legacy: Option<&Path>,
     library: &super::runtime::RuntimeLibrary,
     sources: &[String],
     retry_base: Duration,
@@ -462,6 +555,13 @@ async fn ensure_runtime_library_from(
             .read_timeout(Duration::from_secs(60))
             .build()
             .with_context(|| "创建运行库下载客户端失败")?;
+        if let Some(legacy) = legacy {
+            seed_from_legacy(
+                &super::runtime::library_dir(legacy, library).join(library.file.local_name()),
+                &target,
+                &library.file,
+            );
+        }
         let url_path = super::runtime::library_url_path(library);
         // fetch_verified 仅在 sha256 一致后才把 .part 改名为目标文件，
         // 因此目标文件存在即代表已校验。
@@ -685,7 +785,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let spec = test_spec(false);
         let cancel = CancelToken::default();
-        let dir = ensure_model_from(root.path(), &spec, &sources, FAST_RETRY, &cancel)
+        let dir = ensure_model_from(root.path(), None, &spec, &sources, FAST_RETRY, &cancel)
             .await
             .expect("下载应成功");
         assert!(is_installed(root.path(), &spec));
@@ -698,7 +798,7 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 7);
 
         // 已安装时不再请求。
-        ensure_model_from(root.path(), &spec, &sources, FAST_RETRY, &cancel)
+        ensure_model_from(root.path(), None, &spec, &sources, FAST_RETRY, &cancel)
             .await
             .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 7);
@@ -714,6 +814,7 @@ mod tests {
         let _held = DownloadLock::acquire_for_other_process(root.path()).expect("持锁");
         let error = ensure_model_from(
             root.path(),
+            None,
             &spec,
             &sources,
             FAST_RETRY,
@@ -733,7 +834,7 @@ mod tests {
         let spec = test_spec(false);
         let cancel = CancelToken::default();
         cancel.cancel();
-        let error = ensure_model_from(root.path(), &spec, &sources, FAST_RETRY, &cancel)
+        let error = ensure_model_from(root.path(), None, &spec, &sources, FAST_RETRY, &cancel)
             .await
             .expect_err("取消后应停止");
         assert!(matches!(error, DownloadError::Cancelled), "{error}");
@@ -759,6 +860,90 @@ mod tests {
         assert!(format!("{error:#}").contains("校验失败"), "{error:#}");
         assert!(!root.path().join("model_quantized.onnx").exists());
         assert!(!is_installed(root.path(), &spec));
+    }
+
+    /// 旧目录有完整且校验一致的模型：直接复用，不发网络请求；旧文件保留。
+    #[tokio::test]
+    async fn reuses_verified_legacy_model_without_network() {
+        let (base, hits) = serve(0);
+        let spec = test_spec(false);
+        let legacy = tempfile::tempdir().unwrap();
+        let legacy_dir = model_dir(legacy.path(), &spec);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        for file in spec.files() {
+            std::fs::write(legacy_dir.join(file.local_name()), content(file.path)).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let dir = ensure_model_from(
+            root.path(),
+            Some(legacy.path()),
+            &spec,
+            &[base],
+            FAST_RETRY,
+            &CancelToken::default(),
+        )
+        .await
+        .expect("复用旧模型应成功");
+        assert!(is_installed(root.path(), &spec));
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "旧模型完整时不应下载");
+        assert!(dir.starts_with(root.path()));
+        assert!(
+            legacy_dir.join("model_quantized.onnx").is_file(),
+            "旧文件保留"
+        );
+    }
+
+    /// 旧目录缺文件、内容损坏或不存在：对应文件回落到网络下载。
+    #[tokio::test]
+    async fn falls_back_to_download_when_legacy_is_unusable() {
+        let (base, hits) = serve(0);
+        let spec = test_spec(false);
+        let legacy = tempfile::tempdir().unwrap();
+        let legacy_dir = model_dir(legacy.path(), &spec);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        // tokenizer 完整；onnx 大小一致但内容损坏；其余缺失。
+        std::fs::write(
+            legacy_dir.join(spec.tokenizer.local_name()),
+            content(spec.tokenizer.path),
+        )
+        .unwrap();
+        std::fs::write(
+            legacy_dir.join(spec.onnx.local_name()),
+            vec![b'x'; spec.onnx.size as usize],
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        ensure_model_from(
+            root.path(),
+            Some(legacy.path()),
+            &spec,
+            std::slice::from_ref(&base),
+            FAST_RETRY,
+            &CancelToken::default(),
+        )
+        .await
+        .expect("回落下载应成功");
+        assert!(is_installed(root.path(), &spec));
+        assert_eq!(
+            std::fs::read(model_dir(root.path(), &spec).join("model_quantized.onnx")).unwrap(),
+            content("onnx/model_quantized.onnx"),
+            "损坏的旧文件不得落盘"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 4, "只下载不可复用的 4 个文件");
+
+        // 旧目录完全不存在（或无读权限）同样回落下载。
+        let fresh = tempfile::tempdir().unwrap();
+        ensure_model_from(
+            fresh.path(),
+            Some(&legacy.path().join("absent")),
+            &spec,
+            &[base],
+            FAST_RETRY,
+            &CancelToken::default(),
+        )
+        .await
+        .expect("无旧目录时应正常下载");
+        assert!(is_installed(fresh.path(), &spec));
     }
 
     #[tokio::test]
@@ -806,6 +991,7 @@ mod tests {
         let cancel = CancelToken::default();
         let path = ensure_runtime_library_from(
             root.path(),
+            None,
             &library,
             std::slice::from_ref(&base),
             FAST_RETRY,
@@ -826,7 +1012,7 @@ mod tests {
 
         // 已存在时不再请求。
         let before = hits.load(Ordering::SeqCst);
-        ensure_runtime_library_from(root.path(), &library, &[base], FAST_RETRY, &cancel)
+        ensure_runtime_library_from(root.path(), None, &library, &[base], FAST_RETRY, &cancel)
             .await
             .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), before);
