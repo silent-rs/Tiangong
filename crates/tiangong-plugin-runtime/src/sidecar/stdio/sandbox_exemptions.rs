@@ -14,11 +14,6 @@ pub(super) fn exempt_authorized_reads(
         // 模型配置中的 OAuth 供应商（ChatGPT）凭据存于 auth/，随模型配置读取授权开放。
         exemptions.push(storage_root.join("auth"));
     }
-    if access.mcp_config {
-        // 存储根下旧 mcp.json 只读开放，供 mcp 插件首次启动迁移；迁移后的
-        // data/mcp/mcp.json 属插件自有数据，按插件数据目录隔离保护。
-        exemptions.push(storage_root.join("mcp.json"));
-    }
     if access.server_config {
         exemptions.push(storage_root.join("server.json"));
     }
@@ -46,8 +41,6 @@ pub(super) fn resolve_launcher(storage_root: &std::path::Path) -> Option<std::pa
 pub(super) fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = [
         "keys",
-        "trust.db",
-        "mcp.json",
         "models.json",
         // 账号登录凭据（ChatGPT OAuth 令牌）：只由宿主写入与续期。
         "auth",
@@ -241,8 +234,6 @@ mod sensitive_access_tests {
             // 不在任何可写根内：本就不可写，不追加写保护。
             assert!(!policy.protected_paths.contains(&path), "{other}");
         }
-        // 存储根下旧 mcp.json 仍由宿主写保护，不随插件数据目录放开。
-        assert!(tiangong_protected_paths(storage).contains(&storage.join("mcp.json")));
 
         // 可写根覆盖存储根（如工作区设为家目录）：其他插件数据追加写保护。
         let mut broad = tiangong_sandbox::SandboxPolicy::workspace_write(storage);
@@ -271,12 +262,11 @@ mod sensitive_access_tests {
         let before = policy.denied_read_paths.len();
         assert!(before >= 5, "清单应含配置与信任件（实际 {before}）");
 
-        // 授权模型+MCP：对应配置移出禁读，密钥/信任库/Launcher 保留。
+        // 授权模型配置：对应配置移出禁读，密钥/信任库/Launcher 保留。
         exempt_authorized_reads(
             &mut policy,
             super::SensitiveStorageAccess {
                 model_config: true,
-                mcp_config: true,
                 ..Default::default()
             },
             storage,
@@ -288,9 +278,7 @@ mod sensitive_access_tests {
         );
         // 模型配置授权同时开放 OAuth 凭据读取，但写保护保持。
         assert!(!policy.denied_read_paths.contains(&storage.join("auth")));
-        assert!(!policy.denied_read_paths.contains(&storage.join("mcp.json")));
         assert!(policy.denied_read_paths.contains(&storage.join("keys")));
-        assert!(policy.denied_read_paths.contains(&storage.join("trust.db")));
         assert!(policy.denied_read_paths.contains(&storage.join("sandbox")));
         assert!(
             policy

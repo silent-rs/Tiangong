@@ -28,15 +28,15 @@ pub fn common_credential_paths() -> Vec<PathBuf> {
     .collect()
 }
 
-/// 天工 App 的敏感路径预设。`storage_root` 与其中的 `sandbox` 目录均由 App
-/// 选择；Sandbox 核心不推导该布局。
+/// 天工 App 的敏感路径预设：只含 App 层配置（模型/服务/应用配置、账号凭据）
+/// 与信任件（签名密钥、Launcher 目录），以及常见用户凭据。插件数据（含
+/// MCP 配置）由宿主按插件数据目录隔离，不在此列。`storage_root` 与其中的
+/// `sandbox` 目录均由 App 选择；Sandbox 核心不推导该布局。
 pub fn apply_tiangong(policy: &mut SandboxPolicy, storage_root: &Path) {
     policy.denied_read_paths.extend(common_credential_paths());
     policy.denied_read_paths.extend(
         [
             "keys",
-            "trust.db",
-            "mcp.json",
             "models.json",
             "auth",
             "server.json",

@@ -349,7 +349,6 @@ fn sidecar_connection_inner(
         // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。
         config = config.with_sensitive_storage(crate::sidecar::SensitiveStorageAccess {
             model_config: signed_release.has_permission("model-config.read"),
-            mcp_config: installed.manifest.id == "mcp",
             server_config: signed_release.has_permission("app-storage.read"),
             app_config: false,
         });
