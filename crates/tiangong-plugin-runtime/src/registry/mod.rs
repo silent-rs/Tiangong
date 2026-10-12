@@ -76,6 +76,16 @@ static SIDECAR_CONNECTIONS: OnceLock<
 static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Windows 天工通用持久授权记录（Launcher 目录内，沙箱进程读写双禁）。
+#[cfg(windows)]
+pub(crate) fn common_grants_path(storage_root: &Path) -> PathBuf {
+    storage_root
+        .join("sandbox")
+        .join("grants")
+        .join("common.json")
+}
+
+/// 旧版按插件持久化的整套授权记录：新宿主不再写入，仅用于撤销清理。
 #[cfg(windows)]
 pub(crate) fn persistent_grants_path(storage_root: &Path, plugin_id: &str) -> PathBuf {
     let key = hex::encode(sha2::Sha256::digest(plugin_id.as_bytes()));
@@ -85,7 +95,34 @@ pub(crate) fn persistent_grants_path(storage_root: &Path, plugin_id: &str) -> Pa
         .join(format!("{key}.json"))
 }
 
-/// 配置撤权时先停用旧连接，再撤销已登记的文件身份并按新配置重建。
+/// 清理旧宿主按插件持久化的整套授权（新宿主改用通用授权 + 针对性临时
+/// 授权，不再读取这些记录）。启动预加载前调用；记录仍被运行中的旧 Launcher
+/// 占用时跳过，下次启动再清理。
+#[cfg(windows)]
+pub(crate) fn revoke_legacy_plugin_grants(storage_root: &Path) {
+    let Ok(entries) = std::fs::read_dir(storage_root.join("sandbox").join("grants")) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let legacy = path.extension().is_some_and(|value| value == "json")
+            && path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.len() == 64 && value.bytes().all(|value| value.is_ascii_hexdigit())
+                });
+        if legacy
+            && let Err(error) = tiangong_sandbox::sandbox::windows::revoke_persistent_grants(&path)
+        {
+            tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "旧版插件持久授权清理失败，下次启动重试");
+        }
+    }
+}
+
+/// 配置撤权时先停用旧连接，再撤销已登记的插件级文件身份并按新配置重建。
+///
+/// 天工通用授权（media/tmp）只与存储根相关，不随工作区或沙箱设置变化，
+/// 这里不撤销，避免下次启动重新传播大目录 ACL。
 #[cfg(windows)]
 pub fn invalidate_persistent_grants(storage_root: &Path) -> Result<()> {
     let _operation = LOAD_OPERATION

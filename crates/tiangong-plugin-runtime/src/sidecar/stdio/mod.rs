@@ -720,17 +720,22 @@ impl StdioSidecarConnection {
                     "args": target_args,
                     "interpreter": self.config.interpreter.is_some(),
                 });
+                // Windows 授权分层：天工共享目录（media/tmp）走通用持久授权，
+                // 只授予一次；工作区、插件自有数据等差异部分每次启动临时
+                // 授予。不再按插件持久化整套策略——会话工作区与数据目录
+                // 每次变化都触发整体撤销重建，大目录传播开销最高。
                 #[cfg(windows)]
                 let request = {
                     let mut request = request;
-                    if !self.config.sandbox_follows_user_switch
-                        && self.config.lifecycle == crate::manifest::SidecarLifecycle::Resident
-                    {
-                        request["grant_cache"] =
-                            serde_json::json!(crate::registry::persistent_grants_path(
-                                &self.config.storage_root,
-                                &self.config.plugin_id
-                            ));
+                    let roots = sandbox_exemptions::common_grant_roots(
+                        &self.config.storage_root,
+                        &policy.extra_writable,
+                    );
+                    if !roots.is_empty() {
+                        request["common_grants"] = serde_json::json!({
+                            "cache": crate::registry::common_grants_path(&self.config.storage_root),
+                            "roots": roots,
+                        });
                     }
                     request
                 };

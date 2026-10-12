@@ -59,6 +59,9 @@ const GIT_METADATA_PROBE_MARKER: &str = "GITWRITE";
 struct LaunchRequest {
     #[serde(default)]
     grant_cache: Option<PathBuf>,
+    /// Windows 天工通用持久授权（宿主声明；旧宿主不发送）。
+    #[serde(default)]
+    common_grants: Option<CommonGrantsRequest>,
     protocol_version: u32,
     policy_schema: u32,
     policy: tiangong_sandbox::SandboxPolicy,
@@ -75,6 +78,14 @@ struct LaunchRequest {
     /// 旧协议兼容字段；新宿主应使用 target_validation。
     #[serde(default)]
     interpreter: bool,
+}
+
+/// 通用持久授权声明：授权记录位置与共享可写根（必须属于策略可写根）。
+#[derive(Debug, Deserialize)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct CommonGrantsRequest {
+    cache: PathBuf,
+    roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
@@ -237,6 +248,7 @@ fn run_policy_file(args: &[String]) -> Result<()> {
     let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
     let request = LaunchRequest {
         grant_cache: parsed.grant_cache,
+        common_grants: None,
         protocol_version: PROTOCOL_VERSION,
         policy_schema: POLICY_SCHEMA,
         policy: parsed.policy,
@@ -521,7 +533,7 @@ fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()
         }
         let program_root = std::fs::canonicalize(&request.program_root)
             .context("规范化 Windows command 插件根目录失败")?;
-        let exit_code = tiangong_sandbox::sandbox::windows::launch_with_grant_cache(
+        let exit_code = tiangong_sandbox::sandbox::windows::launch_with_grants(
             tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
                 program: &program_path,
                 program_root: &program_root,
@@ -532,13 +544,19 @@ fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()
                 timeout: None,
             },
             request.grant_cache.as_deref(),
+            request.common_grants.as_ref().map(|common| {
+                tiangong_sandbox::sandbox::windows::CommonGrants {
+                    cache: &common.cache,
+                    roots: &common.roots,
+                }
+            }),
         )?;
         std::process::exit(exit_code);
     }
 
     // Unix 平台沙箱包装（seatbelt / bwrap）；不可用时 fail-closed。
     #[cfg(unix)]
-    if request.grant_cache.is_some() {
+    if request.grant_cache.is_some() || request.common_grants.is_some() {
         bail!("持久授权仅支持 Windows");
     }
     #[cfg(unix)]
@@ -2340,6 +2358,7 @@ mod tests {
     fn request(root: &Path, program: &Path) -> LaunchRequest {
         LaunchRequest {
             grant_cache: None,
+            common_grants: None,
             protocol_version: PROTOCOL_VERSION,
             policy_schema: POLICY_SCHEMA,
             policy: tiangong_sandbox::SandboxPolicy::workspace_write(root),

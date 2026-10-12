@@ -1,3 +1,10 @@
+//! Windows 持久授权。
+//!
+//! - 通用授权（[`prepare_common`]）：天工所有沙箱进程共享的可写目录，按稳定
+//!   身份授予一次并持久保存；之后启动只核对各根目录上的授权项，缺失才补授。
+//!   只增不减，不随单个插件策略变化撤销，避免并发运行的进程失去访问。
+//! - 插件级授权（[`prepare`]）：旧宿主按插件持久化的整套策略授权，保留兼容；
+//!   新宿主只使用通用授权，插件差异部分每次启动临时授予。
 use super::*;
 use std::fs::{File, OpenOptions};
 use windows_sys::Win32::Security::{
@@ -12,6 +19,18 @@ struct Record {
     program: PathBuf,
     policy: SandboxPolicy,
     prepared: bool,
+    /// 已由通用持久授权覆盖、本记录不授予也不撤销的可写根。
+    #[serde(default)]
+    common_roots: Vec<PathBuf>,
+}
+
+/// 通用持久授权记录：稳定身份与已授予的根目录（只增不减）。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommonRecord {
+    schema: u32,
+    generation: String,
+    roots: Vec<PathBuf>,
 }
 
 pub(super) struct Lease {
@@ -41,7 +60,7 @@ fn lock(path: &Path) -> Result<File> {
     }
 }
 
-fn read(path: &Path) -> Result<Option<Record>> {
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -50,7 +69,13 @@ fn read(path: &Path) -> Result<Option<Record>> {
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         bail!("持久授权记录必须是普通文件");
     }
-    let record: Record = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok(Some(serde_json::from_slice(&std::fs::read(path)?)?))
+}
+
+fn read(path: &Path) -> Result<Option<Record>> {
+    let Some(record) = read_json::<Record>(path)? else {
+        return Ok(None);
+    };
     if record.schema != 1 {
         bail!("不支持的持久授权记录版本");
     }
@@ -61,7 +86,7 @@ fn read(path: &Path) -> Result<Option<Record>> {
     Ok(Some(record))
 }
 
-fn save(path: &Path, record: &Record) -> Result<()> {
+fn save<T: serde::Serialize>(path: &Path, record: &T) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().context("授权记录缺少父目录")?)?;
     serde_json::to_writer(file.as_file_mut(), record)?;
     file.as_file().sync_all()?;
@@ -199,10 +224,16 @@ fn permissions_present(record: &Record, file_sid: PSID, restriction_sid: PSID) -
     }
     let writable = record.policy.writable_roots();
     let inheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
-    if !writable.iter().all(|root| {
-        sids.iter()
-            .all(|sid| has_entry(root, *sid, FILE_WORKSPACE_ACCESS, inheritance, false))
-    }) {
+    if !writable
+        .iter()
+        .filter(|root| !record.common_roots.contains(root))
+        .collect::<Vec<_>>()
+        .iter()
+        .all(|root| {
+            sids.iter()
+                .all(|sid| has_entry(root, *sid, FILE_WORKSPACE_ACCESS, inheritance, false))
+        })
+    {
         return false;
     }
     for path in record.policy.read_only_roots() {
@@ -227,7 +258,13 @@ fn revoke_record(record: &Record) -> Result<()> {
     let file_sid = capability(&mut capabilities, &record.generation)?;
     let restriction = restriction(record)?;
     let mut paths = vec![record.program.clone()];
-    paths.extend(record.policy.writable_roots());
+    paths.extend(
+        record
+            .policy
+            .writable_roots()
+            .into_iter()
+            .filter(|root| !record.common_roots.contains(root)),
+    );
     paths.extend(record.policy.read_only_roots());
     let writable = record.policy.writable_roots();
     paths.extend(
@@ -261,29 +298,127 @@ pub fn revoke(path: &Path) -> Result<()> {
     std::fs::remove_file(path).context("删除已撤销的授权记录失败")
 }
 
-pub(super) fn prepare(
-    request: &WindowsLaunchRequest<'_>,
-    path: &Path,
-    capabilities: &mut CapabilitySet,
-) -> Result<Lease> {
+/// 授权记录必须位于策略禁读目录内（宿主管理目录，沙箱进程不可读写）。
+fn ensure_managed_location(path: &Path, policy: &SandboxPolicy) -> Result<()> {
     if !path.is_absolute() {
         bail!("持久授权记录必须使用绝对路径");
     }
     let parent = path.parent().context("持久授权记录缺少目录")?;
     std::fs::create_dir_all(parent)?;
     let parent = crate::canonicalize_path(parent)?;
-    let protected = request
-        .policy
+    let protected = policy
         .denied_read_roots()
         .iter()
         .any(|root| crate::canonicalize_path(root).is_ok_and(|root| parent.starts_with(root)));
     if !protected {
         bail!("持久授权目录必须位于宿主声明的禁读目录内");
     }
+    Ok(())
+}
+
+fn common_capability(set: &mut CapabilitySet, generation: &str) -> Result<PSID> {
+    add_named_capability(set, &format!("TiangongSandbox.Common.{generation}"))
+}
+
+/// 准备通用持久授权，返回通用身份 SID（同时加入 `capabilities`，调用方还需
+/// 把它加入受限令牌的限制 SID 列表）。
+///
+/// 只在根目录缺少授权项时才校验目录树并授予（可继承，一次性传播）；已授予
+/// 时仅读取根目录 ACL 核对。锁只在准备期间持有，不随进程生命周期占用，
+/// 多个插件可并发启动。
+pub(super) fn prepare_common(
+    cache: &Path,
+    roots: &[PathBuf],
+    policy: &SandboxPolicy,
+    capabilities: &mut CapabilitySet,
+) -> Result<PSID> {
+    ensure_managed_location(cache, policy)?;
+    let _lock = lock(cache)?;
+    let mut record = match read_json::<CommonRecord>(cache)? {
+        Some(record) if record.schema == 1 => {
+            record
+                .generation
+                .parse::<scru128::Id>()
+                .context("通用授权身份无效")?;
+            record
+        }
+        Some(_) => bail!("不支持的通用授权记录版本"),
+        None => CommonRecord {
+            schema: 1,
+            generation: scru128::new().to_string(),
+            roots: Vec::new(),
+        },
+    };
+    let sid = common_capability(capabilities, &record.generation)?;
+    let inheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    let missing = roots
+        .iter()
+        .filter(|root| !has_entry(root, sid, FILE_WORKSPACE_ACCESS, inheritance, false))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        // 先登记再授予：中途失败后仍能按记录撤销。
+        for root in &missing {
+            if !record.roots.contains(root) {
+                record.roots.push((*root).clone());
+            }
+        }
+        save(cache, &record)?;
+        for root in missing {
+            // 硬链接别名只能落在通用根内：通用授权对所有插件生效。
+            validate_writable_tree(root, roots)
+                .with_context(|| format!("通用授权目录不安全: {}", root.display()))?;
+            modify_acl(
+                root,
+                &[sid],
+                FILE_WORKSPACE_ACCESS,
+                inheritance,
+                GRANT_ACCESS,
+            )?;
+        }
+    }
+    if std::env::var_os("TIANGONG_SANDBOX_DIAGNOSTICS").is_some() {
+        eprintln!("Windows 通用持久授权 granted={}", roots.len());
+    }
+    Ok(sid)
+}
+
+/// 撤销通用持久授权并删除记录。
+pub fn revoke_common(cache: &Path) -> Result<()> {
+    if !cache.exists() {
+        return Ok(());
+    }
+    let _lock = lock(cache)?;
+    if let Some(record) = read_json::<CommonRecord>(cache)? {
+        let mut capabilities = CapabilitySet::new(false)?;
+        let sid = common_capability(&mut capabilities, &record.generation)?;
+        let mut failures = Vec::new();
+        for root in record.roots.iter().filter(|root| root.exists()) {
+            if let Err(error) = modify_acl(root, &[sid], 0, NO_INHERITANCE, REVOKE_ACCESS) {
+                failures.push(format!("{}: {error:#}", root.display()));
+            }
+        }
+        if !failures.is_empty() {
+            bail!("撤销通用授权失败: {}", failures.join("; "));
+        }
+    }
+    std::fs::remove_file(cache).context("删除已撤销的通用授权记录失败")
+}
+
+pub(super) fn prepare(
+    request: &WindowsLaunchRequest<'_>,
+    path: &Path,
+    common_roots: &[PathBuf],
+    capabilities: &mut CapabilitySet,
+) -> Result<Lease> {
+    ensure_managed_location(path, request.policy)?;
     let file = lock(path)?;
     let previous = read(path)?;
     let mut record = match previous {
-        Some(record) if record.program == request.program && record.policy == *request.policy => {
+        Some(record)
+            if record.program == request.program
+                && record.policy == *request.policy
+                && record.common_roots == common_roots =>
+        {
             record
         }
         previous => {
@@ -296,6 +431,7 @@ pub(super) fn prepare(
                 program: request.program.to_path_buf(),
                 policy: request.policy.clone(),
                 prepared: false,
+                common_roots: common_roots.to_vec(),
             }
         }
     };
@@ -306,8 +442,13 @@ pub(super) fn prepare(
         // 先记身份再授予权限：进程意外结束后，下次仍能撤销未完成的授权。
         record.prepared = false;
         save(path, &record)?;
-        let mut grants =
-            AclGrants::apply(file_sid, restriction.sid, request.program, request.policy)?;
+        let mut grants = AclGrants::apply(
+            file_sid,
+            restriction.sid,
+            request.program,
+            request.policy,
+            common_roots,
+        )?;
         record.prepared = true;
         save(path, &record)?;
         grants.active = false;
@@ -354,7 +495,7 @@ mod tests {
             timeout: None,
         };
         let mut caps = CapabilitySet::new(false).unwrap();
-        let lease = prepare(&request(&policy), &cache, &mut caps).unwrap();
+        let lease = prepare(&request(&policy), &cache, &[], &mut caps).unwrap();
         let initial = read(&cache).unwrap().unwrap();
         let occupied = OpenOptions::new()
             .read(true)
@@ -383,6 +524,7 @@ mod tests {
             prepare(
                 &request(&policy),
                 &cache,
+                &[],
                 &mut CapabilitySet::new(false).unwrap(),
             )
             .unwrap(),
@@ -397,6 +539,7 @@ mod tests {
             prepare(
                 &request(&policy),
                 &cache,
+                &[],
                 &mut CapabilitySet::new(false).unwrap(),
             )
             .unwrap(),
@@ -409,6 +552,7 @@ mod tests {
             prepare(
                 &request(&changed),
                 &cache,
+                &[],
                 &mut CapabilitySet::new(false).unwrap(),
             )
             .unwrap(),
@@ -429,5 +573,102 @@ mod tests {
             3,
             false
         ));
+    }
+
+    #[test]
+    fn common_grants_are_granted_once_checked_and_revocable() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("media");
+        let tmp = root.path().join("tmp");
+        let managed = root.path().join("managed");
+        let workspace = root.path().join("workspace");
+        for path in [&media, &tmp, &managed, &workspace] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let cache = managed.join("common.json");
+        let mut policy = SandboxPolicy::workspace_write(&workspace);
+        policy.extra_writable = vec![media.clone(), tmp.clone()];
+        policy.denied_read_paths.push(managed.clone());
+        let roots = vec![
+            crate::canonicalize_path(&media).unwrap(),
+            crate::canonicalize_path(&tmp).unwrap(),
+        ];
+        let inheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+
+        let sid = prepare_common(
+            &cache,
+            &roots,
+            &policy,
+            &mut CapabilitySet::new(false).unwrap(),
+        )
+        .unwrap();
+        for root in &roots {
+            assert!(has_entry(
+                root,
+                sid,
+                FILE_WORKSPACE_ACCESS,
+                inheritance,
+                false
+            ));
+        }
+        // 工作区不属于通用授权。
+        assert!(!has_entry(
+            &workspace,
+            sid,
+            FILE_WORKSPACE_ACCESS,
+            inheritance,
+            false
+        ));
+        let first = read_json::<CommonRecord>(&cache).unwrap().unwrap();
+
+        // 再次准备：身份不变；被外部撤掉的根自动补授。
+        modify_acl(&roots[1], &[sid], 0, 0, REVOKE_ACCESS).unwrap();
+        let again = prepare_common(
+            &cache,
+            &roots,
+            &policy,
+            &mut CapabilitySet::new(false).unwrap(),
+        )
+        .unwrap();
+        assert!(unsafe { EqualSid(sid, again) } != 0);
+        assert!(has_entry(
+            &roots[1],
+            sid,
+            FILE_WORKSPACE_ACCESS,
+            inheritance,
+            false
+        ));
+        assert_eq!(
+            read_json::<CommonRecord>(&cache)
+                .unwrap()
+                .unwrap()
+                .generation,
+            first.generation
+        );
+
+        // 记录必须位于禁读目录内。
+        let mut unmanaged = policy.clone();
+        unmanaged.denied_read_paths.clear();
+        assert!(
+            prepare_common(
+                &cache,
+                &roots,
+                &unmanaged,
+                &mut CapabilitySet::new(false).unwrap()
+            )
+            .is_err()
+        );
+
+        revoke_common(&cache).unwrap();
+        assert!(!cache.exists());
+        for root in &roots {
+            assert!(!has_entry(
+                root,
+                sid,
+                FILE_WORKSPACE_ACCESS,
+                inheritance,
+                false
+            ));
+        }
     }
 }
