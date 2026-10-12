@@ -99,24 +99,34 @@ impl RecallEngine {
         }
         let mut written = 0;
         let mut failed = 0;
-        for (node, vector) in nodes.iter().zip(vectors) {
-            match vector_index
-                .upsert(VectorPoint {
-                    node_id: node.id.clone(),
-                    title: node.title.clone(),
-                    summary: node.summary.clone(),
-                    kind: node.kind.clone(),
-                    importance: f64::from(node.importance),
-                    vector,
-                })
-                .await
-            {
-                Ok(()) => written += 1,
-                Err(err) => {
-                    failed += 1;
-                    tracing::warn!(node_id = %node.id, "Memory 回填写入向量失败: {err}");
+        let points: Vec<VectorPoint> = nodes
+            .iter()
+            .zip(vectors)
+            .map(|(node, vector)| VectorPoint {
+                node_id: node.id.clone(),
+                title: node.title.clone(),
+                summary: node.summary.clone(),
+                kind: node.kind.clone(),
+                importance: f64::from(node.importance),
+                vector,
+            })
+            .collect();
+        // 整批一次提交（一个表版本）；整批失败时逐条重试定位坏节点，
+        // 避免个别节点让整批永久缺索引。
+        if let Err(err) = vector_index.upsert_batch(points.clone()).await {
+            tracing::warn!("Memory 回填批量写入失败，逐条重试: {err:#}");
+            for point in points {
+                let node_id = point.node_id.clone();
+                match vector_index.upsert_batch(vec![point]).await {
+                    Ok(()) => written += 1,
+                    Err(err) => {
+                        failed += 1;
+                        tracing::warn!(node_id = %node_id, "Memory 回填写入向量失败: {err}");
+                    }
                 }
             }
+        } else {
+            written = nodes.len();
         }
         Ok((written, failed))
     }
@@ -134,14 +144,14 @@ impl RecallEngine {
             anyhow::bail!("Memory node embedding 返回空结果");
         };
         vector_index
-            .upsert(VectorPoint {
+            .upsert_batch(vec![VectorPoint {
                 node_id: node.id.clone(),
                 title: node.title.clone(),
                 summary: node.summary.clone(),
                 kind: node.kind.clone(),
                 importance: f64::from(node.importance),
                 vector,
-            })
+            }])
             .await?;
         tracing::debug!(
             node_id = %node.id,

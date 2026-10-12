@@ -44,6 +44,9 @@ pub(crate) fn migrate_schema_columns(conn: &Connection) -> Result<()> {
 
 // ── 向量数据迁移（SQLite → LanceDB） ────────────────────────────
 
+/// 每次提交的向量条数：一块一个 LanceDB 表版本。
+const MIGRATION_CHUNK: usize = 256;
+
 /// 判断是否需要从 SQLite 迁移向量数据到 LanceDB。
 ///
 /// 条件：SQLite memory_vectors 表中存在记录，且 LanceDB 目录尚未创建。
@@ -69,17 +72,25 @@ pub(crate) async fn migrate_vectors(db: &MemoryDb, index: &LanceDbIndex, dimensi
 
     tracing::info!("Memory 开始迁移 {} 条向量到 LanceDB...", points.len());
 
+    // 同一节点在 SQLite 里理论上唯一；按 node_id 去重保证 merge_insert 的
+    // 源数据没有重复键（重复键会让同一行被多次写入）。
+    let mut seen = std::collections::HashSet::new();
+    let points: Vec<VectorPoint> = points
+        .into_iter()
+        .filter(|point| seen.insert(point.node_id.clone()))
+        .collect();
     let mut migrated = 0usize;
     let mut failed = 0usize;
-    for point in &points {
-        match index.upsert(point.clone()).await {
-            Ok(()) => migrated += 1,
+    // 分块提交：每块一个表版本，避免旧实现逐条写入造成的版本膨胀。
+    for chunk in points.chunks(MIGRATION_CHUNK) {
+        match index.upsert_batch(chunk.to_vec()).await {
+            Ok(()) => migrated += chunk.len(),
             Err(err) => {
                 tracing::warn!(
-                    node_id = %point.node_id,
-                    "Memory 向量迁移失败（跳过）: {err}"
+                    count = chunk.len(),
+                    "Memory 向量迁移批次失败（跳过）: {err}"
                 );
-                failed += 1;
+                failed += chunk.len();
             }
         }
     }
