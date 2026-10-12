@@ -321,7 +321,8 @@ fn common_capability(set: &mut CapabilitySet, generation: &str) -> Result<PSID> 
 }
 
 /// 准备通用持久授权，返回通用身份 SID（同时加入 `capabilities`，调用方还需
-/// 把它加入受限令牌的限制 SID 列表）。
+/// 把它加入受限令牌的限制 SID 列表）。返回的指针指向 `capabilities` 持有的
+/// 存储，只在其存活期间有效。
 ///
 /// 只在根目录缺少授权项时才校验目录树并授予（可继承，一次性传播）；已授予
 /// 时仅读取根目录 ACL 核对。锁只在准备期间持有，不随进程生命周期占用，
@@ -595,13 +596,9 @@ mod tests {
         ];
         let inheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
 
-        let sid = prepare_common(
-            &cache,
-            &roots,
-            &policy,
-            &mut CapabilitySet::new(false).unwrap(),
-        )
-        .unwrap();
+        // 返回的 SID 指向 CapabilitySet 持有的存储，集合必须与 SID 同生命周期。
+        let mut first_caps = CapabilitySet::new(false).unwrap();
+        let sid = prepare_common(&cache, &roots, &policy, &mut first_caps).unwrap();
         for root in &roots {
             assert!(has_entry(
                 root,
@@ -623,13 +620,8 @@ mod tests {
 
         // 再次准备：身份不变；被外部撤掉的根自动补授。
         modify_acl(&roots[1], &[sid], 0, 0, REVOKE_ACCESS).unwrap();
-        let again = prepare_common(
-            &cache,
-            &roots,
-            &policy,
-            &mut CapabilitySet::new(false).unwrap(),
-        )
-        .unwrap();
+        let mut again_caps = CapabilitySet::new(false).unwrap();
+        let again = prepare_common(&cache, &roots, &policy, &mut again_caps).unwrap();
         assert!(unsafe { EqualSid(sid, again) } != 0);
         assert!(has_entry(
             &roots[1],
