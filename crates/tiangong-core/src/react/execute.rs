@@ -258,13 +258,6 @@ pub(super) fn record_rejected_tool_call(
     call: &ToolCall,
     args_summary: &str,
 ) {
-    ctx.observer.audit_tool_execution(
-        &ctx.session.id,
-        &call.name,
-        false,
-        (!args_summary.is_empty()).then_some(args_summary),
-        "用户拒绝执行",
-    );
     append_runtime_tool_message(
         &mut ctx.session,
         &call.name,
@@ -325,13 +318,6 @@ pub(super) fn record_completed_tool_call(
             ctx.session.media_root(),
         ));
     }
-    ctx.observer.audit_tool_execution(
-        &ctx.session.id,
-        &call.name,
-        result.ok,
-        (!args_summary.is_empty()).then_some(args_summary),
-        &result.summary,
-    );
     // 抬头由处理该调用的插件提供，core 只原样放在首行；插件未提供时不加。
     let header = ctx
         .tool_overrides

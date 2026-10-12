@@ -54,8 +54,6 @@ pub struct TurnContext {
     pub agent_config: AgentConfig,
     /// 会话信任模式（供插件按自身策略使用）。
     pub trust_mode: crate::permission::TrustMode,
-    /// 观测器（审计日志写入,持有 storage_root）
-    pub observer: crate::observe::Observer,
     /// 构建前收集完成的工具覆盖处理器。
     pub(crate) tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
     // ===== turn 级配置 =====

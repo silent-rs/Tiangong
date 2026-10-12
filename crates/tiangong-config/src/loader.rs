@@ -4,11 +4,11 @@
 //! 配置文件：
 //! - `models.json` — 模型配置
 //! - `app.json` — 应用长期配置
-//! - `mcp.json` — MCP 服务配置
-//! - `skills.json` — Skill 配置
 //! - `server.json` — Server 配置
-//! - `connectors.json` — Connector 配置
-//! - `mcp-tools-cache.json` — MCP 能力缓存
+//! - `custom-prompt.md` — 自定义系统提示
+//! - `context_windows.json` — 模型上下文窗口表
+//!
+//! Skill、MCP（`mcp.json`、能力缓存）等配置由对应插件自管，不经本加载器。
 
 use std::path::{Path, PathBuf};
 

@@ -437,7 +437,6 @@ impl TiangongCore {
                 reasoning_effort: config.reasoning_effort,
             })
             .trust_mode(trust_mode)
-            .observer(crate::observe::Observer::new(self.storage_root.clone()))
             .tool_overrides(prepared_plugins.tool_overrides)
             .tools(prepared_plugins.tools)
             .build())

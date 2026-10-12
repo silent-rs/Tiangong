@@ -10,7 +10,6 @@ use super::execute_turn;
 use crate::config::agent::AgentConfig;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
-use crate::observe::Observer;
 use crate::permission::TrustMode;
 use crate::prompt::SystemPromptConfig;
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
@@ -391,7 +390,6 @@ impl TestHarness {
             .context_limit(200_000)
             .agent_config(agent_config)
             .trust_mode(TrustMode::FullTrust)
-            .observer(Observer::new(std::env::temp_dir()))
             .tool_overrides(tool_overrides)
             .tools(tools)
             .build();
@@ -2691,7 +2689,6 @@ async fn failed_tool_call_does_not_inject_images() {
         .context_limit(200_000)
         .agent_config(crate::config::agent::AgentConfig::default())
         .trust_mode(crate::permission::TrustMode::FullTrust)
-        .observer(crate::observe::Observer::new(std::env::temp_dir()))
         .tool_overrides(Default::default())
         .tools(Vec::new())
         .build();

@@ -248,13 +248,6 @@ impl SkillService {
             .filter(|name| !all_declared.contains(name))
             .collect();
 
-        crate::audit::append_audit_log(&crate::audit::AuditEntry::new(
-            "skill.remove",
-            id,
-            &format!("skill 已删除：{id}"),
-            true,
-        ));
-
         Ok(RemoveSkillResponse {
             message: format!("skill 已删除：{id}"),
             orphan_mcp_servers,
@@ -266,12 +259,6 @@ impl SkillService {
         self.registry.set_available(id, enabled)?;
         // 同步 mcp-lock（启停影响依赖计数）。
         let _ = crate::mcp_lock::sync_mcp_dependency_lock(&self.registry);
-        crate::audit::append_audit_log(&crate::audit::AuditEntry::new(
-            "skill.toggle",
-            id,
-            &format!("enabled={enabled}"),
-            true,
-        ));
         Ok(format!("skill 状态已更新：{id} enabled={enabled}"))
     }
 
@@ -379,12 +366,6 @@ impl SkillService {
         // 失效缓存，下次读取拿到新内容。
         self.registry.invalidate(id);
         self.registry.refresh();
-        crate::audit::append_audit_log(&crate::audit::AuditEntry::new(
-            "skill.update_md",
-            id,
-            &format!("更新 {}", manifest.entry),
-            true,
-        ));
         Ok(())
     }
 

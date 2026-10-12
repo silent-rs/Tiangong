@@ -10,7 +10,6 @@
 //! 单例与 IPC 由 `tiangong-plugin-sidecar` 通用运行库提供，运行时按 `plugin.json`
 //! 启动本进程。
 
-mod audit;
 mod env_local;
 mod mcp_lock;
 mod paths;

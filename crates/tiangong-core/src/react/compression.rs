@@ -685,7 +685,6 @@ fn notify_session_result(
 mod tests {
     use super::*;
     use crate::config::agent::AgentConfig;
-    use crate::observe::Observer;
     use crate::permission::TrustMode;
     use crate::session::Message;
     use crate::session::MessageToolCall;
@@ -742,7 +741,6 @@ mod tests {
             .context_limit(200_000)
             .agent_config(AgentConfig::default())
             .trust_mode(TrustMode::FullTrust)
-            .observer(Observer::new(std::env::temp_dir()))
             .tool_overrides(Default::default())
             .tools(Vec::new())
             .build();
