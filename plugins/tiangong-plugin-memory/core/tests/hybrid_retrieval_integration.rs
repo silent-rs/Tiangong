@@ -57,7 +57,7 @@ impl Drop for EnvGuard {
 }
 
 fn embedding_config_from_tiangong_config() -> Option<EmbeddingEndpointConfig> {
-    // Embedding 已归 Memory 独立配置（~/.tiangong/memory/config.json）管理。
+    // Embedding 已归 Memory 独立配置（~/.tiangong/data/memory/config.json）管理。
     tiangong_memory::MemoryConfig::load_or_default()
         .to_options()
         .embedding
@@ -417,7 +417,7 @@ async fn vector_index_is_bound_to_model_fingerprint_and_rebuilt_on_switch() {
     let workspace_path = workspace.path().to_path_buf();
     let workspace_id = workspace_id_from_path(&workspace_path);
     let _env = EnvGuard::enter(home.path(), &workspace_path);
-    let lancedb_dir = home.path().join(".tiangong/memory/lancedb");
+    let lancedb_dir = home.path().join(".tiangong/data/memory/lancedb");
     let start = |model: &str| {
         start_with_options(
             MemoryOptions::new()
@@ -493,7 +493,7 @@ async fn legacy_single_table_is_not_claimed_by_current_model() {
     let workspace_path = workspace.path().to_path_buf();
     let workspace_id = workspace_id_from_path(&workspace_path);
     let _env = EnvGuard::enter(home.path(), &workspace_path);
-    let lancedb_dir = home.path().join(".tiangong/memory/lancedb");
+    let lancedb_dir = home.path().join(".tiangong/data/memory/lancedb");
     let options = || {
         MemoryOptions::new()
             .with_embedding(embedding_server.config_with_model("text-embedding-bge-m3"))
@@ -634,7 +634,7 @@ async fn benchmark_recall(hybrid: bool, embedding: Option<EmbeddingEndpointConfi
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-#[ignore = "需要真实 ~/.tiangong/memory/config.json 在线 embedding 配置；使用 --ignored --nocapture 运行"]
+#[ignore = "需要真实 ~/.tiangong/data/memory/config.json 在线 embedding 配置；使用 --ignored --nocapture 运行"]
 async fn embedded_hybrid_retrieval_loads_configured_embedding_and_recalls_semantic_episode() {
     let Some(embedding) = embedding_config_from_tiangong_config() else {
         println!("[skip] 未在配置文件中找到 embedding 路由或 options.dimension");

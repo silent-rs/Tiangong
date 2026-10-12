@@ -89,7 +89,7 @@ pub fn record_handshake(workspace: &str) {
 
 fn record_handshake_inner(workspace: &str) -> Result<()> {
     let path = access_path()?;
-    // 锁文件与登记文件都在 agents-runtime/ 下，目录可能尚未创建。
+    // 锁文件与登记文件都在 runtime/ 下，目录可能尚未创建。
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建运行态目录失败: {}", parent.display()))?;

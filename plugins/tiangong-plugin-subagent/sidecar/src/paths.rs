@@ -18,14 +18,51 @@ pub fn storage_root() -> Result<PathBuf> {
     Ok(Path::new(&home).join(".tiangong"))
 }
 
-/// Agent 身份目录根：`~/.tiangong/agents/`。
-pub fn agents_root() -> Result<PathBuf> {
-    Ok(storage_root()?.join("agents"))
+/// 插件 ID（自有数据目录名）。
+const PLUGIN_ID: &str = "subagent";
+
+/// 插件自有数据目录 `~/.tiangong/data/subagent/`；首次访问时把存储根下旧
+/// `agents/`、`agents-runtime/` 迁移进来（见 [`crate::migration`]）。迁移失败
+/// 时返回错误，所有身份与运行态读写随之失败，避免新目录生成空数据后旧数据
+/// 再也迁不过来。
+fn data_root() -> Result<PathBuf> {
+    static MIGRATION: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+    let data_dir = plugin_data_dir();
+    MIGRATION
+        .get_or_init(|| {
+            let root = storage_root().map_err(|error| format!("{error:#}"))?;
+            crate::migration::migrate_legacy_dirs(
+                &data_dir,
+                &[
+                    (&root.join("agents"), AGENTS_DIR),
+                    (&root.join("agents-runtime"), RUNTIME_DIR),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}"))
+        })
+        .clone()
+        .map_err(|error| anyhow::anyhow!("Subagent 旧数据迁移未完成：{error}"))?;
+    Ok(data_dir)
 }
 
-/// 运行态目录根：`~/.tiangong/agents-runtime/`。
+/// 插件自有数据目录（不触发迁移）：优先宿主注入，否则 `<存储根>/data/subagent`。
+fn plugin_data_dir() -> PathBuf {
+    tiangong_plugin_sidecar::storage::storage_data_dir(PLUGIN_ID)
+}
+
+const AGENTS_DIR: &str = "agents";
+const RUNTIME_DIR: &str = "runtime";
+
+/// Agent 身份目录根：`~/.tiangong/data/subagent/agents/`。
+pub fn agents_root() -> Result<PathBuf> {
+    Ok(data_root()?.join(AGENTS_DIR))
+}
+
+/// 运行态目录根：`~/.tiangong/data/subagent/runtime/`。
 pub fn runtime_root() -> Result<PathBuf> {
-    Ok(storage_root()?.join("agents-runtime"))
+    Ok(data_root()?.join(RUNTIME_DIR))
 }
 
 /// 校验 ID 是安全的单段路径（防目录逃逸）。

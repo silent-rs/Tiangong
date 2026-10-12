@@ -1,4 +1,4 @@
-//! Agent 身份存储：`~/.tiangong/agents/<agent-id>/` 的扫描与 CRUD。
+//! Agent 身份存储：`~/.tiangong/data/subagent/agents/<agent-id>/` 的扫描与 CRUD。
 
 use std::path::PathBuf;
 

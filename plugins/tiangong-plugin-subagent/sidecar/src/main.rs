@@ -12,6 +12,7 @@ mod delivery;
 mod mcp;
 mod mcp_access;
 mod memory;
+mod migration;
 mod paths;
 mod runner;
 mod runtime_store;

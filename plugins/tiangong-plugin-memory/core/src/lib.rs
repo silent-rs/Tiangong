@@ -24,6 +24,7 @@ mod db;
 mod injection;
 mod llm_metrics;
 pub mod local_model;
+mod migration;
 mod options;
 mod paths;
 mod recall;
@@ -49,6 +50,7 @@ pub use election::{
     start_or_connect_with_options_and_service,
 };
 pub use handle::MemoryHandle;
+pub use migration::migrate_legacy_storage;
 pub use options::{MemoryOptions, MemoryVectorMode};
 pub use recovery::recover_plugin_data_dir;
 pub use types::*;

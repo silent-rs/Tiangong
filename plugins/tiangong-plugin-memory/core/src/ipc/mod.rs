@@ -1296,7 +1296,7 @@ mod tests {
             }
         }
         // 与 leader.json 同在存储根下，不同存储根的实例互不干扰。
-        assert_eq!(path, root.path().join("memory/runtime/memory.json"));
+        assert_eq!(path, root.path().join("data/memory/runtime/memory.json"));
     }
 
     #[tokio::test(flavor = "current_thread")]

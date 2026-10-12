@@ -133,6 +133,10 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         return run_update(cli.update).await;
     }
 
+    // 旧版数据位于存储根下 memory/，先迁入插件自有数据目录 data/memory/；
+    // 失败直接中止，避免在新目录建空库后旧数据再也迁不过来。
+    tiangong_memory::migrate_legacy_storage()
+        .map_err(|error| error.context("迁移旧 Memory 数据失败，已中止启动以免丢失记忆"))?;
     if let Some(plugin_data_dir) =
         std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|value| !value.is_empty())
     {

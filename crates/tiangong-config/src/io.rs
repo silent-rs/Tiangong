@@ -166,15 +166,17 @@ fn ensure_routing_models_registered(cfg: &mut ModelsConfig) {
 // Memory 旧模型配置交接
 // ---------------------------------------------------------------------------
 
-/// 交接文件名（位于 `~/.tiangong/memory/`）。
+/// 交接文件名（位于 Memory 插件自有数据目录 `~/.tiangong/data/memory/`）。
 pub const LEGACY_MEMORY_MODELS_FILE: &str = "legacy-models.json";
 
-/// 交接文件路径：`<storage_root>/memory/legacy-models.json`。
+/// 交接文件路径：`<storage_root>/data/memory/legacy-models.json`。
 ///
 /// 宿主从 models.json 迁出的 embedding / rerank 配置先落到此独立文件，
 /// 由 Memory 插件在下次加载配置时并入自身的新配置并归档。
 pub fn legacy_memory_models_path(dir: &Path) -> PathBuf {
-    dir.join("memory").join(LEGACY_MEMORY_MODELS_FILE)
+    dir.join("data")
+        .join("memory")
+        .join(LEGACY_MEMORY_MODELS_FILE)
 }
 
 /// 从 models.json 迁出的 Memory 旧模型配置。
@@ -592,7 +594,7 @@ mod tests {
         .unwrap();
     }
 
-    /// models.json 中的 embedding/rerank 应迁出到 memory/legacy-models.json，
+    /// models.json 中的 embedding/rerank 应迁出到 data/memory/legacy-models.json，
     /// models.json 其余内容保持可用，且迁出幂等。
     #[test]
     fn extract_legacy_memory_models_moves_embedding_and_rerank_out() {

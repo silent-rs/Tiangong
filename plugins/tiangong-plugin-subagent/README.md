@@ -6,13 +6,13 @@
 
 - `plugin.json` — 14 个 AI 工具 + extension.tab 管理页 + resident Rust sidecar；
 - `protocol/` — 宿主、UI 与 sidecar 共用的业务协议类型；
-- `sidecar/` — 统一交互总线：`~/.tiangong/agents/` 身份目录、会话激活与 Workspace 写互斥、Task/Run 状态机、CLI Adapter（JSONL 子进程）、Hook 先落盘再投递；
+- `sidecar/` — 统一交互总线：`~/.tiangong/data/subagent/agents/` 身份目录、会话激活与 Workspace 写互斥、Task/Run 状态机、CLI Adapter（JSONL 子进程）、Hook 先落盘再投递；
 - `src/` — Vue 3 管理页（筛选、三层状态、激活/停用/消息/任务/中断/取消、能力声明展示）。
 
 ## 数据目录
 
-- 身份：`~/.tiangong/agents/<agent-id>/{agent.toml, instructions.md, memory/, artifacts/}`
-- 运行态：`~/.tiangong/agents-runtime/`（激活关系、任务、运行、事件历史、待投递 Hook 队列、worktree）
+- 身份：`~/.tiangong/data/subagent/agents/<agent-id>/{agent.toml, instructions.md, memory/, artifacts/}`
+- 运行态：`~/.tiangong/data/subagent/runtime/`（激活关系、任务、运行、事件历史、待投递 Hook 队列、worktree）
 
 ## CLI 后端协议
 

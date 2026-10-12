@@ -134,7 +134,7 @@ impl From<&ManualEndpoint> for ResolvedEndpoint {
     }
 }
 
-/// 插件持久化配置（存于 `~/.tiangong/generate-image-openai/config.json`）。
+/// 插件持久化配置（存于 `~/.tiangong/data/generate-image-openai/config.json`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageGenConfig {
     /// 模型来源。

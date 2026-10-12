@@ -1,6 +1,6 @@
 //! 运行态记录：激活关系、任务、运行与事件历史。
 //!
-//! 由 sidecar 持久化在 `~/.tiangong/agents-runtime/`，与 agent.toml 身份目录分离。
+//! 由 sidecar 持久化在 `~/.tiangong/data/subagent/runtime/`，与 agent.toml 身份目录分离。
 
 use serde::{Deserialize, Serialize};
 

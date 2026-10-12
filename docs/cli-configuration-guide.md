@@ -72,11 +72,11 @@ tiangong config --port 8800 --no-open   # 在服务器执行，再在本地浏�
   server.json           Server 监听配置（host/port/auth_token）
   app.json              默认信任模式、默认工作目录等
   custom-prompt.md      自定义 Prompt
-  mcp.json              MCP 配置（MCP 插件管理）
   skills/               Skill 目录（Skill 插件管理）
   plugins/              已安装插件
-  memory/
-    config.json         Memory 配置（记忆插件管理）
+  data/
+    mcp/mcp.json        MCP 配置（MCP 插件管理）
+    memory/config.json  Memory 配置（记忆插件管理）
   sessions/             会话持久化
   logs/                 运行日志
 ```

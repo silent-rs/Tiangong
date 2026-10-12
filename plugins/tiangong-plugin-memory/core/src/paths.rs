@@ -11,9 +11,14 @@ pub(crate) fn storage_root() -> PathBuf {
         .join(".tiangong")
 }
 
+/// Memory 数据目录：插件自有数据目录 `<存储根>/data/memory`。
+///
+/// 早期版本使用 `<存储根>/memory`，由 [`crate::migration`] 在启动时迁入。
 pub(crate) fn memory_data_dir() -> PathBuf {
-    storage_root().join("memory")
+    tiangong_plugin_sidecar::storage::storage_data_dir(PLUGIN_ID)
 }
+
+const PLUGIN_ID: &str = "memory";
 
 fn user_home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {

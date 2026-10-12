@@ -598,7 +598,7 @@ mod tests {
     }
 
     /// 真实 ChatGPT 生图：需设置 `TIANGONG_CODEX_IMAGE_E2E=1`，并以
-    /// `TIANGONG_STORAGE_ROOT` 指向含 `auth/codex.json` 与 `generate-image-openai/config.json` 的目录。
+    /// `TIANGONG_STORAGE_ROOT` 指向含 `auth/codex.json` 与 `data/generate-image-openai/config.json` 的目录。
     #[tokio::test]
     async fn chatgpt_image_generation_e2e() {
         if std::env::var("TIANGONG_CODEX_IMAGE_E2E").is_err() {

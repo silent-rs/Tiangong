@@ -163,7 +163,12 @@ fn load_session(&self, id: &str) -> Result<Session> {
   skills.json           # Skill 配置
   skills-lock.json      # Skill 依赖锁文件
   mcp-lock.json         # MCP 依赖锁文件
+  data/<插件 id>/        # 插件自有数据（沙箱内仅此可写），旧数据由插件首次启动自行迁入
   data/mcp/             # MCP 插件数据（mcp.json 配置、mcp-tools-cache.json 能力缓存）
+  data/memory/          # Memory 数据（SQLite / Tantivy / LanceDB / 模型）
+  data/scheduler/       # 定时任务
+  data/subagent/        # Subagent 身份（agents/）与运行态（runtime/）
+  data/index/           # 全文索引
   sessions/             # 会话持久化目录
 ```
 

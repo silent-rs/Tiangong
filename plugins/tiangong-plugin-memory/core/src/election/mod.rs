@@ -193,6 +193,11 @@ pub fn read_leader_info() -> Result<Option<LeaderInfo>> {
     read_leader_info_from_path(&leader_info_path())
 }
 
+/// 读取指定路径的 leader 信息（迁移前检查旧数据目录是否仍被占用）。
+pub(crate) fn read_leader_info_at(path: &Path) -> Result<Option<LeaderInfo>> {
+    read_leader_info_from_path(&path.to_path_buf())
+}
+
 fn read_leader_info_from_path(path: &PathBuf) -> Result<Option<LeaderInfo>> {
     if !path.exists() {
         return Ok(None);

@@ -532,19 +532,19 @@ async fn runtime_loads_profile_workspace_and_session_injections() {
     let _env = EnvGuard::enter(home.path(), &workspace_path);
 
     write_file(
-        &home.path().join(".tiangong/memory/profile/agent.md"),
+        &home.path().join(".tiangong/data/memory/profile/agent.md"),
         "profile-memory",
     );
     write_file(
         &home.path().join(format!(
-            ".tiangong/memory/workspaces/{workspace_id}/agent.md"
+            ".tiangong/data/memory/workspaces/{workspace_id}/agent.md"
         )),
         "workspace-memory",
     );
     write_file(
         &home
             .path()
-            .join(".tiangong/memory/sessions/session-a/agent.md"),
+            .join(".tiangong/data/memory/sessions/session-a/agent.md"),
         "session-memory",
     );
 
@@ -1564,19 +1564,19 @@ async fn memory_recall_levels_cover_injection_depth1_depth2_and_context_summary(
     eprintln!("[memory-levels] workspace_id={workspace_id}");
 
     write_file(
-        &home.path().join(".tiangong/memory/profile/agent.md"),
+        &home.path().join(".tiangong/data/memory/profile/agent.md"),
         "profile recall level",
     );
     write_file(
         &home.path().join(format!(
-            ".tiangong/memory/workspaces/{workspace_id}/agent.md"
+            ".tiangong/data/memory/workspaces/{workspace_id}/agent.md"
         )),
         "workspace recall level",
     );
     write_file(
         &home
             .path()
-            .join(".tiangong/memory/sessions/session-levels/agent.md"),
+            .join(".tiangong/data/memory/sessions/session-levels/agent.md"),
         "session recall level",
     );
 

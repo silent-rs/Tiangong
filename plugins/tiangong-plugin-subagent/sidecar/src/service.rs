@@ -1,6 +1,6 @@
 //! Subagent 插件 sidecar 服务：统一交互总线。
 //!
-//! 职责：扫描管理持久 Agent（~/.tiangong/agents/）、维护会话激活与 Workspace
+//! 职责：扫描管理持久 Agent（~/.tiangong/data/subagent/agents/）、维护会话激活与 Workspace
 //! 写互斥、路由消息与任务到运行后端（首版 CLI Adapter）、归一化状态、把重要
 //! 反馈经 Hook 投回激活会话、退出时清理 managed 运行实例。
 //!

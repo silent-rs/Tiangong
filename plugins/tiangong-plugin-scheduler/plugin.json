@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "scheduler",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "require_server": true,
   "wasm": {
     "binary": "tiangong_plugin_scheduler_wasm.wasm"

@@ -246,7 +246,7 @@ curl -fsSL https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/relay/install.sh
 
 定时任务由 `scheduler` 插件提供（底层基于 `tiangong-scheduler` crate），Webhook 触发由 Server 内置，两者都用于按计划或外部事件驱动 Agent 执行：
 
-- **定时任务**：JSON 文件存储（`~/.tiangong/scheduler/`），复用 silent 框架内置 Scheduler，Server 启动时自动恢复已启用的 Cron Job。
+- **定时任务**：JSON 文件存储（`~/.tiangong/data/scheduler/`），复用 silent 框架内置 Scheduler，由 scheduler 插件 sidecar 启动时恢复已启用的 Cron Job。
 - **双模式编辑**：桌面端提供简单模式和 Cron 模式两种编辑器，内置校验和下次触发预览，可关联已有会话复用上下文或自动创建新会话。
 - **Webhook 触发**：Server 内置独立于定时任务的 HTTP 触发能力（`~/.tiangong/webhooks/`），提供无需认证的外部触发端点和需认证的管理端点，支持可选签名验证。
 - **结果推送**：定时任务和 Webhook 触发的结果可推送到指定 Bot 通道，与移动端控制联动。
@@ -392,8 +392,12 @@ tiangong bot start feishu                         # 在后台启动已配置的 
   sessions/             会话持久化
   logs/                 运行日志
   media/                生成或归档的媒体文件
-  memory/               长期记忆数据（含独立 config.json）
-  data/<插件 id>/        插件自有数据（如 data/mcp/mcp.json 为 MCP 配置）
+  data/<插件 id>/        插件自有数据，旧版位于存储根的数据由各插件首次启动时自行迁入：
+    mcp/                MCP 配置 mcp.json 与能力缓存
+    memory/             长期记忆数据（含独立 config.json）
+    scheduler/          定时任务（jobs.json 与运行记录）
+    subagent/           Subagent 身份（agents/）与运行态（runtime/）
+    index/              工作区与会话全文索引
   auth/                 账号登录凭据（如 ChatGPT OAuth 令牌，默认禁止插件读取）
   plugins-dev/          自建插件开发目录
   sandbox/              Sandbox Launcher 与伴生签名

@@ -183,7 +183,7 @@ fn print_usage() {
   cargo run -p tiangong-memory --example memory_llm_smoke -- [选项]
 
 选项：
-  --config <path>            指定 Memory 配置文件，默认 ~/.tiangong/memory/config.json
+  --config <path>            指定 Memory 配置文件，默认 ~/.tiangong/data/memory/config.json
   --prompt <text>            指定 smoke test 提示词
   --max-tokens <n>           指定最大输出 token，默认 160
   --allow-missing-config     未配置 Memory LLM 时跳过真实调用并返回成功

@@ -9,7 +9,7 @@
 //!   本地运行，阶段 2 接入）或 `remote`（独立在线端点），不再引用 `models.json`。
 //!
 //! 旧版（v1）配置保存的是从 `models.json` 复制出的完整端点，加载时自动升级；
-//! 宿主从 `models.json` 迁出的 embedding / rerank（`memory/legacy-models.json`）
+//! 宿主从 `models.json` 迁出的 embedding / rerank（`data/memory/legacy-models.json`）
 //! 也在加载时并入并归档。
 
 use std::fs;
@@ -201,7 +201,7 @@ pub fn legacy_models_handoff_path() -> PathBuf {
     crate::paths::memory_data_dir().join(LEGACY_MEMORY_MODELS_FILE)
 }
 
-/// Memory 禁用标记文件路径：~/.tiangong/memory/.disabled
+/// Memory 禁用标记文件路径：~/.tiangong/data/memory/.disabled
 ///
 /// 用于 `tiangong memory enable/disable` 实现对称开关（RFC 0015 §6.3）。
 /// MemoryConfig 无顶层 enabled 字段，改用此标记文件存在性表示禁用，

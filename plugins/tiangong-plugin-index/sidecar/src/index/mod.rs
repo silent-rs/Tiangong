@@ -20,6 +20,7 @@ use tiangong_plugin_index_protocol::{IndexHit, IndexScope, SessionIndexHit, Turn
 use self::session_index::SessionIndex;
 use self::workspace_index::WorkspaceIndex;
 
+mod migration;
 pub(crate) mod session_index;
 pub(crate) mod tantivy_schema;
 pub(crate) mod workspace_index;
@@ -105,7 +106,8 @@ impl Drop for WorkspaceScanPermit {
 impl IndexManager {
     pub fn new() -> Result<Self> {
         let base_dir = Self::default_dir();
-        recover_legacy_index_dir(&base_dir);
+        migration::migrate_legacy_index(&base_dir, &legacy_index_dirs())
+            .context("迁移旧 Index 数据失败，已中止启动以免丢失索引")?;
         Self::with_base_dir(base_dir)
     }
 
@@ -460,79 +462,24 @@ impl IndexManager {
             .join("meta.json")
     }
 
+    /// 插件自有数据目录 `~/.tiangong/data/index`（宿主注入优先）。
     fn default_dir() -> PathBuf {
-        // 业务索引属于应用数据，插件私有目录只保存 endpoint 等生命周期文件。
-        if let Some(dir) = std::env::var_os("TIANGONG_STORAGE_ROOT").filter(|v| !v.is_empty()) {
-            return PathBuf::from(dir).join("index");
-        }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".tiangong").join("index")
+        tiangong_plugin_sidecar::storage::storage_data_dir(PLUGIN_ID)
     }
 }
 
-fn recover_legacy_index_dir(target: &Path) {
-    if has_index_data(target) {
-        return;
-    }
-    let mut candidates = Vec::new();
+const PLUGIN_ID: &str = "index";
+
+/// 旧索引目录候选：存储根下的 `index/`，以及更早短暂写入的插件安装目录
+/// `data/index/`（按优先级排列）。
+fn legacy_index_dirs() -> Vec<PathBuf> {
+    let mut candidates = vec![tiangong_plugin_sidecar::storage::storage_root().join("index")];
     if let Some(plugin_dir) =
         std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|value| !value.is_empty())
     {
         candidates.push(PathBuf::from(plugin_dir).join("index"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".tiangong").join("index"));
-    }
-    candidates.retain(|source| source != target);
-
-    for source in candidates {
-        let Ok(metadata) = fs::symlink_metadata(&source) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() {
-            tracing::warn!(source = %source.display(), "拒绝恢复符号链接形式的旧 Index 目录");
-            continue;
-        }
-        if !metadata.is_dir() || !has_index_data(&source) {
-            continue;
-        }
-        if let Some(parent) = target.parent()
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            tracing::warn!(target = %target.display(), %error, "创建 Index 标准数据目录失败");
-            return;
-        }
-        if target.exists() {
-            let target_is_empty = fs::read_dir(target)
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(false);
-            if target_is_empty {
-                if let Err(error) = fs::remove_dir(target) {
-                    tracing::warn!(target = %target.display(), %error, "清理空的 Index 标准数据目录失败");
-                    return;
-                }
-            } else {
-                tracing::warn!(source = %source.display(), target = %target.display(), "Index 标准目录已有其他数据，保留旧目录且不执行覆盖");
-                return;
-            }
-        }
-        match fs::rename(&source, target) {
-            Ok(()) => {
-                tracing::info!(source = %source.display(), target = %target.display(), "旧 Index 数据目录恢复完成");
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(source = %source.display(), target = %target.display(), %error, "旧 Index 数据目录恢复失败，将使用标准目录重新建库");
-                return;
-            }
-        }
-    }
-}
-
-fn has_index_data(dir: &Path) -> bool {
-    dir.join("workspaces").is_dir() || dir.join("sessions").is_dir()
+    candidates
 }
 
 /// 工作区在内存映射（`workspaces` / `scanning_roots`）中的统一 key。

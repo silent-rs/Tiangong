@@ -1,4 +1,4 @@
-//! Agent 身份配置（`~/.tiangong/agents/<agent-id>/agent.toml）。
+//! Agent 身份配置（`~/.tiangong/data/subagent/agents/<agent-id>/agent.toml）。
 
 use serde::{Deserialize, Serialize};
 

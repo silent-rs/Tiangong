@@ -105,9 +105,9 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin tiangong
   server.json           Server 监听配置（host/port/auth_token）
   custom-prompt.md      自定义 Prompt（0.12.0 新增独立文件）
   skills.json           Skill 配置
-  mcp.json              MCP 配置
   sessions/             会话持久化
-  memory/               长期记忆数据（SQLite / Tantivy / 向量索引）
+  data/mcp/mcp.json     MCP 配置
+  data/memory/          长期记忆数据（SQLite / Tantivy / 向量索引）
     config.json         Memory 独立配置
   logs/                 运行日志
   media/                生成或归档的媒体文件

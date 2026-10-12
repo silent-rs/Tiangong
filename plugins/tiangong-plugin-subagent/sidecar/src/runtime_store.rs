@@ -1,4 +1,4 @@
-//! 运行态存储：`~/.tiangong/agents-runtime/`。
+//! 运行态存储：`~/.tiangong/data/subagent/runtime/`。
 //!
 //! 维护会话激活关系、任务、运行、事件历史与待投递 Hook 队列。
 //! 写入全部走原子替换；Hook 事件先落盘再投递（投递成功即移除）。

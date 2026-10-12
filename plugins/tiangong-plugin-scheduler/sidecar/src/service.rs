@@ -14,7 +14,6 @@ use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
-use tiangong_plugin_runtime::sidecar::{PLUGIN_DATA_DIR_ENV, STORAGE_ROOT_ENV};
 use tiangong_plugin_scheduler_protocol::{
     CreateJobRequest, DeleteJobRequest, Empty, GetJobRunsRequest, Job, JobResponse, JobRun,
     JobRunStatus, ListJobsResponse, PLUGIN_ID, PLUGIN_VERSION, SCHEDULER_PROTOCOL_VERSION,
@@ -24,7 +23,7 @@ use tiangong_scheduler::store::JobStore;
 
 /// Scheduler sidecar 业务服务。
 pub struct SchedulerService {
-    /// 任务存储根（默认 `~/.tiangong/scheduler`，由 env 覆盖）。
+    /// 任务存储（`~/.tiangong/data/scheduler`）。
     store: JobStore,
     /// HTTP 投递客户端。
     deliver: Arc<MessageDeliver>,
@@ -615,24 +614,20 @@ fn build_cron_task(
 
 // ── 辅助函数 ─────────────────────────────────────────────────────
 
-/// 打开 JobStore：优先使用宿主共享存储根，确保两个设置入口共用原有任务数据。
+/// 打开 JobStore：数据位于插件自有数据目录 `data/scheduler/`。
+///
+/// 首次启动先把存储根下旧 `scheduler/` 复制进来；迁移失败直接中止启动，
+/// 避免在新目录生成空任务清单后旧任务再也迁不过来。
 fn open_store() -> Result<JobStore> {
-    if let Ok(storage_root) = std::env::var(STORAGE_ROOT_ENV)
-        && !storage_root.is_empty()
+    let base = tiangong_plugin_sidecar::storage::storage_data_dir(PLUGIN_ID);
+    let legacy = tiangong_plugin_sidecar::storage::storage_root().join("scheduler");
+    if let Some(copied) = crate::migration::migrate_legacy_dir(&legacy, &base)
+        .context("迁移旧定时任务数据失败，已中止启动以免丢失任务")?
     {
-        let base = std::path::PathBuf::from(storage_root).join("scheduler");
-        return JobStore::open_at(base);
+        tracing::info!(copied, from = %legacy.display(), "定时任务旧数据迁移完成");
     }
-    // 独立运行且宿主未注入共享根目录时，才回退到插件私有数据目录。
-    if let Ok(data_dir) = std::env::var(PLUGIN_DATA_DIR_ENV)
-        && !data_dir.is_empty()
-    {
-        let base = std::path::PathBuf::from(data_dir).join("scheduler");
-        return JobStore::open_at(base);
-    }
-    JobStore::open()
+    JobStore::open_at(base)
 }
-
 /// 校验 schedule 字符串能否被调度器解析（需 6~7 字段 cron 表达式）。
 fn validate_cron_schedule(expr: &str) -> Result<()> {
     tiangong_scheduler::executor::validate_cron_schedule(expr).with_context(|| {
