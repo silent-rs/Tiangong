@@ -59,6 +59,9 @@ pub const PLUGIN_ID_ENV: &str = "TIANGONG_PLUGIN_ID";
 pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
 pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
 pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
+/// 插件在存储根统一写域下的自有数据目录（`~/.tiangong/data/<插件 id>`）。
+/// 沙箱内存储根只有该目录、`media/` 与 `tmp/` 可写；插件自有数据应落在这里。
+pub const PLUGIN_STORAGE_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_STORAGE_DATA_DIR";
 pub const STORAGE_ROOT_ENV: &str = "TIANGONG_STORAGE_ROOT";
 pub const EXEC_ENV_JSON_ENV: &str = "TIANGONG_EXEC_ENV_JSON";
 

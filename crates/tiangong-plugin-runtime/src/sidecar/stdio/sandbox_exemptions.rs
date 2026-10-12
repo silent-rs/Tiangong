@@ -111,6 +111,81 @@ pub(super) fn retain_existing_writable_roots(policy: &mut tiangong_sandbox::Sand
     });
 }
 
+/// 存储根统一写域下的插件自有数据根目录名（`~/.tiangong/data/<插件 id>`）。
+pub(crate) const STORAGE_DATA_DIR: &str = "data";
+/// 存储根下所有沙箱插件共享可写的顶层目录：`media/` 是跨插件媒体交换区
+/// （截图、语音、Bot 附件），`tmp/` 承载 sidecar 临时目录。`logs/` 由宿主
+/// 写入，不在此列。
+const SHARED_WRITABLE_ENTRIES: [&str; 2] = ["media", "tmp"];
+
+/// 存储根贡献的可写根（按插件 ID 收拢，所有插件同一规则）。
+///
+/// 只放行 `data/<plugin_id>`（spawn 前由宿主创建）、插件安装目录下的
+/// `data/`（`TIANGONG_PLUGIN_DATA_DIR`）、`media/`（跨插件媒体交换）与
+/// `tmp/`。存储根本身、`logs/`（宿主写入）、其他插件的数据目录与历史
+/// 顶层数据目录一律只读；插件升级时自行把旧数据复制进 `data/<id>`。
+/// 条目不跟随符号链接，受保护路径不列入。
+pub(super) fn storage_root_writable_roots(
+    storage_root: &std::path::Path,
+    plugin_id: &str,
+    plugin_data_dir: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let protected = tiangong_protected_paths(storage_root);
+    let mut roots = vec![
+        storage_root.join(STORAGE_DATA_DIR).join(plugin_id),
+        plugin_data_dir.to_path_buf(),
+    ];
+    roots.extend(
+        SHARED_WRITABLE_ENTRIES
+            .iter()
+            .map(|entry| storage_root.join(entry)),
+    );
+    roots.retain(|path| {
+        !protected.iter().any(|item| path.starts_with(item))
+            && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+    });
+    roots.dedup();
+    roots
+}
+
+/// 在存储根下创建插件自有数据目录 `data/<plugin_id>`（实体目录；已存在的
+/// 符号链接视为篡改并拒绝）。插件 ID 已由清单校验限定为字母数字与 `-_.`，
+/// 这里再拒绝 `.`/`..` 等非普通段，防止路径逃逸。
+pub(super) fn ensure_storage_data_dir(
+    storage_root: &std::path::Path,
+    plugin_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let mut components = std::path::Path::new(plugin_id).components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        anyhow::bail!("插件 ID 不能作为数据目录名: {plugin_id}");
+    }
+    let base = storage_root.join(STORAGE_DATA_DIR);
+    let dir = base.join(plugin_id);
+    // 存储根本身由宿主管理，按需创建；只对其下的 data/ 与 data/<id> 两级
+    // 做实体目录校验（存储根是信任锚，不在本函数的篡改防护范围内）。
+    std::fs::create_dir_all(storage_root)?;
+    for path in [&base, &dir] {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => anyhow::bail!("插件数据目录不是实体目录: {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(path).or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(dir)
+}
+
 /// 仅为宿主授权的插件增加用户工具缓存写根。
 pub(super) fn apply_user_cache_write(policy: &mut tiangong_sandbox::SandboxPolicy, allowed: bool) {
     if !allowed {
@@ -265,6 +340,63 @@ mod sensitive_access_tests {
         policy.extra_writable.push(missing.clone());
         retain_existing_writable_roots(&mut policy);
         assert!(policy.extra_writable.contains(&missing));
+    }
+
+    #[test]
+    fn storage_root_write_scope_is_per_plugin_id() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path();
+        for dir in ["tmp", "media", "logs", "skills", "memory", "keys"] {
+            std::fs::create_dir(storage.join(dir)).unwrap();
+        }
+        std::fs::write(storage.join("app.json"), "{}").unwrap();
+        let plugin_data = storage.join("plugins/fs/data");
+        std::fs::create_dir_all(&plugin_data).unwrap();
+        assert_eq!(
+            ensure_storage_data_dir(storage, "fs").unwrap(),
+            storage.join("data/fs")
+        );
+        // 幂等：重复创建不报错。
+        ensure_storage_data_dir(storage, "fs").unwrap();
+        ensure_storage_data_dir(storage, "memory").unwrap();
+
+        let roots = storage_root_writable_roots(storage, "fs", &plugin_data);
+        assert_eq!(
+            roots,
+            vec![
+                storage.join("data/fs"),
+                plugin_data.clone(),
+                storage.join("media"),
+                storage.join("tmp"),
+            ]
+        );
+        assert!(!roots.contains(&storage.to_path_buf()), "根目录本身不可写");
+        assert!(!roots.contains(&storage.join("logs")), "logs 只由宿主写入");
+        assert!(
+            !roots.contains(&storage.join("data/memory")),
+            "插件间数据隔离"
+        );
+        assert!(!roots.contains(&storage.join("memory")), "历史数据目录只读");
+        assert!(!roots.contains(&storage.join("skills")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_root_write_scope_never_follows_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), storage.join("media")).unwrap();
+        std::fs::create_dir(storage.join("data")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), storage.join("data/evil")).unwrap();
+        assert!(ensure_storage_data_dir(storage, "evil").is_err());
+        assert!(ensure_storage_data_dir(storage, "..").is_err());
+        assert!(ensure_storage_data_dir(storage, "a/b").is_err());
+        let roots = storage_root_writable_roots(storage, "evil", &storage.join("missing"));
+        assert!(
+            roots.is_empty(),
+            "符号链接与不存在的目录都不进入写域: {roots:?}"
+        );
     }
 
     #[test]

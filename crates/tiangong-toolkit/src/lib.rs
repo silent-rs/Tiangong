@@ -1,8 +1,10 @@
-//! 工具共享 helper：会话工作目录、路径沙箱、命令白名单、命令执行。
+//! 工具共享 helper：会话工作目录、路径解析、命令执行。
+//!
+//! 访问控制不在本 crate：fs / fetch / index 等 sidecar 运行在 OS 沙箱内，
+//! 读写范围统一由沙箱策略裁决，这里只负责把原始路径解析为绝对路径。
 //!
 //! 原 `tiangong-core::tool::common`，随收敛重构迁出为独立 crate（#208）。
-//! 作为路径沙箱安全基础设施，供 core 与各进程内插件 crate（fs / command / fetch /
-//! index / terminal）共用，避免重复实现安全逻辑。
+//! 供 core 与各插件 crate（fs / command / fetch / index / terminal）共用。
 //!
 //! 会话工作目录的注入采用显式传递：core 在 `prepare_plugins` 阶段把 `Session.cwd`
 //! 经各插件的 `set_workspace` 注入；stdio MCP 子进程等需要 cwd 的执行路径由
@@ -35,8 +37,8 @@ pub fn workspace_root() -> Result<PathBuf> {
 
 /// 应用自管存储根目录：`~/.tiangong/`。
 ///
-/// 该目录承载 skills / MCP 锁等插件自管数据，天然属于应用可信存储区，
-/// 始终允许 fs 工具写入（如 Agent 创建/编辑 skill 文件），无需经插件 hook 声明。
+/// 仅用于路径展示与定位；写入范围由 OS 沙箱裁决（见
+/// [`resolve_write_path_from_base`]）。
 pub fn app_storage_root() -> PathBuf {
     fn user_home_dir() -> Option<PathBuf> {
         if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
@@ -61,45 +63,9 @@ pub fn app_storage_root() -> PathBuf {
         .join(".tiangong")
 }
 
-/// 计算允许写入的根目录列表（工作空间 + 应用存储根）。
-///
-/// 显式传入 `workspace`，供无 thread-local CWD 的插件 handler 调用，
-/// 避免隐式依赖 `SESSION_CWD`。应用存储根（`~/.tiangong/`）天然可信，
-/// 始终追加，无需插件经 hook 声明。
-fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
-    let workspace_canonical = canonicalize_path(workspace)
-        .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
-
-    let mut roots = vec![workspace_canonical];
-    // 应用自管存储根（~/.tiangong/），始终允许。
-    let storage = app_storage_root();
-    let storage_canonical = canonicalize_path(&storage).unwrap_or(storage);
-    if !roots.iter().any(|r| r == &storage_canonical) {
-        roots.push(storage_canonical);
-    }
-    Ok(roots)
-}
-
-pub fn write_allowed_roots() -> Result<Vec<PathBuf>> {
-    let workspace = workspace_root()?;
-    write_allowed_roots_with(&workspace)
-}
-
-/// 基于 `base` 工作目录校验路径是否落在允许写入的根目录内。
-fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path) -> Result<()> {
-    let roots = write_allowed_roots_with(base)?;
-    let canonical =
-        canonicalize_path(path).with_context(|| format!("解析{label}失败：{}", path.display()))?;
-    if !is_path_in_allowed_roots(&canonical, &roots) {
-        return Err(anyhow!(
-            "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
-            canonical.display()
-        ));
-    }
-    Ok(())
-}
-
 /// 解析 effective cwd（显式传入工作目录，供插件 handler 使用）。
+///
+/// 只做路径解析与"是目录"校验；访问范围由 OS 沙箱统一裁决。
 pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<PathBuf> {
     let value = raw.unwrap_or(".").trim();
     let cwd = if value.is_empty() {
@@ -110,23 +76,19 @@ pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<Path
     if !cwd.is_dir() {
         return Err(anyhow!("workdir 不是目录：{}", cwd.display()));
     }
-    ensure_path_in_write_allowed_roots_with(&cwd, "workdir", base)?;
     Ok(cwd)
 }
 
-/// 解析工作空间内的读路径（显式传入工作目录，供插件 handler 使用）。
-pub fn resolve_workspace_path_with(raw: &str, base: &Path) -> Result<PathBuf> {
-    resolve_path_from_base(raw, base)
-}
-
-/// 信任模式下的路径解析（显式传入工作目录）：不做越界检查，路径不存在时不报错。
-pub fn resolve_workspace_path_trusted_with(raw: &str, base: &Path) -> Result<PathBuf> {
+/// 读路径解析（显式传入工作目录）：相对路径基于 `base`，展开 `~`，
+/// 存在时 canonicalize 解析符号链接，不存在时原样返回由调用方报错。
+///
+/// 不做越界检查：读写范围统一交给 sidecar 所在的 OS 沙箱裁决。
+pub fn resolve_read_path_with(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
     }
     let candidate = resolve_path_candidate(raw, base);
-    // 存在时 canonicalize 解析符号链接，不存在时直接返回
     Ok(canonicalize_path(&candidate).unwrap_or(candidate))
 }
 
@@ -142,34 +104,17 @@ pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// 写路径解析：相对路径基于 `base`，展开 `~`，返回绝对路径。
+///
+/// 不做白名单校验：写范围由 OS 沙箱裁决（会话工作区、系统临时目录、
+/// 存储根下 `data/<插件 id>`、`media/`、`tmp/`），越界写入在系统调用处
+/// 以权限错误失败。
 pub fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow!("路径参数不能为空"));
     }
-
-    let candidate = resolve_path_candidate(raw, base);
-    let mut anchor = candidate
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| base.to_path_buf());
-    while !anchor.exists() {
-        let Some(next) = anchor.parent().map(Path::to_path_buf) else {
-            return Err(anyhow!("无法定位可写目录：{}", candidate.display()));
-        };
-        anchor = next;
-    }
-    let parent_canonical = canonicalize_path(&anchor)
-        .with_context(|| format!("解析目标目录失败：{}", anchor.display()))?;
-    let roots = write_allowed_roots_with(base)?;
-
-    if !is_path_in_allowed_roots(&parent_canonical, &roots) {
-        return Err(anyhow!(
-            "路径越界，仅允许当前工作空间或已注册的额外允许目录：{}",
-            candidate.display()
-        ));
-    }
-    Ok(candidate)
+    Ok(resolve_path_candidate(raw, base))
 }
 
 fn resolve_path_candidate(raw: &str, base: &Path) -> PathBuf {
@@ -182,10 +127,6 @@ fn resolve_path_candidate(raw: &str, base: &Path) -> PathBuf {
     } else {
         base.join(path)
     }
-}
-
-fn is_path_in_allowed_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
 }
 
 fn expand_home_path(raw: &str) -> Option<PathBuf> {

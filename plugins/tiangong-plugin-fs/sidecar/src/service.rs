@@ -2,9 +2,7 @@
 //!
 //! 整合原进程内插件的 7 个工具执行 + set_workspace 钩子，全部经 IPC 暴露给
 //! 运行时（host 侧 invoke_sidecar）与 WASM 桥接。无跨请求状态（按需进程随
-//! 调用销毁）：工作区与信任模式由每个请求的 access 上下文携带。
-
-use std::sync::Arc;
+//! 调用销毁）：工作区由每个请求的 access 上下文携带，读写范围由 OS 沙箱裁决。
 
 use anyhow::{Context, Result, anyhow};
 
@@ -14,19 +12,16 @@ use tiangong_plugin_fs_protocol::tools::{
     SET_WORKSPACE_OPERATION, SetWorkspaceRequest, TREE_DIR_OPERATION, TreeDirRequest,
     WRITE_FILE_OPERATION, WriteFileRequest,
 };
-use tiangong_plugin_fs_protocol::{
-    Ack, FS_PROTOCOL_VERSION, FsAccessContext, PLUGIN_ID, PLUGIN_VERSION,
-};
+use tiangong_plugin_fs_protocol::{Ack, FS_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
 
 use crate::handlers;
-use crate::path_policy::{PathPolicy, TrustModePathPolicy};
 
 /// Fs sidecar 业务服务。无跨请求状态（按需进程随调用销毁）：工作区
-/// 与信任模式由每个请求的 access 上下文携带，路径策略按请求构造。
+/// 由每个请求的 access 上下文携带。
 pub struct FsService {}
 
 impl FsService {
@@ -90,74 +85,61 @@ impl FsService {
             LIST_DIR_OPERATION => {
                 let req: ListDirRequest =
                     serde_json::from_value(payload).with_context(|| "解析 list_dir 请求失败")?;
-                let policy = path_policy_from_access(&req.access);
                 let access = req.access.clone();
-                let resp =
-                    tokio::task::spawn_blocking(move || handlers::handle_list_dir(req, &*policy))
-                        .await
-                        .with_context(|| "list_dir 后台任务失败")?;
+                let resp = tokio::task::spawn_blocking(move || handlers::handle_list_dir(req))
+                    .await
+                    .with_context(|| "list_dir 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 list_dir 响应失败")
             }
             TREE_DIR_OPERATION => {
                 let req: TreeDirRequest =
                     serde_json::from_value(payload).with_context(|| "解析 tree_dir 请求失败")?;
-                let policy = path_policy_from_access(&req.access);
                 let access = req.access.clone();
-                let resp =
-                    tokio::task::spawn_blocking(move || handlers::handle_tree_dir(req, &*policy))
-                        .await
-                        .with_context(|| "tree_dir 后台任务失败")?;
+                let resp = tokio::task::spawn_blocking(move || handlers::handle_tree_dir(req))
+                    .await
+                    .with_context(|| "tree_dir 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 tree_dir 响应失败")
             }
             READ_FILE_OPERATION => {
                 let req: ReadFileRequest =
                     serde_json::from_value(payload).with_context(|| "解析 read_file 请求失败")?;
-                let policy = path_policy_from_access(&req.access);
                 let access = req.access.clone();
-                let resp =
-                    tokio::task::spawn_blocking(move || handlers::handle_read_file(req, &*policy))
-                        .await
-                        .with_context(|| "read_file 后台任务失败")?;
+                let resp = tokio::task::spawn_blocking(move || handlers::handle_read_file(req))
+                    .await
+                    .with_context(|| "read_file 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 read_file 响应失败")
             }
             WRITE_FILE_OPERATION => {
                 let req: WriteFileRequest =
                     serde_json::from_value(payload).with_context(|| "解析 write_file 请求失败")?;
-                let policy = path_policy_from_access(&req.access);
                 let access = req.access.clone();
-                let resp =
-                    tokio::task::spawn_blocking(move || handlers::handle_write_file(req, &*policy))
-                        .await
-                        .with_context(|| "write_file 后台任务失败")?;
+                let resp = tokio::task::spawn_blocking(move || handlers::handle_write_file(req))
+                    .await
+                    .with_context(|| "write_file 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 write_file 响应失败")
             }
             REPLACE_IN_FILE_OPERATION => {
                 let req: ReplaceInFileRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 replace_in_file 请求失败")?;
-                let policy = path_policy_from_access(&req.access);
                 let access = req.access.clone();
-                let resp = tokio::task::spawn_blocking(move || {
-                    handlers::handle_replace_in_file(req, &*policy)
-                })
-                .await
-                .with_context(|| "replace_in_file 后台任务失败")?;
+                let resp =
+                    tokio::task::spawn_blocking(move || handlers::handle_replace_in_file(req))
+                        .await
+                        .with_context(|| "replace_in_file 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 replace_in_file 响应失败")
             }
             APPLY_PATCH_OPERATION => {
                 let req: ApplyPatchRequest =
                     serde_json::from_value(payload).with_context(|| "解析 apply_patch 请求失败")?;
-                let policy = path_policy_from_access(&req.access);
                 let access = req.access.clone();
-                let resp = tokio::task::spawn_blocking(move || {
-                    handlers::handle_apply_patch(req, &*policy)
-                })
-                .await
-                .with_context(|| "apply_patch 后台任务失败")?;
+                let resp = tokio::task::spawn_blocking(move || handlers::handle_apply_patch(req))
+                    .await
+                    .with_context(|| "apply_patch 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 apply_patch 响应失败")
             }
@@ -174,12 +156,6 @@ impl FsService {
     }
 }
 
-/// 按请求级访问上下文构造路径策略：信任模式随请求携带，不依赖进程
-/// 内状态（按需生命周期下 set_workspace 进程的缓存随调用销毁）。
-fn path_policy_from_access(access: &FsAccessContext) -> Arc<dyn PathPolicy> {
-    Arc::new(TrustModePathPolicy::new(access.full_trust))
-}
-
 #[async_trait::async_trait]
 impl tiangong_plugin_sidecar::SidecarService for FsService {
     async fn dispatch(
@@ -187,42 +163,5 @@ impl tiangong_plugin_sidecar::SidecarService for FsService {
         request: tiangong_plugin_runtime::protocol::Request,
     ) -> tiangong_plugin_runtime::protocol::Response {
         FsService::dispatch(self, request).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 信任模式随请求携带（按需生命周期无进程内状态）：同一不存在
-    /// 的工作区外路径，full_trust=false 的请求读取失败，full_trust=true
-    /// 的请求按信任模式放行。
-    #[test]
-    fn path_policy_follows_request_access() {
-        use tiangong_plugin_fs_protocol::tools::ListDirRequest;
-        let root = tempfile::tempdir().unwrap();
-        let workspace = root.path().join("ws");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let outside = root.path().join("missing.txt");
-        let mut request = ListDirRequest::default();
-        request.access.workspace = Some(workspace.display().to_string());
-
-        request.access.full_trust = false;
-        let restricted = path_policy_from_access(&request.access);
-        assert!(
-            restricted
-                .resolve_read(outside.to_str().unwrap(), &workspace)
-                .is_err(),
-            "非信任请求读取不存在的工作区外路径应失败"
-        );
-
-        request.access.full_trust = true;
-        let trusted = path_policy_from_access(&request.access);
-        assert!(
-            trusted
-                .resolve_read(outside.to_str().unwrap(), &workspace)
-                .is_ok(),
-            "信任请求按 full_trust 语义放行"
-        );
     }
 }

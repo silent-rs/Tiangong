@@ -355,13 +355,9 @@ impl IndexService {
     }
 }
 
-/// 读路径解析（search_code 用），与原 fs 插件一致的信任模式语义。
-fn resolve_read_path(raw: &str, base: &Path, full_trust: bool) -> Result<PathBuf> {
-    if full_trust {
-        shared::resolve_workspace_path_trusted_with(raw, base)
-    } else {
-        shared::resolve_workspace_path_with(raw, base)
-    }
+/// 读路径解析（search_code 用）：只解析为绝对路径，读取范围由 OS 沙箱裁决。
+fn resolve_read_path(raw: &str, base: &Path) -> Result<PathBuf> {
+    shared::resolve_read_path_with(raw, base)
 }
 
 /// index_search 阻塞实现（在 spawn_blocking 线程内执行）。
@@ -516,7 +512,7 @@ fn handle_search_code_blocking(
         };
     }
     let target = req.path.as_deref().unwrap_or(".");
-    let full_path = match resolve_read_path(target, base, req.full_trust) {
+    let full_path = match resolve_read_path(target, base) {
         Ok(p) => p,
         Err(e) => {
             return SearchCodeResponse {

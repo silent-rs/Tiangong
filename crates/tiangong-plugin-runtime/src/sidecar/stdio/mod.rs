@@ -23,9 +23,9 @@ use crate::protocol::{
     Request, Response,
 };
 use crate::sidecar::{
-    EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_VERSION_ENV,
-    ResponseWait, SERVER_TOKEN_ENV, SERVER_URL_ENV, STORAGE_ROOT_ENV, SidecarConfig,
-    SidecarConnection, SidecarInvokeError,
+    EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV,
+    PLUGIN_STORAGE_DATA_DIR_ENV, PLUGIN_VERSION_ENV, ResponseWait, SERVER_TOKEN_ENV,
+    SERVER_URL_ENV, STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
@@ -40,9 +40,9 @@ use process::{
 #[cfg(windows)]
 use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
 use sandbox_exemptions::{
-    apply_user_cache_write, exempt_authorized_reads, exempt_authorized_user_credentials,
-    exempt_mcp_config_write, resolve_launcher, retain_existing_writable_roots,
-    tiangong_protected_paths,
+    apply_user_cache_write, ensure_storage_data_dir, exempt_authorized_reads,
+    exempt_authorized_user_credentials, exempt_mcp_config_write, resolve_launcher,
+    retain_existing_writable_roots, storage_root_writable_roots, tiangong_protected_paths,
 };
 
 #[cfg(test)]
@@ -477,6 +477,12 @@ impl StdioSidecarConnection {
                 )
             }),
         )?;
+        // 存储根统一写域下的插件自有数据目录（~/.tiangong/data/<id>），
+        // 沙箱内只有它、media 与 tmp 可写，必须先于策略组装创建。
+        let storage_data_dir = preparation(
+            ensure_storage_data_dir(&self.config.storage_root, &self.config.plugin_id)
+                .context("创建插件存储数据目录失败"),
+        )?;
         let stderr = preparation(
             std::fs::OpenOptions::new()
                 .create(true)
@@ -586,11 +592,18 @@ impl StdioSidecarConnection {
             // 统一写域模型：按需调用优先采用本次宿主权威会话工作区；
             // 无调用上下文和常驻进程继续使用连接配置中的固定工作区，最后
             // 才回退存储根。敏感清单读写双禁，其余目录只读。
-            let workspace = sandbox_workspace_for_spawn(&self.config, sandbox_workspace);
+            let workspace =
+                sandbox_workspace_for_spawn(&self.config, sandbox_workspace, &storage_data_dir);
             let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
             policy.extra_writable = self.config.sandbox_extra_writable.clone();
-            // 存储根统一并入可写域（显式 workspace 即存储根时自然去重）。
-            policy.extra_writable.push(self.config.storage_root.clone());
+            // 存储根按插件 ID 收拢写域：只有 data/<id>、插件安装目录 data/、
+            // media、tmp 可写；根目录、logs 与其他插件数据只读（见
+            // storage_root_writable_roots）。
+            policy.extra_writable.extend(storage_root_writable_roots(
+                &self.config.storage_root,
+                &self.config.plugin_id,
+                &self.config.data_dir,
+            ));
             // 工具链缓存（npm 等）是功能基础设施而非用户数据：npx/uvx
             // 启动 MCP server 需要写包缓存。
             if let Some(home) = crate::interpreter_env::user_home_dir() {
@@ -749,6 +762,7 @@ impl StdioSidecarConnection {
             // stdio 模式无 endpoint 文件；保留路径占位以兼容读取方。
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
+            .env(PLUGIN_STORAGE_DATA_DIR_ENV, &storage_data_dir)
             .env(
                 crate::sidecar::INSTANCE_ROLE_ENV,
                 self.config.instance_role(),
@@ -1519,14 +1533,17 @@ impl SidecarConnection for StdioSidecarConnection {
     }
 }
 
+/// 沙箱主写根：本次调用工作区 > 连接固定工作区 > 插件自有数据目录。
+/// 兜底不能是存储根本身，否则统一写域形同虚设。
 fn sandbox_workspace_for_spawn(
     config: &SidecarConfig,
     invocation_workspace: Option<&Path>,
+    storage_data_dir: &Path,
 ) -> PathBuf {
     invocation_workspace
         .map(PathBuf::from)
         .or_else(|| config.sandbox_workspace.clone())
-        .unwrap_or_else(|| config.storage_root.clone())
+        .unwrap_or_else(|| storage_data_dir.to_path_buf())
 }
 
 fn validate_invocation_workspace(workspace: &Path) -> Result<PathBuf> {

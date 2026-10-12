@@ -131,13 +131,21 @@ mod invocation_workspace_tests {
         )
         .with_sandbox_workspace(Some(connection_workspace.clone()));
 
+        let storage_data = root.path().join("data").join("fs");
         assert_eq!(
-            sandbox_workspace_for_spawn(&config, Some(&invocation_workspace)),
+            sandbox_workspace_for_spawn(&config, Some(&invocation_workspace), &storage_data),
             invocation_workspace
         );
         assert_eq!(
-            sandbox_workspace_for_spawn(&config, None),
+            sandbox_workspace_for_spawn(&config, None, &storage_data),
             connection_workspace
+        );
+        // 无任何工作区时兜底到插件自有数据目录，绝不回退存储根本身。
+        let mut unset = config.clone();
+        unset.sandbox_workspace = None;
+        assert_eq!(
+            sandbox_workspace_for_spawn(&unset, None, &storage_data),
+            storage_data
         );
     }
 

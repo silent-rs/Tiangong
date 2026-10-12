@@ -480,7 +480,7 @@ fn resolve_download_target(
         .filter(|v| !v.is_empty())
         .map(ToString::to_string)
         .unwrap_or_else(|| infer_download_file_name(final_url));
-    // trust 模式下写路径校验逻辑与非 trust 相同，保留 is_full_trust 参数供将来差异化。
+    // 写范围由 OS 沙箱裁决，信任模式不影响下载落点解析。
     let _ = is_full_trust;
     shared::resolve_write_path_from_base(&path, base)
 }
@@ -535,7 +535,8 @@ fn header_text(headers: &HeaderMap, name: &str) -> String {
 }
 
 fn error_response(error: anyhow::Error) -> WebFetchResponse {
-    let summary = format!("web_fetch 失败：{error}");
+    // `{:#}` 展开完整错误链，保留底层 IO 原因（如沙箱拒绝落盘）。
+    let summary = format!("web_fetch 失败：{error:#}");
     WebFetchResponse {
         ok: false,
         summary: summary.clone(),

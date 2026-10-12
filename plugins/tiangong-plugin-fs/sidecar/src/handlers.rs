@@ -3,8 +3,7 @@
 //! 改造点：
 //! - 入参由 `ToolCall`（JSON）改为 protocol 的类型化 Request
 //! - 输出由 core `ToolResult` 改为 protocol `FsToolResponse`
-//! - 路径解析经 [`PathPolicy`](crate::path_policy::PathPolicy)（沙箱预留点 A），
-//!   不再直接调 toolkit 自由函数
+//! - 路径只解析为绝对路径（toolkit），读写范围由 OS 沙箱裁决
 //! - 锁的 acquire/release 在写工具内部完成（一次调用完成加锁+写+解锁，避免锁泄漏），
 //!   响应里带回 locked/unlocked 路径供 wasm 发 StreamEvent
 
@@ -21,7 +20,6 @@ use tiangong_plugin_fs_protocol::tools::{
 use tiangong_toolkit as shared;
 
 use crate::file_lock::{FileLockTable, canonicalize_for_lock};
-use crate::path_policy::PathPolicy;
 
 const DEFAULT_TREE_MAX_DEPTH: usize = 2;
 const MAX_TREE_MAX_DEPTH: usize = 8;
@@ -38,19 +36,19 @@ fn base_of(access: &FsAccessContext) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("会话工作目录未注入，无法执行文件工具"))
 }
 
-/// 在工具结果 summary 头部回显工作目录与可写根（规范化绝对路径）。
+/// 在工具结果 summary 头部回显工作目录与可写范围（规范化绝对路径）。
 ///
 /// 工作目录与允许目录不进入 system prompt（会话动态信息，cwd 迟落定/变更时
-/// 改写已发送前缀会作废对话缓存），模型经 fs 工具调用获知。可写根为工作区
-/// 与应用存储根（`~/.tiangong`），与写边界校验同源自 toolkit。写进 summary
-/// 而非 stdout，避免污染 read_file 等工具的文件正文。无状态设计：每次调用
-/// 都回显，按需 sidecar 无需维护"是否已告知"的会话状态。
+/// 改写已发送前缀会作废对话缓存），模型经 fs 工具调用获知。可写范围与宿主
+/// 沙箱策略的统一写域一致：存储根只开放 data/<插件 id>、media、tmp，临时
+/// 文件引导至 /tmp，避免模型把临时脚本堆进存储根。写进 summary 而非
+/// stdout，避免污染 read_file 等工具的文件正文。无状态设计：每次调用都回显。
 pub fn annotate_workdir(mut resp: FsToolResponse, access: &FsAccessContext) -> FsToolResponse {
     if let Some(base) = access.workspace.as_deref() {
         let canonical = std::fs::canonicalize(base).unwrap_or_else(|_| PathBuf::from(base));
         let storage = shared::app_storage_root();
         resp.summary = format!(
-            "工作目录：{}（另可写：{}）；{}",
+            "工作目录：{}（另可写：/tmp，{} 下的 media/、tmp/；临时文件写 /tmp）；{}",
             canonical.display(),
             storage.display(),
             resp.summary
@@ -61,11 +59,11 @@ pub fn annotate_workdir(mut resp: FsToolResponse, access: &FsAccessContext) -> F
 
 // ── list_dir ─────────────────────────────────────────────────
 
-pub fn handle_list_dir(req: ListDirRequest, policy: &dyn PathPolicy) -> FsToolResponse {
+pub fn handle_list_dir(req: ListDirRequest) -> FsToolResponse {
     let result = (|| {
         let base = base_of(&req.access)?;
         let path = req.path.as_deref().unwrap_or(".");
-        let full_path = policy.resolve_read(path, &base)?;
+        let full_path = shared::resolve_read_path_with(path, &base)?;
         ensure_dir_target(&full_path)?;
         let mut items = Vec::new();
         for entry in fs::read_dir(&full_path)
@@ -93,7 +91,7 @@ pub fn handle_list_dir(req: ListDirRequest, policy: &dyn PathPolicy) -> FsToolRe
 
 // ── tree_dir ─────────────────────────────────────────────────
 
-pub fn handle_tree_dir(req: TreeDirRequest, policy: &dyn PathPolicy) -> FsToolResponse {
+pub fn handle_tree_dir(req: TreeDirRequest) -> FsToolResponse {
     let result = (|| {
         let base = base_of(&req.access)?;
         let path = req.path.as_deref().unwrap_or(".");
@@ -102,7 +100,7 @@ pub fn handle_tree_dir(req: TreeDirRequest, policy: &dyn PathPolicy) -> FsToolRe
         } else {
             req.max_depth.min(MAX_TREE_MAX_DEPTH)
         };
-        let full_path = policy.resolve_read(path, &base)?;
+        let full_path = shared::resolve_read_path_with(path, &base)?;
         ensure_dir_target(&full_path)?;
         let rel = shared::display_rel_path_with(&full_path, &base);
         let mut lines = vec![if rel == "." {
@@ -139,7 +137,7 @@ pub fn handle_tree_dir(req: TreeDirRequest, policy: &dyn PathPolicy) -> FsToolRe
 
 // ── read_file ────────────────────────────────────────────────
 
-pub fn handle_read_file(req: ReadFileRequest, policy: &dyn PathPolicy) -> FsToolResponse {
+pub fn handle_read_file(req: ReadFileRequest) -> FsToolResponse {
     let result = (|| {
         let base = base_of(&req.access)?;
         let start_line = req.start_line.max(1);
@@ -148,8 +146,8 @@ pub fn handle_read_file(req: ReadFileRequest, policy: &dyn PathPolicy) -> FsTool
         } else {
             req.max_lines.clamp(1, MAX_READ_MAX_LINES)
         };
-        let full_path = policy.resolve_read(&req.path, &base)?;
-        // 信任模式解析对不存在路径静默放行，这里必须区分"不存在"与"类型不对"，
+        let full_path = shared::resolve_read_path_with(&req.path, &base)?;
+        // 读路径解析对不存在路径静默放行，这里必须区分"不存在"与"类型不对"，
         // 否则文件缺失会被误报成"目标不是文件"，误导调用方反复重试。
         match fs::metadata(&full_path) {
             Ok(meta) if meta.is_file() => {}
@@ -192,13 +190,10 @@ pub fn handle_read_file(req: ReadFileRequest, policy: &dyn PathPolicy) -> FsTool
 
 // ── write_file ───────────────────────────────────────────────
 
-pub fn handle_write_file(req: WriteFileRequest, policy: &dyn PathPolicy) -> FsToolResponse {
-    let (locked, unlocked, result) = with_write_lock(
-        &req.access,
-        policy,
-        std::slice::from_ref(&req.path),
-        |base| {
-            let full_path = policy.resolve_write(&req.path, base)?;
+pub fn handle_write_file(req: WriteFileRequest) -> FsToolResponse {
+    let (locked, unlocked, result) =
+        with_write_lock(&req.access, std::slice::from_ref(&req.path), |base| {
+            let full_path = shared::resolve_write_path_from_base(&req.path, base)?;
             if let Some(parent) = full_path.parent()
                 && let Err(e) = fs::create_dir_all(parent)
                     .with_context(|| format!("创建目录失败：{}", parent.display()))
@@ -233,26 +228,19 @@ pub fn handle_write_file(req: WriteFileRequest, policy: &dyn PathPolicy) -> FsTo
                 exit_code: 0,
                 ..Default::default()
             })
-        },
-    );
+        });
     finalize_write(result, locked, unlocked)
 }
 
 // ── replace_in_file ──────────────────────────────────────────
 
-pub fn handle_replace_in_file(
-    req: ReplaceInFileRequest,
-    policy: &dyn PathPolicy,
-) -> FsToolResponse {
-    let (locked, unlocked, result) = with_write_lock(
-        &req.access,
-        policy,
-        std::slice::from_ref(&req.path),
-        |base| {
+pub fn handle_replace_in_file(req: ReplaceInFileRequest) -> FsToolResponse {
+    let (locked, unlocked, result) =
+        with_write_lock(&req.access, std::slice::from_ref(&req.path), |base| {
             if req.old.is_empty() {
                 return Err(anyhow!("replace_in_file old 参数不能为空"));
             }
-            let full_path = policy.resolve_write(&req.path, base)?;
+            let full_path = shared::resolve_write_path_from_base(&req.path, base)?;
             if !full_path.is_file() {
                 return Err(anyhow!("目标不是文件：{}", full_path.display()));
             }
@@ -303,14 +291,13 @@ pub fn handle_replace_in_file(
                 exit_code: 0,
                 ..Default::default()
             })
-        },
-    );
+        });
     finalize_write(result, locked, unlocked)
 }
 
 // ── apply_patch ──────────────────────────────────────────────
 
-pub fn handle_apply_patch(req: ApplyPatchRequest, policy: &dyn PathPolicy) -> FsToolResponse {
+pub fn handle_apply_patch(req: ApplyPatchRequest) -> FsToolResponse {
     // 先解析出本次补丁涉及的所有目标路径（用于全有或全无加锁）。
     let targets_result = (|| {
         let base = base_of(&req.access)?;
@@ -330,7 +317,7 @@ pub fn handle_apply_patch(req: ApplyPatchRequest, policy: &dyn PathPolicy) -> Fs
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
 
-    let (locked, unlocked, result) = with_write_lock(&req.access, policy, &target_strs, |base| {
+    let (locked, unlocked, result) = with_write_lock(&req.access, &target_strs, |base| {
         let workdir_raw = req.workdir.as_deref();
         let effective_cwd = shared::resolve_effective_cwd_with(workdir_raw, base)?;
         let stats = apply_unified_diff_patch(&req.patch, &effective_cwd, req.verify)?;
@@ -372,11 +359,10 @@ pub fn handle_apply_patch(req: ApplyPatchRequest, policy: &dyn PathPolicy) -> Fs
 /// 锁在本次调用内 acquire/release，与写操作绑定（一次 IPC 完成加锁+写+解锁，
 /// 避免锁泄漏）。返回 `(locked_paths, unlocked_paths, 业务结果)`。
 ///
-/// 注意：`raw_paths` 是**解析前**的原始路径字符串，需先用 policy 解析并
+/// 注意：`raw_paths` 是**解析前**的原始路径字符串，需先解析并
 /// canonicalize_for_lock 规范化后才能加锁（与原实现一致，防软链接/.. 绕过）。
 fn with_write_lock<F>(
     access: &FsAccessContext,
-    policy: &dyn PathPolicy,
     raw_paths: &[String],
     body: F,
 ) -> (Vec<PathBuf>, Vec<PathBuf>, Result<FsToolResponse>)
@@ -388,11 +374,11 @@ where
         Err(e) => return (Vec::new(), Vec::new(), Err(e)),
     };
 
-    // 解析并规范化每个写路径为锁表 key。用 policy（读解析即可，写路径在 body 内再 resolve_write）。
+    // 解析并规范化每个写路径为锁表 key（写路径在 body 内再解析一次）。
     // 注意：这里只为加锁取得稳定 key，用 resolve_write 解析真实写路径再 canonicalize_for_lock。
     let mut keys = Vec::with_capacity(raw_paths.len());
     for raw in raw_paths {
-        match policy.resolve_write(raw, &base) {
+        match shared::resolve_write_path_from_base(raw, &base) {
             Ok(resolved) => keys.push(canonicalize_for_lock(&resolved)),
             Err(e) => return (Vec::new(), Vec::new(), Err(e)),
         }
@@ -447,7 +433,7 @@ fn finalize_write(
 // ── 辅助函数 ─────────────────────────────────────────────────
 
 /// 目录类读工具的目标判定：区分目录不存在 / 目标不是目录 / 无法访问
-/// （信任模式解析对不存在路径静默放行，不能依赖单一 is_dir 判定）。
+/// （读路径解析对不存在路径静默放行，不能依赖单一 is_dir 判定）。
 fn ensure_dir_target(full_path: &Path) -> Result<()> {
     match fs::metadata(full_path) {
         Ok(meta) if meta.is_dir() => Ok(()),
@@ -460,7 +446,9 @@ fn ensure_dir_target(full_path: &Path) -> Result<()> {
 }
 
 fn error_response(tool: &str, e: anyhow::Error) -> FsToolResponse {
-    let summary = format!("{tool} 失败：{e}");
+    // `{:#}` 展开完整错误链，保留底层 IO 原因（如沙箱拒绝时的
+    // Operation not permitted），否则只剩外层上下文。
+    let summary = format!("{tool} 失败：{e:#}");
     FsToolResponse {
         ok: false,
         summary: summary.clone(),
@@ -825,7 +813,6 @@ fn normalize_diff_filename(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::path_policy::TrustModePathPolicy;
 
     fn access(root: &Path) -> FsAccessContext {
         FsAccessContext {
@@ -838,13 +825,10 @@ mod tests {
     fn list_dir_missing_path_reports_not_found() {
         let root = tempfile::tempdir().unwrap();
 
-        let response = handle_list_dir(
-            ListDirRequest {
-                path: Some("docs".to_string()),
-                access: access(root.path()),
-            },
-            &TrustModePathPolicy::new(true),
-        );
+        let response = handle_list_dir(ListDirRequest {
+            path: Some("docs".to_string()),
+            access: access(root.path()),
+        });
 
         assert!(!response.ok);
         assert!(
@@ -859,13 +843,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("README.md"), "hi\n").unwrap();
 
-        let response = handle_list_dir(
-            ListDirRequest {
-                path: Some("README.md".to_string()),
-                access: access(root.path()),
-            },
-            &TrustModePathPolicy::new(true),
-        );
+        let response = handle_list_dir(ListDirRequest {
+            path: Some("README.md".to_string()),
+            access: access(root.path()),
+        });
 
         assert!(!response.ok);
         assert!(
@@ -879,14 +860,11 @@ mod tests {
     fn read_file_missing_path_reports_not_found() {
         let root = tempfile::tempdir().unwrap();
 
-        let response = handle_read_file(
-            ReadFileRequest {
-                path: "docs/requirements.md".to_string(),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(true),
-        );
+        let response = handle_read_file(ReadFileRequest {
+            path: "docs/requirements.md".to_string(),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(!response.ok);
         assert!(
@@ -901,14 +879,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("docs")).unwrap();
 
-        let response = handle_read_file(
-            ReadFileRequest {
-                path: "docs".to_string(),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(true),
-        );
+        let response = handle_read_file(ReadFileRequest {
+            path: "docs".to_string(),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(!response.ok);
         assert!(
@@ -923,14 +898,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("README.md"), "第一行\n第二行\n").unwrap();
 
-        let response = handle_read_file(
-            ReadFileRequest {
-                path: "README.md".to_string(),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(true),
-        );
+        let response = handle_read_file(ReadFileRequest {
+            path: "README.md".to_string(),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(response.ok, "{}", response.stderr);
         assert!(response.stdout.contains("第一行"));
@@ -942,17 +914,14 @@ mod tests {
         let path = root.path().join("windows.txt");
         fs::write(&path, b"alpha\r\nbeta\r\ngamma\r\n").unwrap();
 
-        let response = handle_replace_in_file(
-            ReplaceInFileRequest {
-                path: "windows.txt".to_string(),
-                old: "alpha\nbeta".to_string(),
-                new: "alpha\nBETA".to_string(),
-                expected_count: Some(1),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(false),
-        );
+        let response = handle_replace_in_file(ReplaceInFileRequest {
+            path: "windows.txt".to_string(),
+            old: "alpha\nbeta".to_string(),
+            new: "alpha\nBETA".to_string(),
+            expected_count: Some(1),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(response.ok, "{}", response.stderr);
         assert_eq!(fs::read(&path).unwrap(), b"alpha\r\nBETA\r\ngamma\r\n");
@@ -964,17 +933,14 @@ mod tests {
         let path = root.path().join("unix.txt");
         fs::write(&path, b"alpha\nbeta\ngamma\n").unwrap();
 
-        let response = handle_replace_in_file(
-            ReplaceInFileRequest {
-                path: "unix.txt".to_string(),
-                old: "alpha\r\nbeta".to_string(),
-                new: "alpha\r\nBETA".to_string(),
-                expected_count: Some(1),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(false),
-        );
+        let response = handle_replace_in_file(ReplaceInFileRequest {
+            path: "unix.txt".to_string(),
+            old: "alpha\r\nbeta".to_string(),
+            new: "alpha\r\nBETA".to_string(),
+            expected_count: Some(1),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(response.ok, "{}", response.stderr);
         assert_eq!(fs::read(&path).unwrap(), b"alpha\nBETA\ngamma\n");
@@ -988,14 +954,11 @@ mod tests {
         let patch =
             "--- a/windows.txt\n+++ b/windows.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
 
-        let response = handle_apply_patch(
-            ApplyPatchRequest {
-                patch: patch.to_string(),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(false),
-        );
+        let response = handle_apply_patch(ApplyPatchRequest {
+            patch: patch.to_string(),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(response.ok, "{}", response.stderr);
         assert_eq!(fs::read(&path).unwrap(), b"alpha\r\nBETA\r\ngamma\r\n");
@@ -1009,14 +972,11 @@ mod tests {
         let patch =
             "--- a/unix.txt\n+++ b/unix.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
 
-        let response = handle_apply_patch(
-            ApplyPatchRequest {
-                patch: patch.to_string(),
-                access: access(root.path()),
-                ..Default::default()
-            },
-            &TrustModePathPolicy::new(false),
-        );
+        let response = handle_apply_patch(ApplyPatchRequest {
+            patch: patch.to_string(),
+            access: access(root.path()),
+            ..Default::default()
+        });
 
         assert!(response.ok, "{}", response.stderr);
         assert_eq!(fs::read(&path).unwrap(), b"alpha\nBETA\ngamma\n");

@@ -14,7 +14,6 @@
 
 mod file_lock;
 mod handlers;
-mod path_policy;
 mod service;
 
 #[tokio::main]
