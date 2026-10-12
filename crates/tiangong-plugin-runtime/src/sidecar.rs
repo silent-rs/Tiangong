@@ -290,7 +290,7 @@ pub struct InterpreterLaunch {
 pub struct SensitiveStorageAccess {
     /// `models.json`（模型配置，含端点与密钥）——`model-config.read`。
     pub model_config: bool,
-    /// `data/mcp/mcp.json`（MCP server 配置，旧版位于存储根）——MCP 插件所需。
+    /// 存储根下旧 `mcp.json`（只读，供 mcp 插件迁移到自有数据目录）——MCP 插件所需。
     pub mcp_config: bool,
     /// `server.json`（服务配置）——`app-storage.read`。
     pub server_config: bool,

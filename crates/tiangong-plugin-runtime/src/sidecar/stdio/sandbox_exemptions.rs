@@ -15,9 +15,9 @@ pub(super) fn exempt_authorized_reads(
         exemptions.push(storage_root.join("auth"));
     }
     if access.mcp_config {
-        // 存储根下旧 mcp.json 只读开放，供 mcp 插件首次启动迁移。
+        // 存储根下旧 mcp.json 只读开放，供 mcp 插件首次启动迁移；迁移后的
+        // data/mcp/mcp.json 属插件自有数据，按插件数据目录隔离保护。
         exemptions.push(storage_root.join("mcp.json"));
-        exemptions.push(storage_root.join(MCP_CONFIG_DATA_PATH));
     }
     if access.server_config {
         exemptions.push(storage_root.join("server.json"));
@@ -31,21 +31,6 @@ pub(super) fn exempt_authorized_reads(
     policy
         .denied_read_paths
         .retain(|path| !exemptions.contains(path));
-}
-
-/// MCP 配置在 mcp 插件自有数据目录中的位置（相对存储根）。
-pub(super) const MCP_CONFIG_DATA_PATH: &str = "data/mcp/mcp.json";
-
-/// MCP 配置的写豁免：`data/mcp/mcp.json` 是 MCP 配置的权威存储，唯一合法
-/// 写者是 mcp 插件自身（宿主已验证官方签名身份）。从写保护清单移除后，
-/// 写权限随 `data/mcp` 可写恢复；其他插件对它读写双禁不变。存储根下的
-/// 旧 `mcp.json` 仍保持写保护。
-pub(super) fn exempt_mcp_config_write(
-    policy: &mut tiangong_sandbox::SandboxPolicy,
-    storage_root: &std::path::Path,
-) {
-    let target = storage_root.join(MCP_CONFIG_DATA_PATH);
-    policy.protected_paths.retain(|path| *path != target);
 }
 
 /// 天工宿主的 Launcher 解析：存储目录直存优先，宿主程序同目录（开发与
@@ -63,7 +48,6 @@ pub(super) fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<st
         "keys",
         "trust.db",
         "mcp.json",
-        MCP_CONFIG_DATA_PATH,
         "models.json",
         // 账号登录凭据（ChatGPT OAuth 令牌）：只由宿主写入与续期。
         "auth",
@@ -154,6 +138,36 @@ pub(super) fn storage_root_writable_roots(
     roots
 }
 
+/// 插件数据目录隔离：存储根 `data/` 下其他插件的数据目录对当前插件读写双禁。
+///
+/// 只有 `data/<plugin_id>` 属于当前插件；其余条目（含符号链接与非目录项）
+/// 一律禁读。正常情况下它们不在任何可写根内、本就不可写；仅当某个可写根
+/// （如工作区设为家目录）覆盖了它们时才追加写保护——Windows 写保护是逐目录
+/// 写入的 ACL 拒绝项，对大目录（Memory 数据）每次 spawn 传播开销可观，不应
+/// 无谓施加。须在可写根组装完成后调用。按 spawn 时的目录快照计算，之后新
+/// 出现的目录在下次 spawn 时纳入。
+pub(super) fn isolate_other_plugin_data(
+    policy: &mut tiangong_sandbox::SandboxPolicy,
+    storage_root: &std::path::Path,
+    plugin_id: &str,
+) {
+    let Ok(entries) = std::fs::read_dir(storage_root.join(STORAGE_DATA_DIR)) else {
+        return;
+    };
+    let writable = policy.writable_roots();
+    for entry in entries.flatten() {
+        if entry.file_name() == std::ffi::OsStr::new(plugin_id) {
+            continue;
+        }
+        let path = entry.path();
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if writable.iter().any(|root| canonical.starts_with(root)) {
+            policy.protected_paths.push(path.clone());
+        }
+        policy.denied_read_paths.push(path);
+    }
+}
+
 /// 在存储根下创建插件自有数据目录 `data/<plugin_id>`（实体目录；已存在的
 /// 符号链接视为篡改并拒绝）。插件 ID 已由清单校验限定为字母数字与 `-_.`，
 /// 这里再拒绝 `.`/`..` 等非普通段，防止路径逃逸。
@@ -207,42 +221,47 @@ mod sensitive_access_tests {
     use super::*;
 
     #[test]
-    fn mcp_config_write_exemption_scopes_to_mcp_plugin() {
-        let storage = std::path::Path::new("/tmp/sensitive-storage");
-        let mcp_json = storage.join(MCP_CONFIG_DATA_PATH);
-        let legacy_mcp_json = storage.join("mcp.json");
+    fn plugin_data_dirs_are_isolated_from_each_other() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path();
+        for id in ["mcp", "memory", "fs"] {
+            ensure_storage_data_dir(storage, id).unwrap();
+        }
+        std::fs::write(storage.join("data/stray.json"), "{}").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace.path());
+        policy.extra_writable.push(storage.join("data/mcp"));
+        isolate_other_plugin_data(&mut policy, storage, "mcp");
+        let own = storage.join("data/mcp");
+        assert!(!policy.denied_read_paths.contains(&own), "自有数据可读");
+        assert!(!policy.protected_paths.contains(&own), "自有数据可写");
+        for other in ["data/memory", "data/fs", "data/stray.json"] {
+            let path = storage.join(other);
+            assert!(policy.denied_read_paths.contains(&path), "{other} 应禁读");
+            // 不在任何可写根内：本就不可写，不追加写保护。
+            assert!(!policy.protected_paths.contains(&path), "{other}");
+        }
+        // 存储根下旧 mcp.json 仍由宿主写保护，不随插件数据目录放开。
+        assert!(tiangong_protected_paths(storage).contains(&storage.join("mcp.json")));
 
-        // mcp 插件（mcp_config 授权）：data/mcp/mcp.json 移出写保护，可写恢复。
-        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
-        policy.protected_paths = tiangong_protected_paths(storage);
-        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut policy, storage);
-        exempt_mcp_config_write(&mut policy, storage);
-        assert!(!policy.protected_paths.contains(&mcp_json));
-        // 存储根下旧 mcp.json 仅供迁移读取，写保护保持。
-        assert!(policy.protected_paths.contains(&legacy_mcp_json));
-        // 其他敏感配置的写保护不受影响。
-        assert!(policy.protected_paths.contains(&storage.join("keys")));
-        assert!(policy.protected_paths.contains(&storage.join("trust.db")));
+        // 可写根覆盖存储根（如工作区设为家目录）：其他插件数据追加写保护。
+        let mut broad = tiangong_sandbox::SandboxPolicy::workspace_write(storage);
+        isolate_other_plugin_data(&mut broad, storage, "mcp");
+        assert!(broad.protected_paths.contains(&storage.join("data/memory")));
         assert!(
-            policy
-                .protected_paths
-                .contains(&storage.join("models.json"))
+            broad
+                .read_only_roots()
+                .iter()
+                .any(|path| path.ends_with("data/memory"))
         );
-        assert!(policy.protected_paths.contains(&storage.join("app.json")));
-        assert!(policy.protected_paths.contains(&storage.join("auth")));
-        // 宿主验证记录目录读写双禁：能力快照由宿主维护，插件不得伪造。
-        assert!(
-            policy
-                .protected_paths
-                .contains(&storage.join("plugins/.verifications"))
-        );
+        assert!(!broad.protected_paths.contains(&own));
 
-        // 未授权插件：不调用豁免，mcp.json 写保护原样保留。
-        let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
-        strict.protected_paths = tiangong_protected_paths(storage);
-        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut strict, storage);
-        assert!(strict.protected_paths.contains(&mcp_json));
-        assert!(strict.denied_read_paths.contains(&mcp_json));
+        // 没有 data/ 目录时不报错、不改策略。
+        let empty = tempfile::tempdir().unwrap();
+        let mut untouched = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        isolate_other_plugin_data(&mut untouched, empty.path(), "mcp");
+        assert!(untouched.denied_read_paths.is_empty());
+        assert!(untouched.protected_paths.is_empty());
     }
     #[test]
     fn exempt_opens_only_authorized_configs() {
@@ -270,11 +289,6 @@ mod sensitive_access_tests {
         // 模型配置授权同时开放 OAuth 凭据读取，但写保护保持。
         assert!(!policy.denied_read_paths.contains(&storage.join("auth")));
         assert!(!policy.denied_read_paths.contains(&storage.join("mcp.json")));
-        assert!(
-            !policy
-                .denied_read_paths
-                .contains(&storage.join(MCP_CONFIG_DATA_PATH))
-        );
         assert!(policy.denied_read_paths.contains(&storage.join("keys")));
         assert!(policy.denied_read_paths.contains(&storage.join("trust.db")));
         assert!(policy.denied_read_paths.contains(&storage.join("sandbox")));

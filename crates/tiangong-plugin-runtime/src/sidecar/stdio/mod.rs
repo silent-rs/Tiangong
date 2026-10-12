@@ -41,7 +41,7 @@ use process::{
 use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
 use sandbox_exemptions::{
     apply_user_cache_write, ensure_storage_data_dir, exempt_authorized_reads,
-    exempt_authorized_user_credentials, exempt_mcp_config_write, resolve_launcher,
+    exempt_authorized_user_credentials, isolate_other_plugin_data, resolve_launcher,
     retain_existing_writable_roots, storage_root_writable_roots, tiangong_protected_paths,
 };
 
@@ -637,13 +637,13 @@ impl StdioSidecarConnection {
                 self.config.sensitive_storage,
                 &self.config.storage_root,
             );
-            // data/mcp/mcp.json 由 mcp 插件自管（官方身份经宿主验证后才置位
-            // mcp_config）：开放其写权限，否则用户在 MCP 设置页增删
-            // server 时 sidecar 无法落盘配置；其余敏感配置仍由宿主写入、
-            // 插件只读。
-            if self.config.sensitive_storage.mcp_config {
-                exempt_mcp_config_write(&mut policy, &self.config.storage_root);
-            }
+            // 插件数据目录互相隔离：其他插件的 data/<id> 禁读，被可写根覆盖时
+            // 再加写保护（如 MCP 配置 data/mcp/mcp.json 只有 mcp 插件可访问）。
+            isolate_other_plugin_data(
+                &mut policy,
+                &self.config.storage_root,
+                &self.config.plugin_id,
+            );
             policy.allow_network = self.config.sandbox_network;
             policy.allow_audio_input = self.config.sandbox_audio_input;
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
