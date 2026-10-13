@@ -130,6 +130,11 @@ impl SelfUpdater {
         })
     }
 
+    /// 拉取并校验官方清单，返回其中的最新版本号；不读写磁盘。
+    pub async fn latest_version(&self) -> Result<String> {
+        Ok(self.fetch_valid_manifest().await?.version)
+    }
+
     /// 更新当前正在执行的 Sandbox 自身。
     pub async fn update_current(&self) -> Result<UpdateStatus> {
         let target = std::env::current_exe().context("定位当前 Sandbox 可执行文件失败")?;

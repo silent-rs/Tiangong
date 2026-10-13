@@ -480,10 +480,15 @@ impl TiangongApp {
         });
     }
 
-    /// Sandbox 首次安装与更新由启动准备页和设置页显式触发；宿主不运行
-    /// 独立后台更新器，实际下载与替换复用 Sandbox 自管理能力。
-    pub fn start_launcher_updater(&self, _app_handle: tauri::AppHandle) {
-        tracing::debug!("Sandbox 更新由用户入口显式触发，后台更新任务未启用");
+    /// 启动沙箱自动更新任务（main.rs setup 阶段调用一次）。
+    ///
+    /// 与插件自动升级一致：后台检查一次官方清单，本地已有可用 Sandbox
+    /// 且远端版本更新时直接下载替换。全程无弹窗，离线或失败仅记日志，
+    /// 留待下次启动重试；本地缺失或损坏仍由启动准备页负责安装。
+    pub fn start_launcher_updater(&self, app_handle: tauri::AppHandle) {
+        tauri::async_runtime::spawn(async move {
+            run_launcher_auto_update(app_handle).await;
+        });
     }
 
     /// 同步工具消息注入（供需要同步返回值的场景，如 browser:events 的 ack 判断）。
@@ -1053,6 +1058,38 @@ async fn run_plugin_auto_upgrade(app_handle: tauri::AppHandle) -> anyhow::Result
         }
     }
     Ok(())
+}
+
+async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
+    use tiangong_plugin_runtime::launcher_update::{AutoUpdateOutcome, LauncherUpdater};
+
+    let state = app_handle.state::<TiangongApp>();
+    let storage_root = match state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await
+    {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(%error, "读取存储根目录失败，跳过沙箱自动更新");
+            return;
+        }
+    };
+    match LauncherUpdater::new().update_if_newer(&storage_root).await {
+        Ok(AutoUpdateOutcome::NotInstalled) => {
+            tracing::info!("本地沙箱不可用，交由启动准备页安装，跳过自动更新");
+        }
+        Ok(AutoUpdateOutcome::UpToDate { current }) => {
+            tracing::debug!(current, "沙箱已是最新版本");
+        }
+        Ok(AutoUpdateOutcome::Updated { previous, version }) => {
+            tracing::info!(previous, version, "沙箱自动更新完成");
+            tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
+        }
+        Err(error) => {
+            // 离线、清单不可达或替换失败：静默跳过，下次启动再试。
+            tracing::warn!(error = %format!("{error:#}"), "沙箱自动更新失败，下次启动重试");
+        }
+    }
 }
 
 #[cfg(test)]

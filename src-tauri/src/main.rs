@@ -742,8 +742,8 @@ fn run_gui() {
             // 离线或失败仅记日志。
             state.start_plugin_auto_updater(app.handle().clone());
 
-            // 沙箱 Launcher 在线更新：后台拉取官方清单，经三重门禁后
-            // 激活下载版；内置版保留为回退底线。
+            // 沙箱自动更新：后台比对官方清单，有新版本时直接替换；
+            // 离线或失败仅记日志，下次启动重试。
             state.start_launcher_updater(app.handle().clone());
 
             #[cfg(debug_assertions)]

@@ -153,6 +153,51 @@ impl LauncherUpdater {
         invalidate_launcher_check();
         Ok(version)
     }
+
+    /// 启动后台自动更新：仅当本地已有可用 Sandbox 且官方清单版本更新时
+    /// 才下载替换。本地缺失或损坏交由启动准备页处理，这里不介入。
+    pub async fn update_if_newer(&self, storage_root: &Path) -> Result<AutoUpdateOutcome> {
+        let root = storage_root.to_path_buf();
+        let installed = tokio::task::spawn_blocking(move || verified_launcher_version(&root))
+            .await
+            .context("检查本地 Sandbox 版本任务异常")?;
+        let Ok(installed) = installed else {
+            return Ok(AutoUpdateOutcome::NotInstalled);
+        };
+        let latest = tiangong_sandbox::update::SelfUpdater::new(self.manifest_url.clone())?
+            .latest_version()
+            .await?;
+        if !is_newer_version(&installed, &latest)? {
+            return Ok(AutoUpdateOutcome::UpToDate { current: installed });
+        }
+        let version = self.install_or_update(storage_root).await?;
+        Ok(AutoUpdateOutcome::Updated {
+            previous: installed,
+            version,
+        })
+    }
+}
+
+/// 启动后台自动更新的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoUpdateOutcome {
+    /// 本地无可用 Sandbox，留给启动准备页安装。
+    NotInstalled,
+    UpToDate {
+        current: String,
+    },
+    Updated {
+        previous: String,
+        version: String,
+    },
+}
+
+fn is_newer_version(installed: &str, latest: &str) -> Result<bool> {
+    let installed = semver::Version::parse(installed)
+        .with_context(|| format!("本地 Sandbox 版本非法: {installed}"))?;
+    let latest =
+        semver::Version::parse(latest).with_context(|| format!("官方清单版本非法: {latest}"))?;
+    Ok(latest > installed)
 }
 
 /// 天工宿主的 Sandbox 安装目录：直存布局 `<storage>/sandbox`。
@@ -263,6 +308,14 @@ fn verify_launcher_self_check(binary: &Path) -> Result<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn newer_version_compares_semver() {
+        assert!(is_newer_version("0.1.9", "0.1.10").unwrap());
+        assert!(!is_newer_version("0.2.0", "0.2.0").unwrap());
+        assert!(!is_newer_version("0.3.0", "0.2.9").unwrap());
+        assert!(is_newer_version("not-a-version", "0.1.0").is_err());
+    }
+
     #[test]
     fn cleanup_removes_legacy_layout_only() {
         let root = tempfile::tempdir().unwrap();
