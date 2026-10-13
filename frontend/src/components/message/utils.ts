@@ -10,15 +10,21 @@ import {
 import type { MessageGroup, MessageItem, SystemMessageMeta } from "./types";
 import { baseToolName } from "./toolDisplayModel";
 
-/** 格式化消息时间戳 */
-export function formatMessageTime(createdAt?: string): string {
+/** 格式化消息时间戳：当天只显示 `HH:mm`；非当天加日期——
+ *  同年 `MM-DD HH:mm`，跨年 `YYYY-MM-DD HH:mm`。 */
+export function formatMessageTime(createdAt?: string, now: Date = new Date()): string {
   if (!createdAt) return "";
   try {
     const d = new Date(createdAt);
     if (isNaN(d.getTime())) return createdAt;
-    const h = String(d.getHours()).padStart(2, "0");
-    const m = String(d.getMinutes()).padStart(2, "0");
-    return `${h}:${m}`;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const sameYear = d.getFullYear() === now.getFullYear();
+    if (sameYear && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+      return time;
+    }
+    const date = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    return sameYear ? `${date} ${time}` : `${d.getFullYear()}-${date} ${time}`;
   } catch {
     return createdAt;
   }

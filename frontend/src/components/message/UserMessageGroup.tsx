@@ -379,7 +379,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
           </div>
         </div>
       ) : (
-        <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
+        <div className="flex justify-end">
           {withPluginRender(subagentTaskMatch ? (() => {
             const [, kind, source, body] = subagentTaskMatch;
             return (
@@ -490,7 +490,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
       )}
       {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && (
         <div className="flex justify-end">
-          <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook && !render} onStartEdit={onStartEdit} />
+          <UserMessageActions text={messageText} messageId={message.id} time={formatMessageTime(message.created_at)} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook && !render} onStartEdit={onStartEdit} />
         </div>
       )}
     </div>

@@ -339,10 +339,10 @@ function AgentTurnView({
   const renderFragment = (frag: Fragment, i: number) => {
     if (frag.type === "thinking") {
       // 历史/已完成思考块一律视为非活跃且默认折叠。
-      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} elapsedMs={frag.elapsedMs} /></div>;
+      return <div key={`think-${i}`}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} elapsedMs={frag.elapsedMs} /></div>;
     }
         if (frag.type === "explanation") {
-          return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
+          return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">{frag.text}</p>;
         }
         if (frag.type === "tool_group") {
           return (
@@ -364,7 +364,7 @@ function AgentTurnView({
               ((block.type === "asset_reference" || block.type === "image") && block.asset.kind === "image"),
           );
           return (
-            <div key={msg.id} className="my-1.5 rounded-lg border border-border/70 bg-muted/20 px-3 py-2" title={formatMessageTime(msg.created_at)}>
+            <div key={msg.id} className="my-1.5 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Camera className="h-3.5 w-3.5 shrink-0" />
                 <span>{hasImage ? "截图已注入 · 模型可见" : "媒体已注入 · 模型可见"}</span>
@@ -377,8 +377,9 @@ function AgentTurnView({
           const userTurnStatus = turnStatusOf(frag.msg);
           const userElapsedMs = elapsedMsOf(frag.msg);
           const statusMeta = userTurnStatus ? TURN_STATUS_META[userTurnStatus] : null;
+          const userTime = formatMessageTime(frag.msg.created_at);
           return (
-            <div key={frag.msg.id} className="flex flex-col items-end gap-0.5" title={formatMessageTime(frag.msg.created_at)}>
+            <div key={frag.msg.id} className="flex flex-col items-end gap-0.5">
               <div className="flex justify-end">
                 <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-foreground">
                   <CollapsibleUserText messageId={frag.msg.id}>
@@ -386,8 +387,9 @@ function AgentTurnView({
                   </CollapsibleUserText>
                 </div>
               </div>
-              {(userElapsedMs != null || statusMeta) && (
+              {(userElapsedMs != null || statusMeta || userTime) && (
                 <div className="flex items-center gap-1.5 pr-1 text-[11px] text-muted-foreground/80 tabular-nums">
+                  {userTime && <span className="text-muted-foreground/60">{userTime}</span>}
                   {statusMeta && (
                     <span className={`inline-flex items-center gap-1 ${statusMeta.className}`}>
                       <span className={`inline-block w-1.5 h-1.5 rounded-full ${statusMeta.dot}`} />
@@ -428,7 +430,7 @@ function AgentTurnView({
             const body = isStreaming ? visibleStreamingContent : visibleText;
             if (!body && !streamingReasoningContent) return null;
             return (
-              <div key={msg.id} className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(msg.created_at)}>
+              <div key={msg.id} className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
                 {isStreaming ? (
                   <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
                 ) : (
@@ -438,7 +440,7 @@ function AgentTurnView({
             );
           }
           return (
-            <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
+            <div key={msg.id} className="text-foreground">
               {isStreaming ? (
                 <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
               ) : visibleText || hasMediaBlocks(msg) ? (
@@ -454,6 +456,7 @@ function AgentTurnView({
                   <MessageActions
                     messageId={msg.id}
                     text={visibleText}
+                    time={formatMessageTime(msg.created_at)}
                     durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? (userFrag ? elapsedMsOf(userFrag.msg) : undefined)) : undefined}
                     usageMessages={msg.id === usageAnchorId ? messages : undefined}
                   />
@@ -471,7 +474,7 @@ function AgentTurnView({
         if (frag.type === "context_management") {
           const text = textContent(frag.msg).replace("[上下文管理] ", "");
           return (
-            <div key={frag.msg.id} className="inline-flex max-w-full items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground" title={formatMessageTime(frag.msg.created_at)}>
+            <div key={frag.msg.id} className="inline-flex max-w-full items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground">
               <FileText className="h-3.5 w-3.5 shrink-0" />
               <span className="truncate">{text}</span>
             </div>
@@ -488,13 +491,14 @@ function AgentTurnView({
           };
           const sc = statusColor[frag.status] || statusColor["消息"];
           return (
-            <div key={`sr-${frag.msgId}`} className="my-1.5 rounded-lg border bg-card shadow-sm overflow-hidden" title={formatMessageTime(frag.time)}>
+            <div key={`sr-${frag.msgId}`} className="my-1.5 rounded-lg border bg-card shadow-sm overflow-hidden">
               <div className={`flex items-center gap-2 px-3 py-1.5 border-b text-xs font-medium ${sc}`}>
                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold">S</span>
                 <span className="font-semibold">{frag.agentName}</span>
                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border">
                   {statusIcon[frag.status] || "•"} {frag.status}
                 </span>
+                <span className="ml-auto shrink-0 text-[10px] font-normal text-muted-foreground/60 tabular-nums">{formatMessageTime(frag.time)}</span>
               </div>
               <div className="px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
                 {frag.content}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
 import type { MessageItem } from "./types";
-import { formatMessageTime, formatToolDuration, summarizeToolGroup } from "./utils";
+import { formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
   buildFinishedToolModel,
@@ -78,7 +78,6 @@ function ToolRunRow({
   args,
   expanded = false,
   onToggle,
-  time,
   startedAtMs,
   pendingCommit = false,
 }: {
@@ -86,7 +85,6 @@ function ToolRunRow({
   args?: unknown;
   expanded?: boolean;
   onToggle?: () => void;
-  time?: string;
   /** 运行中调用的发起时刻（毫秒时间戳）：行尾实时跳秒。 */
   startedAtMs?: number;
   /** 已执行完成、结果等待前序工具按序提交。 */
@@ -108,7 +106,7 @@ function ToolRunRow({
   const runningMs = startedAtMs != null ? Date.now() - startedAtMs : null;
 
   return (
-    <div title={time}>
+    <div>
       <button
         type="button"
         className={`w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs transition-colors text-left ${
@@ -165,7 +163,6 @@ function ToolRunRow({
 export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupProps) {
   if (tools.length === 0 && !runningCalls?.length) return null;
   const brief = summarizeToolGroup(tools);
-  const groupTime = tools.length > 0 ? formatMessageTime(tools[0].created_at) : undefined;
 
   const renderToolItem = (tool: MessageItem) => {
     const args = argsOf?.(tool);
@@ -176,13 +173,12 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
         args={args}
         expanded={expansion.isExpanded(tool.id)}
         onToggle={() => expansion.toggle(tool.id)}
-        time={formatMessageTime(tool.created_at)}
       />
     );
   };
 
   return (
-    <div title={groupTime}>
+    <div>
       {/* 组统计为静态摘要行：不再折叠包裹工具行，工具行始终直接列出。
           只有执行中的调用（尚无结果）时不显示「0 次」统计。 */}
       {tools.length > 0 && (

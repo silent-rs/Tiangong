@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Pencil, Copy, Check } from "lucide-react";
 
-export function UserMessageActions({ text, messageId, runStatus, canEdit, showEdit = true, onStartEdit }: {
-  text: string; messageId: string; runStatus: string; canEdit: boolean;
+export function UserMessageActions({ text, messageId, time, runStatus, canEdit, showEdit = true, onStartEdit }: {
+  text: string; messageId: string; time?: string; runStatus: string; canEdit: boolean;
   showEdit?: boolean;
   onStartEdit: (messageId: string, text: string) => void;
 }) {
@@ -15,6 +15,7 @@ export function UserMessageActions({ text, messageId, runStatus, canEdit, showEd
   const btnClass = "p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors";
   return (
     <div className="flex items-center gap-0.5 mt-1">
+      {time && <span className="mr-1 text-[11px] text-muted-foreground/60 tabular-nums">{time}</span>}
       <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
         {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
       </button>

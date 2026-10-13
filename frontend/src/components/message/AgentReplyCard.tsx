@@ -30,7 +30,7 @@ export function AgentReplyCard({ label, body, time, defaultExpanded = false }: A
   const summary = extractSummary(body);
 
   return (
-    <div className="text-foreground" title={time ? formatMessageTime(time) : undefined}>
+    <div className="text-foreground">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-muted/40 transition-colors"
@@ -46,6 +46,9 @@ export function AgentReplyCard({ label, body, time, defaultExpanded = false }: A
         </span>
         {!expanded && summary && (
           <span className="truncate text-xs text-muted-foreground">{summary}</span>
+        )}
+        {time && (
+          <span className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground/60 tabular-nums">{formatMessageTime(time)}</span>
         )}
       </button>
       {expanded && body && (

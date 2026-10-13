@@ -5,7 +5,7 @@ import { CallUsageDetails } from "./CallUsageDetails";
 import { MessagePluginHost } from "../MessagePluginHost";
 import type { MessageItem } from "./types";
 
-export function MessageActions({ messageId, text, durationMs, usageMessages }: { messageId: string; text: string; durationMs?: number | null; usageMessages?: MessageItem[] }) {
+export function MessageActions({ messageId, text, time, durationMs, usageMessages }: { messageId: string; text: string; time?: string; durationMs?: number | null; usageMessages?: MessageItem[] }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -28,6 +28,9 @@ export function MessageActions({ messageId, text, durationMs, usageMessages }: {
         slot="session.message-action"
         message={{ id: messageId, role: "assistant", text, attachments: [] }}
       />
+      {time && (
+        <span className="ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">{time}</span>
+      )}
       {durationMs != null && durationMs > 0 && (
         <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">
           <Clock className="w-3 h-3" />
