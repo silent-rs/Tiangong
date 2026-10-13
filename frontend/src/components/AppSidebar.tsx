@@ -9,7 +9,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu';
-import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight, RefreshCw, Search, X } from 'lucide-react';
+import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight, ChevronsUp, RefreshCw, Search, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
 import { isRemoteHost } from '@/api/host';
@@ -280,9 +280,40 @@ export function AppSidebar() {
       ? group.sessions
       : group.sessions.slice(0, visibleCount);
     const canCollapse = !filterQuery && allowCollapse && group.sessions.length > COLLAPSED_LIMIT;
+    // 已通过「显示更多」展开过（显示数超过初始数）时，右侧提供收起按钮，回落到初始显示数
+    const expanded = canCollapse && visibleCount > COLLAPSED_LIMIT;
     // workspace 下任一会话正在运行时，禁用批量删除。
     const groupHasRunning = group.sessions.some(
       (session) => !!sessionRunStatuses[session.id],
+    );
+
+    // 列表底部操作行：左侧「显示更多（剩余数）」，展开过后右侧显示「收起」
+    const moreControls = canCollapse && (
+      <div className="flex items-center gap-1">
+        {!allShown ? (
+          <button
+            type="button"
+            className="flex-1 min-w-0 text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+            onClick={() => showMore(group.key, group.sessions.length)}
+          >
+            显示更多（{group.sessions.length - visibleCount}）
+          </button>
+        ) : (
+          <div className="flex-1" />
+        )}
+        {expanded && (
+          <button
+            type="button"
+            className="shrink-0 flex items-center gap-0.5 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+            onClick={() => collapseToList(group.key)}
+            title="收起此 workspace 的会话"
+            aria-label="收起此 workspace 的会话"
+          >
+            <ChevronsUp className="w-3.5 h-3.5" />
+            收起
+          </button>
+        )}
+      </div>
     );
 
     if (group.isDefault) {
@@ -290,16 +321,7 @@ export function AppSidebar() {
       return (
         <div key={group.key} className="space-y-1">
           {visibleItems.map(renderSessionItem)}
-          {canCollapse && (
-            <button
-              className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-              onClick={() =>
-                allShown ? collapseToList(group.key) : showMore(group.key, group.sessions.length)
-              }
-            >
-              {allShown ? '收起' : '显示更多'}
-            </button>
-          )}
+          {moreControls}
         </div>
       );
     }
@@ -337,16 +359,7 @@ export function AppSidebar() {
                 <div className="space-y-1 pl-1">
                   {visibleItems.map(renderSessionItem)}
                 </div>
-                {canCollapse && (
-                  <button
-                    className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-                    onClick={() =>
-                      allShown ? collapseToList(group.key) : showMore(group.key, group.sessions.length)
-                    }
-                  >
-                    {allShown ? '收起' : '显示更多'}
-                  </button>
-                )}
+                {moreControls}
               </>
             )}
           </div>
