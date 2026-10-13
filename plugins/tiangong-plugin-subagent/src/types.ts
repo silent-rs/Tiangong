@@ -65,6 +65,8 @@ export interface AgentSummary {
   capabilities: AdapterCapabilities;
   activations: ActivationRecord[];
   activated_in_session: boolean;
+  /** 成员在当前会话工作区的专属会话（在该工作区发起过才有）。 */
+  workspace_session_id?: string | null;
   runtime_status?: RunStatus | null;
   active_run_id?: string | null;
   instructions?: string;

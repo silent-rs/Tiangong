@@ -2211,8 +2211,8 @@ impl SubagentService {
     }
 
     async fn tool_list_agents(&self) -> Result<serde_json::Value> {
-        let (session_id, _) = Self::require_context()?;
-        let summaries = self.build_summaries(Some(&session_id));
+        let (session_id, workspace) = Self::require_context()?;
+        let summaries = self.build_summaries(Some(&session_id), Some(&workspace));
         let mut lines = Vec::new();
         for summary in &summaries {
             let activation = if summary.activated_in_session {
@@ -2224,12 +2224,17 @@ impl SubagentService {
                 .runtime_status
                 .map(|status| status.label())
                 .unwrap_or("空闲");
+            let workspace_session = match &summary.workspace_session_id {
+                Some(session) => format!("本工作区会话 {session}"),
+                None => "本工作区无会话".to_string(),
+            };
             lines.push(format!(
-                "- {}（{}）[{}|{}|{}] {}",
+                "- {}（{}）[{}|{}|{}|{}] {}",
                 summary.config.name,
                 summary.config.id,
                 summary.config.backend.label(),
                 activation,
+                workspace_session,
                 runtime,
                 summary.config.description
             ));
@@ -2243,9 +2248,9 @@ impl SubagentService {
     }
 
     async fn tool_get_agent(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
-        let (session_id, _) = Self::require_context()?;
+        let (session_id, workspace) = Self::require_context()?;
         let request: AgentIdRequest = parse_request(payload)?;
-        let summaries = self.build_summaries(Some(&session_id));
+        let summaries = self.build_summaries(Some(&session_id), Some(&workspace));
         let summary = summaries
             .into_iter()
             .find(|summary| summary.config.id == request.agent_id)
@@ -2280,6 +2285,10 @@ impl SubagentService {
                 .unwrap_or("空闲"),
             detail.summary.config.description
         );
+        match &detail.summary.workspace_session_id {
+            Some(session) => text.push_str(&format!("\n本工作区会话：{session}")),
+            None => text.push_str("\n本工作区会话：无"),
+        }
         if !detail.instructions.is_empty() {
             text.push_str(&format!("\n长期指令：{}", detail.instructions));
         }
@@ -2931,7 +2940,11 @@ impl SubagentService {
         runs.sort_by(|a, b| b.run_id.cmp(&a.run_id));
         runs.truncate(30);
         let snapshot = StateSnapshot {
-            agents: self.build_summaries(Some(&request.session_id)),
+            agents: {
+                // 管理页按会话打开：工作区取该会话的工作目录。
+                let workspace = crate::sessions::session_workspace(&request.session_id);
+                self.build_summaries(Some(&request.session_id), workspace.as_deref())
+            },
             session_id: request.session_id,
             active_tasks: self
                 .store
@@ -3149,7 +3162,13 @@ impl SubagentService {
 
     // ── 概览构建 ──────────────────────────────────────────────
 
-    fn build_summaries(&self, session_id: Option<&str>) -> Vec<AgentSummary> {
+    /// `workspace`：当前会话工作区，用于标记成员在该工作区是否已有专属会话
+    /// （只读查询，不登记）。
+    fn build_summaries(
+        &self,
+        session_id: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Vec<AgentSummary> {
         let activations = self.store.activations();
         let runs = self.store.list_runs();
         self.agents
@@ -3177,11 +3196,23 @@ impl SubagentService {
                     })
                     .max_by_key(|run| run.run_id.as_str());
                 let instructions = self.agents.instructions(&config.id).unwrap_or_default();
+                let workspace_session_id = workspace
+                    .map(str::trim)
+                    .filter(|workspace| !workspace.is_empty())
+                    .and_then(|workspace| {
+                        crate::workspace_state::existing_workspace_session(
+                            &self.agents,
+                            &config.id,
+                            workspace,
+                            config.session_id.as_deref(),
+                        )
+                    });
                 AgentSummary {
                     capabilities: config.backend.capabilities(),
                     config,
                     activations: agent_activations,
                     activated_in_session,
+                    workspace_session_id,
                     runtime_status: active_run.map(|run| run.status),
                     active_run_id: active_run.map(|run| run.run_id.clone()),
                     instructions,

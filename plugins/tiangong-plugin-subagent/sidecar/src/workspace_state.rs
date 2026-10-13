@@ -336,6 +336,75 @@ pub(crate) fn session_for_workspace(
     Ok((session_id, is_new))
 }
 
+/// 只读查询成员在该工作区的专属会话（列表/管理页展示用）：不登记工作区、
+/// 不创建目录、不写映射。
+///
+/// 依据与 [`session_for_workspace`] 一致：工作区映射中登记的会话；未登记时，
+/// 老成员的全局会话若工作在该工作区（且未被其他工作区占用）也算——首次
+/// 派活即沿用它。都没有返回 None。
+pub(crate) fn existing_workspace_session(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+    legacy_session: Option<&str>,
+) -> Option<String> {
+    let dir = agents.root().join(agent_id).join("workspaces");
+    let mapped = lookup_workspace_id(&dir, workspace_path).and_then(|ws_id| {
+        std::fs::read_to_string(dir.join(ws_id).join("workspace.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|meta| {
+                meta.get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+    });
+    if mapped.is_some() {
+        return mapped;
+    }
+    let legacy = legacy_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    (crate::sessions::session_exists(legacy)
+        && !legacy_session_mapped(&dir, legacy)
+        && legacy_session_cwd_matches(legacy, workspace_path))
+    .then(|| legacy.to_string())
+}
+
+/// 只读解析工作区身份（与 [`workspace_id_locked`] 同口径：canonical 路径
+/// 先查索引，再查各工作区登记的路径别名），未登记返回 None。
+fn lookup_workspace_id(dir: &std::path::Path, workspace_path: &str) -> Option<String> {
+    let workspace_path = std::fs::canonicalize(workspace_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| workspace_path.to_string());
+    let index: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("index.json")).ok()?).ok()?;
+    let entries = index.get("workspaces")?.as_array()?;
+    let ids = entries
+        .iter()
+        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry.get("path")?.as_str())));
+    let mut alias_candidates = Vec::new();
+    for (id, path) in ids {
+        if path == Some(workspace_path.as_str()) {
+            return Some(id.to_string());
+        }
+        alias_candidates.push(id);
+    }
+    alias_candidates.into_iter().find_map(|id| {
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(id).join("workspace.json")).ok()?,
+        )
+        .ok()?;
+        meta.get("paths")?
+            .as_array()?
+            .iter()
+            .any(|p| p.as_str() == Some(workspace_path.as_str()))
+            .then(|| id.to_string())
+    })
+}
+
 /// 旧会话是否已被本成员任一工作区映射占用（防同一旧会话迁移到多个
 /// workspace——不同工作区必须使用不同会话）。
 fn legacy_session_mapped(dir: &std::path::Path, legacy: &str) -> bool {
@@ -597,6 +666,55 @@ mod tests {
         let (s3, is_new) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
         assert_eq!(s2, s3);
         assert!(!is_new);
+    }
+    #[serial_test::serial]
+    #[test]
+    fn 工作区会话只读查询_有记录才算且不产生登记() {
+        let (store, _root, agent_id) = store_with_agent("readonly-lookup");
+        let w1 = tempfile::tempdir().unwrap();
+        let w2 = tempfile::tempdir().unwrap();
+        let p1 = w1.path().to_string_lossy().into_owned();
+        let p2 = w2.path().to_string_lossy().into_owned();
+        let ws_dir = store.root().join(&agent_id).join("workspaces");
+        // 从未在任何工作区发起：无会话，且查询不创建任何登记。
+        assert_eq!(
+            existing_workspace_session(&store, &agent_id, &p1, None),
+            None
+        );
+        assert!(
+            !ws_dir.join("index.json").exists(),
+            "只读查询不得登记工作区"
+        );
+        // 在 W1 发起过：W1 有会话（与派活使用的会话一致），W2 仍无。
+        let (s1, _) = session_for_workspace(&store, &agent_id, &p1, None).unwrap();
+        assert_eq!(
+            existing_workspace_session(&store, &agent_id, &p1, None),
+            Some(s1.clone())
+        );
+        assert_eq!(
+            existing_workspace_session(&store, &agent_id, &p2, None),
+            None
+        );
+        let index = std::fs::read_to_string(ws_dir.join("index.json")).unwrap();
+        assert!(!index.contains(&p2), "查询 W2 不得登记 W2");
+    }
+    #[serial_test::serial]
+    #[test]
+    fn 工作区会话只读查询_老全局会话按工作目录计入() {
+        let (store, _root, agent_id) = store_with_agent("readonly-legacy");
+        let w = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        let po = other.path().to_string_lossy().into_owned();
+        create_session_file_with_cwd("legacy-ro", Some(w.path()));
+        assert_eq!(
+            existing_workspace_session(&store, &agent_id, &p, Some("legacy-ro")),
+            Some("legacy-ro".to_string())
+        );
+        assert_eq!(
+            existing_workspace_session(&store, &agent_id, &po, Some("legacy-ro")),
+            None
+        );
     }
     #[serial_test::serial]
     #[test]

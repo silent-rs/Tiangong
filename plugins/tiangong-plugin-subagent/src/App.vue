@@ -491,7 +491,7 @@ function closeMemory(agentId: string) {
 }
 
 function sessionShort(agent: AgentSummary): string {
-  const sessionId = agent.config.session_id ?? '';
+  const sessionId = agent.workspace_session_id ?? '';
   return sessionId ? `…${sessionId.slice(-8)}` : '';
 }
 
@@ -593,6 +593,13 @@ onUnmounted(() => {
           <span class="status-item" :class="{ on: agent.activated_in_session }">
             本会话 · {{ agent.activated_in_session ? '已激活' : '未激活' }}
           </span>
+          <span
+            v-if="agent.config.backend === 'tiangong_session' || agent.config.backend === 'agent_team'"
+            class="status-item"
+            :class="{ on: !!agent.workspace_session_id }"
+          >
+            本工作区 · {{ agent.workspace_session_id ? '已有会话' : '无会话' }}
+          </span>
           <span class="status-item" :class="{ on: !!agent.activations.length }">
             活跃激活 {{ agent.activations.length }}
           </span>
@@ -601,8 +608,8 @@ onUnmounted(() => {
         <p v-if="agent.activated_in_session && sessionActivation(agent)" class="workspace-line">
           Workspace：{{ sessionActivation(agent)?.workspace }}
         </p>
-        <p v-if="agent.config.backend === 'tiangong_session' || agent.config.backend === 'agent_team'" class="workspace-line">
-          关联会话：{{ sessionShort(agent) }}
+        <p v-if="agent.workspace_session_id" class="workspace-line">
+          本工作区会话：{{ sessionShort(agent) }}
         </p>
 
         <div class="actions">

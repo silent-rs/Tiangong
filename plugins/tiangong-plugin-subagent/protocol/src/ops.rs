@@ -388,6 +388,10 @@ pub struct AgentSummary {
     /// 本会话是否已激活（无会话上下文时为 false）。
     #[serde(default)]
     pub activated_in_session: bool,
+    /// 成员在当前会话工作区的专属会话 ID（在该工作区发起过即有记录；
+    /// 无工作区上下文或从未在该工作区发起时为空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_session_id: Option<String>,
     /// 当前运行实例状态（任一激活上的活跃 run；无则空闲）。
     pub runtime_status: Option<RunStatus>,
     /// 活跃 run id。
