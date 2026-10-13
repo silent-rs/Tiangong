@@ -228,8 +228,17 @@ pub fn is_leader_alive(info: &LeaderInfo) -> bool {
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
     // SAFETY: 信号 0 只检查进程是否存在，不会向目标进程发送信号。
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // 只有 ESRCH 表示进程不存在。沙箱（Seatbelt 等）内探测非子进程会得到
+    // EPERM：进程存在但无权发信号，必须视为存活，否则会在旧 Leader 仍在
+    // 写库时误判其已退出（迁移复制半成品、两个 Leader 同时写库）。
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(not(unix))]
@@ -639,6 +648,17 @@ mod tests {
             .expect("leader 信息不存在");
         assert_eq!(loaded.service, "memory-ws-test");
         assert!(!is_leader_alive(&loaded), "过期心跳应判定为不存活");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn process_probe_treats_only_esrch_as_dead() {
+        assert!(process_is_alive(std::process::id()));
+        // pid 1 不是本进程的子进程：非 root 时 kill(1, 0) 返回 EPERM（与沙箱内
+        // 探测其他进程相同），进程存在必须判定为存活。
+        assert!(process_is_alive(1));
+        assert!(!process_is_alive(i32::MAX as u32));
+        assert!(!process_is_alive(u32::MAX), "超出 pid_t 范围视为不存在");
     }
 
     #[test]

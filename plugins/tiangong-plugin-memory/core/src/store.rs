@@ -16,6 +16,7 @@ use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
 use crate::db::migration;
 use crate::injection;
+use crate::migration as migration_files;
 use crate::options::MemoryVectorMode;
 use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
@@ -80,6 +81,8 @@ pub(crate) struct MemoryStore {
     recall_engine: RecallEngine,
     /// 待完成的向量回填。
     vector_backfill: Option<VectorBackfill>,
+    /// 旧目录增量补迁写入、尚未写入向量索引的节点 ID。
+    resync_vector_pending: Vec<String>,
 }
 
 impl MemoryStore {
@@ -99,12 +102,75 @@ impl MemoryStore {
 
         // RecallEngine 不持有 TantivyIndex，避免同一索引目录双 writer 锁冲突
         let recall_engine = RecallEngine::bm25_only();
-        Ok(Self {
+        let mut store = Self {
             db,
             tantivy,
             recall_engine,
             vector_backfill: None,
-        })
+            resync_vector_pending: Vec::new(),
+        };
+        store.reindex_resynced_nodes(&base);
+        Ok(store)
+    }
+
+    /// 补齐旧目录增量补迁写入节点的全文索引（见
+    /// [`crate::migration::resync_legacy_storage`]）；向量索引在向量层启用后由
+    /// [`Self::upsert_resynced_vectors`] 补写。Tantivy 不可用时保留待重建列表，
+    /// 下次启动重试。
+    fn reindex_resynced_nodes(&mut self, base: &std::path::Path) {
+        let ids = migration_files::load_resync_pending(base);
+        if ids.is_empty() {
+            return;
+        }
+        let Some(tantivy) = self.tantivy.as_mut() else {
+            return;
+        };
+        let mut indexed = 0usize;
+        for id in &ids {
+            match self.db.get_memory_node(id) {
+                Ok(Some(node)) if node.status == MemoryStatus::Active => {
+                    match tantivy.index_node(&node, "") {
+                        Ok(()) => indexed += 1,
+                        Err(err) => {
+                            tracing::warn!(node_id = %id, "补迁节点写入 Tantivy 失败: {err}")
+                        }
+                    }
+                }
+                Ok(_) => {
+                    let _ = tantivy.delete_node(id);
+                }
+                Err(err) => tracing::warn!(node_id = %id, "读取补迁节点失败: {err}"),
+            }
+        }
+        if let Err(err) = tantivy.commit() {
+            tracing::warn!("补迁节点 Tantivy commit 失败，下次启动重试: {err}");
+            return;
+        }
+        tracing::info!(total = ids.len(), indexed, "Memory 补迁节点全文索引已补齐");
+        self.resync_vector_pending = ids;
+        migration_files::clear_resync_pending(base);
+    }
+
+    /// 向量层启用后补写补迁节点的向量（失败只告警，不影响召回）。
+    async fn upsert_resynced_vectors(&mut self) {
+        if self.resync_vector_pending.is_empty() {
+            return;
+        }
+        let ids = std::mem::take(&mut self.resync_vector_pending);
+        let mut written = 0usize;
+        for id in &ids {
+            let Ok(Some(node)) = self.db.get_memory_node(id) else {
+                continue;
+            };
+            if node.status != MemoryStatus::Active {
+                continue;
+            }
+            match self.recall_engine.upsert_node(&node).await {
+                Ok(()) => written += 1,
+                Err(err) => tracing::warn!(node_id = %id, "补迁节点写入向量索引失败: {err}"),
+            }
+        }
+        tracing::info!(total = ids.len(), written, "Memory 补迁节点向量索引已补齐");
     }
 
     /// 启用向量双引擎。
@@ -276,6 +342,7 @@ impl MemoryStore {
             rerank_model.as_deref().unwrap_or("none"),
             semantic_ready
         );
+        self.upsert_resynced_vectors().await;
     }
 
     /// 距下一次可推进回填的等待时长。
@@ -1259,6 +1326,7 @@ mod tests {
             tantivy: None,
             recall_engine: RecallEngine::bm25_only(),
             vector_backfill: None,
+            resync_vector_pending: Vec::new(),
         };
         let anchors = RecallAnchors {
             keywords: vec!["Windows".to_string()],
@@ -1311,6 +1379,7 @@ mod tests {
                 retry_at: None,
                 skipped: 0,
             }),
+            resync_vector_pending: Vec::new(),
         }
     }
 

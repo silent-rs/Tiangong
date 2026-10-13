@@ -11776,7 +11776,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "serde",
  "serde_json",
@@ -11784,7 +11784,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "async-trait",

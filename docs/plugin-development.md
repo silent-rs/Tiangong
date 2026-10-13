@@ -278,17 +278,45 @@ sidecar 启动时由天工注入以下环境变量。前三项始终可用；共
 | --- | --- |
 | `TIANGONG_PLUGIN_ID` | 插件 ID |
 | `TIANGONG_PLUGIN_VERSION` | 插件发布版本 |
-| `TIANGONG_PLUGIN_ENDPOINT` | sidecar 写入 endpoint 的文件路径 |
-| `TIANGONG_PLUGIN_DATA_DIR` | 插件独立数据目录 |
+| `TIANGONG_PLUGIN_ENDPOINT` | 旧 TCP 传输下 sidecar 写入 endpoint 的文件路径；stdio 传输下仅为占位，不得写入（见下文） |
+| `TIANGONG_PLUGIN_TRANSPORT` | 传输方式；当前宿主固定为 `stdio` |
+| `TIANGONG_PLUGIN_DATA_DIR` | 插件安装目录下的 `data/`（随插件升级保留） |
+| `TIANGONG_PLUGIN_STORAGE_DATA_DIR` | 存储根下的插件自有数据目录 `~/.tiangong/data/<插件 id>`，由宿主在启动前创建；新数据推荐放这里 |
 | `TIANGONG_STORAGE_ROOT` | 天工应用共享存储根；仅官方签名的 `model-config.read` 或 `app-storage.read` 插件可获得 |
+
+### 沙箱写域
+
+宿主默认在 OS 沙箱（macOS Seatbelt / Linux bubblewrap / Windows AppContainer）内以 stdio 传输启动 sidecar。在 `~/.tiangong` 下，sidecar **只能写**以下位置：
+
+| 可写位置 | 用途 |
+| --- | --- |
+| `data/<插件 id>/`（`TIANGONG_PLUGIN_STORAGE_DATA_DIR`） | 插件自有持久数据、运行态文件（锁、leader、endpoint 等） |
+| `plugins/<插件 id>/data/`（`TIANGONG_PLUGIN_DATA_DIR`） | 安装目录内的插件数据 |
+| `media/` | 跨插件媒体交换 |
+| `tmp/<插件 id>/`、`TMPDIR`、系统 `/tmp` | 临时文件 |
+
+存储根本身、`logs/`、插件安装目录的其他位置（包括 `runtime/`）、其他插件的数据目录，以及旧版本使用的顶层数据目录（如 `memory/`、`agents/`、`skills/`、`index/`）**都是只读的**；`keys/`、`auth/` 等敏感目录读写都被禁止。写入这些位置会返回 `Operation not permitted`（EPERM）。路径用 `tiangong_plugin_sidecar::storage::storage_data_dir(<id>)` 获取，不要自己拼接 `~/.tiangong/<id>`。
+
+开发时注意：
+
+- **stdio 传输不需要 endpoint 文件**。宿主通过 stdin/stdout 通信，`TIANGONG_PLUGIN_ENDPOINT` 指向的 `plugins/<id>/runtime/endpoint.json` 在沙箱内不可写。用 `tiangong_plugin_sidecar::stdio::stdio_requested()` 判断传输方式，stdio 下不要写这个路径。插件自己需要的进程间发现文件（例如给 `--mcp`、`--daemon` 等外部进程使用）放在 `data/<id>/runtime/` 下。
+- **判断进程是否存活时，`kill(pid, 0)` 只有返回 `ESRCH` 才表示进程不存在**。沙箱内探测非子进程会得到 `EPERM`，这时进程是存在的，必须按存活处理，否则会误判旧实例已退出，导致两个实例同时写数据，或迁移时复制到写了一半的数据库。
+- **旧数据迁移由插件自己负责**（Runtime 不提供迁移逻辑）：
+  1. 启动时把旧目录逐项复制到 `data/<id>/`：先复制到同级的临时名，再原子改名；全部成功后写完成标记。中途失败时中止启动、不写标记，下次启动继续。
+  2. 旧目录仍被存活进程占用时拒绝迁移。
+  3. 新目录已有数据库时不要整库覆盖。
+  4. 旧目录原样保留，不要删除（沙箱内它是只读的）。
+  5. 升级期间旧版本进程可能在首次迁移之后继续写旧目录，需要做一次**增量补迁**：按主键和更新时间把旧目录中新增或更新的记录合并进新目录，冲突时以较新的一方为准，完成后写独立标记，并补齐受影响记录的检索索引。参考 [Memory 迁移实现](../plugins/tiangong-plugin-memory/core/src/migration.rs)。
+- 旧目录在沙箱内只读，SQLite 不能在原地以 WAL 模式打开它。需要读取旧库时，把 `*.db`、`*.db-wal`、`*.db-shm` 一起复制到自有目录下的临时位置再打开。
 
 sidecar 必须：
 
-1. 监听本地 TCP 端口并生成短期认证 Token。
-2. 将 host、port、PID、Token 写入指定 endpoint 文件。
+1. 实现 stdio 传输（`TIANGONG_PLUGIN_TRANSPORT=stdio`）：stdin 读帧、stdout 写帧，首帧以 `TIANGONG_PLUGIN_STDIO_TOKEN` 认证，stdin EOF 即退出。Rust 插件直接使用 `tiangong_plugin_sidecar::stdio::run_stdio`。
+2. 仅旧 TCP 传输（兼容）：监听本地端口，将 host、port、PID、Token 写入 `TIANGONG_PLUGIN_ENDPOINT`；stdio 下不得写该路径。
 3. 使用运行时 `0.1.0` JSON Lines 帧协议完成认证、请求和响应。
 4. 实现 `runtime.handshake`，返回插件 ID、插件版本、传输协议版本、业务协议版本和运行状态。
 5. 保证握手中的插件版本与 `plugin.json`、WASM `describe()` 一致。
+6. 只写沙箱可写域（见上文“沙箱写域”）。启动阶段任一写入失败都会让握手超时，宿主报“就绪握手失败”。
 
 协议类型见 [`protocol.rs`](../crates/tiangong-plugin-runtime/src/protocol.rs)，进程行为见 [`sidecar.rs`](../crates/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
 
@@ -353,6 +381,11 @@ Memory 的目录和构建说明见 [`plugins/tiangong-plugin-memory/README.md`](
 确认完整插件目录包含当前操作系统和架构可执行的 sidecar。Windows 文件名应带 `.exe`。
 
 ### sidecar 启动后仍显示异常
+
+先看 `~/.tiangong/plugins/<id>/logs/sidecar.log` 的最后几行：
+
+- 出现 `Operation not permitted` 或“写入 … 失败”：说明 sidecar 写了沙箱可写域以外的位置，最常见的是在 stdio 下仍然写 `TIANGONG_PLUGIN_ENDPOINT`、往存储根或旧顶层目录写数据。按“沙箱写域”一节调整路径。
+- 出现“选举失败”或“仍被进程占用”：检查存活判断是否把 `EPERM` 误判为进程不存在。
 
 检查插件目录下的 `logs/sidecar.log`，并确认 endpoint 文件由当前进程生成、握手协议为 `0.1.0`。
 

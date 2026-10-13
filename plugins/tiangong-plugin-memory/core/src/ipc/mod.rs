@@ -1196,9 +1196,17 @@ impl IpcConnection {
     }
 }
 
+/// Memory IPC endpoint 文件路径。
+///
+/// stdio 传输下宿主注入的 `TIANGONG_PLUGIN_ENDPOINT` 只是占位（宿主经
+/// stdin/stdout 通信，不读取该文件），且指向插件安装目录下的 `runtime/`，
+/// 沙箱内不可写；此时一律落在 Memory 自有数据目录，与 `--mcp` / `--daemon`
+/// 等外部进程读取的位置一致。仅旧 TCP 传输（宿主按该文件发现 sidecar）
+/// 才采用注入路径。
 pub fn endpoint_path(service: &str) -> Result<PathBuf> {
-    if let Some(path) =
-        std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|value| !value.is_empty())
+    if !tiangong_plugin_sidecar::stdio::stdio_requested()
+        && let Some(path) =
+            std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|value| !value.is_empty())
     {
         return Ok(PathBuf::from(path));
     }
@@ -1297,6 +1305,46 @@ mod tests {
         }
         // 与 leader.json 同在存储根下，不同存储根的实例互不干扰。
         assert_eq!(path, root.path().join("data/memory/runtime/memory.json"));
+    }
+
+    #[test]
+    #[serial]
+    fn stdio_transport_ignores_host_endpoint_placeholder() {
+        let root = TempDir::new().expect("创建存储根失败");
+        let keys = [
+            "TIANGONG_PLUGIN_ENDPOINT",
+            "TIANGONG_PLUGIN_TRANSPORT",
+            "TIANGONG_PLUGIN_ID",
+            tiangong_plugin_runtime::sidecar::PLUGIN_STORAGE_DATA_DIR_ENV,
+            tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
+        ];
+        let saved: Vec<_> = keys.iter().map(std::env::var_os).collect();
+        let placeholder = root.path().join("plugins/memory/runtime/endpoint.json");
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_ENDPOINT", &placeholder);
+            std::env::remove_var("TIANGONG_PLUGIN_ID");
+            std::env::remove_var(tiangong_plugin_runtime::sidecar::PLUGIN_STORAGE_DATA_DIR_ENV);
+            std::env::set_var(
+                tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
+                root.path(),
+            );
+            std::env::set_var("TIANGONG_PLUGIN_TRANSPORT", "stdio");
+        }
+        let stdio = endpoint_path("memory").expect("stdio endpoint 路径");
+        unsafe { std::env::remove_var("TIANGONG_PLUGIN_TRANSPORT") };
+        let tcp = endpoint_path("memory").expect("tcp endpoint 路径");
+        for (key, value) in keys.iter().zip(saved) {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        // stdio：宿主注入的路径只是占位且沙箱内不可写，落在自有数据目录。
+        assert_eq!(stdio, root.path().join("data/memory/runtime/memory.json"));
+        // 旧 TCP 传输：宿主按注入路径发现 sidecar，必须照写。
+        assert_eq!(tcp, placeholder);
     }
 
     #[tokio::test(flavor = "current_thread")]

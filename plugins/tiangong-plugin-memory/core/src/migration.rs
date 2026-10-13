@@ -65,16 +65,7 @@ fn migrate_legacy_dir(legacy: &Path, target: &Path) -> Result<()> {
             ),
         );
     }
-    if let Ok(Some(info)) = crate::election::read_leader_info_at(&legacy.join("leader.json"))
-        && crate::election::is_leader_alive(&info)
-        && info.pid != std::process::id()
-    {
-        bail!(
-            "旧 Memory 数据目录仍被进程 {} 使用（{}），请先关闭旧版本 Memory 后重试",
-            info.pid,
-            legacy.display()
-        );
-    }
+    ensure_legacy_idle(legacy)?;
 
     let mut copied = 0usize;
     for entry in std::fs::read_dir(legacy)
@@ -112,6 +103,256 @@ fn migrate_legacy_dir(legacy: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 旧目录仍有存活 Leader（旧版本进程还在写库）时拒绝读取其数据。
+fn ensure_legacy_idle(legacy: &Path) -> Result<()> {
+    if let Ok(Some(info)) = crate::election::read_leader_info_at(&legacy.join("leader.json"))
+        && crate::election::is_leader_alive(&info)
+        && info.pid != std::process::id()
+    {
+        bail!(
+            "旧 Memory 数据目录仍被进程 {} 使用（{}），请先关闭旧版本 Memory 后重试",
+            info.pid,
+            legacy.display()
+        );
+    }
+    Ok(())
+}
+
+/// 增量补迁完成标记文件名（位于新数据目录内）。
+const LEGACY_RESYNC_MARKER: &str = ".legacy-resynced";
+/// 补迁暂存目录：旧目录在沙箱内只读，SQLite 无法原地打开其 WAL，先复制快照。
+const RESYNC_STAGING_DIR: &str = ".legacy-resync-staging";
+/// 补迁写入、尚待重建检索索引的节点 ID 列表（由 Store 启动时消费）。
+pub(crate) const RESYNC_PENDING_FILE: &str = ".legacy-resync-pending.json";
+/// 注入文件目录（agent.md），按修改时间补迁。
+const INJECTION_DIRS: [&str; 3] = ["profile", "workspaces", "sessions"];
+
+/// 增量补迁：首次整目录迁移后，旧版本进程仍可能继续写旧目录（升级时旧
+/// sidecar 未退出、新版本启动失败期间旧版本继续服务），这部分记忆不在新
+/// 目录里。只对完成过整目录迁移（标记为 `migrated from`）的数据执行一次：
+/// - SQLite：旧库中新库缺失或 `updated_at` 更新的节点（含扩展表）与关系按行
+///   合并进新库，冲突以 `updated_at` 较新者为准，新库独有数据不受影响；
+/// - 注入文件：旧目录中缺失或更新的 `agent.md` 覆盖到新目录；
+/// - 合并节点的 ID 写入待重建列表，Store 启动后补齐 Tantivy 与向量索引。
+///
+/// 旧目录仍被存活 Leader 占用时报错，调用方告警后下次启动重试。
+pub fn resync_legacy_storage() -> Result<()> {
+    let legacy = crate::paths::storage_root().join("memory");
+    resync_legacy_dir(&legacy, &crate::paths::memory_data_dir())
+}
+
+fn resync_legacy_dir(legacy: &Path, target: &Path) -> Result<()> {
+    let marker = target.join(LEGACY_RESYNC_MARKER);
+    if marker.exists() || legacy == target || !target.is_dir() {
+        return Ok(());
+    }
+    let migrated =
+        std::fs::read_to_string(target.join(LEGACY_MIGRATION_MARKER)).unwrap_or_default();
+    if !migrated.starts_with("migrated from") || !legacy.join("metadata.db").is_file() {
+        return write_marker(&marker, "skipped: no legacy data to resync");
+    }
+    ensure_legacy_idle(legacy)?;
+    let merged = merge_legacy_database(legacy, target)?;
+    let files = sync_injection_files(legacy, target)?;
+    if !merged.is_empty() {
+        append_resync_pending(target, &merged)?;
+    }
+    write_marker(
+        &marker,
+        &format!(
+            "resynced from {}; nodes={} files={files}",
+            legacy.display(),
+            merged.len()
+        ),
+    )?;
+    tracing::info!(
+        legacy = %legacy.display(),
+        target = %target.display(),
+        nodes = merged.len(),
+        files,
+        "Memory 旧目录增量补迁完成"
+    );
+    Ok(())
+}
+
+/// 把旧库快照合并进新库，返回被写入的节点 ID。
+fn merge_legacy_database(legacy: &Path, target: &Path) -> Result<Vec<String>> {
+    let staging = target.join(RESYNC_STAGING_DIR);
+    remove_any(&staging)?;
+    std::fs::create_dir_all(&staging)
+        .with_context(|| format!("创建补迁暂存目录失败: {}", staging.display()))?;
+    let result = (|| -> Result<Vec<String>> {
+        // 连同 WAL 一起复制：旧进程最近的写入可能还未 checkpoint 进主库。
+        for name in ["metadata.db", "metadata.db-wal", "metadata.db-shm"] {
+            let source = legacy.join(name);
+            if source.is_file() {
+                std::fs::copy(&source, staging.join(name))
+                    .with_context(|| format!("复制旧 Memory 数据库失败: {}", source.display()))?;
+            }
+        }
+        // 按正常流程打开快照：回放 WAL、转换历史加密库并补齐 Schema 列，
+        // 保证与新库列一致后再按列名合并。
+        drop(crate::db::MemoryDb::open_at_data_dir(&staging)?);
+        let db = crate::db::MemoryDb::open_at_data_dir(target)?;
+        let conn = db.connection();
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        let snapshot = staging.join("metadata.db");
+        conn.execute(
+            "ATTACH DATABASE ?1 AS legacy",
+            [snapshot.to_string_lossy().as_ref()],
+        )
+        .with_context(|| "挂载旧 Memory 数据库快照失败")?;
+        let merged = merge_attached(conn);
+        let _ = conn.execute("DETACH DATABASE legacy", []);
+        merged
+    })();
+    let _ = remove_any(&staging);
+    result
+}
+
+const NODE_COLUMNS: &str = "id, kind, memory_type, scope_type, scope_id, title, summary, keywords, \
+     importance, confidence, status, source, usage_count, last_used_at, created_at, updated_at";
+const RELATION_COLUMNS: [&str; 8] = [
+    "id",
+    "from_node_id",
+    "to_node_id",
+    "relation_kind",
+    "weight",
+    "note",
+    "created_at",
+    "updated_at",
+];
+
+fn merge_attached(conn: &rusqlite::Connection) -> Result<Vec<String>> {
+    let relation_columns = RELATION_COLUMNS.join(", ");
+    let relation_select = RELATION_COLUMNS
+        .iter()
+        .map(|column| format!("l.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS resync_nodes (id TEXT PRIMARY KEY);
+         DELETE FROM resync_nodes;
+         INSERT INTO resync_nodes (id)
+           SELECT l.id FROM legacy.memory_nodes l
+           LEFT JOIN main.memory_nodes m ON m.id = l.id
+           WHERE m.id IS NULL OR l.updated_at > m.updated_at;
+         INSERT OR REPLACE INTO main.memory_nodes ({NODE_COLUMNS})
+           SELECT {NODE_COLUMNS} FROM legacy.memory_nodes
+           WHERE id IN (SELECT id FROM resync_nodes);
+         INSERT OR REPLACE INTO main.episodes (id, session_id, outcome, tool_calls, full_content)
+           SELECT id, session_id, outcome, tool_calls, full_content FROM legacy.episodes
+           WHERE id IN (SELECT id FROM resync_nodes);
+         INSERT OR REPLACE INTO main.entities
+           (id, entity_type, file_path, related_episodes, full_content)
+           SELECT id, entity_type, file_path, related_episodes, full_content FROM legacy.entities
+           WHERE id IN (SELECT id FROM resync_nodes);
+         INSERT OR REPLACE INTO main.decisions
+           (id, context, alternatives, chosen, reasons, episode_ids, full_content)
+           SELECT id, context, alternatives, chosen, reasons, episode_ids, full_content
+           FROM legacy.decisions WHERE id IN (SELECT id FROM resync_nodes);
+         INSERT OR REPLACE INTO main.evidence (id, evidence_path, byte_size)
+           SELECT id, evidence_path, byte_size FROM legacy.evidence
+           WHERE id IN (SELECT id FROM resync_nodes);
+         INSERT OR REPLACE INTO main.memory_relations ({relation_columns})
+           SELECT {relation_select} FROM legacy.memory_relations l
+           LEFT JOIN main.memory_relations m
+             ON m.from_node_id = l.from_node_id AND m.to_node_id = l.to_node_id
+            AND m.relation_kind = l.relation_kind
+           WHERE m.id IS NULL OR l.updated_at > m.updated_at;"
+    ))
+    .with_context(|| "合并旧 Memory 数据失败")?;
+    let ids = {
+        let mut stmt = tx.prepare("SELECT id FROM resync_nodes ORDER BY id")?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    tx.execute("DROP TABLE resync_nodes", [])?;
+    tx.commit().with_context(|| "提交旧 Memory 数据合并失败")?;
+    Ok(ids)
+}
+
+/// 注入文件按修改时间补迁，返回覆盖的文件数。
+fn sync_injection_files(legacy: &Path, target: &Path) -> Result<usize> {
+    let mut copied = 0;
+    for dir in INJECTION_DIRS {
+        copied += sync_newer_files(&legacy.join(dir), &target.join(dir))?;
+    }
+    Ok(copied)
+}
+
+fn sync_newer_files(source: &Path, destination: &Path) -> Result<usize> {
+    let entries = match std::fs::read_dir(source) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取旧注入目录失败: {}", source.display()));
+        }
+    };
+    let mut copied = 0;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let to = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copied += sync_newer_files(&entry.path(), &to)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let source_modified = entry.metadata()?.modified()?;
+        let newer = match std::fs::metadata(&to) {
+            Ok(meta) => meta.modified()? < source_modified,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error.into()),
+        };
+        if !newer {
+            continue;
+        }
+        std::fs::create_dir_all(destination)
+            .with_context(|| format!("创建注入目录失败: {}", destination.display()))?;
+        let staged = destination.join(format!(
+            "{STAGING_PREFIX}{}",
+            entry.file_name().to_string_lossy()
+        ));
+        std::fs::copy(entry.path(), &staged)
+            .with_context(|| format!("复制注入文件失败: {}", entry.path().display()))?;
+        std::fs::rename(&staged, &to)
+            .with_context(|| format!("落盘注入文件失败: {}", to.display()))?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+fn append_resync_pending(target: &Path, ids: &[String]) -> Result<()> {
+    let path = target.join(RESYNC_PENDING_FILE);
+    let mut all = load_resync_pending(target);
+    all.extend(ids.iter().cloned());
+    all.sort();
+    all.dedup();
+    std::fs::write(&path, serde_json::to_vec(&all)?)
+        .with_context(|| format!("写入补迁待重建列表失败: {}", path.display()))
+}
+
+/// 读取待重建索引的节点 ID（文件缺失或损坏时返回空）。
+pub(crate) fn load_resync_pending(target: &Path) -> Vec<String> {
+    std::fs::read(target.join(RESYNC_PENDING_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// 索引补齐后清除待重建列表。
+pub(crate) fn clear_resync_pending(target: &Path) {
+    let path = target.join(RESYNC_PENDING_FILE);
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path = %path.display(), "清除补迁待重建列表失败");
+    }
+}
 /// 旧模型目录名（不随启动迁移，由下载流程按需复用）。
 pub(crate) const LEGACY_MODELS_DIR: &str = "models";
 
@@ -125,6 +366,9 @@ fn is_runtime_entry(name: &str) -> bool {
             | "daemon.json"
             | LEGACY_MODELS_DIR
             | LEGACY_MIGRATION_MARKER
+            | LEGACY_RESYNC_MARKER
+            | RESYNC_PENDING_FILE
+            | RESYNC_STAGING_DIR
     ) || name.starts_with(".leader.json.")
         || name.starts_with(STAGING_PREFIX)
 }
@@ -257,6 +501,145 @@ mod tests {
         migrate_legacy_dir(&root.path().join("memory"), &target).unwrap();
         assert!(target.join(LEGACY_MIGRATION_MARKER).is_file());
         assert!(!target.join("metadata.db").exists());
+    }
+
+    fn create_db(dir: &Path) -> crate::db::MemoryDb {
+        crate::db::MemoryDb::open_at_data_dir(dir).unwrap()
+    }
+
+    fn insert_node(db: &crate::db::MemoryDb, id: &str, title: &str, updated_at: &str) {
+        db.connection()
+            .execute(
+                "INSERT OR REPLACE INTO memory_nodes
+                 (id, kind, scope_type, title, summary, created_at, updated_at)
+                 VALUES (?1, 'episode', 'global', ?2, '摘要', ?3, ?3)",
+                rusqlite::params![id, title, updated_at],
+            )
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT OR REPLACE INTO episodes (id, session_id, outcome, full_content)
+                 VALUES (?1, 's', 'success', ?2)",
+                rusqlite::params![id, title],
+            )
+            .unwrap();
+    }
+
+    fn node_title(db: &crate::db::MemoryDb, id: &str) -> Option<String> {
+        db.connection()
+            .query_row(
+                "SELECT title FROM memory_nodes WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    #[test]
+    fn resync_merges_rows_written_to_legacy_after_migration() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("memory");
+        let target = root.path().join("data").join("memory");
+        {
+            let old = create_db(&legacy);
+            insert_node(&old, "a", "旧版本更新后", "2026-10-13 18:00:00");
+            insert_node(&old, "b", "旧版本新增", "2026-10-13 18:00:00");
+            insert_node(&old, "c", "旧版本过时", "2026-10-13 10:00:00");
+        }
+        {
+            let new = create_db(&target);
+            insert_node(&new, "a", "迁移时的版本", "2026-10-13 16:00:00");
+            insert_node(&new, "c", "新版本较新", "2026-10-13 17:00:00");
+            insert_node(&new, "d", "新版本独有", "2026-10-13 17:00:00");
+        }
+        std::fs::create_dir_all(legacy.join("sessions").join("s1")).unwrap();
+        std::fs::write(legacy.join("sessions/s1/agent.md"), "旧注入").unwrap();
+        write_marker(&target.join(LEGACY_MIGRATION_MARKER), "migrated from test").unwrap();
+
+        resync_legacy_dir(&legacy, &target).unwrap();
+
+        let new = create_db(&target);
+        assert_eq!(node_title(&new, "a").as_deref(), Some("旧版本更新后"));
+        assert_eq!(node_title(&new, "b").as_deref(), Some("旧版本新增"));
+        assert_eq!(
+            node_title(&new, "c").as_deref(),
+            Some("新版本较新"),
+            "新库较新不被覆盖"
+        );
+        assert_eq!(node_title(&new, "d").as_deref(), Some("新版本独有"));
+        let episode: String = new
+            .connection()
+            .query_row(
+                "SELECT full_content FROM episodes WHERE id = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(episode, "旧版本新增", "扩展表随节点合并");
+        assert_eq!(
+            std::fs::read_to_string(target.join("sessions/s1/agent.md")).unwrap(),
+            "旧注入"
+        );
+        assert_eq!(load_resync_pending(&target), vec!["a", "b"]);
+        assert!(target.join(LEGACY_RESYNC_MARKER).is_file());
+        assert!(!target.join(RESYNC_STAGING_DIR).exists());
+        assert!(legacy.join("metadata.db").is_file(), "旧目录保留");
+
+        // 只执行一次：标记存在后旧目录变化不再合并。
+        insert_node(
+            &create_db(&legacy),
+            "e",
+            "标记后写入",
+            "2026-10-13 19:00:00",
+        );
+        resync_legacy_dir(&legacy, &target).unwrap();
+        assert_eq!(node_title(&create_db(&target), "e"), None);
+    }
+
+    #[test]
+    fn resync_skips_when_target_was_not_migrated_from_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("memory");
+        let target = root.path().join("data").join("memory");
+        insert_node(&create_db(&legacy), "a", "旧", "2026-10-13 18:00:00");
+        create_db(&target);
+        write_marker(
+            &target.join(LEGACY_MIGRATION_MARKER),
+            "skipped: target already had metadata.db",
+        )
+        .unwrap();
+        resync_legacy_dir(&legacy, &target).unwrap();
+        assert_eq!(
+            node_title(&create_db(&target), "a"),
+            None,
+            "两份独立库不合并"
+        );
+        assert!(target.join(LEGACY_RESYNC_MARKER).is_file());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn alive_legacy_leader_blocks_resync() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("memory");
+        let target = root.path().join("data").join("memory");
+        insert_node(&create_db(&legacy), "a", "旧", "2026-10-13 18:00:00");
+        create_db(&target);
+        write_marker(&target.join(LEGACY_MIGRATION_MARKER), "migrated from test").unwrap();
+        let info = crate::election::LeaderInfo {
+            pid: std::os::unix::process::parent_id(),
+            ..crate::election::LeaderInfo::new(
+                crate::election::ProcessType::Sidecar,
+                "memory".into(),
+            )
+        };
+        std::fs::write(
+            legacy.join("leader.json"),
+            serde_json::to_vec(&info).unwrap(),
+        )
+        .unwrap();
+        assert!(resync_legacy_dir(&legacy, &target).is_err());
+        assert!(!target.join(LEGACY_RESYNC_MARKER).exists(), "下次启动重试");
     }
 
     #[test]

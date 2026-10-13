@@ -137,6 +137,11 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     // 失败直接中止，避免在新目录建空库后旧数据再也迁不过来。
     tiangong_memory::migrate_legacy_storage()
         .map_err(|error| error.context("迁移旧 Memory 数据失败，已中止启动以免丢失记忆"))?;
+    // 首次迁移后旧版本进程继续写入旧目录的增量记忆：失败只告警（旧进程
+    // 仍在运行等），新目录照常服务，下次启动继续补迁。
+    if let Err(error) = tiangong_memory::resync_legacy_storage() {
+        tracing::warn!("Memory 旧目录增量补迁未完成，下次启动重试: {error:#}");
+    }
     if let Some(plugin_data_dir) =
         std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|value| !value.is_empty())
     {
