@@ -286,11 +286,32 @@ pub(crate) fn session_for_workspace(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    // 映射即真相：登记即复用，不查会话文件——会话由宿主在首条消息到达时
-    // 创建（异步窗口），文件缺失是预期状态而非映射失效；被删会话的重置
-    // 走显式入口，不靠这里猜测。
-    if let Some(session_id) = mapped {
-        return Ok((session_id.to_string(), false));
+    // 映射即真相：登记即复用——会话由宿主在首条消息到达时创建（异步窗口），
+    // 文件缺失是预期状态而非映射失效；被删会话的重置走显式入口，不靠这里
+    // 猜测。唯一例外：会话已落盘但 cwd 不是本工作区（旧宿主丢弃了投递携带
+    // 的 workspace，会话落在全局工作目录），有对话后宿主不允许再改 cwd，
+    // 只能换新会话号重建；每个映射最多重建一次（`cwd_rebuilt`），避免在
+    // 仍未修复的宿主上每次投递都换会话。
+    if let Some(stale) = mapped {
+        let rebuilt = meta
+            .get(CWD_REBUILT_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if rebuilt || !session_cwd_mismatched(stale, workspace_path) {
+            return Ok((stale.to_string(), false));
+        }
+        let session_id = paths::new_id();
+        tracing::warn!(
+            agent_id,
+            workspace = workspace_path,
+            stale_session = stale,
+            new_session = %session_id,
+            "成员工作区会话的 cwd 与工作区不一致，重建会话"
+        );
+        meta["session_id"] = serde_json::Value::String(session_id.clone());
+        meta[CWD_REBUILT_KEY] = serde_json::Value::Bool(true);
+        paths::atomic_write(&meta_path, serde_json::to_string(&meta)?.as_bytes())?;
+        return Ok((session_id, true));
     }
 
     // 本工作区从未登记映射：老全局会话一次性迁移（会话须实际存在），
@@ -339,23 +360,35 @@ fn legacy_session_mapped(dir: &std::path::Path, legacy: &str) -> bool {
 /// 旧会话的工作目录是否与给定工作区一致（canonicalize 后比较）——
 /// 只有会话本就工作在该项目下才沿用，避免把别的项目的会话错配过来。
 fn legacy_session_cwd_matches(session_id: &str, workspace_path: &str) -> bool {
-    let Some(cwd) = crate::sessions::load_session_json(session_id)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("cwd")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-    else {
-        return false;
-    };
+    session_cwd(session_id).is_some_and(|cwd| same_path(&cwd, workspace_path))
+}
+
+/// 映射元数据中「已因 cwd 不一致重建过」的标记键。
+const CWD_REBUILT_KEY: &str = "cwd_rebuilt";
+
+/// 会话已落盘且 cwd 明确不是该工作区。会话文件缺失/不可读/cwd 为空均视为
+/// 「未知」而非不一致（首条消息前的异步窗口）。
+fn session_cwd_mismatched(session_id: &str, workspace_path: &str) -> bool {
+    session_cwd(session_id).is_some_and(|cwd| !same_path(&cwd, workspace_path))
+}
+
+fn session_cwd(session_id: &str) -> Option<String> {
+    crate::sessions::load_session_json(session_id)
+        .ok()?
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_string)
+}
+
+fn same_path(left: &str, right: &str) -> bool {
     let canonical = |path: &str| {
         std::fs::canonicalize(path)
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.to_string())
     };
-    !cwd.trim().is_empty() && canonical(&cwd) == canonical(workspace_path)
+    canonical(left) == canonical(right)
 }
 
 /// 反查会话归属的成员 ID：扫描全部成员的全部工作区映射，老全局绑定
@@ -546,6 +579,37 @@ mod tests {
         assert!(!is_new);
     }
 
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_会话cwd与工作区不一致时只重建一次() {
+        let (store, _root, agent_id) = store_with_agent("cwd-rebuild");
+        let w = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        let (s1, _) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        // 旧宿主丢弃 workspace：会话落在其他目录。
+        create_session_file_with_cwd(&s1, Some(other.path()));
+        let (s2, is_new) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        assert!(is_new, "cwd 不一致应换新会话并携带 workspace 创建");
+        assert_ne!(s1, s2);
+        // 宿主仍未修复、新会话再次落错目录：不再反复重建。
+        create_session_file_with_cwd(&s2, Some(other.path()));
+        let (s3, is_new) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        assert_eq!(s2, s3);
+        assert!(!is_new);
+    }
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_会话cwd一致时保持复用() {
+        let (store, _root, agent_id) = store_with_agent("cwd-match");
+        let w = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        let (s1, _) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        create_session_file_with_cwd(&s1, Some(w.path()));
+        let (s2, is_new) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        assert_eq!(s1, s2);
+        assert!(!is_new);
+    }
     #[serial_test::serial]
     #[test]
     fn 会话映射_并发首次访问只产生一个会话() {

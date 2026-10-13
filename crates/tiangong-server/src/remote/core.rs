@@ -179,7 +179,9 @@ impl ServerCoreManager {
             .await
             .core_manager
             .session_exists(&requested_session_id);
-        let session_id = self.ensure_core_locked(&requested_session_id).await?;
+        let session_id = self
+            .ensure_core_locked(&requested_session_id, annotations.workspace.as_deref())
+            .await?;
 
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
         // 附件准备成功后才登记 waiter，准备失败不会污染 tracker。
@@ -301,7 +303,14 @@ impl ServerCoreManager {
     }
 
     /// 调用方必须持有目标 session 的 `session_operation_lock`。
-    async fn ensure_core_locked(&self, requested_session_id: &str) -> Result<String> {
+    ///
+    /// `new_session_workspace`：会话尚不存在时使用的工作目录（须为已存在目录，
+    /// 否则回退全局工作目录）；已有会话始终沿用自身 cwd。
+    async fn ensure_core_locked(
+        &self,
+        requested_session_id: &str,
+        new_session_workspace: Option<&str>,
+    ) -> Result<String> {
         let session_id = normalize_session_id(requested_session_id)?;
 
         if self.core_manager.has_live_core(&session_id) {
@@ -327,6 +336,7 @@ impl ServerCoreManager {
                 .find(|metadata| metadata.id == session_id)
                 .map(|metadata| metadata.cwd)
                 .filter(|cwd| !cwd.trim().is_empty())
+                .or_else(|| new_session_directory(new_session_workspace))
                 .unwrap_or_else(|| state.workspace_dir.clone());
             (
                 state.config.to_core_config(),
@@ -798,6 +808,20 @@ fn cleanup_created_attachment_paths(paths: &[std::path::PathBuf]) -> Result<()> 
     }
 }
 
+/// 新建会话的工作目录：调用方指定的路径须为绝对路径且是已存在目录，
+/// 否则返回 None 由调用方回退全局工作目录。Server 与 Desktop 内嵌桥共用。
+pub fn new_session_directory(workspace: Option<&str>) -> Option<String> {
+    let workspace = workspace.map(str::trim).filter(|path| !path.is_empty())?;
+    let path = Path::new(workspace);
+    if path.is_absolute() && path.is_dir() {
+        return Some(workspace.to_string());
+    }
+    tracing::warn!(
+        workspace,
+        "指定的会话工作目录不存在或不是绝对路径，回退全局工作目录"
+    );
+    None
+}
 fn normalize_session_id(session_id: &str) -> Result<String> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
@@ -1085,6 +1109,28 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn new_session_directory_accepts_only_existing_absolute_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        assert_eq!(new_session_directory(Some(&path)), Some(path.clone()));
+        assert_eq!(
+            new_session_directory(Some(&format!("  {path}  "))),
+            Some(path.clone())
+        );
+        assert_eq!(new_session_directory(None), None);
+        assert_eq!(new_session_directory(Some("   ")), None);
+        assert_eq!(new_session_directory(Some("relative/dir")), None);
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            new_session_directory(Some(&missing.to_string_lossy())),
+            None
+        );
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(new_session_directory(Some(&file.to_string_lossy())), None);
+    }
 
     use tiangong_core::config::core::CoreConfig;
     use tiangong_core::core::Plugin;

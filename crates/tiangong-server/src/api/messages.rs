@@ -46,6 +46,7 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
     let annotations = MessageAnnotations {
         instruction: body.instruction,
         render: body.render,
+        workspace: body.workspace,
     }
     .normalized()
     .map_err(|error| SilentError::business_error(StatusCode::BAD_REQUEST, error))?;

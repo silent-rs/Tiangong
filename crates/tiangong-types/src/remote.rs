@@ -64,21 +64,27 @@ pub struct IncomingMessage {
 /// - `instruction`：只给模型看的文本，保存为 `ContentBlock::ModelInstruction`，
 ///   界面不显示（如 Bot 回复通道说明）；
 /// - `render`：只给界面用的插件渲染声明（见 [`crate::MessageMeta::render`]），
-///   不进模型请求。
+///   不进模型请求；
+/// - `workspace`：目标会话尚不存在时，新建会话使用的工作目录（绝对路径）；
+///   已有会话忽略（会话工作目录在有对话后不再变更）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageAnnotations {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<crate::MessageRender>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl MessageAnnotations {
     pub fn is_empty(&self) -> bool {
-        self.instruction.is_none() && self.render.is_none()
+        self.instruction.is_none() && self.render.is_none() && self.workspace.is_none()
     }
 
-    /// 规范化并校验：空白指令视为未设置；`render` 按 [`crate::MessageRender::validate`] 校验。
+    /// 规范化并校验：空白指令/工作区视为未设置；`render` 按
+    /// [`crate::MessageRender::validate`] 校验；工作区须为绝对路径（是否为
+    /// 实际目录由宿主在新建会话时校验）。
     pub fn normalized(self) -> Result<Self, String> {
         let instruction = self
             .instruction
@@ -87,9 +93,19 @@ impl MessageAnnotations {
         if let Some(render) = &self.render {
             render.validate()?;
         }
+        let workspace = self
+            .workspace
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty());
+        if let Some(path) = &workspace
+            && !std::path::Path::new(path).is_absolute()
+        {
+            return Err(format!("workspace 必须是绝对路径：{path}"));
+        }
         Ok(Self {
             instruction,
             render: self.render,
+            workspace,
         })
     }
 

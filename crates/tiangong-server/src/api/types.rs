@@ -48,6 +48,9 @@ pub struct ConnectorMessageRequest {
     /// 插件渲染声明（仅界面使用，不进模型请求）：由 `plugin` 的 `view` 贡献接管该消息的显示。
     #[serde(default)]
     pub render: Option<tiangong_types::MessageRender>,
+    /// 目标会话尚不存在时新建会话使用的工作目录（绝对路径）；已有会话忽略。
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// 外部 Bot / Connector 消息入口响应体

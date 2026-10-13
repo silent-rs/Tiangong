@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "subagent",
-  "version": "0.2.42",
+  "version": "0.2.43",
   "entrypoints": [
     "desktop"
   ],
