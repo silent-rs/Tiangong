@@ -1545,7 +1545,9 @@ impl SubagentService {
                         message,
                         origin,
                         Some(&run_tag),
-                        if session_is_new {
+                        // 会话尚未落盘（新映射，或上次投递被宿主拒绝/未完成）
+                        // 都携带工作区；已存在的会话宿主沿用自身 cwd。
+                        if session_is_new || !crate::sessions::session_exists(&source_session) {
                             Some(activation.workspace.as_str())
                         } else {
                             None

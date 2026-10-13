@@ -6,7 +6,7 @@ use tauri::{AppHandle, Manager};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::MessageRole;
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
-use tiangong_server::remote::core::{new_session_directory, resolve_or_create_connector_session};
+use tiangong_server::remote::core::{resolve_known_workspace, resolve_or_create_connector_session};
 use tiangong_server::remote::event::{EventBus, TiangongEvent};
 use tiangong_types::{MediaAsset, MessageAnnotations, OutgoingMessage, TurnStatus};
 use tokio::sync::{mpsc, oneshot};
@@ -326,6 +326,14 @@ async fn send_message_and_wait(
         return Err("目标会话 ID 不能为空".to_string());
     }
     let annotations = annotations.normalized()?;
+    // 指定的工作区须为已存在的工作区（全局工作目录或现有会话目录），在任何
+    // 副作用（锁、附件落盘、建会话）之前拒绝，绝不新建目录。
+    let requested_workspace = state
+        .with_state_read(|core_state| {
+            resolve_known_workspace(core_state, annotations.workspace.as_deref())
+                .map_err(anyhow::Error::msg)
+        })
+        .await?;
     let message_id = message_id
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty())
@@ -437,12 +445,12 @@ async fn send_message_and_wait(
     transaction.commit();
 
     let (stream_tx, stream_rx) = std_mpsc::channel::<StreamEvent>();
-    // 新会话：调用方指定的工作区（如 subagent 成员×工作区会话）优先，
-    // 无效或未指定时回退全局工作目录；已有会话沿用自身 cwd。
+    // 新会话：调用方指定的工作区（已在入口校验为已存在的工作区）优先，
+    // 未指定时使用全局工作目录；已有会话沿用自身 cwd。
     let workspace_dir = if session_exists {
         None
     } else {
-        match new_session_directory(annotations.workspace.as_deref()) {
+        match requested_workspace {
             Some(workspace) => Some(workspace),
             None => Some(
                 state

@@ -197,6 +197,12 @@ pub async fn deliver_message(
     if status.is_success() || status.as_u16() == 202 {
         Ok(())
     } else {
-        anyhow::bail!("server 返回 {status}")
+        // 带上宿主拒绝原因（如工作区不是已存在的工作区），便于成员与用户定位。
+        let detail = response.text().await.unwrap_or_default();
+        let detail = detail.trim();
+        if detail.is_empty() {
+            anyhow::bail!("server 返回 {status}")
+        }
+        anyhow::bail!("server 返回 {status}：{detail}")
     }
 }
