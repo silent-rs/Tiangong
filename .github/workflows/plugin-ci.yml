@@ -44,6 +44,25 @@ jobs:
           else
             files=()
           fi
+          # 只提升了版本号的文件（plugin.json / Cargo.toml / Cargo.lock 等）不触发
+          # 插件检查；脚本同时校验这些插件的版本一致性，失败即中止。
+          if [[ ${#files[@]} -gt 0 ]]; then
+            base="$(git merge-base "$PR_BASE" HEAD)"
+            mapfile -t version_only < <(python3 scripts/ci/version_only_changes.py "$base" "${files[@]}")
+            if [[ ${#version_only[@]} -gt 0 ]]; then
+              echo "仅版本号变化，跳过插件检查：" >&2
+              printf '  %s\n' "${version_only[@]}" >&2
+              remaining=()
+              for file in "${files[@]}"; do
+                skip=false
+                for item in "${version_only[@]}"; do
+                  [[ "$file" == "$item" ]] && skip=true && break
+                done
+                [[ "$skip" == "true" ]] || remaining+=("$file")
+              done
+              files=("${remaining[@]+"${remaining[@]}"}")
+            fi
+          fi
 
           check_all=false
           sdk_changed=false
