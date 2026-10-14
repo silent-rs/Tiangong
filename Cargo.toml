@@ -245,3 +245,27 @@ path = "src/main.rs"
 tiangong-entry = { workspace = true }
 tiangong-config = { workspace = true }
 anyhow = { workspace = true }
+
+# 开发/测试编译加速：本地代码只保留行号表（panic 回溯与调试器单步仍可用），
+# 第三方依赖不生成调试信息。减小产物体积与链接耗时，CI 缓存也随之变小。
+# 需要完整调试信息时可临时设置 CARGO_PROFILE_DEV_DEBUG=full。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# 调试构建下哈希类依赖未优化时极慢：sidecar 每次启动都要对解释器
+#（node 约 120MB）计算 SHA-256，宿主与 Launcher 各一次，未优化约 4s/次。
+# 只对这些纯计算 crate 开优化，不影响本地代码的调试体验。
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3
+
+[profile.dev.package.cpufeatures]
+opt-level = 3

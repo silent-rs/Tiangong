@@ -66,6 +66,9 @@ runs:
 
     - name: Cache Rust artifacts
       uses: Swatinem/rust-cache@v2
+      with:
+        # 只在 main 上保存：PR 读取 main 的缓存，自身不再各存一份。
+        save-if: ${{ github.ref == 'refs/heads/main' }}
 
     - name: Resolve package args
       id: pkgs

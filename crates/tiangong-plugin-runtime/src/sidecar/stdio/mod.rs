@@ -35,7 +35,8 @@ mod sandbox_exemptions;
 
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,
-    prepare_policy_fd, sanitize_spawn_environment, terminate_process_tree,
+    prepare_policy_fd, sanitize_spawn_environment, spawn_on_persistent_thread,
+    terminate_process_tree,
 };
 #[cfg(windows)]
 use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
@@ -845,7 +846,7 @@ impl StdioSidecarConnection {
                 "应用正在退出，取消插件启动"
             )));
         }
-        let mut child = command.spawn().map_err(|error| {
+        let mut child = spawn_on_persistent_thread(command).map_err(|error| {
             let display = spawned_program.as_deref().unwrap_or(&program);
             let context = format!("启动 stdio sidecar 失败: {}", display.display());
             SpawnAttemptError::ProcessCreation {

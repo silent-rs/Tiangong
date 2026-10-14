@@ -2,6 +2,10 @@ name: App CI
 
 on:
   pull_request:
+  # 合并到 main 后完整运行一次：只有 main 上的 Rust 缓存能被所有 PR 读取，
+  # PR 自身不保存缓存（见 save-if），避免每个 PR 都从零编译、缓存超出配额。
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -154,27 +158,6 @@ jobs:
           done < <(jq -r '.[]' <<< "$MATRIX")
           cargo fmt "${packages[@]}" -- --check
 
-  rust-check:
-    name: App Rust check
-    needs: changes
-    if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - id: setup
-        uses: ./.github/actions/setup-rust
-        with:
-          matrix: ${{ needs.changes.outputs.matrix }}
-      - name: Check crates
-        env:
-          MATRIX: ${{ needs.changes.outputs.matrix }}
-        run: |
-          packages=()
-          while IFS= read -r package; do
-            packages+=(-p "$package")
-          done < <(jq -r '.[]' <<< "$MATRIX")
-          cargo check "${packages[@]}"
-
   rust-check-windows:
     name: App Rust check (windows)
     needs: changes
@@ -193,6 +176,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-check-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check plugin runtime on Windows
         run: cargo check -p tiangong-plugin-runtime --all-targets
 
@@ -235,7 +219,6 @@ jobs:
       - name: Prepare plugin runtime sandbox tests
         if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-plugin-runtime')
         env:
-          CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
         run: |
           sudo apt-get update
@@ -250,7 +233,6 @@ jobs:
       - name: Test crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}
-          CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
         run: |
           packages=()
@@ -284,6 +266,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: interpreter-release-e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -359,6 +342,8 @@ jobs:
             patchelf
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check Tauri shell
         run: cargo check --manifest-path src-tauri/Cargo.toml
 

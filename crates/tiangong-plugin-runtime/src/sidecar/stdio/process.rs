@@ -160,6 +160,55 @@ pub(super) fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// 在常驻线程上创建子进程。
+///
+/// Linux 的父进程死亡信号（`PR_SET_PDEATHSIG`）以**创建子进程的线程**为
+/// 「父」：该线程一退出就触发。Linux 沙箱经 bubblewrap `--die-with-parent`
+/// 启动，若在短命线程（如 WASM 宿主每次调用 sidecar 时开的线程）里
+/// spawn，线程结束时常驻 sidecar 会被 SIGKILL，下次调用只能重启，且进行中
+/// 的请求无法收到取消帧。统一交给进程内常驻线程创建即可避免；其他平台
+/// 没有该语义，直接在当前线程创建。
+#[cfg(target_os = "linux")]
+pub(super) fn spawn_on_persistent_thread(mut command: Command) -> std::io::Result<Child> {
+    use std::sync::mpsc::{Sender, channel};
+    use std::sync::{Mutex, OnceLock};
+
+    type Job = (Command, Sender<std::io::Result<Child>>);
+    static SPAWNER: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+    let spawner = SPAWNER.get_or_init(|| {
+        let (sender, receiver) = channel::<Job>();
+        std::thread::Builder::new()
+            .name("stdio-sidecar-spawner".to_string())
+            .spawn(move || {
+                for (mut command, reply) in receiver {
+                    let _ = reply.send(command.spawn());
+                }
+            })
+            .expect("启动 sidecar 创建线程失败");
+        Mutex::new(sender)
+    });
+    let (reply, result) = channel();
+    let sent = spawner
+        .lock()
+        .map_err(|_| std::io::Error::other("sidecar 创建线程通道已损坏"))?
+        .send((command, reply));
+    match sent {
+        Ok(()) => result
+            .recv()
+            .map_err(|_| std::io::Error::other("sidecar 创建线程已退出"))?,
+        // 创建线程不可用时退回当前线程，保证仍能启动。
+        Err(std::sync::mpsc::SendError((returned, _))) => {
+            command = returned;
+            command.spawn()
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn spawn_on_persistent_thread(mut command: Command) -> std::io::Result<Child> {
+    command.spawn()
+}
+
 /// 终止后等待子进程退出的上限：正常 SIGKILL 后毫秒级完成；超时说明
 /// 信号被外层环境保护拦截或进程陷入不可中断状态，放弃回收防止调用方
 /// 永久阻塞（所有 stop/取消/换代路径都持有 child 锁调用本函数）。
