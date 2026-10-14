@@ -5,10 +5,10 @@
 //! - `models.json` — 模型配置
 //! - `app.json` — 应用长期配置
 //! - `server.json` — Server 配置
-//! - `custom-prompt.md` — 自定义系统提示
 //! - `context_windows.json` — 模型上下文窗口表
 //!
-//! Skill、MCP（`mcp.json`、能力缓存）等配置由对应插件自管，不经本加载器。
+//! Skill、MCP（`mcp.json`、能力缓存）、自定义指令（Prompt 插件）
+//! 等配置由对应插件自管，不经本加载器。
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +32,6 @@ struct AppConfigFile {
     #[serde(default)]
     command_env_blocklist: Vec<String>,
     #[serde(default)]
-    custom_system_prompt: String,
-    #[serde(default)]
     agent_config: Option<LegacyAgentConfig>,
 }
 
@@ -44,8 +42,6 @@ struct LegacyAgentConfig {
     trust_mode: Option<TrustMode>,
     #[serde(default)]
     default_trust_mode: Option<TrustMode>,
-    #[serde(default)]
-    custom_system_prompt: String,
 }
 
 impl AppConfigFile {
@@ -62,17 +58,6 @@ impl AppConfigFile {
                     .and_then(|config| config.trust_mode)
             })
             .unwrap_or_default()
-    }
-
-    fn legacy_custom_system_prompt(&self) -> &str {
-        if self.custom_system_prompt.trim().is_empty() {
-            self.agent_config
-                .as_ref()
-                .map(|config| config.custom_system_prompt.as_str())
-                .unwrap_or_default()
-        } else {
-            &self.custom_system_prompt
-        }
     }
 }
 
@@ -108,14 +93,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     let models = load_models_config(dir);
     let server = crate::config::load_server_config_from_dir(dir);
 
-    let custom_system_prompt = io::load_custom_prompt_at(
-        &dir.join("custom-prompt.md"),
-        app.legacy_custom_system_prompt(),
-    )
-    .unwrap_or_else(|error| {
-        tracing::warn!("读取 custom-prompt.md 失败：{error}");
-        app.legacy_custom_system_prompt().to_string()
-    });
     let mut sandbox_policy = app.sandbox_policy.clone();
     if sandbox_policy.environment_blocklist.is_empty() && !app.command_env_blocklist.is_empty() {
         sandbox_policy.environment_blocklist = app.command_env_blocklist.clone();
@@ -137,7 +114,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         storage_root: dir.to_path_buf(),
         models,
         default_trust_mode: app.resolved_default_trust_mode(),
-        custom_system_prompt,
         workspace_dir,
         sandbox_disabled: app.sandbox_disabled,
         sandbox_policy,

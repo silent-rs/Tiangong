@@ -32,7 +32,6 @@ impl TiangongState {
         let agent_config = AgentConfig {
             trust_mode: core_config.trust_mode,
             default_trust_mode: core_config.default_trust_mode,
-            custom_system_prompt: core_config.custom_system_prompt,
             reasoning_effort: core_config.reasoning_effort,
         };
         Self {

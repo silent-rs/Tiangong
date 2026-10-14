@@ -433,7 +433,6 @@ impl TiangongCore {
             .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
-                custom_system_prompt: config.custom_system_prompt.clone(),
                 reasoning_effort: config.reasoning_effort,
             })
             .trust_mode(trust_mode)

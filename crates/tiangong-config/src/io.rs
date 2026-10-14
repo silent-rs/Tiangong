@@ -50,11 +50,6 @@ pub fn storage_root() -> PathBuf {
         .join(".tiangong")
 }
 
-/// 自定义 Prompt 独立文件路径：`~/.tiangong/custom-prompt.md`。
-pub fn custom_prompt_path() -> PathBuf {
-    storage_root().join("custom-prompt.md")
-}
-
 // ---------------------------------------------------------------------------
 // 应用长期配置
 // ---------------------------------------------------------------------------
@@ -77,8 +72,7 @@ fn sandbox_policy_is_default(value: &&crate::config::SandboxUserPolicy) -> bool 
 
 /// 保存应用长期配置到 `app.json`。
 ///
-/// 自定义 Prompt 继续由 `custom-prompt.md` 保存；旧 `app.json` 中的运行状态字段
-/// 不再写回。
+/// 旧 `app.json` 中的运行状态字段（含已由 Prompt 插件接管的自定义指令）不再写回。
 pub fn save_app_config_at(
     dir: &Path,
     default_trust_mode: TrustMode,
@@ -385,63 +379,6 @@ fn legacy_endpoint_from_route(
             .and_then(|value| usize::try_from(value).ok())
             .filter(|value| *value > 0),
     })
-}
-
-// ---------------------------------------------------------------------------
-// 自定义 Prompt
-// ---------------------------------------------------------------------------
-
-/// 读取自定义 Prompt，优先 `custom-prompt.md`，回退 `legacy`（旧字段值）。
-///
-/// - 文件存在 → 读取其内容（去除首尾空白后非空才采用）。
-/// - 否则返回 `legacy`。
-pub fn load_custom_prompt_at(path: &Path, legacy: &str) -> Result<String> {
-    if !path.exists() {
-        return Ok(legacy.to_string());
-    }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("读取自定义 Prompt 失败：{}", path.display()))?;
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        Ok(legacy.to_string())
-    } else {
-        Ok(trimmed.to_string())
-    }
-}
-
-/// 读取默认路径（`~/.tiangong/custom-prompt.md`）的自定义 Prompt。
-pub fn load_custom_prompt(legacy: &str) -> Result<String> {
-    load_custom_prompt_at(&custom_prompt_path(), legacy)
-}
-
-/// 保存自定义 Prompt 到指定路径（覆盖写，自动创建父目录）。
-pub fn save_custom_prompt_at(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("创建目录失败：{}", parent.display()))?;
-    }
-    std::fs::write(path, content)
-        .with_context(|| format!("写入自定义 Prompt 失败：{}", path.display()))?;
-    Ok(())
-}
-
-/// 保存自定义 Prompt 到默认路径。
-pub fn save_custom_prompt(content: &str) -> Result<()> {
-    save_custom_prompt_at(&custom_prompt_path(), content)
-}
-
-/// 清除指定路径的自定义 Prompt（删除文件，文件不存在视为成功）。
-pub fn clear_custom_prompt_at(path: &Path) -> Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("删除自定义 Prompt 失败：{}", path.display()))?;
-    }
-    Ok(())
-}
-
-/// 清除默认路径的自定义 Prompt。
-pub fn clear_custom_prompt() -> Result<()> {
-    clear_custom_prompt_at(&custom_prompt_path())
 }
 
 // ---------------------------------------------------------------------------

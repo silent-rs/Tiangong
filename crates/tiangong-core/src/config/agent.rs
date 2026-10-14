@@ -12,9 +12,6 @@ pub struct AgentConfig {
     /// 新对话默认权限信任模式
     #[serde(default)]
     pub default_trust_mode: crate::permission::TrustMode,
-    /// 用户自定义特色 Prompt，会注入到 system prompt。
-    #[serde(default)]
-    pub custom_system_prompt: String,
     /// 思考强度设置：None 关闭思考，默认 Medium
     #[serde(default = "default_reasoning_effort")]
     #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]

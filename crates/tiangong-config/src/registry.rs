@@ -137,12 +137,6 @@ impl TiangongConfig {
     pub fn save_to_disk(&self) -> anyhow::Result<()> {
         let dir = &self.storage_root;
         crate::io::save_models_config_at(dir, &self.models)?;
-        let prompt_path = dir.join("custom-prompt.md");
-        if self.custom_system_prompt.trim().is_empty() {
-            crate::io::clear_custom_prompt_at(&prompt_path)?;
-        } else {
-            crate::io::save_custom_prompt_at(&prompt_path, &self.custom_system_prompt)?;
-        }
         crate::io::save_app_config_at(
             dir,
             self.default_trust_mode,

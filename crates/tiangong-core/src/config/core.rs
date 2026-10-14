@@ -38,8 +38,6 @@ pub struct CoreConfig {
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
     pub default_trust_mode: TrustMode,
-    /// 用户自定义 system prompt
-    pub custom_system_prompt: String,
     /// 思考强度设置
     #[serde(default = "default_reasoning_effort")]
     #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]
@@ -51,7 +49,6 @@ impl Default for CoreConfig {
         Self {
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
-            custom_system_prompt: String::new(),
             reasoning_effort: tiangong_llm::ReasoningEffort::Medium,
         }
     }
@@ -79,11 +76,6 @@ impl CoreConfigBuilder {
 
     pub fn with_default_trust_mode(mut self, mode: TrustMode) -> Self {
         self.config.default_trust_mode = mode;
-        self
-    }
-
-    pub fn with_custom_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.config.custom_system_prompt = prompt.into();
         self
     }
 
@@ -162,7 +154,7 @@ mod tests {
 
         assert_eq!(provider.generation(), 1);
         let snap = provider.snapshot();
-        assert!(snap.custom_system_prompt.is_empty());
+        assert_eq!(snap.reasoning_effort, tiangong_llm::ReasoningEffort::Medium);
     }
 
     #[test]
@@ -170,11 +162,11 @@ mod tests {
         let provider = CoreConfigProvider::new(CoreConfig::default());
         assert_eq!(provider.generation(), 1);
 
-        provider.update(|c| c.custom_system_prompt = "改写".to_string());
+        provider.update(|c| c.reasoning_effort = tiangong_llm::ReasoningEffort::High);
         assert_eq!(provider.generation(), 2);
 
         let snap = provider.snapshot();
-        assert_eq!(snap.custom_system_prompt, "改写");
+        assert_eq!(snap.reasoning_effort, tiangong_llm::ReasoningEffort::High);
     }
 
     #[test]
@@ -182,19 +174,20 @@ mod tests {
         let provider = CoreConfigProvider::new(CoreConfig::default());
         let cloned = provider.clone();
 
-        provider.update(|c| c.custom_system_prompt = "共享".to_string());
+        provider.update(|c| c.reasoning_effort = tiangong_llm::ReasoningEffort::High);
         assert_eq!(cloned.generation(), 2);
-        assert_eq!(cloned.snapshot().custom_system_prompt, "共享");
+        assert_eq!(
+            cloned.snapshot().reasoning_effort,
+            tiangong_llm::ReasoningEffort::High
+        );
     }
 
     #[test]
     fn builder_basic() {
         let config = CoreConfig::builder()
             .with_trust_mode(TrustMode::FullTrust)
-            .with_custom_system_prompt("提示")
             .build();
 
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
-        assert_eq!(config.custom_system_prompt, "提示");
     }
 }
