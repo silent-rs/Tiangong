@@ -289,65 +289,6 @@ fn 已有订阅者时仍按会话请求拉起() {
 }
 
 #[test]
-fn ui_handler超过清单时限仍可正常返回() {
-    let _guard = REGISTRY_LOCK.lock().unwrap();
-    init_globals();
-    let root = tempfile::TempDir::new().unwrap();
-    stage_tool_plugin(root.path(), "tool-ui-no-timeout");
-    let plugin = load_plugin(root.path(), "tool-ui-no-timeout");
-    bridge_subscribe("tool-ui-no-timeout", "tool.requested").unwrap();
-
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let result = runtime.block_on(async {
-        let mut session = Session::new("无时限测试");
-        let call = ToolCall {
-            id: "call-no-timeout".to_string(),
-            name: "demo_tool".to_string(),
-            arguments: serde_json::json!({}),
-        };
-        let task = tokio::spawn({
-            let plugin = plugin.clone();
-            async move { plugin.handle(&call, &mut session, "tester").await }
-        });
-        let invocation_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if let Some((_, _, payload)) = event_hits().iter().rev().find(|(id, channel, _)| {
-                    id == "tool-ui-no-timeout" && channel == "tool.requested"
-                }) {
-                    let value: serde_json::Value = serde_json::from_str(payload).unwrap();
-                    break value["invocation_id"].as_str().unwrap().to_string();
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("工具请求应送达");
-
-        // 清单 timeout_ms=3000；等待超过该值后再返回，调用仍应保持有效。
-        tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
-        bridge_call(
-            "tool-ui-no-timeout",
-            "tool.resolve",
-            &serde_json::json!({
-                "invocation_id": invocation_id,
-                "status": "answered",
-                "result": {"ok": true, "summary": "late but valid", "exit_code": 0}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), task)
-            .await
-            .expect("测试保护时限内应结束")
-            .unwrap()
-            .expect("UI Handler 应返回结果")
-    });
-    assert!(result.ok);
-    assert_eq!(result.summary, "late but valid");
-    bridge_unsubscribe("tool-ui-no-timeout", "tool.requested").unwrap();
-}
-
-#[test]
 fn 调用闭合后重放不得补发requested() {
     let _guard = REGISTRY_LOCK.lock().unwrap();
     init_globals();

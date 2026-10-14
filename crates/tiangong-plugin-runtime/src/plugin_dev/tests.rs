@@ -1263,22 +1263,6 @@ await runSidecar({
     assert_eq!(response["summary"], json!("文本 5 字"));
     assert_eq!(response["stdout"], json!("cba工天"));
 }
-/// 定位示例 memory wasm 组件（与 tests/load_and_call.rs 同一产物）。
-fn memory_wasm_or_skip() -> Option<PathBuf> {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop();
-    path.pop();
-    path.push("target/wasm32-wasip2/debug/tiangong_plugin_memory_wasm.wasm");
-    if !path.exists() {
-        eprintln!(
-            "跳过测试：未找到 wasm 组件 {}，请先执行 `cargo run -p xtask -- build-wasm`",
-            path.display()
-        );
-        return None;
-    }
-    Some(path)
-}
-
 /// 轮询 sidecar 日志（子进程 stderr 全量重定向于此）直至出现标记。
 fn wait_log_contains(log: &Path, marker: &str, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
@@ -1300,19 +1284,14 @@ fn wait_log_contains(log: &Path, marker: &str, timeout: std::time::Duration) -> 
 /// 换用注册表现役连接恢复，会话取消同样要打到新连接（打旧引用是
 /// no-op，换代后的调用将无法取消）。
 ///
-/// 经真实 memory wasm 组件走完整链路：adapter.handle → wasm 工具 →
+/// 经运行时测试插件 runtime-probe 走完整链路：adapter.handle → wasm 工具 →
 /// HostState sidecar host import → stdio 连接；取消是否到达由
 /// sidecar 日志中的标记证明。
 #[test]
 #[serial_test::serial]
 fn sidecar连接停止后wasm调用与取消自动换代() {
-    use tiangong_core::core::Plugin;
-
     let Some(_node) = find_node_for_test() else {
         eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let Some(wasm) = memory_wasm_or_skip() else {
         return;
     };
     let root = tempfile::tempdir().unwrap();
@@ -1324,7 +1303,7 @@ fn sidecar连接停止后wasm调用与取消自动换代() {
     std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
     std::fs::write(
             release.join("plugin.json"),
-            r#"{"schema_version":2,"id":"stale-ref-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"capabilities":{"prompt":true},"prompt":["占位贡献（本测试经 memory wasm 组件走调用链）"],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","lifecycle":"resident"}}"#,
+            r#"{"schema_version":2,"id":"stale-ref-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"capabilities":{"prompt":true},"prompt":["占位贡献（本测试经 runtime-probe 组件走调用链）"],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","lifecycle":"resident"}}"#,
         )
         .unwrap();
     let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
@@ -1333,8 +1312,7 @@ fn sidecar连接停止后wasm调用与取消自动换代() {
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
     )
     .unwrap();
-    // 模拟 memory sidecar 的 recall_context 协议：query 含挂起标记时
-    // 永不返回（等取消），cancel 钩子经 stderr 落入 sidecar 日志。
+    // payload 含挂起标记时永不返回（等取消），cancel 钩子经 stderr 落入 sidecar 日志。
     std::fs::write(
         release.join("sidecar/main.mjs"),
         r#"
@@ -1343,13 +1321,13 @@ await runSidecar({
   pluginId: 'stale-ref-demo',
   pluginVersion: '0.1.0',
   dispatch(operation, payload) {
-    if (operation === 'recall_context') {
-      const query = String(payload?.request?.query ?? '');
+    if (operation === 'probe') {
+      const query = String(payload ?? '');
       if (query.includes('__hang__')) {
         console.error('hang-accepted');
         return new Promise(() => {});
       }
-      return { payload: { response: { content: `回忆完成：${query}`, hits: [] } } };
+      return { payload: `完成：${query}` };
     }
     return { payload: {} };
   },
@@ -1367,11 +1345,10 @@ await runSidecar({
     let installed = crate::registry::find_installed_plugin(root.path(), id).unwrap();
     let first =
         crate::registry::sidecar_connection(root.path(), &installed, false).expect("建立初始连接");
-    let bytes = std::fs::read(&wasm).unwrap();
-    let component = crate::loader::compile_component(&bytes).expect("编译 wasm 组件失败");
+    let component = crate::test_support::runtime_probe_component();
     let config = crate::config::PluginRuntimeConfig::default();
     let plugin =
-        crate::loader::instantiate_component(&component, &config, Some(first.clone()), id, false)
+        crate::loader::instantiate_component(component, &config, Some(first.clone()), id, false)
             .expect("实例化 wasm 组件失败");
     let adapter = crate::adapter::WasmPluginAdapter::new_with_id(
         plugin,
@@ -1386,13 +1363,14 @@ await runSidecar({
     session.cwd = root.path().to_string_lossy().into_owned();
     let recall = |query: &str| tiangong_llm::tool::ToolCall {
         id: scru128::new().to_string(),
-        name: "recall_memory".into(),
-        arguments: serde_json::json!({ "query": query }),
+        name: "sidecar".into(),
+        arguments: serde_json::json!({
+            "operation": "probe",
+            "payload": serde_json::to_string(query).unwrap(),
+        }),
     };
 
-    // 基线：wasm 工具经注入连接完成调用。（memory 组件每轮只回忆一次，
-    // 每步先触发轮次开始钩子重置去重标记，确保真实走 sidecar 链路。）
-    adapter.on_turn_started();
+    // 基线：wasm 工具经注入连接完成调用。
     let baseline = runtime
         .block_on(
             tiangong_core::tools::extension::ToolOverrideHandler::handle(
@@ -1410,8 +1388,7 @@ await runSidecar({
     assert!(first.is_stopped(), "停止后旧引用应报告已停止");
 
     // 恢复：同一 wasm 实例再次调用，宿主状态应自动换代连接并成功
-    //（无自动恢复时旧引用恒报「已停止」，memory 工具降级为不可用）。
-    adapter.on_turn_started();
+    //（无自动恢复时旧引用恒报「已停止」，工具降级为不可用）。
     let recovered = runtime
         .block_on(
             tiangong_core::tools::extension::ToolOverrideHandler::handle(
@@ -1431,7 +1408,6 @@ await runSidecar({
     // 取消：挂起的调用被取消时，取消必须打到换代后的现役连接
     //（打旧引用是 no-op，sidecar 日志不会出现 cancel-reached）。
     let log = installed.directory.join("logs").join("sidecar.log");
-    adapter.on_turn_started();
     let future = tiangong_core::tools::extension::ToolOverrideHandler::handle(
         &adapter,
         &recall("挂起 __hang__"),

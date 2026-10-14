@@ -1,13 +1,9 @@
 //! WASM 插件运行时集成测试。
 //!
-//! 前置条件：需先构建示例 memory wasm 组件：
-//! ```sh
-//! cargo build -p tiangong-plugin-memory-wasm --target wasm32-wasip2
-//! ```
-//! 或 `cargo run -p xtask -- build-wasm`。
-//! 本测试默认指向 workspace target 目录下的 debug 产物。
+//! 使用仓库 `tests/fixtures/plugins/runtime-probe/` 中随仓库提交的专用测试插件制品，
+//! 只验证运行时职责（加载、调用、错误语义、fuel、生命周期转发、锁释放），
+//! 不涉及任何业务插件；制品缺失或摘要不符时测试直接失败，不会静默跳过。
 
-use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,536 +11,286 @@ use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::session::Session;
 use tiangong_core::tools::extension::{PromptSectionProvider, ToolSpecProvider};
+use tiangong_plugin_runtime::loader::instantiate_component;
+use tiangong_plugin_runtime::test_support::{runtime_probe_component, runtime_probe_plugin};
 use tiangong_plugin_runtime::{
-    PluginRuntimeConfig, SidecarConnection, ToolCall, WasmPluginAdapter, WasmPluginLoader,
+    PluginRuntimeConfig, SidecarConnection, ToolCall, WasmPluginAdapter,
 };
 
+/// 记录全部 sidecar 调用；`block_operation` 命中时阻塞到测试显式放行（最长 10 秒）。
 #[derive(Default)]
-struct MockMemorySidecar {
-    calls: Mutex<Vec<(String, serde_json::Value)>>,
-    call_recorded: Condvar,
-}
-
-impl MockMemorySidecar {
-    fn called(&self, operation: &str) -> bool {
-        self.calls
-            .lock()
-            .map(|calls| calls.iter().any(|(item, _)| item == operation))
-            .unwrap_or(false)
-    }
-
-    fn payload(&self, operation: &str) -> serde_json::Value {
-        self.calls
-            .lock()
-            .ok()
-            .and_then(|calls| {
-                calls
-                    .iter()
-                    .rev()
-                    .find(|(item, _)| item == operation)
-                    .map(|(_, payload)| payload.clone())
-            })
-            .unwrap_or(serde_json::Value::Null)
-    }
-
-    fn wait_for_call_count(&self, operation: &str, expected: usize) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let Ok(mut calls) = self.calls.lock() else {
-            return false;
-        };
-        loop {
-            if calls.iter().filter(|(item, _)| item == operation).count() >= expected {
-                return true;
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return false;
-            };
-            let Ok((next, result)) = self.call_recorded.wait_timeout(calls, remaining) else {
-                return false;
-            };
-            calls = next;
-            if result.timed_out() {
-                return calls.iter().filter(|(item, _)| item == operation).count() >= expected;
-            }
-        }
-    }
-}
-
-impl SidecarConnection for MockMemorySidecar {
-    fn invoke(&self, operation: &str, payload: &str) -> anyhow::Result<String> {
-        self.invoke_with_progress(operation, payload, &mut |_| {})
-    }
-
-    fn invoke_with_progress(
-        &self,
-        operation: &str,
-        payload: &str,
-        on_progress: &mut dyn FnMut(String),
-    ) -> anyhow::Result<String> {
-        let payload = serde_json::from_str(payload)?;
-        self.calls
-            .lock()
-            .map_err(|_| anyhow::anyhow!("模拟 sidecar 调用记录已损坏"))?
-            .push((operation.to_string(), payload));
-        self.call_recorded.notify_all();
-        let response = match operation {
-            "recall_context" => {
-                on_progress(serde_json::to_string(
-                    &tiangong_types::StreamEvent::MemoryRecallProgress {
-                        phase: "检索中".to_string(),
-                    },
-                )?);
-                serde_json::json!({
-                    "response": {
-                        "content": "模拟记忆结果",
-                        "hits": [{
-                            "node_id": "node-1",
-                            "title": "历史结果",
-                            "summary": "模拟摘要",
-                            "score": 0.9,
-                            "kind": "episode",
-                            "importance": 0.8,
-                            "depth1_loaded": false
-                        }]
-                    }
-                })
-            }
-            "load_injection" => serde_json::json!({"items": []}),
-            _ => serde_json::json!({}),
-        };
-        Ok(serde_json::to_string(&response)?)
-    }
-}
-
-#[derive(Default)]
-struct BlockingMemorySidecarState {
-    calls: Vec<String>,
-    release_rumination: bool,
+struct RecordingSidecarState {
+    calls: Vec<(String, String)>,
+    released: bool,
     auto_released: bool,
 }
 
 #[derive(Default)]
-struct BlockingMemorySidecar {
-    state: Mutex<BlockingMemorySidecarState>,
+struct RecordingSidecar {
+    state: Mutex<RecordingSidecarState>,
     changed: Condvar,
+    block_operation: Option<&'static str>,
 }
 
-impl BlockingMemorySidecar {
+impl RecordingSidecar {
+    fn blocking(operation: &'static str) -> Self {
+        Self {
+            block_operation: Some(operation),
+            ..Self::default()
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RecordingSidecarState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn operations(&self) -> Vec<String> {
+        self.lock().calls.iter().map(|(op, _)| op.clone()).collect()
+    }
+
+    fn payload(&self, operation: &str) -> serde_json::Value {
+        self.lock()
+            .calls
+            .iter()
+            .rev()
+            .find(|(op, _)| op == operation)
+            .and_then(|(_, payload)| serde_json::from_str(payload).ok())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
     fn wait_for_call(&self, operation: &str, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut state = self.lock();
         loop {
-            if state.calls.iter().any(|call| call == operation) {
+            if state.calls.iter().any(|(op, _)| op == operation) {
                 return true;
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return false;
             };
-            let (next, result) = self
+            state = self
                 .changed
                 .wait_timeout(state, remaining)
-                .unwrap_or_else(|poison| poison.into_inner());
-            state = next;
-            if result.timed_out() {
-                return state.calls.iter().any(|call| call == operation);
-            }
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
         }
     }
 
-    fn release_rumination(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        state.release_rumination = true;
+    fn release(&self) {
+        self.lock().released = true;
         self.changed.notify_all();
-    }
-
-    fn auto_released(&self) -> bool {
-        self.state
-            .lock()
-            .map(|state| state.auto_released)
-            .unwrap_or_else(|poison| poison.into_inner().auto_released)
     }
 }
 
-impl SidecarConnection for BlockingMemorySidecar {
-    fn invoke(&self, operation: &str, _payload: &str) -> anyhow::Result<String> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        state.calls.push(operation.to_string());
+impl SidecarConnection for RecordingSidecar {
+    fn invoke(&self, operation: &str, payload: &str) -> anyhow::Result<String> {
+        let mut state = self.lock();
+        state
+            .calls
+            .push((operation.to_string(), payload.to_string()));
         self.changed.notify_all();
-
-        if operation == "run_enhanced_micro_rumination" {
+        if self.block_operation == Some(operation) {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !state.release_rumination {
+            while !state.released {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     state.auto_released = true;
                     break;
                 };
-                let (next, result) = self
+                state = self
                     .changed
                     .wait_timeout(state, remaining)
-                    .unwrap_or_else(|poison| poison.into_inner());
-                state = next;
-                if result.timed_out() && !state.release_rumination {
-                    state.auto_released = true;
-                    break;
-                }
+                    .unwrap_or_else(|p| p.into_inner())
+                    .0;
             }
         }
-
-        Ok("{}".to_string())
+        Ok(format!("ack:{operation}"))
     }
 }
 
-/// 定位示例 memory wasm 组件文件。
-fn memory_wasm_path() -> PathBuf {
-    if let Ok(p) = std::env::var("MEMORY_WASM_PATH") {
-        return PathBuf::from(p);
+fn adapter(sidecar: Option<Arc<dyn SidecarConnection>>, session_id: &str) -> WasmPluginAdapter {
+    WasmPluginAdapter::new(
+        runtime_probe_plugin(sidecar),
+        PluginRuntimeConfig::default(),
+        session_id,
+    )
+}
+
+fn llm_call(name: &str, arguments: serde_json::Value) -> tiangong_llm::tool::ToolCall {
+    tiangong_llm::tool::ToolCall {
+        id: format!("call-{name}"),
+        name: name.into(),
+        arguments,
     }
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop();
-    path.pop();
-    path.push("target/wasm32-wasip2/debug/tiangong_plugin_memory_wasm.wasm");
-    path
 }
 
-/// 若 wasm 文件不存在则提示并跳过当前测试。
-fn wasm_or_skip() -> Option<PathBuf> {
-    let path = memory_wasm_path();
-    if !path.exists() {
-        eprintln!(
-            "跳过测试：未找到 wasm 组件 {}，请先执行 `cargo run -p xtask -- build-wasm`",
-            path.display()
-        );
-        return None;
-    }
-    Some(path)
-}
-
-#[test]
-fn load_and_describe() {
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-
-    let desc = plugin.describe().expect("describe 失败");
-    assert_eq!(desc.id, "memory");
-    assert_eq!(desc.name, "Memory");
-    assert!(!desc.version.is_empty());
-}
-
-#[test]
-fn tool_specs_contains_recall_memory() {
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-
-    let specs = plugin.tool_specs().expect("tool-specs 失败");
-    let recall = specs
-        .iter()
-        .find(|s| s.name == "recall_memory")
-        .expect("应声明 recall_memory 工具");
-    assert!(recall.description.contains("回忆"));
-    let schema: serde_json::Value =
-        serde_json::from_str(&recall.input_schema).expect("input_schema 应为合法 JSON");
-    assert_eq!(schema["type"], "object");
-}
-
-#[test]
-fn handle_unknown_tool_returns_error() {
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-
-    let result = plugin.handle_tool(
-        ToolCall {
-            id: "call_2".into(),
-            name: "nonexistent_tool".into(),
-            arguments: "{}".into(),
-        },
-        &config,
-    );
-    assert!(result.is_err(), "未知工具应返回错误");
-
-    // 插件已接管调用后产生的错误必须穿过适配器，不能退成未注册。
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-    let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
-    let call = tiangong_llm::tool::ToolCall {
-        id: "call_2".into(),
-        name: "nonexistent_tool".into(),
-        arguments: serde_json::json!({}),
-    };
-    let result = runtime
-        .block_on(
-            tiangong_core::tools::extension::ToolOverrideHandler::handle(
-                &adapter,
-                &call,
-                &mut test_session(),
-                "test",
-            ),
-        )
-        .expect("插件执行错误不得变成 None");
-    assert!(!result.ok);
-    assert!(result.stderr.contains("nonexistent_tool"));
-    assert!(!result.summary.contains("未注册"));
-}
-
-#[test]
-fn fuel_limit_traps_runaway_execution() {
-    // 给极少 fuel，迫使一次正常调用因 fuel 不足被中断，证明 fuel 限制生效。
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let strict = PluginRuntimeConfig {
-        fuel_limit: 1_000,
-        epoch_deadline: Duration::from_secs(10),
-        ..PluginRuntimeConfig::default()
-    };
-    let loader = WasmPluginLoader::new(&PluginRuntimeConfig::default()).expect("创建加载器失败");
-    let mut plugin = loader
-        .load(&wasm, &PluginRuntimeConfig::default())
-        .expect("加载 wasm 组件失败");
-
-    let result = plugin.handle_tool(
-        ToolCall {
-            id: "call_3".into(),
-            name: "recall_memory".into(),
-            arguments: r#"{"query":"test"}"#.into(),
-        },
-        &strict,
-    );
-    assert!(result.is_err(), "极少 fuel 下调用应被中断");
-}
-
-#[test]
-fn handle_recall_memory_without_handle_returns_disabled() {
-    // 无 handle 时，经 request 转发应返回 disabled 降级提示（而非错误）。
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-
-    let outcome = plugin
-        .handle_tool(
-            ToolCall {
-                id: "c1".into(),
-                name: "recall_memory".into(),
-                arguments: r#"{"query":"测试查询"}"#.into(),
-            },
-            &config,
-        )
-        .expect("handle-tool 失败");
-    assert!(!outcome.ok);
-    assert_eq!(outcome.exit_code, 1);
-    assert!(outcome.execution.is_some());
-    // 无 handle 时应返回降级提示。
-    assert!(
-        outcome.summary.contains("未启用") || outcome.summary.contains("失败"),
-        "无 handle 时应降级提示，实际: {}",
-        outcome.summary
-    );
-}
-
-#[test]
-fn handle_recall_memory_with_connection_uses_sidecar() {
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-
-    let outcome = plugin
-        .handle_tool(
-            ToolCall {
-                id: "c2".into(),
-                name: "recall_memory".into(),
-                arguments: r#"{"query":"测试查询"}"#.into(),
-            },
-            &config,
-        )
-        .expect("handle-tool 失败");
-    assert!(outcome.ok);
-    assert_eq!(outcome.summary, "命中 1 条相关记忆并完成整理");
-    let execution = outcome.execution.expect("应保留工具执行记录");
-    assert_eq!(execution.tool_name, "recall_memory");
-    assert_eq!(execution.args, vec!["测试查询"]);
-    // 有 handle 时应正常返回（不再含"未启用"降级提示）。
-    assert!(
-        !outcome.summary.contains("未启用"),
-        "有 sidecar 时不应降级，实际: {}",
-        outcome.summary
-    );
-    assert!(sidecar.called("recall_context"));
-}
-
-#[test]
-fn chat_config_does_not_reload_memory_service() {
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-
-    let core_config = CoreConfig::default();
-    let config_json = serde_json::to_string(&core_config).expect("序列化失败");
-    assert!(plugin.on_config_updated(config_json).is_ok());
-    assert!(!sidecar.called("reconfigure"));
-}
-
-#[test]
-fn adapter_integrates_with_core_plugin_trait() {
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-
-    assert_eq!(adapter.id(), "memory");
-    let specs = <WasmPluginAdapter as ToolSpecProvider>::tool_specs(&adapter);
-    assert!(specs.iter().any(|s| s.name == "recall_memory"));
-
-    // config 事件经 trait 调用不 panic。
-    <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &CoreConfig::default());
-}
-
-// ── 生命周期钩子 + session 注入测试 ──
-
-/// 构造 `on_turn_finished` 的本轮快照（同 Core：从 `idx` 起为本轮消息）。
-fn turn_at(session: &Session, idx: usize) -> tiangong_types::PluginSession {
-    let workspace_id = session
-        .cwd
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
+fn snapshot(session: &Session) -> tiangong_types::PluginSession {
     tiangong_types::PluginSession {
         id: session.id.clone(),
         title: session.title.clone(),
         cwd: session.cwd.clone(),
-        workspace_id,
+        workspace_id: "test-workspace".into(),
         reasoning_effort: None,
-        messages: session.messages[idx..].to_vec(),
+        messages: session.messages.clone(),
         context_summary: session.context_summary.clone(),
         created_at: session.created_at.clone(),
         updated_at: session.updated_at.clone(),
     }
 }
-/// 构造一个测试 Session。
-fn test_session() -> Session {
-    let mut session = Session::new("test-session");
-    session.cwd = "/tmp/test-workspace".to_string();
-    session
-}
 
-/// 构造一个有用户消息的测试 Session（供 turn_finished 测试用）。
-fn test_session_with_user_message() -> Session {
-    use tiangong_types::{Message, MessageRole};
+fn session_with_user_message() -> Session {
     let mut session = Session::new("test-session");
     session.cwd = "/tmp/test-workspace".to_string();
-    let mut message = Message::new(MessageRole::User, "测试用户输入");
-    message.id = "msg-1".to_string();
-    message.created_at = "2026-08-01T00:00:00".to_string();
-    session.messages.push(message);
+    session.messages.push(tiangong_types::Message::new(
+        tiangong_types::MessageRole::User,
+        "本轮问题",
+    ));
     session
 }
 
 #[test]
-fn lifecycle_hooks_forward_session_without_panic() {
-    // 经 Plugin trait 调用全部生命周期钩子，验证 session 序列化传入不 panic。
-    // 无 sidecar 时各钩子内部 best-effort 忽略 request 错误，仍正常返回。
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
+fn load_and_describe() {
+    let mut plugin = runtime_probe_plugin(None);
+    let desc = plugin.describe().expect("describe 失败");
+    assert_eq!(desc.id, "runtime-probe");
+    assert_eq!(desc.name, "Runtime Probe");
+    assert_eq!(desc.version, "1.0.0");
+}
 
-    let session = test_session_with_user_message();
-    // 全部钩子调用不应 panic。
+#[test]
+fn adapter_exposes_tool_specs_and_prompt_sections() {
+    let adapter = adapter(None, "test-session");
+    assert_eq!(adapter.id(), "runtime-probe");
+    let specs = <WasmPluginAdapter as ToolSpecProvider>::tool_specs(&adapter);
+    let names: Vec<_> = specs.iter().map(|spec| spec.name.as_str()).collect();
+    assert_eq!(names, ["echo", "fail", "spin", "sidecar"]);
+    let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
+    assert_eq!(sections, vec!["runtime-probe prompt".to_string()]);
+    // 配置事件经 trait 调用不 panic。
+    <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &CoreConfig::default());
+}
+
+#[test]
+fn plugin_error_is_not_reported_as_unregistered_tool() {
+    let adapter = adapter(None, "test-session");
+    let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
+    let mut session = Session::new("test-session");
+    let result = runtime
+        .block_on(
+            tiangong_core::tools::extension::ToolOverrideHandler::handle(
+                &adapter,
+                &llm_call("fail", serde_json::json!({})),
+                &mut session,
+                "test",
+            ),
+        )
+        .expect("插件执行错误不得变成 None");
+    assert!(!result.ok);
+    assert!(result.stderr.contains("probe failure"), "{}", result.stderr);
+    assert!(!result.summary.contains("未注册"), "{}", result.summary);
+}
+
+#[test]
+fn fuel_limit_traps_runaway_execution() {
+    let strict = PluginRuntimeConfig {
+        fuel_limit: 1_000_000,
+        epoch_deadline: Duration::from_secs(10),
+        ..PluginRuntimeConfig::default()
+    };
+    let mut plugin = runtime_probe_plugin(None);
+    let started = Instant::now();
+    let result = plugin.handle_tool(
+        ToolCall {
+            id: "spin".into(),
+            name: "spin".into(),
+            arguments: "{}".into(),
+        },
+        &strict,
+    );
+    assert!(result.is_err(), "死循环应被 fuel 上限中断");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn tool_forwards_to_sidecar_and_degrades_without_it() {
+    let config = PluginRuntimeConfig::default();
+    let call = || ToolCall {
+        id: "sidecar".into(),
+        name: "sidecar".into(),
+        arguments: r#"{"operation":"ping","payload":"hi"}"#.into(),
+    };
+
+    let sidecar = Arc::new(RecordingSidecar::default());
+    let mut plugin = runtime_probe_plugin(Some(sidecar.clone()));
+    let outcome = plugin.handle_tool(call(), &config).expect("调用失败");
+    assert!(outcome.ok);
+    assert_eq!(outcome.stdout, "ack:ping");
+    assert_eq!(sidecar.lock().calls, vec![("ping".into(), "hi".into())]);
+
+    let mut plugin = runtime_probe_plugin(None);
+    let outcome = plugin.handle_tool(call(), &config).expect("调用失败");
+    assert!(!outcome.ok, "未配置 sidecar 时应显式降级");
+}
+
+#[test]
+fn lifecycle_hooks_forward_session_snapshot() {
+    let sidecar = Arc::new(RecordingSidecar::default());
+    let adapter = adapter(Some(sidecar.clone()), "test-session");
+    let session = session_with_user_message();
+    let expected_id = session.id.clone();
+
     <WasmPluginAdapter as Plugin>::on_session_ready(&adapter);
     <WasmPluginAdapter as Plugin>::on_turn_started(&adapter);
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &snapshot(&session));
     <WasmPluginAdapter as Plugin>::on_session_ended(&adapter);
+
+    assert_eq!(
+        sidecar.operations(),
+        [
+            "hook.session_ready",
+            "hook.turn_started",
+            "hook.turn_finished",
+            "hook.session_ended"
+        ]
+    );
+    let turn = sidecar.payload("hook.turn_finished");
+    assert_eq!(turn["id"], expected_id.as_str());
+    assert_eq!(turn["messages"][0]["content"][0]["text"], "本轮问题");
 }
 
 #[test]
-fn on_turn_finished_with_connection_forwards_rumination() {
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-
-    let session = test_session_with_user_message();
-    // 有用户消息时，on_turn_finished 应有序投递反刍任务并等待 sidecar 入队确认。
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
-    assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
-    assert!(sidecar.called("run_enhanced_micro_rumination"));
-    let payload = sidecar.payload("run_enhanced_micro_rumination");
-    let turn = &payload["turn_result"];
-    assert_eq!(turn["session_id"], session.id);
-    assert_eq!(turn["workspace_id"], "test-workspace");
-    assert_eq!(turn["user_input"], "测试用户输入");
-    assert_eq!(turn["turn_messages"][0]["role"], "user");
-    assert_eq!(turn["turn_id"].as_str().map(str::len), Some(25));
+fn session_hooks_use_session_identity_from_construction() {
+    // 会话级钩子不携带会话数据：适配器以构造时获得的会话身份与已注入的
+    // 工作目录组装 WIT 所需的会话 JSON。
+    let sidecar = Arc::new(RecordingSidecar::default());
+    let adapter = adapter(Some(sidecar.clone()), "owner-session");
+    <WasmPluginAdapter as Plugin>::set_workspace(
+        &adapter,
+        Some(std::path::Path::new("/tmp/owner-ws")),
+    );
+    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter);
+    let payload = sidecar.payload("hook.session_ended");
+    assert_eq!(payload["id"], "owner-session");
+    assert_eq!(payload["workspace_id"], "owner-ws");
+    assert!(payload["messages"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[test]
 fn turn_finish_waits_only_for_sidecar_enqueue_and_releases_wasm_lock() {
-    let sidecar = Arc::new(BlockingMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = Arc::new(WasmPluginAdapter::new(plugin, config, "test-session"));
-    let session = test_session_with_user_message();
+    let sidecar = Arc::new(RecordingSidecar::blocking("hook.turn_finished"));
+    let adapter = Arc::new(adapter(Some(sidecar.clone()), "test-session"));
+    let session = session_with_user_message();
     let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
     let finish_adapter = Arc::clone(&adapter);
     let finish_thread = std::thread::spawn(move || {
-        let session = session;
-        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &turn_at(&session, 0));
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &snapshot(&session));
         let _ = finish_tx.send(());
     });
-    assert!(sidecar.wait_for_call("run_enhanced_micro_rumination", Duration::from_secs(1)));
+    assert!(sidecar.wait_for_call("hook.turn_finished", Duration::from_secs(1)));
     assert!(
         finish_rx.recv_timeout(Duration::from_millis(250)).is_err(),
         "sidecar 尚未确认入队时，收尾调用不应虚报完成"
     );
-    sidecar.release_rumination();
+    sidecar.release();
     finish_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("sidecar 确认入队后收尾调用应尽快返回");
@@ -555,151 +301,26 @@ fn turn_finish_waits_only_for_sidecar_enqueue_and_releases_wasm_lock() {
         started.elapsed() < Duration::from_secs(1),
         "收尾入队完成后不应继续占用 WASM 实例锁"
     );
-    assert!(!sidecar.auto_released(), "测试不应依赖自动释放上限");
-}
-#[test]
-fn session_hooks_use_session_identity_from_construction() {
-    // 会话级钩子不携带会话数据：适配器以构造时获得的会话身份与已注入的
-    // 工作目录组装 WIT 所需的会话 JSON。
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "owner-session");
-
-    <WasmPluginAdapter as Plugin>::set_workspace(
-        &adapter,
-        Some(std::path::Path::new("/tmp/owner-ws")),
-    );
-    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter);
-    assert!(sidecar.wait_for_call_count("run_meso_rumination", 1));
-    let payload = sidecar.payload("run_meso_rumination");
-    assert_eq!(payload["session_id"], "owner-session");
-    assert_eq!(payload["workspace_id"], "owner-ws");
+    assert!(!sidecar.lock().auto_released, "测试不应依赖自动释放上限");
 }
 
 #[test]
-fn every_tenth_turn_forwards_meta_rumination() {
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
+fn send_preparation_never_calls_sidecar() {
+    // 每个新对话有独立 WASM 实例；发送前的准备（配置、目录、信任模式、声明读取）
+    // 均不得唤起 sidecar。
+    let sidecar = Arc::new(RecordingSidecar::default());
     let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-    let session = test_session_with_user_message();
-
-    for _ in 0..9 {
-        <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
-    }
-    assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 9));
-    assert!(!sidecar.called("run_meta_rumination"));
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, 0));
-    assert!(sidecar.wait_for_call_count("run_meta_rumination", 1));
-    assert!(sidecar.called("run_meta_rumination"));
-}
-
-// ── set_workspace + prompt_sections 测试 ──
-
-#[test]
-fn prompt_sections_without_handle_returns_empty() {
-    // 无 handle 时，prompt_sections 应返回空（不注入），不报错。
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-
-    let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
-    assert!(sections.is_empty(), "无 handle 时应返回空注入");
-}
-
-#[test]
-fn new_turns_do_not_load_memory_into_system_prompt() {
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-
-    // 注入 workspace 和 session。
-    <WasmPluginAdapter as Plugin>::set_workspace(
-        &adapter,
-        Some(std::path::Path::new("/tmp/test-ws")),
-    );
-    let mut session = test_session();
-    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter);
-
-    session.system_prompt_message = Some(tiangong_types::Message::new(
-        tiangong_types::MessageRole::System,
-        "旧版自动注入的 Session Memory 和更新时间",
-    ));
-    let mut previous_prompt = None;
-    for turn in 0..3 {
-        <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &CoreConfig::default());
-        <WasmPluginAdapter as Plugin>::set_execution_context(
-            &adapter,
-            Some(std::path::Path::new("/tmp/test-ws")),
-            tiangong_core::permission::TrustMode::FullTrust,
-        );
-        session.append_message(tiangong_types::MessageRole::User, format!("继续 {turn}"));
-        <WasmPluginAdapter as Plugin>::on_turn_started(&adapter);
-        let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
-        assert!(
-            sections.is_empty(),
-            "记忆只能经 handler 返回，不能拼入系统提示"
-        );
-        session.rebuild_system_prompt(
-            &tiangong_core::prompt::SystemPromptConfig::from_plugin_sections(sections),
-        );
-        let prompt = session.system_prompt_message.as_ref().unwrap();
-        assert!(!prompt.text_content().contains("Session Memory"));
-        let serialized_prompt = serde_json::to_vec(prompt).unwrap();
-        if let Some(previous) = &previous_prompt {
-            assert_eq!(
-                previous, &serialized_prompt,
-                "重新加载和追加消息不应重建系统提示"
-            );
-        }
-        previous_prompt = Some(serialized_prompt);
-        assert!(!sidecar.called("load_injection"));
-        assert!(!sidecar.called("recall_context"));
-        assert!(
-            !sidecar.called("reconfigure"),
-            "发送准备不得唤醒 Memory 重载独立配置"
-        );
-        session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
-    }
-}
-
-#[test]
-fn file_plugin_preparation_never_starts_a_sidecar() {
-    let wasm = memory_wasm_path().with_file_name("tiangong_plugin_fs_wasm.wasm");
-    if !wasm.is_file() {
-        eprintln!("跳过测试：请先构建 tiangong-plugin-fs-wasm 的 wasm32-wasip2 制品");
-        return;
-    }
-    let config = PluginRuntimeConfig::default();
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let loader = WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).unwrap();
-    // 每个新对话仍有独立 WASM 状态；首次及后续准备均不得启动进程。
-    for conversation in 0..3 {
-        let plugin = loader.load(&wasm, &config).unwrap();
+    for _ in 0..3 {
+        let plugin = instantiate_component(
+            runtime_probe_component(),
+            &config,
+            Some(sidecar.clone()),
+            "runtime-probe",
+            false,
+        )
+        .unwrap();
         let adapter = WasmPluginAdapter::new(plugin, config.clone(), "test-session");
-        for turn in 0..3 {
-            let started = Instant::now();
+        for _ in 0..3 {
             adapter.on_config_updated(&CoreConfig::default());
             adapter.set_execution_context(
                 Some(std::path::Path::new("/tmp/send-workspace")),
@@ -707,65 +328,11 @@ fn file_plugin_preparation_never_starts_a_sidecar() {
             );
             assert!(!adapter.tool_specs().is_empty());
             let _ = adapter.prompt_sections();
-            eprintln!(
-                "fs preparation conversation={conversation} turn={turn} elapsed_us={}",
-                started.elapsed().as_micros()
-            );
         }
         adapter.set_execution_context(None, tiangong_core::permission::TrustMode::Supervised);
     }
     assert!(
-        sidecar.calls.lock().unwrap().is_empty(),
+        sidecar.operations().is_empty(),
         "仅设置目录、信任模式或读取声明不应调用 sidecar"
     );
-}
-
-#[test]
-fn turn_hooks_receive_only_current_turn_messages() {
-    // 长会话：轮次钩子只把本轮消息交给插件，跨轮历史不得进入快照。
-    use tiangong_types::{Message, MessageRole};
-    let sidecar = Arc::new(MockMemorySidecar::default());
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader =
-        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
-    let adapter = WasmPluginAdapter::new(plugin, config, "test-session");
-    let mut session = test_session();
-    for turn in 0..200 {
-        session
-            .messages
-            .push(Message::new(MessageRole::User, format!("历史问题 {turn}")));
-        session.messages.push(Message::new(
-            MessageRole::Assistant,
-            format!("历史回答 {turn}"),
-        ));
-    }
-    let start = session.messages.len();
-    session
-        .messages
-        .push(Message::new(MessageRole::User, "本轮问题"));
-    session
-        .messages
-        .push(Message::new(MessageRole::Notice, "本轮系统通知"));
-    session
-        .messages
-        .push(Message::new(MessageRole::User, "运行中引导"));
-    session
-        .messages
-        .push(Message::new(MessageRole::Assistant, "本轮回答"));
-
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &turn_at(&session, start));
-    assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
-    let turn = sidecar.payload("run_enhanced_micro_rumination")["turn_result"].clone();
-    assert_eq!(turn["user_input"], "本轮问题");
-    let contents: Vec<String> = turn["turn_messages"]
-        .as_array()
-        .expect("turn_messages 应为数组")
-        .iter()
-        .map(|message| message["content"].as_str().unwrap_or_default().to_string())
-        .collect();
-    assert_eq!(contents, vec!["本轮问题", "运行中引导", "本轮回答"]);
 }

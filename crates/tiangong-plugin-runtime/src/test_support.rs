@@ -160,3 +160,53 @@ pub fn finish_stdio_connection(
         }
     }
 }
+
+/// 运行时测试专用插件 `runtime-probe` 的制品路径（仓库 `tests/fixtures/plugins/runtime-probe/`）。
+///
+/// 制品随仓库提交（源码在同目录，见其 README），测试直接加载，不在测试时编译；
+/// 缺失或被篡改时直接 panic，不允许静默跳过（否则 CI 会把未执行的测试当成通过）。
+pub fn runtime_probe_wasm() -> PathBuf {
+    let dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plugins/runtime-probe");
+    let wasm = dir.join("runtime_probe.wasm");
+    let bytes = std::fs::read(&wasm)
+        .unwrap_or_else(|error| panic!("读取测试插件制品失败 {}: {error}", wasm.display()));
+    let expected = std::fs::read_to_string(dir.join("runtime_probe.wasm.sha256"))
+        .unwrap_or_else(|error| panic!("读取测试插件制品摘要失败: {error}"));
+    let expected = expected.split_whitespace().next().unwrap_or_default();
+    let actual = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(&bytes))
+    };
+    assert_eq!(
+        actual,
+        expected,
+        "测试插件制品摘要不匹配：{}；按同目录 README 重新构建制品并更新摘要",
+        wasm.display()
+    );
+    wasm
+}
+
+/// 编译后的 `runtime-probe` 组件：同一测试进程只编译一次，各测试独立实例化。
+pub fn runtime_probe_component() -> &'static wasmtime::component::Component {
+    static COMPONENT: std::sync::OnceLock<wasmtime::component::Component> =
+        std::sync::OnceLock::new();
+    COMPONENT.get_or_init(|| {
+        let bytes = std::fs::read(runtime_probe_wasm()).expect("读取测试插件制品失败");
+        crate::loader::compile_component(&bytes).expect("编译测试插件失败")
+    })
+}
+
+/// 实例化一个 `runtime-probe` 插件（复用已编译组件）。
+pub fn runtime_probe_plugin(
+    sidecar: Option<std::sync::Arc<dyn crate::sidecar::SidecarConnection>>,
+) -> crate::loader::WasmPlugin {
+    crate::loader::instantiate_component(
+        runtime_probe_component(),
+        &crate::config::PluginRuntimeConfig::default(),
+        sidecar,
+        "runtime-probe",
+        false,
+    )
+    .expect("实例化测试插件失败")
+}
