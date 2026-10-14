@@ -95,6 +95,13 @@ fn v1_插件经_slot_与宿主桥接完成设置页闭环() {
     }
 
     let root = tempfile::TempDir::new().unwrap();
+    // 存储根隔离到临时目录：Prompt 插件的数据目录与旧位置都落在这里，
+    // 不读写真实的 ~/.tiangong。本测试文件只有这一个测试，独占进程环境。
+    unsafe {
+        std::env::set_var("TIANGONG_STORAGE_ROOT", root.path());
+    }
+    // 旧版存储根下的自定义指令：首次访问时应迁移到 data/prompt/。
+    std::fs::write(root.path().join("custom-prompt.md"), "旧位置的自定义指令").unwrap();
     stage_plugins(root.path());
     // 此处验证旧清单结构兼容性，版本仍须匹配当前实际构建的 WASM。
     let config = tiangong_plugin_runtime::PluginRuntimeConfig::default();
@@ -143,8 +150,7 @@ fn v1_插件经_slot_与宿主桥接完成设置页闭环() {
     assert!(!memory_html.is_empty(), "memory 设置页 HTML 非空");
 
     // ── 4. bridge.call("plugin.*") 双向通信：读 → 写 → 读回 ──
-    // prompt 的 custom-prompt.md 经 /storage preopen 落在 ~/.tiangong，
-    // 测试先保存原值，闭环后恢复，不污染用户配置。
+    // 首次读取触发旧数据迁移：读到旧位置内容，且已复制到插件数据目录。
     let original =
         bridge_call("prompt", "plugin.get_prompt", "{}").expect("读取配置应经宿主桥接成功");
     let original_content = serde_json::from_str::<serde_json::Value>(&original)
@@ -153,6 +159,12 @@ fn v1_插件经_slot_与宿主桥接完成设置页闭环() {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
+    assert_eq!(original_content, "旧位置的自定义指令", "应迁移旧位置内容");
+    let data_prompt = root.path().join("data/prompt/custom-prompt.md");
+    assert_eq!(
+        std::fs::read_to_string(&data_prompt).unwrap(),
+        "旧位置的自定义指令"
+    );
 
     let probe = "m0-e2e-bridge-probe";
     bridge_call(
@@ -170,14 +182,26 @@ fn v1_插件经_slot_与宿主桥接完成设置页闭环() {
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     assert_eq!(updated_content, probe, "写读闭环应经新桥接保持一致");
+    // 新内容只写入插件数据目录；旧文件保留原样。
+    assert_eq!(std::fs::read_to_string(&data_prompt).unwrap(), probe);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("custom-prompt.md")).unwrap(),
+        "旧位置的自定义指令"
+    );
 
-    // 恢复用户原值
+    // 清空后删除数据目录中的文件，旧内容不会被重新迁回。
     bridge_call(
         "prompt",
         "plugin.set_prompt",
-        &serde_json::to_string(&serde_json::json!({ "content": original_content })).unwrap(),
+        &serde_json::to_string(&serde_json::json!({ "content": "" })).unwrap(),
     )
-    .expect("恢复原配置失败");
+    .expect("清空配置失败");
+    assert!(!data_prompt.exists());
+    let cleared = bridge_call("prompt", "plugin.get_prompt", "{}").expect("读回配置失败");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&cleared).unwrap()["content"],
+        ""
+    );
 
     // ── 5. 未知 method 被拒绝并给出可读错误 ──
     let error = bridge_call("prompt", "rag.query", "{}").unwrap_err();

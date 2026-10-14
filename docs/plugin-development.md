@@ -260,6 +260,18 @@ wit_bindgen::generate!({
 - `sidecar.invoke`：向当前插件绑定的 sidecar 转发操作名和 JSON。
 - `feedback.emit-stream-event`：向当前 turn 发送通用 `StreamEvent` JSON；Runtime 只验证公共事件结构，不理解具体插件业务。
 
+### WASM 文件访问
+
+WASM 插件经 WASI preopen 访问文件，宿主只挂载下列目录（存储根遵循 `TIANGONG_STORAGE_ROOT`，测试可指向临时目录）：
+
+| WASM 内路径 | 宿主目录 | 说明 |
+| --- | --- | --- |
+| `/data` | `~/.tiangong/data/<插件 id>/` | 插件自有持久数据，**新数据一律写这里**；宿主加载前创建 |
+| `.`（当前目录） | `~/.tiangong/plugins/<插件 id>/` | 插件安装目录；卸载时可能被清理，不要存用户数据 |
+| `/storage` | `~/.tiangong/` | 仅清单声明 `"storage_access": true` 时挂载，只用于读取并迁移旧数据 |
+
+旧版写在存储根的数据由插件在首次访问时复制到 `/data` 并写完成标记，旧文件保留不删；宿主不提供 `/data`（旧宿主）时沿用旧位置。参考 [Prompt 迁移实现](../plugins/tiangong-plugin-prompt/wasm/src/lib.rs)。
+
 完整实现可参考 [Memory WASM](../plugins/tiangong-plugin-memory/wasm/src/lib.rs) 和它的 [绑定入口](../plugins/tiangong-plugin-memory/wasm/src/bindings.rs)。
 
 构建命令：

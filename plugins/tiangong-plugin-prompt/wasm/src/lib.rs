@@ -1,8 +1,10 @@
 //! Prompt 插件的 WASM 组件。
 //!
 //! 注入 identity/rules/custom_prompt 三段 system prompt。
-//! custom_prompt 经 WASI 直接读写 custom-prompt.md。
-//! 设置页经 WASI 直接读写 ~/.tiangong/custom-prompt.md（映射为 /storage/custom-prompt.md）。
+//! 自定义指令保存在插件自有数据目录 `~/.tiangong/data/prompt/custom-prompt.md`
+//! （宿主 preopen 为 `/data`）。旧版保存在存储根 `~/.tiangong/custom-prompt.md`
+//! （preopen 为 `/storage`），首次访问时一次性复制到新位置并写完成标记，旧文件保留。
+//! 旧宿主不提供 `/data` 时继续读写旧位置。
 
 mod bindings;
 
@@ -22,9 +24,16 @@ fn plugin_err(message: impl Into<String>) -> PluginError {
     PluginError::Message(message.into())
 }
 
-/// custom-prompt.md 在 WASI preopen 映射中的路径。
-/// storage_root（~/.tiangong）被 preopen 为 /storage。
-const CUSTOM_PROMPT_PATH: &str = "/storage/custom-prompt.md";
+/// 插件自有数据目录在 WASI preopen 映射中的路径（`~/.tiangong/data/prompt`）。
+const DATA_DIR: &str = "/data";
+/// 自定义指令在数据目录中的路径。
+const CUSTOM_PROMPT_PATH: &str = "/data/custom-prompt.md";
+/// 旧数据迁移完成标记。
+const LEGACY_MIGRATION_MARKER: &str = "/data/.legacy-migrated";
+/// 旧版自定义指令位置（存储根 preopen 为 `/storage`）。
+const LEGACY_CUSTOM_PROMPT_PATH: &str = "/storage/custom-prompt.md";
+/// 更早版本把自定义指令存在 `app.json` 中。
+const LEGACY_APP_CONFIG_PATH: &str = "/storage/app.json";
 
 struct Component;
 
@@ -173,19 +182,67 @@ impl UiGuest for Component {
     }
 }
 
-/// 经 WASI 读取 custom-prompt.md。
-fn read_custom_prompt() -> String {
-    std::fs::read_to_string(CUSTOM_PROMPT_PATH).unwrap_or_default()
+/// 当前生效的自定义指令文件：宿主提供数据目录时用新位置（必要时先迁移），
+/// 旧宿主不提供时沿用旧位置。
+fn custom_prompt_path() -> &'static str {
+    if std::path::Path::new(DATA_DIR).is_dir() {
+        migrate_legacy_prompt();
+        CUSTOM_PROMPT_PATH
+    } else {
+        LEGACY_CUSTOM_PROMPT_PATH
+    }
 }
 
-/// 经 WASI 写入 custom-prompt.md（空内容时删除文件）。
+/// 一次性把旧位置的自定义指令复制到数据目录。新位置已有内容时不覆盖；
+/// 旧文件保留。迁移失败不写标记，下次访问重试。
+fn migrate_legacy_prompt() {
+    if std::path::Path::new(LEGACY_MIGRATION_MARKER).exists() {
+        return;
+    }
+    if !std::path::Path::new(CUSTOM_PROMPT_PATH).exists() {
+        let legacy = std::fs::read_to_string(LEGACY_CUSTOM_PROMPT_PATH)
+            .ok()
+            .filter(|content| !content.trim().is_empty())
+            .or_else(read_legacy_app_config_prompt);
+        if let Some(content) = legacy
+            && std::fs::write(CUSTOM_PROMPT_PATH, content).is_err()
+        {
+            return;
+        }
+    }
+    let _ = std::fs::write(LEGACY_MIGRATION_MARKER, "migrated\n");
+}
+
+/// 读取 `app.json` 中更早版本保存的自定义指令（顶层字段优先，其次
+/// `agent_config` 内字段）。
+fn read_legacy_app_config_prompt() -> Option<String> {
+    let content = std::fs::read_to_string(LEGACY_APP_CONFIG_PATH).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    [
+        value.get("custom_system_prompt"),
+        value
+            .get("agent_config")
+            .and_then(|config| config.get("custom_system_prompt")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|prompt| prompt.as_str())
+    .find(|prompt| !prompt.trim().is_empty())
+    .map(str::to_string)
+}
+
+/// 读取自定义指令（文件不存在时为空）。
+fn read_custom_prompt() -> String {
+    std::fs::read_to_string(custom_prompt_path()).unwrap_or_default()
+}
+
+/// 写入自定义指令（空内容时删除文件）。
 fn write_custom_prompt(content: &str) -> Result<(), PluginError> {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        // 空内容删除文件（与 host 侧 clear_custom_prompt_at 行为一致）。
-        let _ = std::fs::remove_file(CUSTOM_PROMPT_PATH);
+    let path = custom_prompt_path();
+    if content.trim().is_empty() {
+        let _ = std::fs::remove_file(path);
     } else {
-        std::fs::write(CUSTOM_PROMPT_PATH, content)
+        std::fs::write(path, content)
             .map_err(|e| plugin_err(format!("写入 custom-prompt.md 失败: {e}")))?;
     }
     Ok(())
