@@ -34,9 +34,9 @@
 <body>
   <!--
     Computer Use · 恢复窗口按钮（session.input-action 挂载点，位于发送按钮左侧的按钮区）。
-    打开应用时 sidecar 自动把天工窗口放到屏幕右侧、目标应用放左侧；本按钮
-    只在「当前会话用过自动分屏且对话已完成」时显示，点击只还原天工窗口，
-    不调整其他应用；恢复后隐藏。
+    打开应用时 sidecar 自动把天工窗口放到屏幕右侧、目标应用放左侧；天工窗口
+    一进入分屏布局本按钮就始终显示（不区分会话、不等对话结束），点击后天工
+    窗口与被分屏的全部应用窗口回到各自原位置；恢复后隐藏。
     状态来源：bridge.call('plugin.splitState') 拉取 + sidecar.event
     （channel=computer_use.split）推送。
   -->
@@ -54,13 +54,10 @@
     const button = uiRoot.getElementById('rw-button');
     // 按钮隐藏时连宿主容器一起收起，避免按钮区出现 32px 空位。
     const hostEl = uiRoot.host || null;
-    const state = { sessionId: null, split: null, busy: false };
+    const state = { split: null, busy: false };
 
     function render() {
-      const visible = Boolean(
-        state.split && state.split.active && state.sessionId
-          && state.split.restorable_session === state.sessionId,
-      );
+      const visible = Boolean(state.split && state.split.active);
       button.hidden = !visible;
       button.disabled = state.busy;
       if (hostEl) hostEl.style.display = visible ? '' : 'none';
@@ -88,7 +85,8 @@
       try {
         const result = await call('plugin.restoreHostWindow');
         state.split = result.state;
-        if (!result.restored) window.alert(result.detail);
+        // 天工窗口恢复失败，或部分应用窗口未能恢复时提示原因。
+        if (!result.restored || result.detail.includes('未恢复')) window.alert(result.detail);
       } catch (error) {
         window.alert(error instanceof Error ? error.message : String(error));
       } finally {
@@ -97,18 +95,10 @@
       }
     });
 
-    const onContext = (context) => {
-      const next = (context && context.session && context.session.id) || null;
-      if (next === state.sessionId) return;
-      state.sessionId = next;
-      void refresh();
-    };
-
-    const initial = typeof hostContext === 'function' ? hostContext() : hostContext;
     render();
-    if (initial) onContext(initial);
-    if (typeof onHostContextChange === 'function') onHostContextChange(onContext);
-    if (!initial) void refresh();
+    void refresh();
+    // 切换会话时重新拉取，避免挂载期间错过推送。
+    if (typeof onHostContextChange === 'function') onHostContextChange(() => void refresh());
 
     // sidecar 状态变化推送：{ channel, payload } 包装。
     const stop = bridge.on('sidecar.event', (payload) => {

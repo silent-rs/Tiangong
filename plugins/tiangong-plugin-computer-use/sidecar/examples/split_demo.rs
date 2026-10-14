@@ -34,10 +34,13 @@ fn main() {
                 tiangong_plugin_computer_use_sidecar::split::state()
             );
             tokio::time::sleep(Duration::from_secs(hold)).await;
-            match tiangong_plugin_computer_use_sidecar::split::saved_host() {
-                Some(saved) => {
-                    println!("恢复到：{:?}", saved.bounds);
-                    println!("恢复结果：{:?}", mac_split::restore_host(saved).await);
+            match tiangong_plugin_computer_use_sidecar::split::saved() {
+                Some((saved, targets)) => {
+                    println!("恢复到：{:?}；应用窗口：{targets:?}", saved.bounds);
+                    println!(
+                        "恢复结果：{:?}",
+                        mac_split::restore_split(saved, targets).await
+                    );
                     tiangong_plugin_computer_use_sidecar::split::clear();
                 }
                 None => println!("未记录原位置，跳过恢复"),

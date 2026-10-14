@@ -11,15 +11,15 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, HWND_TOP, IsIconic, IsZoomed, SW_MAXIMIZE, SW_RESTORE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SetWindowPos, ShowWindow,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HWND_TOP, IsIconic, IsWindow, IsZoomed,
+    SW_MAXIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow,
 };
 
 use tiangong_plugin_computer_use_protocol::Bounds;
 use tiangong_plugin_computer_use_protocol::ops::{SPLIT_HOST_WIDTH, SplitOutcome, split_layout};
 
 use super::win_desktop::{enum_top_windows, window_bounds};
-use crate::split::SavedHostFrame;
+use crate::split::{SavedHostFrame, SavedTarget};
 
 /// 实际位置与目标的容差（物理像素）。
 const TOLERANCE: f64 = 4.0;
@@ -160,6 +160,20 @@ pub(crate) fn split_with_host(target_hwnd: HWND, target_pid: u32) -> SplitOutcom
         maximized: host_maximized,
         fullscreen: false,
     }));
+    // 记录目标窗口分屏前的状态，恢复时一并还原（同一窗口只记最初位置）。
+    // SAFETY：纯查询。
+    let target_maximized = unsafe { IsZoomed(target_hwnd).as_bool() };
+    let handle = target_hwnd.0 as isize;
+    crate::split::record_target(SavedTarget {
+        key: handle as u64,
+        handle,
+        label: window_title(target_hwnd),
+        frame: SavedHostFrame {
+            bounds: window_bounds(target_hwnd),
+            maximized: target_maximized,
+            fullscreen: false,
+        },
+    });
     let target_result = place(target_hwnd, target_frame);
     let target_actual = target_result.as_ref().ok().copied();
     let all_ok = close_to(host_actual, host_frame)
@@ -177,16 +191,64 @@ pub(crate) fn split_with_host(target_hwnd: HWND, target_pid: u32) -> SplitOutcom
     }
 }
 
-/// 恢复天工窗口到分屏前的位置（不调整其他应用）。
-pub(crate) fn restore_host(saved: SavedHostFrame) -> Result<(), String> {
-    let host_pid = host_pid().ok_or("未获取到天工窗口进程")?;
-    let host = top_window_of(host_pid).ok_or("未找到天工主窗口")?;
-    place(host, saved.bounds)?;
+/// 窗口标题（恢复失败时的人读说明），取不到时用句柄。
+fn window_title(hwnd: HWND) -> String {
+    // SAFETY：缓冲区按标题长度分配。
+    let title = unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            String::new()
+        } else {
+            let mut buf = vec![0u16; len as usize + 1];
+            let copied = GetWindowTextW(hwnd, &mut buf);
+            String::from_utf16_lossy(&buf[..copied.max(0) as usize])
+        }
+    };
+    if title.trim().is_empty() {
+        format!("窗口 0x{:X}", hwnd.0 as isize)
+    } else {
+        format!("「{}」", title.trim())
+    }
+}
+
+/// 把窗口放回保存的位置；原先最大化的重新最大化。
+fn restore_frame(hwnd: HWND, saved: SavedHostFrame) -> Result<(), String> {
+    place(hwnd, saved.bounds)?;
     if saved.maximized {
         // SAFETY：标准窗口状态调用。
         unsafe {
-            let _ = ShowWindow(host, SW_MAXIMIZE);
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
         }
     }
     Ok(())
+}
+
+/// 恢复天工窗口到分屏前的位置。
+pub(crate) fn restore_host(saved: SavedHostFrame) -> Result<(), String> {
+    let host_pid = host_pid().ok_or("未获取到天工窗口进程")?;
+    let host = top_window_of(host_pid).ok_or("未找到天工主窗口")?;
+    restore_frame(host, saved)
+}
+
+/// 恢复分屏：先逐个还原被分屏的应用窗口（后分屏的先还原），再还原天工
+/// 窗口。应用窗口失败（已关闭、权限更高）只记说明不中断；天工窗口失败
+/// 返回 Err。
+pub(crate) fn restore_split(
+    host: SavedHostFrame,
+    targets: Vec<SavedTarget>,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    for target in targets.iter().rev() {
+        let hwnd = HWND(target.handle as *mut core::ffi::c_void);
+        // SAFETY：纯查询；句柄已失效时返回 false。
+        if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
+            warnings.push(format!("{} 已关闭", target.label));
+            continue;
+        }
+        if let Err(reason) = restore_frame(hwnd, target.frame) {
+            warnings.push(format!("{} {reason}", target.label));
+        }
+    }
+    restore_host(host)?;
+    Ok(warnings)
 }

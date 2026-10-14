@@ -269,7 +269,7 @@ fn screenshot_request_new_fields_are_backward_compatible() {
     assert_eq!(req.max_dimension, Some(1568));
 }
 
-/// 自动分屏操作的分发路径：未分屏时状态为空、轮次事件不会显示按钮、
+/// 自动分屏操作的分发路径：未分屏时状态为空（按钮不显示）、
 /// 恢复请求如实返回「无需恢复」（不触碰任何窗口）。
 #[tokio::test]
 async fn split_operations_without_active_split() {
@@ -281,19 +281,6 @@ async fn split_operations_without_active_split() {
     assert!(resp.success);
     let state: SplitState = serde_json::from_value(resp.payload.unwrap()).unwrap();
     assert_eq!(state, SplitState::default());
-
-    let resp = service
-        .dispatch(request(
-            SPLIT_TURN_OPERATION,
-            serde_json::json!({ "session_id": "s1", "finished": true, "used_split": true }),
-        ))
-        .await;
-    assert!(resp.success);
-    let state: SplitState = serde_json::from_value(resp.payload.unwrap()).unwrap();
-    assert_eq!(
-        state.restorable_session, None,
-        "未保存天工原位置时不显示按钮"
-    );
 
     let resp = service
         .dispatch(request(

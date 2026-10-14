@@ -513,13 +513,11 @@ pub struct SplitOutcome {
 /// sidecar 推送分屏状态变化的通知 channel（经宿主 `sidecar.event` 送达插件 UI）。
 pub const SPLIT_NOTIFICATION_CHANNEL: &str = "computer_use.split";
 
-/// 分屏状态：`active` 表示天工窗口处于分屏布局且已保存原位置；
-/// `restorable_session` 为已完成对话、可显示「恢复窗口」按钮的会话。
+/// 分屏状态：`active` 表示天工窗口处于分屏布局且已保存原位置，此时
+/// 「恢复窗口」按钮始终显示（不区分会话、不等对话结束）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitState {
     pub active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restorable_session: Option<String>,
 }
 
 /// 查询分屏状态（插件 UI 挂载/切换会话时拉取）。
@@ -531,26 +529,8 @@ impl ComputerUseOperation for SplitStateQuery {
     type Response = SplitState;
 }
 
-/// 轮次开始/结束通知：开始时隐藏该会话的恢复按钮；结束时若本轮触发过
-/// 自动分屏，标记该会话为分屏发起方并显示恢复按钮。
-pub const SPLIT_TURN_OPERATION: &str = "computer_use.split_turn";
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SplitTurnRequest {
-    pub session_id: String,
-    /// false：轮次开始；true：轮次结束。
-    pub finished: bool,
-    /// 本轮是否触发过自动分屏（仅轮次结束时有意义）。
-    #[serde(default)]
-    pub used_split: bool,
-}
-pub struct SplitTurn;
-impl ComputerUseOperation for SplitTurn {
-    const NAME: &'static str = SPLIT_TURN_OPERATION;
-    type Request = SplitTurnRequest;
-    type Response = SplitState;
-}
-
-/// 用户点击「恢复窗口」：只还原天工窗口的原位置，不调整其他应用。
+/// 用户点击「恢复窗口」：还原天工窗口，并把本次分屏摆放过的全部应用
+/// 窗口还原到各自分屏前的位置。
 pub const RESTORE_HOST_WINDOW_OPERATION: &str = "computer_use.restore_host_window";
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RestoreHostWindowResponse {

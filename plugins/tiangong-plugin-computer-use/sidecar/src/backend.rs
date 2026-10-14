@@ -73,12 +73,14 @@ pub trait Backend: Send + Sync {
             supported: vec![],
         })
     }
-    /// 把天工窗口还原到自动分屏前的位置（只动天工窗口）。默认不支持
-    /// （Linux 不做自动分屏）。
-    async fn restore_host_window(
+    /// 把天工窗口与被分屏的应用窗口还原到自动分屏前的位置。天工窗口
+    /// 恢复失败返回 Err；个别应用窗口恢复失败（已关闭、不可移动）不中断，
+    /// 以说明列表返回。默认不支持（Linux 不做自动分屏）。
+    async fn restore_split(
         &self,
-        _saved: crate::split::SavedHostFrame,
-    ) -> Result<(), String> {
+        _host: crate::split::SavedHostFrame,
+        _targets: Vec<crate::split::SavedTarget>,
+    ) -> Result<Vec<String>, String> {
         Err("当前平台不支持自动分屏".to_string())
     }
 }
@@ -203,6 +205,9 @@ fn cfg_if_current_backend() -> Box<dyn Backend> {
 pub mod app_launch;
 #[cfg(target_os = "macos")]
 pub mod ax;
+/// 点击/键入后归还用户输入焦点与光标（仅 macOS）。
+#[cfg(target_os = "macos")]
+pub mod focus_restore;
 /// 键鼠手势的请求级取消令牌（平台无关）。
 pub mod input_cancel;
 /// 键盘合成输入（CGEvent，RFC 0018 §2.4，仅 macOS）。
@@ -236,6 +241,9 @@ pub mod screenshot_plan;
 /// Windows 截图、窗口枚举与应用唤起。
 #[cfg(target_os = "windows")]
 pub mod win_desktop;
+/// Windows 点击/键入后归还用户输入焦点与光标。
+#[cfg(target_os = "windows")]
+pub mod win_focus_restore;
 /// Windows SendInput 键鼠合成。
 #[cfg(target_os = "windows")]
 pub mod win_input;

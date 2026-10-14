@@ -11,7 +11,7 @@
 use std::ffi::c_void;
 
 use core_foundation::array::{CFArray, CFArrayRef};
-use core_foundation::base::{CFRelease, CFRetain, CFTypeRef, TCFType};
+use core_foundation::base::{CFEqual, CFHash, CFRelease, CFRetain, CFTypeRef, TCFType};
 use core_foundation::boolean::{CFBoolean, CFBooleanRef};
 use core_foundation::string::{CFString, CFStringRef};
 
@@ -105,6 +105,7 @@ unsafe extern "C" {
 /// AXValue 类型常量（与 HIServices AXValue.h 对齐）。
 const AX_VALUE_TYPE_CG_POINT: u32 = 1;
 const AX_VALUE_TYPE_CG_SIZE: u32 = 2;
+const AX_VALUE_TYPE_CF_RANGE: u32 = 4;
 
 // CoreFoundation 类型判断（用于按真实类型解释 CFTypeRef，避免类型误判）。
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -133,6 +134,14 @@ struct CGPoint {
 struct CGSize {
     width: f64,
     height: f64,
+}
+
+/// 文本选区（CFRange：起点 + 长度，单位为 UTF-16 码元）。长度为 0 即插入光标。
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AxTextRange {
+    pub location: isize,
+    pub length: isize,
 }
 
 /// 屏幕边界（与 protocol Bounds 对齐）。
@@ -187,8 +196,80 @@ impl AxElement {
         Some(Self { raw })
     }
 
+    /// 当前拥有键盘焦点的控件（系统范围）。系统范围查询失败时（部分应用
+    /// 不响应 SystemWide 查询）回退到前台应用的 AXFocusedUIElement。
+    pub fn system_focused(frontmost_pid: Option<i32>) -> Option<Self> {
+        // SAFETY：SystemWide 元素为 caller-owned 引用，由 AxElement 接管释放。
+        let system_wide = Self::from_retained(unsafe { AXUIElementCreateSystemWide() })?;
+        system_wide
+            .element_attribute("AXFocusedUIElement")
+            .or_else(|| {
+                frontmost_pid
+                    .map(Self::for_application)
+                    .and_then(|app| app.element_attribute("AXFocusedUIElement"))
+            })
+    }
+
+    /// 控件所属进程。
+    pub fn pid(&self) -> Option<i32> {
+        if self.raw.is_null() {
+            return None;
+        }
+        let mut pid: i32 = 0;
+        // SAFETY：raw 为有效 AXUIElement，pid 可写。
+        (unsafe { AXUIElementGetPid(self.raw, &mut pid) } == 0).then_some(pid)
+    }
+
+    /// 是否与另一引用指向同一个界面元素（CFEqual）。
+    pub fn same_as(&self, other: &AxElement) -> bool {
+        if self.raw.is_null() || other.raw.is_null() {
+            return false;
+        }
+        // SAFETY：两者均为有效 CF 对象。
+        unsafe { CFEqual(self.raw as CFTypeRef, other.raw as CFTypeRef) != 0 }
+    }
+
+    /// 元素哈希（与 [`same_as`](Self::same_as) 一致），用于窗口去重。
+    pub fn hash_key(&self) -> u64 {
+        if self.raw.is_null() {
+            return 0;
+        }
+        // SAFETY：raw 为有效 CF 对象。
+        unsafe { CFHash(self.raw as CFTypeRef) as u64 }
+    }
+
     pub fn raw(&self) -> AXUIElementRef {
         self.raw
+    }
+
+    /// 读取文本选区（AXSelectedTextRange）。
+    pub fn selected_text_range(&self) -> Option<AxTextRange> {
+        let value = self.copy_attribute_value("AXSelectedTextRange")?;
+        ax_catch(|| unsafe {
+            let ax_value = value as AXValueRef;
+            if AXValueGetType(ax_value) != AX_VALUE_TYPE_CF_RANGE {
+                CFRelease(value);
+                return None;
+            }
+            let mut range = AxTextRange::default();
+            let ok = AXValueGetValue(
+                ax_value,
+                AX_VALUE_TYPE_CF_RANGE,
+                &mut range as *mut AxTextRange as *mut c_void,
+            );
+            CFRelease(value);
+            if ok != 0 { Some(range) } else { None }
+        })
+        .flatten()
+    }
+
+    /// 设置文本选区（长度为 0 即把插入光标放到 location）。
+    pub fn set_selected_text_range(&self, range: AxTextRange) -> Result<(), AxError> {
+        self.set_ax_value(
+            "AXSelectedTextRange",
+            AX_VALUE_TYPE_CF_RANGE,
+            &range as *const AxTextRange as *const c_void,
+        )
     }
 
     /// 读取控件的属性名列表。

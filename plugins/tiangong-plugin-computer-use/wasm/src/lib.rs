@@ -22,8 +22,7 @@ use tiangong_plugin_computer_use_protocol::ops::{
     FindConditions, FindRequest, Keyboard, KeyboardActionKind, KeyboardRequest, ListWindows,
     ListWindowsRequest, Mouse, MouseGesture, MouseRequest, OpenApp, OpenAppRequest,
     RestoreHostWindow, Screenshot, ScreenshotRequest, SetAccess, SetAccessRequest, Snapshot,
-    SnapshotRequest, SplitStateQuery, SplitTurn, SplitTurnRequest, VirtualCursor,
-    VirtualCursorRequest, Wait, WaitRequest,
+    SnapshotRequest, SplitStateQuery, VirtualCursor, VirtualCursorRequest, Wait, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     Ack, Bounds, ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_APP,
@@ -44,27 +43,16 @@ mod state {
         full_trust: bool,
         /// 本轮是否执行过鼠标手势（天工指针分身已出现），轮次结束据此收起。
         cursor_summoned: bool,
-        /// 本轮是否触发过自动分屏，轮次结束据此显示「恢复窗口」按钮。
-        split_used: bool,
     }
 
     thread_local! {
         static STATE: RefCell<PluginState> = const {
-            RefCell::new(PluginState { full_trust: false, cursor_summoned: false, split_used: false })
+            RefCell::new(PluginState { full_trust: false, cursor_summoned: false })
         };
     }
 
     pub fn set_full_trust(full_trust: bool) {
         STATE.with(|s| s.borrow_mut().full_trust = full_trust);
-    }
-
-    /// 取出并清零本轮分屏标记。
-    pub fn take_split_used() -> bool {
-        STATE.with(|s| std::mem::take(&mut s.borrow_mut().split_used))
-    }
-
-    pub fn mark_split_used() {
-        STATE.with(|s| s.borrow_mut().split_used = true);
     }
 
     pub fn cursor_summoned() -> bool {
@@ -270,37 +258,17 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_turn_started(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
-        // 新一轮开始：清掉上轮残留的分屏标记，并隐藏该会话的恢复按钮。
-        // 仅在分屏生效时才需要通知 sidecar，但 wasm 侧不掌握该状态；调用
-        // 很轻量，失败静默（按钮状态是纯 UI 增益）。
-        state::take_split_used();
-        if let Some(session_id) = session_id_of(&session_json) {
-            let _ = sidecar_client::invoke::<SplitTurn>(&SplitTurnRequest {
-                session_id,
-                finished: false,
-                used_split: false,
-            });
-        }
+    fn on_turn_started(_session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
         Ok(())
     }
 
-    fn on_turn_finished(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+    fn on_turn_finished(_session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
         // 本轮结束收起天工指针分身（未出现时为无操作）。失败静默：
         // 指针是纯可视化，sidecar 未启动时无需拉起，overlay 也有空闲兜底。
         if state::cursor_summoned() {
             state::set_cursor_summoned(false);
             let _ =
                 sidecar_client::invoke::<VirtualCursor>(&VirtualCursorRequest { enabled: false });
-        }
-        // 对话完成：本会话用过自动分屏时显示「恢复窗口」按钮。
-        let used_split = state::take_split_used();
-        if let Some(session_id) = session_id_of(&session_json) {
-            let _ = sidecar_client::invoke::<SplitTurn>(&SplitTurnRequest {
-                session_id,
-                finished: true,
-                used_split,
-            });
         }
         Ok(())
     }
@@ -967,21 +935,8 @@ fn handle_open_app(arguments: String) -> Result<ToolResult, PluginError> {
     let mut tool_result = desktop_result_to_tool_result(result.clone());
     if let DesktopResult::Ok(resp) = result {
         tool_result.summary = resp.summary;
-        if resp.split.as_ref().is_some_and(|split| split.applied) {
-            state::mark_split_used();
-        }
     }
     Ok(tool_result)
-}
-
-/// 从生命周期钩子的 session 快照中取会话 ID。
-fn session_id_of(session_json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(session_json)
-        .ok()?
-        .get("id")?
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
 }
 
 fn run_desktop_op<O, T>(request: &O::Request, tool: &str) -> Result<ToolResult, PluginError>

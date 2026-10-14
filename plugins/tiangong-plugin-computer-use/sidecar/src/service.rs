@@ -195,37 +195,28 @@ impl ComputerUseService {
             ops::SPLIT_STATE_OPERATION => serde_json::to_value(crate::split::state())
                 .with_context(|| "序列化 split_state 响应失败"),
 
-            ops::SPLIT_TURN_OPERATION => {
-                let req: ops::SplitTurnRequest =
-                    serde_json::from_value(payload).with_context(|| "解析 split_turn 请求失败")?;
-                let state = if req.finished {
-                    crate::split::turn_finished(&req.session_id, req.used_split)
-                } else {
-                    crate::split::turn_started(&req.session_id)
-                };
-                serde_json::to_value(state).with_context(|| "序列化 split_turn 响应失败")
-            }
-
             ops::RESTORE_HOST_WINDOW_OPERATION => {
-                let response = match crate::split::saved_host() {
+                let response = match crate::split::saved() {
                     None => ops::RestoreHostWindowResponse {
                         restored: false,
                         detail: "天工窗口当前不在分屏布局，无需恢复".to_string(),
                         state: crate::split::clear(),
                     },
-                    Some(saved) => match self.backend.restore_host_window(saved).await {
-                        Ok(()) => ops::RestoreHostWindowResponse {
-                            restored: true,
-                            detail: "已恢复天工窗口".to_string(),
-                            state: crate::split::clear(),
-                        },
-                        // 失败时保留状态，按钮继续显示，用户可重试。
-                        Err(reason) => ops::RestoreHostWindowResponse {
-                            restored: false,
-                            detail: format!("恢复天工窗口失败：{reason}"),
-                            state: crate::split::state(),
-                        },
-                    },
+                    Some((host, targets)) => {
+                        match self.backend.restore_split(host, targets).await {
+                            Ok(warnings) => ops::RestoreHostWindowResponse {
+                                restored: true,
+                                detail: restore_detail(&warnings),
+                                state: crate::split::clear(),
+                            },
+                            // 天工窗口恢复失败时保留状态，按钮继续显示，用户可重试。
+                            Err(reason) => ops::RestoreHostWindowResponse {
+                                restored: false,
+                                detail: format!("恢复天工窗口失败：{reason}"),
+                                state: crate::split::state(),
+                            },
+                        }
+                    }
                 };
                 serde_json::to_value(response)
                     .with_context(|| "序列化 restore_host_window 响应失败")
@@ -233,6 +224,18 @@ impl ComputerUseService {
 
             operation => Err(anyhow::anyhow!("不支持的 Computer Use 操作: {operation}")),
         }
+    }
+}
+
+/// 恢复结果说明：应用窗口个别失败（如已关闭）不影响天工窗口恢复，附在说明里。
+fn restore_detail(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        "已恢复天工窗口及分屏应用窗口".to_string()
+    } else {
+        format!(
+            "已恢复天工窗口；部分应用窗口未恢复：{}",
+            warnings.join("；")
+        )
     }
 }
 

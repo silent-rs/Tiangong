@@ -231,8 +231,12 @@ pub fn perform(
         return Err(cancelled_message("键盘输入"));
     }
     let io = KeyboardIo::new()?;
+    // 用户正在别处输入时：先切回 Agent 最近点击的输入框，输入完成后再把
+    // 焦点与光标归还给用户（用户不在输入状态时两步都是空操作）。
+    let user_focus = super::focus_restore::before_keyboard();
     let result = perform_locked(&io, action, text, key, keys, cancel);
     sleep(GESTURE_SETTLE);
+    super::focus_restore::after_keyboard(user_focus);
     result
 }
 

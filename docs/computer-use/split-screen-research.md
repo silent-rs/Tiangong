@@ -103,6 +103,11 @@ computer-use 插件在 `plugins/tiangong-plugin-computer-use/`，sidecar 为独�
 - 不新增 `desktop_arrange` 工具；**打开应用（`desktop_app` action=open）成功后自动分屏**。
 - 输入框发送按钮左侧的按钮区（`session.input-action` 挂载点）增加「恢复窗口」按钮，由用户主动恢复天工窗口；**其他应用不再调整**。
 - 按钮只在「当前会话用过自动分屏」且「对话已完成（轮次结束）」时显示；点击恢复后隐藏；该会话新一轮开始时也先隐藏。
+
+调整（`feature/computer-use-restore-improvements`）：
+- 天工窗口一进入分屏布局，「恢复窗口」按钮就**始终显示**（不区分会话、不等对话结束），便于随时立即恢复；恢复后隐藏。
+- 恢复时**一并还原被分屏的应用窗口**：每个被摆到左侧的应用窗口都记录分屏前的位置/全屏/最大化状态（同一窗口只记最初位置），多次打开多个应用时全部还原；已关闭或无法移动的窗口跳过并在提示中说明，不影响天工窗口恢复。
+- `split_turn` 操作与 wasm 侧按轮次标记分屏的逻辑已删除。
 - Linux 的 computer use 支持不完整，**不做自动分屏**（后端默认返回不支持）。
 - 多显示器：两个窗口都放在天工窗口当前所在的屏幕。
 
@@ -110,12 +115,12 @@ computer-use 插件在 `plugins/tiangong-plugin-computer-use/`，sidecar 为独�
 
 | 模块 | 职责 |
 | --- | --- |
-| `protocol/src/ops.rs` | `OpenAppResponse.split`、`SplitOutcome`、`SplitState`、`split_layout`（纯函数）及 `split_state` / `split_turn` / `restore_host_window` 三个操作 |
-| `sidecar/src/split.rs` | 分屏状态：天工原位置（只记第一次）、分屏发起会话、可显示按钮的会话；状态变化经 `emit_notification("computer_use.split")` 推送 |
+| `protocol/src/ops.rs` | `OpenAppResponse.split`、`SplitOutcome`、`SplitState`、`split_layout`（纯函数）及 `split_state` / `restore_host_window` 两个操作 |
+| `sidecar/src/split.rs` | 分屏状态：天工原位置（只记第一次）、被分屏的应用窗口列表；状态变化经 `emit_notification("computer_use.split")` 推送 |
 | `sidecar/src/backend/mac_split.rs` | macOS：`AXPosition/AXSize` 摆放；先退出全屏；屏幕可用区域由 overlay 主线程代查 `NSScreen.visibleFrame` |
 | `sidecar/src/backend/overlay.rs` | 新增 `ScreenWorkArea` 命令（NSScreen 只能在主线程访问） |
 | `sidecar/src/backend/win_split.rs` | Windows：`SetWindowPos` + `rcWork` + DWM 可见边框补偿 + 按 DPI 换算 400 |
-| `wasm/src/lib.rs` | open 成功且分屏生效时标记本轮；`on_turn_started/finished` 通知 sidecar；`handle_view_message` 提供 `splitState` / `restoreHostWindow` |
+| `wasm/src/lib.rs` | `handle_view_message` 提供 `splitState` / `restoreHostWindow` |
 | `app/restore-window.html` | 按钮 UI（shadow 容器）：拉取状态 + 订阅 `sidecar.event`，隐藏时收起宿主容器 |
 | `plugin.json` | 新增 `bridge.call` 权限、`capabilities.events: ["sidecar.*"]`、`session.input-action` 贡献；版本 0.4.0 |
 

@@ -216,6 +216,13 @@ pub fn perform_mouse(
             overlay::glide_and_wait(x, y);
             sleep(CLICK_SETTLE);
             let origin = cursor_position();
+            // 记下用户原来的输入焦点，点击后立即归还（不在输入状态则不动）。
+            // 右键不归还：切走焦点会关闭刚弹出的上下文菜单。
+            let user_focus = if matches!(gesture, MouseGesture::RightClick) {
+                None
+            } else {
+                super::win_focus_restore::capture_user_focus()
+            };
             let (down, up) = if matches!(gesture, MouseGesture::RightClick) {
                 (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
             } else {
@@ -241,6 +248,8 @@ pub fn perform_mouse(
                 Ok::<(), String>(())
             })();
             restore_cursor(origin);
+            // 点击失败也要归还用户焦点。
+            super::win_focus_restore::after_click(user_focus);
             result?;
             let label = match gesture {
                 MouseGesture::RightClick => "右键",
@@ -447,6 +456,21 @@ pub fn perform_keyboard(
     if cancel.is_cancelled() {
         return Err(cancelled_message("键盘输入"));
     }
+    // 用户正在别处输入时：先切回 Agent 最近点击的输入框，输入完成后再把
+    // 焦点与光标归还给用户（用户不在输入状态时两步都是空操作）。
+    let user_focus = super::win_focus_restore::before_keyboard();
+    let result = perform_keyboard_locked(action, text, key, keys, cancel);
+    super::win_focus_restore::after_keyboard(user_focus);
+    result
+}
+
+fn perform_keyboard_locked(
+    action: KeyboardActionKind,
+    text: Option<String>,
+    key: Option<String>,
+    keys: Option<Vec<String>>,
+    cancel: &CancelToken,
+) -> Result<String, String> {
     match action {
         KeyboardActionKind::Type => {
             let text = text

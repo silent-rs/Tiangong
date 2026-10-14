@@ -827,8 +827,12 @@ impl Backend for MacosBackend {
         }
         result
     }
-    async fn restore_host_window(&self, saved: crate::split::SavedHostFrame) -> Result<(), String> {
-        super::mac_split::restore_host(saved).await
+    async fn restore_split(
+        &self,
+        host: crate::split::SavedHostFrame,
+        targets: Vec<crate::split::SavedTarget>,
+    ) -> Result<Vec<String>, String> {
+        super::mac_split::restore_split(host, targets).await
     }
 }
 

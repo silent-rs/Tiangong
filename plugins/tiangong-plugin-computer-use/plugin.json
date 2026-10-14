@@ -28,7 +28,7 @@
         "slot": "session.input-action",
         "id": "restore-window",
         "title": "恢复窗口",
-        "description": "Computer Use 自动分屏后，把天工窗口恢复到原来的位置和大小",
+        "description": "Computer Use 自动分屏后，一键把天工窗口和被分屏的应用窗口恢复到原来的位置和大小",
         "entry": "app/restore-window.html",
         "context": [
           "session"

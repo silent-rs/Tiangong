@@ -118,19 +118,31 @@ pub fn perform(
             overlay::glide_and_wait(x, y);
             sleep(CLICK_SETTLE);
             let (origin_x, origin_y) = current_cursor_position();
+            // 记下用户原来的输入焦点，点击后立即归还（不在输入状态则不动）。
+            // 右键不归还：切走焦点会关闭刚弹出的上下文菜单。
+            let user_focus = if matches!(gesture, MouseGesture::RightClick) {
+                None
+            } else {
+                super::focus_restore::capture_user_focus()
+            };
             let button = if matches!(gesture, MouseGesture::RightClick) {
                 CGMouseButton::Right
             } else {
                 CGMouseButton::Left
             };
-            io.press_release(x, y, button)?;
-            overlay::click_pulse(x, y);
-            if matches!(gesture, MouseGesture::DoubleClick) {
-                sleep(DOUBLE_CLICK_GAP);
-                io.press_release(x, y, CGMouseButton::Left)?;
+            let pressed = (|| {
+                io.press_release(x, y, button)?;
                 overlay::click_pulse(x, y);
-            }
-            io.move_to(origin_x, origin_y)?;
+                if matches!(gesture, MouseGesture::DoubleClick) {
+                    sleep(DOUBLE_CLICK_GAP);
+                    io.press_release(x, y, CGMouseButton::Left)?;
+                    overlay::click_pulse(x, y);
+                }
+                io.move_to(origin_x, origin_y)
+            })();
+            // 点击失败也要归还用户焦点。
+            super::focus_restore::after_click(user_focus);
+            pressed?;
             let label = match gesture {
                 MouseGesture::RightClick => "右键",
                 MouseGesture::DoubleClick => "双击",

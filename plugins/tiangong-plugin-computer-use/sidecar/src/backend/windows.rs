@@ -838,8 +838,12 @@ impl Backend for WindowsBackend {
         result
     }
 
-    async fn restore_host_window(&self, saved: crate::split::SavedHostFrame) -> Result<(), String> {
-        super::win_split::restore_host(saved)
+    async fn restore_split(
+        &self,
+        host: crate::split::SavedHostFrame,
+        targets: Vec<crate::split::SavedTarget>,
+    ) -> Result<Vec<String>, String> {
+        super::win_split::restore_split(host, targets)
     }
 }
 

@@ -11,7 +11,7 @@ use tiangong_plugin_computer_use_protocol::Bounds;
 use tiangong_plugin_computer_use_protocol::ops::{SPLIT_HOST_WIDTH, SplitOutcome, split_layout};
 
 use super::ax::{self, AxElement};
-use crate::split::SavedHostFrame;
+use crate::split::{SavedHostFrame, SavedTarget};
 
 /// 退出全屏动画的等待时长。
 const FULLSCREEN_EXIT_WAIT: Duration = Duration::from_millis(900);
@@ -143,7 +143,18 @@ pub async fn split_with_host(target_pid: i32) -> SplitOutcome {
     };
     crate::split::record_applied(Some(original));
 
-    leave_fullscreen(&target_window).await;
+    // 记录目标窗口分屏前的状态，恢复时一并还原（同一窗口只记最初位置）。
+    let target_fullscreen = leave_fullscreen(&target_window).await;
+    crate::split::record_target(SavedTarget {
+        key: target_window.hash_key(),
+        label: window_label(target_pid, &target_window),
+        frame: SavedHostFrame {
+            bounds: frame_of(&target_window),
+            maximized: false,
+            fullscreen: target_fullscreen,
+        },
+        handle: target_window.clone(),
+    });
     let target_result = place(&target_window, target_frame);
     let target_actual = target_result.as_ref().ok().copied();
     let host_ok = close_to(host_actual, host_frame);
@@ -163,15 +174,54 @@ pub async fn split_with_host(target_pid: i32) -> SplitOutcome {
     }
 }
 
-/// 恢复天工窗口到分屏前的位置（不调整其他应用）。
-pub async fn restore_host(saved: SavedHostFrame) -> Result<(), String> {
-    let host_pid = host_pid().ok_or("未获取到天工窗口进程")?;
-    let window = main_window(host_pid).ok_or("未找到天工主窗口")?;
-    place(&window, saved.bounds)?;
+/// 窗口的人读名称：应用名（取不到时用 pid）+ 窗口标题。
+fn window_label(pid: i32, window: &AxElement) -> String {
+    let app = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.localizedName())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("pid {pid}"));
+    match window.string_attribute("AXTitle").filter(|t| !t.is_empty()) {
+        Some(title) => format!("{app}「{title}」"),
+        None => app,
+    }
+}
+
+/// 把窗口放回保存的位置；原先全屏的重新进入全屏。
+fn restore_frame(window: &AxElement, saved: SavedHostFrame) -> Result<(), String> {
+    place(window, saved.bounds)?;
     if saved.fullscreen {
         let _ = window.set_bool_attribute("AXFullScreen", true);
     }
     Ok(())
+}
+
+/// 恢复天工窗口到分屏前的位置（不调整其他应用）。
+pub async fn restore_host(saved: SavedHostFrame) -> Result<(), String> {
+    let host_pid = host_pid().ok_or("未获取到天工窗口进程")?;
+    let window = main_window(host_pid).ok_or("未找到天工主窗口")?;
+    restore_frame(&window, saved)
+}
+
+/// 恢复分屏：先逐个还原被分屏的应用窗口（后分屏的先还原，层叠关系与
+/// 分屏前一致），再还原天工窗口。应用窗口失败（已关闭、不可移动）只记
+/// 说明不中断；天工窗口失败返回 Err。
+pub async fn restore_split(
+    host: SavedHostFrame,
+    targets: Vec<SavedTarget>,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    for target in targets.iter().rev() {
+        // 窗口已关闭时 AX 引用失效，读取角色会失败。
+        if target.handle.string_attribute("AXRole").is_none() {
+            warnings.push(format!("{} 已关闭", target.label));
+            continue;
+        }
+        if let Err(reason) = restore_frame(&target.handle, target.frame) {
+            warnings.push(format!("{} {reason}", target.label));
+        }
+    }
+    restore_host(host).await?;
+    Ok(warnings)
 }
 
 #[cfg(test)]
