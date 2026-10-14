@@ -3,13 +3,6 @@
 //! Launcher 为每次调用创建独立 AppContainer 身份，只向目标程序、工作区与
 //! 专用临时目录授予该身份所需的最小 ACL。目标以挂起状态创建，加入带资源
 //! 配额的 Job Object 后才恢复运行；网络能力只在策略明确允许时加入。
-//!
-//! 授权分两层（降低每次启动的 ACL 传播开销）：
-//! - 通用持久授权：所有沙箱进程共享的天工目录（媒体交换区、临时目录等，
-//!   由宿主经 [`CommonGrants`] 声明）只授权一次并持久保存，之后启动只核对
-//!   根目录上的授权项；
-//! - 针对性授权：目标程序、工作区、插件自有数据目录等每次启动临时授予，
-//!   结束后撤销。
 
 #![cfg(windows)]
 
@@ -80,7 +73,7 @@ use super::{SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimi
 
 mod persistent;
 mod volume_metadata;
-pub use persistent::{revoke as revoke_persistent_grants, revoke_common as revoke_common_grants};
+pub use persistent::revoke as revoke_persistent_grants;
 pub use volume_metadata::{prepare_volume_metadata, revoke_volume_metadata};
 
 const SE_GROUP_ENABLED: u32 = 4;
@@ -125,62 +118,25 @@ pub fn availability() -> SandboxAvailability {
     SandboxAvailability::Available
 }
 
-/// 天工通用持久授权：所有沙箱进程共享、可写的天工目录。
-///
-/// `roots` 必须全部属于本次策略的可写根；授权记录 `cache` 必须位于策略
-/// 禁读目录内（宿主管理目录，沙箱进程不可读写）。
-#[derive(Debug, Clone, Copy)]
-pub struct CommonGrants<'a> {
-    pub cache: &'a Path,
-    pub roots: &'a [PathBuf],
-}
-
 /// 创建、运行并清理一次 Windows AppContainer 调用。
 pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
-    launch_with_grants(request, None, None)
+    launch_with_grant_cache(request, None)
 }
 
 pub fn launch_with_grant_cache(
     request: WindowsLaunchRequest<'_>,
     cache: Option<&Path>,
 ) -> Result<i32> {
-    launch_with_grants(request, cache, None)
-}
-
-/// `cache` 为插件级持久授权记录（旧宿主兼容），`common` 为天工通用持久授权。
-pub fn launch_with_grants(
-    request: WindowsLaunchRequest<'_>,
-    cache: Option<&Path>,
-    common: Option<CommonGrants<'_>>,
-) -> Result<i32> {
     trace_self_check(&request, "校验启动请求");
-    let common_roots = common
-        .map(|common| resolve_common_roots(request.policy, common.roots))
-        .transpose()?
-        .unwrap_or_default();
-    validate_launch_request(&request, &common_roots)?;
+    validate_launch_request(&request)?;
     trace_self_check(&request, "创建网络能力集合");
     let mut capabilities = CapabilitySet::new(request.policy.allow_network)?;
     volume_metadata::add_capability(&mut capabilities)?;
-    // 通用身份同时作为能力 SID（AppContainer 检查）与限制 SID（受限令牌
-    // 检查）生效，两道访问检查都由同一条持久授权项放行。
-    let mut common_sid = None;
-    if let Some(common) = common
-        && !common_roots.is_empty()
-    {
-        trace_self_check(&request, "检查通用持久授权");
-        common_sid = Some(persistent::prepare_common(
-            common.cache,
-            &common_roots,
-            request.policy,
-            &mut capabilities,
-        )?);
-    }
     if cache.is_some() {
         trace_self_check(&request, "检查持久目录授权");
     }
     let lease = cache
-        .map(|path| persistent::prepare(&request, path, &common_roots, &mut capabilities))
+        .map(|path| persistent::prepare(&request, path, &mut capabilities))
         .transpose()?;
     trace_self_check(&request, "创建临时 AppContainer 身份");
     let mut profile = AppContainerProfile::create(&capabilities)?;
@@ -202,15 +158,13 @@ pub fn launch_with_grants(
             restriction.sid,
             request.program,
             request.policy,
-            &common_roots,
         )?)
     } else {
         None
     };
 
     trace_self_check(&request, "启动受限目标进程");
-    let execution =
-        run_restricted_process(&request, &profile, restriction, &capabilities, common_sid);
+    let execution = run_restricted_process(&request, &profile, restriction, &capabilities);
     trace_self_check(&request, "受限目标进程已结束");
     let acl_cleanup = grants.as_mut().map_or(Ok(()), AclGrants::revoke);
     trace_self_check(
@@ -290,32 +244,7 @@ pub fn current_process_child_policy_flags() -> Result<u32> {
     Ok(flags)
 }
 
-/// 规范化通用授权根（与 [`SandboxPolicy::writable_roots`] 同一口径），并要求
-/// 每个根都属于本次策略的可写根：通用授权不能扩大策略范围。
-fn resolve_common_roots(policy: &SandboxPolicy, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let writable = policy.writable_roots();
-    let mut resolved = roots
-        .iter()
-        .map(|root| {
-            let root = super::policy::canonical_or_keep(root);
-            if writable.contains(&root) {
-                Ok(root)
-            } else {
-                bail!("通用授权目录不在本次策略的可写根内: {}", root.display())
-            }
-        })
-        .collect::<Result<Vec<_>>>()?;
-    resolved.sort();
-    resolved.dedup();
-    Ok(resolved)
-}
-
-/// `common_roots` 已由通用持久授权覆盖：授权时校验过目录树，这里不再逐次
-/// 遍历（大目录每次启动全量扫描是主要开销之一）。
-fn validate_launch_request(
-    request: &WindowsLaunchRequest<'_>,
-    common_roots: &[PathBuf],
-) -> Result<()> {
+fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {
     if request.policy.mode == SandboxMode::FullAccess {
         bail!("Windows Launcher 不接受 full_access 策略");
     }
@@ -334,14 +263,7 @@ fn validate_launch_request(
                 .with_context(|| format!("解析 Windows 可写目录失败: {}", root.display()))
         })
         .collect::<Result<Vec<_>>>()?;
-    let skipped = common_roots
-        .iter()
-        .filter_map(|root| crate::canonicalize_path(root).ok())
-        .collect::<Vec<_>>();
     for root in &writable_roots {
-        if skipped.contains(root) {
-            continue;
-        }
         if writable_roots
             .iter()
             .any(|parent| parent != root && root.starts_with(parent))
@@ -679,11 +601,7 @@ impl Drop for RestrictionSid {
 struct RestrictedToken(OwnedHandle);
 
 impl RestrictedToken {
-    fn new(
-        restriction_sid: PSID,
-        appcontainer_sid: PSID,
-        common_sid: Option<PSID>,
-    ) -> Result<Self> {
+    fn new(restriction_sid: PSID, appcontainer_sid: PSID) -> Result<Self> {
         let mut source = std::ptr::null_mut();
         if unsafe {
             OpenProcessToken(
@@ -746,12 +664,6 @@ impl RestrictedToken {
         {
             restrictions.push(SID_AND_ATTRIBUTES {
                 Sid: logon.Sid,
-                Attributes: 0,
-            });
-        }
-        if let Some(sid) = common_sid {
-            restrictions.push(SID_AND_ATTRIBUTES {
-                Sid: sid,
                 Attributes: 0,
             });
         }
@@ -946,7 +858,6 @@ impl AclGrants {
         restriction_sid: PSID,
         program: &Path,
         policy: &SandboxPolicy,
-        skip: &[PathBuf],
     ) -> Result<Self> {
         let mut grants = Self {
             roots: Vec::new(),
@@ -962,8 +873,7 @@ impl AclGrants {
                 NO_INHERITANCE,
             )?;
             let writable = policy.writable_roots();
-            // skip 中的根已由通用持久授权覆盖，不重复授予（避免逐次传播）。
-            for root in writable.iter().filter(|root| !skip.contains(root)) {
+            for root in &writable {
                 grants.add(
                     &[appcontainer_sid, restriction_sid],
                     root,
@@ -1178,7 +1088,6 @@ fn run_restricted_process(
     profile: &AppContainerProfile,
     restriction: &RestrictionSid,
     capabilities: &CapabilitySet,
-    common_sid: Option<PSID>,
 ) -> Result<i32> {
     trace_self_check(request, "创建受限 Job");
     let job = WindowsJob::new(request.policy.resource_limits)?;
@@ -1200,7 +1109,7 @@ fn run_restricted_process(
         &child_process_policy,
     )?;
     trace_self_check(request, "创建受限进程令牌");
-    let token = RestrictedToken::new(restriction.sid, profile.sid, common_sid)?;
+    let token = RestrictedToken::new(restriction.sid, profile.sid)?;
 
     let application = wide_os(request.program.as_os_str());
     let mut command_line = windows_command_line(request.program.as_os_str(), request.args);

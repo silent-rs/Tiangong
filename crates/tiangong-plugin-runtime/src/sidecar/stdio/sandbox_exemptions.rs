@@ -108,6 +108,9 @@ const SHARED_WRITABLE_ENTRIES: [&str; 2] = ["media", "tmp"];
 /// `tmp/`。存储根本身、`logs/`（宿主写入）、其他插件的数据目录与历史
 /// 顶层数据目录一律只读；插件升级时自行把旧数据复制进 `data/<id>`。
 /// 条目不跟随符号链接，受保护路径不列入。
+///
+/// Windows 不使用此收拢（见 stdio 策略组装处说明），仅非 Windows 平台生效。
+#[cfg_attr(windows, allow(dead_code))]
 pub(super) fn storage_root_writable_roots(
     storage_root: &std::path::Path,
     plugin_id: &str,
@@ -129,22 +132,6 @@ pub(super) fn storage_root_writable_roots(
     });
     roots.dedup();
     roots
-}
-
-/// Windows 天工通用持久授权根：所有沙箱插件共享、可写的天工目录（媒体交换
-/// 区与 tmp）。只取本次策略实际包含的根（不存在或受保护的条目已被剔除）。
-/// 这些目录授权一次即持久保存；插件自有数据目录、工作区等差异部分每次
-/// 启动临时授予。
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(super) fn common_grant_roots(
-    storage_root: &std::path::Path,
-    writable: &[std::path::PathBuf],
-) -> Vec<std::path::PathBuf> {
-    SHARED_WRITABLE_ENTRIES
-        .iter()
-        .map(|entry| storage_root.join(entry))
-        .filter(|root| writable.contains(root))
-        .collect()
 }
 
 /// 插件数据目录隔离：存储根 `data/` 下其他插件的数据目录对当前插件读写双禁。
@@ -411,27 +398,6 @@ mod sensitive_access_tests {
         );
         assert!(!roots.contains(&storage.join("memory")), "历史数据目录只读");
         assert!(!roots.contains(&storage.join("skills")));
-    }
-
-    #[test]
-    fn common_grant_roots_only_cover_shared_storage_entries() {
-        let root = tempfile::tempdir().unwrap();
-        let storage = root.path();
-        for dir in ["tmp", "media"] {
-            std::fs::create_dir(storage.join(dir)).unwrap();
-        }
-        let plugin_data = storage.join("plugins/fs/data");
-        std::fs::create_dir_all(&plugin_data).unwrap();
-        ensure_storage_data_dir(storage, "fs").unwrap();
-        let writable = storage_root_writable_roots(storage, "fs", &plugin_data);
-        let common = common_grant_roots(storage, &writable);
-        assert_eq!(common, vec![storage.join("media"), storage.join("tmp")]);
-        // 插件自有数据目录属于针对性授权，不进入通用持久授权。
-        assert!(!common.contains(&storage.join("data/fs")));
-        assert!(!common.contains(&plugin_data));
-        // 策略未包含的共享目录（如不存在）不纳入。
-        let partial = vec![storage.join("media")];
-        assert_eq!(common_grant_roots(storage, &partial), partial);
     }
 
     #[cfg(unix)]

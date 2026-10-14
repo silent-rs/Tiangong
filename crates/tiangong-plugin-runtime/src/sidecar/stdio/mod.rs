@@ -39,10 +39,12 @@ use process::{
 };
 #[cfg(windows)]
 use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
+#[cfg(not(windows))]
+use sandbox_exemptions::storage_root_writable_roots;
 use sandbox_exemptions::{
     apply_user_cache_write, ensure_storage_data_dir, exempt_authorized_reads,
     exempt_authorized_user_credentials, isolate_other_plugin_data, resolve_launcher,
-    retain_existing_writable_roots, storage_root_writable_roots, tiangong_protected_paths,
+    retain_existing_writable_roots, tiangong_protected_paths,
 };
 
 #[cfg(test)]
@@ -599,6 +601,14 @@ impl StdioSidecarConnection {
             // 存储根按插件 ID 收拢写域：只有 data/<id>、插件安装目录 data/、
             // media、tmp 可写；根目录、logs 与其他插件数据只读（见
             // storage_root_writable_roots）。
+            //
+            // Windows 例外：AppContainer 默认不可读未授权目录，收拢写域后
+            // 存储根其余内容连读取也一并失去（旧数据迁移、skills 等失效）。
+            // 恢复收拢前的处理：整个存储根并入可写域，敏感清单仍读写双禁、
+            // 其他插件数据仍按 isolate_other_plugin_data 隔离。
+            #[cfg(windows)]
+            policy.extra_writable.push(self.config.storage_root.clone());
+            #[cfg(not(windows))]
             policy.extra_writable.extend(storage_root_writable_roots(
                 &self.config.storage_root,
                 &self.config.plugin_id,
@@ -720,22 +730,22 @@ impl StdioSidecarConnection {
                     "args": target_args,
                     "interpreter": self.config.interpreter.is_some(),
                 });
-                // Windows 授权分层：天工共享目录（media/tmp）走通用持久授权，
-                // 只授予一次；工作区、插件自有数据等差异部分每次启动临时
-                // 授予。不再按插件持久化整套策略——会话工作区与数据目录
-                // 每次变化都触发整体撤销重建，大目录传播开销最高。
+                // Windows 恢复 #655 之前的授权方式：常驻且不随用户沙箱开关
+                // 切换的 sidecar 按插件持久化整套授权（Launcher grant_cache），
+                // 其余每次启动临时授权。#655 引入的通用持久授权在
+                // CreateRestrictedToken 处报参数错误（os error 87），并在多插件
+                // 并发启动时争用同一把锁（os error 33），已停用。
                 #[cfg(windows)]
                 let request = {
                     let mut request = request;
-                    let roots = sandbox_exemptions::common_grant_roots(
-                        &self.config.storage_root,
-                        &policy.extra_writable,
-                    );
-                    if !roots.is_empty() {
-                        request["common_grants"] = serde_json::json!({
-                            "cache": crate::registry::common_grants_path(&self.config.storage_root),
-                            "roots": roots,
-                        });
+                    if !self.config.sandbox_follows_user_switch
+                        && self.config.lifecycle == crate::manifest::SidecarLifecycle::Resident
+                    {
+                        request["grant_cache"] =
+                            serde_json::json!(crate::registry::persistent_grants_path(
+                                &self.config.storage_root,
+                                &self.config.plugin_id
+                            ));
                     }
                     request
                 };

@@ -30,8 +30,6 @@ fn preload_installed_plugins_inner(
     storage_root: &Path,
     wait_for_ready: bool,
 ) -> Result<StartupPluginReadiness> {
-    #[cfg(windows)]
-    super::revoke_legacy_plugin_grants(storage_root);
     if sidecars_shutting_down() {
         bail!("应用正在退出，插件准备已取消");
     }
