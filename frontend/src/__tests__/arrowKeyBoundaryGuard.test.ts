@@ -37,24 +37,25 @@ describe('shouldPreventArrowKey', () => {
     });
   });
 
-  describe('上/下方向键（多行）', () => {
-    it('第一行任意位置按上 → 拦截', () => {
+  describe('上/下方向键（多行 / 自动换行）', () => {
+    it('光标在文本开头按上 → 拦截', () => {
       expect(shouldPreventArrowKey(makeEl('ab\ncd', 0), 'ArrowUp')).toBe(true);
-      expect(shouldPreventArrowKey(makeEl('ab\ncd', 2), 'ArrowUp')).toBe(true);
     });
-    it('非第一行按上 → 不拦截（会跳上一行）', () => {
+    it('首行非开头按上 → 不拦截（macOS 会移到开头；软换行也可能在视觉上方）', () => {
+      expect(shouldPreventArrowKey(makeEl('ab\ncd', 2), 'ArrowUp')).toBe(false);
       expect(shouldPreventArrowKey(makeEl('ab\ncd', 4), 'ArrowUp')).toBe(false);
     });
-    it('最后一行任意位置按下 → 拦截', () => {
-      expect(shouldPreventArrowKey(makeEl('ab\ncd', 3), 'ArrowDown')).toBe(true);
+    it('光标在文本末尾按下 → 拦截', () => {
       expect(shouldPreventArrowKey(makeEl('ab\ncd', 5), 'ArrowDown')).toBe(true);
     });
-    it('非最后一行按下 → 不拦截（会跳下一行）', () => {
+    it('末行非末尾按下 → 不拦截', () => {
+      expect(shouldPreventArrowKey(makeEl('ab\ncd', 3), 'ArrowDown')).toBe(false);
       expect(shouldPreventArrowKey(makeEl('ab\ncd', 1), 'ArrowDown')).toBe(false);
     });
-    it('单行文本按上/下 → 拦截', () => {
-      expect(shouldPreventArrowKey(makeEl('abc', 1), 'ArrowUp')).toBe(true);
-      expect(shouldPreventArrowKey(makeEl('abc', 1), 'ArrowDown')).toBe(true);
+    it('无换行符的长文本（自动换行）中间按上/下 → 不拦截', () => {
+      const long = 'a'.repeat(200);
+      expect(shouldPreventArrowKey(makeEl(long, 100), 'ArrowUp')).toBe(false);
+      expect(shouldPreventArrowKey(makeEl(long, 100), 'ArrowDown')).toBe(false);
     });
   });
 

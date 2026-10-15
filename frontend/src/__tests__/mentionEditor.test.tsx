@@ -167,6 +167,59 @@ describe('MentionEditor 轻量交互', () => {
     expect(onChange).toHaveBeenLastCalledWith('');
   });
 
+  it('Shift+Enter 插入换行并提交，不被序列化吞掉', async () => {
+    const onChange = vi.fn();
+    const editorRef = createRef<MentionEditorHandle>();
+    const editor = await mountEditor('abc', onChange, editorRef);
+    act(() => editorRef.current!.focus());
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => editor.dispatchEvent(event));
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith('abc\n');
+  });
+
+  it('浏览器原生换段生成的块元素序列化为换行', async () => {
+    const onChange = vi.fn();
+    const editorRef = createRef<MentionEditorHandle>();
+    const editor = await mountEditor('', onChange, editorRef);
+
+    act(() => {
+      editor.innerHTML = 'abc<div>x</div><div><br></div>';
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenLastCalledWith('abc\nx\n');
+  });
+
+  it('末尾换行的值渲染占位换行，序列化保持 round-trip', async () => {
+    const onChange = vi.fn();
+    const editorRef = createRef<MentionEditorHandle>();
+    const editor = await mountEditor('abc\n', onChange, editorRef);
+
+    expect(editor.textContent).toBe('abc\n\n');
+    expect(editorRef.current!.getText()).toBe('abc\n');
+  });
+
+  it('上下方向键只在文本首尾拦截，不阻断自动换行文本中的移动', async () => {
+    const editorRef = createRef<MentionEditorHandle>();
+    const editor = await mountEditor('a'.repeat(200), vi.fn(), editorRef);
+
+    act(() => editorRef.current!.setSelection(100));
+    expect(dispatchKey(editor, 'ArrowUp').defaultPrevented).toBe(false);
+    expect(dispatchKey(editor, 'ArrowDown').defaultPrevented).toBe(false);
+
+    act(() => editorRef.current!.setSelection(0));
+    expect(dispatchKey(editor, 'ArrowUp').defaultPrevented).toBe(true);
+    act(() => editorRef.current!.setSelection(200));
+    expect(dispatchKey(editor, 'ArrowDown').defaultPrevented).toBe(true);
+  });
+
   it('多行纯文本粘贴保留换行并清除不同平台的换行差异', async () => {
     const onChange = vi.fn();
     const editorRef = createRef<MentionEditorHandle>();

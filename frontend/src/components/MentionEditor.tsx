@@ -155,6 +155,13 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           frag.appendChild(document.createTextNode(ZWSP));
         }
       }
+      // 与 domToText 对称：pre-wrap 末尾单个换行不可见，值以换行结尾时补一个
+      // 占位换行（并入同一文本节点，WebKit 才会把末尾光标画在新行上），
+      // 保证该空行可见且光标可停留。
+      const last = blocks[blocks.length - 1];
+      if (last?.type === 'text' && last.value.endsWith('\n') && frag.lastChild) {
+        frag.lastChild.nodeValue = `${frag.lastChild.nodeValue ?? ''}\n`;
+      }
       root.replaceChildren(frag);
     }, []);
 
@@ -234,16 +241,17 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     function domToText(root: HTMLElement): string {
       // contenteditable 在不同内核中可能用 CR、LF 或 BR 表示换行；对齐 textarea
       // 的 value 语义，统一向上层提交 LF。
-      return stripZwsp(rawDomText(root)).replace(/\r\n?/g, '\n');
+      // pre-wrap 下内容末尾的那个换行不产生可见空行（WebKit insertLineBreak 在末尾
+      // 会补一个占位 '\n'），因此序列化时去掉末尾一个换行；renderBlocks 对应补回。
+      const text = stripZwsp(rawDomText(root)).replace(/\r\n?/g, '\n');
+      return text.endsWith('\n') ? text.slice(0, -1) : text;
+    }
+
+    function isBlockElement(el: HTMLElement): boolean {
+      return el.tagName === 'DIV' || el.tagName === 'P';
     }
 
     function rawDomText(root: HTMLElement): string {
-      if (
-        root.childNodes.length === 1
-        && root.firstChild?.nodeType === Node.ELEMENT_NODE
-        && (root.firstChild as HTMLElement).tagName === 'BR'
-      ) return '';
-
       let text = '';
       root.childNodes.forEach((node) => {
         if (node.nodeType === Node.TEXT_NODE) {
@@ -255,6 +263,9 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           } else if (el.tagName === 'BR') {
             text += '\n';
           } else {
+            // 浏览器原生换段（insertParagraph）会生成 <div>/<p>：块前补换行，
+            // 否则 "abc<div>x</div>" 会被序列化成 "abcx"，换行丢失。
+            if (isBlockElement(el) && text !== '' && !text.endsWith('\n')) text += '\n';
             text += rawDomText(el);
           }
         }
@@ -484,6 +495,21 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       if (e.defaultPrevented) return;
       if (disabled) return;
 
+      // 换行：外层未消费的 Enter（即 Shift+Enter）由编辑器自行插入软换行。
+      // 浏览器默认的 insertParagraph 会生成 <div> 块，与扁平文本模型不符，
+      // 会导致换行在序列化后丢失；insertLineBreak 在 pre-wrap 下插入 '\n'，
+      // 且进入原生撤销栈。
+      if (
+        e.key === 'Enter'
+        && !isComposingRef.current
+        && !e.nativeEvent.isComposing
+        && e.keyCode !== 229
+      ) {
+        e.preventDefault();
+        insertLineBreak();
+        return;
+      }
+
       const sel = window.getSelection();
       const hasSelection = !!sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed;
       const offsets = currentSelectionOffsets();
@@ -575,6 +601,29 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       onChange(text);
     }
 
+    // 在光标处插入换行。优先 execCommand('insertLineBreak')：进入原生撤销栈并
+    // 触发 input 事件由 handleInput 提交；不支持时按文本模型替换并重建 DOM。
+    function insertLineBreak() {
+      const root = rootRef.current;
+      if (!root) return;
+      let inserted = false;
+      try {
+        inserted = document.execCommand('insertLineBreak');
+      } catch {
+        inserted = false;
+      }
+      if (inserted) return;
+      const offsets = currentSelectionOffsets();
+      const text = domToText(root);
+      const start = Math.min(offsets?.start ?? text.length, text.length);
+      const end = Math.min(offsets?.end ?? text.length, text.length);
+      const replacement = deleteMentionSelection(text, start, end);
+      applyValue(
+        `${replacement.value.slice(0, replacement.offset)}\n${replacement.value.slice(replacement.offset)}`,
+        replacement.offset + 1,
+      );
+    }
+
     function isMentionKey(key: string): key is MentionKey {
       return key === 'Backspace'
         || key === 'Delete'
@@ -587,11 +636,13 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         case 'ArrowLeft':
           return pos === 0;
         case 'ArrowRight':
-          return pos === text.length;
+          return pos >= text.length;
         case 'ArrowUp':
-          return !text.slice(0, pos).includes('\n');
+          // 只在文本开头拦截：自动换行（软换行）不含 '\n'，按 '\n' 判定首行会
+          // 误拦视觉上多行之间的移动；首行按上在 macOS 会移到开头，属有效移动。
+          return pos === 0;
         case 'ArrowDown':
-          return !text.slice(pos).includes('\n');
+          return pos >= text.length;
         default:
           return false;
       }
@@ -600,10 +651,14 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     function currentSelectionOffsets(): { start: number; end: number } | null {
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return null;
+      const root = rootRef.current;
+      if (!root) return null;
       const range = sel.getRangeAt(0);
+      // 末尾占位换行（见 renderBlocks）不计入文本，偏移钳制到文本长度
+      const max = domToText(root).length;
       return {
-        start: offsetFromStart(range.startContainer, range.startOffset),
-        end: offsetFromStart(range.endContainer, range.endOffset),
+        start: Math.min(offsetFromStart(range.startContainer, range.startOffset), max),
+        end: Math.min(offsetFromStart(range.endContainer, range.endOffset), max),
       };
     }
 

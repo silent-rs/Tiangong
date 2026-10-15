@@ -40,12 +40,13 @@ export function shouldPreventArrowKey(
       return atStart;
     case 'ArrowRight':
       return atEnd;
+    // 上/下键只在文本首/尾拦截：自动换行（软换行）没有 '\n'，按 '\n' 判定首末行
+    // 会误拦视觉上的多行移动；macOS 上首行按上会移到文本开头、末行按下会移到
+    // 文本末尾，只有光标已在首/尾时才真正无法移动。
     case 'ArrowUp':
-      // 光标前没有换行 → 已在第一行，上键无法移动
-      return !value.slice(0, ss).includes('\n');
+      return atStart;
     case 'ArrowDown':
-      // 光标后没有换行 → 已在最后一行，下键无法移动
-      return !value.slice(se).includes('\n');
+      return atEnd;
     default:
       return false;
   }
