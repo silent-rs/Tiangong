@@ -29,17 +29,40 @@ pub(crate) trait DeepSeekTransport: Send + Sync {
 #[derive(Clone)]
 pub struct NativeDeepSeekTransport {
     client: tiangong_deepseek::DeepSeekClient,
+    /// 禁用代理的客户端：环境变量代理不可达（如 VPN 已关闭）时直连重试（#662）。
+    direct_client: tiangong_deepseek::DeepSeekClient,
 }
 
 impl NativeDeepSeekTransport {
     pub fn new(config: &DeepSeekConfig) -> Result<Self, LlmError> {
-        let client = tiangong_deepseek::DeepSeekClient::builder(config.api_key.clone())
+        let builder = tiangong_deepseek::DeepSeekClient::builder(config.api_key.clone())
             .base_url(config.resolved_base_url())
             .timeout(config.timeout)
-            .headers(config.headers.clone())
-            .build()
-            .map_err(map_deepseek_error)?;
-        Ok(Self { client })
+            .headers(config.headers.clone());
+        let client = builder.clone().build().map_err(map_deepseek_error)?;
+        let direct_client = builder.no_proxy().build().map_err(map_deepseek_error)?;
+        Ok(Self {
+            client,
+            direct_client,
+        })
+    }
+
+    /// 执行请求；连接阶段失败时以直连客户端重试一次（请求尚未送达服务端，不会重复计费）。
+    async fn with_direct_retry<R, Fut>(
+        &self,
+        operation: impl Fn(tiangong_deepseek::DeepSeekClient) -> Fut,
+    ) -> Result<R, LlmError>
+    where
+        Fut: std::future::Future<Output = Result<R, tiangong_deepseek::DeepSeekError>>,
+    {
+        match operation(self.client.clone()).await {
+            Err(error) if error.is_connect() => {
+                tracing::warn!(error = %error, "DeepSeek 连接失败，改用直连重试");
+                operation(self.direct_client.clone()).await
+            }
+            result => result,
+        }
+        .map_err(map_deepseek_error)
     }
 }
 
@@ -49,28 +72,25 @@ impl DeepSeekTransport for NativeDeepSeekTransport {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, LlmError> {
-        self.client
-            .chat()
-            .create(request)
-            .await
-            .map_err(map_deepseek_error)
+        self.with_direct_retry(|client| {
+            let request = request.clone();
+            async move { client.chat().create(request).await }
+        })
+        .await
     }
 
     async fn create_stream(&self, request: ChatCompletionRequest) -> Result<EventStream, LlmError> {
-        self.client
-            .chat()
-            .create_stream(request)
-            .await
-            .map_err(map_deepseek_error)
+        self.with_direct_retry(|client| {
+            let request = request.clone();
+            async move { client.chat().create_stream(request).await }
+        })
+        .await
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         let response = self
-            .client
-            .models()
-            .list()
-            .await
-            .map_err(map_deepseek_error)?;
+            .with_direct_retry(|client| async move { client.models().list().await })
+            .await?;
         Ok(response
             .data
             .into_iter()

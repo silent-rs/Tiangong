@@ -152,7 +152,7 @@ fn parse_usage(body: &Value) -> CodexUsage {
 /// 供宿主进程（模型管理 / CLI）调用：沿用 [`access`] 的自动续期，
 /// 遇 401 强制刷新后重试一次。
 pub async fn usage() -> Result<CodexUsage, LlmError> {
-    let client = http_client()?;
+    let client = http_client(false)?;
     let url = format!("{CODEX_BASE_URL}/usage");
     let mut force_refresh = false;
     loop {
@@ -167,8 +167,7 @@ pub async fn usage() -> Result<CodexUsage, LlmError> {
         if let Some(residency) = access.residency.as_deref() {
             request = request.header("x-openai-internal-codex-residency", residency);
         }
-        let response = request
-            .send()
+        let response = crate::http::send_with_direct_retry(request, || http_client(true))
             .await
             .map_err(|err| LlmError::Transport(format!("查询 ChatGPT 用量失败：{err}")))?;
         let status = response.status();

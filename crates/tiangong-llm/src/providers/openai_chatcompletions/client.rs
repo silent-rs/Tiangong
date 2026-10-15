@@ -194,7 +194,15 @@ pub(crate) async fn send_request(
     if !api_key.trim().is_empty() {
         request = request.bearer_auth(api_key);
     }
-    let response = timeout(request_timeout, request.send())
+    let direct = || {
+        reqwest::Client::builder()
+            .default_headers(headers.clone())
+            .retry(reqwest::retry::never())
+            .no_proxy()
+            .build()
+    };
+    let send = crate::http::send_with_direct_retry(request, direct);
+    let response = timeout(request_timeout, send)
         .await
         .map_err(|_| stream_timeout_error(request_timeout))??;
     let status = response.status();
@@ -326,8 +334,14 @@ impl OpenAiClient {
             attempt = 0,
             "开始 OpenAI 兼容请求"
         );
-        let response = req
-            .send()
+        let direct = || {
+            reqwest::Client::builder()
+                .timeout(self.config.timeout)
+                .default_headers(self.config.headers.clone())
+                .no_proxy()
+                .build()
+        };
+        let response = crate::http::send_with_direct_retry(req, direct)
             .await
             .with_context(|| format!("Rerank 请求失败：{url}"))
             .map_err(|err| LlmError::Transport(err.to_string()))?;
@@ -477,11 +491,17 @@ pub(crate) async fn list_models_via_config(
         .timeout(timeout)
         .build()
         .map_err(|err| LlmError::Transport(err.to_string()))?;
-    let response = client
+    let request = client
         .get(&url)
         .headers(headers.clone())
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send()
+        .header("Authorization", format!("Bearer {}", api_key));
+    let direct = || {
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .no_proxy()
+            .build()
+    };
+    let response = crate::http::send_with_direct_retry(request, direct)
         .await
         .with_context(|| format!("请求模型列表失败：{url}"))
         .map_err(|err| LlmError::Transport(err.to_string()))?;

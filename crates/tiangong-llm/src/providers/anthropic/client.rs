@@ -24,6 +24,8 @@ pub(crate) trait AnthropicTransport: Send + Sync {
 #[derive(Clone)]
 pub struct NativeAnthropicTransport {
     client: NativeAnthropicClient,
+    /// 禁用代理的客户端：环境变量代理不可达（如 VPN 已关闭）时直连重试（#662）。
+    direct_client: NativeAnthropicClient,
 }
 
 impl NativeAnthropicTransport {
@@ -36,8 +38,30 @@ impl NativeAnthropicTransport {
         if let Some(base_url) = config.normalized_base_url() {
             builder = builder.base_url(base_url);
         }
-        let client = builder.build().map_err(map_anthropic_error)?;
-        Ok(Self { client })
+        let client = builder.clone().build().map_err(map_anthropic_error)?;
+        let direct_client = builder.no_proxy().build().map_err(map_anthropic_error)?;
+        Ok(Self {
+            client,
+            direct_client,
+        })
+    }
+
+    /// 执行请求；连接阶段失败时以直连客户端重试一次（请求尚未送达服务端，不会重复计费）。
+    async fn with_direct_retry<R, Fut>(
+        &self,
+        operation: impl Fn(NativeAnthropicClient) -> Fut,
+    ) -> Result<R, LlmError>
+    where
+        Fut: std::future::Future<Output = Result<R, tiangong_anthropic::AnthropicError>>,
+    {
+        match operation(self.client.clone()).await {
+            Err(error) if error.is_connect() => {
+                tracing::warn!(error = %error, "Anthropic 连接失败，改用直连重试");
+                operation(self.direct_client.clone()).await
+            }
+            result => result,
+        }
+        .map_err(map_anthropic_error)
     }
 }
 
@@ -47,25 +71,25 @@ impl AnthropicTransport for NativeAnthropicTransport {
         &self,
         request: MessagesCreateRequest,
     ) -> Result<MessagesCreateResponse, LlmError> {
-        self.client
-            .create(request)
-            .await
-            .map_err(map_anthropic_error)
+        self.with_direct_retry(|client| {
+            let request = request.clone();
+            async move { client.create(request).await }
+        })
+        .await
     }
 
     async fn create_stream(&self, request: MessagesCreateRequest) -> Result<EventStream, LlmError> {
-        self.client
-            .create_stream(request)
-            .await
-            .map_err(map_anthropic_error)
+        self.with_direct_retry(|client| {
+            let request = request.clone();
+            async move { client.create_stream(request).await }
+        })
+        .await
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         let response = self
-            .client
-            .list_models()
-            .await
-            .map_err(map_anthropic_error)?;
+            .with_direct_retry(|client| async move { client.list_models().await })
+            .await?;
         Ok(response
             .data
             .into_iter()

@@ -385,6 +385,8 @@ pub type ProgressFn = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 pub struct PluginRepository {
     http: reqwest::Client,
+    /// 禁用代理的客户端：环境变量代理不可达（如 VPN 已关闭）时直连重试（#662）。
+    direct_http: reqwest::Client,
 }
 
 /// 平台支持判断（市场列表与下载共用规则）：无 sidecar 制品的纯 UI/WASM
@@ -398,13 +400,18 @@ fn sidecar_supported(sidecars: &BTreeMap<String, RemoteArtifact>, platform: &str
 
 impl PluginRepository {
     pub fn new() -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent("tiangong-plugin-downloader")
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
+        let builder = || {
+            reqwest::Client::builder()
+                .user_agent("tiangong-plugin-downloader")
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(120))
+        };
+        let http = builder().build().context("构建插件下载客户端失败")?;
+        let direct_http = builder()
+            .no_proxy()
             .build()
             .context("构建插件下载客户端失败")?;
-        Ok(Self { http })
+        Ok(Self { http, direct_http })
     }
 
     pub async fn list_available(&self, storage_root: &Path) -> Result<Vec<AvailablePlugin>> {
@@ -456,9 +463,7 @@ impl PluginRepository {
         let endpoint = catalog_endpoint();
         validate_download_url(&endpoint, "OSS 插件目录")?;
         let response = self
-            .http
             .get(&endpoint)
-            .send()
             .await
             .with_context(|| format!("请求 OSS 插件目录失败: {endpoint}"))?;
         if !response.status().is_success() {
@@ -708,12 +713,20 @@ impl PluginRepository {
         Ok(staged)
     }
 
+    /// GET 请求；连接阶段失败（如环境变量代理不可达）时以直连客户端重试一次（#662）。
+    ///
+    /// 连接失败时请求尚未送达服务端，重试不会造成重复下载；HTTP 状态等其他错误不重试。
+    async fn get(&self, url: &str) -> reqwest::Result<reqwest::Response> {
+        match self.http.get(url).send().await {
+            Err(error) if error.is_connect() => self.direct_http.get(url).send().await,
+            result => result,
+        }
+    }
+
     async fn download_unchecked(&self, url: &str, destination: &Path) -> Result<()> {
         validate_download_url(url, "插件签名制品")?;
         let response = self
-            .http
             .get(url)
-            .send()
             .await
             .with_context(|| format!("下载插件签名制品失败: {url}"))?;
         if !response.status().is_success() {
@@ -738,9 +751,7 @@ impl PluginRepository {
         ensure_not_symlink(destination)?;
 
         let response = self
-            .http
             .get(&artifact.url)
-            .send()
             .await
             .with_context(|| format!("下载插件制品失败: {}", artifact.url))?;
         if !response.status().is_success() {
@@ -1106,6 +1117,32 @@ fn set_executable(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn 代理不可达时直连重试() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        // 端口 9（discard）通常无人监听，模拟 VPN 关闭后失效的代理。
+        let repository = PluginRepository {
+            http: reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+                .build()
+                .unwrap(),
+            direct_http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        };
+        let response = repository.get(&format!("http://{address}/")).await.unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        server.join().unwrap();
+    }
 
     /// resources 声明目录随导入递归进入暂存区（plugin-dev 模板分发链路）。
     #[test]

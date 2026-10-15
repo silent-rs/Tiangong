@@ -71,11 +71,14 @@ impl CodexClient {
         let mut force_refresh = false;
         loop {
             let (token, headers) = self.auth(force_refresh).await?;
-            let response = client
-                .get(&url)
-                .headers(headers)
-                .bearer_auth(token)
-                .send()
+            let request = client.get(&url).headers(headers).bearer_auth(token);
+            let direct = || {
+                reqwest::Client::builder()
+                    .timeout(self.config.timeout)
+                    .no_proxy()
+                    .build()
+            };
+            let response = crate::http::send_with_direct_retry(request, direct)
                 .await
                 .map_err(|err| LlmError::Transport(format!("请求 Codex 模型列表失败：{err}")))?;
             let status = response.status();

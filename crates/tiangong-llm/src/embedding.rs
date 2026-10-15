@@ -166,8 +166,13 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             request = request.bearer_auth(&self.api_key);
         }
 
-        let resp = request
-            .send()
+        let direct = || {
+            reqwest::Client::builder()
+                .user_agent(crate::headers::TIANGONG_USER_AGENT)
+                .no_proxy()
+                .build()
+        };
+        let resp = crate::http::send_with_direct_retry(request, direct)
             .await
             .with_context(|| format!("Embedding 请求失败: {url}"))?;
 

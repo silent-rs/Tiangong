@@ -365,10 +365,15 @@ pub async fn logout() -> Result<CodexAuthStatus> {
 /// refresh token 会被服务端轮换，多进程各自刷新会互相作废。
 static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-pub(super) fn http_client() -> Result<reqwest::Client, LlmError> {
-    reqwest::Client::builder()
+/// 授权/用量请求客户端；`no_proxy` 为 true 时禁用代理，供直连重试使用（#662）。
+pub(super) fn http_client(no_proxy: bool) -> Result<reqwest::Client, LlmError> {
+    let mut builder = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
-        .user_agent(crate::headers::TIANGONG_USER_AGENT)
+        .user_agent(crate::headers::TIANGONG_USER_AGENT);
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|err| LlmError::Transport(format!("创建 HTTP 客户端失败：{err}")))
 }
@@ -430,14 +435,14 @@ async fn post_token_form(params: &[(&str, &str)]) -> Result<reqwest::Response, L
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params)
         .finish();
-    http_client()?
+    let request = http_client(false)?
         .post(format!("{ISSUER}/oauth/token"))
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
         )
-        .body(body)
-        .send()
+        .body(body);
+    crate::http::send_with_direct_retry(request, || http_client(true))
         .await
         .map_err(|err| LlmError::Transport(format!("请求 OpenAI 授权服务失败：{err}")))
 }
@@ -822,11 +827,11 @@ pub async fn start_device_login() -> Result<CodexLoginStart> {
     if let Some(previous) = guard.take() {
         previous.abort.abort();
     }
-    let client = http_client().map_err(|err| anyhow!("{err}"))?;
-    let response = client
+    let client = http_client(false).map_err(|err| anyhow!("{err}"))?;
+    let request = client
         .post(format!("{ISSUER}/api/accounts/deviceauth/usercode"))
-        .json(&serde_json::json!({ "client_id": CODEX_CLIENT_ID }))
-        .send()
+        .json(&serde_json::json!({ "client_id": CODEX_CLIENT_ID }));
+    let response = crate::http::send_with_direct_retry(request, || http_client(true))
         .await
         .context("请求设备码失败")?;
     let status = response.status();
@@ -864,14 +869,13 @@ async fn poll_device_login(
     interval: Duration,
 ) -> Result<CodexAuthStatus> {
     loop {
-        let response = client
+        let request = client
             .post(format!("{ISSUER}/api/accounts/deviceauth/token"))
             .json(&serde_json::json!({
                 "device_auth_id": device.device_auth_id,
                 "user_code": device.user_code,
-            }))
-            .send()
-            .await;
+            }));
+        let response = crate::http::send_with_direct_retry(request, || http_client(true)).await;
         match response {
             Ok(response) if response.status().is_success() => {
                 let grant: DeviceTokenGrant =

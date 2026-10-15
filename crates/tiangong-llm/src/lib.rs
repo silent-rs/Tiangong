@@ -3,6 +3,7 @@ pub mod embedding;
 pub mod endpoint;
 pub mod error;
 mod headers;
+mod http;
 pub mod message;
 pub mod model;
 pub mod models_config;

@@ -1775,6 +1775,9 @@ export function PluginView({ contribution }: { contribution: SlotContributionEnt
   );
 }
 
+/** 应用更新请求读取启动时的代理环境变量，关闭 VPN/代理后需重启才能恢复（#662）。 */
+const UPDATE_NETWORK_HINT = '如刚开启或关闭过 VPN/代理，请重启天工后重试。';
+
 function AppUpdateSettings() {
   const storeUpdate = useStore((s) => s.updateAvailable);
   const [currentVersion, setCurrentVersion] = useState('');
@@ -1866,7 +1869,7 @@ function AppUpdateSettings() {
       showSuccess('发现新版本', `可更新到 ${update.version}`);
     } catch (error) {
       console.error('检查更新失败:', error);
-      showError('检查失败', `${error}`);
+      showError('检查失败', `${error}。${UPDATE_NETWORK_HINT}`);
     } finally {
       setIsChecking(false);
     }
@@ -1900,7 +1903,7 @@ function AppUpdateSettings() {
       await relaunch();
     } catch (error) {
       console.error('安装更新失败:', error);
-      showError('安装失败', `${error}`);
+      showError('安装失败', `${error}。${UPDATE_NETWORK_HINT}`);
     } finally {
       setIsInstalling(false);
     }
