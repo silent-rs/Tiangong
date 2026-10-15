@@ -12174,7 +12174,6 @@ dependencies = [
  "tempfile",
  "tiangong-toolkit",
  "tokio",
- "tracing",
  "windows-sys 0.61.2",
 ]
 

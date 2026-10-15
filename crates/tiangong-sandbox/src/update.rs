@@ -81,7 +81,7 @@ pub enum UpdateStatus {
     },
 }
 
-/// 构建更新客户端；`no_proxy` 为 true 时禁用代理，供直连回退使用（#662）。
+/// 构建更新客户端；`no_proxy` 为 true 时禁用代理（含环境变量代理）。
 fn update_client(no_proxy: bool) -> reqwest::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(format!("tiangong-sandbox/{}", env!("CARGO_PKG_VERSION")))
@@ -95,6 +95,8 @@ fn update_client(no_proxy: bool) -> reqwest::Result<reqwest::Client> {
 
 pub struct SelfUpdater {
     client: reqwest::Client,
+    /// 禁用代理的客户端：环境变量代理不可达（如 VPN 已关闭）时直连重试（#662）。
+    direct_client: reqwest::Client,
     manifest_url: String,
     official_pubkey_b64: String,
 }
@@ -112,8 +114,10 @@ impl SelfUpdater {
         let manifest_url = manifest_url.into();
         validate_https_url(&manifest_url, "更新清单")?;
         let client = update_client(false).context("构建 Sandbox 更新客户端失败")?;
+        let direct_client = update_client(true).context("构建 Sandbox 更新客户端失败")?;
         Ok(Self {
             client,
+            direct_client,
             manifest_url,
             official_pubkey_b64: public_key_b64.into().trim().to_string(),
         })
@@ -275,11 +279,8 @@ impl SelfUpdater {
     }
 
     async fn fetch_valid_manifest(&self) -> Result<UpdateManifest> {
-        let request = self.client.get(&self.manifest_url);
-        let response =
-            crate::proxy_fallback::send_with_direct_fallback("sandbox-update", request, || {
-                update_client(true)
-            })
+        let response = self
+            .get(&self.manifest_url)
             .await
             .with_context(|| format!("拉取 Sandbox 更新清单失败: {}", self.manifest_url))?;
         if !response.status().is_success() {
@@ -288,6 +289,16 @@ impl SelfUpdater {
         let manifest: UpdateManifest = response.json().await.context("解析更新清单失败")?;
         validate_manifest(&manifest)?;
         Ok(manifest)
+    }
+
+    /// GET 请求；连接阶段失败（如环境变量代理不可达）时以直连客户端重试一次（#662）。
+    ///
+    /// 连接失败时请求尚未送达服务端，重试不会造成重复下载；HTTP 状态等其他错误不重试。
+    async fn get(&self, url: &str) -> reqwest::Result<reqwest::Response> {
+        match self.client.get(url).send().await {
+            Err(error) if error.is_connect() => self.direct_client.get(url).send().await,
+            result => result,
+        }
     }
 
     async fn download_verified(&self, url: &str, checksum: &str, path: &Path) -> Result<()> {
@@ -305,12 +316,7 @@ impl SelfUpdater {
     }
 
     async fn download_limited(&self, url: &str, path: &Path, limit: u64) -> Result<()> {
-        let request = self.client.get(url);
-        let response =
-            crate::proxy_fallback::send_with_direct_fallback("sandbox-update", request, || {
-                update_client(true)
-            })
-            .await?;
+        let response = self.get(url).await?;
         if !response.status().is_success() {
             bail!("下载响应异常: {} {url}", response.status());
         }
@@ -831,6 +837,35 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&outside).unwrap(), b"safe");
+    }
+
+    #[tokio::test]
+    async fn 代理不可达时直连重试() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        // 端口 9（discard）通常无人监听，模拟 VPN 关闭后失效的代理。
+        let dead_proxy = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        let updater = SelfUpdater {
+            client: dead_proxy,
+            direct_client: update_client(true).unwrap(),
+            manifest_url: String::new(),
+            official_pubkey_b64: String::new(),
+        };
+        let response = updater.get(&format!("http://{address}/")).await.unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        server.join().unwrap();
     }
 
     #[cfg(unix)]
