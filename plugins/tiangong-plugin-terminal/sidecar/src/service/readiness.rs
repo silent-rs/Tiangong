@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 
 use super::shell::{ShellKind, shell_ready_probe, shell_ready_probe_completed};
-use super::{COMMAND_POLL_INTERVAL_MS, SessionPhase, ShellNotReady, TerminalService};
+use super::{COMMAND_POLL_INTERVAL_MS, PtySession, SessionPhase, ShellNotReady, TerminalService};
 
 /// 登录 shell 清理残留输入并确认重新接管终端的最长等待时间。
 const SHELL_READY_TIMEOUT_SECS: u64 = 3;
@@ -132,52 +132,72 @@ impl TerminalService {
         }
     }
 
-    /// PTY 前台是否是一个正在等待按键的交互程序。
+    /// PTY 前台进程组归属：登录 shell 自身，还是被子程序占据。
     ///
-    /// 两个条件同时成立才算：
-    /// 1. 前台进程组不是登录 shell 自身（`tcgetpgrp`）——shell 把前台
-    ///    让给了子程序；
-    /// 2. tty 已被切成非规范模式（`ICANON` 被清除）——交互程序为了逐键
-    ///    读取必然这么做，而 `cargo build`、`pytest`、`sleep` 这类命令
-    ///    从不碰 tty 模式，ICANON 始终保持开启。
-    ///
-    /// 条件 1 单独不足以判定：任何前台命令都会占据前台进程组。条件 2
-    /// 才是区分「交互程序在等输入」与「普通命令在安静地跑」的依据，
-    /// 因此长时间编译、测试不会被误判。
+    /// 「前台是 shell」是命令已结束、shell 已回到提示符的必要条件——命令
+    /// 运行期间 shell 把前台让给命令的进程组。被占据时再读 tty 模式：
+    /// 交互程序（ssh、vi、REPL）为逐键读取必然清除 `ICANON`，而
+    /// `cargo build`、`pytest`、`sleep` 这类命令从不碰 tty 模式。
     ///
     /// 取不到信息（非 Unix、fd 不可用）时返回 None，调用方按「无法判定」
-    /// 处理，保持原有等待行为。
+    /// 处理。
     #[cfg(unix)]
-    pub(super) fn foreground_is_interactive(&self, session_id: &str) -> Option<bool> {
-        let (shell_pid, leader, raw_fd) = self
-            .with_session(session_id, |session| {
-                Ok((
-                    session.shell_pid,
-                    session.master.process_group_leader(),
-                    session.master.as_raw_fd(),
-                ))
-            })
-            .ok()?;
-        let shell_pid = shell_pid? as i64;
-        let leader = leader? as i64;
-        if leader == shell_pid {
-            // 前台是 shell 自身：没有命令在跑，谈不上等待输入。
-            return Some(false);
-        }
-        let fd = raw_fd?;
-        let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
-        // SAFETY: fd 来自存活会话持有的 PTY master，tcgetattr 只读取属性。
-        if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
-            return None;
-        }
-        // SAFETY: tcgetattr 返回 0 表示结构已被完整初始化。
-        let termios = unsafe { termios.assume_init() };
-        Some(termios.c_lflag & libc::ICANON == 0)
+    pub(super) fn foreground(&self, session_id: &str) -> Option<Foreground> {
+        self.with_session(session_id, |session| Ok(foreground_of(session)))
+            .ok()
+            .flatten()
     }
 
     /// Windows（ConPTY）没有前台进程组与 termios，无法判定。
     #[cfg(not(unix))]
-    pub(super) fn foreground_is_interactive(&self, _session_id: &str) -> Option<bool> {
+    pub(super) fn foreground(&self, _session_id: &str) -> Option<Foreground> {
         None
     }
+
+    /// PTY 前台是否是一个正在等待按键的交互程序（见 [`Self::foreground`]）。
+    ///
+    /// 前台被占据单独不足以判定：任何前台命令都会占据前台进程组。tty
+    /// 非规范模式才是区分「交互程序在等输入」与「普通命令在安静地跑」
+    /// 的依据，因此长时间编译、测试不会被误判。
+    pub(super) fn foreground_is_interactive(&self, session_id: &str) -> Option<bool> {
+        self.foreground(session_id)
+            .map(|foreground| matches!(foreground, Foreground::Program { interactive: true }))
+    }
+}
+
+/// PTY 前台进程组归属（见 [`TerminalService::foreground`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Foreground {
+    /// 前台是登录 shell 自身：没有命令占据终端。
+    Shell,
+    /// 前台被子程序占据；`interactive` 表示 tty 已切成非规范模式。
+    Program { interactive: bool },
+}
+
+/// 直接基于会话判定前台归属：供已持有会话表锁的调用方（选终端、
+/// terminal_send 的完成判定）使用，避免重入加锁。
+#[cfg(unix)]
+pub(super) fn foreground_of(session: &PtySession) -> Option<Foreground> {
+    let shell_pid = session.shell_pid? as i64;
+    let leader = session.master.process_group_leader()? as i64;
+    if leader == shell_pid {
+        return Some(Foreground::Shell);
+    }
+    let fd = session.master.as_raw_fd()?;
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
+    // SAFETY: fd 来自存活会话持有的 PTY master，tcgetattr 只读取属性。
+    if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: tcgetattr 返回 0 表示结构已被完整初始化。
+    let termios = unsafe { termios.assume_init() };
+    Some(Foreground::Program {
+        interactive: termios.c_lflag & libc::ICANON == 0,
+    })
+}
+
+/// Windows（ConPTY）没有前台进程组与 termios，无法判定。
+#[cfg(not(unix))]
+pub(super) fn foreground_of(_session: &PtySession) -> Option<Foreground> {
+    None
 }

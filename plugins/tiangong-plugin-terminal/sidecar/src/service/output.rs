@@ -42,6 +42,7 @@ pub(super) fn record_raw_output(
     };
     session.raw_history.extend_from_slice(bytes);
     session.raw_bytes_total = session.raw_bytes_total.saturating_add(bytes.len() as u64);
+    session.last_output_at = std::time::Instant::now();
     let overflow = session
         .raw_history
         .len()

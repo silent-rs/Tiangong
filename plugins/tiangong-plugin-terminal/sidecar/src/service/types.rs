@@ -125,6 +125,19 @@ pub(super) struct SendResponse {
     pub(super) stdout: String,
     pub(super) exit_code: i32,
     pub(super) interactive_mode: bool,
+    /// 所发命令的判定：completed / still_running / interactive / unknown；
+    /// 只发送按键且没有待确认命令时为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) status: Option<&'static str>,
+    /// 待确认命令的文本（status 存在时给出）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) command: Option<String>,
+    /// 待确认命令已执行的秒数（status 存在时给出）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) elapsed_secs: Option<u64>,
+    /// 上一条命令仍在执行，本次以 enter=true 发送的输入被拒绝、未写入。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) rejected: bool,
 }
 
 #[derive(Debug, Deserialize)]

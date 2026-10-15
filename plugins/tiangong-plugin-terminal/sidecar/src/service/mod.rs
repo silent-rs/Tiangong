@@ -28,6 +28,7 @@ mod dispatch;
 mod exec;
 mod frontend;
 mod input;
+mod jobs;
 mod output;
 mod protocol;
 mod readiness;
@@ -64,6 +65,9 @@ const COMMAND_POLL_INTERVAL_MS: u64 = 50;
 /// 最后一个 PTY 会话结束后保留短暂窗口，让关闭响应完成并容纳紧邻的新建请求。
 const SIDECAR_IDLE_EXIT_SECS: u64 = 5;
 
+/// 空闲时检查遗留后台作业的间隔：枚举进程有成本，不必每轮都做。
+const BACKGROUND_JOB_CHECK_INTERVAL_SECS: u64 = 2;
+
 /// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间
 /// （宿主统一的实例资源后台挂载上限）。
 const FRONTEND_ATTACH_WAIT_MS: u64 = tiangong_plugin_runtime::protocol::FRONTEND_ATTACH_WAIT_MS;
@@ -81,6 +85,9 @@ pub struct TerminalService {
     /// 进行中或等待正式取消处理的 Agent 工具调用（sidecar request_id → 执行终端）。
     /// 执行 future 可以先被丢弃，本表必须保留到正常完成或 cancel() 主动清除。
     active_tools: Arc<Mutex<HashMap<String, ActiveTool>>>,
+    /// 登录 shell 的作业会话登记：识别 `&` / `nohup` 遗留的后台进程，
+    /// 空闲退出前确认它们已全部结束（issue #672，见 [`jobs`]）。
+    jobs: Arc<jobs::JobTracker>,
 }
 
 /// 活动工具调用的取消所需信息。
@@ -137,6 +144,8 @@ struct PtySession {
     raw_history_start: u64,
     /// 原始输出累计字节数，不受环形缓冲截断影响。
     raw_bytes_total: u64,
+    /// 最近一次收到 PTY 输出的时刻（判定输出静默）。
+    last_output_at: Instant,
     /// 用户可见输出：过滤内部标记后供 UI 重放。
     display_history: Vec<u8>,
     /// xterm 回传的当前可见画面，供 terminal_send 返回交互结果。
@@ -150,6 +159,14 @@ struct PtySession {
     /// 收尾后 shell 会把它执行掉并回显；选终端时据此判断 Unresponsive
     /// 终端是否已自行恢复，避免长任务结束后终端永久退出复用池。
     pending_ready_marker: Option<String>,
+    /// terminal_send 以 enter=true 发出、尚未确认完成的命令（见
+    /// [`input::PendingSend`]）。
+    pending_send: Option<input::PendingSend>,
+    /// terminal_send 增量读取游标：重复等待时只返回上次之后的新输出。
+    send_read_offset: Option<u64>,
+    /// 最近确认回到提示符时的提示符行：只补发回车（input 为空）时，
+    /// 输入行里混着先前键入的文本，以它作为完成判定的提示符基线。
+    prompt_hint: Option<String>,
     /// 正在执行的命令文本（进入执行态时记录，供 terminal_status 查询）。
     /// 回到空闲时清空；交互中与未就绪（收尾中）保留——查询时能看到
     /// 终端里跑的是什么程序对排查有直接价值。
@@ -185,6 +202,7 @@ impl TerminalService {
             sequence: Mutex::new(0),
             spawn_lock: Mutex::new(()),
             active_tools: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(jobs::JobTracker::default()),
         }
     }
 
@@ -211,12 +229,19 @@ impl TerminalService {
 
     /// terminal 不随 App 常驻：首次业务请求由宿主按需拉起，最后一个 PTY
     /// 会话结束且空闲窗口届满后退出；共享连接会在下次操作时重新启动。
+    ///
+    /// 仍有终端遗留的后台作业（`&` / `nohup`）时不退出：退出后它们落在
+    /// 旧沙箱实例里，新 sidecar 无权向其发信号，只能请用户手动结束
+    /// （issue #672）。保持存活期间 Agent 可经 terminal_status 定位并结束。
     pub fn start_idle_exit_monitor(&self) {
         let sessions = Arc::clone(&self.sessions);
         let last_activity = Arc::clone(&self.last_activity);
+        let jobs = Arc::clone(&self.jobs);
         if let Err(error) = std::thread::Builder::new()
             .name("terminal-idle-exit".to_string())
             .spawn(move || {
+                let mut last_job_check: Option<Instant> = None;
+                let mut reported_jobs = false;
                 loop {
                     std::thread::sleep(Duration::from_millis(250));
                     // 已死亡未回收的会话不算活跃：否则 shell 退出后 sidecar
@@ -239,10 +264,29 @@ impl TerminalService {
                         .is_some_and(|activity| {
                             activity.elapsed() >= Duration::from_secs(SIDECAR_IDLE_EXIT_SECS)
                         });
-                    if idle {
-                        tracing::info!("terminal sidecar 已无 PTY 会话，退出空闲进程");
-                        std::process::exit(0);
+                    if !idle {
+                        continue;
                     }
+                    if last_job_check.is_some_and(|at| {
+                        at.elapsed() < Duration::from_secs(BACKGROUND_JOB_CHECK_INTERVAL_SECS)
+                    }) {
+                        continue;
+                    }
+                    last_job_check = Some(Instant::now());
+                    let remaining = jobs.live_jobs(None, |_| false);
+                    if !remaining.is_empty() {
+                        if !reported_jobs {
+                            let pids: Vec<i32> = remaining.iter().map(|job| job.pid).collect();
+                            tracing::info!(
+                                ?pids,
+                                "terminal sidecar 无 PTY 会话但仍有后台作业，保持存活以便后续结束"
+                            );
+                            reported_jobs = true;
+                        }
+                        continue;
+                    }
+                    tracing::info!("terminal sidecar 已无 PTY 会话，退出空闲进程");
+                    std::process::exit(0);
                 }
             })
         {

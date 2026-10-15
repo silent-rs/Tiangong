@@ -22,6 +22,19 @@ sidecar 握手通过 `tool:<name>` capabilities 注册五个工具 Handler，宿
 执行命令——SSH 等远端行编辑器在正文与回车同包到达时偶发吞掉回车，分开
 写入可稳定触发执行。
 
+`enter: true` 发出的命令会等到真正结束才返回 `completed`，`wait`（默认
+10 秒，最大 110 秒）只是上限：本地 shell 按前台进程组回到 shell 判定，
+SSH 等交互程序内读不到对端进程，按发送前的提示符重新停在光标行判定。
+超过上限仍未结束返回 `still_running` 与截至目前的新增输出；此时再以
+`enter: true` 发送新命令会被拒绝且不写入（否则会被排进 tty 输入缓冲延后
+执行，输出整体错位），`input` 留空且不设 `enter` 即继续等待并增量读取。
+`run_command` / `run_shell` 不复用前台被程序占据的终端（如已 SSH 登录）。
+
+终端里 `&` / `nohup` 启动的后台进程留在登录 shell 的会话里，sidecar 会
+登记这些会话：仍有存活的后台进程时不做空闲退出（退出后新 sidecar 在另一
+个沙箱实例中，无权向其发信号），`terminal_status` 概要以
+`background_jobs` 列出其 pid、进程名与所属终端，供 Agent 用 `kill` 结束。
+
 sidecar 执行中经进度帧请求宿主 App 原语（`host_action`，白名单
 `app.open` / `app.close`）：长任务执行期间终端标签即时建立，用户可
 实时查看输出。Agent 新建终端时，隐藏标签先完成输出订阅和精确 PTY

@@ -21,6 +21,7 @@ pub(super) use super::{ActiveTool, SessionPhase, TerminalService};
 
 mod cancel;
 mod frontend;
+mod send;
 mod tools;
 
 #[derive(Clone)]

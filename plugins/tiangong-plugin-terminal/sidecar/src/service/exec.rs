@@ -12,6 +12,7 @@ use super::protocol::{
     CommandMarkers, ParsedCommandOutput, command_from_request, interactive_cwd_command,
     parse_command_output, prepare_non_interactive_command,
 };
+use super::readiness::Foreground;
 use super::shell::{shell_ready_probe, shell_ready_probe_completed};
 use super::types::{ExecRequest, ExecResponse};
 use super::{COMMAND_POLL_INTERVAL_MS, SessionEndState, SessionPhase, TerminalService};
@@ -279,21 +280,41 @@ impl TerminalService {
             // 区别是「shell 是否已回到提示符」：向 shell 写一条就绪探针，
             // 前台还有命令在跑时它只会躺在输入缓冲里不被执行；夭折后
             // shell 已回到提示符，探针立刻被执行并回显 marker。
+            //
+            // 探针只在前台已是登录 shell 时才发（issue #581）：前台仍被命令
+            // 占据时 shell 必然没回到提示符，探针只会落进该命令的 stdin——
+            // git/ssh 这类读 stdin 的程序会把它当输入吃掉，静默的长命令则
+            // 在探测窗口内恰好结束时，shell 随即执行探针，被误判成夭折并
+            // 丢掉尾部输出。取不到前台信息（Windows）时保持原有探测。
             if last_output_at.elapsed() >= Duration::from_secs(SILENT_ABORTED_WRAPPER_SECS)
                 && parsed.exit_code.is_none()
                 && aborted_probes < MAX_ABORTED_WRAPPER_PROBES
                 && aborted_probe_at.is_none_or(|at: Instant| {
                     at.elapsed() >= Duration::from_secs(ABORTED_WRAPPER_PROBE_INTERVAL_SECS)
                 })
+                && !matches!(
+                    self.foreground(&request.session_id),
+                    Some(Foreground::Program { .. })
+                )
             {
                 aborted_probes += 1;
                 aborted_probe_at = Some(Instant::now());
                 if self.wrapper_aborted(&request.session_id).await? {
+                    // 探针被执行只说明 shell 此刻在提示符。命令可能恰好在
+                    // 探测窗口内正常结束——它的 end marker 先于探针输出，
+                    // 必须以探针之后的完整输出重新解析，已完成就按正常结果
+                    // 收尾，不得误报夭折、丢掉尾部输出。
+                    let raw = self.raw_output_since(&request.session_id, start_offset)?;
+                    let reparsed = parse_command_output(&raw, &markers);
+                    if reparsed.completed || reparsed.exit_code.is_some() {
+                        let end_state = self.session_end_state(&request.session_id);
+                        return Ok(self.finish_parsed(&request.session_id, reparsed, end_state));
+                    }
                     tracing::warn!(
                         session_id = request.session_id,
                         "命令包装脚本未正常结束，shell 已回到提示符，按异常结束收尾"
                     );
-                    let mut response = parsed.into_response(false);
+                    let mut response = reparsed.into_response(false);
                     response.exit_code = -1;
                     response.stderr =
                         "命令包装脚本未正常结束（命令可能存在语法/解析错误），已返回其结束前的输出"
@@ -716,6 +737,61 @@ mod tests {
             result.stdout.contains("before-error"),
             "错误前已执行的输出应保留: {result:?}"
         );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: spawned.session_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    /// issue #581 复现：命令静默超过夭折判定窗口（3 秒），又恰好在探测窗口
+    /// 内正常结束。旧实现中 shell 结束命令后立即执行探针，被误判为「包装
+    /// 脚本夭折」，返回 -1 并丢掉尾部输出（实测 `echo first; sleep 3.4;
+    /// echo LATE` 稳定复现）。现在要么不发探针（前台被占据），要么命中后
+    /// 重新解析，都必须得到正常退出码与完整输出。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 探测窗口内正常结束的命令不被误判夭折() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建测试终端失败");
+
+        for delay in ["3.2", "3.5"] {
+            let result = service
+                .exec_in_session(ExecRequest {
+                    session_id: spawned.session_id.clone(),
+                    cmd: String::new(),
+                    args: Vec::new(),
+                    script: Some(format!("echo first; sleep {delay}; echo late-output")),
+                    timeout: Some(30),
+                    interactive: false,
+                    cwd: None,
+                })
+                .await
+                .expect("命令执行失败");
+            assert_eq!(
+                result.exit_code, 0,
+                "sleep {delay} 不得误判夭折: {result:?}"
+            );
+            assert!(
+                result.stdout.contains("first") && result.stdout.contains("late-output"),
+                "sleep {delay} 应返回完整输出: {result:?}"
+            );
+            assert!(result.stderr.is_empty(), "不得附带夭折说明: {result:?}");
+        }
 
         service
             .kill_session(SessionIdRequest {

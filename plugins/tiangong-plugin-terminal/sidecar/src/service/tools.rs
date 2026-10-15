@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tiangong_plugin_runtime::protocol::RequestInvocationContext;
 
+use super::jobs::BackgroundJob;
 use super::types::{
     AcquireRequest, CloseRequest, ExecRequest, SendRequest, SessionIdRequest, SpawnRequest,
     default_cols, default_rows,
@@ -466,13 +467,41 @@ impl TerminalService {
             })
             .await;
         match sent {
-            Ok(sent) => ToolOutcome {
-                ok: true,
-                summary: format!("终端 {} 已更新，当前内容见 stdout", sent.session_id),
-                stdout: Some(sent.stdout),
-                stderr: None,
-                exit_code: sent.exit_code,
-            },
+            Ok(sent) => {
+                let target = &sent.session_id;
+                let elapsed = sent.elapsed_secs.unwrap_or_default();
+                let command = sent.command.as_deref().unwrap_or("");
+                // 摘要直接给出命令真实状态与下一步做法：Agent 不再需要
+                // 从输出猜测命令是否跑完（issue #673）。
+                let summary = if sent.rejected {
+                    format!(
+                        "未发送：终端 {target} 上一条命令 `{command}` 仍在执行（已 {elapsed} 秒），\
+本次输入未写入，避免被排进输入缓冲延后执行造成输出错位。\
+可 input 留空且不设 enter 继续等待并读取新增输出；不设 enter 发送 \\x03 中断；\
+若程序在等待输入（如 [y/N]），不设 enter 并在 input 末尾带 \\r 作答"
+                    )
+                } else {
+                    match sent.status {
+                        Some("completed") => format!("终端 {target} 命令已执行完成，输出见 stdout"),
+                        Some("interactive") => format!(
+                            "终端 {target} 已进入交互程序（如 ssh 登录、vi、REPL），正在等待输入；\
+后续命令继续用 terminal_send 发送"
+                        ),
+                        Some(_) => format!(
+                            "终端 {target} 命令 `{command}` 仍在执行（已 {elapsed} 秒），stdout 为截至目前的新增输出；\
+可 input 留空且不设 enter 继续等待（wait 最长 110 秒），完成前不要发送新命令"
+                        ),
+                        None => format!("终端 {target} 已更新，当前内容见 stdout"),
+                    }
+                };
+                ToolOutcome {
+                    ok: !sent.rejected,
+                    summary,
+                    stdout: Some(sent.stdout),
+                    stderr: None,
+                    exit_code: sent.exit_code,
+                }
+            }
             Err(error) => ToolOutcome::fail(format!("{error:#}")),
         }
     }
@@ -507,6 +536,77 @@ impl TerminalService {
         ToolOutcome::ok(format!("已关闭终端 {target}"))
     }
 
+    /// terminal_status 概要：当前会话全部终端与遗留的后台进程。
+    fn terminal_overview(
+        &self,
+        scope: &ToolScope,
+        background_jobs: Vec<BackgroundJob>,
+    ) -> ToolOutcome {
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
+        // 概要含已退出待回收的终端：Agent 排查「为什么复用失败」时
+        // 需要看到完整在表集合，与前端恢复列表（只列存活）目的不同。
+        let mut entries: Vec<(u64, &String, &PtySession)> = sessions
+            .iter()
+            .filter(|(_, session)| session.scope_id.as_deref() == Some(scope.session_id.as_str()))
+            .map(|(id, session)| (session.sequence, id, session))
+            .collect();
+        entries.sort_by_key(|(sequence, _, _)| *sequence);
+        let mut status_counts: Vec<(&str, usize)> = Vec::new();
+        let terminals: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(_, id, session)| {
+                let label = phase_label(session.phase, session.exited_code);
+                if let Some(count) = status_counts.iter_mut().find(|(name, _)| *name == label) {
+                    count.1 += 1;
+                } else {
+                    status_counts.push((label, 1));
+                }
+                serde_json::json!({
+                    "terminal_id": id,
+                    "status": label,
+                    "command": session.running_command,
+                    "exited_code": session.exited_code,
+                })
+            })
+            .collect();
+        let mut summary = if terminals.is_empty() {
+            "当前会话没有终端".to_string()
+        } else {
+            let breakdown = status_counts
+                .iter()
+                .map(|(label, count)| format!("{}×{}", phase_label_cn(label), count))
+                .collect::<Vec<_>>()
+                .join("、");
+            format!("当前会话有 {} 个终端：{}", terminals.len(), breakdown)
+        };
+        // 遗留后台进程（`&` / `nohup` 起的服务等）：沙箱内 ps/pgrep 不可用，
+        // 这里是 Agent 定位它们的唯一途径，用完应 kill <pid> 结束。
+        if !background_jobs.is_empty() {
+            let listed = background_jobs
+                .iter()
+                .map(|job| format!("{}({})", job.pid, job.name))
+                .collect::<Vec<_>>()
+                .join("、");
+            summary.push_str(&format!(
+                "；遗留后台进程 {} 个：{listed}，不再需要时用 kill <pid> 结束",
+                background_jobs.len()
+            ));
+        }
+        ToolOutcome {
+            ok: true,
+            summary,
+            stdout: Some(
+                serde_json::to_string(&serde_json::json!({
+                    "terminals": terminals,
+                    "background_jobs": background_jobs,
+                }))
+                .unwrap_or_default(),
+            ),
+            stderr: None,
+            exit_code: 0,
+        }
+    }
+
     /// terminal_status：查询当前会话的终端状态（只读，不触碰任何 PTY）。
     /// 不带 terminal_id 返回全部终端概要（按创建序）；带 terminal_id 返回
     /// 该终端详情（含最近可见输出尾部），归属校验与 terminal_send 一致。
@@ -520,57 +620,22 @@ impl TerminalService {
             Err(error) => return ToolOutcome::fail(format!("terminal_status 参数无效：{error}")),
         };
         let target = parsed.terminal_id.trim().to_string();
-        let sessions = self.sessions.lock().expect("会话表锁损坏");
         if target.is_empty() {
-            // 概要含已退出待回收的终端：Agent 排查「为什么复用失败」时
-            // 需要看到完整在表集合，与前端恢复列表（只列存活）目的不同。
-            let mut entries: Vec<(u64, &String, &PtySession)> = sessions
+            // 枚举进程在会话表锁外完成：终端存活集合先取快照。
+            let alive: Vec<String> = self
+                .sessions
+                .lock()
+                .expect("会话表锁损坏")
                 .iter()
-                .filter(|(_, session)| {
-                    session.scope_id.as_deref() == Some(scope.session_id.as_str())
-                })
-                .map(|(id, session)| (session.sequence, id, session))
+                .filter(|(_, session)| session.exited_code.is_none())
+                .map(|(id, _)| id.clone())
                 .collect();
-            entries.sort_by_key(|(sequence, _, _)| *sequence);
-            let mut status_counts: Vec<(&str, usize)> = Vec::new();
-            let terminals: Vec<serde_json::Value> = entries
-                .iter()
-                .map(|(_, id, session)| {
-                    let label = phase_label(session.phase, session.exited_code);
-                    if let Some(count) = status_counts.iter_mut().find(|(name, _)| *name == label) {
-                        count.1 += 1;
-                    } else {
-                        status_counts.push((label, 1));
-                    }
-                    serde_json::json!({
-                        "terminal_id": id,
-                        "status": label,
-                        "command": session.running_command,
-                        "exited_code": session.exited_code,
-                    })
-                })
-                .collect();
-            let summary = if terminals.is_empty() {
-                "当前会话没有终端".to_string()
-            } else {
-                let breakdown = status_counts
-                    .iter()
-                    .map(|(label, count)| format!("{}×{}", phase_label_cn(label), count))
-                    .collect::<Vec<_>>()
-                    .join("、");
-                format!("当前会话有 {} 个终端：{}", terminals.len(), breakdown)
-            };
-            return ToolOutcome {
-                ok: true,
-                summary,
-                stdout: Some(
-                    serde_json::to_string(&serde_json::json!({ "terminals": terminals }))
-                        .unwrap_or_default(),
-                ),
-                stderr: None,
-                exit_code: 0,
-            };
+            let background_jobs = self.jobs.live_jobs(Some(scope.session_id.as_str()), |id| {
+                alive.iter().any(|alive| alive == id)
+            });
+            return self.terminal_overview(scope, background_jobs);
         }
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
         let Some(session) = sessions.get(&target) else {
             return ToolOutcome::fail(format!("终端 {target} 不存在"));
         };

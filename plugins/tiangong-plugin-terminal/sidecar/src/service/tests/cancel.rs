@@ -147,15 +147,16 @@ async fn 取消执行中的调用(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
-    // 等到命令真正进入 PTY（交互命令没有 start marker，退而求其次等
-    // 到 phase 进入执行态且有输出产生）。
+    // 等到脚本真正执行到 `echo READY_TO_CANCEL`：各用例都在这行之前完成
+    // 布置（起后台作业、设 trap）。不能以 start marker 为准——它在脚本
+    // 正文执行前输出，负载高时取消会抢在布置之前到达，Ctrl+C 直接打断
+    // 脚本，用例验证的场景根本没有发生。
     let started_deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let started = service
             .with_session(&terminal, |session| {
                 let raw = String::from_utf8_lossy(&session.raw_history).to_string();
-                Ok(session.phase == SessionPhase::Running
-                    && (raw.contains("__TIANGONG_START_") || raw.contains("READY_TO_CANCEL")))
+                Ok(session.phase == SessionPhase::Running && raw.contains("READY_TO_CANCEL"))
             })
             .unwrap_or(false);
         if started {
@@ -184,11 +185,11 @@ async fn 取消执行中的调用(
 async fn 取消收尾缓慢的命令后下一条命令仍能正常执行() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
-    // SIGINT 后还要占用前台 4 秒（> SHELL_READY_TIMEOUT_SECS），
-    // 模拟 cargo nextest 之类带子进程树的长任务收尾。
+    // SIGINT 后还要占用前台 8 秒（远大于就绪握手的约 3.6 秒预算，留足
+    // 并发负载下的调度余量），模拟 cargo nextest 之类带子进程树的长任务收尾。
     let (service, terminal, request) = 取消执行中的调用(
         serde_json::json!({
-            "script": "trap 'sleep 4; exit 130' INT; echo READY_TO_CANCEL; sleep 60",
+            "script": "trap 'sleep 8; exit 130' INT; echo READY_TO_CANCEL; sleep 60",
         }),
         "run_shell",
         &workspace,
@@ -278,7 +279,16 @@ async fn 取消不得杀死终端或其后台作业() {
     );
 
     // 后台作业仍在持续写入：取消只放弃本次工具等待，不影响长期进程。
-    let before = std::fs::metadata(&flag).map(|meta| meta.len()).unwrap_or(0);
+    // 并发负载下后台作业的首次写入可能稍晚，先等它真正开始。
+    let started = Instant::now();
+    let mut before = 0;
+    while started.elapsed() < Duration::from_secs(5) {
+        before = std::fs::metadata(&flag).map(|meta| meta.len()).unwrap_or(0);
+        if before > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(before > 0, "后台作业应已开始写入标记文件");
     tokio::time::sleep(Duration::from_millis(800)).await;
     let after = std::fs::metadata(&flag).map(|meta| meta.len()).unwrap_or(0);

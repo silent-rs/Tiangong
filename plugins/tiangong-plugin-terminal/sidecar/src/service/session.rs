@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -13,6 +13,7 @@ use super::output::{
     ExitNotification, OUTPUT_FLUSH_INTERVAL_MS, RawOutputFilter, publish_display_output,
     record_display_output, record_raw_output,
 };
+use super::readiness::{Foreground, foreground_of};
 use super::shell::{
     ShellKind, default_shell, login_shell_args, shell_compatible_cwd, shell_ready_probe_completed,
 };
@@ -138,6 +139,10 @@ impl TerminalService {
         drop(pair.slave);
 
         let shell_pid = child.process_id();
+        if let Some(pid) = shell_pid {
+            self.jobs
+                .register(pid, &session_id, request.scope_id.as_deref());
+        }
         let killer = child.clone_killer();
         // 命令回显登记表：执行侧写入、输出过滤线程消费。
         let pending_echo: Arc<Mutex<HashMap<String, String>>> =
@@ -177,11 +182,15 @@ impl TerminalService {
                 raw_history: Vec::new(),
                 raw_history_start: 0,
                 raw_bytes_total: 0,
+                last_output_at: Instant::now(),
                 display_history: Vec::new(),
                 screen_snapshot: String::new(),
                 screen_updates: 0,
                 exited_code: None,
                 pending_ready_marker: None,
+                pending_send: None,
+                send_read_offset: None,
+                prompt_hint: None,
                 running_command: None,
                 interactive_started: false,
                 shell_pid,
@@ -416,11 +425,18 @@ impl TerminalService {
                 tracing::info!(session_id, "终端前台命令已收尾，提示符恢复，重新加入复用池");
             }
         }
+        // 空闲但前台被程序占据的终端不复用：Agent 经 terminal_send 进入了
+        // ssh / REPL，或发出的命令还在跑——此时 phase 仍是 Idle，但 shell
+        // 并不在提示符。往里写本地包装脚本会被远端 shell / 程序当作输入
+        // 执行，必然失败并污染该会话（issue #673）。terminal_send 登记的
+        // 未完成命令同理。取不到前台信息（Windows）时按原逻辑复用。
         let selected = sessions
             .iter()
             .filter(|(_, session)| {
                 session.scope_id.as_deref() == Some(request.scope_id.as_str())
                     && session.phase == SessionPhase::Idle
+                    && session.pending_send.is_none()
+                    && !matches!(foreground_of(session), Some(Foreground::Program { .. }))
             })
             .min_by_key(|(_, session)| session.sequence)
             .map(|(session_id, _)| session_id.clone());
