@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CornerUpLeft, GripVertical, ListOrdered, Paperclip, Pencil, X } from 'lucide-react';
+import { GripVertical, ListOrdered, Paperclip, Pencil, X } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 
 const EMPTY_QUEUE: never[] = [];
@@ -77,10 +77,10 @@ export function InputQueueBar({ cacheKey, isIdle }: InputQueueBarProps) {
           <button
             type="button"
             onClick={() => { void steerQueuedInputMessage(cacheKey, message.id); }}
-            className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-            title={isIdle ? '立即发送' : '立即引导（打断当前执行）'}
+            className="shrink-0 rounded border border-border/60 px-1.5 py-0.5 text-[11px] leading-4 text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
+            title={isIdle ? '立即发送这条消息' : '立即发送（打断当前执行，作为引导投递）'}
           >
-            <CornerUpLeft className="h-3.5 w-3.5" />
+            立即发送
           </button>
           <button
             type="button"
