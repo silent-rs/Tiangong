@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 
 use super::output::visible_text_from_raw;
-use super::readiness::{Foreground, foreground_of};
+use super::readiness::{Foreground, foreground_of, tty_canonical};
 use super::types::{SendRequest, SendResponse};
 use super::{COMMAND_POLL_INTERVAL_MS, PtySession, SessionPhase, TerminalService};
 use crate::persist;
@@ -44,6 +44,10 @@ const SEND_SETTLE_MS: u64 = 300;
 /// 命令拉起交互程序（ssh 登录、vi、REPL）后，输出静默达本时长即返回。
 const SEND_INTERACTIVE_QUIET_MS: u64 = 500;
 
+/// 规范模式程序等待输入的判定窗口：输出静默达本时长、且光标停在未完成
+/// 的提示语行上。取 1.5 秒：进度条通常每秒刷新，不会被误判为在等待输入。
+const SEND_PROMPT_QUIET_MS: u64 = 1500;
+
 /// 只发送按键（不登记命令）时，输出静默达本时长即返回。
 const SEND_KEYS_QUIET_MS: u64 = 300;
 
@@ -62,6 +66,11 @@ pub(super) struct PendingSend {
     start_offset: u64,
     /// 发送时前台是否为本地登录 shell（可按前台进程组精确判定完成）。
     from_shell: bool,
+    /// 发送时 shell 停在行编辑器里（tty 为非规范模式，zsh ZLE / bash
+    /// readline）。这类 shell 回到提示符必然重新切成非规范模式；执行
+    /// `read` 等内建命令等待整行输入时前台仍是 shell，但 tty 是规范模式，
+    /// 据此区分「已完成」与「内建命令在等输入」。
+    line_editor: bool,
     /// 发送前的提示符行（交互程序内以其重新出现判定完成）。
     prompt: Option<String>,
 }
@@ -239,6 +248,7 @@ impl TerminalService {
             } else {
                 if request.enter {
                     let from_shell = matches!(foreground_of(session), Some(Foreground::Shell));
+                    let line_editor = from_shell && tty_canonical(session) == Some(false);
                     let tail = tail_bytes(session);
                     // 只补发回车（input 为空）时输入行里是先前键入的文本，
                     // 尾行不是干净的提示符，退回最近一次记录的提示符。
@@ -255,6 +265,7 @@ impl TerminalService {
                         started_at: Instant::now(),
                         start_offset: session.raw_bytes_total,
                         from_shell,
+                        line_editor,
                         prompt,
                     });
                 }
@@ -432,7 +443,10 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
         // shell——所以还要求命令行已换行结束、且光标行上已重绘出内容
         // （提示符）。不比对提示符文本：`cd` 等命令会改变提示符。
         let (completed_lines, current) = screen_tail(since);
-        matches!(foreground, Some(Foreground::Shell)) && completed_lines > 0 && !current.is_empty()
+        matches!(foreground, Some(Foreground::Shell))
+            && completed_lines > 0
+            && !current.is_empty()
+            && !(pending.line_editor && tty_canonical(session) == Some(true))
     } else {
         // 交互程序内读不到对端进程状态，唯一判据是提示符重新停在光标行上。
         pending
@@ -454,8 +468,27 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
         Some(Foreground::Program { interactive: true }) if pending.from_shell => {
             SendStatus::Interactive
         }
+        // 规范模式下等待输入的程序（dash 等无行编辑器的 shell、`read`、
+        // `[y/N]` 确认）不会切 tty 模式，只能看输出形态：静默且光标停在
+        // 一行未完成的文本（提示语）上。`sleep` 这类安静的长命令回显后光标
+        // 在空行，不会命中；进度条持续刷新，达不到静默窗口。
+        // 前台仍是 shell 但 tty 停在规范模式：`read` 等内建命令在等整行输入。
+        Some(Foreground::Program { interactive: false }) | Some(Foreground::Shell)
+            if pending.from_shell
+                && session.last_output_at.elapsed()
+                    >= Duration::from_millis(SEND_PROMPT_QUIET_MS)
+                && waiting_at_prompt(since) =>
+        {
+            SendStatus::Interactive
+        }
         _ => SendStatus::Running,
     }
+}
+
+/// 命令行已换行结束、光标停在一行非空的未完成文本上（提示符或提示语）。
+fn waiting_at_prompt(since: &[u8]) -> bool {
+    let (completed_lines, current) = screen_tail(since);
+    completed_lines > 0 && !current.trim().is_empty()
 }
 
 /// 自 `offset` 起的原始输出（被环形缓冲截掉的部分从可用起点读）。

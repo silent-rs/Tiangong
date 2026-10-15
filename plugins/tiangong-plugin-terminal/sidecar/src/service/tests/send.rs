@@ -155,43 +155,89 @@ async fn 短命令完成即返回不等满上限() {
 /// SSH 场景的等价复现：在终端里进入一个嵌套的交互 shell（前台是子
 /// 程序，读不到其内部进程状态），`sleep` 仍须判为执行中，提示符重新
 /// 出现后判为完成。
+///
+/// 两种嵌套 shell 都要覆盖：带行编辑器的 shell 会把 tty 切成非规范模式；
+/// dash（Linux 的 /bin/sh、Debian 系远端的默认 sh）不切，tty 保持规范
+/// 模式，只能按「静默 + 光标停在提示符行」识别。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn 交互程序内的命令以提示符重新出现判定完成() {
+    let shells: Vec<&str> = ["/bin/sh", "/bin/dash"]
+        .into_iter()
+        .filter(|shell| std::path::Path::new(shell).exists())
+        .collect();
+    for shell in shells {
+        let service = TerminalService::new();
+        let (terminal, _cwd) = ready_terminal(&service).await;
+
+        // 进入一个固定提示符的嵌套 shell，模拟 SSH 远端 shell。
+        let entered = send(
+            &service,
+            &terminal,
+            &format!("env -i PS1='remote$ ' TERM=dumb {shell}"),
+            true,
+            8,
+        )
+        .await;
+        assert!(
+            summary(&entered).contains("交互程序"),
+            "{shell}：进入嵌套 shell 应判为交互程序: {entered}"
+        );
+
+        let running = send(&service, &terminal, "sleep 4; echo remote-done", true, 1).await;
+        assert!(
+            summary(&running).contains("仍在执行"),
+            "{shell}：远端 sleep 不得被判为完成: {running}"
+        );
+        let waited = send(&service, &terminal, "", false, 10).await;
+        assert!(
+            summary(&waited).contains("执行完成"),
+            "{shell}：提示符重新出现后应完成: {waited}"
+        );
+        assert!(stdout(&waited).contains("remote-done"), "{shell}: {waited}");
+
+        let echoed = send(&service, &terminal, "echo hello-remote", true, 5).await;
+        assert!(summary(&echoed).contains("执行完成"), "{shell}: {echoed}");
+        assert!(
+            stdout(&echoed).contains("hello-remote"),
+            "{shell}：后续命令结果必须当次返回，不得滞后: {echoed}"
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+}
+
+/// 规范模式下等待输入的程序（`read`、`[y/N]` 确认）停在提示语上：判为
+/// 交互、交还控制权；而回显后静默的 `sleep` 光标在空行，仍判为执行中。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 规范模式等待输入与静默长命令可区分() {
     let service = TerminalService::new();
     let (terminal, _cwd) = ready_terminal(&service).await;
 
-    // 进入一个固定提示符的嵌套 shell，模拟 SSH 远端 shell。
-    let entered = send(
+    let asking = send(
         &service,
         &terminal,
-        "env -i PS1='remote$ ' TERM=dumb /bin/sh",
+        "printf 'Continue? [y/N] '; read answer; echo got-$answer",
         true,
-        5,
+        8,
     )
     .await;
     assert!(
-        summary(&entered).contains("交互程序"),
-        "进入嵌套 shell 应判为交互程序: {entered}"
+        summary(&asking).contains("交互程序"),
+        "停在提示语上等待输入应判为交互: {asking}"
     );
+    let answered = send(&service, &terminal, "y", true, 5).await;
+    assert!(stdout(&answered).contains("got-y"), "{answered}");
 
-    let running = send(&service, &terminal, "sleep 4; echo remote-done", true, 1).await;
+    let quiet = send(&service, &terminal, "sleep 4", true, 3).await;
     assert!(
-        summary(&running).contains("仍在执行"),
-        "远端 sleep 不得被判为完成: {running}"
-    );
-    let waited = send(&service, &terminal, "", false, 10).await;
-    assert!(
-        summary(&waited).contains("执行完成"),
-        "提示符重新出现后应完成: {waited}"
-    );
-    assert!(stdout(&waited).contains("remote-done"), "{waited}");
-
-    let echoed = send(&service, &terminal, "echo hello-remote", true, 5).await;
-    assert!(summary(&echoed).contains("执行完成"), "{echoed}");
-    assert!(
-        stdout(&echoed).contains("hello-remote"),
-        "后续命令结果必须当次返回，不得滞后: {echoed}"
+        summary(&quiet).contains("仍在执行"),
+        "静默长命令不得被判为等待输入: {quiet}"
     );
 
     service

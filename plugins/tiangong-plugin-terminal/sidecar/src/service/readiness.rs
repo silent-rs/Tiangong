@@ -196,6 +196,29 @@ pub(super) fn foreground_of(session: &PtySession) -> Option<Foreground> {
     })
 }
 
+/// PTY 当前是否处于规范模式（`ICANON`）。登录 shell 停在提示符时，
+/// zsh 的 ZLE、bash 的 readline 会把 tty 切成非规范模式逐键读取；仍是
+/// 规范模式说明 shell 在执行 `read` 等内建命令等待整行输入，或本身没有
+/// 行编辑器（dash）。取不到信息时返回 None。
+#[cfg(unix)]
+pub(super) fn tty_canonical(session: &PtySession) -> Option<bool> {
+    let fd = session.master.as_raw_fd()?;
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
+    // SAFETY: fd 来自存活会话持有的 PTY master，tcgetattr 只读取属性。
+    if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: tcgetattr 返回 0 表示结构已被完整初始化。
+    let termios = unsafe { termios.assume_init() };
+    Some(termios.c_lflag & libc::ICANON != 0)
+}
+
+/// Windows（ConPTY）没有 termios，无法判定。
+#[cfg(not(unix))]
+pub(super) fn tty_canonical(_session: &PtySession) -> Option<bool> {
+    None
+}
+
 /// Windows（ConPTY）没有前台进程组与 termios，无法判定。
 #[cfg(not(unix))]
 pub(super) fn foreground_of(_session: &PtySession) -> Option<Foreground> {
