@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-deepseek"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "Apache-2.0"
 description = "An asynchronous Rust client for the DeepSeek API, supporting chat completions (with SSE streaming), responses, files, model listing, and balance queries."

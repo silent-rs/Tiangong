@@ -10,6 +10,8 @@ pub mod responses;
 pub mod types;
 
 pub use client::DeepSeekClient;
+pub use config::DeepSeekClientBuilder;
+#[allow(deprecated)]
 pub use config::DeepSeekConfig;
 pub use error::DeepSeekError;
 

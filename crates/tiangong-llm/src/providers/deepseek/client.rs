@@ -33,13 +33,12 @@ pub struct NativeDeepSeekTransport {
 
 impl NativeDeepSeekTransport {
     pub fn new(config: &DeepSeekConfig) -> Result<Self, LlmError> {
-        let mut native = tiangong_deepseek::DeepSeekConfig::new(config.api_key.clone());
-        native.base_url = config.resolved_base_url();
-        native.timeout = config.timeout;
-        native.headers = config.headers.clone();
-
-        let client =
-            tiangong_deepseek::DeepSeekClient::from_config(native).map_err(map_deepseek_error)?;
+        let client = tiangong_deepseek::DeepSeekClient::builder(config.api_key.clone())
+            .base_url(config.resolved_base_url())
+            .timeout(config.timeout)
+            .headers(config.headers.clone())
+            .build()
+            .map_err(map_deepseek_error)?;
         Ok(Self { client })
     }
 }

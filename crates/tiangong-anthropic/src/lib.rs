@@ -1,9 +1,9 @@
 pub mod client;
-pub mod config;
+mod config;
 pub mod error;
 pub mod types;
 
 pub use client::AnthropicClient;
-pub use config::AnthropicConfig;
+pub use config::AnthropicClientBuilder;
 pub use error::AnthropicError;
 pub use types::{CacheControl, SystemContent, TextBlock};

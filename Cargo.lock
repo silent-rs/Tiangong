@@ -11262,7 +11262,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-deepseek"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bytes",
  "eventsource-stream",

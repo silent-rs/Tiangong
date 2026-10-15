@@ -30,7 +30,15 @@ pub enum DeepSeekError {
     Api(String),
 }
 
+/// 连接阶段失败（DNS、TCP 建连、代理握手）的 `Transport` 消息前缀。
+pub(crate) const CONNECT_ERROR_PREFIX: &str = "connect: ";
+
 impl DeepSeekError {
+    /// 是否为连接阶段失败：请求尚未送达服务端，重发不会造成重复处理。
+    pub fn is_connect(&self) -> bool {
+        matches!(self, Self::Transport(message) if message.starts_with(CONNECT_ERROR_PREFIX))
+    }
+
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Transport(_) | Self::RateLimited(_))
     }

@@ -1,7 +1,6 @@
 use serde_json::json;
 
 use crate::chat::parse_stream_chunk;
-use crate::config::DeepSeekConfig;
 use crate::error::DeepSeekError;
 use crate::types::{
     BalanceResponse, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Currency,
@@ -12,10 +11,24 @@ use crate::types::{
 // ── 配置 ──────────────────────────────────────────────
 
 #[test]
+#[allow(deprecated)]
 fn config_default_values() {
-    let config = DeepSeekConfig::new("test-key");
+    let config = crate::DeepSeekConfig::new("test-key");
     assert_eq!(config.api_key, "test-key");
     assert_eq!(config.base_url, "https://api.deepseek.com");
+}
+
+#[tokio::test]
+#[allow(deprecated)]
+async fn 旧版from_config仍可用() {
+    let body = br#"{"object":"list","data":[]}"#;
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let mut config = crate::DeepSeekConfig::new("test-key");
+    config.base_url = format!("http://{}", server.addr);
+    let client = crate::DeepSeekClient::from_config(config).unwrap();
+    let models = client.models().list().await.unwrap();
+    assert!(models.data.is_empty());
+    assert!(server.request_line().starts_with("GET /models"));
 }
 
 // ── 错误类型 ──────────────────────────────────────────
@@ -1100,13 +1113,11 @@ fn sse_response(events: &str) -> Vec<u8> {
 }
 
 fn mock_client(addr: &str) -> crate::client::DeepSeekClient {
-    crate::client::DeepSeekClient::from_config(crate::config::DeepSeekConfig {
-        headers: Default::default(),
-        api_key: "test-key".into(),
-        base_url: format!("http://{addr}"),
-        timeout: std::time::Duration::from_secs(5),
-    })
-    .unwrap()
+    crate::DeepSeekClient::builder("test-key")
+        .base_url(format!("http://{addr}"))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -1393,4 +1404,28 @@ async fn chat_stream_sniffs_sse_body_when_content_type_mislabeled() {
     }
     assert_eq!(text, "漏标类型的流式回复");
     assert!(done, "应收到终止事件");
+}
+
+// ── 连接失败识别与 no_proxy（#662）────────────────────────
+
+#[test]
+fn error_is_connect_仅识别连接阶段失败() {
+    let prefix = crate::error::CONNECT_ERROR_PREFIX;
+    assert!(DeepSeekError::Transport(format!("{prefix}refused")).is_connect());
+    assert!(!DeepSeekError::Transport("timeout: read".into()).is_connect());
+    assert!(!DeepSeekError::Api("connect: x".into()).is_connect());
+}
+
+#[tokio::test]
+async fn 连接被拒映射为is_connect() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let client = crate::DeepSeekClient::builder("k")
+        .base_url(format!("http://{address}"))
+        .no_proxy()
+        .build()
+        .unwrap();
+    let error = client.models().list().await.unwrap_err();
+    assert!(error.is_connect(), "{error}");
 }

@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use futures_util::stream;
 use serde_json::Value;
 
-use crate::config::AnthropicConfig;
+use crate::config::{AnthropicClientBuilder, ClientOptions};
 use crate::error::AnthropicError;
 use crate::types::{
     ContentBlock, ContentBlockDeltaData, ContentBlockStartData, EventStream, MessageDeltaData,
@@ -116,18 +116,32 @@ async fn read_complete_response(
 pub struct AnthropicClient {
     http_client: reqwest::Client,
     stream_http_client: reqwest::Client,
-    config: AnthropicConfig,
+    config: ClientOptions,
 }
 
 impl AnthropicClient {
-    pub fn from_config(config: AnthropicConfig) -> Result<Self, AnthropicError> {
-        let http_client = reqwest::Client::builder()
+    /// 以默认配置创建构造器（推荐用法）。
+    pub fn builder(api_key: impl Into<String>) -> AnthropicClientBuilder {
+        AnthropicClientBuilder::new(api_key)
+    }
+
+    pub(crate) fn from_options(
+        config: ClientOptions,
+        no_proxy: bool,
+    ) -> Result<Self, AnthropicError> {
+        let mut http_client = reqwest::Client::builder()
             .default_headers(config.headers.clone())
-            .timeout(config.timeout)
+            .timeout(config.timeout);
+        let mut stream_http_client =
+            reqwest::Client::builder().default_headers(config.headers.clone());
+        if no_proxy {
+            http_client = http_client.no_proxy();
+            stream_http_client = stream_http_client.no_proxy();
+        }
+        let http_client = http_client
             .build()
             .map_err(|err| AnthropicError::Transport(err.to_string()))?;
-        let stream_http_client = reqwest::Client::builder()
-            .default_headers(config.headers.clone())
+        let stream_http_client = stream_http_client
             .build()
             .map_err(|err| AnthropicError::Transport(err.to_string()))?;
         Ok(Self {
@@ -278,7 +292,10 @@ impl AnthropicClient {
 }
 
 fn map_reqwest_error(err: reqwest::Error) -> AnthropicError {
-    if err.is_timeout() {
+    // 连接失败优先判定（建连超时同时满足 is_timeout），供上层识别可安全重发的错误。
+    if err.is_connect() {
+        AnthropicError::Transport(format!("{}{err}", crate::error::CONNECT_ERROR_PREFIX))
+    } else if err.is_timeout() {
         AnthropicError::Transport(format!("timeout: {err}"))
     } else {
         AnthropicError::Transport(err.to_string())

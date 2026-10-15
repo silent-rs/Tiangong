@@ -3,7 +3,9 @@ use serde::de::DeserializeOwned;
 
 use crate::balance::Balance;
 use crate::chat::Chat;
+#[allow(deprecated)]
 use crate::config::DeepSeekConfig;
+use crate::config::{ClientOptions, DeepSeekClientBuilder};
 use crate::error::DeepSeekError;
 use crate::files::Files;
 use crate::models::Models;
@@ -13,18 +15,38 @@ use crate::responses::Responses;
 pub struct DeepSeekClient {
     http_client: reqwest::Client,
     stream_http_client: reqwest::Client,
-    config: DeepSeekConfig,
+    config: ClientOptions,
 }
 
 impl DeepSeekClient {
+    /// 以默认配置创建构造器（推荐用法）。
+    pub fn builder(api_key: impl Into<String>) -> DeepSeekClientBuilder {
+        DeepSeekClientBuilder::new(api_key)
+    }
+
+    #[deprecated(since = "0.1.5", note = "请改用 `DeepSeekClient::builder`")]
+    #[allow(deprecated)]
     pub fn from_config(config: DeepSeekConfig) -> Result<Self, DeepSeekError> {
-        let http_client = reqwest::Client::builder()
+        Self::from_options(config.into(), false)
+    }
+
+    pub(crate) fn from_options(
+        config: ClientOptions,
+        no_proxy: bool,
+    ) -> Result<Self, DeepSeekError> {
+        let mut http_client = reqwest::Client::builder()
             .default_headers(config.headers.clone())
-            .timeout(config.timeout)
+            .timeout(config.timeout);
+        let mut stream_http_client =
+            reqwest::Client::builder().default_headers(config.headers.clone());
+        if no_proxy {
+            http_client = http_client.no_proxy();
+            stream_http_client = stream_http_client.no_proxy();
+        }
+        let http_client = http_client
             .build()
             .map_err(|err| DeepSeekError::Transport(err.to_string()))?;
-        let stream_http_client = reqwest::Client::builder()
-            .default_headers(config.headers.clone())
+        let stream_http_client = stream_http_client
             .build()
             .map_err(|err| DeepSeekError::Transport(err.to_string()))?;
         Ok(Self {
@@ -183,7 +205,10 @@ impl DeepSeekClient {
 }
 
 fn map_reqwest_error(err: reqwest::Error) -> DeepSeekError {
-    if err.is_timeout() {
+    // 连接失败优先判定（建连超时同时满足 is_timeout），供上层识别可安全重发的错误。
+    if err.is_connect() {
+        DeepSeekError::Transport(format!("{}{err}", crate::error::CONNECT_ERROR_PREFIX))
+    } else if err.is_timeout() {
         DeepSeekError::Transport(format!("timeout: {err}"))
     } else {
         DeepSeekError::Transport(err.to_string())

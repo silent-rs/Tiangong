@@ -20,19 +20,18 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.1.4"
+tiangong-deepseek = "0.1.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 serde_json = "1"
 ```
 
 ```rust
-use tiangong_deepseek::{DeepSeekConfig, DeepSeekClient, types::*};
+use tiangong_deepseek::{DeepSeekClient, types::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = DeepSeekConfig::new("your-api-key");
-    let client = DeepSeekClient::from_config(config)?;
+    let client = DeepSeekClient::builder("your-api-key").build()?;
 
     // Chat completion
     let response = client.chat().create(ChatCompletionRequest {

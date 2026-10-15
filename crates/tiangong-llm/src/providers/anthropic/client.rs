@@ -1,10 +1,8 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tiangong_anthropic::AnthropicClient as NativeAnthropicClient;
 use tiangong_anthropic::types::{EventStream, MessagesCreateRequest, MessagesCreateResponse};
-use tiangong_anthropic::{
-    AnthropicClient as NativeAnthropicClient, AnthropicConfig as NativeAnthropicConfig,
-};
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
@@ -30,16 +28,15 @@ pub struct NativeAnthropicTransport {
 
 impl NativeAnthropicTransport {
     pub fn new(config: &AnthropicConfig) -> Result<Self, LlmError> {
-        let mut native = NativeAnthropicConfig::new(config.api_key.clone());
+        let mut builder = NativeAnthropicClient::builder(config.api_key.clone())
+            .timeout(config.timeout)
+            .api_version(config.resolve_api_version())
+            .beta(config.beta.clone())
+            .headers(config.headers.clone());
         if let Some(base_url) = config.normalized_base_url() {
-            native.base_url = base_url;
+            builder = builder.base_url(base_url);
         }
-        native.timeout = config.timeout;
-        native.api_version = config.resolve_api_version();
-        native.beta = config.beta.clone();
-        native.headers = config.headers.clone();
-
-        let client = NativeAnthropicClient::from_config(native).map_err(map_anthropic_error)?;
+        let client = builder.build().map_err(map_anthropic_error)?;
         Ok(Self { client })
     }
 }
