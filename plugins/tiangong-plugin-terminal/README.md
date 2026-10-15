@@ -3,7 +3,7 @@
 终端能力的 manifest v2 插件化。工具声明与 prompt 引导来自本清单，经
 TsPluginAdapter 注入 Core。
 
-工具执行策略在 sidecar（`sidecar/src/service.rs`，Rust 进程）：plugin.json
+工具执行策略在 sidecar（`sidecar/src/service/`，Rust 进程，按职责分模块，见 `mod.rs` 模块说明）：plugin.json
 sidecar 握手通过 `tool:<name>` capabilities 注册五个工具 Handler，宿主把工具调用直连 sidecar，并随请求注入
 宿主权威会话上下文（`session_id` 与会话工作目录，来自 Session 真相源）。
 每个会话的终端编排（选终端、新建、开标签、执行、收结果）由 sidecar 内
