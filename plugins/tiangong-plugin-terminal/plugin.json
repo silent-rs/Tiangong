@@ -15,7 +15,7 @@
   "tools": [
     {
       "name": "run_command",
-      "description": "执行受控命令（通过 PTY，输出回显到终端面板）。支持 cwd 和超时设置。",
+      "description": "执行受控命令（通过 PTY，输出回显到终端面板），执行命令的首选工具。支持 cwd 和超时设置；多步操作请多次调用逐步执行，已有脚本文件也用本工具执行（如 bash scripts/x.sh）。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -48,13 +48,13 @@
     },
     {
       "name": "run_shell",
-      "description": "在终端执行 shell 脚本（通过 PTY，支持交互式程序）。",
+      "description": "在终端执行 shell 命令文本（通过 PTY，支持交互式程序）。仅用于需要管道、重定向、变量展开等 shell 语法的单条命令或执行已有脚本；多步操作请用多次 run_command，不要现写多行脚本，也不要用 nohup / & 后台启动（长期服务请用 terminal_open 新开终端前台运行）。",
       "input_schema": {
         "type": "object",
         "properties": {
           "script": {
             "type": "string",
-            "description": "要执行的 shell 脚本"
+            "description": "要执行的 shell 命令文本（尽量是单条命令）"
           },
           "cwd": {
             "type": "string",
@@ -109,7 +109,7 @@
     },
     {
       "name": "terminal_open",
-      "description": "打开终端面板（向用户展示命令执行、跟踪长任务时使用）。面板编号由插件管理并在结果中告知。",
+      "description": "打开一个新终端并展开面板（向用户展示命令执行、跟踪长任务时使用）。需要长期运行的服务（开发服务器、联调后端等）用它新开终端，再用 terminal_send 在前台运行，代替 nohup / & 后台启动；面板编号由插件管理并在结果中告知。",
       "input_schema": {
         "type": "object",
         "properties": {}
@@ -149,7 +149,7 @@
     }
   ],
   "prompt": [
-    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，需要执行命令（包括 SSH 远端命令）时设 enter=true 由插件单独补发回车，向 vi 等编辑器写入纯文本或发送控制按键时不设 enter；关闭该终端时用 terminal_close 并传 terminal_id。仅主动打开空终端时使用 terminal_open。terminal_send 设 enter=true 执行命令时会等命令真正结束；返回 still_running 表示仍在执行（如 sleep、下载、编译），此时不要发送新命令，用空 input 继续等待即可。需要长期运行的服务优先用 terminal_open 打开的终端前台运行，用完 Ctrl+C（terminal_send 发送 \\x03）停止；用 & / nohup 放到后台的进程可在 terminal_status 概要中查到 pid，用完要 kill 结束。需要了解终端现状（有哪些终端、忙闲、是否可复用）或回看某终端最近输出时用 terminal_status。长命令只在有明确时间边界时设置 timeout（秒）。Windows 默认使用 PowerShell，run_shell 应使用 PowerShell 语法；CMD 脚本可用 run_command 调用 cmd.exe，并传入 /d、/c 和脚本参数。显式选择其他 Shell 时以实际终端为准。"
+    "终端工具使用规范：执行命令优先用 run_command（命令名加参数列表）；多步操作拆成多次 run_command 逐步执行并确认每步结果，终端会自动复用、保持工作目录和环境，无需把多步拼进一段脚本。run_shell 只用于执行已有脚本，或确实需要管道、重定向、变量展开等 shell 语法的单条命令，不要现写多行脚本一次执行。终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，需要执行命令（包括 SSH 远端命令）时设 enter=true 由插件单独补发回车，向 vi 等编辑器写入纯文本或发送控制按键时不设 enter；关闭该终端时用 terminal_close 并传 terminal_id。terminal_send 设 enter=true 执行命令时会等命令真正结束；返回 still_running 表示仍在执行（如 sleep、下载、编译），此时不要发送新命令，用空 input 继续等待即可。不要用 nohup、& 把进程放到后台：终端插件支持多个终端并行，需要长期运行的服务（开发服务器、联调后端等）用 terminal_open 新开一个终端，再用 terminal_send（enter=true）在前台运行，其他命令照常用 run_command 在别的终端执行；用完向该终端发送 \\x03 停止并 terminal_close。已在后台遗留的进程可在 terminal_status 概要中查到 pid，用完要 kill 结束。需要了解终端现状（有哪些终端、忙闲、是否可复用）或回看某终端最近输出时用 terminal_status。长命令只在有明确时间边界时设置 timeout（秒）。Windows 默认使用 PowerShell，run_shell 应使用 PowerShell 语法；CMD 脚本可用 run_command 调用 cmd.exe，并传入 /d、/c 和脚本参数。显式选择其他 Shell 时以实际终端为准。"
   ],
   "ui": {
     "sandbox": "shadow",

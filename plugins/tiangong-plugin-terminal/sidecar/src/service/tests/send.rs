@@ -335,3 +335,70 @@ async fn 终端关闭后遗留的后台作业可查询并结束() {
         }
     }
 }
+
+/// 用法引导只提示、不拦截：nohup / & 与现写多行脚本照常执行，摘要末尾
+/// 给出替代做法；普通命令不附提示。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 后台启动与多行脚本附带用法提示且照常执行() {
+    let service = TerminalService::new();
+    let (terminal, cwd) = ready_terminal(&service).await;
+    let workspace = cwd.path().to_string_lossy().to_string();
+    let run_shell = |script: &str| {
+        tool_request(
+            "run_shell",
+            serde_json::json!({ "script": script }),
+            Some((SCOPE, workspace.as_str())),
+        )
+    };
+
+    let background = outcome_of(
+        service
+            .dispatch_test(run_shell("nohup sleep 30 >/dev/null 2>&1 & echo started"))
+            .await,
+    );
+    assert_eq!(background["ok"], true, "{background}");
+    assert!(stdout(&background).contains("started"), "命令照常执行");
+    assert!(
+        summary(&background).contains("terminal_open"),
+        "后台启动应提示改用独立终端: {background}"
+    );
+
+    let script = outcome_of(
+        service
+            .dispatch_test(run_shell("echo one\necho two\necho three\necho four"))
+            .await,
+    );
+    assert_eq!(script["ok"], true, "{script}");
+    assert!(stdout(&script).contains("four"), "多行脚本照常执行");
+    assert!(
+        summary(&script).contains("逐步执行"),
+        "多行脚本应提示拆分: {script}"
+    );
+
+    let plain = outcome_of(
+        service
+            .dispatch_test(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "echo", "args": ["plain"]}),
+                Some((SCOPE, workspace.as_str())),
+            ))
+            .await,
+    );
+    assert!(
+        !summary(&plain).contains("提示"),
+        "普通命令不附提示: {plain}"
+    );
+
+    for job in service.jobs.live_jobs(Some(SCOPE), |_| false) {
+        // SAFETY: 清理本测试启动的后台进程。
+        unsafe {
+            libc::kill(job.pid, libc::SIGKILL);
+        }
+    }
+    let ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+    let _ = terminal;
+    for session_id in ids {
+        let _ = service.kill_session(SessionIdRequest { session_id });
+    }
+}

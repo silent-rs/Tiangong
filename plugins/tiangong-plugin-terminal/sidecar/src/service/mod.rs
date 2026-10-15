@@ -24,6 +24,7 @@ use crate::persist;
 use shell::ShellKind;
 use tools::ActiveToolRegistration;
 
+mod advice;
 mod dispatch;
 mod exec;
 mod frontend;

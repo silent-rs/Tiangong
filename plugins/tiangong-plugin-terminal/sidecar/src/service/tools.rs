@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tiangong_plugin_runtime::protocol::RequestInvocationContext;
 
+use super::advice;
 use super::jobs::BackgroundJob;
 use super::types::{
     AcquireRequest, CloseRequest, ExecRequest, SendRequest, SessionIdRequest, SpawnRequest,
@@ -400,6 +401,14 @@ impl TerminalService {
             format!(
                 "命令失败，退出码 {exit_code}（{terminal_note}，完整输出见 stdout/stderr）{cwd_note}{ended_note}"
             )
+        };
+        // 用法提示附在摘要末尾（只提示不拦截）：现写多行脚本、nohup / &
+        // 后台启动会让终端逐步执行与多终端并行的能力失效。
+        let hints = advice::command_hints(&command, is_shell);
+        let summary = if hints.is_empty() {
+            summary
+        } else {
+            format!("{summary}。提示：{}", hints.join("；"))
         };
         ToolOutcome {
             ok: !executed.timed_out && (executed.interactive_mode || exit_code == 0),
