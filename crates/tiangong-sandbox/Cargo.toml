@@ -30,6 +30,7 @@ reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
 semver = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tiangong-toolkit = { workspace = true }
+tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 dunce = { workspace = true }

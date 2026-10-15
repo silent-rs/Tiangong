@@ -12,6 +12,9 @@
 pub mod installed;
 pub mod launcher_manager;
 mod path;
+/// 代理不可达直连回退（各 crate 各持副本，见模块文档）。
+#[allow(dead_code)]
+mod proxy_fallback;
 pub mod sandbox;
 pub mod update;
 

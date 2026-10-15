@@ -81,6 +81,18 @@ pub enum UpdateStatus {
     },
 }
 
+/// 构建更新客户端；`no_proxy` 为 true 时禁用代理，供直连回退使用（#662）。
+fn update_client(no_proxy: bool) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(format!("tiangong-sandbox/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300));
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+    builder.build()
+}
+
 pub struct SelfUpdater {
     client: reqwest::Client,
     manifest_url: String,
@@ -99,12 +111,7 @@ impl SelfUpdater {
     ) -> Result<Self> {
         let manifest_url = manifest_url.into();
         validate_https_url(&manifest_url, "更新清单")?;
-        let client = reqwest::Client::builder()
-            .user_agent(format!("tiangong-sandbox/{}", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .context("构建 Sandbox 更新客户端失败")?;
+        let client = update_client(false).context("构建 Sandbox 更新客户端失败")?;
         Ok(Self {
             client,
             manifest_url,
@@ -268,10 +275,11 @@ impl SelfUpdater {
     }
 
     async fn fetch_valid_manifest(&self) -> Result<UpdateManifest> {
-        let response = self
-            .client
-            .get(&self.manifest_url)
-            .send()
+        let request = self.client.get(&self.manifest_url);
+        let response =
+            crate::proxy_fallback::send_with_direct_fallback("sandbox-update", request, || {
+                update_client(true)
+            })
             .await
             .with_context(|| format!("拉取 Sandbox 更新清单失败: {}", self.manifest_url))?;
         if !response.status().is_success() {
@@ -297,7 +305,12 @@ impl SelfUpdater {
     }
 
     async fn download_limited(&self, url: &str, path: &Path, limit: u64) -> Result<()> {
-        let response = self.client.get(url).send().await?;
+        let request = self.client.get(url);
+        let response =
+            crate::proxy_fallback::send_with_direct_fallback("sandbox-update", request, || {
+                update_client(true)
+            })
+            .await?;
         if !response.status().is_success() {
             bail!("下载响应异常: {} {url}", response.status());
         }
