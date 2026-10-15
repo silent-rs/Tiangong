@@ -164,4 +164,53 @@ describe('submitExternalText（插件 sendText 的普通 Enter 语义）', () =>
     expect(send.mock.calls[0][1]).toBe('排队的语音');
     expect(send.mock.calls[0][6]).toEqual(render);
   });
+
+  it('执行结束自动放行：输入框有草稿也发送队首，草稿投递后回填且不入队', async () => {
+    const { send } = spyActions();
+    prepareSession({ running: true });
+    useStore.getState().submitExternalText(KEY, '排队消息', 'full_trust');
+    useStore.getState().setInputCacheText(KEY, '正在编辑的草稿');
+
+    useStore.setState({ sessionRunStatuses: {} });
+    // 模拟真实 sendMessage 成功后清空草稿。
+    send.mockImplementation(async () => {
+      useStore.getState().setInputCacheText(KEY, '');
+      return true;
+    });
+    const released = await useStore.getState().dequeueNextQueuedInput(KEY);
+
+    expect(released).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toBe('排队消息');
+    expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(0);
+    expect(useStore.getState().inputCaches[KEY].text).toBe('正在编辑的草稿');
+  });
+
+  it('自动放行投递失败：队首回插，草稿仍回填', async () => {
+    const { send } = spyActions();
+    prepareSession({ running: true });
+    useStore.getState().submitExternalText(KEY, '排队消息', 'full_trust');
+    useStore.getState().setInputCacheText(KEY, '草稿');
+
+    useStore.setState({ sessionRunStatuses: {} });
+    send.mockResolvedValue(false);
+    const released = await useStore.getState().dequeueNextQueuedInput(KEY);
+
+    expect(released).toBe(false);
+    expect(useStore.getState().inputQueues[KEY]?.map((item) => item.text)).toEqual(['排队消息']);
+    expect(useStore.getState().inputCaches[KEY].text).toBe('草稿');
+  });
+
+  it('发送事务进行中不自动放行', async () => {
+    const { send } = spyActions();
+    prepareSession({ running: true });
+    useStore.getState().submitExternalText(KEY, '排队消息', 'full_trust');
+    useStore.setState((current) => ({
+      sessionRunStatuses: {},
+      inputCaches: { ...current.inputCaches, [KEY]: { ...current.inputCaches[KEY], is_sending: true } },
+    }));
+
+    expect(await useStore.getState().dequeueNextQueuedInput(KEY)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
 });

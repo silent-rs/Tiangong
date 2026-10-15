@@ -970,9 +970,16 @@ export interface AppState {
   moveQueuedInputMessage: (cacheKey: string, fromIndex: number, toIndex: number) => void;
   /** 编辑：消息内容（文本+附件）回填草稿并从队列移除；草稿非空时先转入队首。 */
   editQueuedInputMessage: (cacheKey: string, messageId: string) => void;
-  /** 立即投递指定队列消息：空闲走 sendMessage 开新轮，执行中走 appendMessage 引导。 */
-  steerQueuedInputMessage: (cacheKey: string, messageId: string) => Promise<boolean>;
-  /** turn 结束（runStatus 回 idle）且草稿为空时自动放行队首；失败不自动重试。 */
+  /**
+   * 立即投递指定队列消息：空闲走 sendMessage 开新轮，执行中走 appendMessage 引导。
+   * 默认把非空草稿转入队首保底；preserveDraft 时草稿暂存、投递后原样回填输入框。
+   */
+  steerQueuedInputMessage: (
+    cacheKey: string,
+    messageId: string,
+    options?: { preserveDraft?: boolean },
+  ) => Promise<boolean>;
+  /** turn 结束（runStatus 回 idle）时自动放行队首，不受草稿影响（草稿投递后回填）；失败不自动重试。 */
   dequeueNextQueuedInput: (cacheKey: string) => Promise<boolean>;
   /**
    * 插件外部文本按「用户普通 Enter」语义投递：保护现有草稿（先入队，不
@@ -1962,17 +1969,36 @@ export const useStore = create<AppState>((set, get) => ({
     get().setInputCacheAttachments(cacheKey, message.attachments);
   },
 
-  steerQueuedInputMessage: async (cacheKey, messageId) => {
+  steerQueuedInputMessage: async (cacheKey, messageId, options) => {
     const state = get();
     const queue = state.inputQueues[cacheKey] ?? [];
     const index = queue.findIndex((message) => message.id === messageId);
     if (index < 0) return false;
     const message = queue[index];
-    // 草稿非空时先入队保底，避免被队列消息覆盖丢失；排到队首，本轮投递后最先放行。
     const cache = state.inputCaches[cacheKey];
-    const draftMessage = cache && (cache.text.trim().length > 0 || cache.attachments.length > 0)
-      ? queuedMessageFromCache(cache)
+    const hasDraft = !!cache && (cache.text.trim().length > 0 || cache.attachments.length > 0);
+    const preserveDraft = options?.preserveDraft === true;
+    // 默认：草稿非空时先入队保底，避免被队列消息覆盖丢失；排到队首，本轮投递后最先放行。
+    // preserveDraft（自动放行）：草稿不入队，暂存后在投递结束时原样回填输入框，
+    // 用户正在编辑的内容既不被发出也不被打乱顺序。
+    const draftMessage = hasDraft && !preserveDraft ? queuedMessageFromCache(cache) : null;
+    const savedDraft = hasDraft && preserveDraft
+      ? {
+        text: cache.text,
+        attachments: cache.attachments.map((attachment) => ({ ...attachment })),
+      }
       : null;
+    // 投递结束（成功清空或失败）后回填暂存草稿；用户在投递期间又改动了输入框时
+    // 以用户的新内容为准，不覆盖。
+    const restoreSavedDraft = () => {
+      if (!savedDraft) return;
+      const current = get().inputCaches[cacheKey];
+      if (!current || current.is_sending) return;
+      const untouched = current.text.length === 0 && current.attachments.length === 0;
+      if (!untouched) return;
+      get().setInputCacheText(cacheKey, savedDraft.text);
+      get().setInputCacheAttachments(cacheKey, savedDraft.attachments);
+    };
     set((current) => {
       const remaining = (current.inputQueues[cacheKey] ?? []).filter((item) => item.id !== messageId);
       return {
@@ -2005,8 +2031,10 @@ export const useStore = create<AppState>((set, get) => ({
       });
       get().setInputCacheText(cacheKey, '');
       get().setInputCacheAttachments(cacheKey, []);
+      restoreSavedDraft();
       return false;
     }
+    restoreSavedDraft();
     return true;
   },
 
@@ -2014,12 +2042,11 @@ export const useStore = create<AppState>((set, get) => ({
     const state = get();
     if (state.sessionRunStatuses[cacheKey]) return false;
     const cache = state.inputCaches[cacheKey];
-    if (cache && (cache.text.trim().length > 0 || cache.attachments.length > 0 || cache.is_sending)) {
-      return false;
-    }
+    // 只避让进行中的发送事务；输入框草稿不阻塞放行（投递后回填）。
+    if (cache?.is_sending) return false;
     const first = state.inputQueues[cacheKey]?.[0];
     if (!first) return false;
-    return get().steerQueuedInputMessage(cacheKey, first.id);
+    return get().steerQueuedInputMessage(cacheKey, first.id, { preserveDraft: true });
   },
 
   // 编辑态有自己的 revision；这里只按显式 session_id 更新该会话发送状态。
