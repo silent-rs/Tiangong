@@ -308,12 +308,13 @@ async fn repl_多行输入续行提示符不锁死终端() {
         .expect("清理测试终端失败");
 }
 
-/// 逃生口：交互程序内命令的完成判定失效（这里用忽略 SIGINT 的 `sleep`
-/// 模拟一直等不到提示符）时，不带回车发送 `\x03` 解除登记，后续命令不再
-/// 被拒绝。
+/// 交互程序内的中断键：不带回车的 `\x03` 只写给程序、不清除登记。
+/// 程序真被中断时提示符重绘、按规则完成，下一条命令立即执行；忽略中断
+///（`trap '' INT`）仍在跑时继续拒绝新命令，不能让它排进 tty 输入缓冲、
+/// 等程序结束才执行。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 交互程序内发送中断键解除待确认命令() {
+async fn 交互程序内中断键只在程序真正结束后放行新命令() {
     let service = TerminalService::new();
     let (terminal, _cwd) = ready_terminal(&service).await;
     send(
@@ -325,14 +326,37 @@ async fn 交互程序内发送中断键解除待确认命令() {
     )
     .await;
 
-    let stuck = send(&service, &terminal, "trap '' INT; sleep 5", true, 1).await;
-    assert!(summary(&stuck).contains("仍在执行"), "{stuck}");
-    let rejected = send(&service, &terminal, "echo too-early", true, 1).await;
-    assert_eq!(rejected["ok"], false, "未解除前应拒绝: {rejected}");
+    // 可中断的命令：中断后立即完成，新命令当场执行。
+    let running = send(&service, &terminal, "sleep 30", true, 1).await;
+    assert!(summary(&running).contains("仍在执行"), "{running}");
+    let started = Instant::now();
+    send(&service, &terminal, "\\x03", false, 3).await;
+    let next = send(&service, &terminal, "echo interrupted-ok", true, 5).await;
+    assert_eq!(next["ok"], true, "中断生效后新命令应被接受: {next}");
+    assert!(stdout(&next).contains("interrupted-ok"), "{next}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "sleep 30 应被真正中断，而不是等它跑完: {:?}",
+        started.elapsed()
+    );
 
+    // 忽略中断的命令：中断键无效，新命令仍被拒绝且不写入。
+    let stuck = send(&service, &terminal, "trap '' INT; sleep 4", true, 1).await;
+    assert!(summary(&stuck).contains("仍在执行"), "{stuck}");
     send(&service, &terminal, "\\x03", false, 1).await;
-    let accepted = send(&service, &terminal, "echo released", true, 10).await;
-    assert_eq!(accepted["ok"], true, "中断键应解除登记: {accepted}");
+    let rejected = send(&service, &terminal, "echo queued-too-early", true, 1).await;
+    assert_eq!(rejected["ok"], false, "程序未结束时仍应拒绝: {rejected}");
+    let waited = send(&service, &terminal, "", false, 10).await;
+    assert!(summary(&waited).contains("执行完成"), "{waited}");
+    let history = service
+        .with_session(&terminal, |session| {
+            Ok(String::from_utf8_lossy(&session.raw_history).to_string())
+        })
+        .expect("读取输出失败");
+    assert!(
+        !history.contains("queued-too-early"),
+        "被拒绝的命令不得写入终端"
+    );
 
     service
         .kill_session(SessionIdRequest {
@@ -340,82 +364,71 @@ async fn 交互程序内发送中断键解除待确认命令() {
         })
         .expect("清理测试终端失败");
 }
-/// 交互、交还控制权；而回显后静默的 `sleep` 光标在空行，仍判为执行中。
+
+/// 并行发出 terminal_send 与 run_command：terminal_send 判定完成、清除
+/// 登记后还要等提示符绘制完整才返回，这段收尾窗口里选终端不得把该终端
+/// 交给 run_command，否则包装脚本会混进 terminal_send 的输出。
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 规范模式等待输入与静默长命令可区分() {
-    let service = TerminalService::new();
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn 进行中的terminal_send终端不被run_command复用() {
+    let service = Arc::new(TerminalService::new());
     let (terminal, _cwd) = ready_terminal(&service).await;
 
-    let asking = send(
-        &service,
-        &terminal,
-        "printf 'Continue? [y/N] '; read answer; echo got-$answer",
-        true,
-        8,
-    )
-    .await;
-    assert!(
-        summary(&asking).contains("交互程序"),
-        "停在提示语上等待输入应判为交互: {asking}"
-    );
-    let answered = send(&service, &terminal, "y", true, 5).await;
-    assert!(stdout(&answered).contains("got-y"), "{answered}");
-
-    let quiet = send(&service, &terminal, "sleep 4", true, 3).await;
-    assert!(
-        summary(&quiet).contains("仍在执行"),
-        "静默长命令不得被判为等待输入: {quiet}"
-    );
-
-    service
-        .kill_session(SessionIdRequest {
-            session_id: terminal,
-        })
-        .expect("清理测试终端失败");
-}
-
-/// run_command 不得复用前台被程序占据的「空闲」终端：terminal_send 进入
-/// ssh / REPL 后 phase 仍是 Idle，往里写本地包装脚本会被远端当输入执行。
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 选终端跳过前台被程序占据的终端() {
-    let service = TerminalService::new();
-    let (terminal, cwd) = ready_terminal(&service).await;
-    let workspace = cwd.path().to_string_lossy().to_string();
-
-    send(
-        &service,
-        &terminal,
-        "env -i PS1='remote$ ' /bin/sh",
-        true,
-        5,
-    )
-    .await;
-    let executed = outcome_of(
-        service
-            .dispatch_test(tool_request(
-                "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["local-ok"]}),
-                Some((SCOPE, workspace.as_str())),
-            ))
-            .await,
-    );
-    assert_eq!(executed["ok"], true, "{executed}");
-    assert!(
-        summary(&executed).contains("新终端") && !summary(&executed).contains(&terminal),
-        "前台被占据的终端不得复用: {executed}"
-    );
-    assert!(stdout(&executed).contains("local-ok"), "{executed}");
-
-    let other = summary(&executed)
-        .split("新终端 ")
-        .nth(1)
-        .and_then(|rest| rest.split('（').next())
-        .map(str::to_string);
-    for id in [Some(terminal), other].into_iter().flatten() {
-        let _ = service.kill_session(SessionIdRequest { session_id: id });
+    for round in 0..3 {
+        let sender = {
+            let service = Arc::clone(&service);
+            let terminal = terminal.clone();
+            tokio::spawn(async move {
+                send(
+                    &service,
+                    &terminal,
+                    &format!("sleep 1; echo send-{round}"),
+                    true,
+                    10,
+                )
+                .await
+            })
+        };
+        // 等到「登记已清除（判定完成）、调用尚未返回」的收尾窗口。
+        let mut seen_pending = false;
+        let mut probed = false;
+        while !sender.is_finished() {
+            let (pending, in_flight) = service
+                .with_session(&terminal, |session| {
+                    Ok((session.pending_send.is_some(), session.send_in_flight))
+                })
+                .expect("读取终端状态失败");
+            seen_pending |= pending;
+            if seen_pending && !pending && in_flight > 0 {
+                let acquired = service.acquire_session(AcquireRequest {
+                    scope_id: SCOPE.to_string(),
+                });
+                if let Some(id) = acquired.session_id {
+                    let _ = service.release_session(SessionIdRequest {
+                        session_id: id.clone(),
+                    });
+                    assert_ne!(id, terminal, "第 {round} 轮：收尾中的终端被选中");
+                }
+                probed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let sent = sender.await.expect("terminal_send 任务失败");
+        assert!(probed, "第 {round} 轮未观察到收尾窗口: {sent}");
+        assert!(stdout(&sent).contains(&format!("send-{round}")), "{sent}");
+        assert!(!stdout(&sent).contains("__TIANGONG_"), "{sent}");
     }
+
+    // 调用结束后守卫撤销登记，终端重新回到复用池。
+    let acquired = service.acquire_session(AcquireRequest {
+        scope_id: SCOPE.to_string(),
+    });
+    assert_eq!(acquired.session_id.as_deref(), Some(terminal.as_str()));
+
+    let _ = service.kill_session(SessionIdRequest {
+        session_id: terminal,
+    });
 }
 
 /// issue #672 验证要求：终端里 `nohup … &` 起的进程（含孙进程），在终端

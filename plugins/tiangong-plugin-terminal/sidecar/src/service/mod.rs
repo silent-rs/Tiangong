@@ -163,6 +163,10 @@ struct PtySession {
     /// terminal_send 以 enter=true 发出、尚未确认完成的命令（见
     /// [`input::PendingSend`]）。
     pending_send: Option<input::PendingSend>,
+    /// 进行中的 terminal_send 调用数：判定完成后清除登记、到真正返回之间
+    /// 还要等提示符绘制完整，此期间选终端不得把它交给 run_command，否则
+    /// 包装脚本会混进本次 terminal_send 的输出。
+    send_in_flight: u32,
     /// terminal_send 增量读取游标：重复等待时只返回上次之后的新输出。
     send_read_offset: Option<u64>,
     /// 最近确认回到提示符时的提示符行：只补发回车（input 为空）时，

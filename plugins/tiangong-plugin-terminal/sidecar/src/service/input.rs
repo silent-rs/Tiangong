@@ -11,7 +11,9 @@
 //!   同样判为完成；提示符变了（`cd` 改了带路径的提示符、REPL 续行 `...`、
 //!   `[sudo] password:`）时，输出静默且光标停在一行未完成文本上即判为
 //!   interactive 交还控制权，不让登记残留把终端永久锁住；
-//! - 程序内的待确认命令可用不带回车的 `\x03` / `\x04` 解除登记；
+//! - 不带回车的 `\x03` 只是把中断键写给程序，不清除登记：程序真被中断
+//!   会重绘提示符而按上面的规则完成；忽略中断（`trap '' INT`）仍在跑时
+//!   继续拒绝新命令，否则新命令会被排进 tty 输入缓冲、等程序结束才执行；
 //! - 命令拉起了新的交互程序（ssh 登录、vi、REPL）：前台切成非规范模式
 //!   且输出静默即返回 interactive；
 //! - 以上都不成立时等到 wait 上限，如实返回 still_running。
@@ -19,7 +21,9 @@
 //! 待确认命令未完成前，再次以 `enter=true` 发送会被拒绝（不写入），
 //! 避免命令被排进输入缓冲延后执行；空输入用于继续等待并增量读取输出。
 
+use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
@@ -181,6 +185,8 @@ fn ends_with_prompt(raw: &[u8], prompt: &str) -> bool {
         return false;
     }
     let (_, current) = screen_tail(raw);
+    // 忽略中断的程序结束后，提示符紧跟在 `^C` 回显之后（`^Cremote$`）。
+    let current = strip_control_echo(&current);
     current == prompt || current.starts_with(prompt)
 }
 
@@ -197,6 +203,35 @@ fn prompt_candidate(raw: &[u8]) -> Option<String> {
         .then(|| trimmed.to_string())
 }
 
+/// 进行中的 terminal_send 登记守卫（见 [`PtySession::send_in_flight`]）。
+struct SendInFlight<'a> {
+    sessions: &'a Mutex<HashMap<String, PtySession>>,
+    session_id: &'a str,
+}
+
+impl<'a> SendInFlight<'a> {
+    fn enter(sessions: &'a Mutex<HashMap<String, PtySession>>, session_id: &'a str) -> Self {
+        if let Some(session) = sessions.lock().expect("会话表锁损坏").get_mut(session_id) {
+            session.send_in_flight = session.send_in_flight.saturating_add(1);
+        }
+        Self {
+            sessions,
+            session_id,
+        }
+    }
+}
+
+impl Drop for SendInFlight<'_> {
+    fn drop(&mut self) {
+        // 锁中毒时放弃撤销：Drop 内不能再 panic。
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(session) = sessions.get_mut(self.session_id)
+        {
+            session.send_in_flight = session.send_in_flight.saturating_sub(1);
+        }
+    }
+}
+
 /// 截取尾部，避免一次返回过长输出。
 fn tail_chars(text: String, limit: usize) -> String {
     let count = text.chars().count();
@@ -210,6 +245,16 @@ fn tail_chars(text: String, limit: usize) -> String {
 
 impl TerminalService {
     pub(super) async fn send_to_session(&self, request: SendRequest) -> Result<SendResponse> {
+        // 整个调用期间（含判定完成后等提示符绘制完整的收尾窗口）登记为
+        // 进行中，选终端据此跳过本终端：并行发出的 run_command 若在此
+        // 窗口复用它，包装脚本会混进本次返回的输出。守卫在 future 被丢弃
+        //（调用取消）时同样撤销登记。
+        let session_id = request.session_id.clone();
+        let _in_flight = SendInFlight::enter(&self.sessions, &session_id);
+        self.send_to_session_inner(request).await
+    }
+
+    async fn send_to_session_inner(&self, request: SendRequest) -> Result<SendResponse> {
         let decoded = decode_terminal_escapes(&request.input);
         let data = if request.enter {
             strip_trailing_line_ending(&decoded)
@@ -233,20 +278,6 @@ impl TerminalService {
                 .ok_or_else(|| anyhow::anyhow!("目标终端不存在或不属于当前会话"))?;
             if session.exited_code.is_some() {
                 bail!("终端 {} 已退出，无法继续输入", request.session_id);
-            }
-            // 逃生口：交互程序内的待确认命令只能靠提示符启发式判定完成，
-            // 判定失效时用户发出的 Ctrl-C / Ctrl-D 必须能解除登记，否则
-            // 后续所有命令都会被拒绝。本地 shell 发出的命令按前台进程组
-            // 精确判定，中断后自然完成，不需要也不应提前清除。
-            if !request.enter
-                && data.contains(['\x03', '\x04'])
-                && session
-                    .pending_send
-                    .as_ref()
-                    .is_some_and(|pending| !pending.from_shell)
-            {
-                session.pending_send = None;
-                session.send_read_offset = None;
             }
             let had_pending = session.pending_send.is_some();
             let initial = had_pending.then(|| refresh_pending(session));
@@ -513,7 +544,7 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
         // 规范模式的判定同一标准，`sleep` 等安静命令光标在空行，不会命中。
         _ if !pending.from_shell
             && session.last_output_at.elapsed() >= Duration::from_millis(SEND_PROMPT_QUIET_MS)
-            && waiting_at_prompt(since) =>
+            && waiting_at_program_prompt(since) =>
         {
             SendStatus::Interactive
         }
@@ -522,9 +553,42 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
 }
 
 /// 命令行已换行结束、光标停在一行非空的未完成文本上（提示符或提示语）。
+/// 控制键回显（`\x03` 回显的 `^C` 等）不算提示语：程序仍可能在跑。
 fn waiting_at_prompt(since: &[u8]) -> bool {
     let (completed_lines, current) = screen_tail(since);
-    completed_lines > 0 && !current.trim().is_empty()
+    completed_lines > 0 && !strip_control_echo(&current).is_empty()
+}
+
+/// 交互程序内的等待输入判定，比 [`waiting_at_prompt`] 更严：光标行须
+/// 呈提示符形态。程序内写入的按键会被 tty 回显到光标行——`\x03` 回显
+/// 成 `^C`、不带回车键入的文本原样出现——而程序仍在跑，不能据此交还
+/// 控制权，否则下一条命令会被排进输入缓冲、等程序结束才执行。
+fn waiting_at_program_prompt(since: &[u8]) -> bool {
+    let (completed_lines, current) = screen_tail(since);
+    completed_lines > 0 && looks_like_prompt(&current)
+}
+
+/// 去掉行首的控制键回显（`^C`、`^D`、`^Z` 等）。
+fn strip_control_echo(line: &str) -> &str {
+    let mut rest = line.trim();
+    while let Some(stripped) = rest.strip_prefix('^') {
+        let mut chars = stripped.chars();
+        match chars.next() {
+            Some(key) if key.is_ascii_uppercase() || "@[\\]^_?".contains(key) => {
+                rest = chars.as_str().trim_start();
+            }
+            _ => break,
+        }
+    }
+    rest
+}
+
+/// 去掉控制键回显后，以常见提示符结尾字符或 REPL 续行 `...` 收尾。
+fn looks_like_prompt(line: &str) -> bool {
+    let rest = strip_control_echo(line);
+    !rest.is_empty()
+        && (rest.ends_with("...")
+            || rest.ends_with(['$', '#', '%', '>', '❯', '»', '➜', ']', ')', ':', '?']))
 }
 
 /// 自 `offset` 起的原始输出（被环形缓冲截掉的部分从可用起点读）。
@@ -601,5 +665,27 @@ mod tests {
         let tail = tail_chars(text, 4);
         assert!(tail.ends_with("TAIL") && tail.contains("已省略前 20 个字符"));
         assert_eq!(tail_chars("short".to_string(), 10), "short");
+    }
+
+    #[test]
+    fn 控制键回显不算提示语() {
+        assert_eq!(strip_control_echo("^C"), "");
+        assert_eq!(strip_control_echo("^C^C"), "");
+        assert_eq!(strip_control_echo("^Cremote$"), "remote$");
+        assert_eq!(strip_control_echo("^ caret"), "^ caret");
+        assert!(!waiting_at_prompt(b"sleep 30\r\n^C"));
+        assert!(waiting_at_prompt(b"read\r\nname? "));
+        assert!(ends_with_prompt(b"sleep 4\r\n^Cremote$ ", "remote$ "));
+    }
+
+    #[test]
+    fn 程序内只认提示符形态的光标行() {
+        assert!(looks_like_prompt("/tmp$"));
+        assert!(looks_like_prompt("..."));
+        assert!(looks_like_prompt("[sudo] password for me:"));
+        assert!(looks_like_prompt("^C>>>"));
+        assert!(!looks_like_prompt("^C"));
+        assert!(!looks_like_prompt("echo released"));
+        assert!(!waiting_at_program_prompt(b"sleep 30\r\n^Cecho released"));
     }
 }

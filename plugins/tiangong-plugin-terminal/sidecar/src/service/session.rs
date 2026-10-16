@@ -189,6 +189,7 @@ impl TerminalService {
                 exited_code: None,
                 pending_ready_marker: None,
                 pending_send: None,
+                send_in_flight: 0,
                 send_read_offset: None,
                 prompt_hint: None,
                 running_command: None,
@@ -429,13 +430,15 @@ impl TerminalService {
         // ssh / REPL，或发出的命令还在跑——此时 phase 仍是 Idle，但 shell
         // 并不在提示符。往里写本地包装脚本会被远端 shell / 程序当作输入
         // 执行，必然失败并污染该会话（issue #673）。terminal_send 登记的
-        // 未完成命令同理。取不到前台信息（Windows）时按原逻辑复用。
+        // 未完成命令、进行中的 terminal_send 调用同理。取不到前台信息
+        //（Windows）时按原逻辑复用。
         let selected = sessions
             .iter()
             .filter(|(_, session)| {
                 session.scope_id.as_deref() == Some(request.scope_id.as_str())
                     && session.phase == SessionPhase::Idle
                     && session.pending_send.is_none()
+                    && session.send_in_flight == 0
                     && !matches!(foreground_of(session), Some(Foreground::Program { .. }))
             })
             .min_by_key(|(_, session)| session.sequence)
