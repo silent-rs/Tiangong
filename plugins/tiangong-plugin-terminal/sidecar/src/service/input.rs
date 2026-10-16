@@ -167,6 +167,15 @@ fn strip_trailing_line_ending(input: &str) -> &str {
         .unwrap_or(input)
 }
 
+/// 非空且只含控制键（C0 控制字符，不含构成命令行的 `\r` `\n` `\t`，
+/// 也不含引出方向键等转义序列的 `\x1b`）。
+fn is_control_keys(input: &str) -> bool {
+    !input.is_empty()
+        && input
+            .chars()
+            .all(|ch| ch.is_ascii_control() && !matches!(ch, '\r' | '\n' | '\t' | '\x1b'))
+}
+
 /// 输出经终端仿真还原后的形态：已换行结束的行数，与光标所在的未完成行。
 ///
 /// 提示符的特征是停在**未完成行**上等待输入；命令行回显虽然也以提示符
@@ -254,8 +263,15 @@ impl TerminalService {
         self.send_to_session_inner(request).await
     }
 
-    async fn send_to_session_inner(&self, request: SendRequest) -> Result<SendResponse> {
+    async fn send_to_session_inner(&self, mut request: SendRequest) -> Result<SendResponse> {
         let decoded = decode_terminal_escapes(&request.input);
+        // 只含控制键（`\x03` Ctrl-C、`\x04` Ctrl-D、`\x1a` Ctrl-Z 等）的输入
+        // 是按键而非命令：即使调用方带了 enter=true，也按不设 enter 原样
+        // 写入。否则上一条命令仍在执行时它会被当作新命令整条拒绝，中断键
+        // 根本送不到程序；补发的回车也会在程序退出后多执行一个空行。
+        if request.enter && is_control_keys(strip_trailing_line_ending(&decoded)) {
+            request.enter = false;
+        }
         let data = if request.enter {
             strip_trailing_line_ending(&decoded)
         } else {
@@ -665,6 +681,19 @@ mod tests {
         let tail = tail_chars(text, 4);
         assert!(tail.ends_with("TAIL") && tail.contains("已省略前 20 个字符"));
         assert_eq!(tail_chars("short".to_string(), 10), "short");
+    }
+
+    #[test]
+    fn 只含控制键的输入识别() {
+        assert!(is_control_keys("\x03"));
+        assert!(is_control_keys("\x03\x03"));
+        assert!(is_control_keys("\x04"));
+        assert!(is_control_keys("\x1a"));
+        assert!(!is_control_keys(""));
+        assert!(!is_control_keys("ls"));
+        assert!(!is_control_keys("\x03ls"));
+        assert!(!is_control_keys("\x1b[A"));
+        assert!(!is_control_keys("\t"));
     }
 
     #[test]

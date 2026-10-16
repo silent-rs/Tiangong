@@ -486,7 +486,7 @@ impl TerminalService {
                     format!(
                         "未发送：终端 {target} 上一条命令 `{command}` 仍在执行（已 {elapsed} 秒），\
 本次输入未写入，避免被排进输入缓冲延后执行造成输出错位。\
-可 input 留空且不设 enter 继续等待并读取新增输出；不设 enter 发送 \\x03 中断；\
+可 input 留空且不设 enter 继续等待并读取新增输出；发送 \\x03 中断（控制键无论是否设 enter 都直接写入）；\
 若程序在等待输入（如 [y/N]），不设 enter 并在 input 末尾带 \\r 作答"
                     )
                 } else {

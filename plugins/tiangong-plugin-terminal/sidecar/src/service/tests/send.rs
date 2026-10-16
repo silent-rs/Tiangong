@@ -130,6 +130,38 @@ async fn 静默长命令返回仍在执行且不接受新命令() {
         .expect("清理测试终端失败");
 }
 
+/// 本地 shell 前台命令同理：带 enter=true 的 `\x03` 直接写入并真正中断，
+/// 不被「上一条命令仍在执行」拒绝。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 带回车的中断键直接写入本地前台命令() {
+    let service = TerminalService::new();
+    let (terminal, _cwd) = ready_terminal(&service).await;
+
+    let running = send(&service, &terminal, "sleep 30", true, 1).await;
+    assert!(summary(&running).contains("仍在执行"), "{running}");
+    let started = Instant::now();
+    let interrupted = send(&service, &terminal, "\\x03", true, 5).await;
+    assert_eq!(
+        interrupted["ok"], true,
+        "带 enter 的中断键不得被拒绝: {interrupted}"
+    );
+    let next = send(&service, &terminal, "echo local-ctrl-c-ok", true, 5).await;
+    assert_eq!(next["ok"], true, "{next}");
+    assert!(stdout(&next).contains("local-ctrl-c-ok"), "{next}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "sleep 30 应被真正中断: {:?}",
+        started.elapsed()
+    );
+
+    service
+        .kill_session(SessionIdRequest {
+            session_id: terminal,
+        })
+        .expect("清理测试终端失败");
+}
+
 /// 秒级命令在 wait 内完成：一次调用直接拿到完整输出，不必等满 wait。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -337,6 +369,24 @@ async fn 交互程序内中断键只在程序真正结束后放行新命令() {
     assert!(
         started.elapsed() < Duration::from_secs(15),
         "sleep 30 应被真正中断，而不是等它跑完: {:?}",
+        started.elapsed()
+    );
+
+    // 调用方给中断键带了 enter=true：仍按按键写入，不当作新命令拒绝。
+    let running = send(&service, &terminal, "sleep 30", true, 1).await;
+    assert!(summary(&running).contains("仍在执行"), "{running}");
+    let started = Instant::now();
+    let interrupted = send(&service, &terminal, "\\x03", true, 3).await;
+    assert_eq!(
+        interrupted["ok"], true,
+        "带 enter 的中断键不得被拒绝: {interrupted}"
+    );
+    let next = send(&service, &terminal, "echo enter-ctrl-c-ok", true, 5).await;
+    assert_eq!(next["ok"], true, "{next}");
+    assert!(stdout(&next).contains("enter-ctrl-c-ok"), "{next}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "带 enter 的中断键也应真正中断 sleep: {:?}",
         started.elapsed()
     );
 
