@@ -72,8 +72,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBQUE2RDc2MjQwN0I5QzMKUldURHVRY2tkbTJxMmtTTnJnZk9GSVd3amFmb3VoYjVmdFdGbHZCRHZ1VVZCeS9JcS8rUHBVVDgK",
       "endpoints": [
-        "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json",
-        "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/latest.json"
+        "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/latest.json",
+        "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

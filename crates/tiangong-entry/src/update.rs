@@ -16,10 +16,10 @@ use serde::Deserialize;
 
 use crate::args::UpdateArgs;
 
-/// 更新源端点（与桌面端 tauri updater 共用 latest.json）。
+/// 更新源端点（与桌面端 tauri updater 共用 latest.json），优先 OSS，失败回退 GitHub Release。
 const UPDATE_ENDPOINTS: &[&str] = &[
-    "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json",
     "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/latest.json",
+    "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json",
 ];
 
 /// minisign 公钥（base64 编码，与 `src-tauri/tauri.conf.json` 的 updater.pubkey 一致）。

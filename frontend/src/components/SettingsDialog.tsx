@@ -1792,6 +1792,8 @@ function AppUpdateSettings() {
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [contentLength, setContentLength] = useState<number | undefined>();
   const updateRef = useRef<Update | null>(null);
+  // 进行中的静默预取；安装时可复用，避免重复请求。
+  const prefetchRef = useRef<Promise<Update | null> | null>(null);
   const { showSuccess, showError, showInfo } = useToast();
 
   useEffect(() => {
@@ -1812,7 +1814,8 @@ function AppUpdateSettings() {
     };
   }, []);
 
-  // 从全局 store 预填充更新信息并静默获取可用的 Update 对象
+  // 全局已检测到更新时直接展示更新信息并激活「下载并安装」，同时静默预取 Update 句柄；
+  // 预取未完成时点击安装会复用这次预取，无需再手动「检查更新」。
   useEffect(() => {
     if (!storeUpdate || updateRef.current) return;
     let mounted = true;
@@ -1822,12 +1825,17 @@ function AppUpdateSettings() {
       date: storeUpdate.date,
       body: storeUpdate.body,
     });
+    const prefetch = import('@tauri-apps/plugin-updater').then(({ check }) => check({ timeout: 30000 }));
+    prefetchRef.current = prefetch;
     (async () => {
       try {
-        const { check } = await import('@tauri-apps/plugin-updater');
-        const update = await check({ timeout: 30000 });
-        if (!mounted) return;
-        await updateRef.current?.close().catch(() => {});
+        const update = await prefetch;
+        // 已被手动检查或安装流程接管：交由接管方处理，避免重复持有句柄
+        if (!mounted || prefetchRef.current !== prefetch) {
+          if (updateRef.current !== update) await update?.close().catch(() => undefined);
+          return;
+        }
+        prefetchRef.current = null;
         updateRef.current = update;
         if (update) {
           setAvailableUpdate({
@@ -1836,9 +1844,12 @@ function AppUpdateSettings() {
             date: update.date,
             body: update.body,
           });
+        } else {
+          setAvailableUpdate(null);
         }
       } catch {
-        // 静默失败，用户可手动重试
+        // 静默失败：点击「下载并安装」时会重新检查
+        if (prefetchRef.current === prefetch) prefetchRef.current = null;
       }
     })();
     return () => { mounted = false; };
@@ -1849,6 +1860,8 @@ function AppUpdateSettings() {
     setAvailableUpdate(null);
     setDownloadedBytes(0);
     setContentLength(undefined);
+    // 手动检查接管句柄，作废进行中的预取
+    prefetchRef.current = null;
     try {
       const { check } = await import('@tauri-apps/plugin-updater');
       const update = await check({ timeout: 30000 });
@@ -1876,16 +1889,34 @@ function AppUpdateSettings() {
   };
 
   const handleInstallUpdate = async () => {
-    const update = updateRef.current;
-    if (!update) {
-      showError('没有可安装更新', '请先检查更新');
-      return;
-    }
-
     setIsInstalling(true);
     setDownloadedBytes(0);
     setContentLength(undefined);
     try {
+      let update = updateRef.current;
+      if (!update) {
+        // 句柄尚未就绪：优先复用进行中的预取，失败或无预取时立即重新检查
+        const pending = prefetchRef.current;
+        prefetchRef.current = null;
+        if (pending) update = await pending.catch(() => null);
+        if (!update) {
+          const { check } = await import('@tauri-apps/plugin-updater');
+          update = await check({ timeout: 30000 });
+        }
+        updateRef.current = update;
+        if (!update) {
+          setAvailableUpdate(null);
+          showInfo('已是最新版本', '当前没有可用更新');
+          return;
+        }
+        setAvailableUpdate({
+          version: update.version,
+          currentVersion: update.currentVersion,
+          date: update.date,
+          body: update.body,
+        });
+      }
+
       let downloaded = 0;
       await update.downloadAndInstall((event: DownloadEvent) => {
         if (event.event === 'Started') {
@@ -1938,14 +1969,14 @@ function AppUpdateSettings() {
               <div className="text-sm text-muted-foreground">当前版本</div>
               <div className="mt-1 text-2xl font-semibold">{currentVersion || '读取中...'}</div>
             </div>
-            <Badge variant="outline">GitHub / OSS</Badge>
+            <Badge variant="outline">OSS / GitHub</Badge>
           </div>
 
           {availableUpdate ? (
             <div className="rounded-md border p-3 text-sm">
               <div className="font-medium">发现新版本 {availableUpdate.version}</div>
               <div className="mt-1 text-muted-foreground">
-                当前版本 {availableUpdate.currentVersion}
+                当前版本 {availableUpdate.currentVersion || currentVersion}
                 {availableUpdate.date ? ` · ${availableUpdate.date}` : ''}
               </div>
               {availableUpdate.body && (
@@ -1956,7 +1987,7 @@ function AppUpdateSettings() {
             </div>
           ) : (
             <div className="rounded-md border p-3 text-sm text-muted-foreground">
-              更新检查会依次从 GitHub Release 和阿里云 OSS 获取最新版本信息。
+              更新检查会优先从阿里云 OSS 获取最新版本信息，OSS 不可用时回退到 GitHub Release。
             </div>
           )}
 
@@ -1978,7 +2009,7 @@ function AppUpdateSettings() {
                 </>
               )}
             </Button>
-            <Button onClick={handleInstallUpdate} disabled={!updateRef.current || isChecking || isInstalling}>
+            <Button onClick={handleInstallUpdate} disabled={!availableUpdate || isChecking || isInstalling}>
               {isInstalling ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
