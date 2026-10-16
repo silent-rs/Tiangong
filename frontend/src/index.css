@@ -228,6 +228,19 @@
   font-size: 0.875rem;
 }
 
+/* 设置页更新说明：字号对齐卡片正文，去掉首尾段落外边距 */
+.update-notes-md .md-editor-preview {
+  font-size: 0.875rem;
+}
+
+.update-notes-md .md-editor-preview > :first-child {
+  margin-top: 0;
+}
+
+.update-notes-md .md-editor-preview > :last-child {
+  margin-bottom: 0;
+}
+
 .user-bubble-md .md-editor-preview > :first-child {
   margin-top: 0;
 }

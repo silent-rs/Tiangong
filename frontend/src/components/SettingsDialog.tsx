@@ -11,6 +11,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Package, Brain, HardDriveDownload, Route, Smartphone } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { MdPreview } from 'md-editor-rt';
+import 'md-editor-rt/lib/preview.css';
+import { useResolvedTheme } from '@/hooks/useTheme';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
 import { isWebHost } from '@/api/host';
@@ -1792,6 +1795,7 @@ function AppUpdateSettings() {
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [contentLength, setContentLength] = useState<number | undefined>();
   const updateRef = useRef<Update | null>(null);
+  const resolvedTheme = useResolvedTheme();
   // 进行中的静默预取；安装时可复用，避免重复请求。
   const prefetchRef = useRef<Promise<Update | null> | null>(null);
   const { showSuccess, showError, showInfo } = useToast();
@@ -1940,6 +1944,18 @@ function AppUpdateSettings() {
     }
   };
 
+  // 更新说明中的外链交给系统浏览器打开，避免设置窗口自身被导航
+  const handleNotesLinkClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const anchor = (event.target as HTMLElement).closest('a[href]');
+    if (!anchor) return;
+    event.preventDefault();
+    const href = anchor.getAttribute('href') ?? '';
+    if (!/^https?:\/\//i.test(href)) return;
+    import('@tauri-apps/plugin-shell')
+      .then(({ open }) => open(href))
+      .catch((error) => console.error('打开链接失败:', error));
+  };
+
   const progressText = contentLength
     ? `${formatBytes(downloadedBytes)} / ${formatBytes(contentLength)}`
     : downloadedBytes > 0
@@ -1980,8 +1996,15 @@ function AppUpdateSettings() {
                 {availableUpdate.date ? ` · ${availableUpdate.date}` : ''}
               </div>
               {availableUpdate.body && (
-                <div className="mt-3 whitespace-pre-wrap text-muted-foreground">
-                  {availableUpdate.body}
+                <div
+                  className="update-notes-md mt-3 max-h-80 overflow-y-auto"
+                  onClickCapture={handleNotesLinkClick}
+                >
+                  <MdPreview
+                    modelValue={availableUpdate.body}
+                    theme={resolvedTheme}
+                    previewTheme="github"
+                  />
                 </div>
               )}
             </div>
