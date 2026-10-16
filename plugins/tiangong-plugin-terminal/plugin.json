@@ -78,7 +78,7 @@
     },
     {
       "name": "terminal_send",
-      "description": "向指定终端发送按键/文本输入；结果会告知实际送达的终端编号。enter=true 执行命令时会等到命令真正结束（本地按前台进程判定，SSH 等交互程序内按提示符重新出现判定）再返回 completed；超过 wait 仍未结束返回 still_running 及新增输出，此时不要发送新命令，用空 input（不设 enter）继续等待；上一条命令未结束时 enter=true 的新命令会被拒绝且不写入。",
+      "description": "向指定终端发送按键/文本输入；结果会告知实际送达的终端编号。enter=true 执行命令时会等到命令真正结束（本地按前台进程判定，SSH 等交互程序内按提示符重新出现判定；提示符变化（cd、REPL 续行、密码提示）时静默后返回 interactive）再返回 completed；超过 wait 仍未结束返回 still_running 及新增输出，此时不要发送新命令，用空 input（不设 enter）继续等待；上一条命令未结束时 enter=true 的新命令会被拒绝且不写入，交互程序内判定失效时不设 enter 发送 \\x03 可解除。",
       "input_schema": {
         "type": "object",
         "properties": {

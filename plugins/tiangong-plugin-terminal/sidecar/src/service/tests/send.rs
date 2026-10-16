@@ -219,7 +219,127 @@ async fn 交互程序内的命令以提示符重新出现判定完成() {
     }
 }
 
-/// 规范模式下等待输入的程序（`read`、`[y/N]` 确认）停在提示语上：判为
+/// 交互程序内提示符变了（远端 `cd` 改了带路径的提示符等）：等不到发送前
+/// 的提示符，也不能让登记残留拒绝后续所有命令。静默且光标停在新提示符
+/// 上即交还控制权，下一条命令以新提示符为基线正常判定完成。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 交互程序内提示符改变后不锁死终端() {
+    let shells: Vec<&str> = ["/bin/sh", "/bin/dash"]
+        .into_iter()
+        .filter(|shell| std::path::Path::new(shell).exists())
+        .collect();
+    for shell in shells {
+        let service = TerminalService::new();
+        let (terminal, _cwd) = ready_terminal(&service).await;
+        send(
+            &service,
+            &terminal,
+            &format!("env -i PS1='remote$ ' TERM=dumb {shell}"),
+            true,
+            8,
+        )
+        .await;
+
+        let changed = send(&service, &terminal, "PS1='changed> '", true, 8).await;
+        assert!(
+            !summary(&changed).contains("仍在执行"),
+            "{shell}：提示符改变后应交还控制权: {changed}"
+        );
+        let next = send(&service, &terminal, "echo after-$((40+2))", true, 5).await;
+        assert!(summary(&next).contains("执行完成"), "{shell}: {next}");
+        assert!(stdout(&next).contains("after-42"), "{shell}: {next}");
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+}
+
+/// REPL 多行输入：续行提示符 `...` 不是发送前的 `>>>`，必须交还控制权
+/// 让下一行能写入；空行结束代码块后 `>>>` 重新出现，判为完成。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repl_多行输入续行提示符不锁死终端() {
+    let Some(python) = [
+        "/usr/bin/python3",
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+    ]
+    .into_iter()
+    .find(|path| std::path::Path::new(path).exists()) else {
+        return;
+    };
+    let service = TerminalService::new();
+    let (terminal, _cwd) = ready_terminal(&service).await;
+    // 基础 REPL（3.13+ 默认的新 REPL 会重绘整行），关闭用户启动脚本。
+    let entered = send(
+        &service,
+        &terminal,
+        &format!("env -i PYTHON_BASIC_REPL=1 TERM=dumb {python} -q -I"),
+        true,
+        10,
+    )
+    .await;
+    assert!(summary(&entered).contains("交互程序"), "{entered}");
+
+    let header = send(&service, &terminal, "for i in range(3):", true, 8).await;
+    assert!(
+        !summary(&header).contains("仍在执行"),
+        "续行提示符出现后应交还控制权: {header}"
+    );
+    let body = send(&service, &terminal, "    print('loop', i * 7)", true, 8).await;
+    assert_eq!(body["ok"], true, "续行内容不得被拒绝: {body}");
+    let done = send(&service, &terminal, "", true, 8).await;
+    assert!(summary(&done).contains("执行完成"), "{done}");
+    assert!(stdout(&done).contains("loop 14"), "{done}");
+
+    let exited = send(&service, &terminal, "exit()", true, 8).await;
+    assert!(summary(&exited).contains("执行完成"), "{exited}");
+    let back = send(&service, &terminal, "echo back-home", true, 5).await;
+    assert!(stdout(&back).contains("back-home"), "{back}");
+
+    service
+        .kill_session(SessionIdRequest {
+            session_id: terminal,
+        })
+        .expect("清理测试终端失败");
+}
+
+/// 逃生口：交互程序内命令的完成判定失效（这里用忽略 SIGINT 的 `sleep`
+/// 模拟一直等不到提示符）时，不带回车发送 `\x03` 解除登记，后续命令不再
+/// 被拒绝。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 交互程序内发送中断键解除待确认命令() {
+    let service = TerminalService::new();
+    let (terminal, _cwd) = ready_terminal(&service).await;
+    send(
+        &service,
+        &terminal,
+        "env -i PS1='remote$ ' TERM=dumb /bin/sh",
+        true,
+        8,
+    )
+    .await;
+
+    let stuck = send(&service, &terminal, "trap '' INT; sleep 5", true, 1).await;
+    assert!(summary(&stuck).contains("仍在执行"), "{stuck}");
+    let rejected = send(&service, &terminal, "echo too-early", true, 1).await;
+    assert_eq!(rejected["ok"], false, "未解除前应拒绝: {rejected}");
+
+    send(&service, &terminal, "\\x03", false, 1).await;
+    let accepted = send(&service, &terminal, "echo released", true, 10).await;
+    assert_eq!(accepted["ok"], true, "中断键应解除登记: {accepted}");
+
+    service
+        .kill_session(SessionIdRequest {
+            session_id: terminal,
+        })
+        .expect("清理测试终端失败");
+}
 /// 交互、交还控制权；而回显后静默的 `sleep` 光标在空行，仍判为执行中。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

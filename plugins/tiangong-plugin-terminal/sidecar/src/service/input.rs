@@ -7,7 +7,11 @@
 //!
 //! - 本地 shell：前台进程组回到登录 shell 即完成（精确信号）；
 //! - 交互程序内（SSH 远端 shell 等）：读不到对端进程状态，以「发送前的
-//!   提示符重新出现在输出末尾」判定完成；
+//!   提示符重新出现在输出末尾」判定完成；程序退出、前台回到登录 shell
+//!   同样判为完成；提示符变了（`cd` 改了带路径的提示符、REPL 续行 `...`、
+//!   `[sudo] password:`）时，输出静默且光标停在一行未完成文本上即判为
+//!   interactive 交还控制权，不让登记残留把终端永久锁住；
+//! - 程序内的待确认命令可用不带回车的 `\x03` / `\x04` 解除登记；
 //! - 命令拉起了新的交互程序（ssh 登录、vi、REPL）：前台切成非规范模式
 //!   且输出静默即返回 interactive；
 //! - 以上都不成立时等到 wait 上限，如实返回 still_running。
@@ -229,6 +233,20 @@ impl TerminalService {
                 .ok_or_else(|| anyhow::anyhow!("目标终端不存在或不属于当前会话"))?;
             if session.exited_code.is_some() {
                 bail!("终端 {} 已退出，无法继续输入", request.session_id);
+            }
+            // 逃生口：交互程序内的待确认命令只能靠提示符启发式判定完成，
+            // 判定失效时用户发出的 Ctrl-C / Ctrl-D 必须能解除登记，否则
+            // 后续所有命令都会被拒绝。本地 shell 发出的命令按前台进程组
+            // 精确判定，中断后自然完成，不需要也不应提前清除。
+            if !request.enter
+                && data.contains(['\x03', '\x04'])
+                && session
+                    .pending_send
+                    .as_ref()
+                    .is_some_and(|pending| !pending.from_shell)
+            {
+                session.pending_send = None;
+                session.send_read_offset = None;
             }
             let had_pending = session.pending_send.is_some();
             let initial = had_pending.then(|| refresh_pending(session));
@@ -486,6 +504,16 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
                 && session.last_output_at.elapsed()
                     >= Duration::from_millis(SEND_PROMPT_QUIET_MS)
                 && waiting_at_prompt(since) =>
+        {
+            SendStatus::Interactive
+        }
+        // 交互程序内等不到发送前的提示符：提示符可能已经变了（`cd` 改了
+        // 带路径的提示符、REPL 续行 `...`、`[sudo] password:`）。输出静默且
+        // 光标停在一行未完成文本上，说明程序在等输入，交还控制权；与本地
+        // 规范模式的判定同一标准，`sleep` 等安静命令光标在空行，不会命中。
+        _ if !pending.from_shell
+            && session.last_output_at.elapsed() >= Duration::from_millis(SEND_PROMPT_QUIET_MS)
+            && waiting_at_prompt(since) =>
         {
             SendStatus::Interactive
         }
