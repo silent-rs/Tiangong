@@ -448,11 +448,19 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
             && !current.is_empty()
             && !(pending.line_editor && tty_canonical(session) == Some(true))
     } else {
-        // 交互程序内读不到对端进程状态，唯一判据是提示符重新停在光标行上。
-        pending
-            .prompt
-            .as_deref()
-            .is_some_and(|prompt| screen_tail(since).0 > 0 && ends_with_prompt(since, prompt))
+        // 交互程序内读不到对端进程状态，判据是提示符重新停在光标行上。
+        // 程序退出（嵌套 shell 的 `exit`、REPL 的 `exit()`）后回到登录
+        // shell，出现的是登录 shell 的提示符而不是程序的提示符：此时前台
+        // 已回到登录 shell，且命令行已换行、光标行已重绘，同样判为完成。
+        let (completed_lines, current) = screen_tail(since);
+        let back_to_shell = matches!(foreground, Some(Foreground::Shell))
+            && completed_lines > 0
+            && !current.is_empty();
+        back_to_shell
+            || pending
+                .prompt
+                .as_deref()
+                .is_some_and(|prompt| completed_lines > 0 && ends_with_prompt(since, prompt))
     };
     if completed {
         let tail = tail_bytes(session);

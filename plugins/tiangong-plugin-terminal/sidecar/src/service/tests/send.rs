@@ -203,6 +203,14 @@ async fn 交互程序内的命令以提示符重新出现判定完成() {
             "{shell}：后续命令结果必须当次返回，不得滞后: {echoed}"
         );
 
+        // 退出嵌套 shell 回到登录 shell：出现的是登录 shell 的提示符，
+        // 也必须判为完成，不能让登记残留、拒绝后续所有输入。
+        let exited = send(&service, &terminal, "exit", true, 5).await;
+        assert!(summary(&exited).contains("执行完成"), "{shell}: {exited}");
+        let back = send(&service, &terminal, "echo back-home", true, 5).await;
+        assert!(summary(&back).contains("执行完成"), "{shell}: {back}");
+        assert!(stdout(&back).contains("back-home"), "{shell}: {back}");
+
         service
             .kill_session(SessionIdRequest {
                 session_id: terminal,
