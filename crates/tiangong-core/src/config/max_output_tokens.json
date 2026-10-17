@@ -1,0 +1,10 @@
+{
+  "_comment": "ReAct 主循环单次最大输出 token（含 thinking），编译时内嵌进 tiangong-core。匹配：精确 > 最长前缀 > _default。",
+  "_default": 128000,
+  "claude-opus-5": 128000,
+  "claude-sonnet-5": 128000,
+  "claude-fable-5": 128000,
+  "claude-haiku-5": 128000,
+  "deepseek-v4": 384000,
+  "deepseek-flash": 384000
+}

@@ -6,4 +6,5 @@
 
 pub mod agent;
 pub mod core;
+pub(crate) mod max_output;
 pub mod models;

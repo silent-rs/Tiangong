@@ -415,7 +415,9 @@ fn build_react_request(ctx: &TurnContext) -> ModelRequest {
         user_input: String::new(),
         context: ctx.session.context(),
         reasoning_effort: ctx.agent_config.reasoning_effort,
-        max_output_tokens: None,
+        max_output_tokens: Some(crate::config::max_output::max_output_tokens(
+            ctx.client().model_name(),
+        )),
         ..Default::default()
     }
 }
