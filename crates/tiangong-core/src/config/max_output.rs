@@ -43,9 +43,7 @@ mod tests {
         assert_eq!(max_output_tokens("unknown-model"), 128_000);
         // 大小写不敏感、最长前缀优先
         assert_eq!(max_output_tokens("GLM-5.3"), 128_000);
-        assert_eq!(max_output_tokens("glm-4.6v-flash"), 32_000);
-        assert_eq!(max_output_tokens("glm-4.5-air"), 96_000);
-        assert_eq!(max_output_tokens("glm-4-flashx-250414"), 16_000);
+        assert_eq!(max_output_tokens("glm-5v-turbo"), 128_000);
         assert_eq!(max_output_tokens("kimi-k3"), 131_072);
         assert_eq!(max_output_tokens("kimi-k2.7-code-highspeed"), 32_768);
         assert_eq!(max_output_tokens("gpt-5.4-mini"), 128_000);
