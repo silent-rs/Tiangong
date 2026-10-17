@@ -163,16 +163,19 @@ impl TiangongCore {
     /// 返回 `Ok(())` 表示压缩已成功应用或无可压缩历史；`Err` 表示压缩未能
     /// 完成（模型调用失败、被取消、worker 退出等）。**返回 Err 时压缩任务
     /// 同样已进入终态**，调用方可以安全地继续后续操作。
+    ///
+    /// 事件流契约：返回 `Ok`、`ContextCompactionFailed`、
+    /// `ContextCompactionInterrupted` 之前，终态事件 `ContextCompressed` 已写入
+    /// 会话事件流；其余错误（任务未能启动或异常退出）不产生终态事件。
     pub async fn compact_context(&self, notice: &str) -> Result<(), CoreError> {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         self.spawn_context_compression(Some(completion_tx), notice.to_string())?;
         // 任务在任何终态下都会发送一次通知；发送端被丢弃（worker 异常退出）
-        // 时 recv 返回 Err，同样结束等待，不会悬挂。
+        // 时 recv 返回 Err，同样结束等待，不会悬挂。此时任务没有走到终态
+        // 分支、事件流中没有 `ContextCompressed`，按 worker 停止回报。
         match completion_rx.await {
             Ok(outcome) => outcome,
-            Err(_) => Err(CoreError::ContextCompactionFailed(
-                "压缩任务未给出结果（worker 已退出）".to_string(),
-            )),
+            Err(_) => Err(CoreError::WorkerStopped),
         }
     }
 
@@ -633,9 +636,7 @@ impl TiangongCore {
                         Outcome::Failed(reason) => {
                             Err(CoreError::ContextCompactionFailed(reason.clone()))
                         }
-                        Outcome::Interrupted(_) => Err(CoreError::ContextCompactionFailed(
-                            "整理上下文被中断".to_string(),
-                        )),
+                        Outcome::Interrupted(_) => Err(CoreError::ContextCompactionInterrupted),
                     };
                     let _ = tx.send(result);
                 }

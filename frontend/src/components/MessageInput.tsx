@@ -487,39 +487,32 @@ export function MessageInput({
 
   const executeSlashCommand = useCallback(async (command: string) => {
     const trimmed = command.trim();
-    if (trimmed === '/压缩对话' || trimmed === '/compress') {
-      setInputContent('');
-      beginContextManagement('正在压缩早期上下文...');
-      try {
-        const ok = await api.compressContext();
-        if (!ok) {
-          endContextManagement();
-          alert('压缩对话没有执行成功，请稍后重试。');
-        }
-      } catch (e) {
+    const context = trimmed === '/压缩对话' || trimmed === '/compress'
+      ? { label: '压缩对话', summary: '正在压缩早期上下文...', run: api.compressContext }
+      : trimmed === '/清理对话' || trimmed === '/reset'
+        ? { label: '清理对话', summary: '正在清理上下文...', run: api.resetContext }
+        : null;
+    if (!context) return false;
+    setInputContent('');
+    beginContextManagement(context.summary);
+    try {
+      const result = await context.run();
+      // 已进入终态：运行态由事件流里的 context_compressed 收尾（它排在本次
+      // 操作的全部事件之后），这里不提前回到空闲，否则晚到的用量/通知事件
+      // 会把会话重新拉回执行中。
+      if (!result.settled) {
         endContextManagement();
-        console.error('压缩对话失败:', e);
-        alert(e instanceof Error ? e.message : '压缩对话失败');
+        alert(`${context.label}没有执行成功，请稍后重试。`);
+      } else if (result.error) {
+        alert(`${context.label}失败：${result.error}`);
       }
-      return true;
+    } catch (e) {
+      // 命令未执行（无活跃 Core、会话忙碌等）：事件流不会有终态事件。
+      endContextManagement();
+      console.error(`${context.label}失败:`, e);
+      alert(e instanceof Error ? e.message : String(e || `${context.label}失败`));
     }
-    if (trimmed === '/清理对话' || trimmed === '/reset') {
-      setInputContent('');
-      beginContextManagement('正在清理上下文...');
-      try {
-        const ok = await api.resetContext();
-        if (!ok) {
-          endContextManagement();
-          alert('清理对话没有执行成功，请稍后重试。');
-        }
-      } catch (e) {
-        endContextManagement();
-        console.error('清理对话失败:', e);
-        alert(e instanceof Error ? e.message : '清理对话失败');
-      }
-      return true;
-    }
-    return false;
+    return true;
   }, [beginContextManagement, endContextManagement, setInputContent]);
 
   const handleInputChange = (value: string) => {

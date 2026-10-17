@@ -21,8 +21,14 @@ pub enum CoreError {
     Busy,
     /// worker 线程 panic，会话不可恢复，关闭并等待 worker 的操作失败。
     WorkerPanicked,
-    /// 模型切换前的上下文整理未完成（模型调用失败或超时）。
+    /// 上下文整理已启动但未完成（模型调用失败、应用摘要失败或任务异常退出）。
+    ///
+    /// 返回此错误时整理已进入终态，`ContextCompressed { Failed }` 已写入会话
+    /// 事件流。
     ContextCompactionFailed(String),
+    /// 上下文整理被取消或被引导消息中断；`ContextCompressed { Cancelled }` 已
+    /// 写入会话事件流。
+    ContextCompactionInterrupted,
     /// 模型切换失败（目标端点不可用等）。
     ModelSwitchFailed(String),
 }
@@ -39,6 +45,7 @@ impl fmt::Display for CoreError {
             CoreError::ContextCompactionFailed(reason) => {
                 write!(f, "整理上下文未完成：{reason}")
             }
+            CoreError::ContextCompactionInterrupted => write!(f, "整理上下文被中断"),
             CoreError::ModelSwitchFailed(reason) => write!(f, "模型切换失败：{reason}"),
         }
     }

@@ -38,6 +38,34 @@ pub struct EnsuredCore {
     pub is_new: bool,
 }
 
+/// 手动整理上下文未成功的原因。
+///
+/// 区分依据是会话事件流中是否已写入终态事件 `ContextCompressed`：界面运行态
+/// 应由该终态事件收尾，只有未启动时才需要调用方自行收尾。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextCompactionError {
+    /// 整理未启动（无活跃 Core、会话忙碌、worker 已停止等），事件流不会
+    /// 出现终态事件。
+    NotStarted(String),
+    /// 整理已执行但失败（模型调用或应用摘要失败）；`ContextCompressed
+    /// { Failed }` 已写入事件流。
+    Failed(String),
+    /// 整理被取消或被引导消息中断；`ContextCompressed { Cancelled }` 已写入
+    /// 事件流。
+    Interrupted,
+}
+
+impl std::fmt::Display for ContextCompactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStarted(reason) | Self::Failed(reason) => f.write_str(reason),
+            Self::Interrupted => f.write_str("整理上下文被中断"),
+        }
+    }
+}
+
+impl std::error::Error for ContextCompactionError {}
+
 /// 会话级 TiangongCore 管理器。
 ///
 /// `#[derive(Clone)]` 的廉价句柄，内部状态全经 `Arc<Mutex<>>` 共享。

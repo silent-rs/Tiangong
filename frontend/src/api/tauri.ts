@@ -316,6 +316,18 @@ export interface SessionStreamEvent {
   session_id: string;
   event: StreamEvent;
 }
+/**
+ * 上下文管理命令（整理 / 清理）的结果。
+ *
+ * `settled=true`：终态事件 `context_compressed` 已写入会话事件流，运行态
+ * 由该事件收尾（它排在本次操作的用量、通知等事件之后），调用方不得据返回
+ * 值提前回到空闲；`error` 仅用于提示失败原因。
+ * `settled=false`：操作未执行，事件流不会有终态事件，由调用方直接收尾。
+ */
+export interface ContextCommandResult {
+  settled: boolean;
+  error: string | null;
+}
 
 /** 提取消息的纯文本内容，兼容旧格式 content 为字符串的情况 */
 export function textContent(msg: Message): string {
@@ -918,10 +930,10 @@ export const api = {
   // ----------------------------------------------------------------
   // 上下文管理
   // ----------------------------------------------------------------
-  compressContext: (): Promise<boolean> =>
+  compressContext: (): Promise<ContextCommandResult> =>
     invoke('compress_context'),
 
-  resetContext: (): Promise<boolean> =>
+  resetContext: (): Promise<ContextCommandResult> =>
     invoke('reset_context'),
 
   // ----------------------------------------------------------------

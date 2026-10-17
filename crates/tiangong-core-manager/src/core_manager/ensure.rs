@@ -15,7 +15,7 @@ use tiangong_llm::ModelEndpoint;
 use tiangong_types::StreamEvent;
 
 use crate::CoreManager;
-use crate::core_manager::EnsuredCore;
+use crate::core_manager::{ContextCompactionError, EnsuredCore};
 
 impl CoreManager {
     /// 确保 registry 中存在该会话的 Core，返回是否新建。
@@ -447,22 +447,34 @@ impl CoreManager {
     /// 切换（模型已由用户选定，不能因整理失败卡住），手动整理则把失败如实
     /// 回报给调用方，由用户决定是否重试。
     ///
-    /// 返回 `Ok(())` 表示压缩已应用或无可压缩历史；`Err` 表示未能完成。
-    pub async fn compact_session_context(&self, session_id: &str) -> Result<(), String> {
+    /// 返回 `Ok(())` 表示压缩已应用或无可压缩历史；`Err` 表示未能完成，
+    /// 并区分会话事件流中是否已有终态事件（见 [`ContextCompactionError`]）。
+    pub async fn compact_session_context(
+        &self,
+        session_id: &str,
+    ) -> Result<(), ContextCompactionError> {
         let core = {
             let registry = self.registry();
             registry.get(session_id).cloned()
         };
         let Some(core) = core else {
-            return Err("会话无活跃 Core".to_string());
+            return Err(ContextCompactionError::NotStarted(
+                "会话无活跃 Core".to_string(),
+            ));
         };
         core.compact_context(tiangong_core::core::MANUAL_COMPACT_NOTICE)
             .await
             .map_err(|error| match error {
-                tiangong_core::core::CoreError::Busy => {
-                    "会话正在执行，当前回合结束后可整理上下文".to_string()
+                tiangong_core::core::CoreError::Busy => ContextCompactionError::NotStarted(
+                    "会话正在执行，当前回合结束后可整理上下文".to_string(),
+                ),
+                error @ tiangong_core::core::CoreError::ContextCompactionFailed(_) => {
+                    ContextCompactionError::Failed(error.to_string())
                 }
-                other => other.to_string(),
+                tiangong_core::core::CoreError::ContextCompactionInterrupted => {
+                    ContextCompactionError::Interrupted
+                }
+                other => ContextCompactionError::NotStarted(other.to_string()),
             })
     }
 

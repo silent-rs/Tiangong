@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::AgentInputKind;
+use tiangong_core_manager::ContextCompactionError;
 use tracing::warn;
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
@@ -643,7 +644,14 @@ async fn send_message_inner(
         if active_id != session_id {
             return Err("目标会话已切换，请在原会话中重试该命令".to_string());
         }
-        run_context_slash_command(command, app, state).await?;
+        // 经发送入口触发的上下文命令：运行态同样由事件流的终态事件收尾，
+        // 失败原因仍按发送失败回报。
+        if let ContextCommandOutcome::Settled {
+            error: Some(reason),
+        } = run_context_slash_command(command, app, state).await?
+        {
+            return Err(reason);
+        }
         return Ok(());
     }
 
@@ -1317,7 +1325,7 @@ async fn run_context_slash_command(
     command: ContextSlashCommand,
     app: AppHandle,
     state: &TiangongApp,
-) -> Result<bool, String> {
+) -> Result<ContextCommandOutcome, String> {
     use std::sync::mpsc;
 
     // 注：compress/reset 不改变配置；ensure_core 内部对既有 Core 已做 replace_config，
@@ -1348,8 +1356,6 @@ async fn run_context_slash_command(
         return match command {
             // 整理上下文与模型切换前的整理共用同一实现：等待压缩进入终态
             // 后再返回，命令结果反映**压缩本身**的成败，而非"命令已投递"。
-            // 失败沿调用栈回报，前端据此提示用户，不再出现"提示成功但历史
-            // 没变"的中间态。
             ContextSlashCommand::Compress => {
                 // 此 await 在 session_send_lock 内进行（压缩可达数十秒），
                 // 与切换模型链路（set_session_model → 切换前整理）同一口
@@ -1357,18 +1363,80 @@ async fn run_context_slash_command(
                 // 同会话其他写入型命令在此期间排队。取消不受影响（cancel
                 // 先无锁试 cancel_core），进度事件走免锁快速通道（见
                 // start_stream_consumer）。
-                state
+                //
+                // 已进入终态（成功 / 失败 / 被取消）时，终态事件
+                // `ContextCompressed` 已按序写入会话事件流，且排在本次压缩的
+                // 用量、通知等事件之后——界面运行态只由它收尾。命令返回值只
+                // 携带失败原因供提示，不参与运行态判定：本命令持锁返回时，
+                // 这些事件可能还在等同一把锁才能转发，若前端据返回值提前
+                // 回到空闲，晚到的事件会把会话重新拉回执行中且再无终态复位。
+                match state
                     .core_manager
                     .compact_session_context(&ensured.session_id)
                     .await
-                    .map(|()| true)
+                {
+                    Ok(()) | Err(ContextCompactionError::Interrupted) => {
+                        Ok(ContextCommandOutcome::Settled { error: None })
+                    }
+                    Err(ContextCompactionError::Failed(reason)) => {
+                        Ok(ContextCommandOutcome::Settled {
+                            error: Some(reason),
+                        })
+                    }
+                    // 未启动：事件流不会出现终态事件，由调用方直接收尾。
+                    Err(ContextCompactionError::NotStarted(reason)) => Err(reason),
+                }
             }
             // 清理上下文是同步操作（只推进摘要边界、清空用量，不发模型
-            // 请求），维持即发即走。
-            ContextSlashCommand::Reset => Ok(state
-                .core_manager
-                .deliver_to_core_if_live(&ensured.session_id, AgentInputKind::reset_context())),
+            // 请求），维持即发即走：成功时 `ContextCompressed { Clear }` 已入流。
+            ContextSlashCommand::Reset => Ok(
+                if state
+                    .core_manager
+                    .deliver_to_core_if_live(&ensured.session_id, AgentInputKind::reset_context())
+                {
+                    ContextCommandOutcome::Settled { error: None }
+                } else {
+                    ContextCommandOutcome::NotStarted
+                },
+            ),
         };
+    }
+}
+
+/// 上下文管理命令（整理 / 清理）的结果。
+///
+/// 前端据 `settled` 决定由谁收尾运行态：`settled=true` 时终态事件
+/// `ContextCompressed` 已写入会话事件流，运行态由事件收尾；否则事件流不会
+/// 有终态事件，由前端直接回到空闲。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContextCommandOutcome {
+    /// 已进入终态；`error` 为整理失败原因（成功或被取消时为空）。
+    Settled { error: Option<String> },
+    /// 未执行（如无活跃 Core）。
+    NotStarted,
+}
+
+/// 上下文管理命令返回给前端的结构。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContextCommandResult {
+    /// 终态事件 `ContextCompressed` 是否已写入会话事件流。
+    settled: bool,
+    /// 整理失败原因（仅用于提示，运行态由终态事件收尾）。
+    error: Option<String>,
+}
+
+impl From<ContextCommandOutcome> for ContextCommandResult {
+    fn from(outcome: ContextCommandOutcome) -> Self {
+        match outcome {
+            ContextCommandOutcome::Settled { error } => Self {
+                settled: true,
+                error,
+            },
+            ContextCommandOutcome::NotStarted => Self {
+                settled: false,
+                error: None,
+            },
+        }
     }
 }
 
@@ -1377,14 +1445,21 @@ async fn run_context_slash_command(
 pub async fn compress_context(
     app: AppHandle,
     state: State<'_, TiangongApp>,
-) -> Result<bool, String> {
-    run_context_slash_command(ContextSlashCommand::Compress, app, state.inner()).await
+) -> Result<ContextCommandResult, String> {
+    run_context_slash_command(ContextSlashCommand::Compress, app, state.inner())
+        .await
+        .map(Into::into)
 }
 
 /// 清理上下文（重置 LLM 上下文到初始 system prompt）
 #[tauri::command]
-pub async fn reset_context(app: AppHandle, state: State<'_, TiangongApp>) -> Result<bool, String> {
-    run_context_slash_command(ContextSlashCommand::Reset, app, state.inner()).await
+pub async fn reset_context(
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<ContextCommandResult, String> {
+    run_context_slash_command(ContextSlashCommand::Reset, app, state.inner())
+        .await
+        .map(Into::into)
 }
 
 /// 向正在执行的 turn 追加用户消息
