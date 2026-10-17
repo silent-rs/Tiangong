@@ -24,7 +24,6 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEditorModel';
-import { slashPanelKeyAction } from '@/utils/slashCommandKeys';
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
 import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder, truncateMiddle } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
@@ -841,39 +840,21 @@ export function MessageInput({
     }
   };
 
-  // slash 面板键盘（焦点在消息框）：语义见 slashPanelKeyAction。返回 true
-  // 表示已消费该按键。
-  const handleSlashPanelKeyDown = (e: KeyboardEvent<HTMLDivElement>): boolean => {
-    const action = slashPanelKeyAction(
-      {
-        key: e.key,
-        shiftKey: e.shiftKey,
-        metaKey: e.metaKey,
-        ctrlKey: e.ctrlKey,
-        composing: isComposingRef.current || e.nativeEvent.isComposing || e.keyCode === 229,
-      },
-      filteredCandidates.length,
-      mentionIndex,
-    );
-    if (action.type === 'pass') return false;
-    e.preventDefault();
-    if (action.type === 'move') setMentionIndex(action.index);
-    else if (action.type === 'select') selectCandidate(filteredCandidates[action.index]);
-    else closeMentionPanel();
-    return true;
-  };
-
   // 面板打开时键盘由面板内的独立搜索框处理（见 handleMentionSearchKeyDown），
   // 消息框只在焦点意外留在编辑器时兜底关闭面板。
-  // slash 面板没有独立搜索框（过滤词就是消息框里的 `/xxx`），焦点留在编辑器，
-  // 由这里接管导航与选取；否则 Enter 会落到发送分支，把 `/` 原样发成消息。
+  // slash 面板没有独立搜索框，焦点留在编辑器：面板打开时 Enter 触发当前
+  // 选中的命令，否则会落到发送分支，把 `/` 原样发成消息。
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (mentionOpen && completionMode === 'mention' && e.key === 'Escape') {
       e.preventDefault();
       closeMentionPanel();
       return;
     }
-    if (mentionOpen && completionMode === 'slash' && handleSlashPanelKeyDown(e)) {
+    const isPlainEnter = e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229;
+    const selectedCommand = filteredCandidates[mentionIndex];
+    if (mentionOpen && completionMode === 'slash' && isPlainEnter && selectedCommand) {
+      e.preventDefault();
+      selectCandidate(selectedCommand);
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
