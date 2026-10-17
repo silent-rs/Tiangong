@@ -1,10 +1,28 @@
 {
-  "_comment": "ReAct 主循环单次最大输出 token（含 thinking），编译时内嵌进 tiangong-core。匹配：精确 > 最长前缀 > _default。",
+  "_comment": "ReAct 主循环单次最大输出 token（含 thinking），编译时内嵌进 tiangong-core。匹配：模型名转小写后精确 > 最长前缀 > _default。数值取自各厂商官方文档；文档写 nK 的按 n*1000 取下限，避免超限。",
   "_default": 128000,
+
   "claude-opus-5": 128000,
   "claude-sonnet-5": 128000,
   "claude-fable-5": 128000,
   "claude-haiku-5": 128000,
+
+  "gpt-5.5": 128000,
+  "gpt-5.4": 128000,
+
   "deepseek-v4": 384000,
-  "deepseek-flash": 384000
+  "deepseek-flash": 384000,
+
+  "kimi-k3": 131072,
+  "kimi-k2": 32768,
+
+  "glm-5": 128000,
+  "glm-4.7": 128000,
+  "glm-4.6": 128000,
+  "glm-4.6v": 32000,
+  "glm-4.5": 96000,
+  "glm-4.1v": 16000,
+  "glm-4-flash": 16000,
+  "glm-4-long": 4000,
+  "glm-4v": 1000
 }

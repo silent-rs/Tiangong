@@ -16,9 +16,10 @@ static TABLE: LazyLock<HashMap<String, u32>> = LazyLock::new(|| {
     .collect()
 });
 
-/// 按模型名解析单次最大输出 token。
+/// 按模型名解析单次最大输出 token（大小写不敏感）。
 pub(crate) fn max_output_tokens(model: &str) -> u32 {
-    if let Some(value) = TABLE.get(model) {
+    let model = model.trim().to_ascii_lowercase();
+    if let Some(value) = TABLE.get(&model) {
         return *value;
     }
     TABLE
@@ -40,5 +41,13 @@ mod tests {
         assert_eq!(max_output_tokens("deepseek-v4-pro"), 384_000);
         assert_eq!(max_output_tokens("deepseek-flash"), 384_000);
         assert_eq!(max_output_tokens("unknown-model"), 128_000);
+        // 大小写不敏感、最长前缀优先
+        assert_eq!(max_output_tokens("GLM-5.3"), 128_000);
+        assert_eq!(max_output_tokens("glm-4.6v-flash"), 32_000);
+        assert_eq!(max_output_tokens("glm-4.5-air"), 96_000);
+        assert_eq!(max_output_tokens("glm-4-flashx-250414"), 16_000);
+        assert_eq!(max_output_tokens("kimi-k3"), 131_072);
+        assert_eq!(max_output_tokens("kimi-k2.7-code-highspeed"), 32_768);
+        assert_eq!(max_output_tokens("gpt-5.4-mini"), 128_000);
     }
 }
