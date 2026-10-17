@@ -1429,3 +1429,199 @@ async fn 连接被拒映射为is_connect() {
     let error = client.models().list().await.unwrap_err();
     assert!(error.is_connect(), "{error}");
 }
+
+// ── Search / Fetch API ───────────────────────────────
+
+#[tokio::test]
+async fn tools_search_posts_request_and_parses_results() {
+    let body = br#"{"results":[{"rerank_score":2.4,"title":"DeepSeek V4","url":"https://example.com/v4","snippet":"s","summary":"long","content":"","site_name":null,"site_icon":null,"date":"2026-06-01T00:00:00+00:00","authority":3}]}"#;
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+
+    let response = client
+        .tools()
+        .search(
+            crate::types::SearchRequest::new("DeepSeek site:github.com")
+                .count(5)
+                .need_content(true),
+        )
+        .await
+        .unwrap();
+
+    let (request_line, sent) = server
+        .requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        request_line.starts_with("POST /v1/tools/search "),
+        "{request_line}"
+    );
+    let sent: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+    assert_eq!(
+        sent,
+        serde_json::json!({"query":"DeepSeek site:github.com","count":5,"need_content":true}),
+        "未设置的可选字段不应序列化"
+    );
+
+    assert_eq!(response.results.len(), 1);
+    let first = &response.results[0];
+    assert_eq!(first.title, "DeepSeek V4");
+    assert_eq!(first.site_name, None);
+    assert_eq!(first.date.as_deref(), Some("2026-06-01T00:00:00+00:00"));
+    assert!(first.is_high_quality());
+    assert!(first.is_highly_authoritative());
+}
+
+#[tokio::test]
+async fn tools_search_empty_results() {
+    let server = MockServer::start(vec![http_response(
+        "200 OK",
+        "application/json",
+        br#"{"results":[]}"#,
+    )]);
+    let client = mock_client(&server.addr);
+    let response = client
+        .tools()
+        .search(crate::types::SearchRequest::new("nothing"))
+        .await
+        .unwrap();
+    assert!(response.results.is_empty());
+}
+
+#[tokio::test]
+async fn tools_fetch_posts_url_and_parses_markdown() {
+    let body =
+        br##"{"title":"Example article","content":"# Example article\n\nArticle content."}"##;
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+
+    let page = client
+        .tools()
+        .fetch(crate::types::FetchRequest::new(
+            "https://example.com/article",
+        ))
+        .await
+        .unwrap();
+
+    let (request_line, sent) = server
+        .requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        request_line.starts_with("POST /v1/tools/fetch "),
+        "{request_line}"
+    );
+    let sent: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+    assert_eq!(
+        sent,
+        serde_json::json!({"url":"https://example.com/article"})
+    );
+    assert_eq!(page.title, "Example article");
+    assert!(page.content.starts_with("# Example article"));
+}
+
+#[tokio::test]
+async fn tools_url_tolerates_v1_suffix_in_base_url() {
+    let client = crate::DeepSeekClient::builder("k")
+        .base_url("https://api.deepseek.com/v1/")
+        .build()
+        .unwrap();
+    assert_eq!(
+        client.build_tools_url("/v1/tools/search"),
+        "https://api.deepseek.com/v1/tools/search"
+    );
+    let client = crate::DeepSeekClient::builder("k")
+        .base_url("https://api.deepseek.com")
+        .build()
+        .unwrap();
+    assert_eq!(
+        client.build_tools_url("/v1/tools/fetch"),
+        "https://api.deepseek.com/v1/tools/fetch"
+    );
+}
+
+#[tokio::test]
+async fn tools_error_status_mapping() {
+    use crate::DeepSeekError;
+    let err_body = br#"{"error":{"message":"x","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}"#;
+    fn kind(err: &DeepSeekError) -> &'static str {
+        match err {
+            DeepSeekError::InvalidRequest(_) => "invalid",
+            DeepSeekError::Authentication(_) => "auth",
+            DeepSeekError::Api(_) => "api",
+            DeepSeekError::Transport(_) => "transport",
+            DeepSeekError::RateLimited(_) => "rate",
+            _ => "other",
+        }
+    }
+    let cases = [
+        ("400 Bad Request", "invalid", false),
+        ("401 Unauthorized", "auth", false),
+        ("402 Payment Required", "api", false),
+        ("403 Forbidden", "api", false),
+        ("404 Not Found", "api", false),
+        ("408 Request Timeout", "transport", true),
+        ("429 Too Many Requests", "rate", true),
+        ("500 Internal Server Error", "transport", true),
+        ("504 Gateway Timeout", "transport", true),
+    ];
+    for (status, expected, retryable) in cases {
+        let server = MockServer::start(vec![http_response(status, "application/json", err_body)]);
+        let client = mock_client(&server.addr);
+        let err = client
+            .tools()
+            .fetch(crate::types::FetchRequest::new("https://example.com"))
+            .await
+            .unwrap_err();
+        assert_eq!(kind(&err), expected, "{status}: {err:?}");
+        assert_eq!(err.is_retryable(), retryable, "{status}");
+    }
+}
+
+#[test]
+fn tools_search_validation() {
+    use crate::tools::validate_search;
+    use crate::types::SearchRequest;
+
+    assert!(validate_search(&SearchRequest::new("ok")).is_ok());
+    assert!(validate_search(&SearchRequest::new("   ")).is_err());
+    assert!(validate_search(&SearchRequest::new("")).is_err());
+    // 128 个中文字符合法，129 个非法（按 Unicode 字符计）
+    assert!(validate_search(&SearchRequest::new("搜".repeat(128))).is_ok());
+    assert!(validate_search(&SearchRequest::new("搜".repeat(129))).is_err());
+    assert!(validate_search(&SearchRequest::new("q").count(0)).is_err());
+    assert!(validate_search(&SearchRequest::new("q").count(1)).is_ok());
+    assert!(validate_search(&SearchRequest::new("q").count(50)).is_ok());
+    assert!(validate_search(&SearchRequest::new("q").count(51)).is_err());
+    assert!(validate_search(&SearchRequest::new("q").ori_question(" ")).is_err());
+}
+
+#[test]
+fn tools_fetch_url_validation() {
+    use crate::tools::validate_fetch_url;
+
+    assert!(validate_fetch_url("https://example.com/a?b=c").is_ok());
+    assert!(validate_fetch_url("HTTP://example.com").is_ok());
+    assert!(validate_fetch_url("http://[::1]:8080/x").is_ok());
+    assert!(validate_fetch_url("http://example.com/path@not-userinfo").is_ok());
+    assert!(validate_fetch_url("").is_err());
+    assert!(validate_fetch_url("ftp://example.com").is_err());
+    assert!(validate_fetch_url("example.com").is_err());
+    assert!(validate_fetch_url("https:///path").is_err());
+    assert!(validate_fetch_url("https://user:pass@example.com").is_err());
+    assert!(validate_fetch_url("https://user@example.com").is_err());
+    let long = format!("https://example.com/{}", "a".repeat(8192));
+    assert!(validate_fetch_url(&long).is_err());
+}
+
+#[tokio::test]
+async fn tools_invalid_request_is_rejected_locally() {
+    // 未启动服务：若本地校验失效会得到 Transport 而非 InvalidRequest
+    let client = mock_client("127.0.0.1:1");
+    let err = client
+        .tools()
+        .search(crate::types::SearchRequest::new("q").count(100))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::DeepSeekError::InvalidRequest(_)));
+}

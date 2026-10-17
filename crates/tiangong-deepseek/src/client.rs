@@ -10,6 +10,7 @@ use crate::error::DeepSeekError;
 use crate::files::Files;
 use crate::models::Models;
 use crate::responses::Responses;
+use crate::tools::WebTools;
 
 #[derive(Clone)]
 pub struct DeepSeekClient {
@@ -81,6 +82,11 @@ impl DeepSeekClient {
 
     pub fn files(&self) -> Files<'_> {
         Files::new(self)
+    }
+
+    /// 网页搜索与抓取（`/v1/tools/search`、`/v1/tools/fetch`）。
+    pub fn tools(&self) -> WebTools<'_> {
+        WebTools::new(self)
     }
 
     // ── 通用 HTTP 方法 ──────────────────────────────────────
@@ -195,6 +201,47 @@ impl DeepSeekClient {
         Ok(response)
     }
 
+    /// Search / Fetch 等 `/v1/tools/*` 接口：路径自带 `/v1`，
+    /// 兼容 base_url 配置为 OpenAI 风格的 `.../v1`，避免拼出 `/v1/v1/...`。
+    pub(crate) async fn post_tools<T: Serialize, R: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<R, DeepSeekError> {
+        let url = self.build_tools_url(path);
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| DeepSeekError::Transport(err.to_string()))?;
+        if !status.is_success() {
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            return Err(classify_tools_http_error(status, body_text));
+        }
+        serde_json::from_slice(&body).map_err(|err| {
+            DeepSeekError::Serialization(format!(
+                "{err}: {}",
+                String::from_utf8_lossy(&body[..body.len().min(512)])
+            ))
+        })
+    }
+
+    pub(crate) fn build_tools_url(&self, path: &str) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        format!("{}/{}", base, path.trim_start_matches('/'))
+    }
+
     fn build_url(&self, path: &str) -> String {
         format!(
             "{}/{}",
@@ -282,6 +329,20 @@ fn classify_http_error(status: reqwest::StatusCode, body_text: String) -> DeepSe
         401 | 403 => DeepSeekError::Authentication(body_text),
         _ if status.is_server_error() => DeepSeekError::Transport(body_text),
         _ => DeepSeekError::Api(body_text),
+    }
+}
+
+/// Search / Fetch 的状态码语义与对话接口不同：
+/// 403 为 Fetch 安全策略拒绝（非鉴权失败），408 为读取请求体超时（可重试）。
+/// 402 余额不足、404 无可用网页内容归为 `Api`，不重试。
+pub(crate) fn classify_tools_http_error(
+    status: reqwest::StatusCode,
+    body_text: String,
+) -> DeepSeekError {
+    match status.as_u16() {
+        403 => DeepSeekError::Api(body_text),
+        408 => DeepSeekError::Transport(body_text),
+        _ => classify_http_error(status, body_text),
     }
 }
 

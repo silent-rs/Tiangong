@@ -7,6 +7,7 @@ pub mod error;
 pub mod files;
 pub mod models;
 pub mod responses;
+pub mod tools;
 pub mod types;
 
 pub use client::DeepSeekClient;

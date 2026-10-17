@@ -11,6 +11,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 - **Finish Reason** — 普通响应与流式事件均原样保留服务端结束原因，支持完整 JSON 回退和未知值
 - **Responses API** — OpenAI Responses 兼容格式（适配 Codex 场景），非流式 + 流式，支持图片输入（`image_url` / `file_id`）、function / web_search 工具、reasoning effort
 - **Files API** — 图片文件上传（multipart，支持有效期）、列出、查询、删除，`file_id` 可在对话中引用
+- **Search / Fetch API** — 网页搜索（结构化结果、搜索语法、可选正文）与网页抓取（Markdown 正文），本地参数校验
 - **Model Listing** — list available models
 - **Balance Queries** — check account balance (CNY / USD)
 - **Context Caching** — `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` exposed in usage
@@ -20,7 +21,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.1.5"
+tiangong-deepseek = "0.1.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 serde_json = "1"
@@ -263,6 +264,45 @@ assert!(deleted.deleted);
 
 限制速览：单文件最大 64 MiB，文件名最长 512 字符，单用户 25 GiB / 10000 个文件，上传须在 10 分钟内完成。
 
+## Search / Fetch API
+
+[网页搜索与抓取](https://api-docs.deepseek.com/zh-cn/guides/search) 为 Agent / RAG 提供实时网页内容，与对话接口共用 Bearer 鉴权。端点固定为 `/v1/tools/search` 与 `/v1/tools/fetch`；`base_url` 配置为 `https://api.deepseek.com` 或 `https://api.deepseek.com/v1` 均可。
+
+```rust
+use tiangong_deepseek::types::*;
+
+// 搜索：query 支持 site: / -site: / -词 / "短语" / lang: / after: / before: 语法
+let found = client.tools().search(
+    SearchRequest::new("DeepSeek 模型 site:github.com OR site:huggingface.co after:2025")
+        .count(5)                       // 1–50，默认 10
+        .ori_question("DeepSeek 最近发布了什么模型？")
+        .need_content(true),            // 返回正文，默认 false
+).await?;
+for item in found.results.iter().filter(|r| r.is_high_quality()) {
+    println!("[{:.1}] {} {}\n{}", item.rerank_score, item.title, item.url, item.summary);
+}
+
+// 抓取：返回标题与 Markdown 正文
+let page = client.tools().fetch(FetchRequest::new("https://example.com/article")).await?;
+println!("{}\n{}", page.title, page.content);
+```
+
+结果字段：`rerank_score`（0–3，≥1.5 优质，`is_high_quality()`）、`title`、`url`、`snippet`（短摘要，适合展示）、`summary`（长摘要，适合给模型）、`content`、`site_name` / `site_icon` / `date`（可空）、`authority`（0–4，-1 未知，≥3 极权威，`is_highly_authoritative()`）。
+
+本地校验（不合法时直接返回 `InvalidRequest`，不发请求、不计费）：`query` / `ori_question` 1–128 个 Unicode 字符且非全空白；`count` 1–50；`url` 为含 host 的 HTTP/HTTPS URL、≤8192 字符、不含用户名密码。
+
+错误映射：
+
+| HTTP | `DeepSeekError` | `is_retryable()` |
+|------|-----------------|------------------|
+| 400 | `InvalidRequest` | 否 |
+| 401 | `Authentication` | 否 |
+| 402 余额不足 / 403 Fetch 安全策略拒绝 / 404 无可用网页内容 | `Api` | 否 |
+| 408 / 5xx | `Transport` | 是 |
+| 429 QPS 超限 | `RateLimited` | 是 |
+
+计费与限速：按成功请求次数计费（Search 需 `results` 非空，Fetch 需返回正文）；Search、Fetch 各 5 QPS（账号级），Fetch 另有目标域名级限速。
+
 ## Thinking Mode
 
 DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回思维链。开关与强度控制：
@@ -322,8 +362,16 @@ DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回�
 | `/files/{file_id}` | DELETE | Supported |
 | `/models` | GET | Supported |
 | `/user/balance` | GET | Supported |
+| `/v1/tools/search` | POST | Supported (search syntax, count, ori_question, localization, need_content) |
+| `/v1/tools/fetch` | POST | Supported (Markdown content) |
 
 ## Changelog
+
+### 0.1.6
+
+- **Search / Fetch API**：`client.tools().search()` / `fetch()`，对应 `/v1/tools/search` 与 `/v1/tools/fetch`；`SearchRequest` 链式构造，`SearchResult` 提供优质 / 权威判定方法
+- **本地参数校验**：query / ori_question 长度与空白、count 范围、fetch URL 协议 / host / userinfo / 长度
+- **错误映射**：tools 接口 403（Fetch 安全策略）不视为鉴权失败，408 视为可重试；兼容 `base_url` 以 `/v1` 结尾
 
 ### 0.1.2
 

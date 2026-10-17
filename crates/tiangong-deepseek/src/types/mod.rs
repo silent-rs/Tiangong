@@ -3,6 +3,7 @@ pub mod chat;
 pub mod files;
 pub mod model;
 pub mod responses;
+pub mod tools;
 
 pub use balance::{BalanceInfo, BalanceResponse, Currency};
 pub use chat::{
@@ -23,4 +24,8 @@ pub use responses::{
     ResponseRole, ResponseStatus, ResponseUsage, ResponsesEventStream, ResponsesFunctionTool,
     ResponsesStreamEvent, ResponsesTool, TextBlock, TextFormat, TextFormatConfig,
     WebSearchCallItem,
+};
+pub use tools::{
+    FetchRequest, FetchResponse, HIGH_AUTHORITY, HIGH_QUALITY_RERANK_SCORE, SearchRequest,
+    SearchResponse, SearchResult,
 };
