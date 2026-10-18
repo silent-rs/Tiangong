@@ -8,3 +8,5 @@ SHA256SUMS* text eol=lf
 *.wasm binary
 # 插件手写 UI 属于发布制品，禁止 Windows checkout 转 CRLF
 plugins/*/app/*.html text eol=lf
+# 插件随行 UI 资产（图标等）同属发布制品，跨平台校验和必须一致
+plugins/*/assets/** -text
