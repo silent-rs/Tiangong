@@ -334,6 +334,19 @@ const TERMINAL: PluginConfig = PluginConfig {
     protocol_manifest: None,
 };
 
+const WORKSPACE_FILES: PluginConfig = PluginConfig {
+    id: "workspace-files",
+    name: "Workspace Files",
+    description: "工作区文件管理：浏览、预览与编辑会话工作区内的文件",
+    protocol_crate: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: Some("tiangong-plugin-workspace-files-sidecar"),
+    sidecar_artifact: Some("tiangong-workspace-files-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-workspace-files",
+    plugin_manifest: "plugins/tiangong-plugin-workspace-files/plugin.json",
+    protocol_manifest: None,
+};
 const SUBAGENT: PluginConfig = PluginConfig {
     id: "subagent",
     name: "Subagent",
@@ -364,9 +377,8 @@ const BOT: PluginConfig = PluginConfig {
 
 fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator" => {
-            &["dist/index.html"]
-        }
+        "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator"
+        | "workspace-files" => &["dist/index.html"],
         // 构建链管理台 + 手写的消息卡片视图（app/ 下从源码直接拷贝）。
         "subagent" => &["dist/index.html", "app/agent-message.html"],
         // 手写自包含单文件 UI（无前端构建链）。
@@ -386,6 +398,22 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     }
 }
 
+/// UI 随行静态资产（如插件自带的 App 图标）：与页面入口一同进入暂存、
+/// 签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
+fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
+    match config.id {
+        "workspace-files" => &["assets/icon.svg"],
+        _ => &[],
+    }
+}
+/// 需要分发的全部 UI 制品：页面入口 + 随行资产。
+fn plugin_ui_artifacts(config: &PluginConfig) -> Vec<&'static str> {
+    plugin_ui_entries(config)
+        .iter()
+        .chain(plugin_ui_assets(config))
+        .copied()
+        .collect()
+}
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -407,6 +435,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "plugin-creator" => Ok(&PLUGIN_CREATOR),
         "browser" => Ok(&BROWSER),
         "terminal" => Ok(&TERMINAL),
+        "workspace-files" => Ok(&WORKSPACE_FILES),
         "subagent" => Ok(&SUBAGENT),
         "bot" => Ok(&BOT),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
@@ -745,7 +774,7 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
         ));
     }
 
-    for entry in entries {
+    for entry in plugin_ui_artifacts(config) {
         let source = prebuilt
             .as_ref()
             .filter(|_| entry.starts_with("dist/"))
@@ -822,7 +851,7 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
             "sha256": sha256(&plugin.join(&sidecar_name))?,
         });
     }
-    let ui = plugin_ui_entries(config)
+    let ui = plugin_ui_artifacts(config)
         .iter()
         .map(|entry| {
             Ok(serde_json::json!({
@@ -1272,7 +1301,7 @@ fn generate_oss_distribution(
         std::fs::copy(plugin.join(wasm_artifact), release_root.join(wasm_artifact))?;
     }
     let mut ui_artifacts = serde_json::Map::new();
-    for entry in plugin_ui_entries(config) {
+    for entry in plugin_ui_artifacts(config) {
         let destination = release_root.join(entry);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1394,7 +1423,7 @@ fn generate_oss_distribution(
             std::env::consts::EXE_SUFFIX,
         ));
     }
-    for entry in plugin_ui_entries(config) {
+    for entry in plugin_ui_artifacts(config) {
         checksums.push_str(&format!(
             "{}  {}\n",
             sha256(&release_root.join(entry))?,
@@ -1679,6 +1708,24 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     }
 
     let plugin_root = workspace_root.join(config.plugin_root);
+    let resources = manifest
+        .get("resources")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    for asset in plugin_ui_assets(config) {
+        if !resources
+            .iter()
+            .any(|root| Path::new(asset).starts_with(root) && Path::new(asset) != Path::new(root))
+        {
+            return Err(invalid_data(format!(
+                "UI 随行资产 {asset} 不在 plugin.json resources 声明的目录内"
+            )));
+        }
+        require_file(&plugin_root.join(asset))?;
+    }
     if config.protocol_crate.is_some() {
         require_file(&plugin_root.join("protocol/Cargo.toml"))?;
     }

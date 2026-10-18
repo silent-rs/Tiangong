@@ -52,6 +52,7 @@ members = [
     "plugins/tiangong-plugin-scheduler/wasm",
     "plugins/tiangong-plugin-scheduler/sidecar",
     "plugins/tiangong-plugin-terminal/sidecar",
+    "plugins/tiangong-plugin-workspace-files/sidecar",
     "plugins/tiangong-plugin-bot/sidecar",
     "plugins/tiangong-plugin-subagent/protocol",
     "plugins/tiangong-plugin-subagent/wasm",

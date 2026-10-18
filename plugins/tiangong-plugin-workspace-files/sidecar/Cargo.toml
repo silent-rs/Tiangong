@@ -1,0 +1,31 @@
+[package]
+name = "tiangong-plugin-workspace-files-sidecar"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Workspace Files 按需 sidecar（工作区内文件浏览、预览与编辑）"
+publish = false
+
+[[bin]]
+name = "tiangong-workspace-files-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+# 图片预览以 base64 回传页面（不依赖 assetProtocol 的 scope）
+base64 = { workspace = true }
+# 写入乐观锁：内容摘要
+sha2 = { workspace = true }
+hex = { workspace = true }
+scru128 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

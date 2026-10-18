@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "id": "workspace-files",
+  "version": "0.1.0",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "sidecar.invoke",
+    "bridge.call",
+    "app.use"
+  ],
+  "resources": [
+    "assets"
+  ],
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "workspace-files",
+        "title": "文件",
+        "description": "浏览、预览与编辑当前会话工作区内的文件",
+        "icon": "assets/icon.svg",
+        "entry": "dist/index.html",
+        "open_mode": "multi",
+        "context": [
+          "session",
+          "workspace"
+        ]
+      }
+    ]
+  },
+  "sidecar": {
+    "binary": "tiangong-workspace-files-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "lifecycle": "on_demand",
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 30000
+  }
+}
