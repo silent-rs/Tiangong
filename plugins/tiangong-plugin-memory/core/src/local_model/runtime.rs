@@ -52,10 +52,7 @@ impl RuntimeLibrary {
     }
 
     /// 全部文件总字节数。
-    #[cfg_attr(
-        not(any(target_os = "linux", target_os = "windows", test)),
-        allow(dead_code)
-    )]
+    #[cfg(test)]
     pub(crate) fn total_size(&self) -> u64 {
         self.files().map(|file| file.size).sum()
     }
