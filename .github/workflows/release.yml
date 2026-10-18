@@ -12,6 +12,11 @@ on:
         required: true
         default: true
         type: boolean
+      oss_only:
+        description: "跳过构建，仅把已有 Release 重新镜像到 OSS（补发缺失的更新文件）"
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
@@ -34,6 +39,7 @@ jobs:
   publish-tauri:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.platform }}
+    if: ${{ !inputs.oss_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -294,7 +300,11 @@ jobs:
     name: Upload to Aliyun OSS
     needs: publish-tauri
     runs-on: ubuntu-22.04
-    if: ${{ needs.publish-tauri.result == 'success' }}
+    # oss_only=true 时跳过构建，仅把已有 Release 重新镜像到 OSS（补发历史版本）
+    if: ${{ always() && (needs.publish-tauri.result == 'success' || (inputs.oss_only && needs.publish-tauri.result == 'skipped')) }}
+    env:
+      OSS_BASE: https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com
+      OSS_BUCKET: oss://silent-tiangong
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -310,47 +320,80 @@ jobs:
               tag="v0.17.4"
             fi
           fi
-          # Strip leading 'v' or 'app-v' to get bare version
-          version="${tag#app-v}"
-          version="${version#v}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Download release assets
+      # 以 GitHub Release 的 latest.json 为唯一事实来源：清单引用了哪些产物就镜像哪些，
+      # 不再按扩展名白名单挑选（曾漏传 .app.tar.gz/.deb/.rpm，导致 OSS 上的更新地址 404）。
+      - name: Download release assets referenced by latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           mkdir -p oss-upload
           cd oss-upload
-
-          # Download latest.json
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern "latest.json" --clobber
 
-          # Download all platform installers and signatures
-          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
-            --pattern "*.dmg" --pattern "*.dmg.sig" \
-            --pattern "*.AppImage" --pattern "*.AppImage.sig" \
-            --pattern "*-setup.exe" --pattern "*-setup.exe.sig" \
-            --clobber || true
+          mapfile -t assets < <(python3 ../scripts/ci/oss_release_manifest.py \
+            assets latest.json "$GITHUB_REPOSITORY" "$RELEASE_TAG")
+          test "${#assets[@]}" -gt 0
+
+          patterns=()
+          for asset in "${assets[@]}"; do
+            patterns+=(--pattern "$asset" --pattern "$asset.sig")
+          done
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            "${patterns[@]}" --clobber
+
+          for asset in "${assets[@]}"; do
+            test -s "$asset" || { echo "::error::缺少产物 $asset"; exit 1; }
+            test -s "$asset.sig" || { echo "::error::缺少签名 $asset.sig"; exit 1; }
+          done
+          python3 ../scripts/ci/oss_release_manifest.py check-sigs latest.json .
+
+          # 兼容旧流程：macOS .dmg 安装包仍镜像到 OSS 供手动下载（不被 latest.json 引用）
+          shopt -s nullglob
+          if ! gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.dmg" --clobber; then
+            echo "::warning::Release 中没有 .dmg，跳过手动下载包镜像"
+          fi
+          extras=(*.dmg)
+
+          # 上传清单：updater 产物及其 .sig，加上可选的 .dmg
+          {
+            for asset in "${assets[@]}"; do
+              printf '%s\n%s\n' "$asset" "$asset.sig"
+            done
+            for extra in "${extras[@]}"; do
+              printf '%s\n' "$extra"
+            done
+          } > ../oss-assets.txt
+          cat ../oss-assets.txt
 
       - name: Prepare OSS latest.json
         working-directory: oss-upload
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          # Replace GitHub download URLs with OSS URLs in latest.json
-          sed -i \
-            's|https://github.com/${{ github.repository }}/releases/download/|https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/|g' \
-            latest.json
-
+          python3 ../scripts/ci/oss_release_manifest.py rewrite \
+            latest.json ../oss-latest.json "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$OSS_BASE"
           echo "--- OSS latest.json ---"
-          cat latest.json
+          cat ../oss-latest.json
 
       - name: Install ossutil
         run: |
-          curl -fsSL https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip -o /tmp/ossutil.zip
+          curl --connect-timeout 10 --retry 3 -fsSL \
+            https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip \
+            -o /tmp/ossutil.zip
           unzip -o /tmp/ossutil.zip -d /tmp/ossutil
           sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
+
+      - name: Verify OSS credentials present
+        run: |
+          test -n "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" || \
+            { echo "::error::缺少 ALIYUN_OSS_ACCESS_KEY_ID"; exit 1; }
+          test -n "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}" || \
+            { echo "::error::缺少 ALIYUN_OSS_ACCESS_KEY_SECRET"; exit 1; }
 
       - name: Configure ossutil
         run: |
@@ -361,20 +404,36 @@ jobs:
 
       - name: Upload version assets to OSS
         working-directory: oss-upload
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          VERSION="${{ steps.release.outputs.version }}"
-          echo "Uploading version assets to OSS: v${VERSION}/"
+          # 对象路径与 rewrite 生成的 URL 一致：<tag>/<文件名>
+          while IFS= read -r f; do
+            echo "Uploading $f -> ${RELEASE_TAG}/${f}"
+            timeout 15m ossutil cp "$f" "$OSS_BUCKET/${RELEASE_TAG}/${f}" -f
+          done < ../oss-assets.txt
 
-          # Upload installers and signatures to versioned path
-          for f in *.dmg *.dmg.sig *.AppImage *.AppImage.sig *-setup.exe *-setup.exe.sig; do
-            if [[ -f "$f" ]]; then
-              echo "  Uploading $f -> v${VERSION}/${f}"
-              ossutil cp "$f" "oss://silent-tiangong/v${VERSION}/${f}" -f
-            fi
-          done
+      # 正式清单写入前回读每个更新地址并核对 SHA-256：此阶段失败属于"未发布"，
+      # 客户端仍读取旧的 latest.json，不会拿到指向缺失对象的新清单。
+      - name: Verify uploaded assets before manifest
+        run: python3 scripts/ci/oss_release_manifest.py verify oss-latest.json oss-upload
 
-      - name: Upload latest.json to OSS
-        working-directory: oss-upload
+      - name: Stage manifest (next) and verify
         run: |
-          echo "Uploading latest.json to OSS root"
-          ossutil cp latest.json "oss://silent-tiangong/latest.json" -f
+          timeout 5m ossutil cp oss-latest.json "$OSS_BUCKET/latest.json.next" -f
+          curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "$OSS_BASE/latest.json.next?run=$GITHUB_RUN_ID" -o /tmp/staged.json
+          diff oss-latest.json /tmp/staged.json
+
+      - name: Publish latest.json to OSS (last write)
+        run: timeout 5m ossutil cp oss-latest.json "$OSS_BUCKET/latest.json" -f
+
+      - name: Read-only confirmation of published manifest
+        run: |
+          if ! curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "$OSS_BASE/latest.json?run=$GITHUB_RUN_ID-final" -o /tmp/published.json \
+            || ! diff oss-latest.json /tmp/published.json; then
+            echo "::error::正式 latest.json 已上传，但线上回读确认失败，请人工核对发布状态。"
+            exit 1
+          fi
+          echo "OSS latest.json 已发布并确认。"
