@@ -1,0 +1,91 @@
+name: Updater Manifest Monitor
+
+# 巡检应用内更新清单：OSS 与 GitHub 的 latest.json 中每个平台的下载地址都必须可下载，
+# 且 OSS 版本不得落后于 GitHub。任何一项失败即标红（GitHub 会通知仓库关注者），
+# 避免再出现清单指向不存在对象、客户端升级 404 却无人察觉的情况。
+# 补救方式：Release 工作流手动触发并勾选 oss_only，重新镜像对应 tag。
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater-manifest-monitor
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check latest.json download URLs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check OSS and GitHub manifests
+        run: |
+          python3 - <<'PY'
+          import json, sys, urllib.request
+
+          SOURCES = {
+              "OSS": "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/latest.json",
+              "GitHub": "https://github.com/silent-rs/silent-Tiangong/releases/latest/download/latest.json",
+          }
+
+          def fetch_json(url):
+              req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  return json.load(resp)
+
+          def probe(url):
+              # 只取首字节，确认对象存在且可下载，不拉取整个安装包
+              req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as resp:
+                      return resp.status
+              except urllib.error.HTTPError as exc:
+                  return exc.code
+              except Exception as exc:  # noqa: BLE001
+                  return f"{type(exc).__name__}: {exc}"
+
+          def parse(version):
+              return tuple(int(p) for p in version.split("-")[0].split("."))
+
+          errors, versions = [], {}
+          for name, manifest_url in SOURCES.items():
+              try:
+                  manifest = fetch_json(manifest_url)
+              except Exception as exc:  # noqa: BLE001
+                  errors.append(f"{name}: 读取 latest.json 失败：{exc}")
+                  continue
+              versions[name] = manifest.get("version", "")
+              print(f"== {name} latest.json version={versions[name]}")
+              platforms = manifest.get("platforms") or {}
+              if not platforms:
+                  errors.append(f"{name}: platforms 为空")
+              for url in sorted({p.get("url", "") for p in platforms.values()}):
+                  status = probe(url)
+                  ok = status in (200, 206)
+                  print(f"  {'OK  ' if ok else 'FAIL'} {status} {url}")
+                  if not ok:
+                      errors.append(f"{name}: {url} -> {status}")
+              for platform, entry in platforms.items():
+                  if not entry.get("signature"):
+                      errors.append(f"{name}: {platform} 缺少 signature")
+
+          if "OSS" in versions and "GitHub" in versions:
+              try:
+                  if parse(versions["OSS"]) < parse(versions["GitHub"]):
+                      errors.append(
+                          f"OSS 版本 {versions['OSS']} 落后于 GitHub {versions['GitHub']}"
+                      )
+              except ValueError:
+                  errors.append(f"无法解析版本号：{versions}")
+
+          if errors:
+              for err in errors:
+                  print(f"::error::{err}")
+              sys.exit(1)
+          print("全部更新地址可用。")
+          PY
