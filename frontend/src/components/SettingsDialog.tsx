@@ -15,6 +15,7 @@ import { MdPreview } from 'md-editor-rt';
 import 'md-editor-rt/lib/preview.css';
 import { useResolvedTheme } from '@/hooks/useTheme';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
+import { classifyUpdateError, shouldRetryWithGithub, updateErrorHint, UPDATE_RELEASES_URL } from '@/lib/updateError';
 import { api } from '@/api/tauri';
 import { isWebHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
@@ -1778,8 +1779,18 @@ export function PluginView({ contribution }: { contribution: SlotContributionEnt
   );
 }
 
-/** 应用更新请求读取启动时的代理环境变量，关闭 VPN/代理后需重启才能恢复（#662）。 */
-const UPDATE_NETWORK_HINT = '如刚开启或关闭过 VPN/代理，请重启天工后重试。';
+/** 只用 GitHub Release 源重新检查更新，返回可直接下载安装的官方 Update 句柄。 */
+async function checkGithubFallback(): Promise<Update | null> {
+  const [{ invoke }, { Update: UpdateHandle }] = await Promise.all([
+    import('@tauri-apps/api/core'),
+    import('@tauri-apps/plugin-updater'),
+  ]);
+  const metadata = await invoke<ConstructorParameters<typeof UpdateHandle>[0] | null>(
+    'check_update_github_fallback',
+    { timeoutMs: 30000 },
+  );
+  return metadata ? new UpdateHandle(metadata) : null;
+}
 
 function AppUpdateSettings() {
   const storeUpdate = useStore((s) => s.updateAvailable);
@@ -1798,6 +1809,8 @@ function AppUpdateSettings() {
   const resolvedTheme = useResolvedTheme();
   // 进行中的静默预取；安装时可复用，避免重复请求。
   const prefetchRef = useRef<Promise<Update | null> | null>(null);
+  // 安装失败且与网络无关（如更新源缺包）时，提供手动下载入口
+  const [showReleaseLink, setShowReleaseLink] = useState(false);
   const { showSuccess, showError, showInfo } = useToast();
 
   useEffect(() => {
@@ -1886,7 +1899,7 @@ function AppUpdateSettings() {
       showSuccess('发现新版本', `可更新到 ${update.version}`);
     } catch (error) {
       console.error('检查更新失败:', error);
-      showError('检查失败', `${error}。${UPDATE_NETWORK_HINT}`);
+      showError('检查失败', `${error}。${updateErrorHint(classifyUpdateError(error))}`);
     } finally {
       setIsChecking(false);
     }
@@ -1894,6 +1907,7 @@ function AppUpdateSettings() {
 
   const handleInstallUpdate = async () => {
     setIsInstalling(true);
+    setShowReleaseLink(false);
     setDownloadedBytes(0);
     setContentLength(undefined);
     try {
@@ -1922,7 +1936,7 @@ function AppUpdateSettings() {
       }
 
       let downloaded = 0;
-      await update.downloadAndInstall((event: DownloadEvent) => {
+      const onEvent = (event: DownloadEvent) => {
         if (event.event === 'Started') {
           downloaded = 0;
           setDownloadedBytes(0);
@@ -1932,16 +1946,40 @@ function AppUpdateSettings() {
           downloaded += event.data.chunkLength;
           setDownloadedBytes(downloaded);
         }
-      });
+      };
+      try {
+        await update.downloadAndInstall(onEvent);
+      } catch (error) {
+        // 首选源（通常是 OSS）下载失败：updater 下载阶段不会自动回退，改用 GitHub 源重试一次
+        if (!shouldRetryWithGithub(classifyUpdateError(error))) throw error;
+        console.warn('首选更新源下载失败，改用 GitHub 源重试:', error);
+        showInfo('正在切换下载源', '首选更新源下载失败，改从 GitHub 下载');
+        const fallback = await checkGithubFallback().catch((fallbackError) => {
+          console.error('GitHub 更新源检查失败:', fallbackError);
+          return null;
+        });
+        if (!fallback) throw error;
+        await updateRef.current?.close().catch(() => undefined);
+        updateRef.current = fallback;
+        await fallback.downloadAndInstall(onEvent);
+      }
       showSuccess('更新已安装', '应用将重新启动');
       const { relaunch } = await import('@tauri-apps/plugin-process');
       await relaunch();
     } catch (error) {
       console.error('安装更新失败:', error);
-      showError('安装失败', `${error}。${UPDATE_NETWORK_HINT}`);
+      const kind = classifyUpdateError(error);
+      setShowReleaseLink(kind !== 'network');
+      showError('安装失败', `${error}。${updateErrorHint(kind)}`);
     } finally {
       setIsInstalling(false);
     }
+  };
+
+  const handleOpenReleases = () => {
+    import('@tauri-apps/plugin-shell')
+      .then(({ open }) => open(UPDATE_RELEASES_URL))
+      .catch((error) => console.error('打开下载页失败:', error));
   };
 
   // 更新说明中的外链交给系统浏览器打开，避免设置窗口自身被导航
@@ -2019,6 +2057,12 @@ function AppUpdateSettings() {
           )}
 
           <div className="flex flex-wrap justify-end gap-2">
+            {showReleaseLink && !isInstalling && (
+              <Button variant="outline" onClick={handleOpenReleases}>
+                <Globe className="w-4 h-4 mr-2" />
+                打开下载页
+              </Button>
+            )}
             <Button variant="outline" onClick={handleCheckUpdate} disabled={isChecking || isInstalling}>
               {isChecking ? (
                 <>

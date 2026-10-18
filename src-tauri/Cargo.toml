@@ -64,6 +64,8 @@ tauri-plugin-dialog = { workspace = true }
 tauri-plugin-notification = { workspace = true }
 tauri-plugin-process = { workspace = true }
 tauri-plugin-updater = { workspace = true }
+# 应用内更新 GitHub 兜底源的 endpoint 解析（updater_fallback）
+url = { workspace = true }
 
 # 后台悬停监听（inactive_hover）：原生窗口/视图坐标转换
 [target.'cfg(target_os = "macos")'.dependencies]

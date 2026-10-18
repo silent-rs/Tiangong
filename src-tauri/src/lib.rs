@@ -12,6 +12,7 @@ pub mod remote;
 pub mod session_input;
 mod session_ops;
 mod state_ops;
+pub mod updater_fallback;
 pub mod view;
 pub mod web_config;
 pub mod webview_host;

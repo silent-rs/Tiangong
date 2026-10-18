@@ -797,6 +797,7 @@ fn run_gui() {
             tiangong_app::commands::send_message,
             tiangong_app::commands::send_message_with_media,
             tiangong_app::commands::read_attachment_as_data_url,
+            tiangong_app::updater_fallback::check_update_github_fallback,
             tiangong_app::commands::cancel_turn,
             tiangong_app::commands::get_input_cache,
             tiangong_app::commands::set_input_cache,
