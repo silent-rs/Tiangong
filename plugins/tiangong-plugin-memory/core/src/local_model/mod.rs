@@ -106,7 +106,7 @@ async fn prepare(
         set_state(spec, RuntimeState::Failed(message.clone()));
         anyhow::bail!(message);
     }
-    // Linux 需要先就绪 ONNX Runtime 动态库（其他平台为空操作）。
+    // Linux / Windows 需要先就绪 ONNX Runtime 动态库（macOS 静态链接，为空操作）。
     if let Err(error) = runtime::ensure_loaded(cancel).await {
         if !is_transient(&error) {
             set_state(spec, RuntimeState::Failed(format!("{error:#}")));

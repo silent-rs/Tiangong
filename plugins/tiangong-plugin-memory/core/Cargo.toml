@@ -50,17 +50,28 @@ fs2 = { workspace = true }
 
 # 内置本地推理（builtin 档位）。
 #
-# macOS / Windows：静态链接 pyke 预编译 ONNX Runtime。
+# macOS：静态链接 pyke 预编译 ONNX Runtime。
 # Linux：pyke 的 Linux 静态库依赖 glibc 2.38+（__isoc23_* 符号），在 Ubuntu
 # 22.04 等发行版上无法链接；改为运行时 dlopen 微软官方 libonnxruntime.so
-# （glibc 2.27 基线），该库与模型一样按需下载并校验（见 local_model::runtime）。
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+# （glibc 2.27 基线）。
+# Windows：pyke 静态库使用动态 CRT 并强制链接 DirectML，静态链接会让 sidecar.exe
+# 静态导入 MSVCP140.dll / MSVCP140_1.dll / VCRUNTIME140_1.dll / DirectML.dll /
+# d3d12.dll / dxgi.dll，任一不可加载（未装 VC++ 运行库、安全软件拒绝访问、无 DX12）
+# 时进程在加载期即退出（0xC0000022 / 0xC0000135），整个插件无法启动；改为运行时
+# LoadLibrary 微软官方 CPU 版 onnxruntime.dll。
+# 动态库与模型一样按需下载并校验（见 local_model::runtime）。
+[target.'cfg(not(any(target_os = "linux", target_os = "windows")))'.dependencies]
 fastembed = { workspace = true, features = ["ort-download-binaries-rustls-tls"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 fastembed = { workspace = true, features = ["ort-load-dynamic"] }
 # 与 fastembed 7.1 锁定的版本一致；仅用于在创建会话前 `ort::init_from` 指定库路径。
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "std"] }
+
+# Windows：在加载 onnxruntime.dll 前按绝对路径预加载随附的 VC++ 运行库
+# （与 ort 内部使用的 libloading 同一版本，不引入新依赖）。
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = "0.9"
 
 [dev-dependencies]
 serial_test = { workspace = true }

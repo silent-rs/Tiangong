@@ -485,7 +485,7 @@ async fn fetch_verified(
 
 /// 运行库只托管在天工 OSS（及自定义镜像）上：ModelScope / HuggingFace 按模型
 /// 仓库布局寻址，没有这些文件，跳过以免无效请求。
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 fn runtime_sources() -> Vec<String> {
     sources()
         .into_iter()
@@ -493,15 +493,15 @@ fn runtime_sources() -> Vec<String> {
         .collect()
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 fn is_model_hub(source: &str) -> bool {
     source.contains("huggingface.co") || source.contains("hf-mirror.com")
 }
 
-/// 确保当前平台的 ONNX Runtime 动态库已下载，返回库文件绝对路径。
+/// 确保当前平台的 ONNX Runtime 动态库（含随附依赖）已下载，返回主库绝对路径。
 ///
 /// 目录：`<root>/onnxruntime/<version>/<platform>/`，与模型共用下载锁与校验流程。
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(crate) async fn ensure_runtime_library(
     root: &Path,
     library: &super::runtime::RuntimeLibrary,
@@ -519,7 +519,18 @@ pub(crate) async fn ensure_runtime_library(
     .await
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// 运行库全部文件是否已落盘（`fetch_verified` 仅在 sha256 一致后才改名为
+/// 目标文件，因此目标文件存在且大小一致即代表已校验）。
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+fn runtime_library_installed(dir: &Path, library: &super::runtime::RuntimeLibrary) -> bool {
+    library.files().all(|file| {
+        std::fs::metadata(dir.join(file.local_name()))
+            .map(|meta| meta.len() == file.size)
+            .unwrap_or(false)
+    })
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 async fn ensure_runtime_library_from(
     root: &Path,
     legacy: Option<&Path>,
@@ -530,12 +541,7 @@ async fn ensure_runtime_library_from(
 ) -> std::result::Result<PathBuf, DownloadError> {
     let dir = super::runtime::library_dir(root, library);
     let target = dir.join(library.file.local_name());
-    let installed = |target: &Path| {
-        std::fs::metadata(target)
-            .map(|meta| meta.len() == library.file.size)
-            .unwrap_or(false)
-    };
-    if installed(&target) {
+    if runtime_library_installed(&dir, library) {
         return Ok(target);
     }
     if cancel.is_cancelled() {
@@ -544,7 +550,7 @@ async fn ensure_runtime_library_from(
     let Some(_lock) = DownloadLock::acquire(root).map_err(DownloadError::Failed)? else {
         return Err(DownloadError::Busy);
     };
-    if installed(&target) {
+    if runtime_library_installed(&dir, library) {
         return Ok(target);
     }
     let result = async {
@@ -555,28 +561,34 @@ async fn ensure_runtime_library_from(
             .read_timeout(Duration::from_secs(60))
             .build()
             .with_context(|| "创建运行库下载客户端失败")?;
-        if let Some(legacy) = legacy {
-            seed_from_legacy(
-                &super::runtime::library_dir(legacy, library).join(library.file.local_name()),
-                &target,
-                &library.file,
-            );
+        // 依赖在前、主库最后：主库落盘即代表整套就绪（中断后按文件续传）。
+        for file in library.files() {
+            let local = dir.join(file.local_name());
+            if let Some(legacy) = legacy {
+                seed_from_legacy(
+                    &super::runtime::library_dir(legacy, library).join(file.local_name()),
+                    &local,
+                    file,
+                );
+            }
+            let url_path = super::runtime::file_url_path(library, file);
+            fetch_verified(
+                &client,
+                sources,
+                "onnxruntime",
+                file,
+                &dir,
+                retry_base,
+                cancel,
+                |source| format!("{source}/{url_path}"),
+            )
+            .await?;
         }
-        let url_path = super::runtime::library_url_path(library);
-        // fetch_verified 仅在 sha256 一致后才把 .part 改名为目标文件，
-        // 因此目标文件存在即代表已校验。
-        fetch_verified(
-            &client,
-            sources,
-            "onnxruntime",
-            &library.file,
-            &dir,
-            retry_base,
-            cancel,
-            |source| format!("{source}/{url_path}"),
-        )
-        .await?;
-        tracing::info!(path = %target.display(), "Memory ONNX Runtime 运行库下载完成");
+        tracing::info!(
+            dir = %dir.display(),
+            files = library.files().count(),
+            "Memory ONNX Runtime 运行库下载完成"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -591,14 +603,19 @@ async fn ensure_runtime_library_from(
 #[cfg(test)]
 pub(crate) fn runtime_partial_bytes(root: &Path, library: &super::runtime::RuntimeLibrary) -> u64 {
     let dir = super::runtime::library_dir(root, library);
-    let name = library.file.local_name();
-    let done = std::fs::metadata(dir.join(name))
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let part = std::fs::metadata(dir.join(format!("{name}.part")))
-        .map(|m| m.len())
-        .unwrap_or(0);
-    done.max(part).min(library.file.size)
+    library
+        .files()
+        .map(|file| {
+            let name = file.local_name();
+            let done = std::fs::metadata(dir.join(name))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let part = std::fs::metadata(dir.join(format!("{name}.part")))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            done.max(part).min(file.size)
+        })
+        .sum()
 }
 
 /// 从 `part` 当前长度续传到 `expected` 字节。
@@ -981,6 +998,7 @@ mod tests {
         });
         let library = super::super::runtime::RuntimeLibrary {
             platform: "linux-test",
+            dependencies: &[],
             file: ModelFile {
                 path: "libonnxruntime.so.1.24.1",
                 size: bytes.len() as u64,
@@ -1016,6 +1034,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), before);
+    }
+
+    /// Windows 形态：依赖库与主库同目录全部下载校验；缺任一文件都会补齐，
+    /// 已就绪的文件不重复请求。
+    #[tokio::test]
+    async fn runtime_library_downloads_dependencies_with_main_library() {
+        let dep_a = b"fake-vcruntime".repeat(300);
+        let dep_b = b"fake-msvcp".repeat(500);
+        let main = b"fake-onnxruntime-dll".repeat(800);
+        let served: Arc<Vec<(&'static str, Vec<u8>)>> = Arc::new(vec![
+            (
+                "/onnxruntime/1.24.1/windows-test/vcruntime140.dll",
+                dep_a.clone(),
+            ),
+            (
+                "/onnxruntime/1.24.1/windows-test/msvcp140.dll",
+                dep_b.clone(),
+            ),
+            (
+                "/onnxruntime/1.24.1/windows-test/onnxruntime.dll",
+                main.clone(),
+            ),
+        ]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = requests.clone();
+        let files = served.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                log.lock().unwrap().push(path.clone());
+                let response = match files.iter().find(|(p, _)| *p == path) {
+                    Some((_, body)) => {
+                        let mut head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        head.extend_from_slice(body);
+                        head
+                    }
+                    None => {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec()
+                    }
+                };
+                let _ = std::io::Write::write_all(&mut stream, &response);
+            }
+        });
+        let dependencies: &'static [ModelFile] = Box::leak(Box::new([
+            ModelFile {
+                path: "vcruntime140.dll",
+                size: dep_a.len() as u64,
+                sha256: leak(sha(&dep_a)),
+            },
+            ModelFile {
+                path: "msvcp140.dll",
+                size: dep_b.len() as u64,
+                sha256: leak(sha(&dep_b)),
+            },
+        ]));
+        let library = super::super::runtime::RuntimeLibrary {
+            platform: "windows-test",
+            dependencies,
+            file: ModelFile {
+                path: "onnxruntime.dll",
+                size: main.len() as u64,
+                sha256: leak(sha(&main)),
+            },
+        };
+        let root = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::default();
+        let path = ensure_runtime_library_from(
+            root.path(),
+            None,
+            &library,
+            std::slice::from_ref(&base),
+            FAST_RETRY,
+            &cancel,
+        )
+        .await
+        .expect("运行库及依赖下载应成功");
+        let dir = root.path().join("onnxruntime/1.24.1/windows-test");
+        assert_eq!(path, dir.join("onnxruntime.dll"));
+        assert_eq!(std::fs::read(dir.join("vcruntime140.dll")).unwrap(), dep_a);
+        assert_eq!(std::fs::read(dir.join("msvcp140.dll")).unwrap(), dep_b);
+        assert_eq!(std::fs::read(&path).unwrap(), main);
+        assert_eq!(
+            runtime_partial_bytes(root.path(), &library),
+            library.total_size()
+        );
+        // 依赖先于主库下载（即加载顺序）。
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            served
+                .iter()
+                .map(|(p, _)| p.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // 只缺一个依赖：仅补下该文件，主库存在也不能视为已安装。
+        std::fs::remove_file(dir.join("msvcp140.dll")).unwrap();
+        requests.lock().unwrap().clear();
+        ensure_runtime_library_from(root.path(), None, &library, &[base], FAST_RETRY, &cancel)
+            .await
+            .expect("缺失依赖应被补齐");
+        assert_eq!(std::fs::read(dir.join("msvcp140.dll")).unwrap(), dep_b);
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            ["/onnxruntime/1.24.1/windows-test/msvcp140.dll"]
+        );
     }
 
     #[test]

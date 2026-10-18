@@ -11352,6 +11352,7 @@ dependencies = [
  "hex",
  "lancedb",
  "libc",
+ "libloading 0.9.0",
  "ort",
  "reqwest 0.13.4",
  "rusqlite",
@@ -11776,7 +11777,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "serde",
  "serde_json",
@@ -11784,7 +11785,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
