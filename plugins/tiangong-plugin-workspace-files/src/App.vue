@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { HostContext } from '@tiangong/plugin-sdk';
 import { FilesApi, type DirEntry, type FileContent } from './api';
 
@@ -20,6 +20,13 @@ type DialogState =
   | { kind: 'delete'; target: DirEntry }
   | { kind: 'discard'; next: () => void };
 
+/** 右键菜单：target 为空表示在树的空白处右键（作用于工作区根目录）。 */
+interface ContextMenuState {
+  x: number;
+  y: number;
+  target: DirEntry | null;
+}
+
 const workspace = ref(props.initialHostContext?.session?.workspace ?? '');
 const children = ref<Record<string, DirEntry[]>>({});
 const truncatedDirs = ref<Set<string>>(new Set());
@@ -33,9 +40,12 @@ const saving = ref(false);
 const error = ref('');
 const notice = ref('');
 const dialog = ref<DialogState | null>(null);
+const menu = ref<ContextMenuState | null>(null);
 let stopContext: (() => void) | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 const gutter = ref<HTMLElement | null>(null);
+const root = ref<HTMLElement | null>(null);
+const menuEl = ref<HTMLElement | null>(null);
 
 const api = computed(() => new FilesApi(workspace.value));
 const dirty = computed(
@@ -214,23 +224,99 @@ function onEditorKeydown(event: KeyboardEvent) {
   }
 }
 
-/** 新建目标目录：选中目录则建在其中，选中文件则建在其所在目录。 */
-function targetDir(): string {
+/** 新建目标目录：右键目录则建在其中，右键文件则建在其所在目录，空白处建在根目录。 */
+function targetDir(entry: DirEntry | null): string {
+  if (!entry) return '';
+  return entry.kind === 'dir' ? entry.path : parentOf(entry.path);
+}
+
+function openCreate(type: 'file' | 'dir', entry: DirEntry | null) {
+  dialog.value = { kind: 'create', type, parent: targetDir(entry), value: '' };
+}
+
+function openRename(entry: DirEntry) {
+  dialog.value = { kind: 'rename', target: entry, value: entry.name };
+}
+
+function openDelete(entry: DirEntry) {
+  dialog.value = { kind: 'delete', target: entry };
+}
+
+function openMenu(event: MouseEvent, target: DirEntry | null) {
+  if (!workspace.value) return;
+  const bounds = root.value?.getBoundingClientRect();
+  if (!bounds) return;
+  if (target) selected.value = target;
+  menu.value = { x: event.clientX - bounds.left, y: event.clientY - bounds.top, target };
+  // 渲染后按实际尺寸收回到容器内，避免菜单超出右侧或底部
+  void nextTick(() => {
+    const state = menu.value;
+    const el = menuEl.value;
+    if (!state || !el) return;
+    const maxX = bounds.width - el.offsetWidth - 4;
+    const maxY = bounds.height - el.offsetHeight - 4;
+    menu.value = {
+      ...state,
+      x: Math.max(4, Math.min(state.x, maxX)),
+      y: Math.max(4, Math.min(state.y, maxY)),
+    };
+    el.focus();
+  });
+}
+
+function closeMenu() {
+  menu.value = null;
+}
+
+type MenuAction = 'newFile' | 'newDir' | 'rename' | 'delete' | 'copyPath' | 'refresh';
+
+function runMenu(action: MenuAction) {
+  const target = menu.value?.target ?? null;
+  closeMenu();
+  if (action === 'newFile') openCreate('file', target);
+  else if (action === 'newDir') openCreate('dir', target);
+  else if (action === 'refresh') void refreshTree();
+  else if (action === 'copyPath' && target) void copyPath(target);
+  else if (action === 'rename' && target) openRename(target);
+  else if (action === 'delete' && target) openDelete(target);
+}
+
+async function copyPath(entry: DirEntry) {
+  try {
+    await navigator.clipboard.writeText(entry.path);
+    flash('已复制相对路径');
+  } catch (err) {
+    showError(err);
+  }
+}
+
+/** 文件树获得焦点时的快捷键：F2 重命名，Delete / Cmd+Backspace 删除。 */
+function onTreeKeydown(event: KeyboardEvent) {
   const current = selected.value;
-  if (!current) return '';
-  return current.kind === 'dir' ? current.path : parentOf(current.path);
+  if (!current || dialog.value || menu.value) return;
+  if (event.key === 'F2') {
+    event.preventDefault();
+    openRename(current);
+  } else if (
+    event.key === 'Delete' ||
+    (event.key === 'Backspace' && (event.metaKey || event.ctrlKey))
+  ) {
+    event.preventDefault();
+    openDelete(current);
+  }
 }
 
-function openCreate(type: 'file' | 'dir') {
-  dialog.value = { kind: 'create', type, parent: targetDir(), value: '' };
+function onMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeMenu();
+  }
 }
 
-function openRename() {
-  if (selected.value) dialog.value = { kind: 'rename', target: selected.value, value: selected.value.name };
-}
-
-function openDelete() {
-  if (selected.value) dialog.value = { kind: 'delete', target: selected.value };
+/** 菜单外任意按下即关闭；捕获阶段监听，shadow DOM 下用 composedPath 判断。 */
+function onGlobalPointerDown(event: PointerEvent) {
+  if (!menu.value || !menuEl.value) return;
+  if (!event.composedPath().includes(menuEl.value)) closeMenu();
 }
 
 function validName(name: string): boolean {
@@ -305,6 +391,7 @@ function resetForWorkspace(next: string) {
   file.value = null;
   draft.value = '';
   dialog.value = null;
+  menu.value = null;
   error.value = '';
   if (next) void loadDir('');
 }
@@ -324,40 +411,54 @@ watch(dialog, (state) => {
 onMounted(() => {
   stopContext = props.subscribeHostContext?.(applyContext) ?? null;
   if (workspace.value) void loadDir('');
+  window.addEventListener('pointerdown', onGlobalPointerDown, true);
+  window.addEventListener('blur', closeMenu);
 });
 
 onUnmounted(() => {
+  window.removeEventListener('pointerdown', onGlobalPointerDown, true);
+  window.removeEventListener('blur', closeMenu);
   stopContext?.();
   if (noticeTimer) clearTimeout(noticeTimer);
 });
 </script>
 
 <template>
-  <div class="files-app">
+  <div ref="root" class="files-app">
     <aside class="sidebar">
       <header class="sidebar-header">
         <div class="workspace" :title="workspace">
           {{ workspace ? workspace.split('/').filter(Boolean).pop() : '无工作区' }}
         </div>
         <div class="actions">
-          <button title="新建文件" :disabled="!workspace" @click="openCreate('file')">+文件</button>
-          <button title="新建文件夹" :disabled="!workspace" @click="openCreate('dir')">+目录</button>
           <button title="刷新" :disabled="!workspace" @click="refreshTree">刷新</button>
         </div>
       </header>
-      <div class="tree" role="tree">
+      <div
+        class="tree"
+        role="tree"
+        tabindex="0"
+        @contextmenu.prevent="openMenu($event, null)"
+        @keydown="onTreeKeydown"
+      >
         <p v-if="!workspace" class="empty">当前会话没有可用的工作区</p>
         <p v-else-if="loadingDirs.has('') && !children['']" class="empty">加载中…</p>
-        <p v-else-if="children[''] && children[''].length === 0" class="empty">工作区为空</p>
+        <p v-else-if="children[''] && children[''].length === 0" class="empty">
+          工作区为空，右键可新建文件
+        </p>
         <div
           v-for="row in rows"
           :key="row.entry.path"
           class="row"
-          :class="{ active: selected?.path === row.entry.path }"
+          :class="{
+            active: selected?.path === row.entry.path,
+            'menu-target': menu?.target?.path === row.entry.path,
+          }"
           :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
           role="treeitem"
           :title="row.entry.path"
           @click="onRowClick(row.entry)"
+          @contextmenu.prevent.stop="openMenu($event, row.entry)"
         >
           <span class="twisty">
             {{ row.entry.kind === 'dir' ? (expanded.has(row.entry.path) ? '▾' : '▸') : '' }}
@@ -368,10 +469,6 @@ onUnmounted(() => {
         </div>
         <p v-if="truncatedDirs.has('')" class="empty">条目过多，仅显示前 5000 项</p>
       </div>
-      <footer class="sidebar-footer">
-        <button :disabled="!selected" @click="openRename">重命名</button>
-        <button class="danger" :disabled="!selected" @click="openDelete">删除</button>
-      </footer>
     </aside>
 
     <main class="viewer">
@@ -417,6 +514,35 @@ onUnmounted(() => {
         </div>
       </section>
     </main>
+
+    <div
+      v-if="menu"
+      ref="menuEl"
+      class="context-menu"
+      role="menu"
+      tabindex="-1"
+      :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
+      @keydown="onMenuKeydown"
+      @contextmenu.prevent
+    >
+      <button type="button" role="menuitem" @click="runMenu('newFile')">新建文件</button>
+      <button type="button" role="menuitem" @click="runMenu('newDir')">新建文件夹</button>
+      <template v-if="menu.target">
+        <div class="menu-separator"></div>
+        <button type="button" role="menuitem" @click="runMenu('rename')">
+          重命名<span class="shortcut">F2</span>
+        </button>
+        <button type="button" role="menuitem" @click="runMenu('copyPath')">复制相对路径</button>
+        <div class="menu-separator"></div>
+        <button type="button" role="menuitem" class="danger" @click="runMenu('delete')">
+          删除<span class="shortcut">⌘⌫</span>
+        </button>
+      </template>
+      <template v-else>
+        <div class="menu-separator"></div>
+        <button type="button" role="menuitem" @click="runMenu('refresh')">刷新</button>
+      </template>
+    </div>
 
     <div v-if="dialog" class="overlay" @click.self="dialog = null">
       <form class="dialog" @submit.prevent="confirmDialog">
@@ -591,11 +717,52 @@ button.link {
   margin: 12px;
   color: var(--ui-muted-foreground);
 }
-.sidebar-footer {
+.tree:focus {
+  outline: none;
+}
+.row.menu-target {
+  outline: 1px solid var(--ui-primary);
+  outline-offset: -1px;
+}
+
+.context-menu {
+  position: absolute;
+  z-index: 20;
   display: flex;
-  gap: 6px;
-  padding: 6px 10px;
-  border-top: 1px solid var(--ui-border);
+  flex-direction: column;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-card);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+  outline: none;
+}
+.context-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 12.5px;
+  text-align: left;
+}
+.context-menu button:hover,
+.context-menu button:focus-visible {
+  outline: none;
+  background: var(--ui-accent);
+}
+.shortcut {
+  color: var(--ui-muted-foreground);
+  font-size: 11px;
+}
+.menu-separator {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--ui-border);
 }
 
 .viewer {
