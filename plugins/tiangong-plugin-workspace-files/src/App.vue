@@ -474,6 +474,8 @@ onUnmounted(() => {
   display: flex;
   width: 100%;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
   color: var(--ui-foreground);
   background: var(--ui-background);
   font-size: 13px;
@@ -521,6 +523,7 @@ button.link {
   flex-direction: column;
   flex: 0 0 260px;
   min-width: 0;
+  min-height: 0;
   border-right: 1px solid var(--ui-border);
 }
 .sidebar-header,
@@ -548,6 +551,7 @@ button.link {
 }
 .tree {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 4px 0;
 }
@@ -599,6 +603,7 @@ button.link {
   flex: 1;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 .path {
   display: flex;
