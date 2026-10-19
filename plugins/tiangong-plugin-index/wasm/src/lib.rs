@@ -342,11 +342,13 @@ fn forward_turn_batch(session_json: &str) -> Result<(), PluginError> {
 
 /// 收集本轮需要写入会话索引的消息。
 ///
-/// 排除两类数据（否则会产生索引垃圾/异常数据）：
-/// - 宿主注入的 role=User 消息（`HostInjected` 插件反馈图片注入、
-///   `CompressedResume` 压缩恢复锚点）：不是用户意图，图片消息经
-///   `text_content()` 提取后内容为空，索引后是空内容条目；
-/// - 文本内容为空的消息（纯媒体内容），避免空文档进入 Tantivy。
+/// 排除宿主注入的 role=User 消息（`HostInjected` 插件反馈图片注入、
+/// `CompressedResume` 压缩恢复锚点）：不是用户意图。
+///
+/// 正文直接遍历内容块生成（见 [`turn_index_content`]），不使用
+/// `Message::text_content()`——后者只取 `Text` 块，会丢掉附件路径与
+/// 模型指令，导致只发附件的消息整条漏记。完全没有可索引内容的消息
+/// 仍然跳过，避免空文档进入 Tantivy。
 ///
 /// 宿主快照只含本轮消息。
 fn collect_turn_data(session: &PluginSession) -> Vec<TurnData> {
@@ -364,7 +366,7 @@ fn collect_turn_data(session: &PluginSession) -> Vec<TurnData> {
             if msg.kind() == MessageRole::User && !msg.is_user_input() {
                 return None;
             }
-            let content = msg.text_content();
+            let content = turn_index_content(msg);
             if content.trim().is_empty() {
                 return None;
             }
@@ -378,6 +380,34 @@ fn collect_turn_data(session: &PluginSession) -> Vec<TurnData> {
             })
         })
         .collect()
+}
+
+/// 按内容块原始顺序生成索引正文：文本与模型指令原样保留，附件写成
+/// `[附件] 名称 (mime) path=路径`，保证事后可以检索回附件位置。
+fn turn_index_content(message: &tiangong_types::Message) -> String {
+    use tiangong_types::ContentBlock;
+
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } | ContentBlock::ModelInstruction { text } => {
+                let text = text.trim();
+                (!text.is_empty()).then(|| text.to_string())
+            }
+            ContentBlock::Image { asset, .. } | ContentBlock::AssetReference { asset } => {
+                Some(format!(
+                    "[附件] {} ({}) path={}",
+                    asset.original_name, asset.mime_type, asset.local_path
+                ))
+            }
+            ContentBlock::Media { url, title, .. } => Some(format!(
+                "[附件] {} path={url}",
+                title.as_deref().unwrap_or("media")
+            )),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// on_session_ended：通知 sidecar finalize 会话索引。
@@ -626,7 +656,7 @@ mod tests {
             Message::new(MessageRole::User, "帮我看下这张截图"),
             host_injected_image_message(),
             Message::new(MessageRole::Assistant, "已查看截图内容"),
-            // 纯媒体消息：无文本，不应产生空内容索引条目。
+            // 宿主注入的纯媒体消息：不是用户意图，不应进入索引。
             host_injected_image_message(),
         ]);
         let turns = collect_turn_data(&session);
@@ -645,6 +675,50 @@ mod tests {
         let turns = collect_turn_data(&session);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].content, "真实输入");
+    }
+
+    fn image_asset() -> tiangong_types::StoredAsset {
+        tiangong_types::StoredAsset {
+            asset_id: "a-2".to_string(),
+            local_path: "/media/images/photo.png".to_string(),
+            original_name: "photo.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 2048,
+            kind: tiangong_types::MediaKind::Image,
+        }
+    }
+
+    #[test]
+    fn collect_turn_data_indexes_attachment_only_user_message() {
+        // 用户只发附件、未附文字：仍要写入索引，并能检索到附件路径。
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::asset_reference(image_asset()),
+            ContentBlock::model_instruction("本条用户消息只包含上述附件"),
+        ];
+        let turns = collect_turn_data(&test_session(vec![message]));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "user");
+        assert!(
+            turns[0]
+                .content
+                .contains("[附件] photo.png (image/png) path=/media/images/photo.png")
+        );
+        assert!(turns[0].content.contains("本条用户消息只包含上述附件"));
+    }
+
+    #[test]
+    fn collect_turn_data_keeps_text_and_attachment_in_block_order() {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::text("把这张图调亮"),
+            ContentBlock::asset_reference(image_asset()),
+        ];
+        let turns = collect_turn_data(&test_session(vec![message]));
+        assert_eq!(
+            turns[0].content,
+            "把这张图调亮\n[附件] photo.png (image/png) path=/media/images/photo.png"
+        );
     }
 }
 

@@ -1242,7 +1242,21 @@ impl Message {
         self.user_source().is_some_and(UserSource::is_user_input)
     }
 
-    /// 获取纯文本内容（拼接所有 Text 块）
+    /// 拼接所有 `Text` 块（用户可见文本）。
+    ///
+    /// **计划淘汰，新代码不要使用。**
+    ///
+    /// 该方法只取 `ContentBlock::Text`，会静默丢弃 `ModelInstruction`
+    /// （宿主写给模型的说明，含附件路径等）、`AssetReference` / `Image`
+    /// （附件本身）等内容块；名称却像是“整条消息的文本”，已导致调用方
+    /// 误用（例如会话索引因此漏记附件路径、只发附件的消息整条丢失）。
+    ///
+    /// 消息内容以 `content: Vec<ContentBlock>` 完整提供，调用方应按自身
+    /// 需求直接遍历内容块、自行决定取舍，而不是依赖这里的固定裁剪。
+    ///
+    /// 淘汰计划：现有调用点逐步改为直接处理 `content` 后移除本方法。
+    /// 暂不标注 `#[deprecated]`：现存调用点较多，且工作区以
+    /// `clippy -D warnings` 为门禁，待调用点迁移完成后再加属性并删除。
     pub fn text_content(&self) -> String {
         self.content
             .iter()

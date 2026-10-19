@@ -2013,8 +2013,8 @@ export const useStore = create<AppState>((set, get) => ({
     get().setInputCacheAttachments(cacheKey, message.attachments);
     const latest = get().inputCaches[cacheKey];
     if (!latest) return false;
-    const content = message.text.trim()
-      || (message.attachments.length > 0 ? '请处理这些附件。' : message.text);
+    // 仅附件时发送空文本，宿主负责追加中性的模型指令（见 MessageInput.handleSend）。
+    const content = message.text.trim();
     const isIdle = !get().sessionRunStatuses[cacheKey];
     // 队列项原样投递时保留插件渲染声明（未经用户编辑）。
     const delivered = isIdle

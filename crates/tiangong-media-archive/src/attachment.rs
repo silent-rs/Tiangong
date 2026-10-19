@@ -273,7 +273,12 @@ impl AttachmentTransaction {
             return Err("准备用户消息时 message_id 不能为空".to_string());
         }
         let mut content = Vec::with_capacity(1 + self.stored.len() * 2);
-        content.push(ContentBlock::Text { text });
+        // 仅附件、无文字时不写入空文本块，也不由宿主代拟“请处理附件”之类的
+        // 用户文本——那会被模型当作用户新指令，打断或扭曲正在进行的任务。
+        // 附件用途交给模型结合上下文判断，每个附件的说明只陈述事实。
+        if !(text.trim().is_empty() && !self.stored.is_empty()) {
+            content.push(ContentBlock::Text { text });
+        }
         let mut assets = Vec::with_capacity(self.stored.len());
 
         for (index, stored) in self.stored.iter().enumerate() {
@@ -368,9 +373,12 @@ fn inline_image_instruction(index: usize, asset: &StoredAsset) -> String {
     )
 }
 
+/// 文件附件只陈述事实（内容未直接发送、本地路径），不使用命令语气：
+/// 执行中补发的文件不应被当作“立即处理文件”的新指令，用途由模型结合
+/// 上下文判断，可用的处理能力由各插件在其提示词中说明。
 fn file_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息包含文件引用，文件内容不会直接发送给模型。请使用文件工具、文档解析器或 Skill 按下列本地 path 处理。\n- {}",
+        "本条用户消息包含文件引用，文件内容不会直接发送给模型，需要读取时使用下列本地 path。\n- {}",
         asset_notice_item(index, asset)
     )
 }
@@ -1010,6 +1018,79 @@ mod tests {
                     transaction.assets()[1].local_path
                 )
         ));
+    }
+
+    #[test]
+    fn attachment_only_message_has_only_attachment_blocks() {
+        let root = TestRoot::new();
+        let mut transaction = root
+            .store()
+            .store_batch(vec![data_attachment(
+                MediaKind::Image,
+                "photo.png",
+                "image/png",
+                b"png bytes",
+            )])
+            .unwrap();
+        let message = transaction.prepare_message("message-only", "  ").unwrap();
+
+        // 不写入任何用户文本块（含空串），也不追加额外指令：
+        // 只有附件引用与该附件的事实性路径说明。
+        assert_eq!(message.len(), 2);
+        assert!(matches!(&message[0], ContentBlock::AssetReference { .. }));
+        assert!(matches!(
+            &message[1],
+            ContentBlock::ModelInstruction { text } if text.starts_with("本条消息中的图片已归档")
+        ));
+    }
+
+    #[test]
+    fn message_with_text_keeps_text_first() {
+        let root = TestRoot::new();
+        let mut transaction = root
+            .store()
+            .store_batch(vec![data_attachment(
+                MediaKind::File,
+                "doc.txt",
+                "text/plain",
+                b"file",
+            )])
+            .unwrap();
+        let message = transaction
+            .prepare_message("message-text", "总结一下")
+            .unwrap();
+
+        assert_eq!(message.len(), 3);
+        assert!(matches!(&message[0], ContentBlock::Text { text } if text == "总结一下"));
+    }
+
+    /// 附件说明只陈述事实，不使用“请……处理”之类的命令语气：
+    /// 执行中补发附件时不应被模型理解为新的处理指令。
+    #[test]
+    fn attachment_instructions_are_factual_without_imperatives() {
+        let root = TestRoot::new();
+        let mut transaction = root
+            .store()
+            .store_batch(vec![
+                data_attachment(MediaKind::Image, "photo.png", "image/png", b"png"),
+                data_attachment(MediaKind::File, "doc.txt", "text/plain", b"file"),
+                data_attachment(MediaKind::Audio, "voice.mp3", "audio/mpeg", b"audio"),
+                data_attachment(MediaKind::Video, "clip.mp4", "video/mp4", b"video"),
+            ])
+            .unwrap();
+        let message = transaction.prepare_message("message-facts", "").unwrap();
+        let instructions = message
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ModelInstruction { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(instructions.len(), 4);
+        for text in instructions {
+            assert!(text.contains("path="), "附件说明必须包含路径：{text}");
+            assert!(!text.contains('请'), "附件说明不应使用命令语气：{text}");
+        }
     }
 
     #[test]

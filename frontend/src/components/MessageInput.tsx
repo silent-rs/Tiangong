@@ -916,8 +916,9 @@ export function MessageInput({
     if (await executeSlashCommand(trimmed)) {
       return;
     }
-    const content = inputSnapshot.text.trim()
-      || (inputSnapshot.attachments.length > 0 ? '请处理这些附件。' : inputSnapshot.text);
+    // 仅附件时发送空文本：由宿主追加中性的模型指令说明“未附文字”，
+    // 不在这里代拟用户指令，避免误导正在执行的任务。
+    const content = inputSnapshot.text.trim();
     if (isIdle) {
       await sendMessage(
         targetCacheKey,

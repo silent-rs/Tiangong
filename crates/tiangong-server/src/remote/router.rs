@@ -268,17 +268,17 @@ fn summarize_runtime_event(event: &RuntimeEvent) -> Option<String> {
 ///
 /// 语音消息不在此处转写：音频随 `extract_media` 作为附件进入归档流水线，
 /// 语音识别插件可用时由模型调用 `speech_to_text` 处理。
+///
+/// 非文本消息只保留用户真实填写的 caption，不再代拟 `[图片消息]` 之类的
+/// 占位文本：附件由 `extract_media` 交给归档层，以事实性的路径说明提供
+/// 给模型；宿主代写的用户文本会被模型误当作新指令，干扰正在执行的任务。
 fn extract_text(msg: &IncomingMessage) -> String {
     match &msg.content {
         MessageContent::Text(text) => text.clone(),
-        MessageContent::Audio { .. } => "[语音消息]".to_string(),
-        MessageContent::Image { caption, .. } => {
-            caption.clone().unwrap_or_else(|| "[图片消息]".to_string())
+        MessageContent::Image { caption, .. } | MessageContent::Video { caption, .. } => {
+            caption.clone().unwrap_or_default()
         }
-        MessageContent::Video { caption, .. } => {
-            caption.clone().unwrap_or_else(|| "[视频消息]".to_string())
-        }
-        MessageContent::File { name, .. } => format!("[文件: {name}]"),
+        MessageContent::Audio { .. } | MessageContent::File { .. } => String::new(),
     }
 }
 
@@ -381,5 +381,46 @@ mod tests {
         assert_eq!(media.len(), 2);
         assert_eq!(media[0].url, "first");
         assert_eq!(media[1].url, "second");
+    }
+
+    #[test]
+    fn extract_text_does_not_fabricate_placeholder_for_media_only_messages() {
+        let message = |content: MessageContent| IncomingMessage {
+            id: "message".to_string(),
+            connector: "feishu-bot".to_string(),
+            channel_id: "chat".to_string(),
+            sender_id: "sender".to_string(),
+            sender_role: RemoteRole::Controller,
+            content,
+            media: Vec::new(),
+            reply_to: None,
+            timestamp: "now".to_string(),
+            annotations: Default::default(),
+        };
+        for content in [
+            MessageContent::Image {
+                url: "img".to_string(),
+                caption: None,
+            },
+            MessageContent::Video {
+                url: "video".to_string(),
+                caption: None,
+            },
+            MessageContent::Audio {
+                url: "audio".to_string(),
+                duration: None,
+            },
+            MessageContent::File {
+                url: "file".to_string(),
+                name: "a.pdf".to_string(),
+            },
+        ] {
+            assert_eq!(extract_text(&message(content)), "");
+        }
+        let captioned = message(MessageContent::Image {
+            url: "img".to_string(),
+            caption: Some("看看这个".to_string()),
+        });
+        assert_eq!(extract_text(&captioned), "看看这个");
     }
 }
