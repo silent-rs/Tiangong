@@ -647,11 +647,16 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
         context[1].user_source(),
         Some(crate::session::UserSource::CompressedResume)
     );
+    // 锚点原样复制：首块为来源说明，用户原文保留为普通文本块。
     assert!(matches!(
         &context[1].content[0],
         crate::session::ContentBlock::ModelInstruction { text }
-            if text.contains("处理 latest.txt")
+            if text.starts_with("用户当前请求")
     ));
+    assert!(context[1].content.iter().any(|block| matches!(
+        block,
+        crate::session::ContentBlock::Text { text } if text.contains("处理 latest.txt")
+    )));
     assert_eq!(context[2].role, MessageRole::Assistant);
     assert!(context.iter().any(|message| {
         message.tool_call_id() == Some("latest-call")
