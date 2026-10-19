@@ -410,26 +410,26 @@ impl AgentLoopState {
 
 // 阶段数据类型统一定义在 super::phase。
 
-/// 由当前会话上下文构造主循环模型请求；转换失败（如缺少 system prompt）
-/// 时由请求任务返回错误，与模型请求失败走同一条恢复/失败链路。
-fn build_react_request(ctx: &TurnContext) -> anyhow::Result<ModelRequest> {
-    Ok(ModelRequest {
-        session_id: Some(ctx.session.id.clone()),
-        reasoning_effort: ctx.agent_config.reasoning_effort,
-        max_output_tokens: Some(crate::config::max_output::max_output_tokens(
-            ctx.client().model_name(),
-        )),
-        ..ctx.session.context().into_model_request()?
-    })
-}
-
 fn start_llm_request(
     ctx: &TurnContext,
-    request: anyhow::Result<ModelRequest>,
     purpose: LlmPurpose,
     text_kind: StreamTextKind,
     tool_choice: Option<ToolChoice>,
 ) -> ActiveLlm {
+    // 由当前会话上下文构造请求；转换失败（如缺少 system prompt）时由请求
+    // 任务返回错误，与模型请求失败走同一条恢复/失败链路。
+    let request = ctx
+        .session
+        .context()
+        .into_model_request()
+        .map(|request| ModelRequest {
+            session_id: Some(ctx.session.id.clone()),
+            reasoning_effort: ctx.agent_config.reasoning_effort,
+            max_output_tokens: Some(crate::config::max_output::max_output_tokens(
+                ctx.client().model_name(),
+            )),
+            ..request
+        });
     let pending_msg_id = scru128::new().to_string();
     let sink = ThrottledStreamSink::with_text_kind(
         pending_msg_id.clone(),
@@ -711,7 +711,6 @@ pub(super) async fn execute_turn(
                 }
                 let active = start_llm_request(
                     ctx,
-                    build_react_request(ctx),
                     LlmPurpose::React {
                         request_injection_generation,
                     },
