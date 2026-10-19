@@ -65,7 +65,7 @@ impl MessageDeliver {
     /// 投递消息到本机 server。
     ///
     /// 用 `connector="server-api"` + `channel_id=session_id`，让 server 把 channel_id
-    /// 直接当 session_id 用（与 `/api/v1/chat` 同路径，零改动 server 路由）。
+    /// 直接当 session_id 用。
     /// `render` 为插件渲染声明：界面据此以本插件的定时任务卡片显示，正文
     /// `message` 保持完整供模型读取与旧版宿主兜底。
     ///

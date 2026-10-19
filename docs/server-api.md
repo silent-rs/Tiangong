@@ -50,45 +50,14 @@ GET /api/v1/health
 { "status": "ok" }
 ```
 
-### 发送消息（简易）
-
-```
-POST /api/v1/chat
-```
-
-直接发送文本消息并同步等待 AI 回复。省略 `session_id` 时会发起新对话；继续已有
-对话时传入上一次响应中的 `session_id`。
-
-**请求体**：
-
-```json
-{
-  "session_id": "可选，指定会话 ID",
-  "message": "用户消息文本"
-}
-```
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| session_id | string | 否 | 省略时发起新对话；传入时继续对应会话 |
-| message | string | 是 | 用户消息内容 |
-
-**响应**：
-
-```json
-{
-  "session_id": "会话 ID",
-  "response": "AI 回复文本"
-}
-```
-
-### 发送消息（Connector 完整接口）
+### 发送消息
 
 ```
 POST /api/v1/messages
 ```
 
-外部 Bot / Connector 统一消息入口，支持多模态内容和媒体资源。
+统一消息入口（Bot、定时任务、Subagent 及外部调用方共用），支持文本与附件。默认同步等待 AI 回复；
+请求带 `Prefer: respond-async` 头时立即返回 `202 Accepted`，整轮在后台执行。
 
 **请求体**：
 
@@ -112,8 +81,8 @@ POST /api/v1/messages
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| connector | string | 否 | Connector 名称，默认 `external-bot` |
-| channel_id | string | 是 | 外部通道 ID（如飞书 chat_id） |
+| connector | string | 否 | Connector 名称，默认 `external-bot`；填 `server-api` 时 `channel_id` 直接作为会话 ID |
+| channel_id | string | 是 | 外部通道 ID（如飞书 chat_id），同一 connector + channel 固定进入同一会话；`connector` 为 `server-api` 时为会话 ID |
 | message_id | string | 否 | 外部消息 ID，不传时自动生成 |
 | message | string | 否 | 用户正文，只发附件时可省略或为空 |
 | media | array | 否 | 全部附件（图片、视频、音频、文件），按发送顺序排列 |

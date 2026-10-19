@@ -270,7 +270,7 @@ Server 模式提供 HTTP REST API，详见 `docs/server-api.md`。关键端点�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/health` | 健康检查（无需鉴权） |
-| POST | `/api/v1/chat` | 对话 |
+| POST | `/api/v1/messages` | 发送消息（文本与附件） |
 
 所有非 health 端点需在请求头携带 `Authorization: Bearer <token>`，Token 在 `tiangong config` 配置页的「Server」分区生成。
 

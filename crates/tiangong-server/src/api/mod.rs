@@ -1,4 +1,3 @@
-mod chat;
 mod health;
 mod messages;
 mod server_ctrl;
@@ -76,7 +75,6 @@ pub fn build_routes(app: SharedAppContext, token: Option<String>) -> (Route, Sta
 
     let route = Route::new("api/v1")
         .append(Route::new("health").get(health::health_check))
-        .append(Route::new("chat").post(chat::chat))
         .append(Route::new("messages").post(messages::post_message))
         .append(
             Route::new("sessions").get(sessions::list_sessions).append(

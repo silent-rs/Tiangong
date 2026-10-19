@@ -1,22 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tiangong_types::{MediaAsset, MessageContent};
 
-/// POST /api/v1/chat 请求体
-#[derive(Debug, Deserialize)]
-pub struct ChatRequest {
-    /// 可选的会话 ID，为空时使用当前活跃会话
-    pub session_id: Option<String>,
-    /// 用户消息内容
-    pub message: String,
-}
-
-/// POST /api/v1/chat 响应体
-#[derive(Debug, Serialize)]
-pub struct ChatResponse {
-    pub session_id: String,
-    pub response: String,
-}
-
 /// 外部 Bot / Connector 消息入口请求体
 #[derive(Debug, Deserialize)]
 pub struct ConnectorMessageRequest {
