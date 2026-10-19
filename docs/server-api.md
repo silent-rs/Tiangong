@@ -2,7 +2,7 @@
 
 ## 概述
 
-天工 Server 提供基于 HTTP + WebSocket 的 API，支持外部 Bot / Connector 接入，实现消息收发、会话管理、事件订阅等能力。
+天工 Server 提供 HTTP API，支持外部 Bot / Connector 接入，实现消息收发、会话管理、Webhook 等能力。
 
 - **基础路径**: `/api/v1`
 - **默认监听**: `127.0.0.1:8080`
@@ -31,17 +31,6 @@ tiangong server --host 127.0.0.1 --port 8080 --token your_secret_token
 ```
 Authorization: Bearer your_secret_token
 ```
-
-### 角色与权限
-
-通过请求头 `x-tiangong-role` 指定角色，支持两种角色：
-
-| 角色 | 权限 |
-|------|------|
-| `controller`（默认） | 发送消息、管理会话、观察数据 |
-| `observer` | 仅观察（只读） |
-
-可通过 `x-tiangong-session-id` 请求头限定 observer 仅可访问指定会话。
 
 ---
 
@@ -107,10 +96,8 @@ POST /api/v1/messages
 {
   "connector": "feishu-bot",
   "channel_id": "oc_xxxxxx",
-  "sender_id": "user_001",
   "message_id": "可选，外部消息 ID",
-  "message": "文本消息",
-  "content": { "type": "text", "text": "或使用结构化内容" },
+  "message": "文本消息，只发附件时可为空",
   "media": [
     {
       "kind": "image",
@@ -119,8 +106,7 @@ POST /api/v1/messages
       "title": "图片描述",
       "capability": "multimodal"
     }
-  ],
-  "reply_to": "可选，回复的消息 ID"
+  ]
 }
 ```
 
@@ -128,14 +114,15 @@ POST /api/v1/messages
 |------|------|------|------|
 | connector | string | 否 | Connector 名称，默认 `external-bot` |
 | channel_id | string | 是 | 外部通道 ID（如飞书 chat_id） |
-| sender_id | string | 否 | 外部发送者 ID，默认 `external-user` |
 | message_id | string | 否 | 外部消息 ID，不传时自动生成 |
-| message | string | 否 | 文本消息快捷字段 |
-| content | object | 否 | 结构化消息内容（与 message 二选一） |
-| media | array | 否 | 附加媒体资源列表 |
-| reply_to | string | 否 | 回复的消息 ID |
+| message | string | 否 | 用户正文，只发附件时可省略或为空 |
+| media | array | 否 | 全部附件（图片、视频、音频、文件），按发送顺序排列 |
 
-> `message` 和 `content` 至少提供一个。`message` 优先级更高。
+> `message` 与 `media` 不能同时为空。只发图片时 `message` 留空即可，Server 不会代拟占位文本。
+>
+> **已废弃**：旧的 `content` 字段（单一类型正文，格式见下方「回复内容类型」）仍被接受，
+> Server 在入口转为 `message` + `media`：附件排在 `media` 之前，图片/视频的 `caption`
+> 仅在 `message` 为空时作为正文。新接入请勿使用，确认无外部调用方后将删除。
 
 **响应**：
 
@@ -157,9 +144,9 @@ POST /api/v1/messages
 `attachments`。回复引用天工媒体目录或当前会话工作区内的本地文件时，Server 会
 移除正文中的本机路径，并把文件放入上述结构化字段。
 
-### 消息内容类型
+### 回复内容类型
 
-`content` 字段支持以下类型：
+响应中的 `content` 与 `attachments` 元素支持以下类型：
 
 #### 文本消息
 
@@ -502,102 +489,6 @@ GET /api/v1/webhooks/{id}/runs?limit=20
 
 ---
 
-## WebSocket API
-
-### 连接
-
-```
-WS /api/v1/ws
-```
-
-**连接时需在请求头中携带认证 Token**（与 HTTP 相同方式）。
-
-**可选请求头**：
-
-| 请求头 | 说明 |
-|--------|------|
-| `x-tiangong-role` | 角色：`controller` 或 `observer` |
-| `x-tiangong-session-id` | 限定会话范围（observer 角色适用） |
-
-### 发送消息
-
-向 Server 发送 JSON 文本消息：
-
-```json
-{
-  "message": "用户消息文本",
-  "session_id": "可选，指定会话 ID"
-}
-```
-
-如果未指定 `session_id`，将使用当前活跃会话。
-
-### 接收事件
-
-Server 会持续推送以下类型的事件：
-
-#### 消息接收
-
-```json
-{
-  "type": "message_received",
-  "data": {
-    "id": "消息 ID",
-    "connector": "来源 Connector",
-    "channel_id": "通道 ID",
-    "sender_id": "发送者 ID"
-  }
-}
-```
-
-#### 消息发送
-
-```json
-{
-  "type": "message_sent",
-  "data": {
-    "session_id": "会话 ID",
-    "content": "AI 回复内容",
-    "reply_to": "回复的消息 ID"
-  }
-}
-```
-
-#### 会话创建
-
-```json
-{
-  "type": "session_created",
-  "data": { "session_id": "会话 ID" }
-}
-```
-
-#### 回合完成
-
-```json
-{
-  "type": "turn_completed",
-  "data": {
-    "session_id": "会话 ID",
-    "success": true
-  }
-}
-```
-
-#### 配置变更
-
-```json
-{ "type": "config_changed" }
-```
-
-#### Server 关闭
-
-```json
-{ "type": "shutdown" }
-```
-
----
-
 ## 对接示例
 
 ### cURL 示例
@@ -711,39 +602,6 @@ result = send_text("channel_001", "你好")
 print(result)
 ```
 
-### WebSocket 示例（JavaScript）
-
-```javascript
-const ws = new WebSocket("ws://127.0.0.1:8080/api/v1/ws", {
-  headers: {
-    Authorization: "Bearer your_secret_token",
-    "x-tiangong-role": "controller",
-  },
-});
-
-// 发送消息
-ws.send(JSON.stringify({
-  message: "你好",
-  session_id: "可选的会话 ID",
-}));
-
-// 接收事件
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  switch (data.type) {
-    case "message_sent":
-      console.log("AI 回复:", data.data.content);
-      break;
-    case "turn_completed":
-      console.log("回合完成:", data.data.success);
-      break;
-    case "message_received":
-      console.log("收到消息:", data.data);
-      break;
-  }
-};
-```
-
 ---
 
 ## 错误处理
@@ -764,7 +622,6 @@ ws.onmessage = (event) => {
 |--------|------|
 | 400 | 请求参数错误 |
 | 401 | 未认证或 Token 无效 |
-| 403 | 权限不足 |
 | 404 | 资源不存在 |
 | 500 | 服务端内部错误 |
 
@@ -777,11 +634,10 @@ ws.onmessage = (event) => {
 ```
 外部 Bot → POST /api/v1/messages
   → 认证校验 + 权限校验
-  → MessageRouter.handle_incoming_with_session
-    → 提取文本 + 提取媒体资源
-    → ServerCoreManager.send_connector_message_and_wait
-      → TiangongCore.send_message_with_id(text, id, media)
-        → React Engine 执行
+  → 正文与附件统一为 message + media
+  → ServerCoreManager.send_connector_message_and_wait
+    → TiangongCore.send_message_with_id(text, id, media)
+      → React Engine 执行
   → 返回 AI 回复
 ```
 
@@ -789,9 +645,8 @@ ws.onmessage = (event) => {
 
 ```
 外部 Bot 发送图片:
-  → content: Image { url, caption }
+  → message: 正文（可为空）
   → media: [MediaAsset { kind: Image, url, ... }]
-  → Router: extract_text("[图片消息]") + extract_media([MediaAsset])
   → CoreManager: send_message_with_id(text, id, media)
   → TiangongCore: 媒体归档到本地 → session 消息包含完整媒体数据
 ```

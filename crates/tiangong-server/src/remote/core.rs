@@ -5,7 +5,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::api::SharedState;
-use crate::remote::event::{EventBus, TiangongEvent};
 use anyhow::{Result, anyhow};
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::permission::TrustMode;
@@ -21,7 +20,6 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct ServerCoreManager {
     state: SharedState,
     core_manager: tiangong_app_state::app_state::CoreManager,
-    event_bus: Arc<EventBus>,
     /// 同一会话的 Core 创建、消息投递和删除共用这一把锁。
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
@@ -37,12 +35,10 @@ impl ServerCoreManager {
     pub fn new(
         state: SharedState,
         core_manager: tiangong_app_state::app_state::CoreManager,
-        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             state,
             core_manager,
-            event_bus,
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
@@ -207,8 +203,6 @@ impl ServerCoreManager {
                 state.active_session_id = session_id.clone();
             }
             drop(state);
-            self.event_bus
-                .publish(TiangongEvent::SessionCreated(session_id.clone()));
         }
         // 消息已入队；完整 turn 可能持续较久，释放锁让 DELETE 可以取消 Core。
         drop(session_guard);
@@ -381,7 +375,7 @@ impl ServerCoreManager {
         }
 
         let tracker = self.tracker_for(&actual_session_id);
-        self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
+        self.spawn_stream_forwarder(stream_rx, tracker);
 
         Ok(actual_session_id)
     }
@@ -402,7 +396,7 @@ impl ServerCoreManager {
             return Ok(session_id);
         }
 
-        let (session_id, created) = {
+        let (session_id, _) = {
             let mut state = self.state.lock().await;
             let resolved =
                 resolve_or_create_connector_session(&state.core_manager, connector, channel_id)?;
@@ -411,10 +405,6 @@ impl ServerCoreManager {
             }
             resolved
         };
-        if created {
-            self.event_bus
-                .publish(TiangongEvent::SessionCreated(session_id.clone()));
-        }
 
         self.remote_sessions
             .lock()
@@ -425,15 +415,11 @@ impl ServerCoreManager {
 
     fn spawn_stream_forwarder(
         &self,
-        session_id: String,
         stream_rx: mpsc::Receiver<StreamEvent>,
         tracker: Arc<ExecutionTracker>,
     ) {
-        let event_bus = self.event_bus.clone();
         thread::spawn(move || {
             for event in stream_rx {
-                sync_stream_event_to_state(&event_bus, &session_id, &event);
-                // 先发布终态事件，再唤醒本次调用的等待者。
                 tracker.observe_event(&event);
             }
             tracker.fail_all("Core 事件流已关闭");
@@ -926,7 +912,6 @@ fn text_outgoing(text: impl Into<String>) -> OutgoingMessage {
     OutgoingMessage {
         content: MessageContent::Text(text.into()),
         attachments: Vec::new(),
-        reply_to: None,
     }
 }
 
@@ -941,7 +926,6 @@ fn media_outgoing(media: Vec<MediaAsset>, caption: String) -> OutgoingMessage {
         return OutgoingMessage {
             content: MessageContent::Text(caption),
             attachments,
-            reply_to: None,
         };
     }
     let content = media_content(first, (!caption.trim().is_empty()).then_some(caption));
@@ -951,7 +935,6 @@ fn media_outgoing(media: Vec<MediaAsset>, caption: String) -> OutgoingMessage {
     OutgoingMessage {
         content,
         attachments,
-        reply_to: None,
     }
 }
 
@@ -1090,21 +1073,6 @@ fn remove_turn_state(state: &mut ExecutionTrackerState, turn_id: u64) {
     state.outcomes.remove(&turn_id);
 }
 
-fn sync_stream_event_to_state(event_bus: &Arc<EventBus>, session_id: &str, event: &StreamEvent) {
-    let completion_event = match event {
-        StreamEvent::Done { .. } => Some(true),
-        StreamEvent::Error { .. } => Some(false),
-        _ => None,
-    };
-
-    if let Some(success) = completion_event {
-        event_bus.publish(TiangongEvent::TurnCompleted {
-            session_id: session_id.to_string(),
-            success,
-        });
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::OsString;
@@ -1219,11 +1187,7 @@ mod tests {
             .join("sessions")
             .join(format!("{}.json", session.id));
         let state = Arc::new(AsyncMutex::new(state));
-        let manager = Arc::new(ServerCoreManager::new(
-            state.clone(),
-            core_manager,
-            Arc::new(EventBus::default()),
-        ));
+        let manager = Arc::new(ServerCoreManager::new(state.clone(), core_manager));
         (manager, session, session_path, state)
     }
 
@@ -1283,34 +1247,6 @@ mod tests {
             .expect("取消任务不应 panic")
             .unwrap();
         assert!(!result);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn terminal_state_sync_does_not_rewrite_session_file() {
-        let _storage_guard = STORAGE_TEST_LOCK.lock().await;
-        let root = tempfile::tempdir().unwrap();
-        let _home_guard = TestHomeGuard::new(&root.path().join("home"));
-        let (_manager, session, session_path, state) = isolated_test_manager(root.path());
-        let authoritative_session = std::fs::read(&session_path).unwrap();
-
-        let session_id = session.id.clone();
-        tokio::task::spawn_blocking(move || {
-            sync_stream_event_to_state(
-                &Arc::new(EventBus::default()),
-                &session_id,
-                &StreamEvent::Done { usage: None },
-            );
-        })
-        .await
-        .expect("终态同步不应 panic");
-
-        // session.json 应保持 Core 写入的原始内容，未被宿主重写。
-        assert_eq!(std::fs::read(&session_path).unwrap(), authoritative_session);
-        // 终态事件不改变本次运行中的活动会话。
-        assert_eq!(
-            state.lock().await.active_session_id.as_str(),
-            session.id.as_str()
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

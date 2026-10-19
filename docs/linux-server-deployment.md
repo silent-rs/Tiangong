@@ -11,7 +11,7 @@
 
 - 无图形界面的 Linux 服务器（VPS、云主机、自建机房）。
 - Docker / Podman 容器内运行。
-- 希望通过 HTTP / WebSocket API 接入脚本、服务或外部消息通道。
+- 希望通过 HTTP API 接入脚本、服务或外部消息通道。
 - 需要长期常驻运行，由 systemd 或容器编排托管。
 
 **关键说明**：天工的发布流水线（`.github/workflows/release.yml`）默认构建桌面安装包（macOS `.dmg`、Linux `.AppImage`、Windows NSIS）。这些安装包依赖 WebKit、GTK 等桌面运行时。**在纯服务器上，推荐通过源码编译获得无桌面依赖的纯二进制**（`target/release/tiangong`），它只包含 CLI/Server 能力，体积更小、依赖更少。
@@ -241,9 +241,6 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
 
-        # WebSocket 支持
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
 
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -268,13 +265,12 @@ curl https://tiangong.example.com/api/v1/health \
 
 ## 8. API 速览
 
-Server 模式提供 HTTP REST + WebSocket API，详见 `docs/server-api.md`。关键端点：
+Server 模式提供 HTTP REST API，详见 `docs/server-api.md`。关键端点：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/health` | 健康检查（无需鉴权） |
 | POST | `/api/v1/chat` | 对话 |
-| WS | `/api/v1/ws` | WebSocket 流式对话 |
 
 所有非 health 端点需在请求头携带 `Authorization: Bearer <token>`，Token 在 `tiangong config` 配置页的「Server」分区生成。
 

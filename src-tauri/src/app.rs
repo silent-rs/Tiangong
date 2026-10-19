@@ -967,9 +967,8 @@ impl TiangongApp {
             .get()
             .cloned()
             .ok_or_else(|| "Desktop 应用尚未完成初始化".to_string())?;
-        let event_bus = std::sync::Arc::new(tiangong_server::remote::event::EventBus::default());
         let core_backend: std::sync::Arc<dyn tiangong_server::remote::backend::ServerCoreBackend> =
-            crate::embedded_server::spawn_desktop_server_core_bridge(app_handle, event_bus.clone());
+            crate::embedded_server::spawn_desktop_server_core_bridge(app_handle);
         let handle = tiangong_server::run_embedded(
             host,
             port,
@@ -978,7 +977,6 @@ impl TiangongApp {
                 state: self.state.clone(),
                 config: self.config.clone(),
                 core_backend,
-                event_bus,
             },
         )
         .map_err(|e| e.to_string())?;

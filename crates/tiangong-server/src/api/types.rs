@@ -25,23 +25,20 @@ pub struct ConnectorMessageRequest {
     pub connector: Option<String>,
     /// 外部通道 ID，如飞书 chat_id
     pub channel_id: String,
-    /// 外部发送者 ID
-    #[serde(default)]
-    pub sender_id: Option<String>,
     /// 外部消息 ID，不传时由 Server 生成
     #[serde(default)]
     pub message_id: Option<String>,
-    /// 文本消息快捷字段
+    /// 用户正文，只发附件时可省略或为空
     #[serde(default)]
     pub message: Option<String>,
-    /// 结构化消息内容
+    /// 已废弃：旧的单一类型正文，服务端在入口转为 `message` + `media`。
+    /// 新调用方请只用 `message` + `media`；确认无外部调用方后删除（issue #689）。
+    #[deprecated(note = "改用 message + media")]
     #[serde(default)]
     pub content: Option<ApiMessageContent>,
-    /// 附加媒体资源（图片、视频等）
+    /// 全部附件（图片、视频、音频、文件），按发送顺序排列
     #[serde(default)]
     pub media: Vec<MediaAsset>,
-    #[serde(default)]
-    pub reply_to: Option<String>,
     /// 只给模型看的附加指令（保存为模型指令块，界面不显示），如 Bot 回复通道说明。
     #[serde(default)]
     pub instruction: Option<String>,
@@ -51,6 +48,18 @@ pub struct ConnectorMessageRequest {
     /// 目标会话尚不存在时新建会话使用的工作目录（绝对路径）；已有会话忽略。
     #[serde(default)]
     pub workspace: Option<String>,
+}
+
+/// 入口校验后的待投递消息（`/api/v1/messages` 内部使用）。
+pub struct ConnectorMessage {
+    pub connector: String,
+    pub channel_id: String,
+    pub message_id: String,
+    /// 正文，可为空（只发附件时）
+    pub text: String,
+    /// 全部附件，按发送顺序排列
+    pub media: Vec<MediaAsset>,
+    pub annotations: tiangong_types::MessageAnnotations,
 }
 
 /// 外部 Bot / Connector 消息入口响应体
@@ -101,18 +110,6 @@ impl ApiMessageContent {
                 caption.clone().unwrap_or_default()
             }
             Self::File { .. } | Self::Audio { .. } => String::new(),
-        }
-    }
-}
-
-impl From<ApiMessageContent> for MessageContent {
-    fn from(value: ApiMessageContent) -> Self {
-        match value {
-            ApiMessageContent::Text { text } => Self::Text(text),
-            ApiMessageContent::Image { url, caption } => Self::Image { url, caption },
-            ApiMessageContent::File { url, name } => Self::File { url, name },
-            ApiMessageContent::Audio { url, duration } => Self::Audio { url, duration },
-            ApiMessageContent::Video { url, caption } => Self::Video { url, caption },
         }
     }
 }

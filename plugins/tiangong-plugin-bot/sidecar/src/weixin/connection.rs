@@ -69,13 +69,11 @@ impl RecentMessages {
 struct ConnectorRequest {
     connector: String,
     channel_id: String,
-    sender_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<ApiMessageContent>,
+    /// 用户正文，只发图片时为空。
+    message: String,
+    /// 全部附件，按用户发送顺序排列。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
     /// 只给模型看的来源标签。
@@ -134,26 +132,6 @@ impl ApiMessageContent {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Text { text } => text.trim().is_empty(),
-            Self::Image { url, .. }
-            | Self::File { url, .. }
-            | Self::Audio { url, .. }
-            | Self::Video { url, .. } => url.trim().is_empty(),
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Text { .. } => "text",
-            Self::Image { .. } => "image",
-            Self::File { .. } => "file",
-            Self::Audio { .. } => "audio",
-            Self::Video { .. } => "video",
-        }
-    }
-
     fn local_file_url(&self) -> Option<&str> {
         match self {
             Self::Image { url, .. }
@@ -204,7 +182,7 @@ struct DownloadedImage {
 }
 
 struct ParsedMessage {
-    content: ApiMessageContent,
+    text: String,
     media: Vec<MediaAsset>,
 }
 
@@ -371,57 +349,36 @@ async fn handle_message(
         images.push(download_image(state, image).await?);
     }
 
-    let parsed = if !text.trim().is_empty() {
-        ParsedMessage {
-            content: ApiMessageContent::Text { text },
-            media: images
-                .into_iter()
-                .map(|image| MediaAsset::image(image.url, image.mime_type))
-                .collect(),
-        }
-    } else {
-        let mut images = images.into_iter();
-        let Some(first) = images.next() else {
-            tracing::debug!("微信消息没有可处理的文本或图片，跳过");
-            return Ok(());
-        };
-        ParsedMessage {
-            content: ApiMessageContent::Image {
-                url: first.url,
-                caption: None,
-            },
-            media: images
-                .map(|image| MediaAsset::image(image.url, image.mime_type))
-                .collect(),
-        }
-    };
-
-    if parsed.content.is_empty() {
+    let media = images
+        .into_iter()
+        .map(|image| MediaAsset::image(image.url, image.mime_type))
+        .collect();
+    let Some(parsed) = compose_message(text, media) else {
+        tracing::debug!("微信消息没有可处理的文本或图片，跳过");
         return Ok(());
-    }
+    };
     let push = target_id;
     let source = message_source(target_kind, push.as_deref());
     tracing::info!(
-        "转发微信消息 sender={sender_id} content_type={} images={}",
-        parsed.content.kind(),
+        "转发微信消息 sender={sender_id} text_len={} images={}",
+        parsed.text.len(),
         parsed.media.len()
     );
 
-    let reply = forward_to_tiangong(
-        state,
-        channel_id,
-        sender_id,
-        message_id,
-        parsed.content,
-        parsed.media,
-        &source,
-    )
-    .await?;
+    let reply = forward_to_tiangong(state, channel_id, message_id, parsed, &source).await?;
     if push.is_some() {
         tracing::debug!("微信回复由 Agent 经推送工具发送，忽略同步响应");
         return Ok(());
     }
     send_reply(state, sender_id, context_token, reply).await
+}
+
+/// 正文原样保留（可为空），图片全部按顺序放入 `media`；两者皆空时返回 `None`。
+fn compose_message(text: String, media: Vec<MediaAsset>) -> Option<ParsedMessage> {
+    if text.trim().is_empty() && media.is_empty() {
+        return None;
+    }
+    Some(ParsedMessage { text, media })
 }
 
 async fn send_reply(
@@ -526,10 +483,8 @@ fn detect_image_mime(data: &[u8]) -> &'static str {
 async fn forward_to_tiangong(
     state: &BotState,
     channel_id: &str,
-    sender_id: &str,
     message_id: Option<&str>,
-    content: ApiMessageContent,
-    media: Vec<MediaAsset>,
+    parsed: ParsedMessage,
     source: &InboundSource,
 ) -> Result<BotReply> {
     let url = format!(
@@ -539,11 +494,9 @@ async fn forward_to_tiangong(
     let request = ConnectorRequest {
         connector: "weixin-bot".to_string(),
         channel_id: channel_id.to_string(),
-        sender_id: sender_id.to_string(),
         message_id: message_id.map(str::to_string),
-        message: None,
-        content: Some(content),
-        media,
+        message: parsed.text,
+        media: parsed.media,
         instruction: Some(source.instruction()),
         render: Some(source.render()),
     };
@@ -630,12 +583,11 @@ mod tests {
         let reply = forward_to_tiangong(
             &state,
             "mock-channel",
-            "mock-sender",
             Some("mock-message"),
-            ApiMessageContent::Text {
+            ParsedMessage {
                 text: "mock-request".to_string(),
+                media: Vec::new(),
             },
-            Vec::new(),
             &message_source("direct", None),
         )
         .await
@@ -703,12 +655,8 @@ mod tests {
         let request = ConnectorRequest {
             connector: "weixin-bot".to_string(),
             channel_id: "user@im.wechat".to_string(),
-            sender_id: "user@im.wechat".to_string(),
             message_id: Some("42".to_string()),
-            message: None,
-            content: Some(ApiMessageContent::Text {
-                text: "你好".into(),
-            }),
+            message: "你好".into(),
             media: vec![MediaAsset::image(
                 "data:image/png;base64,AA==".into(),
                 "image/png".into(),
@@ -718,21 +666,31 @@ mod tests {
         };
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["message_id"], "42");
-        assert_eq!(value["content"]["type"], "text");
+        assert!(value.get("content").is_none());
+        assert_eq!(value["message"], "你好");
         assert_eq!(value["media"][0]["mime_type"], "image/png");
         assert_eq!(value["media"][0]["capability"], "multimodal");
     }
 
     #[test]
-    fn content_validation_and_mime_detection() {
-        assert!(ApiMessageContent::Text { text: "  ".into() }.is_empty());
-        assert!(
-            !ApiMessageContent::Image {
-                url: "data:image/png;base64,AA==".into(),
-                caption: None,
-            }
-            .is_empty()
-        );
+    fn image_only_and_text_with_images_send_message_plus_media() {
+        let png = |url: &str| MediaAsset::image(url.into(), "image/png".into());
+        assert!(compose_message("  ".into(), Vec::new()).is_none());
+
+        let image_only = compose_message(String::new(), vec![png("first"), png("second")]).unwrap();
+        assert_eq!(image_only.text, "");
+        assert_eq!(image_only.media.len(), 2);
+        assert_eq!(image_only.media[0].url, "first");
+        assert_eq!(image_only.media[1].url, "second");
+
+        let with_text = compose_message("看图".into(), vec![png("first"), png("second")]).unwrap();
+        assert_eq!(with_text.text, "看图");
+        assert_eq!(with_text.media.len(), 2);
+        assert_eq!(with_text.media[0].url, "first");
+    }
+
+    #[test]
+    fn mime_detection() {
         assert_eq!(
             detect_image_mime(&[0x89, 0x50, 0x4e, 0x47, 0x0d]),
             "image/png"

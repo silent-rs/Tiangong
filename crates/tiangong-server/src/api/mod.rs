@@ -5,7 +5,6 @@ mod server_ctrl;
 mod sessions;
 mod types;
 mod webhook;
-pub mod ws;
 
 use std::sync::Arc;
 
@@ -16,36 +15,28 @@ use tokio::sync::Mutex;
 
 use crate::remote::backend::ServerCoreBackend;
 use crate::remote::core::ServerCoreManager;
-use crate::remote::event::EventBus;
-use crate::remote::router::MessageRouter;
 
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
 
-/// Server 共享上下文：统一持有应用状态、Core 运行时与消息路由器
+/// Server 共享上下文：统一持有应用状态与 Core 运行时
 #[derive(Clone)]
 pub struct ServerAppContext {
     pub state: SharedState,
     pub config: CoreConfigProvider,
     pub core_backend: Arc<dyn ServerCoreBackend>,
-    pub router: Arc<MessageRouter>,
 }
 
 impl ServerAppContext {
     pub fn new(
         state: SharedState,
         core_manager: tiangong_app_state::app_state::CoreManager,
-        event_bus: Arc<EventBus>,
         _storage_root: std::path::PathBuf,
     ) -> Self {
         let config = core_manager.config().clone();
-        let cores = Arc::new(ServerCoreManager::new(
-            state.clone(),
-            core_manager,
-            event_bus.clone(),
-        ));
+        let cores = Arc::new(ServerCoreManager::new(state.clone(), core_manager));
         let core_backend: Arc<dyn ServerCoreBackend> = cores.clone();
-        Self::with_backend(state, config, event_bus, core_backend)
+        Self::with_backend(state, config, core_backend)
     }
 
     /// 使用宿主提供的 Core 构建 Server。
@@ -54,19 +45,12 @@ impl ServerAppContext {
     pub fn with_backend(
         state: SharedState,
         config: CoreConfigProvider,
-        event_bus: Arc<EventBus>,
         core_backend: Arc<dyn ServerCoreBackend>,
     ) -> Self {
-        let router = Arc::new(MessageRouter::new(
-            state.clone(),
-            event_bus,
-            core_backend.clone(),
-        ));
         Self {
             state,
             config,
             core_backend,
-            router,
         }
     }
 
@@ -85,15 +69,10 @@ pub type SharedAppContext = Arc<ServerAppContext>;
 pub struct AuthToken(pub Option<String>);
 
 /// 构建完整的 API 路由树，通过 State 注入共享状态和 Token
-pub fn build_routes(
-    app: SharedAppContext,
-    token: Option<String>,
-    event_bus: Arc<EventBus>,
-) -> (Route, State) {
+pub fn build_routes(app: SharedAppContext, token: Option<String>) -> (Route, State) {
     let mut configs = State::default();
     configs.insert(app);
     configs.insert(AuthToken(token));
-    configs.insert(ws::SharedEventBus(event_bus));
 
     let route = Route::new("api/v1")
         .append(Route::new("health").get(health::health_check))
@@ -121,8 +100,7 @@ pub fn build_routes(
                         .append(Route::new("invoke").post(webhook::invoke_webhook)),
                 ),
         )
-        .append(Route::new("server/shutdown").post(server_ctrl::shutdown))
-        .append(ws::ws_route());
+        .append(Route::new("server/shutdown").post(server_ctrl::shutdown));
 
     (route, configs)
 }
@@ -133,9 +111,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
-    use tiangong_types::{
-        IncomingMessage, MediaAsset, MessageContent, OutgoingMessage, RemoteRole,
-    };
+    use tiangong_types::{MediaAsset, MessageContent, OutgoingMessage};
 
     use super::*;
     use crate::remote::backend::CoreBackendKind;
@@ -165,7 +141,6 @@ mod tests {
                 OutgoingMessage {
                     content: MessageContent::Text("embedded reply".to_string()),
                     attachments: Vec::new(),
-                    reply_to: None,
                 },
             ))
         }
@@ -210,31 +185,26 @@ mod tests {
         let state = Arc::new(Mutex::new(
             tiangong_app_state::app_state::TiangongState::new(),
         ));
-        let event_bus = Arc::new(EventBus::default());
         let backend_calls = Arc::new(AtomicUsize::new(0));
         let backend: Arc<dyn ServerCoreBackend> = Arc::new(EmbeddedBackend {
             calls: backend_calls.clone(),
         });
 
-        let context = ServerAppContext::with_backend(state, config, event_bus, backend);
+        let context = ServerAppContext::with_backend(state, config, backend);
 
         assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);
         assert_eq!(backend_calls.load(Ordering::Relaxed), 0);
 
-        let outgoing = context
-            .router
-            .handle_incoming(IncomingMessage {
-                id: "stable-message".to_string(),
-                connector: "embedded-test".to_string(),
-                channel_id: "desktop-session".to_string(),
-                sender_id: "test".to_string(),
-                sender_role: RemoteRole::Controller,
-                content: MessageContent::Text("hello".to_string()),
-                media: Vec::new(),
-                reply_to: None,
-                timestamp: tiangong_core::session::now_text(),
-                annotations: Default::default(),
-            })
+        let (_, outgoing) = context
+            .core_backend
+            .send_connector_message_and_wait(
+                "embedded-test",
+                "desktop-session",
+                "hello".to_string(),
+                Some("stable-message".to_string()),
+                Vec::new(),
+                Default::default(),
+            )
             .await
             .unwrap();
         assert!(matches!(

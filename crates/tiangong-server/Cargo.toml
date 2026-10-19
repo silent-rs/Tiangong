@@ -13,7 +13,7 @@ tiangong-config = { workspace = true }
 tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
 async-trait = { workspace = true }
-silent = { workspace = true, features = ["upgrade", "scheduler"] }
+silent = { workspace = true, features = ["scheduler"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "fs", "time"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

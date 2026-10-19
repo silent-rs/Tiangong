@@ -7,7 +7,6 @@ use tiangong_core::permission::TrustMode;
 use tiangong_core::session::MessageRole;
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
 use tiangong_server::remote::core::{resolve_known_workspace, resolve_or_create_connector_session};
-use tiangong_server::remote::event::{EventBus, TiangongEvent};
 use tiangong_types::{MediaAsset, MessageAnnotations, OutgoingMessage, TurnStatus};
 use tokio::sync::{mpsc, oneshot};
 
@@ -168,15 +167,11 @@ impl ServerCoreBackend for DesktopServerCoreBridge {
     }
 }
 
-pub(crate) fn spawn_desktop_server_core_bridge(
-    app: AppHandle,
-    event_bus: Arc<EventBus>,
-) -> Arc<DesktopServerCoreBridge> {
+pub(crate) fn spawn_desktop_server_core_bridge(app: AppHandle) -> Arc<DesktopServerCoreBridge> {
     let (request_tx, mut request_rx) = mpsc::unbounded_channel();
     tauri::async_runtime::spawn(async move {
         while let Some(request) = request_rx.recv().await {
             let request_app = app.clone();
-            let request_event_bus = event_bus.clone();
             tauri::async_runtime::spawn(async move {
                 match request {
                     EmbeddedCoreRequest::SendConnector {
@@ -193,14 +188,8 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                             match resolve_connector_session(state.inner(), &connector, &channel_id)
                                 .await
                             {
-                                Ok((session_id, creates_session)) => {
-                                    let completion_session_id = session_id.clone();
-                                    if creates_session {
-                                        request_event_bus.publish(TiangongEvent::SessionCreated(
-                                            completion_session_id.clone(),
-                                        ));
-                                    }
-                                    let result = send_message_and_wait(
+                                Ok((session_id, _)) => {
+                                    send_message_and_wait(
                                         request_app.clone(),
                                         state.inner(),
                                         session_id,
@@ -209,12 +198,7 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                                         media,
                                         annotations,
                                     )
-                                    .await;
-                                    request_event_bus.publish(TiangongEvent::TurnCompleted {
-                                        session_id: completion_session_id,
-                                        success: result.is_ok(),
-                                    });
-                                    result
+                                    .await
                                 }
                                 Err(error) => Err(error),
                             };
@@ -229,7 +213,6 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                         reply,
                     } => {
                         let state = request_app.state::<TiangongApp>();
-                        let completion_session_id = session_id.clone();
                         let result = send_message_and_wait(
                             request_app.clone(),
                             state.inner(),
@@ -240,10 +223,6 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                             annotations,
                         )
                         .await;
-                        request_event_bus.publish(TiangongEvent::TurnCompleted {
-                            session_id: completion_session_id,
-                            success: result.is_ok(),
-                        });
                         let _ = reply.send(result);
                     }
                     EmbeddedCoreRequest::DeleteSession { session_id, reply } => {
@@ -268,9 +247,6 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                     EmbeddedCoreRequest::SyncConfig { reply } => {
                         let state = request_app.state::<TiangongApp>();
                         let result = state.sync_core_config_from_state().await;
-                        if result.is_ok() {
-                            request_event_bus.publish(TiangongEvent::ConfigChanged);
-                        }
                         let _ = reply.send(result);
                     }
                 }

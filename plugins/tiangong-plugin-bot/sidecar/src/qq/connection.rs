@@ -76,13 +76,11 @@ impl RecentMessages {
 struct ConnectorRequest {
     connector: String,
     channel_id: String,
-    sender_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<ApiMessageContent>,
+    /// 用户正文，只发图片时为空。
+    message: String,
+    /// 全部附件，按用户发送顺序排列。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
     /// 只给模型看的来源标签。
@@ -141,26 +139,6 @@ impl ApiMessageContent {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Text { text } => text.trim().is_empty(),
-            Self::Image { url, .. }
-            | Self::File { url, .. }
-            | Self::Audio { url, .. }
-            | Self::Video { url, .. } => url.trim().is_empty(),
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Text { .. } => "text",
-            Self::Image { .. } => "image",
-            Self::File { .. } => "file",
-            Self::Audio { .. } => "audio",
-            Self::Video { .. } => "video",
-        }
-    }
-
     fn local_file_url(&self) -> Option<&str> {
         match self {
             Self::Image { url, .. }
@@ -206,7 +184,7 @@ impl MediaAsset {
 }
 
 struct ParsedMessage {
-    content: ApiMessageContent,
+    text: String,
     media: Vec<MediaAsset>,
 }
 
@@ -381,26 +359,24 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
 
     let _ = seq;
     tracing::info!(
-        "转发 QQ 群消息 group={} sender={sender_id} content_type={} images={}",
+        "转发 QQ 群消息 group={} sender={sender_id} text_len={} images={}",
         message.group_openid,
-        parsed.content.kind(),
+        parsed.text.len(),
         parsed.media.len()
     );
     let group_openid = message.group_openid.clone();
-    let reply =
-        match forward_to_tiangong(state, &channel_id, sender_id, message_id, parsed, &source).await
-        {
-            Ok(reply) => reply,
-            Err(error) => {
-                // 转发失败时释放去重占用，允许下次推送重试
-                state
-                    .recent_messages
-                    .lock()
-                    .await
-                    .release(&channel_id, message_id);
-                return Err(error);
-            }
-        };
+    let reply = match forward_to_tiangong(state, &channel_id, message_id, parsed, &source).await {
+        Ok(reply) => reply,
+        Err(error) => {
+            // 转发失败时释放去重占用，允许下次推送重试
+            state
+                .recent_messages
+                .lock()
+                .await
+                .release(&channel_id, message_id);
+            return Err(error);
+        }
+    };
     if push.is_some() {
         tracing::debug!("QQ 群聊回复由 Agent 经推送工具发送，忽略同步响应");
         return Ok(());
@@ -449,27 +425,16 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         return Ok(());
     };
 
-    if parsed.content.is_empty() {
-        return Ok(());
-    }
     let push = target_id;
     let source = message_source("direct", push.as_deref());
     let _ = seq;
     tracing::info!(
-        "转发 QQ 私聊消息 user={} content_type={} images={}",
+        "转发 QQ 私聊消息 user={} text_len={} images={}",
         user_openid,
-        parsed.content.kind(),
+        parsed.text.len(),
         parsed.media.len()
     );
-    let forward_result = forward_to_tiangong(
-        state,
-        &channel_id,
-        &user_openid,
-        message_id,
-        parsed,
-        &source,
-    )
-    .await;
+    let forward_result = forward_to_tiangong(state, &channel_id, message_id, parsed, &source).await;
     let reply = match forward_result {
         Ok(reply) => reply,
         Err(error) => {
@@ -488,49 +453,33 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
     send_reply(state, ReplyTarget::User(user_openid), message_id, reply).await
 }
 
-/// 把文本与图片附件解析为 `ParsedMessage`，对齐微信 `handle_message` 的图文组装逻辑。
-///
-/// - 文本非空 → `Text` + 图片作 `media`
-/// - 文本为空 → 首图作 `content`、余图作 `media`
-/// - 文本与图片皆空 → 返回 `None`
+/// 把文本与图片附件解析为 `ParsedMessage`：正文原样保留（可为空），图片全部
+/// 按顺序放入 `media`；文本与图片皆空时返回 `None`。
 async fn parse_text_with_images(
     state: &BotState,
     text: &str,
     attachments: &[QqAttachment],
 ) -> Option<ParsedMessage> {
-    let mut images = Vec::new();
+    let mut media = Vec::new();
     for attachment in attachments {
         if attachment.content_type.starts_with("image/") {
             match download_attachment(state, attachment).await {
-                Ok(image) => images.push(image),
+                Ok(image) => media.push(MediaAsset::image(image.url, image.mime_type)),
                 Err(error) => tracing::warn!("下载 QQ 图片失败: {error}"),
             }
         }
     }
+    compose_message(text, media)
+}
 
-    if !text.trim().is_empty() {
-        Some(ParsedMessage {
-            content: ApiMessageContent::Text {
-                text: text.to_string(),
-            },
-            media: images
-                .into_iter()
-                .map(|image| MediaAsset::image(image.url, image.mime_type))
-                .collect(),
-        })
-    } else {
-        let mut images = images.into_iter();
-        let first = images.next()?;
-        Some(ParsedMessage {
-            content: ApiMessageContent::Image {
-                url: first.url,
-                caption: None,
-            },
-            media: images
-                .map(|image| MediaAsset::image(image.url, image.mime_type))
-                .collect(),
-        })
+fn compose_message(text: &str, media: Vec<MediaAsset>) -> Option<ParsedMessage> {
+    if text.trim().is_empty() && media.is_empty() {
+        return None;
     }
+    Some(ParsedMessage {
+        text: text.to_string(),
+        media,
+    })
 }
 
 // ── 天工 Server 调用 ──────────────────────────────────────────
@@ -538,7 +487,6 @@ async fn parse_text_with_images(
 async fn forward_to_tiangong(
     state: &BotState,
     channel_id: &str,
-    sender_id: &str,
     message_id: &str,
     parsed: ParsedMessage,
     source: &InboundSource,
@@ -550,10 +498,8 @@ async fn forward_to_tiangong(
     let request = ConnectorRequest {
         connector: "qq-bot".to_string(),
         channel_id: channel_id.to_string(),
-        sender_id: sender_id.to_string(),
         message_id: Some(message_id.to_string()),
-        message: None,
-        content: Some(parsed.content),
+        message: parsed.text,
         media: parsed.media,
         instruction: Some(source.instruction()),
         render: Some(source.render()),
@@ -1042,12 +988,9 @@ mod tests {
         let reply = forward_to_tiangong(
             &state,
             "mock-channel",
-            "mock-sender",
             "mock-message",
             ParsedMessage {
-                content: ApiMessageContent::Text {
-                    text: "mock-request".to_string(),
-                },
+                text: "mock-request".to_string(),
                 media: Vec::new(),
             },
             &message_source("direct", None),
@@ -1090,12 +1033,8 @@ mod tests {
         let request = ConnectorRequest {
             connector: "qq-bot".to_string(),
             channel_id: "group:abc".to_string(),
-            sender_id: "member-1".to_string(),
             message_id: Some("msg-1".to_string()),
-            message: None,
-            content: Some(ApiMessageContent::Text {
-                text: "你好".into(),
-            }),
+            message: "你好".into(),
             media: vec![MediaAsset::image(
                 "data:image/png;base64,AA==".into(),
                 "image/png".into(),
@@ -1104,7 +1043,8 @@ mod tests {
             render: Some(message_source("group", Some("t1")).render()),
         };
         let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["content"]["text"], "你好", "正文不再拼接来源标签");
+        assert!(value.get("content").is_none());
+        assert_eq!(value["message"], "你好", "正文不再拼接来源标签");
         assert!(
             value["instruction"]
                 .as_str()
@@ -1208,8 +1148,46 @@ mod tests {
         let parsed = parse_text_with_images(&state, "你好", &[])
             .await
             .expect("应解析文本");
-        assert!(matches!(parsed.content, ApiMessageContent::Text { ref text } if text == "你好"));
+        assert_eq!(parsed.text, "你好");
         assert!(parsed.media.is_empty());
+    }
+
+    fn png(url: &str) -> MediaAsset {
+        MediaAsset::image(url.into(), "image/png".into())
+    }
+
+    fn request_value(parsed: ParsedMessage) -> serde_json::Value {
+        serde_json::to_value(ConnectorRequest {
+            connector: "qq-bot".to_string(),
+            channel_id: "c2c:user".to_string(),
+            message_id: Some("msg".to_string()),
+            message: parsed.text,
+            media: parsed.media,
+            instruction: None,
+            render: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn image_only_message_sends_every_image_as_media() {
+        let parsed = compose_message("", vec![png("first"), png("second")]).unwrap();
+        let value = request_value(parsed);
+        assert!(value.get("content").is_none());
+        assert_eq!(value["message"], "");
+        assert_eq!(value["media"].as_array().unwrap().len(), 2);
+        assert_eq!(value["media"][0]["url"], "first");
+        assert_eq!(value["media"][1]["url"], "second");
+    }
+
+    #[test]
+    fn text_with_images_keeps_text_and_every_image() {
+        let parsed = compose_message("看图", vec![png("first"), png("second")]).unwrap();
+        let value = request_value(parsed);
+        assert!(value.get("content").is_none());
+        assert_eq!(value["message"], "看图");
+        assert_eq!(value["media"][0]["url"], "first");
+        assert_eq!(value["media"][1]["url"], "second");
     }
 
     #[tokio::test]

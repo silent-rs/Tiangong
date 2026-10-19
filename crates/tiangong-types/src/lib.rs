@@ -4,11 +4,10 @@
 //! 不包含业务逻辑，只有数据结构和序列化。
 
 pub mod attachment;
-pub mod event;
+pub mod delivery;
 pub mod mention;
 pub mod message;
 pub mod plugin_session;
-pub mod remote;
 pub mod session;
 pub mod status;
 pub mod stream;
@@ -20,7 +19,7 @@ pub use attachment::{
     content_blocks_are_empty, content_blocks_text, stable_content_blocks,
     validate_ready_content_blocks,
 };
-pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
+pub use delivery::{MessageAnnotations, MessageContent, OutgoingMessage};
 pub use mention::{
     MentionCandidate, MentionContext, MentionGroup, MentionQuery, MentionRequest, MentionTarget,
 };
@@ -30,9 +29,6 @@ pub use message::{
     deserialize_messages, now_text, serialize_messages_flat,
 };
 pub use plugin_session::PluginSession;
-pub use remote::{
-    IncomingMessage, MessageAnnotations, MessageContent, OutgoingMessage, RemoteRole,
-};
 pub use session::Session;
 pub use status::RunStatus;
 pub use stream::{MemoryRecallHitSummary, SessionEvent, StreamEvent, StreamToolCall};

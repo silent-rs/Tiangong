@@ -867,7 +867,7 @@ fn message_annotations_normalize_and_append_instruction() {
     }
     .normalized()
     .unwrap();
-    assert!(blank.is_empty());
+    assert_eq!(blank, MessageAnnotations::default());
 
     let invalid = MessageAnnotations {
         instruction: None,
@@ -886,25 +886,16 @@ fn message_annotations_normalize_and_append_instruction() {
     .normalized()
     .unwrap();
     assert_eq!(workspace.workspace.as_deref(), Some("/tmp/ws"));
-    assert!(!workspace.is_empty());
     let blank_workspace = MessageAnnotations {
         workspace: Some("  ".into()),
         ..Default::default()
     }
     .normalized()
     .unwrap();
-    assert!(blank_workspace.is_empty());
+    assert_eq!(blank_workspace, MessageAnnotations::default());
     let relative = MessageAnnotations {
         workspace: Some("relative/ws".into()),
         ..Default::default()
     };
     assert!(relative.normalized().is_err());
-
-    // 旧版 IncomingMessage JSON 不带 annotations 仍可解析。
-    let legacy: IncomingMessage = serde_json::from_value(serde_json::json!({
-        "id": "m", "connector": "c", "channel_id": "ch", "sender_id": "s",
-        "content": { "Text": "hi" }, "reply_to": null, "timestamp": "now"
-    }))
-    .unwrap();
-    assert!(legacy.annotations.is_empty());
 }

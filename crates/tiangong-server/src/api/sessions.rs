@@ -3,33 +3,19 @@ use silent::prelude::*;
 use super::AuthToken;
 use super::SharedAppContext;
 use super::types::{MessageSummary, SessionSummary};
-use crate::auth::{
-    check_auth, ensure_remote_action, extract_remote_access, resolve_visible_session_id,
-};
+use crate::auth::check_auth;
 
 /// GET /api/v1/sessions — 会话列表
 pub async fn list_sessions(req: Request) -> Result<Response> {
     let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_observe(), "查看会话")?;
-
     let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let app = app_ctx.state.lock().await;
-
-    let visible_session_id = (!access.role.can_manage_sessions())
-        .then(|| resolve_visible_session_id(&access, app.active_session_id.as_str(), None))
-        .transpose()?;
 
     let sessions: Vec<SessionSummary> = app
         .core_manager
         .list_session_metadata()
         .iter()
-        .filter(|metadata| {
-            visible_session_id
-                .as_deref()
-                .is_none_or(|visible_id| metadata.id == visible_id)
-        })
         .map(|metadata| SessionSummary {
             id: metadata.id.clone(),
             title: metadata.title.clone(),
@@ -49,20 +35,15 @@ pub async fn list_sessions(req: Request) -> Result<Response> {
 pub async fn get_session(req: Request) -> Result<Response> {
     let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_observe(), "查看会话")?;
 
-    let requested_id: String = req.get_path_params("id")?;
+    let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_state::<SharedAppContext>()?.clone();
-    let (id, core_manager, session_exists) = {
+    let (core_manager, session_exists) = {
         let app = app_ctx.state.lock().await;
-        let id = resolve_visible_session_id(
-            &access,
-            app.active_session_id.as_str(),
-            Some(&requested_id),
-        )?;
-        let exists = app.core_manager.session_exists(&id);
-        (id, app.core_manager.clone(), exists)
+        (
+            app.core_manager.clone(),
+            app.core_manager.session_exists(&id),
+        )
     };
     if !session_exists {
         return Err(SilentError::business_error(
@@ -102,8 +83,6 @@ pub async fn get_session(req: Request) -> Result<Response> {
 pub async fn delete_session(req: Request) -> Result<Response> {
     let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_manage_sessions(), "删除会话")?;
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_state::<SharedAppContext>()?.clone();
@@ -139,8 +118,6 @@ pub async fn delete_session(req: Request) -> Result<Response> {
 pub async fn cancel_session_turn(req: Request) -> Result<Response> {
     let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_manage_sessions(), "取消会话执行")?;
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_state::<SharedAppContext>()?.clone();

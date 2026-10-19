@@ -2,9 +2,10 @@ use silent::prelude::*;
 
 use super::types::{ApiMessageContent, ConnectorMessageRequest, ConnectorMessageResponse};
 use super::{AuthToken, SharedAppContext};
-use crate::auth::{check_auth, ensure_remote_action, extract_remote_access};
-use tiangong_core::session::now_text;
-use tiangong_types::{IncomingMessage, MessageAnnotations};
+use crate::auth::check_auth;
+use tiangong_types::{MediaAsset, MediaKind, MessageAnnotations, OutgoingMessage};
+
+use super::types::ConnectorMessage;
 
 /// POST /api/v1/messages — 外部 Bot / Connector 统一消息入口
 ///
@@ -15,8 +16,6 @@ use tiangong_types::{IncomingMessage, MessageAnnotations};
 pub async fn post_message(mut req: Request) -> Result<Response> {
     let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_send_message(), "发送消息")?;
 
     let respond_async = req
         .headers()
@@ -41,7 +40,8 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         ));
     }
 
-    let content = resolve_content(body.message, body.content)?;
+    #[allow(deprecated)]
+    let (text, media) = resolve_body(body.message, body.content, body.media)?;
     // 入口即校验：异步模式下后台失败只能写日志，调用方应当场拿到 400。
     let annotations = MessageAnnotations {
         instruction: body.instruction,
@@ -57,37 +57,26 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         crate::remote::core::resolve_known_workspace(&state, annotations.workspace.as_deref())
             .map_err(|error| SilentError::business_error(StatusCode::BAD_REQUEST, error))?;
     }
-    let media = body.media;
     let message_id = body
         .message_id
         .filter(|id| !id.trim().is_empty())
         .map(|id| id.trim().to_string())
         .unwrap_or_else(|| scru128::new().to_string());
-    let sender_id = body
-        .sender_id
-        .filter(|id| !id.trim().is_empty())
-        .map(|id| id.trim().to_string())
-        .unwrap_or_else(|| "external-user".to_string());
-    let incoming = IncomingMessage {
-        id: message_id,
+    let message = ConnectorMessage {
         connector: connector.clone(),
         channel_id: channel_id.clone(),
-        sender_id,
-        sender_role: access.role,
-        content: content.into(),
+        message_id,
+        text,
         media,
-        reply_to: body.reply_to,
-        timestamp: now_text(),
         annotations,
     };
 
     if respond_async {
         // 异步模式：立即返回 202，整轮 turn 在后台执行。
-        // session_id 此时未知（由 router 解析），返回请求的 channel_id 作为占位，
+        // session_id 此时未知（由 Core 后端解析），返回请求的 channel_id 作为占位，
         // 调用方（如 scheduler）已通过 channel_id 语义绑定了目标会话。
-        let router = app.router.clone();
         tokio::spawn(async move {
-            if let Err(error) = router.handle_incoming_with_session(incoming).await {
+            if let Err(error) = deliver(&app, message).await {
                 tracing::error!(%error, "异步处理外部消息失败");
             }
         });
@@ -100,16 +89,13 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         .with_status(StatusCode::ACCEPTED));
     }
 
-    let (session_id, outgoing) = app
-        .router
-        .handle_incoming_with_session(incoming)
-        .await
-        .map_err(|e| {
-            SilentError::business_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("处理外部消息失败：{e}"),
-            )
-        })?;
+    let reply_to = Some(message.message_id.clone());
+    let (session_id, outgoing) = deliver(&app, message).await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("处理外部消息失败：{e}"),
+        )
+    })?;
 
     let content = ApiMessageContent::from(outgoing.content);
     let attachments = outgoing
@@ -122,25 +108,230 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         session_id,
         connector,
         channel_id,
-        reply_to: outgoing.reply_to,
+        reply_to,
         message,
         content,
         attachments,
     }))
 }
 
-fn resolve_content(
+/// 把消息交给 Core 后端：`server-api` 按 `channel_id` 直投会话，其余按
+/// connector + channel 解析（或新建）会话。
+async fn deliver(
+    app: &SharedAppContext,
+    message: ConnectorMessage,
+) -> anyhow::Result<(String, OutgoingMessage)> {
+    let ConnectorMessage {
+        connector,
+        channel_id,
+        message_id,
+        text,
+        media,
+        annotations,
+    } = message;
+    let (session_id, outgoing) = if connector == "server-api" {
+        app.core_backend
+            .send_message_and_wait(&channel_id, text, Some(message_id), media, annotations)
+            .await?
+    } else {
+        app.core_backend
+            .send_connector_message_and_wait(
+                &connector,
+                &channel_id,
+                text,
+                Some(message_id),
+                media,
+                annotations,
+            )
+            .await?
+    };
+    Ok((session_id, outgoing))
+}
+
+/// 把请求体正文统一为「文本 + 附件」。
+///
+/// 已废弃的 `content` 在入口转换：图片/视频的 caption 仅在 `message` 为空时
+/// 作为正文，附件本身排在 `media` 之前；附件 `title` 只取真实文件名。
+fn resolve_body(
     message: Option<String>,
     content: Option<ApiMessageContent>,
-) -> Result<ApiMessageContent> {
-    match (message, content) {
-        (Some(message), _) if !message.trim().is_empty() => Ok(ApiMessageContent::Text {
-            text: message.trim().to_string(),
-        }),
-        (_, Some(content)) => Ok(content),
-        _ => Err(SilentError::business_error(
+    media: Vec<MediaAsset>,
+) -> Result<(String, Vec<MediaAsset>)> {
+    let mut text = message.unwrap_or_default().trim().to_string();
+    let mut assets = Vec::with_capacity(media.len() + 1);
+    if let Some(content) = content {
+        let (caption, asset) = legacy_content_parts(content);
+        if text.is_empty() {
+            text = caption
+                .map(|caption| caption.trim().to_string())
+                .unwrap_or_default();
+        }
+        assets.extend(asset);
+    }
+    assets.extend(media);
+    if text.is_empty() && assets.is_empty() {
+        return Err(SilentError::business_error(
             StatusCode::BAD_REQUEST,
-            "message 或 content 必须提供一个".to_string(),
-        )),
+            "message 与 media 不能同时为空".to_string(),
+        ));
+    }
+    Ok((text, assets))
+}
+
+/// 旧 `content` → （可作正文的文字, 附件）。
+fn legacy_content_parts(content: ApiMessageContent) -> (Option<String>, Option<MediaAsset>) {
+    let asset = |kind, url, title| MediaAsset {
+        kind,
+        url,
+        mime_type: None,
+        title,
+        capability: None,
+    };
+    match content {
+        ApiMessageContent::Text { text } => (Some(text), None),
+        ApiMessageContent::Image { url, caption } => {
+            (caption, Some(asset(MediaKind::Image, url, None)))
+        }
+        ApiMessageContent::Video { url, caption } => {
+            (caption, Some(asset(MediaKind::Video, url, None)))
+        }
+        ApiMessageContent::Audio { url, .. } => (None, Some(asset(MediaKind::Audio, url, None))),
+        ApiMessageContent::File { url, name } => {
+            (None, Some(asset(MediaKind::File, url, Some(name))))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(url: &str) -> MediaAsset {
+        MediaAsset {
+            kind: MediaKind::Image,
+            url: url.to_string(),
+            mime_type: None,
+            title: None,
+            capability: Some("multimodal".to_string()),
+        }
+    }
+
+    fn urls(media: &[MediaAsset]) -> Vec<&str> {
+        media.iter().map(|asset| asset.url.as_str()).collect()
+    }
+
+    #[test]
+    fn message_and_media_pass_through() {
+        let (text, media) = resolve_body(
+            Some("  看看这两张  ".into()),
+            None,
+            vec![image("first"), image("second")],
+        )
+        .unwrap();
+        assert_eq!(text, "看看这两张");
+        assert_eq!(urls(&media), ["first", "second"]);
+    }
+
+    #[test]
+    fn media_only_message_has_empty_text() {
+        let (text, media) = resolve_body(None, None, vec![image("only")]).unwrap();
+        assert_eq!(text, "");
+        assert_eq!(urls(&media), ["only"]);
+    }
+
+    #[test]
+    fn empty_message_without_media_is_rejected() {
+        assert!(resolve_body(Some("  ".into()), None, Vec::new()).is_err());
+        assert!(resolve_body(None, None, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn legacy_text_content_becomes_text() {
+        let (text, media) = resolve_body(
+            None,
+            Some(ApiMessageContent::Text {
+                text: "你好".into(),
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(text, "你好");
+        assert!(media.is_empty());
+    }
+
+    #[test]
+    fn legacy_image_content_goes_before_media_without_placeholder() {
+        let (text, media) = resolve_body(
+            None,
+            Some(ApiMessageContent::Image {
+                url: "first".into(),
+                caption: None,
+            }),
+            vec![image("second"), image("third")],
+        )
+        .unwrap();
+        assert_eq!(text, "");
+        assert_eq!(urls(&media), ["first", "second", "third"]);
+        assert_eq!(media[0].kind, MediaKind::Image);
+        assert!(media[0].title.is_none());
+    }
+
+    #[test]
+    fn legacy_caption_is_text_not_title() {
+        let (text, media) = resolve_body(
+            None,
+            Some(ApiMessageContent::Image {
+                url: "img".into(),
+                caption: Some("看看这个".into()),
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(text, "看看这个");
+        assert!(media[0].title.is_none());
+    }
+
+    #[test]
+    fn legacy_content_keeps_media_when_message_is_present() {
+        let (text, media) = resolve_body(
+            Some("正文".into()),
+            Some(ApiMessageContent::Image {
+                url: "img".into(),
+                caption: Some("说明".into()),
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(text, "正文");
+        assert_eq!(urls(&media), ["img"]);
+    }
+
+    #[test]
+    fn legacy_file_uses_its_name_as_title() {
+        let (_, media) = resolve_body(
+            None,
+            Some(ApiMessageContent::File {
+                url: "file".into(),
+                name: "a.pdf".into(),
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(media[0].kind, MediaKind::File);
+        assert_eq!(media[0].title.as_deref(), Some("a.pdf"));
+    }
+
+    #[test]
+    fn legacy_request_json_is_still_accepted() {
+        let body: ConnectorMessageRequest = serde_json::from_value(serde_json::json!({
+            "channel_id": "chat",
+            "content": { "type": "image", "url": "data:image/png;base64,AA==" },
+            "media": [{ "kind": "image", "url": "second" }]
+        }))
+        .unwrap();
+        #[allow(deprecated)]
+        let (text, media) = resolve_body(body.message, body.content, body.media).unwrap();
+        assert_eq!(text, "");
+        assert_eq!(urls(&media), ["data:image/png;base64,AA==", "second"]);
     }
 }

@@ -15,7 +15,6 @@ use tokio::sync::Mutex;
 
 use self::api::{ServerAppContext, SharedState, build_routes};
 use self::remote::backend::ServerCoreBackend;
-use self::remote::event::EventBus;
 
 /// 启动 Server 模式（前台运行，阻塞）
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
@@ -55,16 +54,10 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     app_state.agent_config.trust_mode = TrustMode::FullTrust;
     let state: SharedState = Arc::new(Mutex::new(app_state));
 
-    let event_bus = Arc::new(EventBus::default());
-    let app = Arc::new(ServerAppContext::new(
-        state,
-        core_manager,
-        event_bus.clone(),
-        storage_root,
-    ));
+    let app = Arc::new(ServerAppContext::new(state, core_manager, storage_root));
 
     tracing::info!("构建路由...");
-    let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
+    let (api_routes, configs) = build_routes(app.clone(), token);
 
     let mut route = Route::new_root().append(api_routes);
     route.set_state(Some(configs));
@@ -121,7 +114,6 @@ pub struct EmbeddedServerDependencies {
     pub state: SharedState,
     pub config: tiangong_core::config::core::CoreConfigProvider,
     pub core_backend: Arc<dyn ServerCoreBackend>,
-    pub event_bus: Arc<EventBus>,
 }
 
 pub fn run_embedded(
@@ -141,17 +133,11 @@ pub fn run_embedded(
         state,
         config,
         core_backend,
-        event_bus,
     } = dependencies;
-    let app = Arc::new(ServerAppContext::with_backend(
-        state,
-        config,
-        event_bus.clone(),
-        core_backend,
-    ));
+    let app = Arc::new(ServerAppContext::with_backend(state, config, core_backend));
 
     tracing::info!("构建嵌入式 Server 路由...");
-    let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
+    let (api_routes, configs) = build_routes(app.clone(), token);
 
     let mut route = Route::new_root().append(api_routes);
     route.set_state(Some(configs));
