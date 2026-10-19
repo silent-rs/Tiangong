@@ -244,7 +244,7 @@ fn new_path_tool_context_messages_preserved() {
     let mut session = helper_session();
     session.append_message(MessageRole::User, "写代码");
     session.append_message(MessageRole::Assistant, "好的");
-    // 模拟完成度检查提示（tool_context 类型，无 tool_call_id）
+    // 旧版本会话中的无配对调用 Tool 消息：context() 原样保留，转换为模型请求时丢弃
     session.messages.push(tool_context_msg(
         "react_completion_check",
         "上方回复被判定为未完成",

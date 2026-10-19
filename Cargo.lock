@@ -11230,6 +11230,7 @@ version = "0.17.4"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "base64 0.23.1",
  "chrono",
  "dirs",
  "scru128",

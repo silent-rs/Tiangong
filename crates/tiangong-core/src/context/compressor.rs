@@ -1,3 +1,4 @@
+use crate::context::model_context::ModelContext;
 use crate::session::{Message, MessageRole, Session, UserSource};
 use tiangong_llm::tool::ToolSpec;
 use tiangong_llm::{ModelRequest, ReasoningEffort, SingleProviderClient, StopReason};
@@ -109,14 +110,15 @@ impl ContextCompressor {
             split_point,
             max_output_tokens,
             self.reasoning_effort,
-        );
+        )
+        .map_err(|error| CompressionError::new(error.to_string()))?;
         // 工具声明与 tool_choice 保持与主循环一致（未指定 → 有工具即 auto）：
         // 多数 provider 的缓存键/对话模板包含 tool_choice，改为 none 会使
         // 整段前缀缓存失效。是否调用工具由压缩指令约束，返回工具调用时
         // 下方拒绝提交摘要。
         let response = self
             .client
-            .complete_async(&request.with_tools(self.tools, None))
+            .complete_async(request.with_tools(self.tools, None))
             .await
             .map_err(|error| CompressionError::new(error.to_string()))?;
         let usage = response.usage.clone();
@@ -144,31 +146,42 @@ impl ContextCompressor {
         })
     }
 
-    fn summary_request(
+    /// 压缩请求的会话上下文：主循环上下文原样作为前缀（保持缓存命中），
+    /// 末尾追加压缩指令。
+    fn summary_context(
         session: &Session,
         split_point: usize,
         max_output_tokens: u32,
-        reasoning_effort: ReasoningEffort,
-    ) -> ModelRequest {
+    ) -> ModelContext {
         let split_point = split_point.min(session.messages.len());
         let mut context = session.context();
         context.push(Message::new(
             MessageRole::User,
             Self::compress_instruction(session, split_point, max_output_tokens),
         ));
+        context
+    }
 
-        ModelRequest {
+    fn summary_request(
+        session: &Session,
+        split_point: usize,
+        max_output_tokens: u32,
+        reasoning_effort: ReasoningEffort,
+    ) -> anyhow::Result<ModelRequest> {
+        Ok(ModelRequest {
             session_id: Some(session.id.clone()),
-            user_input: String::new(),
-            context,
             // 思考强度沿用主循环：thinking/effort 参与 provider 的缓存键与
             // 对话模板渲染，改变档位会使历史前缀缓存整体失效。思考长度改由
             // 压缩指令约束。
             reasoning_effort,
             // 仅为输出上限（不参与前缀缓存），按剩余上下文空间限制。
             max_output_tokens: Some(max_output_tokens),
-            ..Default::default()
-        }
+            ..ModelRequest::try_from(Self::summary_context(
+                session,
+                split_point,
+                max_output_tokens,
+            ))?
+        })
     }
 
     fn compress_instruction(
@@ -254,18 +267,25 @@ mod tests {
         session.messages = vec![user("你好"), assistant("你好，有什么可以帮你？")];
 
         let request =
-            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::High);
+            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::High).unwrap();
         assert_eq!(request.session_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(request.reasoning_effort, ReasoningEffort::High);
 
         assert_eq!(request.max_output_tokens, Some(10_000));
-        assert_eq!(request.context.len(), 4);
-        assert_eq!(request.context[0].role, MessageRole::System);
-        assert_eq!(request.context[1].text_content(), "你好");
-        assert_eq!(request.context[2].text_content(), "你好，有什么可以帮你？");
-        let instruction = request.context[3].text_content();
-        assert!(instruction.contains("不得超过 10000 tokens"));
-        assert!(instruction.contains("[[SUMMARY]]"));
+        assert_eq!(request.system, "系统提示");
+        let texts = request
+            .messages
+            .iter()
+            .map(|message| match message.content.as_slice() {
+                [tiangong_llm::message::MessageContent::Text(text)] => text.as_str(),
+                other => panic!("压缩请求消息应为纯文本：{other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[0], "你好");
+        assert_eq!(texts[1], "你好，有什么可以帮你？");
+        assert!(texts[2].contains("不得超过 10000 tokens"));
+        assert!(texts[2].contains("[[SUMMARY]]"));
     }
 
     #[test]
@@ -293,10 +313,11 @@ mod tests {
             ReasoningEffort::High,
             ReasoningEffort::Max,
         ] {
-            let request = ContextCompressor::summary_request(&session, 2, 10_000, effort);
+            let request = ContextCompressor::summary_request(&session, 2, 10_000, effort).unwrap();
             // 与主循环档位一致，避免 thinking/effort 变化导致缓存失效。
             assert_eq!(request.reasoning_effort, effort);
-            let (instruction, prefix) = request.context.split_last().unwrap();
+            let context = ContextCompressor::summary_context(&session, 2, 10_000);
+            let (instruction, prefix) = context.split_last().unwrap();
             assert_eq!(serde_json::to_value(prefix).unwrap(), history);
             assert_eq!(instruction.role, MessageRole::User);
             assert!(instruction.text_content().contains("尽量缩短思考"));
@@ -324,16 +345,12 @@ mod tests {
         let resume = user("上一轮续接状态").with_source(UserSource::CompressedResume);
         session.messages = vec![resume, assistant("后续交互")];
 
-        let request =
-            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::None);
+        let context = ContextCompressor::summary_context(&session, 2, 10_000);
 
-        assert_eq!(request.context[1].role, MessageRole::User);
-        assert_eq!(
-            request.context[1].user_source(),
-            Some(UserSource::CompressedResume)
-        );
-        assert_eq!(request.context[1].text_content(), "上一轮续接状态");
-        assert_eq!(request.context[2].text_content(), "后续交互");
+        assert_eq!(context[1].role, MessageRole::User);
+        assert_eq!(context[1].user_source(), Some(UserSource::CompressedResume));
+        assert_eq!(context[1].text_content(), "上一轮续接状态");
+        assert_eq!(context[2].text_content(), "后续交互");
     }
 
     /// HostInjected 不因前端展示而豁免压缩，压缩请求必须保留它的
@@ -346,15 +363,11 @@ mod tests {
         let image = user("截图 provenance").with_source(UserSource::HostInjected);
         session.messages = vec![image, assistant("基于截图的后续回答")];
 
-        let request =
-            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::None);
-        assert_eq!(request.context.len(), 4);
-        assert_eq!(
-            request.context[1].user_source(),
-            Some(UserSource::HostInjected)
-        );
-        assert_eq!(request.context[1].text_content(), "截图 provenance");
-        assert_eq!(request.context[2].text_content(), "基于截图的后续回答");
+        let context = ContextCompressor::summary_context(&session, 2, 10_000);
+        assert_eq!(context.len(), 4);
+        assert_eq!(context[1].user_source(), Some(UserSource::HostInjected));
+        assert_eq!(context[1].text_content(), "截图 provenance");
+        assert_eq!(context[2].text_content(), "基于截图的后续回答");
     }
 
     #[test]

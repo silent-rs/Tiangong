@@ -149,8 +149,8 @@ pub enum Role {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
     },
-    /// 工具结果。`tool_call_id` 为空表示无配对调用的运行时上下文
-    /// （provider 映射为 `<tool-context>` 用户文本）。
+    /// 工具结果。`tool_call_id` 为空只出现在旧版本会话（曾把运行时轨迹写成
+    /// Tool 消息），这类消息不进入模型请求。
     Tool {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         tool_call_id: String,

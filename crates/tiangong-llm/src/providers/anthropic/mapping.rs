@@ -277,10 +277,7 @@ pub(super) fn from_anthropic_response(
     Ok(ProviderResponse {
         id: Some(response.id),
         model: Some(response.model),
-        assistant_message: ChatMessage {
-            role: MessageRole::Assistant,
-            content: assistant_content,
-        },
+        assistant_message: ChatMessage::new(MessageRole::Assistant, assistant_content),
         reasoning_content: (!reasoning_chunks.is_empty()).then(|| reasoning_chunks.join("")),
         stop_reason: response.stop_reason.as_deref().map(map_stop_reason),
         usage: response.usage.map(map_usage),

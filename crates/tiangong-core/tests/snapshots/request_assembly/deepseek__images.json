@@ -1,0 +1,85 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "你是看图助手。",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "看看这些图",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "data:image/png;base64,AQIDBA=="
+          },
+          "type": "image_url"
+        },
+        {
+          "image_url": {
+            "url": "data:image/jpeg;base64,UlVOVElNRQ=="
+          },
+          "type": "image_url"
+        },
+        {
+          "image_url": {
+            "url": "https://example.com/remote.png"
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\":\"call_shot\"}",
+            "name": "desktop_screenshot"
+          },
+          "id": "call_shot",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"ok\":true}",
+      "role": "tool",
+      "tool_call_id": "call_shot"
+    },
+    {
+      "content": "[injected-images provenance]\n- 截图\n[image unavailable] 图片文件已不可读（asset_id=asset-missing，path=/nonexistent/tiangong-request-snapshot/ gnp.missing line），内容不可用",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "reasoning_effort": "high",
+  "thinking": {
+    "type": "enabled"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "读取文件",
+        "name": "read_file",
+        "parameters": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ],
+  "user_id": "snapshot-session"
+}

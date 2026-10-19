@@ -393,10 +393,7 @@ pub fn parse_complete_response(payload: &Value) -> Result<ProviderResponse> {
             .get("model")
             .and_then(Value::as_str)
             .map(String::from),
-        assistant_message: ChatMessage {
-            role: MessageRole::Assistant,
-            content,
-        },
+        assistant_message: ChatMessage::new(MessageRole::Assistant, content),
         reasoning_content,
         stop_reason,
         usage,

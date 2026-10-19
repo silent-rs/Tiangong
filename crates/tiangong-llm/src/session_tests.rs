@@ -1,7 +1,9 @@
 use super::*;
 use crate::client::rerank_provider_from_config;
 use crate::embedding::{EmbeddingEndpointConfig, embedding_provider_from_config};
+use crate::message::ThinkingContent;
 use crate::rerank::{RerankEndpointConfig, RerankRequest};
+use crate::tool::{ToolResult, ToolResultContent};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -77,7 +79,7 @@ async fn anthropic_usage_keeps_cache_fields_across_partial_and_repeated_frames()
             ..Default::default()
         });
         let req = request("cache-usage");
-        let ordinary = client.complete_async(&req).await.unwrap();
+        let ordinary = client.complete_async(req.clone()).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let streamed = client.stream_async(req, tx).await.unwrap();
         let mut snapshots = TokenUsage::default();
@@ -99,15 +101,39 @@ async fn anthropic_usage_keeps_cache_fields_across_partial_and_repeated_frames()
 fn request(session_id: &str) -> ModelRequest {
     ModelRequest {
         session_id: Some(session_id.to_string()),
-        user_input: String::new(),
-        context: vec![
-            Message::new(MessageRole::System, "固定系统提示"),
-            Message::new(MessageRole::User, "回答 OK"),
-        ],
+        system: "固定系统提示".to_string(),
+        messages: vec![ChatMessage::text(LlmMessageRole::User, "回答 OK")],
         reasoning_effort: ReasoningEffort::None,
         max_output_tokens: Some(256),
         ..Default::default()
     }
+}
+
+/// 把模型响应还原为下一轮请求中的 Assistant 历史消息（思考 → 正文 → 工具调用）。
+fn assistant_history(text: &str, reasoning: &str, calls: &[ToolCall]) -> ChatMessage {
+    let mut content = Vec::new();
+    if !reasoning.trim().is_empty() {
+        content.push(LlmMessageContent::Thinking(ThinkingContent {
+            thinking: reasoning.to_string(),
+            signature: None,
+        }));
+    }
+    if !text.trim().is_empty() {
+        content.push(LlmMessageContent::Text(text.to_string()));
+    }
+    content.extend(calls.iter().cloned().map(LlmMessageContent::ToolCall));
+    ChatMessage::new(LlmMessageRole::Assistant, content)
+}
+
+fn tool_history(call_id: &str, text: &str) -> ChatMessage {
+    ChatMessage::new(
+        LlmMessageRole::Tool,
+        vec![LlmMessageContent::ToolResult(ToolResult {
+            tool_call_id: call_id.to_string(),
+            content: ToolResultContent::Text(text.to_string()),
+            is_error: false,
+        })],
+    )
 }
 
 fn reply(protocol: ProviderProtocol) -> Value {
@@ -169,10 +195,10 @@ async fn unified_sync_async_and_stream_requests_preserve_parameters_and_usage() 
             timeout_ms: Some(5_000),
             ..request("unified-session")
         };
-        let first = client.complete_async(&req).await.unwrap();
+        let first = client.complete_async(req.clone()).await.unwrap();
         let sync_client = client.clone();
         let sync_req = req.clone();
-        let second = tokio::task::spawn_blocking(move || sync_client.complete(&sync_req))
+        let second = tokio::task::spawn_blocking(move || sync_client.complete(sync_req))
             .await
             .unwrap()
             .unwrap();
@@ -183,7 +209,7 @@ async fn unified_sync_async_and_stream_requests_preserve_parameters_and_usage() 
         let (fourth, chunks) = tokio::task::spawn_blocking(move || {
             let mut chunks = Vec::new();
             let response = client
-                .complete_stream(&req, &mut |chunk| chunks.push(chunk.clone()))
+                .complete_stream(req, &mut |chunk| chunks.push(chunk.clone()))
                 .unwrap();
             (response, chunks)
         })
@@ -228,7 +254,7 @@ async fn empty_truncated_response_preserves_stop_reason_and_usage_in_both_modes(
         ..Default::default()
     });
     let req = request("empty-response");
-    let first = client.complete_async(&req).await.unwrap();
+    let first = client.complete_async(req.clone()).await.unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let second = client.stream_async(req, tx).await.unwrap();
     for response in [first, second] {
@@ -313,7 +339,7 @@ async fn lite_and_text_helpers_preserve_their_request_options() {
         let provider = client.build_provider_dispatch(5_000, None, 0).unwrap();
         assert!(
             provider
-                .stream(client.build_provider_request(&request("no-retry")).unwrap())
+                .stream(client.build_provider_request(request("no-retry")).unwrap())
                 .await
                 .is_err()
         );
@@ -353,7 +379,7 @@ async fn session_headers_reach_streaming_and_non_streaming_openai_requests() {
             ..Default::default()
         });
         let req = request(&session_id);
-        let response = client.complete_async(&req).await.unwrap();
+        let response = client.complete_async(req.clone()).await.unwrap();
         assert_eq!(response.text, "OK");
         assert_eq!(response.usage.prompt_cache_hit_tokens, Some(80));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -506,26 +532,13 @@ async fn streamed_reasoning_is_replayed_verbatim_after_message_reload() {
             assert_eq!(message["reasoning_content"], reasoning);
         }
         prefix = messages.clone();
-        let assistant = Message::with_reasoning(
-            MessageRole::Assistant,
-            response.text,
-            response.reasoning_content,
-        )
-        .with_tool_calls(
-            response
-                .tool_calls
-                .into_iter()
-                .map(|call| tiangong_types::MessageToolCall {
-                    id: call.id,
-                    name: call.name,
-                    arguments: call.arguments,
-                })
-                .collect(),
-        );
-        req.context.push(assistant);
-        req.context
-            .push(Message::tool_result("probe", "read_probe", "OK", false));
-        req.context = serde_json::from_slice(&serde_json::to_vec(&req.context).unwrap()).unwrap();
+        req.messages.push(assistant_history(
+            &response.text,
+            &response.reasoning_content,
+            &response.tool_calls,
+        ));
+        req.messages.push(tool_history("probe", "OK"));
+        req.messages = serde_json::from_slice(&serde_json::to_vec(&req.messages).unwrap()).unwrap();
     }
 }
 
@@ -601,7 +614,7 @@ async fn deepseek_uses_user_id_and_openai_uses_prompt_cache_key() {
             ..Default::default()
         });
         for id in ["session_one", "session_two"] {
-            client.complete_async(&request(id)).await.unwrap();
+            client.complete_async(request(id)).await.unwrap();
         }
         for (request, id) in server
             .received_requests()
@@ -667,8 +680,8 @@ async fn live_session_routing_smoke() {
     if thinking_tools {
         req.reasoning_effort = ReasoningEffort::High;
         req.max_output_tokens = Some(2048);
-        req.context[1] = Message::new(
-            MessageRole::User,
+        req.messages[0] = ChatMessage::text(
+            LlmMessageRole::User,
             "调用 read_probe 工具一次，然后只回复 OK。",
         );
         let tools = vec![ToolSpec {
@@ -698,50 +711,34 @@ async fn live_session_routing_smoke() {
                 response.usage.prompt_cache_hit_tokens,
                 response.reasoning_content.len()
             );
-            let assistant = Message::with_reasoning(
-                MessageRole::Assistant,
-                response.text,
-                response.reasoning_content,
-            )
-            .with_tool_calls(
-                response
-                    .tool_calls
-                    .iter()
-                    .map(|call| tiangong_types::MessageToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    })
-                    .collect(),
-            );
-            req.context.push(assistant);
+            req.messages.push(assistant_history(
+                &response.text,
+                &response.reasoning_content,
+                &response.tool_calls,
+            ));
             for call in response.tool_calls {
-                req.context
-                    .push(Message::tool_result(call.id, call.name, "OK", false));
+                req.messages.push(tool_history(&call.id, "OK"));
             }
             if round == 1 {
-                let injection = Message::new(MessageRole::Assistant, "").with_tool_calls(vec![
-                    tiangong_types::MessageToolCall {
+                req.messages.push(assistant_history(
+                    "",
+                    "",
+                    &[ToolCall {
                         id: "internal_probe".into(),
                         name: "plugin_injection".into(),
                         arguments: json!({}),
-                    },
-                ]);
-                req.context.push(injection);
-                req.context.push(Message::tool_result(
-                    "internal_probe",
-                    "plugin_injection",
-                    "检查已完成，只回复 OK。",
-                    false,
+                    }],
                 ));
+                req.messages
+                    .push(tool_history("internal_probe", "检查已完成，只回复 OK。"));
             }
-            req.context =
-                serde_json::from_slice(&serde_json::to_vec(&req.context).unwrap()).unwrap();
+            req.messages =
+                serde_json::from_slice(&serde_json::to_vec(&req.messages).unwrap()).unwrap();
         }
         return;
     }
-    req.context[1] = Message::new(
-        MessageRole::User,
+    req.messages[0] = ChatMessage::text(
+        LlmMessageRole::User,
         format!(
             "天工代码助手连接与缓存检查。以下是固定代码参考，忽略正文，只回复 OK。\n{}",
             (0..128)
@@ -751,10 +748,11 @@ async fn live_session_routing_smoke() {
         ),
     );
     for round in 1..=2 {
-        let response = tokio::time::timeout(Duration::from_secs(35), client.complete_async(&req))
-            .await
-            .unwrap()
-            .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_secs(35), client.complete_async(req.clone()))
+                .await
+                .unwrap()
+                .unwrap();
         assert!(response.usage.prompt_tokens > 0);
         println!(
             "model={model_key}, round={round}, input={}, cached={:?}, output={}",
@@ -762,12 +760,12 @@ async fn live_session_routing_smoke() {
             response.usage.prompt_cache_hit_tokens,
             response.usage.completion_tokens
         );
-        req.context.push(Message::with_reasoning(
-            MessageRole::Assistant,
-            response.text,
-            response.reasoning_content,
+        req.messages.push(assistant_history(
+            &response.text,
+            &response.reasoning_content,
+            &[],
         ));
-        req.context
-            .push(Message::new(MessageRole::User, "继续，只回复 OK。"));
+        req.messages
+            .push(ChatMessage::text(LlmMessageRole::User, "继续，只回复 OK。"));
     }
 }

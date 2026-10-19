@@ -6,9 +6,9 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
+use tiangong_llm::message::{ChatMessage, MessageRole};
 use tiangong_llm::{ModelClient, ModelRequest};
 use tiangong_llm::{ModelEndpoint, ProviderProtocol, SingleProviderClient};
-use tiangong_types::{Message, MessageRole};
 
 fn main() -> anyhow::Result<()> {
     let home = PathBuf::from(std::env::var("HOME")?);
@@ -59,10 +59,11 @@ fn main() -> anyhow::Result<()> {
     println!("complete(non-stream via stream): {lite:?}");
 
     let request = ModelRequest {
-        context: vec![
-            Message::new(MessageRole::System, "需要时间时调用 get_time 工具。"),
-            Message::new(MessageRole::User, "现在几点？请调用 get_time 工具"),
-        ],
+        system: "需要时间时调用 get_time 工具。".to_string(),
+        messages: vec![ChatMessage::text(
+            MessageRole::User,
+            "现在几点？请调用 get_time 工具",
+        )],
         tools: vec![tiangong_llm::tool::ToolSpec {
             name: "get_time".to_string(),
             description: "获取当前时间".to_string(),
@@ -77,7 +78,7 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let mut streamed = String::new();
-    let response = client.complete_stream(&request, &mut |chunk| {
+    let response = client.complete_stream(request, &mut |chunk| {
         streamed.push_str(&chunk.content);
     })?;
     println!(

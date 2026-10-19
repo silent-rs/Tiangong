@@ -122,10 +122,7 @@ async fn collect_stream_response(mut stream: ProviderStream) -> Result<ProviderR
     Ok(ProviderResponse {
         id: None,
         model: None,
-        assistant_message: ChatMessage {
-            role: MessageRole::Assistant,
-            content,
-        },
+        assistant_message: ChatMessage::new(MessageRole::Assistant, content),
         reasoning_content: (!reasoning.trim().is_empty()).then_some(reasoning),
         stop_reason,
         usage,

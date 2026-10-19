@@ -1,0 +1,120 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "看看这些图",
+          "type": "text"
+        },
+        {
+          "source": {
+            "data": "AQIDBA==",
+            "media_type": "image/png",
+            "type": "base64"
+          },
+          "type": "image"
+        },
+        {
+          "source": {
+            "data": "UlVOVElNRQ==",
+            "media_type": "image/jpeg",
+            "type": "base64"
+          },
+          "type": "image"
+        },
+        {
+          "source": {
+            "data": "https://example.com/remote.png",
+            "media_type": "image/png",
+            "type": "base64"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "call_shot",
+          "input": {
+            "path": "call_shot"
+          },
+          "name": "desktop_screenshot",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "{\"ok\":true}",
+          "is_error": false,
+          "tool_use_id": "call_shot",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "[injected-images provenance]\n- 截图",
+          "type": "text"
+        },
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "[image unavailable] 图片文件已不可读（asset_id=asset-missing，path=/nonexistent/tiangong-request-snapshot/ gnp.missing line），内容不可用",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "output_config": {
+    "effort": "high"
+  },
+  "system": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "text": "你是看图助手。",
+      "type": "text"
+    }
+  ],
+  "thinking": {
+    "type": "adaptive"
+  },
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "description": "读取文件",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file"
+    }
+  ]
+}

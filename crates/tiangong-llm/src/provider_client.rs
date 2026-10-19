@@ -3,25 +3,24 @@
 //! 这里聚合了：
 //! - [`ModelClient`] trait、[`ModelRequest`] / [`ModelResponse`] / [`ModelStreamChunk`] 等数据类型
 //! - [`SingleProviderClient`]：持有 [`ModelEndpoint`]，按 `protocol` 分发到 Anthropic / OpenAI / DeepSeek provider
-//! - provider 构造辅助、消息构建、流式消费、错误映射等私有逻辑
+//! - provider 构造辅助、协议约束修正（tool_call 配对）、流式消费、错误映射等私有逻辑
+//!
+//! 会话消息到 [`ChatMessage`] 的组装由调用方（core）负责，本模块不理解宿主
+//! 消息格式，也不读取本地文件。
 //!
 //! 迁移自 `tiangong-core/src/model.rs`，已移除 `ModelProviderConfig` 依赖，直接消费
 //! [`ModelEndpoint`]（`base_url` / `api_key` / `model` / `protocol` / `timeout_ms` / `options`）。
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tiangong_types::{ContentBlock, Message, MessageRole, Role, StoredAsset};
 
 use crate::endpoint::ModelEndpoint;
 use crate::message::{
     ChatMessage, MessageContent as LlmMessageContent, MessageRole as LlmMessageRole,
-    ThinkingContent as LlmThinkingContent,
 };
 use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
@@ -34,8 +33,7 @@ use crate::request::ProviderRequest;
 use crate::response::{ProviderResponse, StopReason};
 use crate::stream::{ProviderStream, ProviderStreamEvent};
 use crate::tool::{
-    ToolCall, ToolCall as LlmToolCall, ToolChoice, ToolChoice as LlmToolChoice,
-    ToolResult as LlmToolResult, ToolResultContent as LlmToolResultContent, ToolSpec,
+    ToolCall, ToolChoice, ToolChoice as LlmToolChoice, ToolResult as LlmToolResult, ToolSpec,
 };
 use crate::usage::TokenUsageData;
 use tiangong_types::TokenUsage;
@@ -106,10 +104,17 @@ fn append_stream_tool_call_arguments(raw_args: &mut String, partial_json: &str) 
     }
 }
 
+/// 已组装好的模型请求。
+///
+/// 会话语义（选取上下文、模型指令、附件、图片读取与降级、兜底消息等）由
+/// 调用方组装为 `system` 与 `messages`；llm 层只做协议映射与必要的协议
+/// 约束修正（如 tool_call / tool_result 配对），不理解宿主消息格式。
 #[derive(Debug, Clone, Default)]
 pub struct ModelRequest {
-    pub user_input: String,
-    pub context: Vec<Message>,
+    /// 系统提示；空白时请求不带 system。
+    pub system: String,
+    /// 对话消息，至少需要一条 User 消息。
+    pub messages: Vec<ChatMessage>,
     /// 会话级缓存路由标识，不参与消息内容构造。
     pub session_id: Option<String>,
     /// 思考强度：None 关闭思考，其余档位开启。
@@ -264,11 +269,11 @@ pub trait ModelClient {
     fn api_base_url(&self) -> &str;
     fn api_timeout_ms(&self) -> u64;
     fn api_model(&self) -> &str;
-    fn complete(&self, req: &ModelRequest) -> Result<ModelResponse>;
+    fn complete(&self, req: ModelRequest) -> Result<ModelResponse>;
     /// 流式调用，通过 on_delta 实时回调内容和用量。
     fn complete_stream(
         &self,
-        req: &ModelRequest,
+        req: ModelRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse>;
 }
@@ -294,25 +299,29 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
-    fn build_provider_request(&self, req: &ModelRequest) -> Result<ProviderRequest> {
+    /// 按值消费请求：消息直接移入 provider 请求，不复制消息内容。
+    fn build_provider_request(&self, req: ModelRequest) -> Result<ProviderRequest> {
         let model = self.cfg.model.trim();
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
-        let (system, messages) = build_provider_messages(req)?;
+        let messages = sanitize_provider_messages(req.messages);
+        if messages.is_empty() {
+            return Err(anyhow!(
+                "模型请求缺少有效的 User 消息，无法发起模型请求（消息应由调用方组装）"
+            ));
+        }
+        let system = req.system.trim();
+        let tool_choice = req
+            .tool_choice
+            .or_else(|| (!req.tools.is_empty()).then_some(LlmToolChoice::Auto));
         Ok(ProviderRequest {
-            session_id: req
-                .session_id
-                .clone()
-                .or_else(|| Some(self.session_id.clone())),
+            session_id: req.session_id.or_else(|| Some(self.session_id.clone())),
             model: model.to_string(),
-            system: (!system.trim().is_empty()).then_some(system),
+            system: (!system.is_empty()).then(|| system.to_string()),
             messages,
-            tools: req.tools.clone(),
-            tool_choice: req
-                .tool_choice
-                .clone()
-                .or_else(|| (!req.tools.is_empty()).then_some(LlmToolChoice::Auto)),
+            tools: req.tools,
+            tool_choice,
             max_tokens: req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN),
             temperature: req.temperature.or_else(configured_temperature_f32),
             top_p: None,
@@ -322,14 +331,19 @@ impl SingleProviderClient {
         })
     }
 
-    fn prepare_request(&self, req: &ModelRequest) -> Result<(ProviderDispatch, ProviderRequest)> {
-        let request = self.build_provider_request(req)?;
+    /// 返回 provider、provider 请求与本次工具定义（响应侧校验工具调用用）。
+    fn prepare_request(
+        &self,
+        req: ModelRequest,
+    ) -> Result<(ProviderDispatch, ProviderRequest, Vec<ToolSpec>)> {
         let timeout_ms = req
             .timeout_ms
             .unwrap_or_else(|| function_timeout_ms(self.cfg.timeout_ms));
         let provider =
             self.build_provider_dispatch(timeout_ms, req.session_id.as_deref(), MAX_RETRIES)?;
-        Ok((provider, request))
+        let request = self.build_provider_request(req)?;
+        let tools = request.tools.clone();
+        Ok((provider, request, tools))
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -340,12 +354,12 @@ impl SingleProviderClient {
         self.cfg.model.trim()
     }
     /// 可取消的非流式调用；完整保留终态和用量，由业务调用方判断内容是否有效。
-    pub async fn complete_async(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        let (provider, request) = self.prepare_request(req)?;
+    pub async fn complete_async(&self, req: ModelRequest) -> Result<ModelResponse> {
+        let (provider, request, tools) = self.prepare_request(req)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
         filter_invalid_openai_tool_calls(
             self.protocol(),
-            &req.tools,
+            &tools,
             convert_provider_response(response),
         )
     }
@@ -356,7 +370,7 @@ impl SingleProviderClient {
         req: ModelRequest,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelResponse> {
-        let (provider, request) = self.prepare_request(&req)?;
+        let (provider, request, tools) = self.prepare_request(req)?;
         let preserve_tool_call_order = matches!(
             self.protocol(),
             ProviderProtocol::OpenAi
@@ -372,7 +386,7 @@ impl SingleProviderClient {
             preserve_tool_call_order,
         )
         .await;
-        filter_invalid_openai_tool_calls(self.protocol(), &req.tools, response)
+        filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
     }
 
     pub fn new(cfg: ModelEndpoint) -> Self {
@@ -664,17 +678,15 @@ impl SingleProviderClient {
         temperature: f32,
     ) -> Result<String> {
         let request = ModelRequest {
-            context: vec![
-                Message::new(MessageRole::System, system),
-                Message::new(MessageRole::User, prompt),
-            ],
+            system: system.to_string(),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
             max_output_tokens: Some(MAX_TOKENS_LITE),
             reasoning_effort: ReasoningEffort::None,
             temperature: Some(temperature),
             timeout_ms: Some(120_000),
             ..Default::default()
         };
-        let response = self.complete(&request)?;
+        let response = self.complete(request)?;
         Ok(if self.protocol() == ProviderProtocol::Anthropic {
             strip_think_tags(&response.text).trim().to_string()
         } else {
@@ -698,15 +710,15 @@ impl ModelClient for SingleProviderClient {
 
     fn complete_stream(
         &self,
-        req: &ModelRequest,
+        req: ModelRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse> {
-        let (provider, request) = self.prepare_request(req)?;
+        let (provider, request, tools) = self.prepare_request(req)?;
         let response = block_on_provider_stream(provider, request, on_delta)?;
-        filter_invalid_openai_tool_calls(self.protocol(), &req.tools, response)
+        filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
     }
 
-    fn complete(&self, req: &ModelRequest) -> Result<ModelResponse> {
+    fn complete(&self, req: ModelRequest) -> Result<ModelResponse> {
         self.block_on_llm(self.complete_async(req))
     }
 }
@@ -824,209 +836,6 @@ fn build_deepseek_provider_from_config(
     DeepSeekProvider::from_config(config).map_err(|err| anyhow!("{err}"))
 }
 
-fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessage>)> {
-    let mut messages = Vec::new();
-    // System prompt 必须由 core 显式注入（session.system_prompt_message）：
-    // context 缺 System 角色消息视为调用方错误，fail-fast。文本允许为空
-    //（core 不再生产 prompt 内容，无插件段落且无摘要时为空，请求即不带 system）。
-    let mut system_texts: Vec<String> = Vec::new();
-    let mut has_system_message = false;
-    for msg in &req.context {
-        if msg.role == MessageRole::System {
-            has_system_message = true;
-            let text = msg.text_content().trim().to_string();
-            if !text.is_empty() {
-                system_texts.push(text);
-            }
-            continue;
-        }
-        if let Some(message) = provider_message_from_session(msg)? {
-            messages.push(message);
-        }
-    }
-
-    if !has_system_message {
-        anyhow::bail!(
-            "build_provider_messages: context 缺少 System 消息。system prompt 应由 core 显式注入（session.system_prompt_message）。"
-        );
-    }
-
-    // 跳过消息列表开头的非 User 消息（summary_up_to 截断可能导致以 Assistant/Tool 开头）
-    if let Some(idx) = messages.iter().position(|m| m.role == LlmMessageRole::User)
-        && idx > 0
-    {
-        tracing::debug!(
-            skipped = idx,
-            "跳过消息列表开头的非 User 消息（可能是 summary 截断导致）"
-        );
-        messages = messages.split_off(idx);
-    }
-
-    if !req.user_input.is_empty() {
-        messages.push(ChatMessage::text(
-            LlmMessageRole::User,
-            req.user_input.clone(),
-        ));
-    }
-
-    let mut messages = sanitize_provider_messages(messages);
-    if messages.is_empty() {
-        let fallback = if req.user_input.trim().is_empty() {
-            "请继续处理当前任务。".to_string()
-        } else {
-            req.user_input.trim().to_string()
-        };
-        messages.push(ChatMessage::text(LlmMessageRole::User, fallback));
-    }
-
-    Ok((system_texts.join("\n"), messages))
-}
-
-fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
-    let role = match &msg.role {
-        Role::User { .. } => LlmMessageRole::User,
-        Role::Assistant { .. } => LlmMessageRole::Assistant,
-        Role::Tool {
-            tool_call_id,
-            tool_name,
-            is_error,
-            ..
-        } => {
-            let text = msg.text_content();
-            if tool_call_id.is_empty() {
-                if text.trim().is_empty() {
-                    return Ok(None);
-                }
-                let tool_name = if tool_name.is_empty() {
-                    "runtime_context"
-                } else {
-                    tool_name.as_str()
-                };
-                return Ok(Some(ChatMessage::text(
-                    LlmMessageRole::User,
-                    format!(
-                        "<tool-context name=\"{tool_name}\">\n{}\n</tool-context>",
-                        text.trim()
-                    ),
-                )));
-            }
-            return Ok(Some(ChatMessage::new(
-                LlmMessageRole::Tool,
-                vec![LlmMessageContent::ToolResult(LlmToolResult {
-                    tool_call_id: tool_call_id.clone(),
-                    content: LlmToolResultContent::Text(text),
-                    is_error: *is_error,
-                })],
-            )));
-        }
-        Role::System => return Ok(None),
-        // Notice 是系统发给用户的通知，任何路径都不得进入模型请求。
-        Role::Notice { .. } => return Ok(None),
-    };
-
-    let mut content = Vec::new();
-    let reasoning = msg.reasoning_content();
-    if !reasoning.trim().is_empty() {
-        content.push(LlmMessageContent::Thinking(LlmThinkingContent {
-            thinking: reasoning.to_string(),
-            signature: msg.reasoning_signature().map(str::to_string),
-        }));
-    }
-
-    // 宿主已经完成全部输入准备；这里只做内容块到 Provider 消息的机械映射。
-    for block in &msg.content {
-        match block {
-            ContentBlock::Text { text: s } | ContentBlock::ModelInstruction { text: s } => {
-                if !s.trim().is_empty() {
-                    content.push(LlmMessageContent::Text(s.clone()));
-                }
-            }
-            ContentBlock::Image { asset, data } => {
-                match image_content_from_ready_image(asset, data.as_deref()) {
-                    Some(img_content) => content.push(LlmMessageContent::Image(img_content)),
-                    // 图片文件缺失（被清理/声明失效）时降级为文字说明，不让整个
-                    // 请求失败——否则该会话之后每一轮请求都会报错。路径可能来自
-                    // 工具可控字段，净化后拼接。
-                    None => content.push(LlmMessageContent::Text(format!(
-                        "[image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
-                        asset.asset_id,
-                        escape_asset_text(&asset.local_path)
-                    ))),
-                }
-            }
-            ContentBlock::Media { .. } | ContentBlock::AssetReference { .. } => {}
-        }
-    }
-
-    content.extend(msg.tool_calls().iter().map(|call| {
-        LlmMessageContent::ToolCall(LlmToolCall {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-        })
-    }));
-    if content.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(ChatMessage::new(role, content)))
-}
-
-fn image_content_from_runtime(mime_type: &str, data: &str) -> crate::message::ImageContent {
-    let data = if data.trim_start().starts_with("data:") {
-        data.to_string()
-    } else {
-        format!("data:{mime_type};base64,{data}")
-    };
-    crate::message::ImageContent {
-        mime_type: mime_type.to_string(),
-        data,
-    }
-}
-
-fn image_content_from_ready_image(
-    asset: &StoredAsset,
-    runtime_data: Option<&str>,
-) -> Option<crate::message::ImageContent> {
-    if let Some(data) = runtime_data.filter(|data| !data.trim().is_empty()) {
-        return Some(image_content_from_runtime(&asset.mime_type, data));
-    }
-
-    let trimmed = asset.local_path.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        return Some(crate::message::ImageContent {
-            mime_type: asset.mime_type.clone(),
-            data: trimmed.to_string(),
-        });
-    }
-
-    let bytes = std::fs::read(Path::new(trimmed)).ok()?;
-    let mime_type = asset.mime_type.clone();
-    let data = format!(
-        "data:{mime_type};base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    );
-    Some(crate::message::ImageContent { mime_type, data })
-}
-
-/// 降级说明中资产路径的净化（复评小问题 3）：压缩控制字符与 Unicode
-/// 行/双向控制符、按字符边界截断。
-fn escape_asset_text(value: &str) -> String {
-    fn is_suspicious(c: char) -> bool {
-        c.is_control()
-            || matches!(
-                c,
-                '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
-                    | '\u{2066}'..='\u{2069}'
-            )
-    }
-    value
-        .chars()
-        .map(|c| if is_suspicious(c) { ' ' } else { c })
-        .take(160)
-        .collect()
-}
-
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut filtered = Vec::new();
     let mut seen_user = false;
@@ -1088,32 +897,23 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
             }
         }
 
-        // 一个调用批次只消费紧随其后的 Tool 消息；工具内部上下文可以夹在
-        // 并行结果之间，但普通 User/Assistant 会立即封闭批次。
+        // 一个调用批次只消费紧随其后的 Tool 消息；任何非 Tool 消息都封闭批次。
         let mut cursor = index + 1;
         let mut results = std::collections::HashMap::<String, LlmToolResult>::new();
-        let mut deferred_contexts = Vec::new();
-        while cursor < input.len() {
-            let message = &input[cursor];
-            if message.role == LlmMessageRole::Tool {
-                for content in &message.content {
-                    if let LlmMessageContent::ToolResult(result) = content
-                        && unique_call_ids.contains(&result.tool_call_id)
-                    {
-                        results
-                            .entry(result.tool_call_id.clone())
-                            .or_insert_with(|| result.clone());
-                    }
+        while let Some(message) = input
+            .get(cursor)
+            .filter(|message| message.role == LlmMessageRole::Tool)
+        {
+            for content in &message.content {
+                if let LlmMessageContent::ToolResult(result) = content
+                    && unique_call_ids.contains(&result.tool_call_id)
+                {
+                    results
+                        .entry(result.tool_call_id.clone())
+                        .or_insert_with(|| result.clone());
                 }
-                cursor += 1;
-                continue;
             }
-            if is_internal_tool_context_message(message) {
-                deferred_contexts.push(message.clone());
-                cursor += 1;
-                continue;
-            }
-            break;
+            cursor += 1;
         }
 
         let valid_ids = results
@@ -1144,9 +944,6 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
                 ChatMessage::new(LlmMessageRole::Tool, paired_results),
             );
         }
-        for context in deferred_contexts {
-            push_provider_message(&mut output, context);
-        }
         index = cursor;
     }
 
@@ -1160,16 +957,6 @@ fn provider_message_tool_result_count(message: &ChatMessage) -> usize {
         .iter()
         .filter(|content| matches!(content, LlmMessageContent::ToolResult(_)))
         .count()
-}
-
-fn is_internal_tool_context_message(message: &ChatMessage) -> bool {
-    message.role == LlmMessageRole::User
-        && message.content.iter().any(|content| {
-            matches!(
-                content,
-                LlmMessageContent::Text(text) if text.trim_start().starts_with("<tool-context")
-            )
-        })
 }
 
 fn push_provider_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
@@ -1588,9 +1375,7 @@ mod tests {
         assert_eq!(absent.prompt_cache_hit_tokens, None);
         assert_eq!(absent.prompt_cache_miss_tokens, None);
     }
-    use tiangong_types::{
-        ContentBlock, MediaKind, Message, MessageRole, Role, StoredAsset, UserSource,
-    };
+    use crate::tool::{ToolCall as LlmToolCall, ToolResultContent as LlmToolResultContent};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1620,30 +1405,6 @@ mod tests {
             content: LlmToolResultContent::Text(format!("result-{id}")),
             is_error: false,
         })
-    }
-
-    #[test]
-    fn build_provider_messages_fails_without_system_message() {
-        // context 无 System 消息时必须 fail-fast，
-        // 防止调用方遗漏 system prompt 注入。
-        let user_msg = Message {
-            id: "u".to_string(),
-            ..Message::with_role(Role::user(), vec![ContentBlock::text("你好")])
-        };
-        let req = ModelRequest {
-            session_id: None,
-            user_input: String::new(),
-            context: vec![user_msg],
-            reasoning_effort: ReasoningEffort::None,
-            max_output_tokens: None,
-            ..Default::default()
-        };
-
-        let err = build_provider_messages(&req).unwrap_err();
-        assert!(
-            err.to_string().contains("System"),
-            "错误信息应指出缺少 System 消息，实际：{err}"
-        );
     }
 
     #[test]
@@ -1979,8 +1740,8 @@ mod tests {
         });
         let request = ModelRequest {
             session_id: None,
-            user_input: "检查项目".to_string(),
-            context: vec![Message::new(MessageRole::System, "system")],
+            system: "system".to_string(),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, "检查项目")],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
             ..Default::default()
@@ -2052,8 +1813,8 @@ mod tests {
         });
         let request = ModelRequest {
             session_id: None,
-            user_input: "检查项目".to_string(),
-            context: vec![Message::new(MessageRole::System, "system")],
+            system: "system".to_string(),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, "检查项目")],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
             ..Default::default()
@@ -2132,8 +1893,8 @@ mod tests {
         });
         let request = ModelRequest {
             session_id: None,
-            user_input: "检查项目".to_string(),
-            context: vec![Message::new(MessageRole::System, "system")],
+            system: "system".to_string(),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, "检查项目")],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
             ..Default::default()
@@ -2160,54 +1921,30 @@ mod tests {
         assert_eq!(requests.len(), 1);
     }
 
+    /// 插在并行结果之间的 User 消息封闭调用批次：之后的结果成为孤立结果被丢弃，
+    /// 未得到结果的调用从 assistant 中移除。
     #[test]
-    fn sanitize_defers_internal_tool_context_until_tool_results_complete() {
-        let messages = vec![
+    fn user_message_between_parallel_results_closes_the_batch() {
+        let sanitized = sanitize_provider_messages(vec![
             ChatMessage::text(LlmMessageRole::User, "开始"),
             ChatMessage::new(
                 LlmMessageRole::Assistant,
-                vec![
-                    LlmMessageContent::ToolCall(LlmToolCall {
-                        id: "call_1".to_string(),
-                        name: "read_file".to_string(),
-                        arguments: serde_json::json!({"path": "a"}),
-                    }),
-                    LlmMessageContent::ToolCall(LlmToolCall {
-                        id: "call_2".to_string(),
-                        name: "read_file".to_string(),
-                        arguments: serde_json::json!({"path": "b"}),
-                    }),
-                ],
+                vec![provider_tool_call("a"), provider_tool_call("b")],
             ),
-            ChatMessage::new(
-                LlmMessageRole::Tool,
-                vec![LlmMessageContent::ToolResult(LlmToolResult {
-                    tool_call_id: "call_1".to_string(),
-                    content: LlmToolResultContent::Text("a".to_string()),
-                    is_error: false,
-                })],
-            ),
-            ChatMessage::text(
-                LlmMessageRole::User,
-                "<tool-context name=\"read_file\">trace</tool-context>",
-            ),
-            ChatMessage::new(
-                LlmMessageRole::Tool,
-                vec![LlmMessageContent::ToolResult(LlmToolResult {
-                    tool_call_id: "call_2".to_string(),
-                    content: LlmToolResultContent::Text("b".to_string()),
-                    is_error: false,
-                })],
-            ),
-        ];
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("a")]),
+            ChatMessage::text(LlmMessageRole::User, "插入的用户消息"),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("b")]),
+        ]);
 
-        let sanitized = sanitize_provider_messages(messages);
-
-        assert_eq!(sanitized.len(), 4);
-        assert_eq!(sanitized[2].role, LlmMessageRole::Tool);
-        assert_eq!(provider_message_tool_result_count(&sanitized[2]), 2);
-        assert_eq!(sanitized[3].role, LlmMessageRole::User);
-        assert!(is_internal_tool_context_message(&sanitized[3]));
+        assert_eq!(
+            sanitized,
+            vec![
+                ChatMessage::text(LlmMessageRole::User, "开始"),
+                ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("a")]),
+                ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("a")]),
+                ChatMessage::text(LlmMessageRole::User, "插入的用户消息"),
+            ]
+        );
     }
 
     #[test]
@@ -2323,444 +2060,5 @@ mod tests {
             .iter()
             .filter(|content| matches!(content, LlmMessageContent::ToolCall(_)))
             .count()
-    }
-
-    #[test]
-    fn ready_image_prefers_current_data() {
-        let msg = test_user_message_with_ready_image(
-            "/path/that/does/not/exist.png",
-            Some("CURRENT_RUNTIME_BASE64"),
-        );
-
-        let result = provider_message_from_session(&msg)
-            .expect("映射不应失败")
-            .expect("应生成消息");
-        let image = result
-            .content
-            .iter()
-            .find_map(|content| match content {
-                LlmMessageContent::Image(image) => Some(image),
-                _ => None,
-            })
-            .expect("已就绪图片应进入请求");
-        assert_eq!(image.data, "data:image/png;base64,CURRENT_RUNTIME_BASE64");
-    }
-
-    /// 评审问题 2 回归：HostInjected 消息的图片文件缺失（被清理/声明
-    /// 失效）时，provider 映射降级为文字说明，整个请求不得失败——
-    /// 否则该会话之后每一轮请求都会报错。
-    #[test]
-    fn host_injected_image_with_missing_file_degrades_to_text() {
-        let mut msg = test_message(vec![
-            ContentBlock::model_instruction("[injected-images provenance]\n- 工具截图产出图片"),
-            ContentBlock::Image {
-                asset: test_asset(
-                    MediaKind::Image,
-                    "/nonexistent/path/deleted-by-cleanup.png",
-                    "image/png",
-                ),
-                data: None,
-            },
-        ]);
-        msg = msg.with_source(UserSource::HostInjected);
-
-        let result = provider_message_from_session(&msg)
-            .expect("映射不得失败")
-            .expect("应生成消息");
-        assert!(
-            result.content.iter().any(|content| matches!(
-                content,
-                LlmMessageContent::Text(text) if text.contains("[image unavailable]")
-            )),
-            "缺失图片应降级为文字说明"
-        );
-        assert!(
-            !result
-                .content
-                .iter()
-                .any(|content| matches!(content, LlmMessageContent::Image(_)))
-        );
-    }
-
-    /// 抓包式判据：含 HostInjected 图片消息的请求经 OpenAI Chat
-    /// Completions 协议真实发出时，HTTP body 必须包含 image_url 形式的
-    /// 原生图片内容与 provenance 文本——排除序列化层静默丢图。
-    #[tokio::test]
-    async fn openai_request_body_carries_host_injected_image() {
-        use wiremock::{Mock, ResponseTemplate, matchers::method};
-        let server = MockServer::start().await;
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("tiangong-wire-{}-{unique}.png", std::process::id()));
-        std::fs::write(&path, [5_u8, 6, 7, 8]).unwrap();
-
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "chatcmpl-ok",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "test-model",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "ok"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11}
-            })))
-            .mount(&server)
-            .await;
-
-        let client = SingleProviderClient::new(ModelEndpoint {
-            headers: Default::default(),
-            base_url: server.uri(),
-            api_key: "test-key".to_string(),
-            model: "test-model".to_string(),
-            protocol: ProviderProtocol::OpenAiChatCompletions,
-            timeout_ms: 5_000,
-            options: Value::Object(serde_json::Map::new()),
-            context_window: None,
-        });
-        let mut injected = test_message(vec![
-            ContentBlock::model_instruction(
-                "[injected-images provenance]\n- 工具 desktop_screenshot 产出图片",
-            ),
-            ContentBlock::Image {
-                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
-                data: None,
-            },
-        ]);
-        injected = injected.with_source(UserSource::HostInjected);
-        let request = ModelRequest {
-            session_id: None,
-            user_input: String::new(),
-            context: vec![
-                Message::new(MessageRole::System, "system"),
-                Message::new(MessageRole::User, "看看屏幕"),
-                injected,
-            ],
-            reasoning_effort: ReasoningEffort::None,
-            max_output_tokens: None,
-            ..Default::default()
-        };
-        let _response = client.complete_async(&request).await.expect("请求应成功");
-
-        let bodies = server.received_requests().await.expect("应捕获到请求");
-        let body = String::from_utf8(bodies[0].body.clone()).expect("body 应为 UTF-8");
-        assert!(
-            body.contains("image_url"),
-            "HTTP body 必须包含 image_url 原生图片内容，实际 body 前 500 字：{}",
-            &body[..body.len().min(500)]
-        );
-        assert!(
-            body.contains("injected-images"),
-            "provenance 文本必须随请求发出"
-        );
-    }
-
-    /// 端到端序列判据（RFC 0017 注入消息「进入 agent 上下文」）：完整
-    /// 工具轮序列 user → assistant(tool_calls) → tool 结果 → HostInjected
-    /// 注入消息（provenance + Image）经 build_provider_messages 组装后，
-    /// 注入消息必须保留——provenance 文本与原生图片内容都在，且位于
-    /// Tool 消息之后。任何环节（映射、跳头、sanitize 配对整形）把它
-    /// 丢弃都视为回归。
-    #[test]
-    fn host_injected_message_survives_full_request_assembly() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "tiangong-inject-seq-{}-{unique}.png",
-            std::process::id()
-        ));
-        std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
-
-        let system_msg = Message {
-            id: "sys".to_string(),
-            ..Message::with_role(Role::System, vec![ContentBlock::text("你是通用助手。")])
-        };
-        let anchor_user = test_message(vec![ContentBlock::text("看看屏幕")]);
-
-        let mut assistant = Message::with_role(Role::assistant(), Vec::new());
-        if let Role::Assistant { tool_calls, .. } = &mut assistant.role {
-            *tool_calls = vec![tiangong_types::MessageToolCall {
-                id: "call-1".to_string(),
-                name: "desktop_screenshot".to_string(),
-                arguments: serde_json::json!({}),
-            }];
-        }
-
-        let tool_result = Message::tool_result(
-            "call-1",
-            "desktop_screenshot",
-            "{\"path\": \"/tmp/shot.png\"}",
-            false,
-        );
-
-        let mut injected = test_message(vec![
-            ContentBlock::model_instruction(
-                "[injected-images provenance]\n- 工具 desktop_screenshot（call-1）产出图片 shot.png",
-            ),
-            ContentBlock::Image {
-                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
-                data: None,
-            },
-        ]);
-        injected = injected.with_source(UserSource::HostInjected);
-
-        let req = ModelRequest {
-            session_id: None,
-            user_input: String::new(),
-            context: vec![system_msg, anchor_user, assistant, tool_result, injected],
-            reasoning_effort: ReasoningEffort::None,
-            max_output_tokens: None,
-            ..Default::default()
-        };
-        let (_system, messages) = build_provider_messages(&req).unwrap();
-
-        // 定位注入消息：必须是 User 角色、含 provenance 文本和图片内容。
-        let position = messages
-            .iter()
-            .position(|m| {
-                m.role == LlmMessageRole::User
-                    && m.content.iter().any(|content| {
-                        matches!(
-                            content,
-                            LlmMessageContent::Text(text) if text.contains("injected-images")
-                        )
-                    })
-            })
-            .expect("注入消息必须存在于组装后的请求");
-        assert!(
-            messages[position]
-                .content
-                .iter()
-                .any(|content| matches!(content, LlmMessageContent::Image(_))),
-            "注入消息必须携带原生图片内容"
-        );
-        // 位置判据：必须在 Tool 结果消息之后（不被配对整形吞掉或前移）。
-        let tool_position = messages
-            .iter()
-            .position(|m| m.role == LlmMessageRole::Tool)
-            .expect("工具结果消息必须存在");
-        assert!(position > tool_position, "注入消息应位于工具结果之后");
-    }
-
-    #[test]
-    fn historical_ready_image_is_encoded_from_local_path() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "tiangong-provider-inline-{}-{unique}.png",
-            std::process::id()
-        ));
-        std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
-        let msg = test_user_message_with_ready_image(path.to_str().unwrap(), None);
-
-        let result = provider_message_from_session(&msg)
-            .expect("映射不应失败")
-            .expect("应生成消息");
-        let image = result
-            .content
-            .iter()
-            .find_map(|content| match content {
-                LlmMessageContent::Image(image) => Some(image),
-                _ => None,
-            })
-            .expect("历史图片应从本地路径重编码");
-        assert_eq!(image.mime_type, "image/png");
-        assert_eq!(image.data, "data:image/png;base64,AQIDBA==");
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// 图片文件缺失的降级覆盖所有消息（不限 HostInjected）：普通用户
-    /// 消息的历史图片被清理后，请求仍可发出，图片位置换成文字说明。
-    #[test]
-    fn missing_historical_ready_image_degrades_to_text() {
-        let msg = test_user_message_with_ready_image("/path/that/does/not/exist-history.png", None);
-
-        let result = provider_message_from_session(&msg)
-            .expect("映射不得失败")
-            .expect("应生成消息");
-        assert!(result.content.iter().any(|content| matches!(
-            content,
-            LlmMessageContent::Text(text)
-                if text.contains("[image unavailable]") && text.contains("asset-ready")
-        )));
-        assert!(
-            !result
-                .content
-                .iter()
-                .any(|content| matches!(content, LlmMessageContent::Image(_)))
-        );
-    }
-
-    /// RFC 0017「看见而非知道」判据的回归保护：HostInjected 注入消息
-    /// （provenance + Image、data=None）映射后必须携带原生图片内容
-    /// （从 local_path 读取编码），不得退化为文本提及路径。
-    #[test]
-    fn host_injected_message_carries_native_image() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "tiangong-model-only-{}-{unique}.png",
-            std::process::id()
-        ));
-        std::fs::write(&path, [9_u8, 8, 7, 6]).unwrap();
-        let mut msg = test_message(vec![
-            ContentBlock::model_instruction(
-                "[injected-images provenance]\n- 工具 desktop_screenshot",
-            ),
-            ContentBlock::Image {
-                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
-                data: None,
-            },
-        ]);
-        msg = msg.with_source(UserSource::HostInjected);
-
-        let result = provider_message_from_session(&msg)
-            .expect("映射不应失败")
-            .expect("应生成消息");
-        assert!(result.content.iter().any(|content| matches!(
-            content,
-            LlmMessageContent::Text(text) if text.contains("injected-images")
-        )));
-        let image = result
-            .content
-            .iter()
-            .find_map(|content| match content {
-                LlmMessageContent::Image(image) => Some(image),
-                _ => None,
-            })
-            .expect("注入消息必须携带原生图片内容");
-        assert_eq!(image.mime_type, "image/png");
-        assert_eq!(image.data, "data:image/png;base64,CQgHBg==");
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn model_instruction_is_mapped_verbatim_and_asset_reference_is_ignored() {
-        let instruction = "  使用宿主已选择的资源能力处理 path=/tmp/report.pdf\n";
-        let msg = test_message(vec![
-            ContentBlock::text("处理资源"),
-            ContentBlock::AssetReference {
-                asset: test_asset(MediaKind::File, "/tmp/report.pdf", "application/pdf"),
-            },
-            ContentBlock::model_instruction(instruction),
-        ]);
-
-        let result = provider_message_from_session(&msg)
-            .expect("映射不应失败")
-            .expect("应生成消息");
-        assert!(result.content.iter().any(|content| matches!(
-            content,
-            LlmMessageContent::Text(text) if text == instruction
-        )));
-        assert_eq!(
-            result
-                .content
-                .iter()
-                .filter(|content| matches!(content, LlmMessageContent::Text(_)))
-                .count(),
-            2
-        );
-        assert!(!result.content.iter().any(|content| matches!(
-            content,
-            LlmMessageContent::Image(_) | LlmMessageContent::File(_)
-        )));
-    }
-
-    #[test]
-    fn legacy_media_is_ignored_without_provider_decision() {
-        let msg = test_message(vec![
-            ContentBlock::text("仅保留用户文本"),
-            ContentBlock::Media {
-                kind: MediaKind::Image,
-                url: "data:image/png;base64,SHOULD_NOT_INLINE".to_string(),
-                mime_type: Some("image/png".to_string()),
-                title: None,
-            },
-        ]);
-        let result = provider_message_from_session(&msg)
-            .expect("映射不应失败")
-            .expect("应生成消息");
-        assert_eq!(result.content.len(), 1);
-        assert!(matches!(
-            &result.content[0],
-            LlmMessageContent::Text(text) if text == "仅保留用户文本"
-        ));
-    }
-
-    fn test_user_message_with_ready_image(local_path: &str, data: Option<&str>) -> Message {
-        test_message(vec![
-            ContentBlock::text("处理图片"),
-            ContentBlock::Image {
-                asset: test_asset(MediaKind::Image, local_path, "image/png"),
-                data: data.map(str::to_string),
-            },
-        ])
-    }
-
-    fn test_asset(kind: MediaKind, local_path: &str, mime_type: &str) -> StoredAsset {
-        StoredAsset {
-            asset_id: "asset-ready".to_string(),
-            local_path: local_path.to_string(),
-            original_name: "ready-resource".to_string(),
-            mime_type: mime_type.to_string(),
-            size: 4,
-            kind,
-        }
-    }
-
-    fn test_message(content: Vec<ContentBlock>) -> Message {
-        Message {
-            id: "msg-ready".to_string(),
-            ..Message::with_role(Role::user(), content)
-        }
-    }
-
-    #[test]
-    fn end_to_end_request_preserves_ready_instruction() {
-        let instruction = "读取宿主提供的资源 path=/tmp/report.pdf";
-        let user_msg = test_message(vec![
-            ContentBlock::text("请处理资源。"),
-            ContentBlock::AssetReference {
-                asset: test_asset(MediaKind::File, "/tmp/report.pdf", "application/pdf"),
-            },
-            ContentBlock::model_instruction(instruction),
-        ]);
-
-        let system_msg = Message {
-            id: "sys".to_string(),
-            ..Message::with_role(Role::System, vec![ContentBlock::text("你是通用助手。")])
-        };
-
-        let req = ModelRequest {
-            session_id: None,
-            user_input: String::new(),
-            context: vec![system_msg, user_msg],
-            reasoning_effort: ReasoningEffort::None,
-            max_output_tokens: None,
-            ..Default::default()
-        };
-
-        let (system, messages) = build_provider_messages(&req).unwrap();
-
-        assert_eq!(system, "你是通用助手。");
-        let user_content = messages
-            .iter()
-            .find(|m| m.role == LlmMessageRole::User)
-            .expect("应有 user 消息");
-        assert!(user_content.content.iter().any(|content| matches!(
-            content,
-            LlmMessageContent::Text(text) if text == instruction
-        )));
     }
 }

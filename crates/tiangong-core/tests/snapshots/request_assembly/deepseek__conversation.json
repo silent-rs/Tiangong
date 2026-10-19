@@ -1,0 +1,81 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "你是通用助手。\n遵守规则。",
+      "role": "system"
+    },
+    {
+      "content": "请读取两个文件",
+      "role": "user"
+    },
+    {
+      "content": "我来读取。",
+      "reasoning_content": "先读 a 再读 b\n保留原文",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"path\":\"call_a\"}",
+            "name": "read_file"
+          },
+          "id": "call_a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"path\":\"call_b\"}",
+            "name": "read_file"
+          },
+          "id": "call_b",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "内容 A",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    },
+    {
+      "content": "读取失败",
+      "role": "tool",
+      "tool_call_id": "call_b"
+    },
+    {
+      "content": "两个文件都已读取。",
+      "role": "assistant"
+    },
+    {
+      "content": "处理附件\n  附件路径 path=/tmp/report.pdf\n",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "reasoning_effort": "high",
+  "thinking": {
+    "type": "enabled"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "读取文件",
+        "name": "read_file",
+        "parameters": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ],
+  "user_id": "snapshot-session"
+}

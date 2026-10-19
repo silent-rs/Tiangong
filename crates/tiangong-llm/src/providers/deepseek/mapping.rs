@@ -398,10 +398,7 @@ pub fn from_deepseek_response(
     Ok(ProviderResponse {
         id: Some(id),
         model: Some(model),
-        assistant_message: ChatMessage {
-            role: MessageRole::Assistant,
-            content,
-        },
+        assistant_message: ChatMessage::new(MessageRole::Assistant, content),
         reasoning_content,
         stop_reason: Some(map_stop_reason(&choice.finish_reason)),
         usage: Some(usage),

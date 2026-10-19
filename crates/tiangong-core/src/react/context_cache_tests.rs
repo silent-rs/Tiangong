@@ -29,7 +29,7 @@ async fn compression_request_keeps_every_cache_relevant_param_of_main_loop() {
         } else {
             mount_completion(&server, "正常回复", "stop", 100, 10, None).await;
         }
-        let req = super::super::build_react_request(&harness.ctx);
+        let req = super::super::build_react_request(&harness.ctx).unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         harness
             .ctx

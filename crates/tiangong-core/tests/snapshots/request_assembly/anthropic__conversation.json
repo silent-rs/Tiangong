@@ -1,0 +1,128 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "请读取两个文件",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig-1",
+          "thinking": "  先读 a 再读 b\n保留原文  ",
+          "type": "thinking"
+        },
+        {
+          "text": "我来读取。",
+          "type": "text"
+        },
+        {
+          "id": "call_a",
+          "input": {
+            "path": "call_a"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        },
+        {
+          "id": "call_b",
+          "input": {
+            "path": "call_b"
+          },
+          "name": "read_file",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "内容 A",
+          "is_error": false,
+          "tool_use_id": "call_a",
+          "type": "tool_result"
+        },
+        {
+          "content": "读取失败",
+          "is_error": true,
+          "tool_use_id": "call_b",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "两个文件都已读取。",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "处理附件",
+          "type": "text"
+        },
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "  附件路径 path=/tmp/report.pdf\n",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "output_config": {
+    "effort": "high"
+  },
+  "system": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "text": "你是通用助手。\n遵守规则。",
+      "type": "text"
+    }
+  ],
+  "thinking": {
+    "type": "adaptive"
+  },
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "description": "读取文件",
+      "input_schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "read_file"
+    }
+  ]
+}

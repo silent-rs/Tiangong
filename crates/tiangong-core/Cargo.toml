@@ -8,6 +8,8 @@ license = "Apache-2.0"
 tiangong-types = { workspace = true }
 tiangong-llm = { workspace = true }
 anyhow = { workspace = true }
+# 请求组装：历史图片从本地文件读取后编码为 data URL
+base64 = { workspace = true }
 arc-swap = { workspace = true }
 chrono = { workspace = true, default-features = false, features = [
     "std",

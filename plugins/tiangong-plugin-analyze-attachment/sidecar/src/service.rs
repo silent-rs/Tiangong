@@ -3,6 +3,7 @@
 //! 读取图片文件 → 构造多模态 ModelRequest → 调 SingleProviderClient → 返回分析文本。
 
 use anyhow::{Context, Result};
+use tiangong_core::context::model_context::ModelContext;
 use tiangong_core::session::{Message, MessageRole};
 use tiangong_llm::{
     ModelCapability, ModelEndpoint, ModelEntry, ModelRequest, ModelsConfig, ResolvedModel,
@@ -132,15 +133,13 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
 
     let request = ModelRequest {
         session_id: None,
-        user_input: String::new(),
-        context,
         reasoning_effort: tiangong_llm::request::ReasoningEffort::None,
         max_output_tokens: None,
-        ..Default::default()
+        ..ModelRequest::try_from(ModelContext::from(context))?
     };
 
     let response = client
-        .complete_async(&request)
+        .complete_async(request)
         .await
         .map_err(|e| anyhow::anyhow!("多模态模型调用失败：{e}"))?;
 

@@ -67,22 +67,22 @@ fn sample_request() -> ProviderRequest {
         system: Some("你是测试助手".to_string()),
         messages: vec![
             ChatMessage::text(MessageRole::User, "你好"),
-            ChatMessage {
-                role: MessageRole::Assistant,
-                content: vec![MessageContent::ToolCall(crate::tool::ToolCall {
+            ChatMessage::new(
+                MessageRole::Assistant,
+                vec![MessageContent::ToolCall(crate::tool::ToolCall {
                     id: "call_1".to_string(),
                     name: "search_web".to_string(),
                     arguments: json!({"q": "rust"}),
                 })],
-            },
-            ChatMessage {
-                role: MessageRole::Tool,
-                content: vec![MessageContent::ToolResult(ToolResult {
+            ),
+            ChatMessage::new(
+                MessageRole::Tool,
+                vec![MessageContent::ToolResult(ToolResult {
                     tool_call_id: "call_1".to_string(),
                     content: ToolResultContent::Json(json!({"answer": "ok"})),
                     is_error: false,
                 })],
-            },
+            ),
         ],
         tools: vec![ToolSpec {
             name: "search_web".to_string(),

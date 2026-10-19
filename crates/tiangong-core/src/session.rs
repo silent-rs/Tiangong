@@ -112,7 +112,7 @@ pub struct Session {
     /// 缓存的 system prompt 消息（role=System）。
     ///
     /// 在新对话、压缩对话、清空上下文时由外部调用 `rebuild_system_prompt()` 重建。
-    /// `context()` 返回时会将其置于消息列表头部，由 `build_provider_messages()` 提取。
+    /// `context()` 返回时会将其置于消息列表头部，经 `ModelRequest::try_from` 提取为 system prompt。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_message: Option<Message>,
     pub created_at: String,
@@ -483,9 +483,10 @@ impl Session {
 
     /// 构建 LLM 请求上下文
     ///
-    /// 返回 system_prompt_message（如有）+ `summary_up_to` 之后的对话消息。
-    /// System 消息由 `build_provider_messages` 提取到 system prompt。
-    pub fn context(&self) -> Vec<Message> {
+    /// 返回 system_prompt_message（如有）+ `summary_up_to` 之后的对话消息，
+    /// 顺序即模型请求顺序；经 `ModelRequest::try_from` 转为模型请求，
+    /// System 消息被提取为 system prompt。
+    pub fn context(&self) -> crate::context::model_context::ModelContext {
         let mut context = Vec::new();
         if let Some(ref msg) = self.system_prompt_message {
             context.push(msg.clone());
@@ -501,7 +502,7 @@ impl Session {
                 })
                 .cloned(),
         );
-        context
+        context.into()
     }
 
     /// 截断指定消息之后的所有消息（保留该消息本身），返回移除数量

@@ -60,9 +60,6 @@ impl ChatMessage {
     }
 
     pub fn text(role: MessageRole, text: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: vec![MessageContent::Text(text.into())],
-        }
+        Self::new(role, vec![MessageContent::Text(text.into())])
     }
 }
