@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::context::model_request::IntoModelRequest;
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -418,7 +419,7 @@ fn build_react_request(ctx: &TurnContext) -> anyhow::Result<ModelRequest> {
         max_output_tokens: Some(crate::config::max_output::max_output_tokens(
             ctx.client().model_name(),
         )),
-        ..ModelRequest::try_from(ctx.session.context())?
+        ..ctx.session.context().into_model_request()?
     })
 }
 

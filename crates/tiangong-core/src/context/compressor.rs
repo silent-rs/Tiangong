@@ -1,4 +1,4 @@
-use crate::context::model_context::ModelContext;
+use crate::context::model_request::IntoModelRequest;
 use crate::session::{Message, MessageRole, Session, UserSource};
 use tiangong_llm::tool::ToolSpec;
 use tiangong_llm::{ModelRequest, ReasoningEffort, SingleProviderClient, StopReason};
@@ -152,7 +152,7 @@ impl ContextCompressor {
         session: &Session,
         split_point: usize,
         max_output_tokens: u32,
-    ) -> ModelContext {
+    ) -> Vec<Message> {
         let split_point = split_point.min(session.messages.len());
         let mut context = session.context();
         context.push(Message::new(
@@ -176,11 +176,7 @@ impl ContextCompressor {
             reasoning_effort,
             // 仅为输出上限（不参与前缀缓存），按剩余上下文空间限制。
             max_output_tokens: Some(max_output_tokens),
-            ..ModelRequest::try_from(Self::summary_context(
-                session,
-                split_point,
-                max_output_tokens,
-            ))?
+            ..Self::summary_context(session, split_point, max_output_tokens).into_model_request()?
         })
     }
 

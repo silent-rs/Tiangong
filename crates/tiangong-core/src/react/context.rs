@@ -112,7 +112,7 @@ pub(crate) fn emit_token_usage(
 ///
 /// 复用 `inject_tool_to_messages` 统一注入通道（合法的 assistant tool_call + tool result
 /// 消息对），而非手工追加消息：
-/// - 避免使用 `MessageRole::System`——它会被 `ModelRequest::try_from(ModelContext)` 的
+/// - 避免使用 `MessageRole::System`——它会被 `into_model_request()` 的
 ///   `system_texts.clear()` 覆盖整个 system prompt，污染 prompt 并破坏 KV cache 前缀；
 /// - 走标准注入通道保证 append-only、provider 序列化为合法 tool pair，cache 友好。
 ///

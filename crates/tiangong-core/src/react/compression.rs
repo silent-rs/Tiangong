@@ -578,7 +578,7 @@ fn apply_compression(
     //
     // 用 Notice 而非 System：Notice 是「系统发给用户的通知」通道，角色
     // 本身保证排除出模型上下文与后续压缩范围；System 会被
-    // ModelRequest::try_from(ModelContext) 拼进 system prompt，污染 prompt 并破坏
+    // into_model_request() 拼进 system prompt，污染 prompt 并破坏
     // KV cache 前缀。
     let record_id = {
         let record = Message::notice(crate::core::CONTEXT_NOTICE_CATEGORY, notice);

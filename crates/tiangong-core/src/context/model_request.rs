@@ -1,24 +1,20 @@
-//! 模型上下文：[`Session::context`](crate::session::Session::context) 的返回类型。
+//! 会话上下文 → 模型请求：[`IntoModelRequest`] 把 `Session::context()` 返回的
+//! 有序消息列表按值转换为 llm 层的 [`ModelRequest`]（`system` + `messages`），
+//! 消息内容直接移动，不再额外拷贝。
 //!
 //! 消息的选取与顺序（system prompt + 摘要边界之后的对话，排除持久化 System
-//! 与 Notice）已在 `Session::context()` 中确定；本类型只负责把这份上下文
-//! 按值转换为 llm 层的 [`ModelRequest`]（`system` + `messages`），消息内容
-//! 直接移动，不再额外拷贝。
-//!
-//! 宿主会话语义只在这里处理（issue #691），llm 层不理解宿主消息格式、
-//! 不读取本地文件：
+//! 与 Notice）已在 `Session::context()` 中确定，这里只做内容转换。宿主会话
+//! 语义只在这里处理（issue #691），llm 层不理解宿主消息格式、不读取本地文件：
 //! - system prompt 取自 `MessageRole::System` 消息，缺少即视为调用方错误；
 //! - 没有配对调用（`tool_call_id` 为空）的 Tool 消息不进入请求（仅存在于 #77 之前的旧会话）；
 //! - 模型指令与用户文本同样进入请求，附件引用与旧格式媒体不进入请求；
 //! - 图片按当前请求数据 → 远程 URL → 本地文件的顺序取用，文件不可读时降级为文字说明；
 //! - 截断导致的开头非 User 消息被跳过，没有 User 消息时补兜底用户文本。
 
-use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
 use anyhow::bail;
 use base64::{Engine as _, engine::general_purpose};
-use serde::Serialize;
 use tiangong_llm::ModelRequest;
 use tiangong_llm::message::{
     ChatMessage, ImageContent, MessageContent, MessageRole as LlmMessageRole, ThinkingContent,
@@ -30,47 +26,25 @@ use crate::session::{ContentBlock, Message, MessageRole, Role, StoredAsset};
 /// 上下文中没有任何 User 消息时补发的兜底用户文本。
 pub const FALLBACK_USER_TEXT: &str = "请继续处理当前任务。";
 
-/// 发送给模型的有序会话上下文。
+/// 把有序会话消息转换为模型请求。
 ///
-/// 解引用为 `Vec<Message>`，可像普通消息列表一样读取或追加（如压缩请求
-/// 在末尾追加压缩指令）；用 `ModelRequest::try_from` / `try_into` 转为模型请求。
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(transparent)]
-pub struct ModelContext(Vec<Message>);
-
-impl From<Vec<Message>> for ModelContext {
-    fn from(messages: Vec<Message>) -> Self {
-        Self(messages)
-    }
+/// `ModelRequest` 与 `Vec<Message>` 都不是 core 定义的类型，孤儿规则不允许在
+/// core 中为它们实现 `TryFrom`；由 core 自定义该 trait 承载转换。
+pub trait IntoModelRequest {
+    /// 只填充 `system` 与 `messages`，其余请求参数（会话 ID、思考强度、输出
+    /// 上限等）由调用方用结构体更新语法补充。
+    fn into_model_request(self) -> anyhow::Result<ModelRequest>;
 }
 
-impl Deref for ModelContext {
-    type Target = Vec<Message>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for ModelContext {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// 只填充 `system` 与 `messages`，其余请求参数（会话 ID、思考强度、输出
-/// 上限等）由调用方用结构体更新语法补充。
-impl TryFrom<ModelContext> for ModelRequest {
-    type Error = anyhow::Error;
-
-    fn try_from(context: ModelContext) -> anyhow::Result<Self> {
+impl IntoModelRequest for Vec<Message> {
+    fn into_model_request(self) -> anyhow::Result<ModelRequest> {
         // System prompt 必须由 core 显式注入（session.system_prompt_message）：
         // context 缺 System 角色消息视为调用方错误，fail-fast。文本允许为空
         //（core 不再生产 prompt 内容，无插件段落且无摘要时为空，请求即不带 system）。
         let mut system_texts: Vec<String> = Vec::new();
         let mut has_system_message = false;
-        let mut messages = Vec::with_capacity(context.len());
-        for message in context.0 {
+        let mut messages = Vec::with_capacity(self.len());
+        for message in self {
             if message.role == MessageRole::System {
                 has_system_message = true;
                 let text = plain_text(message.content);
@@ -269,7 +243,7 @@ mod tests {
     use crate::session::{MediaKind, MessageToolCall, UserSource};
 
     fn assemble(messages: Vec<Message>) -> anyhow::Result<ModelRequest> {
-        ModelContext::from(messages).try_into()
+        messages.into_model_request()
     }
 
     fn test_asset(kind: MediaKind, local_path: &str, mime_type: &str) -> StoredAsset {

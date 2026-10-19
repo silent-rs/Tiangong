@@ -31,7 +31,7 @@ impl SystemPromptConfig {
 /// 环境信息（当前工作目录、允许文件操作目录）不进入 system prompt：
 /// 属会话动态信息（cwd 可能迟落定或变更），改写已发送前缀会作废对话
 /// 历史缓存，改由 fs 工具结果回显（模型经首次文件工具调用获知）。
-/// 返回 `Message { role: System }`，经 `ModelRequest::try_from(session.context())` 提取为 system prompt。
+/// 返回 `Message { role: System }`，经 `session.context().into_model_request()` 提取为 system prompt。
 pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) -> Message {
     let mut parts = Vec::new();
 

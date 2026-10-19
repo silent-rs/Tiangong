@@ -3,7 +3,7 @@
 //! 同一组会话上下文经 core 组装、llm 协议适配后，各协议实际发出的 HTTP
 //! 请求体必须与 `tests/snapshots/request_assembly/` 下的基准逐字节一致。
 //! 基准由迁移前（llm 层自行组装会话消息）的实现录制，证明组装职责迁移到
-//! core（`ModelContext` → `ModelRequest` 转换）后请求内容（含缓存前缀）不变。
+//! core（`IntoModelRequest`）后请求内容（含缓存前缀）不变。
 //!
 //! 有意调整请求内容时，用 `UPDATE_REQUEST_SNAPSHOTS=1` 运行本测试重录基准，
 //! 并在评审中说明差异。
@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tiangong_core::context::model_context::ModelContext;
+use tiangong_core::context::model_request::IntoModelRequest;
 use tiangong_core::session::{
     ContentBlock, MediaKind, Message, MessageRole, MessageToolCall, Role, StoredAsset, UserSource,
 };
@@ -239,7 +239,7 @@ fn build_request(context: &[Message]) -> ModelRequest {
                 "required": ["path"]
             }),
         }],
-        ..ModelRequest::try_from(ModelContext::from(context.to_vec())).unwrap()
+        ..context.to_vec().into_model_request().unwrap()
     }
 }
 
