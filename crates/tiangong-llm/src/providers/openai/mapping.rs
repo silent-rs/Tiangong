@@ -227,9 +227,8 @@ fn build_user_item(message: &ChatMessage) -> Result<Option<Value>> {
         })));
     }
 
-    // 多模态消息按内容块原始顺序逐块映射（与 Anthropic / Chat Completions
-    // 一致）：每个附件紧跟宿主写入的路径说明，多附件时图片与说明保持
-    // 一一相邻，不再把全部文本前置、媒体后置。
+    // 多模态消息按 ChatMessage 内容块原始顺序逐块映射（与 Anthropic /
+    // Chat Completions 一致），适配层不重排内容。
     let mut content = Vec::new();
     for block in &message.content {
         match block {
@@ -239,7 +238,7 @@ fn build_user_item(message: &ChatMessage) -> Result<Option<Value>> {
             })),
             // 文档附件（PDF/Office）的 Responses API 原生 file block 映射。
             // 官方规范：{ "type": "file", "file": { "filename": "...", "file_data": "data:<mime>;base64,..." } }
-            // 注：当前上层策略下文件附件统一走本地路径引用，不会产生 MessageContent::File；
+            // 注：当前上层策略下文件附件统一走本地脚本解析，不会产生 MessageContent::File；
             // 此分支保留以支持未来直传场景，并维持 provider 层映射的完整性。
             MessageContent::File(file) => {
                 let filename = file_filename_with_fallback(&file.title, &file.mime_type);
@@ -829,9 +828,8 @@ mod tests {
     }
 
     #[test]
-    fn user_item_keeps_block_order_for_images_and_path_notes() {
-        // 多图消息：每张图紧跟宿主写入的路径说明，映射后顺序必须保持，
-        // 不能把全部文本前置、图片后置（否则图片与路径对应关系被打乱）。
+    fn user_item_preserves_content_block_order() {
+        // 多模态消息逐块映射：输出顺序与输入内容块顺序一致，不重排。
         let image = |data: &str| {
             MessageContent::Image(crate::message::ImageContent {
                 mime_type: "image/png".to_string(),
@@ -841,11 +839,11 @@ mod tests {
         let message = ChatMessage::new(
             MessageRole::User,
             vec![
-                MessageContent::Text("对比这两张图".to_string()),
+                MessageContent::Text("t0".to_string()),
                 image("data:image/png;base64,AAA"),
-                MessageContent::Text("index=0 path=/media/a.png".to_string()),
+                MessageContent::Text("t1".to_string()),
                 image("data:image/png;base64,BBB"),
-                MessageContent::Text("index=1 path=/media/b.png".to_string()),
+                MessageContent::Text("t2".to_string()),
             ],
         );
         let item = build_user_item(&message)
@@ -863,11 +861,11 @@ mod tests {
         assert_eq!(
             shape,
             vec![
-                "text:对比这两张图",
+                "text:t0",
                 "image:data:image/png;base64,AAA",
-                "text:index=0 path=/media/a.png",
+                "text:t1",
                 "image:data:image/png;base64,BBB",
-                "text:index=1 path=/media/b.png",
+                "text:t2",
             ]
         );
     }
