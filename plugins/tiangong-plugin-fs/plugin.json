@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "fs",
   "version": "0.1.11",
   "wasm": {
@@ -21,14 +21,17 @@
     "server",
     "desktop"
   ],
+  "resources": [
+    "assets"
+  ],
   "tool_icons": {
-    "list_dir": "folder-tree",
-    "tree_dir": "folder-tree",
-    "read_file": "file-text",
-    "read_image": "image",
-    "write_file": "file-pen-line",
-    "replace_in_file": "file-pen-line",
-    "apply_patch": "file-pen-line",
-    "current_time": "clock"
+    "list_dir": "assets/tool-folder.svg",
+    "tree_dir": "assets/tool-folder.svg",
+    "read_file": "assets/tool-file-read.svg",
+    "read_image": "assets/tool-image.svg",
+    "write_file": "assets/tool-file-write.svg",
+    "replace_in_file": "assets/tool-file-write.svg",
+    "apply_patch": "assets/tool-file-write.svg",
+    "current_time": "assets/tool-clock.svg"
   }
 }

@@ -38,6 +38,29 @@ fn official_plugin_manifests_all_validate() {
         if let Err(error) = manifest.validate() {
             failures.push(format!("{}: {error:#}", manifest_path.display()));
         }
+        // 资源形态的工具图标须随插件分发：文件存在且位于 resources 声明目录内
+        // （否则安装时不会被复制，界面回落默认图标）。
+        for icon in manifest.tool_icons.iter().flat_map(|icons| icons.values()) {
+            if !tiangong_plugin_runtime::tool_icons::is_icon_resource(icon) {
+                continue;
+            }
+            let declared = manifest.resources.iter().flatten().any(|root| {
+                let root = std::path::Path::new(root);
+                std::path::Path::new(icon).starts_with(root) && std::path::Path::new(icon) != root
+            });
+            if !declared {
+                failures.push(format!(
+                    "{}: 工具图标 {icon} 不在 resources 声明的目录内",
+                    manifest_path.display()
+                ));
+            }
+            if !plugin_dir.join(icon).is_file() {
+                failures.push(format!(
+                    "{}: 工具图标文件 {icon} 不存在",
+                    manifest_path.display()
+                ));
+            }
+        }
         checked += 1;
     }
 

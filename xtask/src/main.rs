@@ -398,13 +398,21 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     }
 }
 
-/// UI 随行静态资产（如插件自带的 App 图标）：与页面入口一同进入暂存、
-/// 签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
+/// UI 随行静态资产（如插件自带的 App 图标、工具图标）：与页面入口一同进入
+/// 暂存、签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
 fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
         "workspace-files" | "browser" | "plugin-creator" | "terminal" | "subagent" => {
             &["assets/icon.svg"]
         }
+        // plugin.json tool_icons 引用的工具图标。
+        "fs" => &[
+            "assets/tool-folder.svg",
+            "assets/tool-file-read.svg",
+            "assets/tool-image.svg",
+            "assets/tool-file-write.svg",
+            "assets/tool-clock.svg",
+        ],
         _ => &[],
     }
 }
@@ -750,7 +758,8 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
 fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig) -> io::Result<()> {
     let entries = plugin_ui_entries(config);
     if entries.is_empty() {
-        return Ok(());
+        // 无页面入口的插件（如仅声明工具图标的 fs）仍可能携带随行资产。
+        return stage_plugin_assets(workspace_root, staging, config);
     }
 
     // CI 对无 UI 插件会传空串占位，空值视为未设置。
@@ -784,6 +793,24 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
             .unwrap_or_else(|| workspace_root.join(config.plugin_root).join(entry));
         require_file(&source)?;
         let destination = staging.join(entry);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &destination)?;
+    }
+    Ok(())
+}
+
+/// 复制随行静态资产（不含页面入口）到暂存目录。
+fn stage_plugin_assets(
+    workspace_root: &Path,
+    staging: &Path,
+    config: &PluginConfig,
+) -> io::Result<()> {
+    for asset in plugin_ui_assets(config) {
+        let source = workspace_root.join(config.plugin_root).join(asset);
+        require_file(&source)?;
+        let destination = staging.join(asset);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2689,6 +2716,22 @@ fn merge_plugin_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 无页面入口的插件（fs）随行资产也要进入暂存目录，否则签名清单与
+    /// OSS 制品会引用不存在的文件，插件安装后工具图标丢失。
+    #[test]
+    fn 无页面入口插件_随行资产进入暂存() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let staging = std::env::temp_dir().join(format!("xtask-assets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(plugin_ui_entries(&FS).is_empty());
+        stage_plugin_ui(&workspace, &staging, &FS).unwrap();
+        for asset in plugin_ui_assets(&FS) {
+            assert!(staging.join(asset).is_file(), "缺少 {asset}");
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+    }
 
     /// CI 同款链路：generate-plugin-test-key（未加密）→ 签名 → 公钥验证。
     /// 部署守卫只认内置官方公钥：测试密钥签名（即使注入同名环境变量）
