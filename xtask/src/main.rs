@@ -2307,7 +2307,12 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// 插件部署目标存储根：与运行时一致，设置 `TIANGONG_STORAGE_ROOT` 时部署到
+/// 该目录（隔离测试根），否则为 `~/.tiangong`。
 fn storage_root() -> PathBuf {
+    if let Some(root) = non_empty_env_os("TIANGONG_STORAGE_ROOT") {
+        return PathBuf::from(root);
+    }
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join(".tiangong")
