@@ -386,6 +386,7 @@ fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
         // 拒绝（fail-closed）。
         allow_credential_services: false,
         allow_audio_input: false,
+        allow_browser_runtime: false,
         resource_limits,
     })
 }
@@ -2461,6 +2462,7 @@ mod tests {
             tiangong_sandbox::SandboxMode::WorkspaceWrite
         );
         assert!(!parsed.policy.allow_network);
+        assert!(!parsed.policy.allow_browser_runtime);
         assert_eq!(
             parsed.policy.resource_limits,
             tiangong_sandbox::SandboxResourceLimits::default()

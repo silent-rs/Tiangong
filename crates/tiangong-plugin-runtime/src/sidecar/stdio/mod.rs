@@ -657,6 +657,7 @@ impl StdioSidecarConnection {
             );
             policy.allow_network = self.config.sandbox_network;
             policy.allow_audio_input = self.config.sandbox_audio_input;
+            policy.allow_browser_runtime = self.config.sandbox_browser_runtime;
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
             policy
                 .denied_read_paths

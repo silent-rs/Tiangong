@@ -329,6 +329,7 @@ fn sidecar_connection_inner(
     .with_user_credential_reads(host_policy.user_credential_reads)
     .with_sandbox_user_cache_write(host_policy.allow_user_cache_write)
     .with_sandbox_audio_input(host_policy.allow_audio_input)
+    .with_sandbox_browser_runtime(host_policy.allow_browser_runtime)
     .with_sandbox_user_policy(&tiangong_config::registry::try_sandbox_policy());
     // 统一写域：宿主会话工作区 + 存储根（敏感清单双禁由传输层施加）。
     // 没有会话上下文的全局调用才使用应用默认工作区；带会话上下文时

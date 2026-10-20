@@ -45,6 +45,11 @@ pub struct SandboxPolicy {
     /// 麦克风隐私授权（TCC）仍由系统按宿主 App 独立把关。
     #[serde(default)]
     pub allow_audio_input: bool,
+    /// 是否允许运行无头浏览器（Chrome/Chromium）。macOS 上放行 IOKit 与
+    /// `org.chromium.*` 的 mach 注册/查询（MachPortRendezvous）；
+    /// 默认 false，仅宿主按已验证插件身份授权。旧 Launcher 忽略该字段即保持拒绝。
+    #[serde(default)]
+    pub allow_browser_runtime: bool,
     /// 单次 command 的资源上限。
     #[serde(default)]
     pub resource_limits: SandboxResourceLimits,
@@ -83,6 +88,7 @@ impl SandboxPolicy {
             allow_network: false,
             allow_credential_services: false,
             allow_audio_input: false,
+            allow_browser_runtime: false,
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -97,6 +103,7 @@ impl SandboxPolicy {
             allow_network: true,
             allow_credential_services: true,
             allow_audio_input: true,
+            allow_browser_runtime: true,
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -253,6 +260,7 @@ mod tests {
         assert_eq!(value["allow_network"], false);
         assert_eq!(value["allow_credential_services"], false);
         assert_eq!(value["allow_audio_input"], false);
+        assert_eq!(value["allow_browser_runtime"], false);
         assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
         assert_eq!(value["resource_limits"]["max_processes"], 64);
 

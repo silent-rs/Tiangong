@@ -13,7 +13,8 @@
 //!
 //! 网络维度：沙箱开启即视为执行安全，网络全放行。用户凭据默认禁读；
 //! 官方 terminal/command 为保持完整 Git 工作流，固定获得 SSH 与 GitHub
-//! CLI 配置目录的只读例外，其他插件不能通过清单或调用载荷申请该能力。
+//! CLI 配置目录的只读例外，并获得沙箱内运行无头浏览器的能力；其他插件
+//! 不能通过清单或调用载荷申请这些能力。
 
 use std::collections::BTreeMap;
 
@@ -58,6 +59,8 @@ pub struct HostExecutionPolicy {
     pub allow_user_cache_write: bool,
     /// 沙箱内是否放行系统音频输入服务（麦克风录音）。
     pub allow_audio_input: bool,
+    /// 沙箱内是否允许运行无头浏览器（Chrome/Chromium，#695）。
+    pub allow_browser_runtime: bool,
 }
 
 /// 解析插件的宿主执行策略。
@@ -86,6 +89,10 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     // 官方 volcengine 提供按住说话录音，sidecar 需在沙箱内经 CoreAudio 打开
     // 麦克风；仅按已验证官方身份授予，清单声明不构成授权输入。
     let audio_input = official_signed && plugin_id == "volcengine";
+    // 无头浏览器运行能力（Puppeteer/Playwright/HyperFrames）与 Git 工作流同属
+    // "命令执行位"，按已验证官方身份授予；保持独立字段以便两者分开调整。
+    // command 退役（#697 阶段 3）后改为只认 terminal。
+    let browser_runtime = official_signed && matches!(plugin_id, "terminal" | "command");
     HostExecutionPolicy {
         sandbox: !accessibility_host_child,
         allow_network: true,
@@ -93,6 +100,7 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
         user_credential_reads,
         allow_user_cache_write: git_workflow,
         allow_audio_input: audio_input,
+        allow_browser_runtime: browser_runtime,
     }
 }
 
@@ -210,6 +218,34 @@ mod tests {
         );
         for id in ["terminal", "command", "computer-use", "unknown-third-party"] {
             assert!(!resolve(id, true).allow_audio_input, "{id} 不需要录音能力");
+        }
+    }
+
+    #[test]
+    fn browser_runtime_is_granted_only_to_official_terminal_and_command() {
+        for id in ["terminal", "command"] {
+            let official = resolve(id, true);
+            assert!(
+                official.allow_browser_runtime,
+                "官方 {id} 需要无头浏览器能力"
+            );
+            assert!(official.sandbox, "浏览器授权不改变沙箱基线");
+            assert!(
+                !resolve(id, false).allow_browser_runtime,
+                "非官方同名 {id} 不得按名称获得无头浏览器能力"
+            );
+        }
+        for id in [
+            "mcp",
+            "volcengine",
+            "computer-use",
+            "fetch",
+            "unknown-third-party",
+        ] {
+            assert!(
+                !resolve(id, true).allow_browser_runtime,
+                "{id} 不需要无头浏览器能力"
+            );
         }
     }
 

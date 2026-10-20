@@ -160,8 +160,25 @@ fn compile_profile_explicit_categories(
     sbpl.push_str("(allow pseudo-tty)\n");
     sbpl.push_str("(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\"))\n");
     sbpl.push_str("(allow file-read* file-write* file-ioctl (regex \"^/dev/tty[^\\\\.]\"))\n");
+    if policy.allow_browser_runtime {
+        // 无头 Chrome 启动最小集合（#695，macOS 27.0.1 实测）：缺 IOKit 时
+        // IONotificationPortGetRunLoopSource 拿到空值直接 SIGSEGV。POSIX
+        // 共享内存/信号量经实测非必需（dump-dom 与 HyperFrames 渲染均通过），
+        // 不放行。mach 注册/查询见服务规则段。旧系统未提及类别默认放行，无需此段。
+        sbpl.push_str(BROWSER_RUNTIME_EXPLICIT_RULES);
+    }
     sbpl
 }
+
+/// 无头浏览器在显式类别语义下额外需要的非 mach 规则。
+const BROWSER_RUNTIME_EXPLICIT_RULES: &str = "(allow iokit-open)\n(allow iokit-get-properties)\n";
+
+/// 无头浏览器的 mach 规则：Chromium 主进程向 bootstrap 注册
+/// `org.chromium.Chromium.MachPortRendezvousServer.<pid>`，子进程需查询它；
+/// 仅放行 `org.chromium.` 前缀，不放行任何 `com.apple.*` 服务。
+const BROWSER_RUNTIME_MACH_RULES: &str = r##"(allow mach-register (global-name-regex #"^org\.chromium\."))
+(allow mach-lookup (global-name-regex #"^org\.chromium\."))
+"##;
 
 /// darwin < 25（后匹配生效 + 未提及默认放行）：保持既有规则顺序——
 /// 全局放行/拒绝在前，定点规则在后靠覆盖生效（Codex 验证过的顺序）。
@@ -195,7 +212,7 @@ fn compile_profile_legacy(policy: &SandboxPolicy, writable: &[std::path::PathBuf
     sbpl
 }
 /// 证书验证随网络授权开放；Keychain 与用户身份解析只随凭据授权开放；
-/// CoreAudio 输入只随音频授权开放。
+/// CoreAudio 输入只随音频授权开放；`org.chromium.*` 只随浏览器运行授权开放。
 /// 两组均限制到精确服务名，不允许任意系统服务查询。
 fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
     if policy.allow_network {
@@ -223,6 +240,10 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
              (allow mach-lookup (global-name \"com.apple.audio.AudioComponentRegistrar\"))\n\
              (allow device-microphone)\n",
         );
+    }
+    if policy.allow_browser_runtime {
+        // 必须位于兜底 (deny mach-lookup) 之前才生效。
+        sbpl.push_str(BROWSER_RUNTIME_MACH_RULES);
     }
     // 显式拒绝名单之外的服务，也约束未提及类别默认放行的旧系统。
     sbpl.push_str("(deny mach-lookup)\n");
@@ -285,6 +306,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn browser_runtime_rules_follow_explicit_authorization() {
+        let mach_rules = [
+            r##"(allow mach-register (global-name-regex #"^org\.chromium\."))"##,
+            r##"(allow mach-lookup (global-name-regex #"^org\.chromium\."))"##,
+        ];
+        let explicit_rules = ["(allow iokit-open)", "(allow iokit-get-properties)"];
+        for browser in [false, true] {
+            let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
+            policy.protected_paths = vec!["/tmp/ws/protected".into()];
+            policy.denied_read_paths = vec!["/tmp/home/.ssh".into()];
+            policy.allow_browser_runtime = browser;
+            let explicit = compile_profile_explicit_categories(&policy, &policy.writable_roots());
+            let legacy = compile_profile_legacy(&policy, &policy.writable_roots());
+            for sbpl in [&explicit, &legacy] {
+                let deny = sbpl.find("(deny mach-lookup)").expect("兜底拒绝必须保留");
+                for rule in mach_rules {
+                    assert_eq!(sbpl.contains(rule), browser, "{rule} 必须独立授权");
+                    if browser {
+                        assert!(
+                            sbpl.find(rule).unwrap() < deny,
+                            "{rule} 必须位于兜底拒绝之前"
+                        );
+                    }
+                }
+                // 不得放行全部 mach 服务或任何 com.apple.* 前缀。
+                assert!(!sbpl.contains("(allow mach-lookup)\n"));
+                assert!(!sbpl.contains("(allow mach-register)\n"));
+                assert!(!sbpl.contains("global-name-regex #\"^com\\.apple"));
+                // 写保护与禁读规则不随授权变化。
+                assert!(sbpl.contains("(deny file-write* (subpath \"/tmp/ws/protected\"))"));
+                assert!(sbpl.contains("/tmp/home/.ssh"));
+                assert!(!sbpl.contains("com.apple.SecurityServer"));
+                // 实测非必需的共享内存类别不放行。
+                assert!(!sbpl.contains("ipc-posix"));
+            }
+            for rule in explicit_rules {
+                assert_eq!(explicit.contains(rule), browser, "{rule} 必须独立授权");
+                // 旧系统未提及类别默认放行，不额外写入。
+                assert!(!legacy.contains(rule));
+            }
+        }
+        // 授权前后除新增规则外 profile 完全一致。
+        let mut base = SandboxPolicy::workspace_write("/tmp/ws");
+        let without = compile_profile_explicit_categories(&base, &base.writable_roots());
+        base.allow_browser_runtime = true;
+        let with = compile_profile_explicit_categories(&base, &base.writable_roots());
+        let mut stripped = with.replace(BROWSER_RUNTIME_MACH_RULES, "");
+        stripped = stripped.replace(BROWSER_RUNTIME_EXPLICIT_RULES, "");
+        assert_eq!(stripped, without);
     }
 
     #[test]
@@ -395,18 +468,22 @@ mod tests {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
-        let profile = compile_profile(&SandboxPolicy::workspace_write(workspace.path()));
-        let output = std::process::Command::new(SEATBELT_BIN)
-            .arg("-p")
-            .arg(profile)
-            .arg("/usr/bin/true")
-            .output()
-            .expect("执行 sandbox-exec 策略解析检查失败");
-        assert!(
-            output.status.success(),
-            "生成的 Seatbelt 策略无法解析：{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let mut policy = SandboxPolicy::workspace_write(workspace.path());
+        for browser in [false, true] {
+            policy.allow_browser_runtime = browser;
+            let profile = compile_profile(&policy);
+            let output = std::process::Command::new(SEATBELT_BIN)
+                .arg("-p")
+                .arg(profile)
+                .arg("/usr/bin/true")
+                .output()
+                .expect("执行 sandbox-exec 策略解析检查失败");
+            assert!(
+                output.status.success(),
+                "生成的 Seatbelt 策略无法解析（browser={browser}）：{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
