@@ -19,6 +19,8 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
+// 自带 App 图标（plugin.json resources 声明的 assets/）随包分发。
+cpSync(join(pluginRoot, 'assets'), join(release, 'assets'), { recursive: true });
 // 按需 node sidecar：自包含 bundle 产物（devkit 工具链 + 协议库已内联）。
 const sidecarEntry = manifest_sidecar_entry();
 mkdirSync(join(release, 'sidecar'), { recursive: true });

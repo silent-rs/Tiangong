@@ -402,7 +402,9 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
 /// 签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
 fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "workspace-files" => &["assets/icon.svg"],
+        "workspace-files" | "browser" | "plugin-creator" | "terminal" | "subagent" => {
+            &["assets/icon.svg"]
+        }
         _ => &[],
     }
 }

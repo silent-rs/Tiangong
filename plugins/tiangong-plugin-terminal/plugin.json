@@ -12,6 +12,9 @@
     "bridge.events",
     "app.use"
   ],
+  "resources": [
+    "assets"
+  ],
   "tools": [
     {
       "name": "run_command",
@@ -159,7 +162,7 @@
         "id": "terminal",
         "title": "终端",
         "description": "嵌入式终端，支持多标签与会话隔离",
-        "icon": "terminal",
+        "icon": "assets/icon.svg",
         "entry": "dist/index.html",
         "open_mode": "multi",
         "instance_resources": true,

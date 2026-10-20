@@ -18,6 +18,8 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
+// 自带 App 图标（plugin.json resources 声明的 assets/）随包分发。
+cpSync(join(pluginRoot, 'assets'), join(release, 'assets'), { recursive: true });
 // 打包即校验：清单与 entry 就位，避免导入时才发现问题
 const manifest = JSON.parse(readFileSync(join(release, 'plugin.json'), 'utf8'));
 const entry = manifest.ui?.contributions?.[0]?.entry;

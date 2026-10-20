@@ -11,6 +11,9 @@
     "bridge.call",
     "app.use"
   ],
+  "resources": [
+    "assets"
+  ],
   "capabilities": {
     "tools": true,
     "prompt": true,
@@ -244,7 +247,7 @@
         "id": "browser",
         "title": "浏览器",
         "description": "嵌入式浏览器（webview 容器原语 + 插件管理界面）",
-        "icon": "globe",
+        "icon": "assets/icon.svg",
         "entry": "dist/index.html",
         "open_mode": "multi",
         "instance_resources": true,

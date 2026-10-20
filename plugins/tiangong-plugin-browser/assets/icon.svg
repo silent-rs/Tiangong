@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="globe" x1="10" y1="5" x2="34" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8CC2FF"/>
+      <stop offset="0.45" stop-color="#4A8AF4"/>
+      <stop offset="1" stop-color="#2B55C9"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="15" cy="12" r="15" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="shade" cx="15" cy="13" r="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0.55" stop-color="#0B2A7A" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0B2A7A" stop-opacity="0.35"/>
+    </radialGradient>
+    <linearGradient id="badge" x1="32" y1="31" x2="44" y2="45" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFBE55"/>
+      <stop offset="1" stop-color="#F26B2A"/>
+    </linearGradient>
+    <clipPath id="sphere">
+      <circle cx="22" cy="22" r="17"/>
+    </clipPath>
+  </defs>
+
+  <circle cx="22" cy="23.2" r="17" fill="#1B3F9E" fill-opacity="0.18"/>
+  <circle cx="22" cy="22" r="17" fill="url(#globe)"/>
+
+  <g clip-path="url(#sphere)" stroke="#FFFFFF" stroke-linecap="round">
+    <ellipse cx="22" cy="22" rx="13.2" ry="17" stroke-width="1" stroke-opacity="0.32"/>
+    <path d="M7.4 13.5h29.2M7.4 30.5h29.2" stroke-width="1.3" stroke-opacity="0.55"/>
+    <ellipse cx="22" cy="22" rx="7" ry="17" stroke-width="1.6" stroke-opacity="0.92"/>
+    <path d="M22 5v34M5 22h34" stroke-width="1.6" stroke-opacity="0.92"/>
+  </g>
+
+  <circle cx="22" cy="22" r="17" fill="url(#shade)"/>
+  <circle cx="22" cy="22" r="17" fill="url(#glow)"/>
+  <circle cx="22" cy="22" r="16.3" stroke="#FFFFFF" stroke-opacity="0.3" stroke-width="1.2"/>
+  <circle cx="22" cy="22" r="17" stroke="#2148B5" stroke-opacity="0.5" stroke-width="0.6"/>
+
+  <circle cx="37.5" cy="37.5" r="8.2" fill="#FFFFFF"/>
+  <circle cx="37.5" cy="37.5" r="6.8" fill="url(#badge)"/>
+  <path d="M35.1 34.4l6.1 2.36c.43.17.41.79-.03.93l-2.42.77-.77 2.42c-.14.44-.76.46-.93.03l-2.36-6.1c-.16-.4.24-.8.64-.64z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="0.6" stroke-linejoin="round"/>
+</svg>

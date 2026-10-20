@@ -29,6 +29,7 @@
         "id": "plugin-creator",
         "title": "插件创作",
         "description": "创建、构建与安装自建插件",
+        "icon": "assets/icon.svg",
         "entry": "dist/index.html",
         "open_mode": "singleton"
       }
@@ -43,7 +44,8 @@
     "request_timeout_ms": 300000
   },
   "resources": [
-    "templates"
+    "templates",
+    "assets"
   ],
   "tools": [
     {

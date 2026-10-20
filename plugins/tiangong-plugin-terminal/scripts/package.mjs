@@ -20,6 +20,8 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
+// 自带 App 图标（plugin.json resources 声明的 assets/）随包分发。
+cpSync(join(pluginRoot, 'assets'), join(release, 'assets'), { recursive: true });
 // sidecar 制品随插件包分发：优先取 release/ 已有制品（build-sidecar.sh 已放）；
 // 不存在时自动构建（确保 yarn package 一步产出完整可导入的包）。
 const sidecarName = 'tiangong-terminal-sidecar';

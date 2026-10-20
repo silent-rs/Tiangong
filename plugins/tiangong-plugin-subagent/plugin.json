@@ -12,6 +12,9 @@
     "bridge.events",
     "app.use"
   ],
+  "resources": [
+    "assets"
+  ],
   "wasm": {
     "binary": "tiangong_plugin_subagent_wasm.wasm"
   },
@@ -23,7 +26,7 @@
         "id": "subagent",
         "title": "Subagent",
         "description": "持久 Subagent 管理台：身份、激活、任务与运行状态",
-        "icon": "bot",
+        "icon": "assets/icon.svg",
         "entry": "dist/index.html",
         "open_mode": "multi",
         "context": [
