@@ -22,6 +22,13 @@
     "desktop"
   ],
   "tool_icons": {
-    "read_image": "image"
+    "list_dir": "folder-tree",
+    "tree_dir": "folder-tree",
+    "read_file": "file-text",
+    "read_image": "image",
+    "write_file": "file-pen-line",
+    "replace_in_file": "file-pen-line",
+    "apply_patch": "file-pen-line",
+    "current_time": "clock"
   }
 }
