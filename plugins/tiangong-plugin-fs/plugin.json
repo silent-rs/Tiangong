@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "fs",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "wasm": {
     "binary": "tiangong_plugin_fs_wasm.wasm"
   },
@@ -25,13 +25,8 @@
     "assets"
   ],
   "tool_icons": {
-    "list_dir": "assets/tool-folder.svg",
-    "tree_dir": "assets/tool-folder.svg",
-    "read_file": "assets/tool-file-read.svg",
-    "read_image": "assets/tool-image.svg",
-    "write_file": "assets/tool-file-write.svg",
-    "replace_in_file": "assets/tool-file-write.svg",
-    "apply_patch": "assets/tool-file-write.svg",
+    "file_read": "assets/tool-file-read.svg",
+    "file_write": "assets/tool-file-write.svg",
     "current_time": "assets/tool-clock.svg"
   }
 }

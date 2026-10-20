@@ -17,14 +17,30 @@ pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const FS_PROTOCOL_VERSION: u32 = 1;
 
 /// 工具名常量（与工具规格、handle_tool 路由对齐）。
-pub const TOOL_LIST_DIR: &str = "list_dir";
-pub const TOOL_TREE_DIR: &str = "tree_dir";
-pub const TOOL_READ_FILE: &str = "read_file";
+///
+/// 对模型只暴露 3 个工具：读类操作经 `file_read` 的 `action` 分派，写类
+/// 操作经 `file_write` 的 `action` 分派，`current_time` 单独保留。
+pub const TOOL_FILE_READ: &str = "file_read";
+pub const TOOL_FILE_WRITE: &str = "file_write";
 pub const TOOL_CURRENT_TIME: &str = "current_time";
-pub const TOOL_WRITE_FILE: &str = "write_file";
-pub const TOOL_REPLACE_IN_FILE: &str = "replace_in_file";
-pub const TOOL_APPLY_PATCH: &str = "apply_patch";
-pub const TOOL_READ_IMAGE: &str = "read_image";
+
+/// `file_read` 的 action 取值。
+pub const READ_ACTION_LIST: &str = "list";
+pub const READ_ACTION_TREE: &str = "tree";
+pub const READ_ACTION_READ: &str = "read";
+pub const READ_ACTION_IMAGE: &str = "image";
+pub const READ_ACTIONS: &[&str] = &[
+    READ_ACTION_LIST,
+    READ_ACTION_TREE,
+    READ_ACTION_READ,
+    READ_ACTION_IMAGE,
+];
+
+/// `file_write` 的 action 取值。
+pub const WRITE_ACTION_WRITE: &str = "write";
+pub const WRITE_ACTION_REPLACE: &str = "replace";
+pub const WRITE_ACTION_PATCH: &str = "patch";
+pub const WRITE_ACTIONS: &[&str] = &[WRITE_ACTION_WRITE, WRITE_ACTION_REPLACE, WRITE_ACTION_PATCH];
 
 /// 一个类型化 Fs 业务操作。
 ///

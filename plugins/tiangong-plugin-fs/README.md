@@ -1,6 +1,12 @@
 # Fs Plugin
 
-Fs 插件（基础文件工具：list_dir / tree_dir / read_file / read_image / write_file / replace_in_file / apply_patch / current_time）由三个独立 crate 组成：
+Fs 插件对模型暴露 3 个工具：
+
+- `file_read`：只读，`action` 取 `list`（列目录）/ `tree`（目录树）/ `read`（读文本文件）/ `image`（读图片并注入对话）；
+- `file_write`：写入，`action` 取 `write`（写入/追加）/ `replace`（文本替换）/ `patch`（应用 unified diff）；
+- `current_time`：当前时间。
+
+每个工具在 plugin.json `tool_icons` 中声明一个自带 SVG 图标。插件由三个独立 crate 组成：
 
 - `protocol`：WASM 与 sidecar 共用的私有业务协议（含 `FsAccessContext` 访问能力上下文，为后续沙箱能力预留）；
 - `wasm`：工具规格、参数解析与生命周期入口，桥接 sidecar（`current_time` 例外，用 clock host import 本地实现）；

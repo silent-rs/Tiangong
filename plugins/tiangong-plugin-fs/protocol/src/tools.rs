@@ -1,4 +1,7 @@
-//! Fs 工具链路操作（8 工具 + set_workspace）。
+//! Fs sidecar 业务操作（7 个文件操作 + set_workspace）。
+//!
+//! 对模型暴露的是 `file_read` / `file_write` 两个按 action 分派的工具
+//! （见 crate 根的工具名常量）；sidecar 侧仍按单一操作粒度处理。
 //!
 //! 所有读写请求都内嵌 [`FsAccessContext`]（沙箱预留点 B），sidecar 据此
 //! 做路径解析与信任模式判定。`current_time` 不经 sidecar（wasm 内部用
