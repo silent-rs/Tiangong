@@ -1,6 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
-  <path d="M10 14a4 4 0 0 1 4-4h5a4.5 4.5 0 0 1 9 0h5a4 4 0 0 1 4 4v5a4.5 4.5 0 0 1 0 9v6a4 4 0 0 1-4 4h-6a4.5 4.5 0 0 0-9 0h-4a4 4 0 0 1-4-4v-5a4.5 4.5 0 0 0 0-9v-6z" fill="#F29B38"/>
-  <path d="M17 30l7-12 7 12" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <path d="M20 25.5h8" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round"/>
-  <path d="M40 6.5l1.2 2.8 2.8 1.2-2.8 1.2L40 14.5l-1.2-2.8-2.8-1.2 2.8-1.2z" fill="#FFC857"/>
+  <defs>
+    <linearGradient id="piece" x1="8" y1="8" x2="36" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC266"/>
+      <stop offset="0.5" stop-color="#FF9A3D"/>
+      <stop offset="1" stop-color="#E8642A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="14" cy="12" r="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="spark" x1="34" y1="2" x2="46" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C4B5FF"/>
+      <stop offset="1" stop-color="#7C5CF5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 拼图块：上/右为凸榫，左/下为平边 -->
+  <path d="M10 15a4 4 0 0 1 4-4h5.2a.6.6 0 0 0 .55-.85 4.6 4.6 0 1 1 8.5 0 .6.6 0 0 0 .55.85H34a4 4 0 0 1 4 4v5.2a.6.6 0 0 0 .85.55 4.6 4.6 0 1 1 0 8.5.6.6 0 0 0-.85.55V37a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V15z" fill="#B4471B" fill-opacity="0.22" transform="translate(0 1.2)"/>
+  <path d="M10 15a4 4 0 0 1 4-4h5.2a.6.6 0 0 0 .55-.85 4.6 4.6 0 1 1 8.5 0 .6.6 0 0 0 .55.85H34a4 4 0 0 1 4 4v5.2a.6.6 0 0 0 .85.55 4.6 4.6 0 1 1 0 8.5.6.6 0 0 0-.85.55V37a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V15z" fill="url(#piece)"/>
+  <path d="M10 15a4 4 0 0 1 4-4h5.2a.6.6 0 0 0 .55-.85 4.6 4.6 0 1 1 8.5 0 .6.6 0 0 0 .55.85H34a4 4 0 0 1 4 4v5.2a.6.6 0 0 0 .85.55 4.6 4.6 0 1 1 0 8.5.6.6 0 0 0-.85.55V37a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V15z" fill="url(#glow)"/>
+  <path d="M10.7 15a3.3 3.3 0 0 1 3.3-3.3h5.2a1.3 1.3 0 0 0 1.2-1.85 3.9 3.9 0 1 1 7.2 0 1.3 1.3 0 0 0 1.2 1.85H34a3.3 3.3 0 0 1 3.3 3.3" stroke="#FFFFFF" stroke-opacity="0.45" stroke-width="1.1" stroke-linecap="round"/>
+
+  <!-- 代码符号 </> -->
+  <g stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 22.5l-4.5 4.5 4.5 4.5"/>
+    <path d="M29 22.5l4.5 4.5-4.5 4.5" stroke-opacity="0.95"/>
+    <path d="M25.6 20.5l-3.2 13" stroke-opacity="0.85"/>
+  </g>
+
+  <!-- 创作星芒 -->
+  <path d="M40 3.5c.4 2.9 1.6 4.1 4.5 4.5-2.9.4-4.1 1.6-4.5 4.5-.4-2.9-1.6-4.1-4.5-4.5 2.9-.4 4.1-1.6 4.5-4.5z" fill="url(#spark)"/>
+  <path d="M6.5 35c.25 1.7.95 2.4 2.6 2.6-1.65.25-2.35.95-2.6 2.6-.25-1.65-.95-2.35-2.6-2.6 1.65-.2 2.35-.9 2.6-2.6z" fill="#FFC266"/>
 </svg>
