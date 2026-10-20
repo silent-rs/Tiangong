@@ -334,4 +334,24 @@ mod tests {
         assert_eq!(text, "");
         assert_eq!(urls(&media), ["data:image/png;base64,AA==", "second"]);
     }
+
+    /// Bot 插件只发图片时的请求（兼容旧宿主：首图在 content，其余在 media，message 为空）。
+    #[test]
+    fn bot_image_only_request_keeps_order_without_duplicates() {
+        let body: ConnectorMessageRequest = serde_json::from_value(serde_json::json!({
+            "connector": "feishu-bot",
+            "channel_id": "chat",
+            "message": "",
+            "content": { "type": "image", "url": "first" },
+            "media": [
+                { "kind": "image", "url": "second", "capability": "multimodal" },
+                { "kind": "image", "url": "third", "capability": "multimodal" }
+            ]
+        }))
+        .unwrap();
+        #[allow(deprecated)]
+        let (text, media) = resolve_body(body.message, body.content, body.media).unwrap();
+        assert_eq!(text, "");
+        assert_eq!(urls(&media), ["first", "second", "third"]);
+    }
 }

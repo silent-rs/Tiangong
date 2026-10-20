@@ -129,7 +129,10 @@ struct ConnectorRequest {
     message_id: Option<String>,
     /// 用户正文，只发图片时为空。
     message: String,
-    /// 全部附件，按用户发送顺序排列。
+    /// 已废弃字段，只在只发图片时携带首图，见 [`ParsedMessage::into_request_parts`]。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ApiMessageContent>,
+    /// 附件，按用户发送顺序排列（只发图片时不含已放入 `content` 的首图）。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
     /// 只给模型看的来源标签。
@@ -248,6 +251,25 @@ struct ParsedMessage {
 impl ParsedMessage {
     fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.media.is_empty()
+    }
+
+    /// 兼容旧宿主：v0.17.4 及更早的 server 要求 `message` 非空或带 `content`，
+    /// 只发图片时会返回 400。正文为空时把首图移入 `content`、其余留在 `media`；
+    /// 新 server 把 `content` 的附件排在 `media` 之前，顺序不变也不重复。
+    /// 宿主普遍升级到 #689 之后的版本后删除。
+    fn into_request_parts(self) -> (String, Option<ApiMessageContent>, Vec<MediaAsset>) {
+        let Self { text, mut media } = self;
+        let image_only =
+            text.trim().is_empty() && media.first().is_some_and(|asset| asset.kind == "image");
+        if !image_only {
+            return (text, None, media);
+        }
+        let first = media.remove(0);
+        let content = ApiMessageContent::Image {
+            url: first.url,
+            caption: None,
+        };
+        (text, Some(content), media)
     }
 }
 
@@ -935,12 +957,14 @@ async fn forward_to_tiangong(
         state.tiangong_url.trim_end_matches('/')
     );
 
+    let (message, content, media) = parsed.into_request_parts();
     let req_body = ConnectorRequest {
         connector: "feishu-bot".to_string(),
         channel_id: chat_id.to_string(),
         message_id: message_id.clone(),
-        message: parsed.text,
-        media: parsed.media,
+        message,
+        content,
+        media,
         instruction: Some(source.instruction()),
         render: Some(source.render()),
     };
@@ -1411,12 +1435,14 @@ mod tests {
     const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
 
     fn request_from(parsed: ParsedMessage) -> ConnectorRequest {
+        let (message, content, media) = parsed.into_request_parts();
         ConnectorRequest {
             connector: "feishu-bot".to_string(),
             channel_id: "chat".to_string(),
             message_id: Some("message".to_string()),
-            message: parsed.text,
-            media: parsed.media,
+            message,
+            content,
+            media,
             instruction: None,
             render: None,
         }
@@ -1430,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn request_never_sends_legacy_content() {
+    fn text_request_has_no_legacy_content() {
         let value = serde_json::to_value(request_from(compose_post_message(
             "你好".into(),
             Vec::new(),
@@ -1443,21 +1469,32 @@ mod tests {
     }
 
     #[test]
-    fn image_only_post_keeps_every_image_in_order() {
+    fn image_only_post_puts_first_image_in_legacy_content() {
         let parsed = compose_post_message(
             String::new(),
             vec!["first".into(), "second".into(), "third".into()],
         );
         let value = serde_json::to_value(request_from(parsed)).unwrap();
 
-        assert!(value.get("content").is_none());
+        // 旧宿主（v0.17.4 及更早）靠 content 接收首图；新宿主把它排在 media 之前。
         assert_eq!(value["message"], "");
+        assert_eq!(value["content"]["type"], "image");
+        assert_eq!(value["content"]["url"], "first");
         let media = value["media"].as_array().unwrap();
-        assert_eq!(media.len(), 3);
-        assert_eq!(media[0]["url"], "first");
-        assert_eq!(media[1]["url"], "second");
-        assert_eq!(media[2]["url"], "third");
+        assert_eq!(media.len(), 2);
+        assert_eq!(media[0]["url"], "second");
+        assert_eq!(media[1]["url"], "third");
         assert_eq!(media[0]["kind"], "image");
+    }
+
+    #[test]
+    fn single_image_is_sent_only_in_legacy_content() {
+        let parsed = compose_post_message(String::new(), vec!["only".into()]);
+        let value = serde_json::to_value(request_from(parsed)).unwrap();
+
+        assert_eq!(value["content"]["url"], "only");
+        assert!(value["content"].get("caption").is_none());
+        assert!(value.get("media").is_none());
     }
 
     #[test]

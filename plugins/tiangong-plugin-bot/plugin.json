@@ -3,7 +3,7 @@
   "id": "bot",
   "name": "Bot",
   "description": "飞书 / QQ / 微信机器人：接收 IM 消息转发到天工，并提供主动推送工具\n需要天工 Server 运行（桌面开启 Server 或 tiangong server）；在插件设置中扫码或填写凭据即可启用对应平台。",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "entrypoints": [
     "desktop",
     "server"

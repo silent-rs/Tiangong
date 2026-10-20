@@ -73,7 +73,10 @@ struct ConnectorRequest {
     message_id: Option<String>,
     /// 用户正文，只发图片时为空。
     message: String,
-    /// 全部附件，按用户发送顺序排列。
+    /// 已废弃字段，只在只发图片时携带首图，见 [`ParsedMessage::into_request_parts`]。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ApiMessageContent>,
+    /// 附件，按用户发送顺序排列（只发图片时不含已放入 `content` 的首图）。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media: Vec<MediaAsset>,
     /// 只给模型看的来源标签。
@@ -184,6 +187,27 @@ struct DownloadedImage {
 struct ParsedMessage {
     text: String,
     media: Vec<MediaAsset>,
+}
+
+impl ParsedMessage {
+    /// 兼容旧宿主：v0.17.4 及更早的 server 要求 `message` 非空或带 `content`，
+    /// 只发图片时会返回 400。正文为空时把首图移入 `content`、其余留在 `media`；
+    /// 新 server 把 `content` 的附件排在 `media` 之前，顺序不变也不重复。
+    /// 宿主普遍升级到 #689 之后的版本后删除。
+    fn into_request_parts(self) -> (String, Option<ApiMessageContent>, Vec<MediaAsset>) {
+        let Self { text, mut media } = self;
+        let image_only =
+            text.trim().is_empty() && media.first().is_some_and(|asset| asset.kind == "image");
+        if !image_only {
+            return (text, None, media);
+        }
+        let first = media.remove(0);
+        let content = ApiMessageContent::Image {
+            url: first.url,
+            caption: None,
+        };
+        (text, Some(content), media)
+    }
 }
 
 struct BotReply {
@@ -491,12 +515,14 @@ async fn forward_to_tiangong(
         "{}/api/v1/messages",
         state.tiangong_url.trim_end_matches('/')
     );
+    let (message, content, media) = parsed.into_request_parts();
     let request = ConnectorRequest {
         connector: "weixin-bot".to_string(),
         channel_id: channel_id.to_string(),
         message_id: message_id.map(str::to_string),
-        message: parsed.text,
-        media: parsed.media,
+        message,
+        content,
+        media,
         instruction: Some(source.instruction()),
         render: Some(source.render()),
     };
@@ -657,6 +683,7 @@ mod tests {
             channel_id: "user@im.wechat".to_string(),
             message_id: Some("42".to_string()),
             message: "你好".into(),
+            content: None,
             media: vec![MediaAsset::image(
                 "data:image/png;base64,AA==".into(),
                 "image/png".into(),
@@ -687,6 +714,21 @@ mod tests {
         assert_eq!(with_text.text, "看图");
         assert_eq!(with_text.media.len(), 2);
         assert_eq!(with_text.media[0].url, "first");
+
+        // 文字加图：不带 content。
+        let (message, content, media) = with_text.into_request_parts();
+        assert_eq!(message, "看图");
+        assert!(content.is_none());
+        assert_eq!(media.len(), 2);
+
+        // 只发图片：首图移入 content 以兼容旧宿主（v0.17.4 及更早），其余留在 media。
+        let (message, content, media) = image_only.into_request_parts();
+        assert_eq!(message, "");
+        assert!(
+            matches!(content, Some(ApiMessageContent::Image { ref url, .. }) if url == "first")
+        );
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].url, "second");
     }
 
     #[test]
