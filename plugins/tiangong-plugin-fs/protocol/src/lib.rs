@@ -24,6 +24,7 @@ pub const TOOL_CURRENT_TIME: &str = "current_time";
 pub const TOOL_WRITE_FILE: &str = "write_file";
 pub const TOOL_REPLACE_IN_FILE: &str = "replace_in_file";
 pub const TOOL_APPLY_PATCH: &str = "apply_patch";
+pub const TOOL_READ_IMAGE: &str = "read_image";
 
 /// 一个类型化 Fs 业务操作。
 ///

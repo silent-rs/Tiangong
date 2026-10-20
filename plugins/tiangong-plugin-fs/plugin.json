@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "fs",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "wasm": {
     "binary": "tiangong_plugin_fs_wasm.wasm"
   },
@@ -20,5 +20,8 @@
     "cli",
     "server",
     "desktop"
-  ]
+  ],
+  "tool_icons": {
+    "read_image": "image"
+  }
 }

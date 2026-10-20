@@ -14,6 +14,7 @@
 
 mod file_lock;
 mod handlers;
+mod read_image;
 mod service;
 
 #[tokio::main]

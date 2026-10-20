@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-fs-protocol"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -10,5 +10,6 @@ description = "Fs WASM 与 sidecar 共用的私有业务协议"
 publish = false
 
 [dependencies]
+tiangong-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

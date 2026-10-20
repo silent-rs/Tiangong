@@ -170,6 +170,8 @@ hex = "0.4"
 hmac = "0.13"
 http = "1"
 http-body-util = "0.1"
+# 图片解码/缩放/编码（fs read_image）；只启用常见位图格式，关闭 rayon 与 AVIF 等重依赖。
+image = { version = "0.25", default-features = false }
 jsonschema = { version = "0.50", default-features = false }
 libc = "0.2"
 minisign-verify = "0.2"

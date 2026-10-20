@@ -8,9 +8,9 @@ use anyhow::{Context, Result, anyhow};
 
 use tiangong_plugin_fs_protocol::tools::{
     APPLY_PATCH_OPERATION, ApplyPatchRequest, LIST_DIR_OPERATION, ListDirRequest,
-    READ_FILE_OPERATION, REPLACE_IN_FILE_OPERATION, ReadFileRequest, ReplaceInFileRequest,
-    SET_WORKSPACE_OPERATION, SetWorkspaceRequest, TREE_DIR_OPERATION, TreeDirRequest,
-    WRITE_FILE_OPERATION, WriteFileRequest,
+    READ_FILE_OPERATION, READ_IMAGE_OPERATION, REPLACE_IN_FILE_OPERATION, ReadFileRequest,
+    ReadImageRequest, ReplaceInFileRequest, SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
+    TREE_DIR_OPERATION, TreeDirRequest, WRITE_FILE_OPERATION, WriteFileRequest,
 };
 use tiangong_plugin_fs_protocol::{Ack, FS_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
 use tiangong_plugin_runtime::protocol::{
@@ -18,7 +18,7 @@ use tiangong_plugin_runtime::protocol::{
     ServiceStatus,
 };
 
-use crate::handlers;
+use crate::{handlers, read_image};
 
 /// Fs sidecar 业务服务。无跨请求状态（按需进程随调用销毁）：工作区
 /// 由每个请求的 access 上下文携带。
@@ -111,6 +111,16 @@ impl FsService {
                     .with_context(|| "read_file 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 read_file 响应失败")
+            }
+            READ_IMAGE_OPERATION => {
+                let req: ReadImageRequest =
+                    serde_json::from_value(payload).with_context(|| "解析 read_image 请求失败")?;
+                let access = req.access.clone();
+                let resp = tokio::task::spawn_blocking(move || read_image::handle_read_image(req))
+                    .await
+                    .with_context(|| "read_image 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
+                serde_json::to_value(resp).with_context(|| "序列化 read_image 响应失败")
             }
             WRITE_FILE_OPERATION => {
                 let req: WriteFileRequest =

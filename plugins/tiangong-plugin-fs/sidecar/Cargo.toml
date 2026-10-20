@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-fs-sidecar"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 license = "Apache-2.0"
 description = "Fs 独立 sidecar 进程（承载文件读写、进程级锁表、路径解析与沙箱策略）"
@@ -15,6 +15,7 @@ tiangong-plugin-fs-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 tiangong-toolkit = { workspace = true }
+tiangong-types = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -25,6 +26,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 chrono = { workspace = true }
 scru128 = { workspace = true }
 diffy = { workspace = true }
+# read_image：按文件头解码常见位图、等比缩放并重新编码为模型可接受的格式。
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
