@@ -40,7 +40,7 @@ pub fn verify_official_install(program: &Path) -> Result<String> {
     verify_official_signature(program)?;
     let mut command = std::process::Command::new(program);
     command.arg("--self-check");
-    let output = tiangong_toolkit::configure_no_window(&mut command)
+    let output = crate::configure_no_window(&mut command)
         .output()
         .with_context(|| format!("运行 Sandbox 自检失败: {}", program.display()))?;
     if !output.status.success() && output.status.code() != Some(79) {

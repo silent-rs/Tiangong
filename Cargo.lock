@@ -12192,7 +12192,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tiangong-sandbox-update",
- "tiangong-toolkit",
  "tokio",
  "windows-sys 0.61.2",
 ]
@@ -12215,7 +12214,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tiangong-toolkit",
  "tokio",
  "windows-sys 0.61.2",
 ]
@@ -12273,7 +12271,6 @@ version = "0.17.5"
 dependencies = [
  "anyhow",
  "dunce",
- "tiangong-types",
  "tokio",
  "windows-sys 0.61.2",
 ]

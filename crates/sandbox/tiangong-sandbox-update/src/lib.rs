@@ -13,6 +13,20 @@ pub mod installed;
 pub mod launcher_manager;
 pub mod update;
 
+/// 子进程「无窗口」配置：Windows 上抑制控制台窗口弹出，其余平台空操作。
+///
+/// 沙箱组件自持这份实现（Launcher 与更新器共用），不依赖 App 侧的
+/// `tiangong-toolkit`，避免 Launcher 独立版本线被 App 通用代码牵动。
+pub fn configure_no_window(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Windows 上通过进程环境传递一次性 Launcher 请求；Launcher 启动目标前会移除。
 /// Unix 使用 fd3，不使用该变量。
 pub const POLICY_ENV: &str = "TIANGONG_SANDBOX_REQUEST";

@@ -19,7 +19,6 @@ fs2 = { workspace = true }
 minisign-verify = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
 semver = { workspace = true }
-tiangong-toolkit = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

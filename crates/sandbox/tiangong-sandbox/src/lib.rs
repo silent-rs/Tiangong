@@ -19,6 +19,6 @@ pub use sandbox::{
     SandboxedProgram, availability, explain_violation, supported_capabilities, wrap,
 };
 pub use tiangong_sandbox_update::{
-    HOST_PID_ENV, MAX_POLICY_FRAME_BYTES, POLICY_ENV, WINDOWS_STOP_EVENT_ENV, installed,
-    launcher_manager, legacy, update,
+    HOST_PID_ENV, MAX_POLICY_FRAME_BYTES, POLICY_ENV, WINDOWS_STOP_EVENT_ENV, configure_no_window,
+    installed, launcher_manager, legacy, update,
 };

@@ -1377,7 +1377,7 @@ fn create_directory_junction(target: &Path, link: &Path) -> Result<bool> {
         .arg(target)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = tiangong_toolkit::configure_no_window(&mut command)
+    let output = tiangong_sandbox::configure_no_window(&mut command)
         .output()
         .context("创建 Windows 自检 Junction 失败")?;
     if !output.status.success() {
@@ -1464,7 +1464,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
                 .stderr(std::process::Stdio::from(stderr));
-            tiangong_toolkit::configure_no_window(&mut command).status()
+            tiangong_sandbox::configure_no_window(&mut command).status()
         }
         (stdin, stdout, stderr) => {
             eprintln!(
@@ -1498,7 +1498,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let piped_child = tiangong_toolkit::configure_no_window(&mut piped_command).spawn();
+    let piped_child = tiangong_sandbox::configure_no_window(&mut piped_command).spawn();
     let pipe_stdio_ok = match piped_child {
         Ok(mut child) => {
             let input_written = child
@@ -1672,7 +1672,7 @@ fn run_windows_process_limit_probe() -> i32 {
     };
     let mut command = std::process::Command::new(program);
     command.args(["--self-check-network-probe", "invalid"]);
-    match tiangong_toolkit::configure_no_window(&mut command).spawn() {
+    match tiangong_sandbox::configure_no_window(&mut command).spawn() {
         Err(_) => 0,
         Ok(mut child) => {
             let _ = child.wait();
@@ -1728,7 +1728,7 @@ fn run_windows_tree_probe(raw: &str) -> i32 {
     command
         .arg("--windows-self-check-idle-probe")
         .current_dir(&request.workspace);
-    let child = match tiangong_toolkit::configure_no_window(&mut command).spawn() {
+    let child = match tiangong_sandbox::configure_no_window(&mut command).spawn() {
         Ok(child) => child,
         Err(_) => return 4,
     };
@@ -1961,7 +1961,7 @@ fn windows_host_exit_cleanup_probe(root: &Path, current_exe: &Path) -> Result<bo
     let fixture = WindowsTreeFixture::new(root, current_exe, "host-exit")?;
     let mut command = std::process::Command::new(current_exe);
     command.arg("--windows-self-check-idle-probe");
-    let mut host = tiangong_toolkit::configure_no_window(&mut command)
+    let mut host = tiangong_sandbox::configure_no_window(&mut command)
         .spawn()
         .context("启动 Windows 生命周期宿主探针失败")?;
     let host_pid = host.id();
@@ -2036,7 +2036,7 @@ fn windows_concurrent_cleanup_probe(root: &Path, current_exe: &Path) -> Result<b
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
                 .stderr(std::process::Stdio::from(stderr));
-            Ok(tiangong_toolkit::configure_no_window(&mut command).spawn()?)
+            Ok(tiangong_sandbox::configure_no_window(&mut command).spawn()?)
         })();
         match child {
             Ok(child) => workers.push((child, stdout_path, stderr_path)),

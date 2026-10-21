@@ -451,7 +451,7 @@ fn verify_signature(binary: &Path, signature: &Path, pubkey_b64: &str) -> Result
 fn verify_candidate_self_check(binary: &Path, manifest: &UpdateManifest) -> Result<()> {
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
-    let output = tiangong_toolkit::configure_no_window(&mut command)
+    let output = crate::configure_no_window(&mut command)
         .output()
         .with_context(|| format!("运行候选 Sandbox 自检失败: {}", binary.display()))?;
     if !output.status.success() && output.status.code() != Some(79) {
@@ -472,7 +472,7 @@ fn trusted_target_version(binary: &Path, signature: &Path, pubkey_b64: &str) -> 
     verify_signature(binary, signature, pubkey_b64)?;
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
-    let output = tiangong_toolkit::configure_no_window(&mut command).output()?;
+    let output = crate::configure_no_window(&mut command).output()?;
     if !output.status.success() && output.status.code() != Some(79) {
         bail!("已安装 Sandbox 自检失败");
     }
@@ -604,9 +604,8 @@ fn spawn_windows_update_completer(
     target_signature: &Path,
     transaction: &Path,
 ) -> Result<()> {
-    use std::os::windows::process::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new(candidate_binary)
+    let mut command = std::process::Command::new(candidate_binary);
+    crate::configure_no_window(&mut command)
         .arg("complete-update")
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
@@ -620,7 +619,6 @@ fn spawn_windows_update_completer(
         .arg(target_signature)
         .arg("--cleanup")
         .arg(transaction)
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .context("启动 Windows Sandbox 更新完成器失败")?;
     Ok(())
