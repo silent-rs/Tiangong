@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tiangong_plugin_runtime::protocol::RequestInvocationContext;
+use tiangong_plugin_sidecar::protocol::RequestInvocationContext;
 
 use super::advice;
 use super::jobs::{BackgroundJob, session_processes};

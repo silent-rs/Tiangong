@@ -3,14 +3,13 @@ name = "tiangong-plugin-sidecar"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
-description = "插件 sidecar 通用运行库（单例选举、IPC server、端点发布、退出信号）"
+description = "插件 sidecar 通用运行库与宿主/插件共用约定（协议、环境变量、发布约定、IPC server）"
 publish = false
 
 [dependencies]
-tiangong-plugin-command-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
-tiangong-llm = { workspace = true }
-tiangong-config = { workspace = true }
+# 模型配置读取（model 模块）：只有需要调用用户模型的插件开启。
+tiangong-llm = { workspace = true, optional = true }
+tiangong-config = { workspace = true, optional = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -22,7 +21,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 scru128 = { workspace = true }
 chrono = { workspace = true }
 
+[features]
+# 读取用户模型配置（models.json）并解析模型端点。
+model = ["dep:tiangong-llm", "dep:tiangong-config"]
+
 [dev-dependencies]
-sha2 = { workspace = true }
-hex = { workspace = true }
 serial_test = { workspace = true }

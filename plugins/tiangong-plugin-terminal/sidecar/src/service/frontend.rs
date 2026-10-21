@@ -216,8 +216,8 @@ impl TerminalService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_plugin_runtime::protocol::Request;
     use tiangong_plugin_sidecar::SidecarService as _;
+    use tiangong_plugin_sidecar::protocol::Request;
 
     use crate::service::output::record_display_output;
     use crate::service::types::{SessionIdRequest, SpawnRequest, default_cols, default_rows};

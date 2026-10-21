@@ -51,13 +51,9 @@ use sandbox_exemptions::{
 #[cfg(test)]
 mod tests;
 
-/// 子进程环境：传输模式标记。
-pub const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
-/// 子进程环境：stdio 模式的认证 token。
-pub const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
-/// 子进程环境：创建并持有 stdio 连接的宿主进程 PID。
-pub const HOST_PID_ENV: &str = "TIANGONG_PLUGIN_HOST_PID";
-pub const TRANSPORT_STDIO: &str = "stdio";
+pub use tiangong_plugin_sidecar::env::{
+    HOST_PID_ENV, STDIO_TOKEN_ENV, TRANSPORT_ENV, TRANSPORT_STDIO,
+};
 const PROCESS_GROUP_ENV: &str = "TIANGONG_SIDECAR_OWN_PROCESS_GROUP";
 
 /// stdio 传输连接：单子进程 + 常驻读线程按 request_id 路由响应与进度，

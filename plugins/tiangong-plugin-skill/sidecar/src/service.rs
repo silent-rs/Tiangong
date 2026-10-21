@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV;
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
-use tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV;
 use tiangong_plugin_skill_protocol::{
     Empty, GetSkillDetailRequest, GetSkillEnvRequest, GetSkillEnvResponse, InstalledSkillConfig,
     ListSkillsResponse, PLUGIN_ID, PLUGIN_VERSION, RemoveSkillRequest, RemoveSkillResponse,

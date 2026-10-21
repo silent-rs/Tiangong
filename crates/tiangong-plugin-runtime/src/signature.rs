@@ -6,53 +6,15 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use minisign_verify::{PublicKey, Signature};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::CONTENT_MANIFEST_FILE;
 
-pub const SIGNED_RELEASE_FILE: &str = "release.json";
-pub const SIGNATURE_FILE: &str = "release.json.sig";
-pub const SIGNED_RELEASE_SCHEMA_VERSION: u32 = 1;
-
-/// 插件专用 minisign 公钥。私钥只保存在官方发布环境（CI secret 与
-/// 官方开发者本机，打包时经 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 提供）。
-pub const OFFICIAL_PUBKEY_B64: &str = include_str!("official-pubkey.b64");
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignedPluginRelease {
-    pub schema_version: u32,
-    pub id: String,
-    pub version: String,
-    pub publisher: String,
-    #[serde(default)]
-    pub permissions: Vec<String>,
-    pub manifest: SignedArtifact,
-    /// 纯 TS/sidecar 插件无 wasm 制品，签名清单省略 wasm 条目。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wasm: Option<SignedArtifact>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ui: Vec<SignedArtifact>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sidecar: Option<SignedArtifact>,
-    /// 解释器 sidecar 插件：官方签名锚定完整内容清单（content-manifest.json
-    /// 的哈希），清单覆盖全树——与本地信任锚同构，签名即信任根。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_manifest: Option<SignedArtifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignedArtifact {
-    pub path: PathBuf,
-    pub sha256: String,
-}
-
-impl SignedPluginRelease {
-    pub fn has_permission(&self, permission: &str) -> bool {
-        self.permissions.iter().any(|item| item == permission)
-    }
-}
+pub use tiangong_plugin_sidecar::release::{
+    OFFICIAL_PUBKEY_B64, SIGNATURE_FILE, SIGNED_RELEASE_FILE, SIGNED_RELEASE_SCHEMA_VERSION,
+    SignedArtifact, SignedPluginRelease,
+};
 
 /// 验证签名发布清单及其覆盖的当前平台制品。
 ///
@@ -88,7 +50,11 @@ pub fn verify_signed_release(
     Ok(Some(release))
 }
 
-impl SignedPluginRelease {
+trait ValidateSignedRelease {
+    fn validate(&self, directory: &Path, plugin_manifest: &PluginManifest) -> Result<()>;
+}
+
+impl ValidateSignedRelease for SignedPluginRelease {
     fn validate(&self, directory: &Path, plugin_manifest: &PluginManifest) -> Result<()> {
         if self.schema_version != SIGNED_RELEASE_SCHEMA_VERSION {
             bail!("插件签名清单版本不支持: {}", self.schema_version);
@@ -207,7 +173,11 @@ impl SignedPluginRelease {
     }
 }
 
-impl SignedArtifact {
+trait VerifySignedArtifact {
+    fn verify(&self, directory: &Path, expected_path: &Path) -> Result<()>;
+}
+
+impl VerifySignedArtifact for SignedArtifact {
     fn verify(&self, directory: &Path, expected_path: &Path) -> Result<()> {
         validate_relative_path(&self.path)?;
         if self.path != expected_path {

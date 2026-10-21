@@ -17,6 +17,7 @@ shift || true
 #   plugins/tiangong-plugin-memory/<part>/... → tiangong-plugin-memory-<part>
 #   crates/plugins/<name>/...   → <name>（插件 crate 嵌套在 plugins/ 子目录下）
 #   crates/sandbox/<name>/...   → <name>（沙箱 crate 嵌套在 sandbox/ 子目录下）
+#   tests/plugin-sidecar-e2e/...→ tiangong-plugin-sidecar-e2e
 #   src-tauri/...               → tiangong-app
 #   src/...                     → tiangong
 # 用 if [[ ]] 模式匹配 + sort -u 去重，兼容老版本 bash，避免 case 在命令替换内的解析问题
@@ -57,6 +58,8 @@ crates="$(
     elif [[ "$f" == crates/*/* ]]; then
       rest="${f#crates/}"
       printf '%s\n' "${rest%%/*}"
+    elif [[ "$f" == tests/plugin-sidecar-e2e/* ]]; then
+      printf '%s\n' "tiangong-plugin-sidecar-e2e"
     elif [[ "$f" == src-tauri/* ]]; then
       printf '%s\n' "tiangong-app"
     elif [[ "$f" == src/* ]]; then
@@ -105,7 +108,7 @@ case "$sub" in
     if [[ "$prepare_runtime_test_binaries" == "true" ]]; then
       cargo build -p tiangong-sandbox --bin tiangong-sandbox \
         -p tiangong-plugin-command-sidecar --bin tiangong-command-sidecar \
-        -p tiangong-plugin-sidecar --bin test-stdio-host
+        -p tiangong-plugin-sidecar-e2e --bin test-stdio-host
     fi
     cargo nextest run "${args[@]}" --no-tests pass
     ;;

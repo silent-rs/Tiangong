@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, Request, Response, ServiceStatus,
 };
 use tiangong_plugin_sidecar::{SidecarConfig, SidecarService, run};
@@ -31,7 +31,7 @@ impl SidecarService for EchoService {
                         plugin_id: "test-stdio".to_string(),
                         plugin_version: "0.0.0".to_string(),
                         sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
-                        protocol_version: tiangong_plugin_runtime::protocol::PROTOCOL_VERSION
+                        protocol_version: tiangong_plugin_sidecar::protocol::PROTOCOL_VERSION
                             .to_string(),
                         business_protocol: 0,
                         capabilities: vec!["echo".to_string()],

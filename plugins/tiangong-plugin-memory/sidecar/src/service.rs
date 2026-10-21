@@ -318,7 +318,7 @@ impl MemoryService {
         operation: &str,
         payload: serde_json::Value,
     ) -> ServiceResult<serde_json::Value> {
-        let request = tiangong_plugin_runtime::protocol::Request::new(operation, payload);
+        let request = tiangong_plugin_sidecar::protocol::Request::new(operation, payload);
         let response =
             tiangong_memory::ipc::dispatch_checked_plugin_request(self.handle(), request).await;
         if response.success {

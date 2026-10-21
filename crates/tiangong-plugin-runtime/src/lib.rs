@@ -27,7 +27,8 @@ pub mod loader;
 pub mod manifest;
 pub mod platform;
 pub mod plugin_dev;
-pub mod protocol;
+/// 宿主与 sidecar 共用的通信协议（定义在 `tiangong-plugin-sidecar`）。
+pub use tiangong_plugin_sidecar::protocol;
 pub mod registry;
 pub mod seams;
 pub mod sidecar;

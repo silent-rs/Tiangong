@@ -163,7 +163,7 @@ pub(crate) fn effective_max_dimension(requested: Option<u32>) -> u32 {
 
 /// 存储根：宿主经 `TIANGONG_STORAGE_ROOT` 注入；缺失时退回默认 `~/.tiangong`。
 fn storage_root() -> PathBuf {
-    std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+    std::env::var_os(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(shared::app_storage_root)

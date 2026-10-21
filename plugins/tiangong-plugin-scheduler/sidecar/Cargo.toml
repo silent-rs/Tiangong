@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 tiangong-scheduler = { workspace = true }
 tiangong-plugin-scheduler-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

@@ -1,9 +1,13 @@
 //! 插件 sidecar 通用运行库。
 //!
-//! 业务中立的 sidecar 进程通用能力，与宿主侧 `tiangong-plugin-runtime`
-//! （加载 WASM / 启动连接 sidecar / 转发请求）边界清晰。
+//! 业务中立的 sidecar 进程通用能力，以及宿主与 sidecar 双方共用的约定。
+//! 依赖方向：插件与宿主侧 `tiangong-plugin-runtime`（加载 WASM / 启动连接
+//! sidecar / 转发请求）都依赖本 crate，本 crate 不依赖宿主实现。
 //!
 //! # 包含
+//! - [`protocol`]：宿主与 sidecar 共用的请求信封、握手与帧协议
+//! - [`env`]：宿主注入 sidecar 进程的环境变量约定
+//! - [`release`]：插件发布约定（官方目录、签名清单数据结构、信任根常量）
 //! - [`singleton`]：进程单例（淘汰制：已有健康实例则退出，不存在时才启动）
 //! - [`identity`]：sidecar 配置与实例身份
 //! - [`endpoint`]：运行时目录解析、endpoint 文件发布/读取/清理、TCP 可达性探测
@@ -20,7 +24,7 @@
 //! # use std::sync::Arc;
 //! # use async_trait::async_trait;
 //! # use tiangong_plugin_sidecar::{SidecarConfig, SidecarService, run};
-//! # use tiangong_plugin_runtime::protocol::{Request, Response};
+//! # use tiangong_plugin_sidecar::protocol::{Request, Response};
 //! # struct MyService;
 //! # #[async_trait]
 //! # impl SidecarService for MyService {
@@ -33,8 +37,12 @@
 //! ```
 
 pub mod endpoint;
+pub mod env;
 pub mod identity;
+#[cfg(feature = "model")]
 pub mod model;
+pub mod protocol;
+pub mod release;
 pub mod server;
 pub mod shutdown;
 pub mod singleton;
@@ -42,6 +50,7 @@ pub mod stdio;
 pub mod storage;
 
 pub use identity::{SidecarConfig, SidecarIdentity};
+#[cfg(feature = "model")]
 pub use model::{ModelInfo, mask_sensitive};
 pub use server::IpcBridge;
 pub use singleton::{SidecarService, SingletonError, SingletonGuard, start};
@@ -54,7 +63,7 @@ pub async fn emit_progress(message: impl Into<String>) {
 }
 
 /// 获取当前工具请求的宿主权威上下文。TCP 与 stdio 一致；旧宿主调用返回 None。
-pub fn invocation_context() -> Option<tiangong_plugin_runtime::protocol::RequestInvocationContext> {
+pub fn invocation_context() -> Option<protocol::RequestInvocationContext> {
     server::invocation_context().or_else(stdio::invocation_context)
 }
 

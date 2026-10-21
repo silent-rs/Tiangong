@@ -10,14 +10,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tiangong_plugin_runtime::protocol::{
-    ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
-    ServiceStatus,
-};
 use tiangong_plugin_scheduler_protocol::{
     CreateJobRequest, DeleteJobRequest, Empty, GetJobRunsRequest, Job, JobResponse, JobRun,
     JobRunStatus, ListJobsResponse, PLUGIN_ID, PLUGIN_VERSION, SCHEDULER_PROTOCOL_VERSION,
     TriggerJobRequest, TriggerJobResponse, TriggerType, UpdateJobRequest,
+};
+use tiangong_plugin_sidecar::protocol::{
+    ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
+    ServiceStatus,
 };
 use tiangong_scheduler::store::JobStore;
 

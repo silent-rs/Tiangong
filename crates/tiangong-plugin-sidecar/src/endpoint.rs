@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::protocol::IpcEndpoint;
 use anyhow::{Context, Result, anyhow};
-use tiangong_plugin_runtime::protocol::IpcEndpoint;
 
 /// 解析指定 service 的运行时目录（endpoint.json 所在）。
 pub fn runtime_dir(service: &str) -> Result<PathBuf> {

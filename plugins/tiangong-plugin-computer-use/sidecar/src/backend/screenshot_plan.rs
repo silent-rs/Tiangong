@@ -46,7 +46,7 @@ pub(crate) fn plan_screenshot_output(
 /// `TIANGONG_STORAGE_ROOT` 注入；缺失时退回系统临时目录（截图仍可用，
 /// 但不参与媒体目录的统一管理）。
 pub(crate) fn screenshot_output_dir() -> std::path::PathBuf {
-    let root = std::env::var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+    let root = std::env::var(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV)
         .ok()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);

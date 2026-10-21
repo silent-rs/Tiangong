@@ -71,7 +71,7 @@ const BACKGROUND_JOB_CHECK_INTERVAL_SECS: u64 = 2;
 
 /// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间
 /// （宿主统一的实例资源后台挂载上限）。
-const FRONTEND_ATTACH_WAIT_MS: u64 = tiangong_plugin_runtime::protocol::FRONTEND_ATTACH_WAIT_MS;
+const FRONTEND_ATTACH_WAIT_MS: u64 = tiangong_plugin_sidecar::protocol::FRONTEND_ATTACH_WAIT_MS;
 
 pub struct TerminalService {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,

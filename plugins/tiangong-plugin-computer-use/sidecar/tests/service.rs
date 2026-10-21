@@ -6,12 +6,12 @@ use tiangong_plugin_computer_use_protocol::ops::*;
 use tiangong_plugin_computer_use_protocol::{
     DesktopError, DesktopResult, DesktopSession, Platform,
 };
-use tiangong_plugin_runtime::protocol::{ErrorCode, HANDSHAKE_OPERATION, Request};
+use tiangong_plugin_sidecar::protocol::{ErrorCode, HANDSHAKE_OPERATION, Request};
 
 /// 构造一个测试用 Request（绕过 next_request_id 自增，使用固定 id）。
 fn request(operation: &str, payload: serde_json::Value) -> Request {
     Request {
-        protocol_version: tiangong_plugin_runtime::protocol::PROTOCOL_VERSION.to_string(),
+        protocol_version: tiangong_plugin_sidecar::protocol::PROTOCOL_VERSION.to_string(),
         request_id: "test-req".to_string(),
         operation: operation.to_string(),
         payload,

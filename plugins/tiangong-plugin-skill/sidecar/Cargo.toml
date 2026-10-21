@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 tiangong-plugin-skill-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

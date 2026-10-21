@@ -293,8 +293,8 @@ struct MemoryStdioService {
 impl tiangong_plugin_sidecar::SidecarService for MemoryStdioService {
     async fn dispatch(
         &self,
-        request: tiangong_plugin_runtime::protocol::Request,
-    ) -> tiangong_plugin_runtime::protocol::Response {
+        request: tiangong_plugin_sidecar::protocol::Request,
+    ) -> tiangong_plugin_sidecar::protocol::Response {
         tiangong_memory::ipc::dispatch_checked_plugin_request(self.managed.handle(), request).await
     }
 }

@@ -115,6 +115,20 @@ WASM Component
 
 代码审查发现单插件需求进入 Runtime 时，应退回插件侧实现。不得以临时兼容、示例插件或当前只有一个使用方为理由增加特化处理。
 
+### 依赖方向
+
+宿主与插件共用的约定放在 `tiangong-plugin-sidecar`：通信协议（`protocol`）、宿主注入的环境变量（`env`）、插件发布约定（`release`：官方目录、签名清单数据结构、信任根常量）。依赖方向固定为：
+
+```text
+插件 sidecar ───────────────┐
+                            ├──> tiangong-plugin-sidecar
+tiangong-plugin-runtime ────┘
+```
+
+- 插件 crate（`plugins/**`）只依赖 `tiangong-plugin-sidecar`，不得依赖 `tiangong-plugin-runtime`。需要读取用户模型配置的插件开启 `features = ["model"]`。
+- `tiangong-plugin-sidecar` 不得依赖 `tiangong-plugin-runtime`。新增双方共用的协议或常量时，定义在 `tiangong-plugin-sidecar`，Runtime 按原路径重新导出。
+- 宿主与 sidecar 对接的端到端测试放在 `tests/plugin-sidecar-e2e`（crate `tiangong-plugin-sidecar-e2e`，只用于测试，不被任何 crate 依赖）。
+
 ## 开发环境
 
 当前仓库使用 Rust 2024 edition，WASM 目标为 `wasm32-wasip2`：
@@ -330,7 +344,7 @@ sidecar 必须：
 5. 保证握手中的插件版本与 `plugin.json`、WASM `describe()` 一致。
 6. 只写沙箱可写域（见上文“沙箱写域”）。启动阶段任一写入失败都会让握手超时，宿主报“就绪握手失败”。
 
-协议类型见 [`protocol.rs`](../crates/tiangong-plugin-runtime/src/protocol.rs)，进程行为见 [`sidecar.rs`](../crates/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
+协议类型见 [`protocol.rs`](../crates/tiangong-plugin-sidecar/src/protocol.rs)，环境变量约定见 [`env.rs`](../crates/tiangong-plugin-sidecar/src/env.rs)，宿主侧进程行为见 [`sidecar.rs`](../crates/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
 
 ## 本地导入与调试
 

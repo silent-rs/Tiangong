@@ -14,11 +14,11 @@ use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tiangong_plugin_runtime::protocol::{
-    ErrorCode, HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, RequestInvocationContext, Response,
-};
-use tiangong_plugin_runtime::sidecar::{
+use tiangong_plugin_sidecar::env::{
     INSTANCE_ROLE_ENV, INSTANCE_ROLE_PRIMARY, PLUGIN_DATA_DIR_ENV, SERVER_TOKEN_ENV, SERVER_URL_ENV,
+};
+use tiangong_plugin_sidecar::protocol::{
+    ErrorCode, HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, RequestInvocationContext, Response,
 };
 use tokio::sync::watch;
 

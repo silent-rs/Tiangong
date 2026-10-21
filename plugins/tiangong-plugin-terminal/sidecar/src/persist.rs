@@ -85,7 +85,7 @@ fn rotate_tail(file: &mut File, len: u64) -> std::io::Result<()> {
 
 /// 会话（scope）的日志路径；插件数据目录缺失时返回 None（不持久化）。
 pub fn scope_log_path(scope_id: &str) -> Option<PathBuf> {
-    let data_dir = std::env::var_os(tiangong_plugin_runtime::sidecar::PLUGIN_DATA_DIR_ENV)?;
+    let data_dir = std::env::var_os(tiangong_plugin_sidecar::env::PLUGIN_DATA_DIR_ENV)?;
     Some(
         PathBuf::from(data_dir)
             .join("terminal-logs")

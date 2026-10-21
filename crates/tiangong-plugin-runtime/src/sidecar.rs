@@ -55,33 +55,12 @@ impl ResponseWait {
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-pub const PLUGIN_ID_ENV: &str = "TIANGONG_PLUGIN_ID";
-pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
-pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
-pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
-/// 插件在存储根统一写域下的自有数据目录（`~/.tiangong/data/<插件 id>`）。
-/// 沙箱内存储根只有该目录、`media/` 与 `tmp/` 可写；插件自有数据应落在这里。
-pub const PLUGIN_STORAGE_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_STORAGE_DATA_DIR";
-pub const STORAGE_ROOT_ENV: &str = "TIANGONG_STORAGE_ROOT";
-pub const EXEC_ENV_JSON_ENV: &str = "TIANGONG_EXEC_ENV_JSON";
-
-/// 本机 server 的 HTTP 地址（如 `http://127.0.0.1:8080`），供需要回调 host 的
-/// sidecar（如 scheduler 到点投递消息）使用。
-pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
-/// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
-pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
-
-/// sidecar 实例角色：`primary` 为注册表持有的共享连接进程（常驻服务
-/// 只应在该进程内建立 IM 长连接等独占外部资源）；`auxiliary` 为安装
-/// 验证、按需直连等临时进程，只应完成握手与无副作用的请求。
-pub const INSTANCE_ROLE_ENV: &str = "TIANGONG_PLUGIN_INSTANCE_ROLE";
-/// 共享连接进程的角色值。
-pub const INSTANCE_ROLE_PRIMARY: &str = "primary";
-/// 临时进程的角色值。
-pub const INSTANCE_ROLE_AUXILIARY: &str = "auxiliary";
-
-/// 插件内容清单固定文件名（devkit 构建生成，本地信任与官方签名共用的信任锚）。
-pub const CONTENT_MANIFEST_FILE: &str = "content-manifest.json";
+pub use tiangong_plugin_sidecar::env::{
+    EXEC_ENV_JSON_ENV, INSTANCE_ROLE_AUXILIARY, INSTANCE_ROLE_ENV, INSTANCE_ROLE_PRIMARY,
+    PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_STORAGE_DATA_DIR_ENV,
+    PLUGIN_VERSION_ENV, SERVER_TOKEN_ENV, SERVER_URL_ENV, STORAGE_ROOT_ENV,
+};
+pub use tiangong_plugin_sidecar::release::CONTENT_MANIFEST_FILE;
 
 /// 宿主在单次工具调用边界确定的权威上下文。
 ///

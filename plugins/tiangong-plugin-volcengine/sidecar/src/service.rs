@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde_json::Value;
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };

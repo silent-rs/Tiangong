@@ -328,7 +328,7 @@ fn emit_recovery_if_needed(
     };
     if let Ok(payload) = serde_json::to_string(&event) {
         tiangong_plugin_sidecar::server::emit_notification(
-            tiangong_plugin_runtime::protocol::TOOLS_RECOVERED_CHANNEL,
+            tiangong_plugin_sidecar::protocol::TOOLS_RECOVERED_CHANNEL,
             payload,
         );
     }
@@ -338,7 +338,7 @@ fn recovery_event(
     name: &str,
     previous: Option<&McpServerCapability>,
     current: &McpServerCapability,
-) -> Option<tiangong_plugin_runtime::protocol::ToolsRecovered> {
+) -> Option<tiangong_plugin_sidecar::protocol::ToolsRecovered> {
     if !previous.is_some_and(|previous| !previous.healthy) || !current.healthy {
         return None;
     }
@@ -350,7 +350,7 @@ fn recovery_event(
     if tools.is_empty() {
         return None;
     }
-    Some(tiangong_plugin_runtime::protocol::ToolsRecovered { tools })
+    Some(tiangong_plugin_sidecar::protocol::ToolsRecovered { tools })
 }
 
 #[cfg(test)]

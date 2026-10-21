@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
-use tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV;
+use tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV;
 use tiangong_plugin_volcengine_protocol::{
     PlayRequest, PlayResponse, RecordControlRequest, RecordStartRequest, RecordStartResponse,
     RecordStopResponse,

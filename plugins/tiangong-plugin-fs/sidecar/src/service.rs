@@ -13,7 +13,7 @@ use tiangong_plugin_fs_protocol::tools::{
     TREE_DIR_OPERATION, TreeDirRequest, WRITE_FILE_OPERATION, WriteFileRequest,
 };
 use tiangong_plugin_fs_protocol::{Ack, FS_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
@@ -170,8 +170,8 @@ impl FsService {
 impl tiangong_plugin_sidecar::SidecarService for FsService {
     async fn dispatch(
         &self,
-        request: tiangong_plugin_runtime::protocol::Request,
-    ) -> tiangong_plugin_runtime::protocol::Response {
+        request: tiangong_plugin_sidecar::protocol::Request,
+    ) -> tiangong_plugin_sidecar::protocol::Response {
         FsService::dispatch(self, request).await
     }
 }

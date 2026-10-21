@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 pub(crate) fn storage_root() -> PathBuf {
-    if let Some(root) = std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+    if let Some(root) = std::env::var_os(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV)
         .filter(|value| !value.is_empty())
     {
         return PathBuf::from(root);

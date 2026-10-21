@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use tiangong_plugin_coding_protocol::*;
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::env::PLUGIN_DATA_DIR_ENV;
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
-use tiangong_plugin_runtime::sidecar::PLUGIN_DATA_DIR_ENV;
 
 const PROJECT_MANIFESTS: &[&str] = &[
     "Cargo.toml",

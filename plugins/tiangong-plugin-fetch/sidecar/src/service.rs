@@ -11,7 +11,7 @@ use tiangong_plugin_fetch_protocol::web_fetch::{
     SET_WORKSPACE_OPERATION, SetWorkspaceRequest, WEB_FETCH_OPERATION, WebFetchRequest,
 };
 use tiangong_plugin_fetch_protocol::{Ack, FETCH_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
@@ -138,8 +138,8 @@ impl FetchService {
 impl tiangong_plugin_sidecar::SidecarService for FetchService {
     async fn dispatch(
         &self,
-        request: tiangong_plugin_runtime::protocol::Request,
-    ) -> tiangong_plugin_runtime::protocol::Response {
+        request: tiangong_plugin_sidecar::protocol::Request,
+    ) -> tiangong_plugin_sidecar::protocol::Response {
         FetchService::dispatch(self, request).await
     }
 }

@@ -9,13 +9,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
 
-pub const PLUGIN_CATALOG_ENDPOINT: &str =
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/plugins-index/catalog.json";
+pub use tiangong_plugin_sidecar::release::{
+    PLUGIN_CATALOG_ENDPOINT, PluginCatalog, PluginRelease, RemoteArtifact, RemoteSignedRelease,
+    current_platform_key,
+};
 const CATALOG_VERSION: u32 = 1;
 /// 平台无关制品的目录键（解释器插件归档）：任一具体平台均可安装。
 const ANY_PLATFORM_KEY: &str = "any";
@@ -83,43 +85,6 @@ pub fn mark_first_launch_completed(storage_root: &Path) -> Result<()> {
     let timestamp = chrono::Local::now().naive_local().to_string();
     std::fs::write(&marker, timestamp)
         .with_context(|| format!("写入首次启动标记失败: {}", marker.display()))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginCatalog {
-    pub version: u32,
-    pub plugins: Vec<PluginRelease>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginRelease {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    #[serde(default)]
-    pub description: String,
-    pub manifest: RemoteArtifact,
-    /// 纯 UI 插件（无 WASM 制品）在目录中省略 wasm 条目；
-    /// 是否下载以 plugin.json 是否声明 wasm 为准。
-    #[serde(default)]
-    pub wasm: Option<RemoteArtifact>,
-    #[serde(default)]
-    pub signed_releases: BTreeMap<String, RemoteSignedRelease>,
-    #[serde(default)]
-    pub sidecars: BTreeMap<String, RemoteArtifact>,
-    #[serde(default)]
-    pub ui: BTreeMap<String, RemoteArtifact>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteSignedRelease {
-    pub url: String,
-    pub signature_url: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteArtifact {
-    pub url: String,
-    pub checksum: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1067,26 +1032,6 @@ fn catalog_endpoint() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| PLUGIN_CATALOG_ENDPOINT.to_string())
-}
-
-pub fn current_platform_key() -> String {
-    let os = if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "unknown"
-    };
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else {
-        "unknown"
-    };
-    format!("{os}-{arch}")
 }
 
 fn ensure_not_symlink(path: &Path) -> Result<()> {
