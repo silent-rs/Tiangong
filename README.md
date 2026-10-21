@@ -164,7 +164,7 @@ macOS 首次使用需授予天工「辅助功能」与「屏幕录制」权限�
 - **可信启动**：Launcher 在线安装并独立更新，每次使用前检查签名、自检结果及协议兼容性；不满足要求时受保护进程拒绝启动，但对话和浏览等不依赖 Launcher 的功能仍可使用。
 - **必要例外**：官方签名的 Terminal 和 Command 可获得完成 Git 工作流所需的凭据只读能力；macOS 官方 `computer-use` 为继承应用辅助功能授权采用受控直启。第三方或同名自签插件不能获得这些例外。
 
-Sandbox Launcher 也可作为独立程序使用，平台能力、策略格式和更新方式见 [`tiangong-sandbox` 说明](crates/tiangong-sandbox/README.md)。
+Sandbox Launcher 也可作为独立程序使用，平台能力、策略格式和更新方式见 [`tiangong-sandbox` 说明](crates/sandbox/tiangong-sandbox/README.md)。
 
 ## 多智能体协作（`subagent` 插件）
 
@@ -438,7 +438,7 @@ yarn --cwd frontend dev
 
 - [插件开发指南](docs/plugin-development.md)
 - [Plugin Creator / devkit](plugins/devkit/README.md)
-- [Sandbox Launcher 使用说明](crates/tiangong-sandbox/README.md)
+- [Sandbox Launcher 使用说明](crates/sandbox/tiangong-sandbox/README.md)
 - [Computer Use 文档](docs/computer-use/README.md)
 - [Memory 插件](plugins/tiangong-plugin-memory/README.md)
 - [Bot 制品说明](bots/README.md)

@@ -42,7 +42,7 @@ jobs:
       - name: Resolve crate and tag versions
         id: version
         run: |
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/sandbox/tiangong-sandbox/Cargo.toml | head -1)"
           test -n "$version"
           git fetch origin main:refs/remotes/origin/main
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
@@ -146,6 +146,9 @@ jobs:
             *) test "$status" -eq 0 ;;
           esac
           [[ "$(jq -r .product_version <<< "$report")" == "${{ needs.resolve.outputs.version }}" ]]
+          # protocol_version / policy_schema 已不再版本化，仅为兼容已发布 App
+          # （≤ v0.17.5）保留冻结值；断言自检报告与清单的兼容值一致，避免
+          # 旧 App 拒绝新 Launcher。
           [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]
           [[ "$(jq -r .policy_schema <<< "$report")" == "$schema" ]]
 

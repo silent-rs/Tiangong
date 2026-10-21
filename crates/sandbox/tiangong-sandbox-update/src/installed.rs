@@ -40,7 +40,7 @@ pub fn verify_official_install(program: &Path) -> Result<String> {
     verify_official_signature(program)?;
     let mut command = std::process::Command::new(program);
     command.arg("--self-check");
-    let output = tiangong_toolkit::configure_no_window(&mut command)
+    let output = crate::configure_no_window(&mut command)
         .output()
         .with_context(|| format!("运行 Sandbox 自检失败: {}", program.display()))?;
     if !output.status.success() && output.status.code() != Some(79) {
@@ -52,11 +52,6 @@ pub fn verify_official_install(program: &Path) -> Result<String> {
     }
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("解析 Sandbox 自检报告失败")?;
-    if report["protocol_version"].as_u64() != Some(u64::from(crate::LAUNCHER_PROTOCOL_VERSION))
-        || report["policy_schema"].as_u64() != Some(u64::from(crate::LAUNCHER_POLICY_SCHEMA))
-    {
-        bail!("Sandbox 自报协议或策略 Schema 与宿主不兼容");
-    }
     report["product_version"]
         .as_str()
         .filter(|version| !version.is_empty())

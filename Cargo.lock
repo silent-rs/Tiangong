@@ -11904,6 +11904,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "chrono",
+ "dunce",
  "futures-util",
  "hex",
  "libc",
@@ -11924,6 +11925,7 @@ dependencies = [
  "tiangong-llm",
  "tiangong-plugin-command-protocol",
  "tiangong-sandbox",
+ "tiangong-sandbox-update",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -12227,13 +12229,30 @@ name = "tiangong-sandbox"
 version = "0.1.15"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
  "clap",
  "dunce",
  "fs2",
- "futures-util",
  "hex",
  "libc",
+ "scru128",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tiangong-sandbox-update",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tiangong-sandbox-update"
+version = "0.17.5"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "fs2",
+ "futures-util",
+ "hex",
  "minisign",
  "minisign-verify",
  "reqwest 0.13.4",
@@ -12243,7 +12262,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tiangong-toolkit",
  "tokio",
  "windows-sys 0.61.2",
 ]
@@ -12301,7 +12319,6 @@ version = "0.17.5"
 dependencies = [
  "anyhow",
  "dunce",
- "tiangong-types",
  "tokio",
  "windows-sys 0.61.2",
 ]
@@ -14711,7 +14728,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tar",
- "tiangong-sandbox",
+ "tiangong-sandbox-update",
  "toml 1.1.4+spec-1.1.0",
  "url",
  "zstd",

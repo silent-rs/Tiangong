@@ -16,6 +16,7 @@ shift || true
 #   crates/<name>/...           → <name>
 #   plugins/tiangong-plugin-memory/<part>/... → tiangong-plugin-memory-<part>
 #   crates/plugins/<name>/...   → <name>（插件 crate 嵌套在 plugins/ 子目录下）
+#   crates/sandbox/<name>/...   → <name>（沙箱 crate 嵌套在 sandbox/ 子目录下）
 #   src-tauri/...               → tiangong-app
 #   src/...                     → tiangong
 # 用 if [[ ]] 模式匹配 + sort -u 去重，兼容老版本 bash，避免 case 在命令替换内的解析问题
@@ -49,6 +50,9 @@ crates="$(
       printf '%s\n' "${rest%%/*}"
     elif [[ "$f" == crates/plugins/*/* ]]; then
       rest="${f#crates/plugins/}"
+      printf '%s\n' "${rest%%/*}"
+    elif [[ "$f" == crates/sandbox/*/* ]]; then
+      rest="${f#crates/sandbox/}"
       printf '%s\n' "${rest%%/*}"
     elif [[ "$f" == crates/*/* ]]; then
       rest="${f#crates/}"

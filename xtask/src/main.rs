@@ -1782,7 +1782,7 @@ const OFFICIAL_PLUGIN_PUBKEY_B64: &str =
 /// Sandbox 自管理官方根：发布守卫与 Sandbox 内置验证共用此文件，
 /// 不随插件签名根的后续轮换漂移。
 const OFFICIAL_SANDBOX_PUBKEY_B64: &str =
-    include_str!("../../crates/tiangong-sandbox/src/official-pubkey.b64");
+    include_str!("../../crates/sandbox/tiangong-sandbox-update/src/official-pubkey.b64");
 
 /// staging 的 release.json 签名是否通过内置官方公钥验证（官方信任根
 /// 固定，不接受环境变量或配置覆盖）。无签名清单的插件（纯 UI 等）不设部署门槛。
@@ -2054,8 +2054,9 @@ fn prepare_sandbox_release() -> io::Result<()> {
     // workflow 读取本文件组清单与断言，不做源码正则提取。
     let release_info = serde_json::json!({
         "version": version,
-        "protocol_version": tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
-        "policy_schema_max": tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
+        // 冻结兼容值：已发布 App（≤ v0.17.5）要求清单带这两个字段且取值不变。
+        "protocol_version": tiangong_sandbox_update::legacy::PROTOCOL_VERSION,
+        "policy_schema_max": tiangong_sandbox_update::legacy::POLICY_SCHEMA,
     });
     std::fs::write(
         dist.join("release-info.json"),
@@ -2089,7 +2090,7 @@ fn launcher_platform_key(target: &str) -> io::Result<String> {
 /// Launcher crate 独立版本（Cargo.toml，脱离 workspace 版本）。
 fn launcher_crate_version(workspace_root: &Path) -> io::Result<String> {
     let manifest =
-        std::fs::read_to_string(workspace_root.join("crates/tiangong-sandbox/Cargo.toml"))
+        std::fs::read_to_string(workspace_root.join("crates/sandbox/tiangong-sandbox/Cargo.toml"))
             .map_err(|error| {
                 invalid_data(format!("读取 tiangong-sandbox/Cargo.toml 失败: {error}"))
             })?;

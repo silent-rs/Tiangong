@@ -54,7 +54,7 @@ pub fn ensure_test_launcher_signed(storage_root: &Path) -> Result<(), String> {
         .map_err(|e| format!("写入测试公钥失败: {e}"))?;
         // 自验：立即验证签名与信任根配对，失败信息携带实际路径，
         // 用于定位 ensure 产物与连接验签路径的分歧。
-        let resolved = tiangong_sandbox::launcher_manager::resolve_installed_program(
+        let resolved = tiangong_sandbox_update::launcher_manager::resolve_installed_program(
             &storage_root.join("sandbox"),
         );
         crate::signature::verify_launcher_signature(
@@ -104,11 +104,44 @@ fn sign_minisign(launcher: &Path) -> Result<(), String> {
 /// 天工终端/受限 CI 等外层 Seatbelt 环境内，Launcher 无法再次嵌套应用
 /// 沙箱而拒绝启动（退出码 78，安全设计而非缺陷）——真实沙箱链路测试
 /// 在此类环境必然失败或卡死，统一跳过并打印原因。
+///
+/// 探测逻辑与 Launcher 的平台可用性判断一致（宿主不链接沙箱实现）：
+/// macOS 试跑最小 Seatbelt profile，Linux 查找 bubblewrap，Windows 由
+/// AppContainer 承担（视为可用）。
 pub fn native_sandbox_skip_reason() -> Option<String> {
-    match tiangong_sandbox::sandbox::availability() {
-        tiangong_sandbox::SandboxAvailability::Available => None,
-        tiangong_sandbox::SandboxAvailability::EnvironmentRestricted(reason)
-        | tiangong_sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
+    #[cfg(target_os = "macos")]
+    {
+        const PROBE_PROFILE: &str = "(version 1)(allow process-exec*)(allow file-read*)";
+        match std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", PROBE_PROFILE, "/usr/bin/true"])
+            .output()
+        {
+            Ok(output) if output.status.success() => None,
+            Ok(output) => Some(format!(
+                "当前宿主环境无法嵌套应用 macOS Seatbelt（{}）",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => Some(format!("无法执行 sandbox-exec 探测：{error}")),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let found = std::env::var("TIANGONG_SANDBOX_BWRAP")
+            .ok()
+            .filter(|path| Path::new(path).exists())
+            .is_some()
+            || ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
+                .iter()
+                .any(|path| Path::new(path).exists());
+        (!found).then(|| "未找到 bwrap（需要 bubblewrap 且系统允许非特权 user namespace）".into())
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Some("当前平台没有可用的原生沙箱".into())
     }
 }
 

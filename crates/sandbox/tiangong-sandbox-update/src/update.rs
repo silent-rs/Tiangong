@@ -42,7 +42,14 @@ const UPDATE_DIR_PREFIX: &str = ".tiangong-sandbox-update-";
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct UpdateManifest {
     pub version: String,
+    /// 已废弃：不再按协议版本化，新代码不读取。发布时仍写入冻结值
+    /// [`crate::legacy::PROTOCOL_VERSION`]，供已发布 App（≤ v0.17.5）的清单
+    /// 校验通过；旧 App 退出支持后移除。
+    #[serde(default = "legacy_protocol_version")]
     pub protocol_version: u32,
+    /// 已废弃：不再按策略 Schema 版本化，冻结为
+    /// [`crate::legacy::POLICY_SCHEMA`]，用途同上。
+    #[serde(default = "legacy_policy_schema")]
     pub policy_schema_max: u32,
     pub platforms: std::collections::BTreeMap<String, PlatformArtifact>,
 }
@@ -84,7 +91,10 @@ pub enum UpdateStatus {
 /// 构建更新客户端；`no_proxy` 为 true 时禁用代理（含环境变量代理）。
 fn update_client(no_proxy: bool) -> reqwest::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
-        .user_agent(format!("tiangong-sandbox/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "tiangong-sandbox-update/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300));
     if no_proxy {
@@ -128,10 +138,11 @@ impl SelfUpdater {
         Self::with_public_key(manifest_url, pubkey_b64)
     }
 
-    /// 只检查官方更新，不读写安装目录。
-    pub async fn check(&self) -> Result<UpdateStatus> {
+    /// 只检查官方更新，不读写安装目录。`current` 为调用方（Launcher）
+    /// 自身的产品版本。
+    pub async fn check(&self, current: &str) -> Result<UpdateStatus> {
         let manifest = self.fetch_valid_manifest().await?;
-        let current = env!("CARGO_PKG_VERSION").to_string();
+        let current = current.to_string();
         if Version::parse(&manifest.version)? <= Version::parse(&current)? {
             return Ok(UpdateStatus::UpToDate { current });
         }
@@ -146,11 +157,14 @@ impl SelfUpdater {
         Ok(self.fetch_valid_manifest().await?.version)
     }
 
-    /// 更新当前正在执行的 Sandbox 自身。
-    pub async fn update_current(&self) -> Result<UpdateStatus> {
+    /// 更新当前正在执行的 Sandbox 自身。`running` 为调用方（Launcher）
+    /// 自身的产品版本，用于判定是否需要更新。
+    pub async fn update_current(&self, running: &str) -> Result<UpdateStatus> {
         let target = std::env::current_exe().context("定位当前 Sandbox 可执行文件失败")?;
         ensure_regular_file(&target, "当前 Sandbox")?;
-        self.update_target(&target, UpdateMode::Current).await
+        let running = Version::parse(running).context("当前 Sandbox 版本非法")?;
+        self.update_target(&target, UpdateMode::Current(running))
+            .await
     }
 
     /// 把官方最新版安装到指定目录；目标名固定为 tiangong-sandbox[.exe]。
@@ -167,9 +181,10 @@ impl SelfUpdater {
         cleanup_stale_transactions(parent);
 
         let manifest = self.fetch_valid_manifest().await?;
-        let running = Version::parse(env!("CARGO_PKG_VERSION"))?;
         let candidate = Version::parse(&manifest.version)?;
-        if mode == UpdateMode::Current && candidate <= running {
+        if let UpdateMode::Current(running) = &mode
+            && candidate <= *running
+        {
             return Ok(UpdateStatus::UpToDate {
                 current: running.to_string(),
             });
@@ -232,7 +247,9 @@ impl SelfUpdater {
                     path: target.to_path_buf(),
                 })
             }
-            UpdateMode::Current => {
+            UpdateMode::Current(running) => {
+                #[cfg(not(any(unix, windows)))]
+                let _ = running;
                 #[cfg(unix)]
                 {
                     install_verified_pair(
@@ -343,9 +360,10 @@ impl SelfUpdater {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum UpdateMode {
-    Current,
+    /// 替换当前正在执行的程序；携带其产品版本，用于判定是否需要更新。
+    Current(Version),
     Install,
 }
 
@@ -401,22 +419,14 @@ impl Drop for TransactionCleanup {
     }
 }
 
+fn legacy_protocol_version() -> u32 {
+    crate::legacy::PROTOCOL_VERSION
+}
+fn legacy_policy_schema() -> u32 {
+    crate::legacy::POLICY_SCHEMA
+}
 fn validate_manifest(manifest: &UpdateManifest) -> Result<()> {
     Version::parse(&manifest.version).context("更新清单版本非法")?;
-    if manifest.protocol_version != crate::LAUNCHER_PROTOCOL_VERSION {
-        bail!(
-            "Sandbox 协议不兼容: expected={}, actual={}",
-            crate::LAUNCHER_PROTOCOL_VERSION,
-            manifest.protocol_version
-        );
-    }
-    if manifest.policy_schema_max != crate::LAUNCHER_POLICY_SCHEMA {
-        bail!(
-            "Sandbox 策略 Schema 不兼容: expected={}, actual={}",
-            crate::LAUNCHER_POLICY_SCHEMA,
-            manifest.policy_schema_max
-        );
-    }
     if manifest.platforms.is_empty() {
         bail!("更新清单缺少平台制品");
     }
@@ -441,7 +451,7 @@ fn verify_signature(binary: &Path, signature: &Path, pubkey_b64: &str) -> Result
 fn verify_candidate_self_check(binary: &Path, manifest: &UpdateManifest) -> Result<()> {
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
-    let output = tiangong_toolkit::configure_no_window(&mut command)
+    let output = crate::configure_no_window(&mut command)
         .output()
         .with_context(|| format!("运行候选 Sandbox 自检失败: {}", binary.display()))?;
     if !output.status.success() && output.status.code() != Some(79) {
@@ -452,11 +462,8 @@ fn verify_candidate_self_check(binary: &Path, manifest: &UpdateManifest) -> Resu
         );
     }
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    if report["product_version"].as_str() != Some(&manifest.version)
-        || report["protocol_version"].as_u64() != Some(u64::from(manifest.protocol_version))
-        || report["policy_schema"].as_u64() != Some(u64::from(manifest.policy_schema_max))
-    {
-        bail!("候选 Sandbox 自报版本、协议或策略 Schema 与清单不一致");
+    if report["product_version"].as_str() != Some(&manifest.version) {
+        bail!("候选 Sandbox 自报版本与清单不一致");
     }
     Ok(())
 }
@@ -465,16 +472,11 @@ fn trusted_target_version(binary: &Path, signature: &Path, pubkey_b64: &str) -> 
     verify_signature(binary, signature, pubkey_b64)?;
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
-    let output = tiangong_toolkit::configure_no_window(&mut command).output()?;
+    let output = crate::configure_no_window(&mut command).output()?;
     if !output.status.success() && output.status.code() != Some(79) {
         bail!("已安装 Sandbox 自检失败");
     }
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    if report["protocol_version"].as_u64() != Some(u64::from(crate::LAUNCHER_PROTOCOL_VERSION))
-        || report["policy_schema"].as_u64() != Some(u64::from(crate::LAUNCHER_POLICY_SCHEMA))
-    {
-        bail!("已安装 Sandbox 协议或策略 Schema 不兼容");
-    }
     Version::parse(
         report["product_version"]
             .as_str()
@@ -602,9 +604,8 @@ fn spawn_windows_update_completer(
     target_signature: &Path,
     transaction: &Path,
 ) -> Result<()> {
-    use std::os::windows::process::CommandExt as _;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new(candidate_binary)
+    let mut command = std::process::Command::new(candidate_binary);
+    crate::configure_no_window(&mut command)
         .arg("complete-update")
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
@@ -618,7 +619,6 @@ fn spawn_windows_update_completer(
         .arg(target_signature)
         .arg("--cleanup")
         .arg(transaction)
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .context("启动 Windows Sandbox 更新完成器失败")?;
     Ok(())
@@ -782,13 +782,39 @@ pub fn current_platform_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 测试中模拟的"当前运行 Launcher"版本（低于清单的 0.2.0）。
+    #[cfg(unix)]
+    const RUNNING_TEST_VERSION: &str = "0.1.0";
 
     #[test]
-    fn manifest_rejects_incompatible_protocol() {
+    fn manifest_ignores_legacy_version_fields() {
+        // 协议版本与策略 Schema 不再参与兼容判断：任意值或缺省均可。
+        let without_legacy: UpdateManifest = serde_json::from_value(serde_json::json!({
+            "version": "0.2.0",
+            "platforms": {"linux-x86_64": {
+                "url": "https://example.com/a",
+                "checksum": format!("sha256:{}", "0".repeat(64)),
+                "signature_url": "https://example.com/a.sig",
+            }},
+        }))
+        .unwrap();
+        assert_eq!(
+            without_legacy.protocol_version,
+            crate::legacy::PROTOCOL_VERSION
+        );
+        assert_eq!(
+            without_legacy.policy_schema_max,
+            crate::legacy::POLICY_SCHEMA
+        );
+        validate_manifest(&without_legacy).unwrap();
+        // 序列化仍输出冻结值，供已发布 App 的清单校验通过。
+        let value = serde_json::to_value(&without_legacy).unwrap();
+        assert_eq!(value["protocol_version"], crate::legacy::PROTOCOL_VERSION);
+        assert_eq!(value["policy_schema_max"], crate::legacy::POLICY_SCHEMA);
         let manifest = UpdateManifest {
             version: "0.2.0".into(),
-            protocol_version: crate::LAUNCHER_PROTOCOL_VERSION + 1,
-            policy_schema_max: crate::LAUNCHER_POLICY_SCHEMA,
+            protocol_version: crate::legacy::PROTOCOL_VERSION + 1,
+            policy_schema_max: crate::legacy::POLICY_SCHEMA + 1,
             platforms: [(
                 "linux-x86_64".into(),
                 PlatformArtifact {
@@ -799,7 +825,8 @@ mod tests {
             )]
             .into(),
         };
-        assert!(validate_manifest(&manifest).is_err());
+        // 冻结字段取任意值都不影响校验。
+        validate_manifest(&manifest).unwrap();
     }
 
     #[test]
@@ -878,10 +905,11 @@ mod tests {
         let install = root.path().join("install");
         std::fs::create_dir(&install).unwrap();
         let candidate = root.path().join("candidate");
-        std::fs::write(&candidate, format!(
-            "#!/bin/sh\nprintf '%s\\n' '{{\"platform\":\"available\",\"product_version\":\"0.2.0\",\"protocol_version\":{},\"policy_schema\":{}}}'\n",
-            crate::LAUNCHER_PROTOCOL_VERSION, crate::LAUNCHER_POLICY_SCHEMA,
-        )).unwrap();
+        std::fs::write(
+            &candidate,
+            "#!/bin/sh\nprintf '%s\\n' '{\"platform\":\"available\",\"product_version\":\"0.2.0\"}'\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
         let payload = std::fs::read(&candidate).unwrap();
         let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
@@ -901,8 +929,6 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let manifest = serde_json::json!({
             "version": "0.2.0",
-            "protocol_version": crate::LAUNCHER_PROTOCOL_VERSION,
-            "policy_schema_max": crate::LAUNCHER_POLICY_SCHEMA,
             "platforms": { current_platform_key(): {
                 "url": format!("http://{address}/artifact"),
                 "checksum": format!("sha256:{}", hex::encode(Sha256::digest(&payload))),
@@ -957,14 +983,17 @@ mod tests {
         std::fs::write(&current, b"old").unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = updater
-            .update_target(&current, UpdateMode::Current)
+            .update_target(
+                &current,
+                UpdateMode::Current(Version::parse(RUNNING_TEST_VERSION).unwrap()),
+            )
             .await
             .unwrap();
         server.join().unwrap();
         assert_eq!(
             status,
             UpdateStatus::Updated {
-                previous: env!("CARGO_PKG_VERSION").into(),
+                previous: RUNNING_TEST_VERSION.into(),
                 version: "0.2.0".into(),
                 path: current.clone(),
             }

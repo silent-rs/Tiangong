@@ -318,10 +318,8 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
-    /// 是否在沙箱内放行系统音频输入服务。
-    pub sandbox_audio_input: bool,
-    /// 是否在沙箱内允许运行无头浏览器。
-    pub sandbox_browser_runtime: bool,
+    /// 宿主授予的沙箱特殊能力；原样写入 Launcher 策略。
+    pub sandbox_capabilities: std::collections::BTreeSet<String>,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
     /// 本机 server 的 HTTP 地址（供需要回调 host 的 sidecar 使用，如 scheduler）。
@@ -357,7 +355,7 @@ pub struct SidecarConfig {
     /// 沙箱内进程使用的专用临时目录。
     pub sandbox_temp_dir: Option<PathBuf>,
     /// 覆盖单次执行的资源上限（None 用沙箱默认值；Launcher 与 sidecar 双层施加）。
-    pub sandbox_resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    pub sandbox_resource_limits: Option<crate::launch_policy::ResourceLimits>,
     /// Launcher 允许启动目标程序的插件权威目录。
     #[allow(dead_code)]
     pub sandbox_program_root: Option<PathBuf>,
@@ -389,8 +387,7 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
-            sandbox_audio_input: false,
-            sandbox_browser_runtime: false,
+            sandbox_capabilities: std::collections::BTreeSet::new(),
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
@@ -431,13 +428,12 @@ impl SidecarConfig {
         self
     }
 
-    pub fn with_sandbox_audio_input(mut self, allowed: bool) -> Self {
-        self.sandbox_audio_input = allowed;
-        self
-    }
-
-    pub fn with_sandbox_browser_runtime(mut self, allowed: bool) -> Self {
-        self.sandbox_browser_runtime = allowed;
+    /// 设置宿主授予的沙箱特殊能力（新增能力无需再加字段与方法）。
+    pub fn with_sandbox_capabilities(
+        mut self,
+        capabilities: std::collections::BTreeSet<String>,
+    ) -> Self {
+        self.sandbox_capabilities = capabilities;
         self
     }
 
@@ -673,7 +669,7 @@ impl SidecarConfig {
     /// 覆盖单次执行的沙箱资源上限（Launcher 强制施加，sidecar 层纵深防御）。
     pub fn with_sandbox_resource_limits(
         mut self,
-        limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+        limits: Option<crate::launch_policy::ResourceLimits>,
     ) -> Self {
         self.sandbox_resource_limits = limits;
         self

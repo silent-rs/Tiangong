@@ -10,7 +10,9 @@ pub mod seatbelt;
 #[cfg(windows)]
 pub mod windows;
 
-pub use policy::{SandboxMode, SandboxPolicy, SandboxResourceLimits};
+pub use policy::{
+    SandboxCapability, SandboxMode, SandboxPolicy, SandboxResourceLimits, supported_capabilities,
+};
 
 /// 平台沙箱可用性。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,0 +1,507 @@
+//! 沙箱策略：平台无关的中间表示（IR）。
+//!
+//! command 工具的宿主调用上下文最终归一为 [`SandboxPolicy`]；插件载荷和
+//! manifest 不参与安全策略决策。
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+/// 沙箱模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    /// 全盘只读，无任何可写路径。
+    ReadOnly,
+    /// 读全盘放行、写限白名单（工作区 + 临时目录 + 额外可写）、网络默认禁。
+    WorkspaceWrite,
+    /// 仅供宿主显式特殊路径表示无沙箱；当前 Launcher 始终拒绝该模式。
+    FullAccess,
+}
+
+/// 沙箱特殊能力（Launcher 内置的封闭集合）。
+///
+/// 每项能力对应的平台规则只由签名的 Launcher 维护，宿主只决定授予与否。
+/// 未知值在反序列化时即失败，Launcher 因此拒绝启动（fail-closed），
+/// 不会静默忽略新能力。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxCapability {
+    /// 宿主系统凭据服务（macOS Keychain、OpenDirectory）。Git/SSH/GitHub CLI
+    /// 依赖它解析用户身份与读取凭据；证书验证由 `allow_network` 独立授权。
+    CredentialServices,
+    /// 系统音频输入服务（macOS CoreAudio HAL 与麦克风数据）。麦克风隐私
+    /// 授权（TCC）仍由系统按宿主 App 独立把关。
+    AudioInput,
+    /// 运行无头浏览器（Chrome/Chromium）：macOS 上放行 IOKit 与
+    /// `org.chromium.*` 的 mach 注册/查询（MachPortRendezvous）。
+    BrowserRuntime,
+    /// 进程表查询服务（macOS `com.apple.sysmond`）：`pgrep` / `pkill` 经
+    /// libsysmon 向它查询进程列表。只读进程信息，不扩大信号或文件权限。
+    ProcessInspection,
+}
+
+impl SandboxCapability {
+    /// 全部已定义能力。
+    pub const ALL: [Self; 4] = [
+        Self::CredentialServices,
+        Self::AudioInput,
+        Self::BrowserRuntime,
+        Self::ProcessInspection,
+    ];
+
+    /// 序列化名（与 JSON 表示一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CredentialServices => "credential_services",
+            Self::AudioInput => "audio_input",
+            Self::BrowserRuntime => "browser_runtime",
+            Self::ProcessInspection => "process_inspection",
+        }
+    }
+
+    /// 当前平台的 Launcher 是否实现了该能力。
+    ///
+    /// macOS Seatbelt 为每项能力编译精确的系统服务与设备规则。bubblewrap
+    /// 与 AppContainer 不按 mach 服务等维度隔离，这些能力在其上本就没有
+    /// 额外限制需要解除，视为支持（授予与否不改变生成的规则）。新增能力时
+    /// 必须逐平台显式判定，不得默认放行。
+    pub fn supported_on_current_platform(self) -> bool {
+        match self {
+            Self::CredentialServices
+            | Self::AudioInput
+            | Self::BrowserRuntime
+            | Self::ProcessInspection => true,
+        }
+    }
+}
+
+/// 当前平台 Launcher 支持的能力集合（自检上报与启动校验共用）。
+pub fn supported_capabilities() -> BTreeSet<SandboxCapability> {
+    SandboxCapability::ALL
+        .into_iter()
+        .filter(|capability| capability.supported_on_current_platform())
+        .collect()
+}
+
+/// 平台无关的沙箱策略（可序列化，经 Launcher 协议传输）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "compat::PolicyWire")]
+pub struct SandboxPolicy {
+    pub mode: SandboxMode,
+    /// 会话工作区（WorkspaceWrite 模式下的主可写根）。
+    pub workspace: PathBuf,
+    /// 额外可写根（插件数据目录等）。
+    #[serde(default)]
+    pub extra_writable: Vec<PathBuf>,
+    /// 即使位于可写根内也保持只读的宿主敏感路径。
+    #[serde(default)]
+    pub protected_paths: Vec<PathBuf>,
+    /// 沙箱内不可读取的宿主敏感路径（用户凭据等）。
+    #[serde(default)]
+    pub denied_read_paths: Vec<PathBuf>,
+    /// 是否放行出网（默认 false；放行走宿主代理体系，见 RFC D16）。
+    #[serde(default)]
+    pub allow_network: bool,
+    /// 宿主授予的特殊能力（默认为空；仅宿主按已验证插件身份授予）。
+    /// 含未知能力的策略无法解析，含本平台不支持能力的策略被 Launcher
+    /// 拒绝，均不会静默降级。
+    #[serde(default)]
+    pub capabilities: BTreeSet<SandboxCapability>,
+    /// 单次 command 的资源上限。
+    #[serde(default)]
+    pub resource_limits: SandboxResourceLimits,
+}
+
+/// 单次 command 进程树的资源上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SandboxResourceLimits {
+    /// 整次命令可消耗的 CPU 时间上限（秒）。
+    pub max_cpu_time_seconds: u64,
+    /// Unix 为单进程地址空间上限，Windows 为整个 Job 的提交内存上限。
+    pub max_memory_bytes: u64,
+    /// Linux 与 Windows 的进程数量上限。
+    pub max_processes: u32,
+}
+
+impl Default for SandboxResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_cpu_time_seconds: 300,
+            max_memory_bytes: 2 * 1024 * 1024 * 1024,
+            max_processes: 64,
+        }
+    }
+}
+
+impl SandboxPolicy {
+    /// 命令执行位的默认策略：workspace-write、禁网。
+    pub fn workspace_write(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            mode: SandboxMode::WorkspaceWrite,
+            workspace: workspace.into(),
+            extra_writable: Vec::new(),
+            protected_paths: Vec::new(),
+            denied_read_paths: Vec::new(),
+            allow_network: false,
+            capabilities: BTreeSet::new(),
+            resource_limits: SandboxResourceLimits::default(),
+        }
+    }
+
+    pub fn full_access() -> Self {
+        Self {
+            mode: SandboxMode::FullAccess,
+            workspace: PathBuf::new(),
+            extra_writable: Vec::new(),
+            protected_paths: Vec::new(),
+            denied_read_paths: Vec::new(),
+            allow_network: true,
+            capabilities: SandboxCapability::ALL.into_iter().collect(),
+            resource_limits: SandboxResourceLimits::default(),
+        }
+    }
+
+    /// 是否授予了指定能力。
+    pub fn has(&self, capability: SandboxCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    /// 按布尔值授予或撤销能力。
+    pub fn set_capability(&mut self, capability: SandboxCapability, granted: bool) {
+        if granted {
+            self.capabilities.insert(capability);
+        } else {
+            self.capabilities.remove(&capability);
+        }
+    }
+
+    /// 授予但当前平台 Launcher 不支持的能力（非空时 Launcher 必须拒绝启动）。
+    pub fn unsupported_capabilities(&self) -> Vec<SandboxCapability> {
+        self.capabilities
+            .iter()
+            .copied()
+            .filter(|capability| !capability.supported_on_current_platform())
+            .collect()
+    }
+
+    /// 全部可写根（已规范化去重）：工作区、临时目录、额外可写。
+    pub fn writable_roots(&self) -> Vec<PathBuf> {
+        if self.mode != SandboxMode::WorkspaceWrite {
+            return Vec::new();
+        }
+        // 不自动放行全局系统临时目录（审查修订）：每次执行的专用临时目录
+        // 由宿主创建并经 extra_writable 显式传入。
+        let mut roots = vec![self.workspace.clone()];
+        roots.extend(self.extra_writable.iter().cloned());
+        let mut seen: Vec<PathBuf> = Vec::new();
+        roots
+            .into_iter()
+            .filter(|p| p.is_absolute())
+            .map(|p| canonical_or_keep(&p))
+            .filter(|p| {
+                if seen.contains(p) {
+                    false
+                } else {
+                    seen.push(p.clone());
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// 防篡改段：宿主敏感路径保持只读。
+    ///
+    /// 当敏感根是工作区的祖先时不能整体锁死，否则默认的
+    /// `<storage>/workspaces/<session>` 会失去写权限。白名单外本就默认禁写，
+    /// 因此此时跳过祖先根仍会保护其它会话和宿主文件。
+    /// 工作区内 `.git` 不在此列（用户裁定 2026-08-30）：agent 需要完整
+    /// git 工作流，`.git` 与源码同等对待——可写。
+    pub fn read_only_roots(&self) -> Vec<PathBuf> {
+        let writable = self.writable_roots();
+        let mut paths = self
+            .protected_paths
+            .iter()
+            .map(|path| canonical_or_keep(path))
+            .filter(|protected| {
+                !writable
+                    .iter()
+                    .any(|root| root != protected && root.starts_with(protected))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// 不可读取路径（规范化、去重，只保留绝对路径）。
+    pub fn denied_read_roots(&self) -> Vec<PathBuf> {
+        let mut paths = self
+            .denied_read_paths
+            .iter()
+            .filter(|path| path.is_absolute())
+            .map(|path| canonical_or_keep(path))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+}
+
+/// 规范化路径：能解析则用真实路径（macOS 上 `/var` → `/private/var`），
+/// 解析失败（路径不存在）保留原样。
+pub fn canonical_or_keep(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
+}
+
+/// 旧策略格式兼容层（临时）。
+///
+/// 已发布的 App（≤ v0.17.5）以 `allow_credential_services` /
+/// `allow_audio_input` / `allow_browser_runtime` 布尔字段授予特殊能力。
+/// 先升级 Launcher、后升级 App 的过渡期内，Launcher 必须继续理解这些
+/// 字段：解析时把为 true 的布尔并入 `capabilities`（与新字段取并集），
+/// 序列化只输出新格式。旧 App 全部退出支持后可删除本模块与
+/// `#[serde(from)]`，或决定永久保留。
+mod compat {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    pub(super) struct PolicyWire {
+        mode: SandboxMode,
+        workspace: PathBuf,
+        #[serde(default)]
+        extra_writable: Vec<PathBuf>,
+        #[serde(default)]
+        protected_paths: Vec<PathBuf>,
+        #[serde(default)]
+        denied_read_paths: Vec<PathBuf>,
+        #[serde(default)]
+        allow_network: bool,
+        #[serde(default)]
+        capabilities: BTreeSet<SandboxCapability>,
+        #[serde(default)]
+        resource_limits: SandboxResourceLimits,
+        #[serde(default)]
+        allow_credential_services: bool,
+        #[serde(default)]
+        allow_audio_input: bool,
+        #[serde(default)]
+        allow_browser_runtime: bool,
+    }
+
+    impl From<PolicyWire> for SandboxPolicy {
+        fn from(wire: PolicyWire) -> Self {
+            let mut capabilities = wire.capabilities;
+            for (granted, capability) in [
+                (
+                    wire.allow_credential_services,
+                    SandboxCapability::CredentialServices,
+                ),
+                (wire.allow_audio_input, SandboxCapability::AudioInput),
+                (
+                    wire.allow_browser_runtime,
+                    SandboxCapability::BrowserRuntime,
+                ),
+            ] {
+                if granted {
+                    capabilities.insert(capability);
+                }
+            }
+            Self {
+                mode: wire.mode,
+                workspace: wire.workspace,
+                extra_writable: wire.extra_writable,
+                protected_paths: wire.protected_paths,
+                denied_read_paths: wire.denied_read_paths,
+                allow_network: wire.allow_network,
+                capabilities,
+                resource_limits: wire.resource_limits,
+            }
+        }
+    }
+}
+
+/// 无需文件系统访问的路径规范化：拆段、处理 `.` 与 `..`、去尾部 `/`。
+fn normalize(path: &Path) -> PathBuf {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for comp in path.components() {
+        use std::path::Component;
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop();
+            }
+            other => parts.push(other.as_os_str().to_os_string()),
+        }
+    }
+    let mut out = PathBuf::new();
+    for part in parts {
+        out.push(part);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writable_roots_are_canonical_and_deduped() {
+        let root = tempfile::tempdir().unwrap();
+        let policy = SandboxPolicy::workspace_write(root.path().join("workspace"));
+        let roots = policy.writable_roots();
+        // 不自动包含全局系统临时目录：可写根 = 工作区 + 显式 extra。
+        assert_eq!(roots.len(), 1);
+        let mut policy = policy;
+        policy.extra_writable = vec![root.path().join("exec-tmp")];
+        assert_eq!(policy.writable_roots().len(), 2);
+    }
+
+    #[test]
+    fn full_access_has_no_writable_roots() {
+        assert!(SandboxPolicy::full_access().writable_roots().is_empty());
+    }
+
+    #[test]
+    fn protected_storage_root_does_not_shadow_nested_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspaces/session");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut policy = SandboxPolicy::workspace_write(&workspace);
+        policy.protected_paths = vec![root.path().to_path_buf()];
+
+        assert!(
+            !policy
+                .read_only_roots()
+                .contains(&canonical_or_keep(root.path()))
+        );
+        assert_eq!(policy.writable_roots(), vec![canonical_or_keep(&workspace)]);
+    }
+
+    #[test]
+    fn protected_storage_root_remains_locked_for_broad_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = SandboxPolicy::workspace_write(root.path().parent().unwrap());
+        policy.protected_paths = vec![root.path().to_path_buf()];
+
+        assert!(
+            policy
+                .read_only_roots()
+                .contains(&canonical_or_keep(root.path()))
+        );
+    }
+
+    #[test]
+    fn policy_serialization_is_platform_stable() {
+        let mut policy = SandboxPolicy::workspace_write("/workspace");
+        policy.extra_writable = vec!["/execution/tmp".into()];
+        policy.protected_paths = vec!["/workspace/.git".into()];
+        policy.denied_read_paths = vec!["/home/user/.ssh".into()];
+
+        let value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["mode"], "workspace_write");
+        assert_eq!(value["workspace"], "/workspace");
+        assert_eq!(value["allow_network"], false);
+        assert_eq!(value["capabilities"], serde_json::json!([]));
+        assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
+        assert_eq!(value["resource_limits"]["max_processes"], 64);
+
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, policy);
+
+        policy.set_capability(SandboxCapability::BrowserRuntime, true);
+        policy.set_capability(SandboxCapability::CredentialServices, true);
+        let value = serde_json::to_value(&policy).unwrap();
+        // 有序集合：序列化顺序稳定，与授予顺序无关。
+        assert_eq!(
+            value["capabilities"],
+            serde_json::json!(["credential_services", "browser_runtime"])
+        );
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, policy);
+    }
+
+    #[test]
+    fn unknown_capability_fails_to_parse() {
+        // 新能力的旧 Launcher 必须拒绝启动，而不是静默忽略。
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        value["capabilities"] = serde_json::json!(["browser_runtime", "future_capability"]);
+        assert!(serde_json::from_value::<SandboxPolicy>(value).is_err());
+    }
+
+    #[test]
+    fn legacy_boolean_grants_merge_into_capabilities() {
+        // 已发布 App（≤ v0.17.5）发出的旧格式策略仍可解析，布尔授予并入能力集合。
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("capabilities");
+        object.insert("allow_credential_services".into(), true.into());
+        object.insert("allow_audio_input".into(), false.into());
+        object.insert("allow_browser_runtime".into(), true.into());
+        let decoded: SandboxPolicy = serde_json::from_value(value.clone()).unwrap();
+        let mut expected = SandboxPolicy::workspace_write("/workspace");
+        expected.set_capability(SandboxCapability::CredentialServices, true);
+        expected.set_capability(SandboxCapability::BrowserRuntime, true);
+        assert_eq!(decoded, expected);
+        // 新旧字段并存时取并集。
+        value["capabilities"] = serde_json::json!(["audio_input"]);
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert!(decoded.has(SandboxCapability::AudioInput));
+        assert!(decoded.has(SandboxCapability::BrowserRuntime));
+        // 序列化只输出新格式。
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert!(encoded.get("allow_browser_runtime").is_none());
+        // 全部旧布尔为 false 与缺省等价：不授予任何能力。
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("capabilities");
+        object.insert("allow_audio_input".into(), false.into());
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert!(decoded.capabilities.is_empty());
+    }
+
+    #[test]
+    fn capability_names_match_serialization() {
+        for capability in SandboxCapability::ALL {
+            assert_eq!(
+                serde_json::to_value(capability).unwrap(),
+                serde_json::Value::String(capability.as_str().to_string())
+            );
+        }
+        assert_eq!(
+            supported_capabilities().len(),
+            SandboxCapability::ALL
+                .iter()
+                .filter(|capability| capability.supported_on_current_platform())
+                .count()
+        );
+    }
+
+    #[test]
+    fn set_capability_grants_and_revokes() {
+        let mut policy = SandboxPolicy::workspace_write("/workspace");
+        assert!(!policy.has(SandboxCapability::AudioInput));
+        policy.set_capability(SandboxCapability::AudioInput, true);
+        assert!(policy.has(SandboxCapability::AudioInput));
+        policy.set_capability(SandboxCapability::AudioInput, false);
+        assert!(policy.capabilities.is_empty());
+        assert!(policy.unsupported_capabilities().is_empty());
+    }
+
+    #[test]
+    fn git_metadata_is_writable_in_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let git_file = workspace.path().join(".git");
+        std::fs::write(&git_file, "gitdir: ../metadata").unwrap();
+        let policy = SandboxPolicy::workspace_write(workspace.path());
+
+        // .git 与源码同等对待（用户裁定 2026-08-30）：agent 需要完整 git
+        // 工作流，不得出现在只读根中。
+        assert!(
+            !policy
+                .read_only_roots()
+                .contains(&canonical_or_keep(&git_file))
+        );
+    }
+}

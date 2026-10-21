@@ -1,6 +1,7 @@
 name: Sandbox CI
 
-# 沙箱独立组件 CI（不依赖 App 集成）：crates/tiangong-sandbox 的格式、
+# 沙箱独立组件 CI（不依赖 App 集成）：crates/sandbox 下 Launcher
+# （tiangong-sandbox）与安装更新组件（tiangong-sandbox-update）的格式、
 # lint、单元与真实自检，以及 Launcher 发布制品（prepare-sandbox-release
 # 产物 + 独立版本断言）。App 集成链路（ephemeral 路由、Tauri 打包）由
 # 集成分支的 CI 覆盖。
@@ -9,13 +10,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/tiangong-sandbox/**"
+      - "crates/sandbox/**"
       - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
       - ".github/workflows/publish-sandbox.yml"
   pull_request:
     paths:
-      - "crates/tiangong-sandbox/**"
+      - "crates/sandbox/**"
       - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
       - ".github/workflows/publish-sandbox.yml"
@@ -51,7 +52,7 @@ jobs:
             mapfile -t files < <(git diff --name-only "$PR_BASE...HEAD")
             for file in "${files[@]}"; do
               case "$file" in
-                crates/tiangong-sandbox/*|.github/actions/prepare-sandbox-key/*|.github/workflows/publish-sandbox.yml)
+                crates/sandbox/*|.github/actions/prepare-sandbox-key/*|.github/workflows/publish-sandbox.yml)
                   release_artifact=true
                   break
                   ;;
@@ -77,12 +78,13 @@ jobs:
         with:
           key: sandbox-linux
       - name: Check formatting
-        run: cargo fmt -p tiangong-sandbox --all -- --check
+        run: cargo fmt -p tiangong-sandbox -p tiangong-sandbox-update -- --check
       - name: Lint sandbox crate
-        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+        run: cargo clippy --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets -- -D warnings
       - name: Test sandbox crate
         run: |
           cargo test --locked -p tiangong-sandbox --lib --bins
+          cargo test --locked -p tiangong-sandbox-update
           cargo test --locked -p tiangong-sandbox --test launcher_execution
       - name: Test Launcher execution contract
         timeout-minutes: 10
@@ -127,10 +129,11 @@ jobs:
         with:
           key: sandbox-macos
       - name: Lint sandbox crate
-        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+        run: cargo clippy --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets -- -D warnings
       - name: Test sandbox crate
         run: |
           cargo test --locked -p tiangong-sandbox --lib --bins
+          cargo test --locked -p tiangong-sandbox-update
           cargo test --locked -p tiangong-sandbox --test launcher_execution
       - name: Test Launcher execution contract
         timeout-minutes: 10
@@ -168,10 +171,11 @@ jobs:
         with:
           key: sandbox-windows
       - name: Lint sandbox crate
-        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+        run: cargo clippy --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets -- -D warnings
       - name: Test sandbox crate
         run: |
           cargo test --locked -p tiangong-sandbox --lib --bins
+          cargo test --locked -p tiangong-sandbox-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p tiangong-sandbox --test launcher_execution
       - uses: actions/setup-node@v4
@@ -281,6 +285,8 @@ jobs:
             *) test "$status" -eq 0 ;;
           esac
           [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
-          # 协议断言以 release-info.json（crate 常量直引）为准，不做源码正则提取。
+          # protocol_version / policy_schema 已不再版本化，仅为兼容已发布 App
+          # （≤ v0.17.5）保留冻结值；断言自检报告与清单的兼容值一致（以
+          # release-info.json 的 crate 常量为准），避免旧 App 拒绝新 Launcher。
           [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]
           [[ "$(jq -r .policy_schema <<< "$report")" == "$schema" ]]

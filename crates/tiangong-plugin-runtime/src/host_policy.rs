@@ -13,11 +13,15 @@
 //!
 //! 网络维度：沙箱开启即视为执行安全，网络全放行。用户凭据默认禁读；
 //! 官方 terminal/command 为保持完整 Git 工作流，固定获得 SSH 与 GitHub
-//! CLI 配置目录的只读例外，并获得沙箱内运行无头浏览器的能力；其他插件
-//! 不能通过清单或调用载荷申请这些能力。
+//! CLI 配置目录的只读例外，并获得沙箱内运行无头浏览器与查询进程表
+//! （pgrep/pkill）的能力；其他插件不能通过清单或调用载荷申请这些能力。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::launch_policy::{
+    CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_CREDENTIAL_SERVICES,
+    CAPABILITY_PROCESS_INSPECTION,
+};
 /// sidecar 与宿主的通信通道（宿主权威决定，插件不声明——spawn 时由
 /// 宿主注入环境变量选择，sidecar 通用库自动适配）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +61,16 @@ pub struct HostExecutionPolicy {
     pub user_credential_reads: UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub allow_user_cache_write: bool,
-    /// 沙箱内是否放行系统音频输入服务（麦克风录音）。
-    pub allow_audio_input: bool,
-    /// 沙箱内是否允许运行无头浏览器（Chrome/Chromium，#695）。
-    pub allow_browser_runtime: bool,
+    /// 沙箱内授予的特殊能力名（凭据服务、录音、无头浏览器等，见
+    /// `launch_policy::CAPABILITY_*`）。整条链路只传这一个集合；能力怎样
+    /// 变成系统规则由 Launcher 定义。
+    pub capabilities: BTreeSet<String>,
+}
+impl HostExecutionPolicy {
+    /// 是否授予了指定沙箱能力。
+    pub fn has(&self, capability: &str) -> bool {
+        self.capabilities.contains(capability)
+    }
 }
 
 /// 解析插件的宿主执行策略。
@@ -93,14 +103,29 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     // "命令执行位"，按已验证官方身份授予；保持独立字段以便两者分开调整。
     // command 退役（#697 阶段 3）后改为只认 terminal。
     let browser_runtime = official_signed && matches!(plugin_id, "terminal" | "command");
+    // 进程表查询（pgrep/pkill 经 sysmond，#677）：排查后台进程、确认服务
+    // 是否在跑属于命令执行位的日常操作，同样只按已验证官方身份授予。
+    let process_inspection = official_signed && matches!(plugin_id, "terminal" | "command");
+    // Git/SSH/GitHub CLI 需经系统凭据服务解析用户身份与读取凭据，随凭据
+    // 目录读取能力一并授予；证书验证由网络授权独立开放。
+    let credential_services = user_credential_reads.ssh || user_credential_reads.github_cli;
+    let capabilities = [
+        (CAPABILITY_CREDENTIAL_SERVICES, credential_services),
+        (CAPABILITY_AUDIO_INPUT, audio_input),
+        (CAPABILITY_BROWSER_RUNTIME, browser_runtime),
+        (CAPABILITY_PROCESS_INSPECTION, process_inspection),
+    ]
+    .into_iter()
+    .filter(|(_, granted)| *granted)
+    .map(|(capability, _)| capability.to_string())
+    .collect();
     HostExecutionPolicy {
         sandbox: !accessibility_host_child,
         allow_network: true,
         transport: SidecarTransport::Stdio,
         user_credential_reads,
         allow_user_cache_write: git_workflow,
-        allow_audio_input: audio_input,
-        allow_browser_runtime: browser_runtime,
+        capabilities,
     }
 }
 
@@ -210,14 +235,20 @@ mod tests {
     #[test]
     fn audio_input_is_granted_only_to_official_volcengine() {
         let official = resolve("volcengine", true);
-        assert!(official.allow_audio_input, "官方 volcengine 需要录音能力");
+        assert!(
+            official.has(CAPABILITY_AUDIO_INPUT),
+            "官方 volcengine 需要录音能力"
+        );
         assert!(official.sandbox, "录音授权不改变沙箱基线");
         assert!(
-            !resolve("volcengine", false).allow_audio_input,
+            !resolve("volcengine", false).has(CAPABILITY_AUDIO_INPUT),
             "非官方同名插件不得按名称获得录音能力"
         );
         for id in ["terminal", "command", "computer-use", "unknown-third-party"] {
-            assert!(!resolve(id, true).allow_audio_input, "{id} 不需要录音能力");
+            assert!(
+                !resolve(id, true).has(CAPABILITY_AUDIO_INPUT),
+                "{id} 不需要录音能力"
+            );
         }
     }
 
@@ -226,12 +257,12 @@ mod tests {
         for id in ["terminal", "command"] {
             let official = resolve(id, true);
             assert!(
-                official.allow_browser_runtime,
+                official.has(CAPABILITY_BROWSER_RUNTIME),
                 "官方 {id} 需要无头浏览器能力"
             );
             assert!(official.sandbox, "浏览器授权不改变沙箱基线");
             assert!(
-                !resolve(id, false).allow_browser_runtime,
+                !resolve(id, false).has(CAPABILITY_BROWSER_RUNTIME),
                 "非官方同名 {id} 不得按名称获得无头浏览器能力"
             );
         }
@@ -243,9 +274,72 @@ mod tests {
             "unknown-third-party",
         ] {
             assert!(
-                !resolve(id, true).allow_browser_runtime,
+                !resolve(id, true).has(CAPABILITY_BROWSER_RUNTIME),
                 "{id} 不需要无头浏览器能力"
             );
+        }
+    }
+
+    #[test]
+    fn process_inspection_is_granted_only_to_official_terminal_and_command() {
+        for id in ["terminal", "command"] {
+            let official = resolve(id, true);
+            assert!(
+                official.has(CAPABILITY_PROCESS_INSPECTION),
+                "官方 {id} 需要进程表查询能力"
+            );
+            assert!(official.sandbox, "进程表查询授权不改变沙箱基线");
+            assert!(
+                !resolve(id, false).has(CAPABILITY_PROCESS_INSPECTION),
+                "非官方同名 {id} 不得按名称获得进程表查询能力"
+            );
+        }
+        for id in [
+            "mcp",
+            "volcengine",
+            "computer-use",
+            "fetch",
+            "unknown-third-party",
+        ] {
+            assert!(
+                !resolve(id, true).has(CAPABILITY_PROCESS_INSPECTION),
+                "{id} 不需要进程表查询能力"
+            );
+        }
+    }
+    #[test]
+    fn capability_grant_table_matches_previous_boolean_grants() {
+        // 迁移前的授权表（布尔字段时代）：凭据服务随 Git 工作流，录音只给
+        // volcengine，无头浏览器给 terminal/command；非官方一律不授予。
+        // #677 起官方 terminal/command 另获进程表查询能力。
+        let ids = [
+            "terminal",
+            "command",
+            "volcengine",
+            "computer-use",
+            "mcp",
+            "fetch",
+            "fs",
+            "unknown-third-party",
+        ];
+        for id in ids {
+            for official in [false, true] {
+                let git = official && matches!(id, "terminal" | "command");
+                let mut expected = BTreeSet::new();
+                if git {
+                    expected.insert(CAPABILITY_CREDENTIAL_SERVICES.to_string());
+                    expected.insert(CAPABILITY_BROWSER_RUNTIME.to_string());
+                    expected.insert(CAPABILITY_PROCESS_INSPECTION.to_string());
+                }
+                if official && id == "volcengine" {
+                    expected.insert(CAPABILITY_AUDIO_INPUT.to_string());
+                }
+                assert_eq!(
+                    resolve(id, official).capabilities,
+                    expected,
+                    "{id} official={official} 的能力授权表必须与迁移前一致"
+                );
+            }
         }
     }
 

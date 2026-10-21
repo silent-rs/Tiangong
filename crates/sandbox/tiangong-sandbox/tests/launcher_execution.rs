@@ -266,6 +266,10 @@ fn launcher_attack_matrix_and_resource_self_check() {
     ] {
         assert_eq!(report[field], true, "{field}: {report}");
     }
+    // 自检上报当前平台支持的能力，宿主据此比对授予的能力。
+    let reported: std::collections::BTreeSet<tiangong_sandbox::SandboxCapability> =
+        serde_json::from_value(report["capabilities"].clone()).expect("自检必须上报能力");
+    assert_eq!(reported, tiangong_sandbox::supported_capabilities());
     #[cfg(windows)]
     for field in [
         "outside_read_blocked",

@@ -35,13 +35,12 @@ https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json
 ## 安全门禁
 
 - 清单、制品和签名必须使用 HTTPS；
-- 清单协议与当前 Launcher 精确相等；
-- 首版策略 Schema 精确相等；
+- 不按协议版本或策略 Schema 版本化；清单中的 `protocol_version`（冻结为 1）与 `policy_schema_max`（冻结为 2）仅为兼容已发布 App 保留，新版本不校验；
 - 制品逐块下载且有 128 MiB 上限；
 - SHA-256 必须匹配清单；
 - minisign 必须通过内置官方公钥；
 - 候选必须是普通文件，不接受符号链接；
-- 候选 `--self-check` 必须退出 0，且自报版本、协议、Schema 与清单及当前 Launcher 一致；
+- 候选 `--self-check` 必须退出 0，且自报版本与清单一致；
 - 进程级文件锁串行化检查和升级，进程异常退出后锁自动释放；
 - 指定目录中的已有程序必须先验签、自检并检查版本，禁止降级；
 - 程序与签名使用同目录事务文件成对替换，失败时恢复旧文件。

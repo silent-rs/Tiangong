@@ -49,7 +49,7 @@ struct WindowsSandboxProbeRequest {
     report_path: PathBuf,
     child_report_path: PathBuf,
     network_address: String,
-    resource_limits: tiangong_sandbox::SandboxResourceLimits,
+    resource_limits: tiangong_plugin_runtime::launch_policy::ResourceLimits,
 }
 
 #[cfg(windows)]
@@ -85,10 +85,7 @@ fn command_sidecar_binary() -> Option<PathBuf> {
 
 #[cfg(any(unix, windows))]
 fn sandbox_binaries_ready() -> bool {
-    if !matches!(
-        tiangong_sandbox::availability(),
-        tiangong_sandbox::SandboxAvailability::Available
-    ) {
+    if tiangong_plugin_runtime::test_support::native_sandbox_skip_reason().is_some() {
         eprintln!("跳过真实 Launcher 测试：当前环境不支持嵌套操作系统沙箱");
         return false;
     }
@@ -171,7 +168,7 @@ fn ensure_test_launcher_signed(storage_root: &Path) {
 
 #[cfg(any(unix, windows))]
 fn sandbox_fixture_with_limits(
-    limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    limits: Option<tiangong_plugin_runtime::launch_policy::ResourceLimits>,
 ) -> Option<SandboxFixture> {
     sandbox_fixture_configured(true, limits)
 }
@@ -181,7 +178,7 @@ fn sandbox_fixture_with_limits(
 #[cfg(any(unix, windows))]
 fn sandbox_fixture_configured(
     sandbox: bool,
-    limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    limits: Option<tiangong_plugin_runtime::launch_policy::ResourceLimits>,
 ) -> Option<SandboxFixture> {
     if sandbox {
         if !sandbox_binaries_ready() {
@@ -914,14 +911,18 @@ fn collect_windows_sandbox_probe(
             .all(|path| std::fs::read(path).is_err()),
         path_traversal_blocked: std::fs::write(&request.traversal_target, "PWNED").is_err(),
         policy_envelope_hidden: [
-            tiangong_sandbox::POLICY_ENV,
-            tiangong_sandbox::WINDOWS_STOP_EVENT_ENV,
-            tiangong_sandbox::HOST_PID_ENV,
+            tiangong_sandbox_update::POLICY_ENV,
+            tiangong_sandbox_update::WINDOWS_STOP_EVENT_ENV,
+            tiangong_sandbox_update::HOST_PID_ENV,
         ]
         .iter()
         .all(|key| std::env::var_os(key).is_none()),
         resource_limits_applied: tiangong_sandbox::sandbox::windows::current_process_limits_match(
-            request.resource_limits,
+            tiangong_sandbox::SandboxResourceLimits {
+                max_cpu_time_seconds: request.resource_limits.max_cpu_time_seconds,
+                max_memory_bytes: request.resource_limits.max_memory_bytes,
+                max_processes: request.resource_limits.max_processes,
+            },
         ),
         child_restrictions_inherited: false,
     }

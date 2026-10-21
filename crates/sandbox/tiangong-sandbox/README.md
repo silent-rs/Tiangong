@@ -19,11 +19,21 @@ Sandbox 不决定宿主的存储布局。安装目录由 App、服务或其他�
 <宿主选择的目录>/tiangong-sandbox[.exe].sig
 ```
 
-库提供程序定位、签名验证和自检能力，但不会自动拼接天工的存储根或 `sandbox` 目录。
+程序定位、签名验证、自检与在线更新位于轻量 crate `tiangong-sandbox-update`（不含平台沙箱实现），不会自动拼接天工的存储根或 `sandbox` 目录。
+
+## 宿主集成
+
+宿主（如天工 App）只依赖 `tiangong-sandbox-update`，不链接本 crate 的平台沙箱实现：
+
+- 启动请求按 JSON 约定构造（策略字段与 `SandboxPolicy` 一一对应，能力用字符串名），由签名的 Launcher 解析与执行；
+- 安装、更新、验签与自检使用 `tiangong-sandbox-update`；
+- Windows 持久授权的撤销调用 Launcher 的 `revoke-grants <授权记录绝对路径>` 子命令。
+
+宿主一侧可用 dev-dependency 引入本 crate 做契约测试，保证双方对请求的解析语义一致（天工见 `crates/tiangong-plugin-runtime/tests/launch_policy_contract.rs`）。
 
 ## 正式版本下载
 
-正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、协议版本、各平台下载地址、SHA-256 和签名地址。
+正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、各平台下载地址、SHA-256 和签名地址。
 
 当前正式版为 `0.1.3`：
 
@@ -104,6 +114,7 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
   "protected_paths": ["/absolute/workspace/protected"],
   "denied_read_paths": ["/home/user/.ssh"],
   "allow_network": false,
+  "capabilities": [],
   "resource_limits": {
     "max_cpu_time_seconds": 300,
     "max_memory_bytes": 2147483648,
@@ -122,6 +133,8 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
 - 目标程序会校验普通文件形态、摘要和平台权限。
 - 平台沙箱不可用时拒绝执行，不静默降级。
 - 敏感路径不会由通用核心隐式猜测；宿主应通过 `protected_paths` 和 `denied_read_paths` 明确传入。crate 另提供可选的常见凭据与天工宿主预设。
+- 特殊能力（`capabilities`）默认为空，只能取 Launcher 内置的封闭集合：`credential_services`（系统凭据服务）、`audio_input`（音频输入）、`browser_runtime`（无头浏览器）、`process_inspection`（进程查看：macOS 放行 `com.apple.sysmond`，使 `pgrep`/`pkill` 可用）。未知能力导致策略解析失败，当前平台不支持的能力会被拒绝，均不会静默忽略。
+- 平台限制：macOS 上 `ps`、`top` 是 setuid 程序，Seatbelt 禁止执行 setuid 程序，`top` 还需要 root 与 `com.apple.system-task-ports.read` entitlement，因此即使授予 `process_inspection` 也无法在沙箱内运行。天工终端插件改由 `terminal_status` 返回终端内进程树（pid、父进程、命令行）替代。
 
 ## 宿主协议
 
@@ -130,15 +143,23 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
 - Unix：通过继承的文件描述符 3 传入长度前缀 JSON 帧。
 - Windows：通过一次性环境信封传入请求，并可关联宿主进程和停止事件。
 
-请求包含独立的协议版本和策略 Schema。版本不兼容时 Launcher 会拒绝启动。目标校验默认使用路径、摘要和权限；需要天工插件清单比对时，宿主可以显式选择对应校验方式。
+请求不按协议版本或策略 Schema 版本化：新增字段一律带默认值，旧的 `allow_*` 布尔能力字段由兼容层并入 `capabilities`；请求中的 `protocol_version` / `policy_schema` 字段被忽略（已发布宿主仍会携带）。目标校验默认使用路径、摘要和权限；需要天工插件清单比对时，宿主可以显式选择对应校验方式。
 
 ## 签名、自检与更新
 
-检查当前平台能力和协议信息：
+检查当前平台能力：
 
 ```bash
 tiangong-sandbox --self-check
 ```
+
+自检报告的 `capabilities` 字段列出当前平台支持的特殊能力；只查询能力（不运行拦截探针）可使用：
+
+```bash
+tiangong-sandbox --capabilities
+```
+
+宿主在启动前比对授予的能力与 Launcher 上报的能力，缺失时提示更新沙箱组件。
 
 检查和安装官方更新：
 
@@ -156,17 +177,17 @@ tiangong-sandbox update --root /absolute/install-directory
 
 ```bash
 cargo build --locked -p tiangong-sandbox --bin tiangong-sandbox
-cargo check --locked -p tiangong-sandbox --all-targets
-cargo test --locked -p tiangong-sandbox
-cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+cargo check --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets
+cargo test --locked -p tiangong-sandbox -p tiangong-sandbox-update
+cargo clippy --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets -- -D warnings
 ```
 
 真实隔离测试需要当前环境允许应用对应平台的沙箱。已经处于受限沙箱中的开发环境可能无法再次嵌套，此时 Launcher 会报告平台不可用并拒绝执行。
 
 ## 设计资料
 
-- [Sandbox 通用化与宿主安装目录](../../docs/sandbox-direct-storage.md)
-- [Sandbox 自管理与首版发布](../../docs/sandbox-self-management.md)
+- [Sandbox 通用化与宿主安装目录](../../../docs/sandbox-direct-storage.md)
+- [Sandbox 自管理与首版发布](../../../docs/sandbox-self-management.md)
 
 ## 许可证
 

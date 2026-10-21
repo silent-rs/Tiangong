@@ -4,7 +4,7 @@ use crate::sidecar::SensitiveStorageAccess;
 
 /// 按宿主授权从禁读清单移除对应配置文件（仅读开放；写保护不动）。
 pub(super) fn exempt_authorized_reads(
-    policy: &mut tiangong_sandbox::SandboxPolicy,
+    policy: &mut crate::launch_policy::LaunchPolicy,
     access: SensitiveStorageAccess,
     storage_root: &std::path::Path,
 ) {
@@ -31,8 +31,10 @@ pub(super) fn exempt_authorized_reads(
 /// 天工宿主的 Launcher 解析：存储目录直存优先，宿主程序同目录（开发与
 /// 测试布局）兜底。P1 通用化后组合策略由宿主决定，crate 只提供原语。
 pub(super) fn resolve_launcher(storage_root: &std::path::Path) -> Option<std::path::PathBuf> {
-    tiangong_sandbox::launcher_manager::resolve_installed_program(&storage_root.join("sandbox"))
-        .or_else(tiangong_sandbox::launcher_manager::sibling_program)
+    tiangong_sandbox_update::launcher_manager::resolve_installed_program(
+        &storage_root.join("sandbox"),
+    )
+    .or_else(tiangong_sandbox_update::launcher_manager::sibling_program)
 }
 
 /// 天工宿主的 `protected_paths`（读写双禁）组合：存储配置信任件 + 家目录
@@ -52,17 +54,17 @@ pub(super) fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<st
     .iter()
     .map(|path| storage_root.join(path))
     .collect();
-    paths.extend(tiangong_sandbox::sandbox::presets::common_credential_paths());
+    paths.extend(crate::launch_policy::common_credential_paths());
     paths
 }
 
 /// 按宿主验证过的插件身份移除用户凭据目录禁读；写保护清单保持不变。
 pub(super) fn exempt_authorized_user_credentials(
-    policy: &mut tiangong_sandbox::SandboxPolicy,
+    policy: &mut crate::launch_policy::LaunchPolicy,
     access: crate::host_policy::UserCredentialReadAccess,
 ) {
-    // 网络证书验证由 Launcher 根据 allow_network 独立开放，不授予凭据访问。
-    policy.allow_credential_services = access.ssh || access.github_cli;
+    // 凭据服务能力由 host_policy 与凭据目录读取一并授予（见
+    // HostExecutionPolicy::capabilities），这里只移除对应目录的禁读。
     let Some(home) = crate::interpreter_env::user_home_dir() else {
         return;
     };
@@ -80,7 +82,7 @@ pub(super) fn exempt_authorized_user_credentials(
 
 /// 最终策略中的额外写根都必须是已存在目录。Linux bubblewrap 的 bind
 /// 源不存在会拒绝启动；其他平台也不应携带无效授权项。
-pub(super) fn retain_existing_writable_roots(policy: &mut tiangong_sandbox::SandboxPolicy) {
+pub(super) fn retain_existing_writable_roots(policy: &mut crate::launch_policy::LaunchPolicy) {
     policy.extra_writable.retain(|path| {
         if path.is_dir() {
             true
@@ -143,7 +145,7 @@ pub(super) fn storage_root_writable_roots(
 /// 无谓施加。须在可写根组装完成后调用。按 spawn 时的目录快照计算，之后新
 /// 出现的目录在下次 spawn 时纳入。
 pub(super) fn isolate_other_plugin_data(
-    policy: &mut tiangong_sandbox::SandboxPolicy,
+    policy: &mut crate::launch_policy::LaunchPolicy,
     storage_root: &std::path::Path,
     plugin_id: &str,
 ) {
@@ -203,7 +205,10 @@ pub(super) fn ensure_storage_data_dir(
 }
 
 /// 仅为宿主授权的插件增加用户工具缓存写根。
-pub(super) fn apply_user_cache_write(policy: &mut tiangong_sandbox::SandboxPolicy, allowed: bool) {
+pub(super) fn apply_user_cache_write(
+    policy: &mut crate::launch_policy::LaunchPolicy,
+    allowed: bool,
+) {
     if !allowed {
         return;
     }
@@ -225,7 +230,7 @@ mod sensitive_access_tests {
         }
         std::fs::write(storage.join("data/stray.json"), "{}").unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace.path());
+        let mut policy = crate::launch_policy::LaunchPolicy::workspace_write(workspace.path());
         policy.extra_writable.push(storage.join("data/mcp"));
         isolate_other_plugin_data(&mut policy, storage, "mcp");
         let own = storage.join("data/mcp");
@@ -239,11 +244,12 @@ mod sensitive_access_tests {
         }
 
         // 可写根覆盖存储根（如工作区设为家目录）：其他插件数据追加写保护。
-        let mut broad = tiangong_sandbox::SandboxPolicy::workspace_write(storage);
+        let mut broad = crate::launch_policy::LaunchPolicy::workspace_write(storage);
         isolate_other_plugin_data(&mut broad, storage, "mcp");
         assert!(broad.protected_paths.contains(&storage.join("data/memory")));
+        // Launcher 语义：该路径成为只读根（经契约同构转换后由 Launcher 计算）。
         assert!(
-            broad
+            crate::launch_policy::tests_support::to_launcher_policy(&broad)
                 .read_only_roots()
                 .iter()
                 .any(|path| path.ends_with("data/memory"))
@@ -252,7 +258,7 @@ mod sensitive_access_tests {
 
         // 没有 data/ 目录时不报错、不改策略。
         let empty = tempfile::tempdir().unwrap();
-        let mut untouched = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        let mut untouched = crate::launch_policy::LaunchPolicy::workspace_write("/tmp/ws");
         isolate_other_plugin_data(&mut untouched, empty.path(), "mcp");
         assert!(untouched.denied_read_paths.is_empty());
         assert!(untouched.protected_paths.is_empty());
@@ -260,8 +266,8 @@ mod sensitive_access_tests {
     #[test]
     fn exempt_opens_only_authorized_configs() {
         let storage = std::path::Path::new("/tmp/sensitive-storage");
-        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
-        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut policy, storage);
+        let mut policy = crate::launch_policy::LaunchPolicy::workspace_write("/tmp/ws");
+        crate::launch_policy::apply_tiangong_denied_reads(&mut policy, storage);
         let before = policy.denied_read_paths.len();
         assert!(before >= 5, "清单应含配置与信任件（实际 {before}）");
 
@@ -290,8 +296,8 @@ mod sensitive_access_tests {
         );
 
         // 无授权：禁读清单原样保留。
-        let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
-        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut strict, storage);
+        let mut strict = crate::launch_policy::LaunchPolicy::workspace_write("/tmp/ws");
+        crate::launch_policy::apply_tiangong_denied_reads(&mut strict, storage);
         assert!(strict.denied_read_paths.contains(&storage.join("auth")));
         let strict_before = strict.denied_read_paths.clone();
         exempt_authorized_reads(
@@ -304,20 +310,16 @@ mod sensitive_access_tests {
 
     #[test]
     fn git_workflow_credentials_are_readable_but_remain_write_protected() {
-        for network in [false, true] {
-            for ssh in [false, true] {
-                for github_cli in [false, true] {
-                    let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
-                    policy.allow_network = network;
-                    exempt_authorized_user_credentials(
-                        &mut policy,
-                        crate::host_policy::UserCredentialReadAccess { ssh, github_cli },
-                    );
-                    assert_eq!(policy.allow_credential_services, ssh || github_cli);
-                    assert_eq!(policy.allow_network, network);
-                }
-            }
-        }
+        // 目录读取豁免不再隐式改动能力集合：能力只由 host_policy 授予。
+        let mut policy = crate::launch_policy::LaunchPolicy::workspace_write("/tmp/ws");
+        exempt_authorized_user_credentials(
+            &mut policy,
+            crate::host_policy::UserCredentialReadAccess {
+                ssh: true,
+                github_cli: true,
+            },
+        );
+        assert!(policy.capabilities.is_empty());
 
         let Some(home) = crate::interpreter_env::user_home_dir() else {
             return;
@@ -326,9 +328,9 @@ mod sensitive_access_tests {
         let ssh = home.join(".ssh");
         let github_cli = home.join(".config/gh");
         let aws = home.join(".aws");
-        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        let mut policy = crate::launch_policy::LaunchPolicy::workspace_write("/tmp/ws");
         policy.protected_paths = tiangong_protected_paths(storage);
-        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut policy, storage);
+        crate::launch_policy::apply_tiangong_denied_reads(&mut policy, storage);
 
         exempt_authorized_user_credentials(
             &mut policy,
@@ -343,14 +345,13 @@ mod sensitive_access_tests {
         assert!(policy.denied_read_paths.contains(&aws));
         assert!(policy.protected_paths.contains(&ssh));
         assert!(policy.protected_paths.contains(&github_cli));
-        assert!(policy.allow_credential_services);
     }
 
     #[test]
     fn missing_optional_cache_is_not_added_to_policy() {
         let root = tempfile::tempdir().unwrap();
         let missing = root.path().join(".npm");
-        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(root.path());
+        let mut policy = crate::launch_policy::LaunchPolicy::workspace_write(root.path());
 
         policy.extra_writable.push(missing.clone());
         retain_existing_writable_roots(&mut policy);
@@ -424,8 +425,8 @@ mod sensitive_access_tests {
         let Some(home) = crate::interpreter_env::user_home_dir() else {
             return;
         };
-        let cache = tiangong_sandbox::sandbox::policy::canonical_or_keep(&home.join(".cache"));
-        let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        let cache = crate::launch_policy::canonical_or_keep(&home.join(".cache"));
+        let mut strict = crate::launch_policy::LaunchPolicy::workspace_write("/tmp/ws");
         apply_user_cache_write(&mut strict, false);
         assert!(!strict.writable_roots().contains(&cache));
 

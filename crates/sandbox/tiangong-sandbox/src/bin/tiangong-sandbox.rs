@@ -13,13 +13,15 @@
 //! - **fail-closed**：协议版本不符、策略非法、平台沙箱不可用一律拒绝
 //!   （结构化错误 + 非零退出码），绝不静默降级为无沙箱执行。
 //!
-//! 版本化三层（RFC 0017 §九）：
-//! - 产品版本：本 crate 版本；
-//! - `protocol_version`：App↔Launcher 通信协议；
-//! - `policy_schema`：策略字段与安全语义。
+//! 版本化：只保留产品版本（本 crate 版本）。请求不再按协议版本或策略
+//! Schema 版本化：新增字段一律带默认值，旧格式由策略兼容层转换，特殊
+//! 能力经自检报告的 `capabilities` 协商，未知能力 fail-closed。请求中的
+//! `protocol_version` / `policy_schema` 被忽略；自检报告仍输出
+//! [`tiangong_sandbox::legacy`] 中的冻结值供已发布 App 校验。
 //!
 //! 子命令：
-//! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项）；
+//! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项），报告含 `capabilities`；
+//! - `--capabilities`：只上报版本与当前平台支持的特殊能力（不跑拦截探针）；
 //! - `check-update`：只检查当前 Sandbox 是否有官方更新；
 //! - `update`：由 Sandbox 自身下载、验签、自检并更新当前程序；
 //! - `update --root <目录>`：将最新版安装到指定绝对目录。
@@ -39,10 +41,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-/// App ↔ Launcher 通信协议版本（唯一定义在库层，宿主与 bin 共同引用）。
-const PROTOCOL_VERSION: u32 = tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION;
-/// 策略 Schema 版本（同上，库层唯一）。
-const POLICY_SCHEMA: u32 = tiangong_sandbox::LAUNCHER_POLICY_SCHEMA;
 /// 策略经此继承描述符传入。
 #[cfg(unix)]
 const POLICY_FD: i32 = 3;
@@ -59,8 +57,8 @@ const GIT_METADATA_PROBE_MARKER: &str = "GITWRITE";
 struct LaunchRequest {
     #[serde(default)]
     grant_cache: Option<PathBuf>,
-    protocol_version: u32,
-    policy_schema: u32,
+    // `protocol_version` / `policy_schema`（已发布 App 仍会携带）不再参与
+    // 校验，按未知字段忽略。
     policy: tiangong_sandbox::SandboxPolicy,
     #[serde(default)]
     plugin_id: String,
@@ -123,6 +121,30 @@ fn main() {
                 eprintln!("{error:#}");
                 std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
             }
+        }
+        return;
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("revoke-grants") {
+        // 宿主卸载插件或配置撤权时撤销 Launcher 登记的持久授权（ACL 与
+        // 身份），宿主不再直接链接 AppContainer 实现。
+        let result = match args.get(1) {
+            Some(path) if args.len() == 2 => {
+                tiangong_sandbox::sandbox::windows::revoke_persistent_grants(Path::new(path))
+            }
+            _ => Err(anyhow::anyhow!("用法: revoke-grants <授权记录绝对路径>")),
+        };
+        if let Err(error) = result {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "launcher": "tiangong-sandbox",
+                    "product_version": env!("CARGO_PKG_VERSION"),
+                    // 前缀供宿主区分"撤销失败"与"旧 Launcher 不支持该子命令"。
+                    "error": format!("撤销持久授权失败: {error:#}"),
+                })
+            );
+            std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
         }
         return;
     }
@@ -206,6 +228,11 @@ fn main() {
     if args.first().map(String::as_str) == Some("--windows-lifecycle-self-check") {
         std::process::exit(run_windows_lifecycle_self_check());
     }
+    if args.first().map(String::as_str) == Some("--capabilities") {
+        // 轻量能力查询（不跑拦截探针）：宿主 spawn 前比对授予的能力。
+        println!("{}", capabilities_report());
+        return;
+    }
     if args.iter().any(|arg| arg == "--self-check") {
         // 自检有自己的三态退出码语义，不走统一拒绝路径。
         std::process::exit(run_self_check());
@@ -237,8 +264,6 @@ fn run_policy_file(args: &[String]) -> Result<()> {
     let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
     let request = LaunchRequest {
         grant_cache: parsed.grant_cache,
-        protocol_version: PROTOCOL_VERSION,
-        policy_schema: POLICY_SCHEMA,
         policy: parsed.policy,
         plugin_id: String::new(),
         program: program.display().to_string(),
@@ -382,11 +407,9 @@ fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
         protected_paths,
         denied_read_paths,
         allow_network: matches!(args.network, CliNetwork::Allow),
-        // 凭据服务放行由宿主经策略文件显式授权；通用 CLI 保持默认
-        // 拒绝（fail-closed）。
-        allow_credential_services: false,
-        allow_audio_input: false,
-        allow_browser_runtime: false,
+        // 特殊能力由宿主经策略文件显式授予；通用 CLI 保持默认拒绝
+        // （fail-closed）。
+        capabilities: Default::default(),
         resource_limits,
     })
 }
@@ -449,8 +472,8 @@ fn run_self_update(args: &[String]) -> Result<()> {
     };
     let status = runtime.block_on(async {
         match (command, root) {
-            ("check-update", None) => updater.check().await,
-            ("update", None) => updater.update_current().await,
+            ("check-update", None) => updater.check(env!("CARGO_PKG_VERSION")).await,
+            ("update", None) => updater.update_current(env!("CARGO_PKG_VERSION")).await,
             ("update", Some(directory)) => updater.install_to(&directory).await,
             _ => unreachable!(),
         }
@@ -485,21 +508,10 @@ fn run_launch() -> Result<()> {
 }
 
 fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()> {
-    if request.protocol_version != PROTOCOL_VERSION {
-        bail!(
-            "Launcher 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
-            request.protocol_version
-        );
-    }
-    if request.policy_schema != POLICY_SCHEMA {
-        bail!(
-            "策略 Schema 版本不匹配: expected={POLICY_SCHEMA}, actual={}",
-            request.policy_schema
-        );
-    }
     if request.policy.mode == tiangong_sandbox::SandboxMode::FullAccess {
         bail!("当前 command Launcher 不接受 full_access 策略");
     }
+    validate_policy_capabilities(&request.policy)?;
     validate_policy_paths(&request)?;
     let program_path = validate_target(&request)?;
 
@@ -676,6 +688,21 @@ fn read_request() -> Result<LaunchRequest> {
     bail!("当前平台没有 Launcher 策略传输通道")
 }
 
+/// 能力校验：授予了本平台未实现的能力时拒绝启动（fail-closed）。
+/// 未知能力在解析策略时已失败，这里只处理已知但平台不支持的能力。
+fn validate_policy_capabilities(policy: &tiangong_sandbox::SandboxPolicy) -> Result<()> {
+    let unsupported = policy.unsupported_capabilities();
+    if !unsupported.is_empty() {
+        let names = unsupported
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("当前平台的 Launcher 不支持沙箱能力：{names}");
+    }
+    Ok(())
+}
+
 /// 策略路径注入防护（平台无关）：控制字符或非 UTF-8 路径可能破坏
 /// macOS SBPL profile 结构或干扰平台包装器，直接结构化拒绝。
 fn validate_policy_paths(request: &LaunchRequest) -> Result<()> {
@@ -824,6 +851,18 @@ fn validate_unix_permissions(_path: &Path, _metadata: &std::fs::Metadata) -> Res
     Ok(())
 }
 
+/// 能力报告：版本信息 + 当前平台支持的特殊能力。`--capabilities` 原样
+/// 输出，`--self-check` 复用其中的 `capabilities` 字段。
+fn capabilities_report() -> serde_json::Value {
+    serde_json::json!({
+        "product_version": env!("CARGO_PKG_VERSION"),
+        "capabilities": tiangong_sandbox::supported_capabilities()
+            .into_iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// 制品自检。三态退出码：0=全部通过；79=当前宿主环境无法验证（如
 /// 嵌套沙箱，非制品缺陷）；78=必需能力失败（制品不可用，必须拒绝启动）。
 fn run_self_check() -> i32 {
@@ -832,13 +871,20 @@ fn run_self_check() -> i32 {
         "product_version".into(),
         serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string()),
     );
+    // 兼容已发布 App（≤ v0.17.5）：它们要求自检报告带这两个冻结值。
     report.insert(
         "protocol_version".into(),
-        serde_json::Value::from(PROTOCOL_VERSION),
+        serde_json::Value::from(tiangong_sandbox::legacy::PROTOCOL_VERSION),
     );
     report.insert(
         "policy_schema".into(),
-        serde_json::Value::from(POLICY_SCHEMA),
+        serde_json::Value::from(tiangong_sandbox::legacy::POLICY_SCHEMA),
+    );
+    // 本 Launcher 支持的特殊能力：宿主据此在启动前比对授予的能力，
+    // 缺失时提示更新沙箱组件，而不是等到目标进程内出现难以归因的故障。
+    report.insert(
+        "capabilities".into(),
+        capabilities_report()["capabilities"].clone(),
     );
 
     let availability = tiangong_sandbox::availability();
@@ -1331,7 +1377,7 @@ fn create_directory_junction(target: &Path, link: &Path) -> Result<bool> {
         .arg(target)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = tiangong_toolkit::configure_no_window(&mut command)
+    let output = tiangong_sandbox::configure_no_window(&mut command)
         .output()
         .context("创建 Windows 自检 Junction 失败")?;
     if !output.status.success() {
@@ -1418,7 +1464,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
                 .stderr(std::process::Stdio::from(stderr));
-            tiangong_toolkit::configure_no_window(&mut command).status()
+            tiangong_sandbox::configure_no_window(&mut command).status()
         }
         (stdin, stdout, stderr) => {
             eprintln!(
@@ -1452,7 +1498,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let piped_child = tiangong_toolkit::configure_no_window(&mut piped_command).spawn();
+    let piped_child = tiangong_sandbox::configure_no_window(&mut piped_command).spawn();
     let pipe_stdio_ok = match piped_child {
         Ok(mut child) => {
             let input_written = child
@@ -1626,7 +1672,7 @@ fn run_windows_process_limit_probe() -> i32 {
     };
     let mut command = std::process::Command::new(program);
     command.args(["--self-check-network-probe", "invalid"]);
-    match tiangong_toolkit::configure_no_window(&mut command).spawn() {
+    match tiangong_sandbox::configure_no_window(&mut command).spawn() {
         Err(_) => 0,
         Ok(mut child) => {
             let _ = child.wait();
@@ -1682,7 +1728,7 @@ fn run_windows_tree_probe(raw: &str) -> i32 {
     command
         .arg("--windows-self-check-idle-probe")
         .current_dir(&request.workspace);
-    let child = match tiangong_toolkit::configure_no_window(&mut command).spawn() {
+    let child = match tiangong_sandbox::configure_no_window(&mut command).spawn() {
         Ok(child) => child,
         Err(_) => return 4,
     };
@@ -1915,7 +1961,7 @@ fn windows_host_exit_cleanup_probe(root: &Path, current_exe: &Path) -> Result<bo
     let fixture = WindowsTreeFixture::new(root, current_exe, "host-exit")?;
     let mut command = std::process::Command::new(current_exe);
     command.arg("--windows-self-check-idle-probe");
-    let mut host = tiangong_toolkit::configure_no_window(&mut command)
+    let mut host = tiangong_sandbox::configure_no_window(&mut command)
         .spawn()
         .context("启动 Windows 生命周期宿主探针失败")?;
     let host_pid = host.id();
@@ -1990,7 +2036,7 @@ fn windows_concurrent_cleanup_probe(root: &Path, current_exe: &Path) -> Result<b
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
                 .stderr(std::process::Stdio::from(stderr));
-            Ok(tiangong_toolkit::configure_no_window(&mut command).spawn()?)
+            Ok(tiangong_sandbox::configure_no_window(&mut command).spawn()?)
         })();
         match child {
             Ok(child) => workers.push((child, stdout_path, stderr_path)),
@@ -2341,8 +2387,6 @@ mod tests {
     fn request(root: &Path, program: &Path) -> LaunchRequest {
         LaunchRequest {
             grant_cache: None,
-            protocol_version: PROTOCOL_VERSION,
-            policy_schema: POLICY_SCHEMA,
             policy: tiangong_sandbox::SandboxPolicy::workspace_write(root),
             plugin_id: "command".to_string(),
             program: program.display().to_string(),
@@ -2462,7 +2506,7 @@ mod tests {
             tiangong_sandbox::SandboxMode::WorkspaceWrite
         );
         assert!(!parsed.policy.allow_network);
-        assert!(!parsed.policy.allow_browser_runtime);
+        assert!(parsed.policy.capabilities.is_empty());
         assert_eq!(
             parsed.policy.resource_limits,
             tiangong_sandbox::SandboxResourceLimits::default()
@@ -2509,10 +2553,34 @@ mod tests {
     }
 
     #[test]
+    fn launch_request_with_unknown_capability_is_rejected() {
+        // 旧 Launcher 收到新能力时必须拒绝启动，而不是静默忽略后放行。
+        let mut policy = serde_json::to_value(tiangong_sandbox::SandboxPolicy::workspace_write(
+            "/workspace",
+        ))
+        .unwrap();
+        policy["capabilities"] = serde_json::json!(["future_capability"]);
+        let value = serde_json::json!({
+            "policy": policy,
+            "program": "/bin/sh",
+            "program_root": "/bin",
+            "program_sha256": "00"
+        });
+        assert!(serde_json::from_value::<LaunchRequest>(value).is_err());
+    }
+
+    #[test]
+    fn supported_capabilities_pass_launch_validation() {
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/workspace");
+        for capability in tiangong_sandbox::supported_capabilities() {
+            policy.set_capability(capability, true);
+        }
+        validate_policy_capabilities(&policy).unwrap();
+    }
+
+    #[test]
     fn missing_target_validation_defaults_to_digest_only() {
         let value = serde_json::json!({
-            "protocol_version": PROTOCOL_VERSION,
-            "policy_schema": POLICY_SCHEMA,
             "policy": tiangong_sandbox::SandboxPolicy::workspace_write("/workspace"),
             "program": "/bin/sh",
             "program_root": "/bin",
