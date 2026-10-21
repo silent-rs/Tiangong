@@ -6,9 +6,7 @@
 
 use std::path::PathBuf;
 
-use tiangong_plugin_runtime::sidecar::{
-    PLUGIN_ID_ENV, PLUGIN_STORAGE_DATA_DIR_ENV, STORAGE_ROOT_ENV,
-};
+use crate::env::{PLUGIN_ID_ENV, PLUGIN_STORAGE_DATA_DIR_ENV, STORAGE_ROOT_ENV};
 
 /// 天工存储根：优先宿主注入的 `TIANGONG_STORAGE_ROOT`，否则 `~/.tiangong`。
 pub fn storage_root() -> PathBuf {

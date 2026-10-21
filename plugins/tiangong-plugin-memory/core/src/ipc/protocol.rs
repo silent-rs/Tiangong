@@ -9,7 +9,7 @@ use crate::types::{
     MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
     RuntimeRecallContext, TurnResult,
 };
-pub use tiangong_plugin_runtime::protocol::{
+pub use tiangong_plugin_sidecar::protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse,
 };
 

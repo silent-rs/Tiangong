@@ -71,6 +71,7 @@ members = [
     "plugins/tiangong-plugin-prompt/wasm",
     "crates/tiangong-plugin-runtime",
     "crates/tiangong-plugin-sidecar",
+    "tests/plugin-sidecar-e2e",
     "src-tauri",
     "xtask",
 ]

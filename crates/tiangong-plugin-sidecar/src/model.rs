@@ -13,7 +13,7 @@ use tiangong_llm::{ModelCapability, ModelEndpoint, ModelsConfig, ResolvedModel};
 
 /// 从环境变量读取天工存储根目录（host spawn 时注入，仅可信插件可获得）。
 pub fn storage_root() -> Result<PathBuf> {
-    let value = std::env::var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+    let value = std::env::var(crate::env::STORAGE_ROOT_ENV)
         .context("TIANGONG_STORAGE_ROOT 未注入，sidecar 无法读取模型配置")?;
     Ok(PathBuf::from(value))
 }

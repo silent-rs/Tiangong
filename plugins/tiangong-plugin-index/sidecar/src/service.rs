@@ -28,7 +28,7 @@ use tiangong_plugin_index_protocol::search::{
 use tiangong_plugin_index_protocol::{
     INDEX_PROTOCOL_VERSION, IndexScope, PLUGIN_ID, PLUGIN_VERSION, WorkspaceIndexInfo,
 };
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
@@ -648,8 +648,8 @@ fn handle_prewarm_blocking(manager: Arc<IndexManager>, root: &Path) -> Result<()
 impl tiangong_plugin_sidecar::SidecarService for IndexService {
     async fn dispatch(
         &self,
-        request: tiangong_plugin_runtime::protocol::Request,
-    ) -> tiangong_plugin_runtime::protocol::Response {
+        request: tiangong_plugin_sidecar::protocol::Request,
+    ) -> tiangong_plugin_sidecar::protocol::Response {
         IndexService::dispatch(self, request).await
     }
 }

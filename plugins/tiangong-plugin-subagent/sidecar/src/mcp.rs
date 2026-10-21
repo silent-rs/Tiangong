@@ -7,7 +7,7 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 
 use crate::service::SubagentService;
-use tiangong_plugin_runtime::protocol::{PROTOCOL_VERSION, Request};
+use tiangong_plugin_sidecar::protocol::{PROTOCOL_VERSION, Request};
 
 /// MCP 工具清单：(MCP 工具名, 描述, input_schema, 总线操作名)。
 fn mcp_tools() -> Vec<(&'static str, &'static str, Value, &'static str)> {

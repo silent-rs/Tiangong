@@ -17,9 +17,9 @@ use anyhow::{Result, anyhow};
 
 use crate::endpoint;
 use crate::identity::SidecarConfig;
+use crate::protocol::{Request, Response};
 use crate::server::{self, IpcBridge};
 use async_trait::async_trait;
-use tiangong_plugin_runtime::protocol::{Request, Response};
 
 /// 业务 sidecar 实现此 trait，提供请求分发。
 ///

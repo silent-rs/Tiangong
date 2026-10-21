@@ -7,10 +7,10 @@ pub(super) use std::collections::HashMap;
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::time::{Duration, Instant};
 
-pub(super) use tiangong_plugin_runtime::protocol::{
+pub(super) use tiangong_plugin_sidecar::SidecarService as _;
+pub(super) use tiangong_plugin_sidecar::protocol::{
     PROTOCOL_VERSION, Request, RequestInvocationContext, Response,
 };
-pub(super) use tiangong_plugin_sidecar::SidecarService as _;
 
 pub(super) use super::output::contains_marker;
 pub(super) use super::types::{

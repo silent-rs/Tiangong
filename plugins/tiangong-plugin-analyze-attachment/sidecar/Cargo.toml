@@ -12,8 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tiangong-plugin-analyze-attachment-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
-tiangong-plugin-sidecar = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true, features = ["model"] }
 tiangong-core = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-config = { workspace = true }

@@ -1,6 +1,6 @@
 //! 通用 IPC server（TCP loopback + 动态端口 + endpoint 文件 + 首帧 token 鉴权）。
 //!
-//! 帧层复用 `tiangong_plugin_runtime::protocol` 的通用类型，不重新定义。
+//! 帧层复用 `crate::protocol` 的通用类型，不重新定义。
 //! 各 sidecar 通过实现 [`SidecarService`] trait 提供请求分发。
 
 use std::collections::HashMap;
@@ -10,11 +10,11 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
-use tiangong_plugin_runtime::protocol::{
+use crate::protocol::{
     ErrorCode as PluginErrorCode, IpcEndpoint, IpcFrame, IpcResponse, Request as PluginRequest,
     RequestInvocationContext, Response as PluginResponse,
 };
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};

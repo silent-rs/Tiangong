@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tiangong_plugin_runtime::sidecar::PLUGIN_DATA_DIR_ENV;
+use tiangong_plugin_sidecar::env::PLUGIN_DATA_DIR_ENV;
 use tiangong_plugin_volcengine_protocol::VolcengineConfig;
 
 fn config_path() -> Result<PathBuf> {

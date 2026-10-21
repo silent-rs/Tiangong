@@ -14,7 +14,7 @@ use tiangong_plugin_generate_image_openai_protocol::{
     IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, ModelInfo, ModelSource, PLUGIN_ID,
     PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint, SET_CONFIG_OPERATION,
 };
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };

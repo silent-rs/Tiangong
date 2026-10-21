@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tiangong_plugin_runtime::manifest::SidecarLifecycle;
-use tiangong_plugin_runtime::protocol::PROTOCOL_VERSION;
 use tiangong_plugin_runtime::sidecar::{
     SidecarConfig, SidecarConnection, SidecarInvocationContext, StdioSidecarConnection,
 };
+use tiangong_plugin_sidecar::protocol::PROTOCOL_VERSION;
 
 fn echo_sidecar_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_test-stdio-sidecar"))

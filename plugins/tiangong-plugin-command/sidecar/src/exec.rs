@@ -204,7 +204,7 @@ fn command_env_allowlist() -> Vec<(String, String)> {
 ///
 /// 再过滤动态加载器、shell 初始化和追踪类危险 key，避免命令执行环境被劫持。
 fn collect_runtime_env() -> BTreeMap<String, String> {
-    let Ok(raw) = std::env::var(tiangong_plugin_runtime::sidecar::EXEC_ENV_JSON_ENV) else {
+    let Ok(raw) = std::env::var(tiangong_plugin_sidecar::env::EXEC_ENV_JSON_ENV) else {
         return BTreeMap::new();
     };
     let Ok(env) = serde_json::from_str::<BTreeMap<String, String>>(&raw) else {

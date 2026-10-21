@@ -15,7 +15,6 @@ path = "src/lib.rs"
 
 [dependencies]
 tiangong-plugin-computer-use-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 tiangong-types = { workspace = true }
 anyhow = { workspace = true }

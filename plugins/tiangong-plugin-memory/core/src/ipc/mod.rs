@@ -26,7 +26,7 @@ use tiangong_plugin_memory_protocol::{
     injection as plugin_injection, recall as plugin_recall, rumination as plugin_rumination,
     ui as plugin_ui,
 };
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode as PluginErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION,
     Request as PluginRequest, Response as PluginResponse, ServiceStatus,
 };
@@ -1286,21 +1286,18 @@ mod tests {
         let home = TempDir::new().expect("创建 fake home 失败");
         let root = TempDir::new().expect("创建存储根失败");
         let _env = EnvGuard::enter(home.path());
-        let previous = std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV);
+        let previous = std::env::var_os(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV);
         unsafe {
             std::env::remove_var("TIANGONG_PLUGIN_ENDPOINT");
-            std::env::set_var(
-                tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
-                root.path(),
-            );
+            std::env::set_var(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV, root.path());
         }
         let path = endpoint_path("memory").expect("endpoint 路径");
         unsafe {
             match previous {
                 Some(value) => {
-                    std::env::set_var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV, value)
+                    std::env::set_var(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV, value)
                 }
-                None => std::env::remove_var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV),
+                None => std::env::remove_var(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV),
             }
         }
         // 与 leader.json 同在存储根下，不同存储根的实例互不干扰。
@@ -1315,19 +1312,16 @@ mod tests {
             "TIANGONG_PLUGIN_ENDPOINT",
             "TIANGONG_PLUGIN_TRANSPORT",
             "TIANGONG_PLUGIN_ID",
-            tiangong_plugin_runtime::sidecar::PLUGIN_STORAGE_DATA_DIR_ENV,
-            tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
+            tiangong_plugin_sidecar::env::PLUGIN_STORAGE_DATA_DIR_ENV,
+            tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV,
         ];
         let saved: Vec<_> = keys.iter().map(std::env::var_os).collect();
         let placeholder = root.path().join("plugins/memory/runtime/endpoint.json");
         unsafe {
             std::env::set_var("TIANGONG_PLUGIN_ENDPOINT", &placeholder);
             std::env::remove_var("TIANGONG_PLUGIN_ID");
-            std::env::remove_var(tiangong_plugin_runtime::sidecar::PLUGIN_STORAGE_DATA_DIR_ENV);
-            std::env::set_var(
-                tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
-                root.path(),
-            );
+            std::env::remove_var(tiangong_plugin_sidecar::env::PLUGIN_STORAGE_DATA_DIR_ENV);
+            std::env::set_var(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV, root.path());
             std::env::set_var("TIANGONG_PLUGIN_TRANSPORT", "stdio");
         }
         let stdio = endpoint_path("memory").expect("stdio endpoint 路径");

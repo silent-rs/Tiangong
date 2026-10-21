@@ -20,10 +20,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// 官方发布者标识（内置公钥验签）。
-pub const OFFICIAL_PUBLISHER: &str = "tiangong-official";
-/// 本机用户密钥的发布者标识（创作链自动签名使用）。
-pub const LOCAL_PUBLISHER: &str = "local";
+pub use tiangong_plugin_sidecar::release::{LOCAL_PUBLISHER, OFFICIAL_PUBLISHER};
 
 const USER_SIGNING_KEY_FILE: &str = "user-signing.key";
 const TRUSTED_PUBLISHERS_FILE: &str = "trusted-publishers.json";

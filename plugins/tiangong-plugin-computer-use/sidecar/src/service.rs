@@ -15,7 +15,7 @@ use tiangong_plugin_computer_use_protocol::ops::{
 use tiangong_plugin_computer_use_protocol::{
     Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, PLUGIN_ID, PLUGIN_VERSION,
 };
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };

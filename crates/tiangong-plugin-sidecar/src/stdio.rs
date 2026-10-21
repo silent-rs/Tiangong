@@ -1,5 +1,5 @@
 //! stdio 传输 server（RFC 0017 D16 / S2）：与宿主
-//! `tiangong_plugin_runtime::sidecar::stdio::StdioSidecarConnection` 对接。
+//! `tiangong_plugin_runtime::sidecar::StdioSidecarConnection` 对接。
 //!
 //! 帧协议与 TCP 完全一致；区别仅在通道：stdin 读帧（Auth 首帧校验 token、
 //! Request 交业务 dispatch），Response/Notification 写 stdout。stdin EOF
@@ -8,20 +8,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use tiangong_plugin_runtime::protocol::{
+use crate::protocol::{
     ErrorCode as PluginErrorCode, IpcFrame, IpcResponse, Request as PluginRequest,
     RequestInvocationContext, Response as PluginResponse,
 };
-#[cfg(target_os = "macos")]
-use tiangong_plugin_runtime::sidecar::stdio::HOST_PID_ENV;
+use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[cfg(target_os = "macos")]
+use crate::env::HOST_PID_ENV;
+use crate::env::{STDIO_TOKEN_ENV, TRANSPORT_ENV, TRANSPORT_STDIO};
 use crate::singleton::SidecarService;
 
-const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
-const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
-const TRANSPORT_STDIO: &str = "stdio";
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
 
 tokio::task_local! {

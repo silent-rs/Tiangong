@@ -12,7 +12,7 @@ use tiangong_plugin_command_protocol::exec::{
     SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
 };
 use tiangong_plugin_command_protocol::{Ack, COMMAND_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
@@ -240,8 +240,8 @@ fn error_response(tool: &str, e: anyhow::Error) -> ExecResponse {
 impl tiangong_plugin_sidecar::SidecarService for CommandService {
     async fn dispatch(
         &self,
-        request: tiangong_plugin_runtime::protocol::Request,
-    ) -> tiangong_plugin_runtime::protocol::Response {
+        request: tiangong_plugin_sidecar::protocol::Request,
+    ) -> tiangong_plugin_sidecar::protocol::Response {
         CommandService::dispatch(self, request).await
     }
 }

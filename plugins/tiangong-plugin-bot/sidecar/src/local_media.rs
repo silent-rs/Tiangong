@@ -133,7 +133,7 @@ fn media_directory() -> Option<PathBuf> {
 
 /// 天工存储根：优先宿主注入的 `TIANGONG_STORAGE_ROOT`，否则 `~/.tiangong`。
 pub(crate) fn storage_root() -> Option<PathBuf> {
-    std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+    std::env::var_os(tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| home_directory().map(|home| home.join(".tiangong")))

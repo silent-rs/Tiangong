@@ -1,10 +1,10 @@
 use anyhow::Context;
-use tiangong_plugin_runtime::protocol::{
-    ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
-    ServiceStatus,
-};
 use tiangong_plugin_screenshot_input_protocol::{
     CAPTURE_OPERATION, PLUGIN_ID, PLUGIN_VERSION, SCREENSHOT_PROTOCOL_VERSION,
+};
+use tiangong_plugin_sidecar::protocol::{
+    ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
+    ServiceStatus,
 };
 
 pub struct ScreenshotService;

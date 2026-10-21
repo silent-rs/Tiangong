@@ -22,7 +22,7 @@ use tiangong_plugin_mcp_protocol::tool::{ExecuteToolResponse, ListToolsResponse}
 use tiangong_plugin_mcp_protocol::{
     MCP_PROTOCOL_VERSION, MessageResponse, PLUGIN_ID, PLUGIN_VERSION,
 };
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
@@ -697,8 +697,8 @@ struct NormalizedMcpFields {
 impl tiangong_plugin_sidecar::SidecarService for McpService {
     async fn dispatch(
         &self,
-        request: tiangong_plugin_runtime::protocol::Request,
-    ) -> tiangong_plugin_runtime::protocol::Response {
+        request: tiangong_plugin_sidecar::protocol::Request,
+    ) -> tiangong_plugin_sidecar::protocol::Response {
         McpService::dispatch(self, request).await
     }
 }

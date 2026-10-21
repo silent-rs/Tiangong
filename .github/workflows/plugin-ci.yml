@@ -80,8 +80,8 @@ jobs:
               plugins/sdk/*)
                 sdk_changed=true
                 ;;
-              crates/tiangong-plugin-sidecar/src/bin/*)
-                # 测试/诊断二进制由 App CI 覆盖，不影响插件 Sidecar 共享库。
+              tests/plugin-sidecar-e2e/*)
+                # 宿主与 sidecar 对接的端到端测试由 App CI 覆盖，不影响插件 Sidecar 共享库。
                 ;;
               crates/tiangong-plugin-sidecar/Cargo.toml|crates/tiangong-plugin-sidecar/src/*.rs)
                 sidecar_shared_changed=true

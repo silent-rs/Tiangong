@@ -14,7 +14,6 @@ path = "src/main.rs"
 tiangong-memory = { workspace = true }
 tiangong-plugin-memory-protocol = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
 # 进程创建不弹窗（Windows）
 tiangong-toolkit = { workspace = true }
 anyhow = { workspace = true }

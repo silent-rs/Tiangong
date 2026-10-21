@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use portable_pty::PtySize;
-use tiangong_plugin_runtime::protocol::{
+use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, RequestInvocationContext, Response,
 };
 

@@ -12,8 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tiangong-plugin-generate-image-openai-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
-tiangong-plugin-sidecar = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true, features = ["model"] }
 tiangong-llm = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media-archive = { workspace = true }

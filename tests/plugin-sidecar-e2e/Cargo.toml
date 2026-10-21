@@ -1,0 +1,26 @@
+[package]
+name = "tiangong-plugin-sidecar-e2e"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "宿主 Runtime 与插件 sidecar 运行库的端到端测试（含测试用宿主与 echo sidecar）"
+publish = false
+
+# 本 crate 同时依赖宿主（tiangong-plugin-runtime）与插件侧运行库
+# （tiangong-plugin-sidecar），专门承载两者对接的端到端测试，使
+# tiangong-plugin-sidecar 本身无需反向依赖宿主实现。
+
+[dependencies]
+tiangong-plugin-command-protocol = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+libc = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+hex = { workspace = true }
+serial_test = { workspace = true }

@@ -9,7 +9,6 @@ default = []
 
 [dependencies]
 tiangong-plugin-memory-protocol = { workspace = true }
-tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 tiangong-config = { workspace = true }
 tokio = { workspace = true, features = [

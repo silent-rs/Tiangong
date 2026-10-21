@@ -18,9 +18,9 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use tiangong_plugin_runtime::protocol::{HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, Response};
 use tiangong_plugin_sidecar::SidecarService;
 use tiangong_plugin_sidecar::invocation_context;
+use tiangong_plugin_sidecar::protocol::{HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, Response};
 use tiangong_plugin_sidecar::server::emit_notification;
 use tiangong_plugin_subagent_protocol::config::{AgentConfig, BackendKind, WorkspacePolicy};
 use tiangong_plugin_subagent_protocol::hooks::{HookEvent, HookEventType};
