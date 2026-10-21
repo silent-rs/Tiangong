@@ -1,19 +1,18 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
 import type { MessageItem } from "./types";
+import { toolCallIdOf } from "@/api/message";
 import { formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
   buildFinishedToolModel,
   buildRunningToolModel,
   buildToolDisplayModel,
-  writeContentFromArgs,
   type ToolDisplayModel,
 } from "./toolDisplayModel";
 import { ToolIcon } from "./ToolIcon";
-import { TerminalCard } from "./toolViews/TerminalCard";
-import { NumberedFileCard } from "./toolViews/NumberedFileCard";
-import { InOutCard, WritePreviewCard } from "./toolViews/InOutCard";
+import { ToolCallCard } from "./toolViews/ToolCallCard";
+import { ToolViewHost } from "./toolViews/ToolViewHost";
 
 /** 运行中工具调用（结果未到达）。 */
 export interface RunningToolCall {
@@ -35,37 +34,42 @@ interface ToolGroupProps {
   runningCalls?: RunningToolCall[];
 }
 
-/** 变体的展开体：terminal → 终端卡；读文件 → 行号内容块；写文件 → 内容预览；其余 → IN/OUT。 */
-function ToolCardBody({ model, args }: { model: ToolDisplayModel; args?: unknown }) {
-  if (model.variant === "terminal" && model.terminal) {
-    return <TerminalCard terminal={model.terminal} />;
-  }
-  if (model.variant === "file-read" && model.outputText) {
-    return <NumberedFileCard content={model.outputText} title={model.filePath} />;
-  }
-  if (model.variant === "file-write") {
-    return (
-      <WritePreviewCard
-        path={model.filePath}
-        content={writeContentFromArgs(args)}
-        outputText={model.outputText}
-      />
-    );
-  }
+/**
+ * 展开体：插件声明了工具视图时由插件渲染调用与结果，否则文本默认显示
+ * （参数 + 完成后的结果）。
+ */
+function ToolCardBody({
+  model,
+  callId,
+  args,
+}: {
+  model: ToolDisplayModel;
+  callId: string;
+  args?: unknown;
+}) {
   return (
-    <InOutCard
-      argsText={model.argsText}
-      outputText={model.outputText}
-      isError={model.state === "error"}
+    <ToolViewHost
+      data={{
+        tool_call_id: callId,
+        tool_name: model.toolName,
+        arguments: args ?? null,
+        status: model.state,
+        output: model.outputText,
+        duration_ms: model.durationMs,
+      }}
+      fallback={
+        <ToolCallCard
+          argsText={model.argsText}
+          outputText={model.outputText}
+          isError={model.state === "error"}
+        />
+      }
     />
   );
 }
 
-/** 该调用是否有详情卡片可展开；执行中的调用只要有参数就能展开查看。 */
+/** 该调用是否有内容可展开：执行中有调用参数即可展开查看。 */
 function isExpandable(model: ToolDisplayModel): boolean {
-  if (model.state === "running") return !!model.terminal?.command || model.argsText !== null;
-  if (model.variant === "terminal") return !!model.terminal?.command || !!model.terminal?.stdout || !!model.terminal?.stderr;
-  if (model.variant === "file-read") return !!model.outputText;
   return model.argsText !== null || model.outputText !== null;
 }
 
@@ -74,6 +78,7 @@ function isExpandable(model: ToolDisplayModel): boolean {
  * 失败行摘要为错误首行（错误色）；运行行带扫光动画，展开只显示调用参数。
  */
 function ToolRunRow({
+  callId,
   model,
   args,
   expanded = false,
@@ -81,6 +86,8 @@ function ToolRunRow({
   startedAtMs,
   pendingCommit = false,
 }: {
+  /** 工具调用 ID（交给工具视图）；旧会话无 ID 时用消息 ID。 */
+  callId: string;
   model: ToolDisplayModel;
   args?: unknown;
   expanded?: boolean;
@@ -123,6 +130,7 @@ function ToolRunRow({
         )}
         <ToolIcon
           toolName={model.toolName}
+          args={args}
           className={`w-3 h-3 shrink-0 ${isError ? "text-destructive" : ""}`}
         />
         <span className="font-medium shrink-0">{model.title}</span>
@@ -153,7 +161,7 @@ function ToolRunRow({
       </button>
       {open && (
         <div className="ml-5 mt-0.5 mb-1">
-          <ToolCardBody model={model} args={args} />
+          <ToolCardBody model={model} callId={callId} args={args} />
         </div>
       )}
     </div>
@@ -169,6 +177,7 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
     return (
       <ToolRunRow
         key={tool.id}
+        callId={toolCallIdOf(tool) ?? tool.id}
         model={buildToolDisplayModel(tool, args)}
         args={args}
         expanded={expansion.isExpanded(tool.id)}
@@ -191,6 +200,7 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       {runningCalls?.map((call) => (
         <div key={`running-${call.id}`} className="ml-4">
           <ToolRunRow
+            callId={call.id}
             model={
               call.finished
                 ? buildFinishedToolModel(call.name, call.arguments, call.finished)

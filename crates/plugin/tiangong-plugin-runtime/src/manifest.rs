@@ -188,6 +188,12 @@ pub struct UiContributionDecl {
     /// 替换该消息的默认显示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<MessageItemRender>,
+    /// 接管展示的工具（仅 `session.message-item` 且 `render: "replace"`）：
+    /// 本插件的工具原名，或 `工具名:参数=取值` 特指某类调用（如
+    /// `file_read:action=list`）。界面展开这些工具调用时挂载本贡献渲染
+    /// 调用与结果；未声明的工具以文本默认显示。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
 }
 
 /// 单项模型能力需求。
@@ -612,6 +618,28 @@ impl PluginManifest {
                     decl.slot
                 );
             }
+            if !decl.tools.is_empty() {
+                if decl.slot != MESSAGE_ITEM_SLOT || decl.render != Some(MessageItemRender::Replace)
+                {
+                    bail!(
+                        "插件 {} 贡献 {} 的 tools 仅对 render 为 replace 的 {MESSAGE_ITEM_SLOT} 生效",
+                        self.id,
+                        decl.id
+                    );
+                }
+                if let Some(key) = decl.tools.iter().find(|key| {
+                    let key = key.trim();
+                    key.is_empty()
+                        || key == crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
+                        || crate::tool_icons::parse_tool_key(key).is_none()
+                }) {
+                    bail!(
+                        "插件 {} 贡献 {} 的 tools 项 {key} 不合法（应为工具名或 工具名:参数=取值）",
+                        self.id,
+                        decl.id
+                    );
+                }
+            }
             if decl.instance_resources {
                 if decl.slot != OPEN_MODE_SLOT {
                     bail!(
@@ -792,6 +820,11 @@ impl PluginManifest {
                 sandbox: decl.sandbox.unwrap_or(default_sandbox),
                 instance_resources: decl.instance_resources,
                 render: decl.render.unwrap_or_default(),
+                tools: decl
+                    .tools
+                    .iter()
+                    .map(|tool| tool.trim().to_string())
+                    .collect(),
             })
             .collect()
     }
@@ -1115,6 +1148,36 @@ mod tests {
             .unwrap();
         assert_eq!(contribution.render, MessageItemRender::Replace);
     }
+    #[test]
+    fn v2_工具视图_tools_仅对_replace_message_item_生效() {
+        let item = |extra: &str| {
+            v2_json().replace(
+                r#""slot": "settings.plugin-page","#,
+                &format!(r#""slot": "session.message-item"{extra},"#),
+            )
+        };
+        let manifest = parse(&item(
+            r#", "render": "replace", "tools": ["board_list", "board_edit:action=move"]"#,
+        ))
+        .unwrap();
+        let view = manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|contribution| contribution.id == "board-settings")
+            .unwrap();
+        assert_eq!(view.tools, vec!["board_list", "board_edit:action=move"]);
+
+        let not_replace = parse(&item(r#", "tools": ["board_list"]"#)).unwrap_err();
+        assert!(not_replace.to_string().contains("tools"));
+        for bad in [r#""*""#, r#""""#, r#""board_edit:action""#] {
+            let error = parse(&item(&format!(
+                r#", "render": "replace", "tools": [{bad}]"#
+            )))
+            .unwrap_err();
+            assert!(error.to_string().contains("不合法"), "{bad}: {error}");
+        }
+    }
+
     #[test]
     fn v2_未声明_instance_resources_缺省为假() {
         let manifest = parse(&v2_json()).unwrap();

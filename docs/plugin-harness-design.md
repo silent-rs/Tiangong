@@ -404,6 +404,14 @@ Shadow 插件无需复制。后续可在这些 token 之上提供前端组件库
 - **贡献声明**：`{ "slot": "session.message-item", "id": "<view>", "entry": "...", "render": "replace" }`。`render` 仅对 `session.message-item` 合法；`replace` 贡献不再作为附加区挂到每条消息。
 - **渲染**：宿主按 `plugin` + `view` 找到 `replace` 贡献后挂载，消息上下文额外带 `message.render = { view, data }`；插件接管整条消息（附件从 `message.attachments` 读取并自行渲染），宿主只提供容器与统一的上下留白。插件缺失、停用或未声明该视图时，按角色默认渲染（降级可读），附件按普通文件显示。
 
+#### 6.5.2 工具视图（`tools`）
+
+工具行由宿主通用展示为「工具名 + 参数摘要」，展开区由处理该工具的插件提供：
+
+- **贡献声明**：`session.message-item` 的 `replace` 贡献可声明 `tools: ["<工具原名>" | "<工具原名>:<参数>=<取值>"]`，键格式与 `tool_icons` 一致；特指键优先于通用键。`tools` 仅对 `render: "replace"` 的 `session.message-item` 合法，宿主查询时换成对外名 `{插件id}__{工具名}`。
+- **渲染**：展开工具行时宿主挂载匹配的视图，消息上下文 `message.id` 为 tool_call_id，`message.render.data` 为调用原始数据 `{tool_call_id, tool_name, arguments, status, output, duration_ms}`；状态从运行中到完成时推送新上下文。宿主不定义标题、摘要或详情等展示类型，也不改 Core 与消息结构。
+- **降级**：未声明视图、插件缺失或停用时以文本默认显示（参数 + 结果）。
+
 ### 6.6 拓展区扩展与「能力矩阵（App Matrix）」
 
 拓展区即现有右侧 `workspace panel`（`TabKind = 'browser' | 'terminal'`）。引入 `extension.tab` 后，所有「面板类」能力（浏览器、终端、Agent Team、三方 App）统一为**App**，拓展区成为承载 App 的容器。

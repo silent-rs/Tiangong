@@ -8,7 +8,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { MessageGroup, MessageItem, SystemMessageMeta } from "./types";
-import { baseToolName } from "./toolDisplayModel";
+
 
 /** 格式化消息时间戳：当天只显示 `HH:mm`；非当天加日期——
  *  同年 `MM-DD HH:mm`，跨年 `YYYY-MM-DD HH:mm`。 */
@@ -264,7 +264,7 @@ export function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
   }
 
   // recall_memory
-  if (baseToolName(toolName) === "recall_memory" || content.startsWith("[记忆检索]")) {
+  if (content.startsWith("[记忆检索]")) {
     const countMatch = content.match(/命中 (\d+) 条/);
     const count = countMatch ? countMatch[1] : "";
     const noHit = content.includes("无相关记忆");

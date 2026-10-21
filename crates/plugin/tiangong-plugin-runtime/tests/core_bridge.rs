@@ -614,11 +614,13 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
     // 声明图标的插件：含合法资源、插件默认图标与不合法条目。
     let dir = root.path().join("plugins").join("icon-rich");
     std::fs::create_dir_all(dir.join("icons")).unwrap();
-    std::fs::write(
-        dir.join("icons/speak.svg"),
-        "<svg xmlns='http://www.w3.org/2000/svg'/>",
-    )
-    .unwrap();
+    for icon in ["speak", "folder", "read"] {
+        std::fs::write(
+            dir.join(format!("icons/{icon}.svg")),
+            "<svg xmlns='http://www.w3.org/2000/svg'/>",
+        )
+        .unwrap();
+    }
     std::fs::write(
         dir.join("plugin.json"),
         r#"{"schema_version":2,"id":"icon-rich","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true},
@@ -626,9 +628,11 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
               {"name":"speak","description":"测试","input_schema":{"type":"object"}},
               {"name":"read_file","description":"测试","input_schema":{"type":"object"}},
               {"name":"run_shell","description":"测试","input_schema":{"type":"object"}},
-              {"name":"other_tool","description":"测试","input_schema":{"type":"object"}}
+              {"name":"other_tool","description":"测试","input_schema":{"type":"object"}},
+              {"name":"file_read","description":"测试","input_schema":{"type":"object"}}
             ],
-            "tool_icons":{"speak":"icons/speak.svg","read_file":"../escape.svg","*":"flame"}}"#,
+            "tool_icons":{"speak":"icons/speak.svg","read_file":"../escape.svg","*":"flame",
+              "file_read":"icons/read.svg","file_read:action=list":"icons/folder.svg"}}"#,
     )
     .unwrap();
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
@@ -662,6 +666,23 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
         "同名工具各自按插件解析"
     );
 
+    let file_read = &table["icon-rich__file_read"];
+    assert_eq!(file_read.icon, "icons/read.svg", "通用图标");
+    assert_eq!(file_read.variants["action"]["list"], "icons/folder.svg");
+    assert_eq!(
+        file_read.icon_for_args(&serde_json::json!({"action": "list"})),
+        "icons/folder.svg",
+        "特指图标"
+    );
+    assert!(
+        !table.contains_key("file_read:action=list"),
+        "特指键不单独成为工具"
+    );
+    assert!(
+        tiangong_plugin_runtime::registry::read_plugin_tool_icon("icon-rich", "icons/folder.svg")
+            .is_ok(),
+        "特指声明的资源图标可读取"
+    );
     let (bytes, mime) =
         tiangong_plugin_runtime::registry::read_plugin_tool_icon("icon-rich", "icons/speak.svg")
             .unwrap();

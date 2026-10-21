@@ -484,6 +484,11 @@ export interface SlotContributionEntry {
   source: 'wasm' | 'manifest';
   /** session.message-item 的渲染方式：缺省附加区；replace 按消息渲染声明替换默认显示。 */
   render?: 'append' | 'replace';
+  /**
+   * 工具视图（replace 贡献）：接管展示的工具调用，键为工具对外名，特指键为
+   * `对外名:参数=取值`。未声明的工具调用以文本默认显示。
+   */
+  tools?: string[];
 }
 
 export interface SessionInputAttachmentPayload {
@@ -514,8 +519,11 @@ export interface SessionInputOverlayPayload {
 
 /** 工具图标查询表条目：图标名或插件内资源路径（资源图标带所属插件）。 */
 export interface ToolIconEntry {
+  /** 通用图标；只声明了特指图标且无通用图标时为空串。 */
   icon: string;
   plugin_id?: string | null;
+  /** 特指图标：参数名 → 参数取值 → 图标（plugin.json 键 `工具名:参数=取值`）。 */
+  variants?: Record<string, Record<string, string>> | null;
 }
 
 /** 插件入口资源响应（字节数组 + MIME）。 */

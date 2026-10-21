@@ -192,13 +192,8 @@ fn tool_icon(name: &str) -> &'static str {
         _ => name,
     };
     match name {
-        "read_file" => "📄",
-        "write_file" | "replace_in_file" => "✏️",
-        "list_dir" => "📂",
-        "tree_dir" => "🌳",
         "search_code" => "🔍",
         "run_command" | "run_shell" => "⚡",
-        "apply_patch" => "🩹",
         "generate_image" => "🎨",
         "text_to_speech" => "🔊",
         "speech_to_text" => "🎤",

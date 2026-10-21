@@ -6,6 +6,11 @@
 //! 3. runtime 内置表（按工具原名，短期在此维护，插件普遍声明后逐步收缩）；
 //! 4. 都没有时不给出，前端使用默认图标（工具交叉）。
 //!
+//! 通用 + 特指：键 `工具名` 为该工具的通用图标；键 `工具名:参数=取值`
+//! （如 `file_read:action=list`）为调用参数取该值时的特指图标，前端按调用
+//! 参数选用，参数未到或取值无特指声明时使用通用图标。值始终为字符串，不
+//! 识别特指键的旧版宿主只是多出一个永不命中的条目。
+//!
 //! 图标值为宿主内置图标名（小写字母、数字与 `-`），或插件目录内 png/svg/jpeg
 //! 相对路径。声明不合法时只跳过该条并告警，不影响插件装载与运行。
 
@@ -17,6 +22,12 @@ use tiangong_core::tools::extension::namespaced_tool_name;
 
 /// `tool_icons` 中表示「本插件其余工具」的键。
 pub const PLUGIN_DEFAULT_ICON_KEY: &str = "*";
+
+/// 特指键中工具名与参数条件的分隔符（`工具名:参数=取值`）。
+const ARG_KEY_SEPARATOR: char = ':';
+
+/// 特指键中参数名的长度上限。
+const MAX_ARG_NAME_LEN: usize = 64;
 
 /// 图标资源扩展名白名单（与 UI 贡献图标一致）。
 const ICON_RESOURCE_EXTENSIONS: &[&str] = &["png", "svg", "jpg", "jpeg"];
@@ -30,14 +41,6 @@ const BUILTIN_TOOL_ICONS: &[(&str, &str)] = &[
     ("terminal_open", "square-terminal"),
     ("terminal_close", "square-terminal"),
     ("terminal_status", "square-terminal"),
-    // 文件
-    ("read_file", "file-text"),
-    ("list_dir", "folder-tree"),
-    ("tree_dir", "folder-tree"),
-    ("write_file", "file-pen-line"),
-    ("replace_in_file", "file-pen-line"),
-    ("apply_patch", "file-pen-line"),
-    ("current_time", "clock"),
     // 检索
     ("index_search", "search"),
     ("search_code", "search"),
@@ -120,11 +123,54 @@ const BUILTIN_TOOL_ICONS: &[(&str, &str)] = &[
 /// 查询表中的一项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolIcon {
-    /// 图标名，或插件目录内的图标资源相对路径。
+    /// 通用图标：图标名，或插件目录内的图标资源相对路径。只声明了特指
+    /// 图标、无通用图标可用时为空串（前端用默认图标）。
     pub icon: String,
     /// 图标来自的插件；资源图标据此读取文件，内置表条目为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
+    /// 特指图标：参数名 → 参数取值 → 图标（均来自 `plugin_id` 插件的声明）。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub variants: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl ToolIcon {
+    fn fixed(icon: impl Into<String>, plugin_id: Option<&str>) -> Self {
+        Self {
+            icon: icon.into(),
+            plugin_id: plugin_id.map(str::to_string),
+            variants: BTreeMap::new(),
+        }
+    }
+
+    /// 按调用参数选图标：命中特指声明时用特指图标，否则用通用图标。
+    pub fn icon_for_args(&self, args: &serde_json::Value) -> &str {
+        self.variants
+            .iter()
+            .find_map(|(arg, values)| {
+                args.get(arg)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| values.get(value))
+            })
+            .map_or(self.icon.as_str(), String::as_str)
+    }
+}
+
+/// 解析工具键（`tool_icons` 的键与工具视图贡献的 `tools` 项共用）：通用键
+/// 返回 `(工具名, None)`，特指键返回 `(工具名, Some((参数名, 取值)))`；
+/// 特指键格式不合法时返回 None。
+pub fn parse_tool_key(key: &str) -> Option<(&str, Option<(&str, &str)>)> {
+    let Some((tool, condition)) = key.split_once(ARG_KEY_SEPARATOR) else {
+        return Some((key, None));
+    };
+    let (arg, value) = condition.split_once('=')?;
+    let valid_arg = !arg.is_empty()
+        && arg.len() <= MAX_ARG_NAME_LEN
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    (!tool.is_empty() && tool != PLUGIN_DEFAULT_ICON_KEY && valid_arg && !value.is_empty())
+        .then_some((tool, Some((arg, value))))
 }
 
 /// 参与建表的插件信息：插件 id、`tool_icons` 声明与插件声明的工具原名。
@@ -188,24 +234,59 @@ fn declared_icon(
     }
 }
 
-/// 解析单个插件工具的图标（插件声明优先，其次内置表）。
+/// 插件为该工具声明的合法特指图标：参数名 → 取值 → 图标。
+fn declared_variants(
+    plugin_id: &str,
+    declared: Option<&BTreeMap<String, String>>,
+    tool: &str,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut variants: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for key in declared.into_iter().flat_map(BTreeMap::keys) {
+        if !key.contains(ARG_KEY_SEPARATOR) {
+            continue;
+        }
+        let Some((name, Some((arg, value)))) = parse_tool_key(key) else {
+            tracing::warn!(plugin = %plugin_id, key = %key, "插件声明的特指工具图标键不合法，已忽略");
+            continue;
+        };
+        if name != tool {
+            continue;
+        }
+        if let Some(icon) = declared_icon(plugin_id, declared, key) {
+            variants
+                .entry(arg.to_string())
+                .or_default()
+                .insert(value.to_string(), icon);
+        }
+    }
+    variants
+}
+
+/// 解析单个插件工具的图标（插件声明优先，其次内置表）；特指图标只来自插件声明。
 pub fn resolve_plugin_tool_icon(
     plugin_id: &str,
     declared: Option<&BTreeMap<String, String>>,
     tool: &str,
 ) -> Option<ToolIcon> {
-    if let Some(icon) = declared_icon(plugin_id, declared, tool)
+    let variants = declared_variants(plugin_id, declared, tool);
+    let mut icon = if let Some(icon) = declared_icon(plugin_id, declared, tool)
         .or_else(|| declared_icon(plugin_id, declared, PLUGIN_DEFAULT_ICON_KEY))
     {
-        return Some(ToolIcon {
-            icon,
-            plugin_id: Some(plugin_id.to_string()),
-        });
+        ToolIcon::fixed(icon, Some(plugin_id))
+    } else if let Some(icon) = builtin_tool_icon(tool) {
+        ToolIcon::fixed(icon, None)
+    } else if !variants.is_empty() {
+        ToolIcon::fixed("", None)
+    } else {
+        return None;
+    };
+    if !variants.is_empty() {
+        // 特指图标均为本插件声明：资源图标按本插件读取（内置表通用图标是
+        // 图标名，不受 plugin_id 影响）。
+        icon.plugin_id = Some(plugin_id.to_string());
+        icon.variants = variants;
     }
-    builtin_tool_icon(tool).map(|icon| ToolIcon {
-        icon: icon.to_string(),
-        plugin_id: None,
-    })
+    Some(icon)
 }
 
 /// 建立工具图标查询表：键为工具对外名 `{插件id}__{工具名}` 与原名（旧会话历史）。
@@ -217,15 +298,7 @@ pub fn build_tool_icon_table<'a>(
 ) -> BTreeMap<String, ToolIcon> {
     let mut table: BTreeMap<String, ToolIcon> = BUILTIN_TOOL_ICONS
         .iter()
-        .map(|(name, icon)| {
-            (
-                (*name).to_string(),
-                ToolIcon {
-                    icon: (*icon).to_string(),
-                    plugin_id: None,
-                },
-            )
-        })
+        .map(|(name, icon)| ((*name).to_string(), ToolIcon::fixed(*icon, None)))
         .collect();
     for plugin in plugins {
         for tool in &plugin.tools {
@@ -242,7 +315,8 @@ pub fn build_tool_icon_table<'a>(
     table
 }
 
-/// 资源图标是否确为该插件 `tool_icons` 中声明的值（读取文件前的校验）。
+/// 资源图标是否确为该插件 `tool_icons` 中声明的值（读取文件前的校验；
+/// 通用与特指声明均覆盖）。
 pub fn declares_icon_resource(declared: Option<&BTreeMap<String, String>>, icon: &str) -> bool {
     is_icon_resource(icon)
         && is_valid_icon(icon)
@@ -277,8 +351,8 @@ mod tests {
                 .icon,
             "flame"
         );
-        let builtin = resolve_plugin_tool_icon("fs", None, "read_file").unwrap();
-        assert_eq!(builtin.icon, "file-text");
+        let builtin = resolve_plugin_tool_icon("terminal", None, "run_shell").unwrap();
+        assert_eq!(builtin.icon, "square-terminal");
         assert_eq!(builtin.plugin_id, None);
         assert_eq!(resolve_plugin_tool_icon("demo", None, "unknown_tool"), None);
     }
@@ -358,11 +432,126 @@ mod tests {
     }
 
     #[test]
+    fn 解析通用键与特指键() {
+        assert_eq!(parse_tool_key("file_read"), Some(("file_read", None)));
+        assert_eq!(parse_tool_key("*"), Some(("*", None)));
+        assert_eq!(
+            parse_tool_key("file_read:action=list"),
+            Some(("file_read", Some(("action", "list"))))
+        );
+        assert_eq!(
+            parse_tool_key("t:mode=a=b"),
+            Some(("t", Some(("mode", "a=b")))),
+            "取值可含 ="
+        );
+        for bad in [
+            "file_read:action",
+            "file_read:=list",
+            "file_read:action=",
+            ":action=list",
+            "*:action=list",
+            "file_read:a b=list",
+        ] {
+            assert_eq!(parse_tool_key(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn 特指图标按参数取值选用_未命中用通用图标() {
+        let icons = declared(&[
+            ("file_read", "assets/read.svg"),
+            ("file_read:action=list", "assets/folder.svg"),
+            ("file_read:action=tree", "assets/folder.svg"),
+            ("file_read:action=image", "assets/image.svg"),
+            ("file_write", "assets/write.svg"),
+        ]);
+        let icon = resolve_plugin_tool_icon("fs", Some(&icons), "file_read").unwrap();
+        assert_eq!(icon.icon, "assets/read.svg");
+        assert_eq!(icon.plugin_id.as_deref(), Some("fs"));
+        assert_eq!(icon.variants["action"].len(), 3);
+        assert_eq!(
+            icon.icon_for_args(&serde_json::json!({"action": "tree"})),
+            "assets/folder.svg"
+        );
+        assert_eq!(
+            icon.icon_for_args(&serde_json::json!({"action": "image"})),
+            "assets/image.svg"
+        );
+        assert_eq!(
+            icon.icon_for_args(&serde_json::json!({"action": "read"})),
+            "assets/read.svg",
+            "无特指声明的取值用通用图标"
+        );
+        assert_eq!(
+            icon.icon_for_args(&serde_json::Value::Null),
+            "assets/read.svg",
+            "参数未到时用通用图标"
+        );
+        let write = resolve_plugin_tool_icon("fs", Some(&icons), "file_write").unwrap();
+        assert!(write.variants.is_empty(), "特指只作用于同名工具");
+        let json = serde_json::to_value(&icon).unwrap();
+        assert_eq!(json["variants"]["action"]["list"], "assets/folder.svg");
+        assert!(
+            serde_json::to_value(&write)
+                .unwrap()
+                .get("variants")
+                .is_none(),
+            "无特指图标时不输出 variants，保持旧前端兼容"
+        );
+    }
+
+    #[test]
+    fn 只有特指图标时通用图标回落插件默认与内置表() {
+        let icons = declared(&[
+            ("file_read:action=image", "assets/image.svg"),
+            ("*", "flame"),
+        ]);
+        let icon = resolve_plugin_tool_icon("fs", Some(&icons), "file_read").unwrap();
+        assert_eq!(icon.icon, "flame");
+        assert_eq!(icon.variants["action"]["image"], "assets/image.svg");
+
+        let icons = declared(&[("run_shell:mode=image", "assets/image.svg")]);
+        let icon = resolve_plugin_tool_icon("terminal", Some(&icons), "run_shell").unwrap();
+        assert_eq!(icon.icon, "square-terminal", "回落内置表");
+        assert_eq!(
+            icon.plugin_id.as_deref(),
+            Some("terminal"),
+            "特指资源按本插件读取"
+        );
+
+        let icons = declared(&[("speak:voice=a", "icons/a.svg")]);
+        let icon = resolve_plugin_tool_icon("p", Some(&icons), "speak").unwrap();
+        assert_eq!(icon.icon, "", "无通用图标时为空串，由前端用默认图标");
+        assert_eq!(
+            icon.icon_for_args(&serde_json::json!({"voice": "a"})),
+            "icons/a.svg"
+        );
+    }
+
+    #[test]
+    fn 不合法的特指声明被忽略() {
+        let icons = declared(&[
+            ("file_read", "assets/read.svg"),
+            ("file_read:action=list", "../folder.svg"),
+            ("file_read:action", "assets/folder.svg"),
+            ("file_read:action=image", "assets/image.svg"),
+        ]);
+        let icon = resolve_plugin_tool_icon("fs", Some(&icons), "file_read").unwrap();
+        assert_eq!(icon.variants["action"].len(), 1);
+        assert_eq!(icon.variants["action"]["image"], "assets/image.svg");
+    }
+
+    #[test]
     fn 只能读取插件声明过的资源图标() {
         let icons = declared(&[("speak", "icons/speak.svg"), ("*", "flame")]);
         assert!(declares_icon_resource(Some(&icons), "icons/speak.svg"));
         assert!(!declares_icon_resource(Some(&icons), "icons/other.svg"));
         assert!(!declares_icon_resource(Some(&icons), "flame"));
         assert!(!declares_icon_resource(None, "icons/speak.svg"));
+        let icons = declared(&[("file_read:action=list", "assets/folder.svg")]);
+        assert!(
+            declares_icon_resource(Some(&icons), "assets/folder.svg"),
+            "特指声明的资源可读取"
+        );
     }
 }
