@@ -854,6 +854,24 @@ async fn terminal_status_概要详情与跨会话拒绝() {
         detail_payload.get("recent_output").is_some(),
         "详情应含最近输出字段: {detail_payload}"
     );
+    // 进程树（issue #677）：存活终端至少含登录 shell 自身。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let shell_pid = service
+            .sessions
+            .lock()
+            .unwrap()
+            .get("status-idle")
+            .and_then(|session| session.shell_pid)
+            .expect("应有登录 shell 进程号");
+        let processes = detail_payload["processes"].as_array().expect("应有进程树");
+        assert!(
+            processes
+                .iter()
+                .any(|process| process["pid"].as_u64() == Some(u64::from(shell_pid))),
+            "进程树应含登录 shell: {detail_payload}"
+        );
+    }
 
     // 跨会话与不存在终端：明确失败，与其他工具的归属语义一致。
     let denied = outcome_of(
