@@ -61,8 +61,8 @@ pub(super) fn exempt_authorized_user_credentials(
     policy: &mut tiangong_sandbox::SandboxPolicy,
     access: crate::host_policy::UserCredentialReadAccess,
 ) {
-    // 网络证书验证由 Launcher 根据 allow_network 独立开放，不授予凭据访问。
-    policy.allow_credential_services = access.ssh || access.github_cli;
+    // 凭据服务能力由 host_policy 与凭据目录读取一并授予（见
+    // HostExecutionPolicy::capabilities），这里只移除对应目录的禁读。
     let Some(home) = crate::interpreter_env::user_home_dir() else {
         return;
     };
@@ -304,20 +304,16 @@ mod sensitive_access_tests {
 
     #[test]
     fn git_workflow_credentials_are_readable_but_remain_write_protected() {
-        for network in [false, true] {
-            for ssh in [false, true] {
-                for github_cli in [false, true] {
-                    let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
-                    policy.allow_network = network;
-                    exempt_authorized_user_credentials(
-                        &mut policy,
-                        crate::host_policy::UserCredentialReadAccess { ssh, github_cli },
-                    );
-                    assert_eq!(policy.allow_credential_services, ssh || github_cli);
-                    assert_eq!(policy.allow_network, network);
-                }
-            }
-        }
+        // 目录读取豁免不再隐式改动能力集合：能力只由 host_policy 授予。
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        exempt_authorized_user_credentials(
+            &mut policy,
+            crate::host_policy::UserCredentialReadAccess {
+                ssh: true,
+                github_cli: true,
+            },
+        );
+        assert!(policy.capabilities.is_empty());
 
         let Some(home) = crate::interpreter_env::user_home_dir() else {
             return;
@@ -343,7 +339,6 @@ mod sensitive_access_tests {
         assert!(policy.denied_read_paths.contains(&aws));
         assert!(policy.protected_paths.contains(&ssh));
         assert!(policy.protected_paths.contains(&github_cli));
-        assert!(policy.allow_credential_services);
     }
 
     #[test]

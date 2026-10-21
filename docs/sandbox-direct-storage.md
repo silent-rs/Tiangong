@@ -37,6 +37,7 @@ tiangong-sandbox run \
 - fd3 / Windows 信封协议继续可用。
 - 新增的目标校验字段缺省为通用摘要校验；旧 `interpreter` 字段继续兼容。
 - 策略中新增默认值，旧策略缺少额外可写、保护/禁读、网络和资源限制字段时仍可解析。
+- 策略 Schema 3 起特殊能力改为 `capabilities` 集合，取代 Schema 2 的 `allow_credential_services` / `allow_audio_input` / `allow_browser_runtime` 布尔字段；App 与 Launcher 需配套发版。
 
 ## 策略示例
 
@@ -48,6 +49,7 @@ tiangong-sandbox run \
   "protected_paths": ["/absolute/workspace/protected"],
   "denied_read_paths": ["/home/user/.ssh"],
   "allow_network": false,
+  "capabilities": [],
   "resource_limits": {
     "max_cpu_time_seconds": 300,
     "max_memory_bytes": 2147483648,

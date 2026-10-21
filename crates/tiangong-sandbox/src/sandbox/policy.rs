@@ -3,6 +3,7 @@
 //! command 工具的宿主调用上下文最终归一为 [`SandboxPolicy`]；插件载荷和
 //! manifest 不参与安全策略决策。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// 沙箱模式。
@@ -15,6 +16,65 @@ pub enum SandboxMode {
     WorkspaceWrite,
     /// 仅供宿主显式特殊路径表示无沙箱；当前 Launcher 始终拒绝该模式。
     FullAccess,
+}
+
+/// 沙箱特殊能力（Launcher 内置的封闭集合）。
+///
+/// 每项能力对应的平台规则只由签名的 Launcher 维护，宿主只决定授予与否。
+/// 未知值在反序列化时即失败，Launcher 因此拒绝启动（fail-closed），
+/// 不会静默忽略新能力。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxCapability {
+    /// 宿主系统凭据服务（macOS Keychain、OpenDirectory）。Git/SSH/GitHub CLI
+    /// 依赖它解析用户身份与读取凭据；证书验证由 `allow_network` 独立授权。
+    CredentialServices,
+    /// 系统音频输入服务（macOS CoreAudio HAL 与麦克风数据）。麦克风隐私
+    /// 授权（TCC）仍由系统按宿主 App 独立把关。
+    AudioInput,
+    /// 运行无头浏览器（Chrome/Chromium）：macOS 上放行 IOKit 与
+    /// `org.chromium.*` 的 mach 注册/查询（MachPortRendezvous）。
+    BrowserRuntime,
+}
+
+impl SandboxCapability {
+    /// 全部已定义能力。
+    pub const ALL: [Self; 3] = [
+        Self::CredentialServices,
+        Self::AudioInput,
+        Self::BrowserRuntime,
+    ];
+
+    /// 序列化名（与 JSON 表示一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CredentialServices => "credential_services",
+            Self::AudioInput => "audio_input",
+            Self::BrowserRuntime => "browser_runtime",
+        }
+    }
+
+    /// 当前平台的 Launcher 是否实现了该能力。
+    ///
+    /// macOS Seatbelt 为每项能力编译精确的系统服务与设备规则。bubblewrap
+    /// 与 AppContainer 不按 mach 服务等维度隔离，这些能力在其上本就没有
+    /// 额外限制需要解除，视为支持（授予与否不改变生成的规则）。新增能力时
+    /// 必须逐平台显式判定，不得默认放行。
+    pub fn supported_on_current_platform(self) -> bool {
+        match self {
+            Self::CredentialServices | Self::AudioInput | Self::BrowserRuntime => true,
+        }
+    }
+}
+
+/// 当前平台 Launcher 支持的能力集合（自检上报与启动校验共用）。
+pub fn supported_capabilities() -> BTreeSet<SandboxCapability> {
+    SandboxCapability::ALL
+        .into_iter()
+        .filter(|capability| capability.supported_on_current_platform())
+        .collect()
 }
 
 /// 平台无关的沙箱策略（可序列化，经 Launcher 协议传输）。
@@ -35,21 +95,11 @@ pub struct SandboxPolicy {
     /// 是否放行出网（默认 false；放行走宿主代理体系，见 RFC D16）。
     #[serde(default)]
     pub allow_network: bool,
-    /// 是否允许访问宿主系统凭据服务（macOS Keychain、OpenDirectory）。
-    /// 证书验证由 allow_network 独立授权。Git/SSH/GitHub CLI 依赖凭据服务解析
-    /// 用户身份与读取凭据；默认 false，仅宿主显式授权的策略开放。
+    /// 宿主授予的特殊能力（默认为空；仅宿主按已验证插件身份授予）。
+    /// 含未知能力的策略无法解析，含本平台不支持能力的策略被 Launcher
+    /// 拒绝，均不会静默降级。
     #[serde(default)]
-    pub allow_credential_services: bool,
-    /// 是否允许访问宿主音频输入服务（macOS CoreAudio HAL）。录音类插件需要
-    /// 经 coreaudiod 枚举与打开麦克风；默认 false，仅宿主按已验证插件身份授权。
-    /// 麦克风隐私授权（TCC）仍由系统按宿主 App 独立把关。
-    #[serde(default)]
-    pub allow_audio_input: bool,
-    /// 是否允许运行无头浏览器（Chrome/Chromium）。macOS 上放行 IOKit 与
-    /// `org.chromium.*` 的 mach 注册/查询（MachPortRendezvous）；
-    /// 默认 false，仅宿主按已验证插件身份授权。旧 Launcher 忽略该字段即保持拒绝。
-    #[serde(default)]
-    pub allow_browser_runtime: bool,
+    pub capabilities: BTreeSet<SandboxCapability>,
     /// 单次 command 的资源上限。
     #[serde(default)]
     pub resource_limits: SandboxResourceLimits,
@@ -86,9 +136,7 @@ impl SandboxPolicy {
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: false,
-            allow_credential_services: false,
-            allow_audio_input: false,
-            allow_browser_runtime: false,
+            capabilities: BTreeSet::new(),
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -101,11 +149,32 @@ impl SandboxPolicy {
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: true,
-            allow_credential_services: true,
-            allow_audio_input: true,
-            allow_browser_runtime: true,
+            capabilities: SandboxCapability::ALL.into_iter().collect(),
             resource_limits: SandboxResourceLimits::default(),
         }
+    }
+
+    /// 是否授予了指定能力。
+    pub fn has(&self, capability: SandboxCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    /// 按布尔值授予或撤销能力。
+    pub fn set_capability(&mut self, capability: SandboxCapability, granted: bool) {
+        if granted {
+            self.capabilities.insert(capability);
+        } else {
+            self.capabilities.remove(&capability);
+        }
+    }
+
+    /// 授予但当前平台 Launcher 不支持的能力（非空时 Launcher 必须拒绝启动）。
+    pub fn unsupported_capabilities(&self) -> Vec<SandboxCapability> {
+        self.capabilities
+            .iter()
+            .copied()
+            .filter(|capability| !capability.supported_on_current_platform())
+            .collect()
     }
 
     /// 全部可写根（已规范化去重）：工作区、临时目录、额外可写。
@@ -258,14 +327,59 @@ mod tests {
         assert_eq!(value["mode"], "workspace_write");
         assert_eq!(value["workspace"], "/workspace");
         assert_eq!(value["allow_network"], false);
-        assert_eq!(value["allow_credential_services"], false);
-        assert_eq!(value["allow_audio_input"], false);
-        assert_eq!(value["allow_browser_runtime"], false);
+        assert_eq!(value["capabilities"], serde_json::json!([]));
         assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
         assert_eq!(value["resource_limits"]["max_processes"], 64);
 
         let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, policy);
+
+        policy.set_capability(SandboxCapability::BrowserRuntime, true);
+        policy.set_capability(SandboxCapability::CredentialServices, true);
+        let value = serde_json::to_value(&policy).unwrap();
+        // 有序集合：序列化顺序稳定，与授予顺序无关。
+        assert_eq!(
+            value["capabilities"],
+            serde_json::json!(["credential_services", "browser_runtime"])
+        );
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, policy);
+    }
+
+    #[test]
+    fn unknown_capability_fails_to_parse() {
+        // 新能力的旧 Launcher 必须拒绝启动，而不是静默忽略。
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        value["capabilities"] = serde_json::json!(["browser_runtime", "future_capability"]);
+        assert!(serde_json::from_value::<SandboxPolicy>(value).is_err());
+    }
+
+    #[test]
+    fn capability_names_match_serialization() {
+        for capability in SandboxCapability::ALL {
+            assert_eq!(
+                serde_json::to_value(capability).unwrap(),
+                serde_json::Value::String(capability.as_str().to_string())
+            );
+        }
+        assert_eq!(
+            supported_capabilities().len(),
+            SandboxCapability::ALL
+                .iter()
+                .filter(|capability| capability.supported_on_current_platform())
+                .count()
+        );
+    }
+
+    #[test]
+    fn set_capability_grants_and_revokes() {
+        let mut policy = SandboxPolicy::workspace_write("/workspace");
+        assert!(!policy.has(SandboxCapability::AudioInput));
+        policy.set_capability(SandboxCapability::AudioInput, true);
+        assert!(policy.has(SandboxCapability::AudioInput));
+        policy.set_capability(SandboxCapability::AudioInput, false);
+        assert!(policy.capabilities.is_empty());
+        assert!(policy.unsupported_capabilities().is_empty());
     }
 
     #[test]

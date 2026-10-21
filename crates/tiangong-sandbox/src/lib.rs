@@ -30,10 +30,10 @@ pub const MAX_POLICY_FRAME_BYTES: usize = 1024 * 1024;
 pub const LAUNCHER_PROTOCOL_VERSION: u32 = 1;
 /// 策略 Schema 版本（安全语义层）。与协议版本分开演进；在线更新同样
 /// 只接受相等值，杜绝新旧策略语义错位。
-pub const LAUNCHER_POLICY_SCHEMA: u32 = 2;
+pub const LAUNCHER_POLICY_SCHEMA: u32 = 3;
 
 pub use path::canonicalize_path;
 pub use sandbox::{
-    SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits, SandboxedProgram,
-    availability, explain_violation, wrap,
+    SandboxAvailability, SandboxCapability, SandboxMode, SandboxPolicy, SandboxResourceLimits,
+    SandboxedProgram, availability, explain_violation, supported_capabilities, wrap,
 };

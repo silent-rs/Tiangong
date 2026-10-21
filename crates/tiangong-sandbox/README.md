@@ -104,6 +104,7 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
   "protected_paths": ["/absolute/workspace/protected"],
   "denied_read_paths": ["/home/user/.ssh"],
   "allow_network": false,
+  "capabilities": [],
   "resource_limits": {
     "max_cpu_time_seconds": 300,
     "max_memory_bytes": 2147483648,
@@ -122,6 +123,7 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
 - 目标程序会校验普通文件形态、摘要和平台权限。
 - 平台沙箱不可用时拒绝执行，不静默降级。
 - 敏感路径不会由通用核心隐式猜测；宿主应通过 `protected_paths` 和 `denied_read_paths` 明确传入。crate 另提供可选的常见凭据与天工宿主预设。
+- 特殊能力（`capabilities`）默认为空，只能取 Launcher 内置的封闭集合：`credential_services`（系统凭据服务）、`audio_input`（音频输入）、`browser_runtime`（无头浏览器）。未知能力导致策略解析失败，当前平台不支持的能力会被拒绝，均不会静默忽略。
 
 ## 宿主协议
 
@@ -139,6 +141,14 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
 ```bash
 tiangong-sandbox --self-check
 ```
+
+自检报告的 `capabilities` 字段列出当前平台支持的特殊能力；只查询能力（不运行拦截探针）可使用：
+
+```bash
+tiangong-sandbox --capabilities
+```
+
+宿主在启动前比对授予的能力与 Launcher 上报的能力，缺失时提示更新沙箱组件。
 
 检查和安装官方更新：
 

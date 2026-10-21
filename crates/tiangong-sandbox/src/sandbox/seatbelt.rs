@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use super::policy::SandboxPolicy;
+use super::policy::{SandboxCapability, SandboxPolicy};
 
 const SEATBELT_BIN: &str = "/usr/bin/sandbox-exec";
 
@@ -160,7 +160,7 @@ fn compile_profile_explicit_categories(
     sbpl.push_str("(allow pseudo-tty)\n");
     sbpl.push_str("(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\"))\n");
     sbpl.push_str("(allow file-read* file-write* file-ioctl (regex \"^/dev/tty[^\\\\.]\"))\n");
-    if policy.allow_browser_runtime {
+    if policy.has(SandboxCapability::BrowserRuntime) {
         // 无头 Chrome 启动最小集合（#695，macOS 27.0.1 实测）：缺 IOKit 时
         // IONotificationPortGetRunLoopSource 拿到空值直接 SIGSEGV。POSIX
         // 共享内存/信号量经实测非必需（dump-dom 与 HyperFrames 渲染均通过），
@@ -222,7 +222,7 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
              (allow mach-lookup (global-name \"com.apple.trustd.agent\"))\n",
         );
     }
-    if policy.allow_credential_services {
+    if policy.has(SandboxCapability::CredentialServices) {
         sbpl.push_str(
             "(allow mach-lookup (global-name \"com.apple.SecurityServer\"))\n\
              (allow mach-lookup (global-name \"com.apple.securityd.xpc\"))\n\
@@ -230,7 +230,7 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
              (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.membership\"))\n",
         );
     }
-    if policy.allow_audio_input {
+    if policy.has(SandboxCapability::AudioInput) {
         // 实测 cpal/CoreAudio 采集默认输入设备的最小集合：缺 audiohald 无法
         // 枚举设备，缺 AudioComponentRegistrar 找不到 HAL 输入 AudioUnit；
         // 缺 device-microphone 时设备能打开、回调照常触发，但 coreaudiod 对
@@ -241,7 +241,7 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
              (allow device-microphone)\n",
         );
     }
-    if policy.allow_browser_runtime {
+    if policy.has(SandboxCapability::BrowserRuntime) {
         // 必须位于兜底 (deny mach-lookup) 之前才生效。
         sbpl.push_str(BROWSER_RUNTIME_MACH_RULES);
     }
@@ -277,7 +277,7 @@ mod tests {
     fn audio_input_services_follow_explicit_authorization() {
         for audio in [false, true] {
             let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
-            policy.allow_audio_input = audio;
+            policy.set_capability(SandboxCapability::AudioInput, audio);
             for sbpl in [
                 compile_profile_explicit_categories(&policy, &policy.writable_roots()),
                 compile_profile_legacy(&policy, &policy.writable_roots()),
@@ -319,7 +319,7 @@ mod tests {
             let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
             policy.protected_paths = vec!["/tmp/ws/protected".into()];
             policy.denied_read_paths = vec!["/tmp/home/.ssh".into()];
-            policy.allow_browser_runtime = browser;
+            policy.set_capability(SandboxCapability::BrowserRuntime, browser);
             let explicit = compile_profile_explicit_categories(&policy, &policy.writable_roots());
             let legacy = compile_profile_legacy(&policy, &policy.writable_roots());
             for sbpl in [&explicit, &legacy] {
@@ -353,7 +353,7 @@ mod tests {
         // 授权前后除新增规则外 profile 完全一致。
         let mut base = SandboxPolicy::workspace_write("/tmp/ws");
         let without = compile_profile_explicit_categories(&base, &base.writable_roots());
-        base.allow_browser_runtime = true;
+        base.set_capability(SandboxCapability::BrowserRuntime, true);
         let with = compile_profile_explicit_categories(&base, &base.writable_roots());
         let mut stripped = with.replace(BROWSER_RUNTIME_MACH_RULES, "");
         stripped = stripped.replace(BROWSER_RUNTIME_EXPLICIT_RULES, "");
@@ -366,7 +366,7 @@ mod tests {
             for credentials in [false, true] {
                 let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
                 policy.allow_network = network;
-                policy.allow_credential_services = credentials;
+                policy.set_capability(SandboxCapability::CredentialServices, credentials);
                 // 两种编译路径都必须保留精确授权边界。
                 for sbpl in [
                     compile_profile_explicit_categories(&policy, &policy.writable_roots()),
@@ -470,7 +470,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let mut policy = SandboxPolicy::workspace_write(workspace.path());
         for browser in [false, true] {
-            policy.allow_browser_runtime = browser;
+            policy.set_capability(SandboxCapability::BrowserRuntime, browser);
             let profile = compile_profile(&policy);
             let output = std::process::Command::new(SEATBELT_BIN)
                 .arg("-p")

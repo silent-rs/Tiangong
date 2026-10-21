@@ -656,8 +656,7 @@ impl StdioSidecarConnection {
                 &self.config.plugin_id,
             );
             policy.allow_network = self.config.sandbox_network;
-            policy.allow_audio_input = self.config.sandbox_audio_input;
-            policy.allow_browser_runtime = self.config.sandbox_browser_runtime;
+            policy.capabilities = self.config.sandbox_capabilities.clone();
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
             policy
                 .denied_read_paths
@@ -697,8 +696,6 @@ impl StdioSidecarConnection {
                 }))?;
                 // Launcher 是安全边界执行者：每次启动前验签（官方或本机
                 // 信任根任一通过），签名缺失/不匹配一律拒绝，防单文件替换。
-                // Launcher 是安全边界执行者：每次启动前验签（官方或本机
-                // 信任根任一通过），签名缺失/不匹配一律拒绝，防单文件替换。
                 preparation(
                     crate::signature::verify_launcher_signature(
                         &sandbox_bin,
@@ -706,6 +703,33 @@ impl StdioSidecarConnection {
                     )
                     .context("沙箱 Launcher 验签失败，拒绝启动沙箱"),
                 )?;
+                // 授予的能力必须是 Launcher 上报支持的子集：App 升级而
+                // Launcher 未升级时，在此给出明确提示，而不是让目标进程
+                // 在沙箱内以难以归因的方式失败（如 Chrome 段错误）。
+                if !policy.capabilities.is_empty() {
+                    let supported = preparation(
+                        crate::launcher_update::launcher_capabilities(&sandbox_bin)
+                            .context("查询沙箱 Launcher 支持的能力失败"),
+                    )?;
+                    let missing = crate::launcher_update::missing_capabilities(
+                        &policy.capabilities,
+                        &supported,
+                    );
+                    if !missing.is_empty() {
+                        let message = crate::launcher_update::missing_capabilities_message(
+                            &self.config.plugin_id,
+                            &missing,
+                        );
+                        tracing::warn!(
+                            plugin_id = %self.config.plugin_id,
+                            launcher = %sandbox_bin.display(),
+                            ?missing,
+                            ?supported,
+                            "{message}"
+                        );
+                        return Err(SpawnAttemptError::Preparation(anyhow!(message)));
+                    }
+                }
                 // 解释器形态的权威目录是解释器所在目录（目标程序不在
                 // 插件目录内，Launcher 按解释器形态做退化校验）；native
                 // 形态沿用插件目录（清单比对依据）。

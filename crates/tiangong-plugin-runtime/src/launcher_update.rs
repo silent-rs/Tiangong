@@ -3,6 +3,7 @@
 //! App 不维护版本目录或 active/pending 指针。首次准备与手动更新都复用
 //! Sandbox 的 SelfUpdater，把程序和签名直接安装到 storage_root/sandbox。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -275,6 +276,73 @@ fn launcher_cache_key(launcher: &Path) -> Result<LauncherCacheKey> {
         modified: metadata.modified().ok(),
     })
 }
+
+type CapabilitySet = BTreeSet<tiangong_sandbox::SandboxCapability>;
+
+fn launcher_capability_cache()
+-> &'static std::sync::Mutex<Option<(LauncherCacheKey, CapabilitySet)>> {
+    static CACHE: OnceLock<std::sync::Mutex<Option<(LauncherCacheKey, CapabilitySet)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 查询（已验签的）Launcher 支持的沙箱能力。按程序路径、大小与修改时间
+/// 缓存，Launcher 更新后自动重新查询。
+pub fn launcher_capabilities(launcher: &Path) -> Result<CapabilitySet> {
+    let key = launcher_cache_key(launcher)?;
+    if let Ok(cache) = launcher_capability_cache().lock()
+        && let Some((cached_key, capabilities)) = cache.as_ref()
+        && cached_key == &key
+    {
+        return Ok(capabilities.clone());
+    }
+    let mut command = std::process::Command::new(launcher);
+    command.arg("--capabilities");
+    let output = crate::platform::configure_no_window(&mut command)
+        .output()
+        .with_context(|| format!("查询 Sandbox 能力失败: {}", launcher.display()))?;
+    // 不认识 `--capabilities` 的旧 Launcher 会把它当作启动请求处理并以
+    // 非零码退出（或输出无法解析的内容），统一视为"未上报任何能力"。
+    let capabilities = if output.status.success() {
+        parse_reported_capabilities(&output.stdout)
+    } else {
+        CapabilitySet::new()
+    };
+    if let Ok(mut cache) = launcher_capability_cache().lock() {
+        *cache = Some((key, capabilities.clone()));
+    }
+    Ok(capabilities)
+}
+
+/// 解析能力报告。未知能力名（更新的 Launcher）忽略：宿主不会授予它不认识的能力。
+fn parse_reported_capabilities(stdout: &[u8]) -> CapabilitySet {
+    let Ok(report) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return CapabilitySet::new();
+    };
+    report["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
+}
+
+/// 授予但 Launcher 未上报支持的能力。
+pub fn missing_capabilities(granted: &CapabilitySet, supported: &CapabilitySet) -> CapabilitySet {
+    granted.difference(supported).copied().collect()
+}
+
+/// 能力缺失时给用户与日志的提示。
+pub fn missing_capabilities_message(plugin_id: &str, missing: &CapabilitySet) -> String {
+    let names = missing
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "插件 {plugin_id} 需要的沙箱能力（{names}）当前沙箱组件不支持，需要更新沙箱组件：请在设置中更新 Sandbox 后重试"
+    )
+}
 fn verify_launcher_self_check(binary: &Path) -> Result<(String, bool)> {
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
@@ -308,6 +376,31 @@ fn verify_launcher_self_check(binary: &Path) -> Result<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reported_capabilities_parse_and_diff() {
+        use tiangong_sandbox::SandboxCapability as C;
+        let supported = parse_reported_capabilities(
+            br#"{"capabilities":["credential_services","browser_runtime","future_capability"]}"#,
+        );
+        // 未知能力名（更新的 Launcher）被忽略。
+        assert_eq!(
+            supported,
+            [C::CredentialServices, C::BrowserRuntime]
+                .into_iter()
+                .collect()
+        );
+        // 旧 Launcher：缺字段或输出无法解析，视为不支持任何能力。
+        assert!(parse_reported_capabilities(br#"{"policy_schema":2}"#).is_empty());
+        assert!(parse_reported_capabilities(b"not json").is_empty());
+
+        let granted: CapabilitySet = [C::AudioInput, C::BrowserRuntime].into_iter().collect();
+        let missing = missing_capabilities(&granted, &supported);
+        assert_eq!(missing, [C::AudioInput].into_iter().collect());
+        assert!(missing_capabilities(&CapabilitySet::new(), &CapabilitySet::new()).is_empty());
+        let message = missing_capabilities_message("volcengine", &missing);
+        assert!(message.contains("audio_input") && message.contains("更新沙箱组件"));
+    }
+
     #[test]
     fn newer_version_compares_semver() {
         assert!(is_newer_version("0.1.9", "0.1.10").unwrap());

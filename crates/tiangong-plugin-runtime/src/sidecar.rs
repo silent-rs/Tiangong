@@ -318,10 +318,8 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
-    /// 是否在沙箱内放行系统音频输入服务。
-    pub sandbox_audio_input: bool,
-    /// 是否在沙箱内允许运行无头浏览器。
-    pub sandbox_browser_runtime: bool,
+    /// 宿主授予的沙箱特殊能力；原样写入 Launcher 策略。
+    pub sandbox_capabilities: std::collections::BTreeSet<tiangong_sandbox::SandboxCapability>,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
     /// 本机 server 的 HTTP 地址（供需要回调 host 的 sidecar 使用，如 scheduler）。
@@ -389,8 +387,7 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
-            sandbox_audio_input: false,
-            sandbox_browser_runtime: false,
+            sandbox_capabilities: std::collections::BTreeSet::new(),
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
@@ -431,13 +428,12 @@ impl SidecarConfig {
         self
     }
 
-    pub fn with_sandbox_audio_input(mut self, allowed: bool) -> Self {
-        self.sandbox_audio_input = allowed;
-        self
-    }
-
-    pub fn with_sandbox_browser_runtime(mut self, allowed: bool) -> Self {
-        self.sandbox_browser_runtime = allowed;
+    /// 设置宿主授予的沙箱特殊能力（新增能力无需再加字段与方法）。
+    pub fn with_sandbox_capabilities(
+        mut self,
+        capabilities: std::collections::BTreeSet<tiangong_sandbox::SandboxCapability>,
+    ) -> Self {
+        self.sandbox_capabilities = capabilities;
         self
     }
 
