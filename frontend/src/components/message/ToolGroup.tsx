@@ -13,6 +13,7 @@ import {
 import { ToolIcon } from "./ToolIcon";
 import { ToolCallCard } from "./toolViews/ToolCallCard";
 import { ToolViewHost } from "./toolViews/ToolViewHost";
+import { useToolArgsPresentation } from "./toolArgsPresentation";
 
 /** 运行中工具调用（结果未到达）。 */
 export interface RunningToolCall {
@@ -169,6 +170,7 @@ function ToolRunRow({
 }
 
 export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupProps) {
+  const hints = useToolArgsPresentation();
   if (tools.length === 0 && !runningCalls?.length) return null;
   const brief = summarizeToolGroup(tools);
 
@@ -178,7 +180,7 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       <ToolRunRow
         key={tool.id}
         callId={toolCallIdOf(tool) ?? tool.id}
-        model={buildToolDisplayModel(tool, args)}
+        model={buildToolDisplayModel(tool, args, hints)}
         args={args}
         expanded={expansion.isExpanded(tool.id)}
         onToggle={() => expansion.toggle(tool.id)}
@@ -203,8 +205,8 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
             callId={call.id}
             model={
               call.finished
-                ? buildFinishedToolModel(call.name, call.arguments, call.finished)
-                : buildRunningToolModel(call.name, call.arguments)
+                ? buildFinishedToolModel(call.name, call.arguments, call.finished, hints)
+                : buildRunningToolModel(call.name, call.arguments, hints)
             }
             args={call.arguments}
             expanded={expansion.isExpanded(`running-${call.id}`)}

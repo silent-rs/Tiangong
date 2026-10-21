@@ -8,10 +8,3 @@ export interface MessageGroup {
   type: "user" | "agent_turn";
   messages: MessageItem[];
 }
-
-export interface SystemMessageMeta {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  summary: string;
-  toolName?: string;
-}

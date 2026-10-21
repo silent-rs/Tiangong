@@ -184,21 +184,11 @@ pub fn prompt_status(session_id: &str) {
     let _ = std::io::stdout().flush();
 }
 
-/// 工具图标
+/// 工具字形：图标与字形映射统一由插件运行时提供（插件声明优先，其次运行时
+/// 内置表），CLI 不写死工具名。
 fn tool_icon(name: &str) -> &'static str {
-    // 重名工具按 `{插件id}__{工具名}` 暴露：按原名取图标（MCP 工具名保持原样）。
-    let name = match name.split_once("__") {
-        Some((_, base)) if !name.starts_with("mcp__") => base,
-        _ => name,
-    };
-    match name {
-        "search_code" => "🔍",
-        "run_command" | "run_shell" => "⚡",
-        "generate_image" => "🎨",
-        "text_to_speech" => "🔊",
-        "speech_to_text" => "🎤",
-        _ => "🔧",
-    }
+    let table = tiangong_plugin_runtime::registry::list_tool_icons();
+    tiangong_plugin_runtime::tool_icons::terminal_glyph_for(&table, name)
 }
 
 /// 输出预览（单行，截断）

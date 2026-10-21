@@ -526,6 +526,16 @@ export interface ToolIconEntry {
   variants?: Record<string, Record<string, string>> | null;
 }
 
+/** 工具参数摘要的展示提示（运行时提供）。 */
+export interface ToolArgsPresentation {
+  /** 摘要中排在最前、只显示取值的参数。 */
+  lead_args: string[];
+  /** 摘要跳过的环境 / 配置类参数。 */
+  skip_args: string[];
+  /** 位置参数中不展示的取值前缀。 */
+  hidden_value_prefixes: string[];
+}
+
 /** 插件入口资源响应（字节数组 + MIME）。 */
 export interface PluginEntryResource {
   data: number[];
@@ -1059,6 +1069,10 @@ export const api = {
   /// 工具图标查询表（键为工具名与 `{插件id}__{工具名}`；查不到的工具用默认图标）。
   listToolIcons: (): Promise<Record<string, ToolIconEntry>> =>
     invoke('list_tool_icons'),
+
+  /// 工具参数摘要的展示提示（运行时提供，前端不写死参数名）。
+  toolArgsPresentation: (): Promise<ToolArgsPresentation> =>
+    invoke('tool_args_presentation'),
 
   /// 读取插件在 tool_icons 中声明的图标资源。
   pluginReadToolIcon: (pluginId: string, icon: string): Promise<PluginEntryResource> =>

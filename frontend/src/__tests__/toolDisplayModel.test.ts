@@ -8,6 +8,13 @@ import {
 } from "@/components/message/toolDisplayModel";
 import type { MessageItem } from "@/components/message/types";
 
+/** 运行时提供的参数摘要提示（测试固定一份）。 */
+const hints = {
+  lead_args: ["action"],
+  skip_args: ["cwd", "limit"],
+  hidden_value_prefixes: ["__tiangong_cwd="],
+};
+
 const toolMsg = (toolName: string, text: string): MessageItem =>
   ({
     id: `t-${toolName}`,
@@ -43,19 +50,24 @@ describe("工具结果抬头与插件前缀", () => {
 });
 
 describe("通用工具行", () => {
-  it("标题为工具名，摘要为参数（action 在前，跳过配置键）", () => {
-    const model = buildRunningToolModel("fs__file_write", {
-      path: "docs/a.md",
-      action: "replace",
-      cwd: "/ws",
-    });
+  it("按运行时提示组织摘要：lead 参数在前且只显示取值，跳过配置参数", () => {
+    const model = buildRunningToolModel(
+      "fs__file_write",
+      { path: "docs/a.md", action: "replace", cwd: "/ws" },
+      hints,
+    );
     expect(model.title).toBe("fs__file_write");
     expect(model.summary).toBe("replace path=docs/a.md");
     expect(model.argsText).toContain('"path": "docs/a.md"');
     expect(model.outputText).toBeNull();
     expect(model.state).toBe("running");
     // 不按工具名推断展示（旧工具名同样通用展示）。
-    expect(buildRunningToolModel("read_file", { path: "a.rs" }).title).toBe("read_file");
+    expect(buildRunningToolModel("read_file", { path: "a.rs" }, hints).title).toBe("read_file");
+  });
+
+  it("没有提示时按全部参数通用拼接", () => {
+    const model = buildRunningToolModel("fs__file_write", { action: "replace", cwd: "/ws" });
+    expect(model.summary).toBe("action=replace cwd=/ws");
   });
 
   it("完成后显示结果，失败时摘要为错误首行", () => {
@@ -72,8 +84,8 @@ describe("通用工具行", () => {
   });
 
   it("参数摘要：位置参数与对象参数", () => {
-    expect(argsSummary(["ls", "-la", "__tiangong_cwd=/ws"])).toBe("ls -la");
-    expect(argsSummary({ query: "foo", limit: 5 })).toBe("query=foo");
+    expect(argsSummary(["ls", "-la", "__tiangong_cwd=/ws"], hints)).toBe("ls -la");
+    expect(argsSummary({ query: "foo", limit: 5 }, hints)).toBe("query=foo");
     expect(argsSummary({})).toBeNull();
     expect(argsSummary(undefined)).toBeNull();
   });

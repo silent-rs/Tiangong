@@ -1,13 +1,7 @@
 import { textContent } from "@/api/tauri";
 import { reasoningOf, toolIsError, toolNameOf, turnStatusOf, userSourceOf } from "@/api/message";
 import { resolveAttachmentUrl } from "@/utils/attachments";
-import {
-  Brain,
-  Plug,
-  Terminal,
-  type LucideIcon,
-} from "lucide-react";
-import type { MessageGroup, MessageItem, SystemMessageMeta } from "./types";
+import type { MessageGroup, MessageItem } from "./types";
 
 
 /** 格式化消息时间戳：当天只显示 `HH:mm`；非当天加日期——
@@ -228,7 +222,7 @@ export function summarizeToolGroup(tools: MessageItem[]): string {
   const names = Array.from(
     new Set(
       tools
-        .map((tool) => toolNameOf(tool) || getToolMessageMeta(tool).toolName || "")
+        .map((tool) => toolNameOf(tool) || "")
         .filter(Boolean),
     ),
   );
@@ -237,60 +231,6 @@ export function summarizeToolGroup(tools: MessageItem[]): string {
     : "";
   const statusSummary = failed > 0 ? `成功 ${succeeded} / 失败 ${failed}` : `成功 ${succeeded}`;
   return `工具调用 ${total} 次 · ${statusSummary}${nameSummary}`;
-}
-
-/** 从 Tool result 消息提取元数据（不依赖 System 摘要格式）。 */
-export function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
-  const content = textContent(msg);
-  const toolName = toolNameOf(msg) || "";
-  const isError = toolIsError(msg);
-
-  // 注入消息格式（数据来源：xxx）
-  if (content.startsWith("数据来源：")) {
-    const sourceMatch = content.match(/^数据来源：(\S+)/);
-    const source = sourceMatch ? sourceMatch[1] : "plugin";
-    const cmdMatch = content.match(/command:\s*(.+)/);
-    const urlMatch = content.match(/url:\s*(.+)/);
-    const titleMatch = content.match(/title:\s*(.+)/);
-    const detail = cmdMatch?.[1] || urlMatch?.[1] || titleMatch?.[1] || "";
-    return {
-      icon: Plug as LucideIcon,
-      label: "插件注入",
-      summary: detail
-        ? `${source} · ${detail.length > 50 ? detail.slice(0, 47) + "..." : detail}`
-        : source,
-      toolName: source,
-    };
-  }
-
-  // recall_memory
-  if (content.startsWith("[记忆检索]")) {
-    const countMatch = content.match(/命中 (\d+) 条/);
-    const count = countMatch ? countMatch[1] : "";
-    const noHit = content.includes("无相关记忆");
-    return {
-      icon: Brain as LucideIcon,
-      label: "记忆检索",
-      summary: noHit ? "无命中" : count ? `${count} 条命中` : "记忆检索",
-      toolName: "recall_memory",
-    };
-  }
-
-  // 正常工具结果
-  const parts: string[] = [];
-  if (toolName) parts.push(toolName);
-  parts.push(isError ? "FAIL" : "OK");
-  const cmdMatch = content.match(/命令:\s*(.+)/);
-  if (cmdMatch) {
-    const cmd = cmdMatch[1];
-    parts.push(cmd.length > 50 ? cmd.slice(0, 47) + "..." : cmd);
-  }
-  return {
-    icon: Terminal as LucideIcon,
-    label: "工具执行",
-    summary: parts.join(" · ") || content.split("\n")[0].slice(0, 60),
-    toolName: toolName || undefined,
-  };
 }
 
 /** 分组结果引用缓存：流式期间 messages 数组每批（约 16ms）都是新引用，但

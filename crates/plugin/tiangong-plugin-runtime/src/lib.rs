@@ -9,11 +9,14 @@
 //! 数据路径、业务事件或条件分支。单个插件需要的行为必须放在该插件的 WASM、私有
 //! 协议或 sidecar 中。只有能被任意插件复用、且无需理解业务负载的机制，才能进入
 //! 运行时。完整约束见 `docs/plugin-development.md` 的“WASM Runtime 公共中立约束”。
+//! 唯一的过渡期例外是 [`builtin_tables`]：宿主展示用的工具名映射纯数据集中
+//! 于此，插件自行声明后逐条删除。
 
 pub mod adapter;
 pub mod artifacts;
 pub mod bindings;
 pub mod bridge;
+pub mod builtin_tables;
 pub mod config;
 pub mod core_bridge;
 pub mod events;

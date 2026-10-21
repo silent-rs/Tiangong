@@ -6,6 +6,8 @@ import {
   toolNameOf,
 } from "@/api/message";
 import type { MessageItem } from "./types";
+import type { ToolArgsPresentation } from "@/api/tauri";
+import { EMPTY_ARGS_PRESENTATION } from "./toolArgsPresentation";
 
 /**
  * 工具调用展示模型。
@@ -54,24 +56,6 @@ export function stripToolResultHeader(content: string): string {
   return content.replace(/^调用(?:工具 \S+|插件 \S+ 的 \S+)：(?:成功|失败)\n?/, "");
 }
 
-/** 后端混入参数数组的工作目录参数前缀（formatting.rs 约定）。 */
-const CWD_ARG_PREFIX = "__tiangong_cwd=";
-/** 对象参数中的环境/配置键，参数摘要跳过（不构成"这次调用做了什么"）。 */
-const CONFIG_ARG_KEYS: ReadonlySet<string> = new Set([
-  "cwd",
-  "workdir",
-  "working_dir",
-  "timeout",
-  "timeout_secs",
-  "interactive",
-  "encoding",
-  "offset",
-  "limit",
-  "append",
-  "dry_run",
-  "force",
-]);
-
 /** 摘要字符上限：多行文本压缩为单行后截断防撑爆。 */
 const SUMMARY_MAX_CHARS = 500;
 
@@ -97,31 +81,40 @@ function squeezeToSingleLine(text: string): string {
     .join(" ");
 }
 
-function visibleArgs(args: unknown[]): unknown[] {
-  return args.filter((item) => !(typeof item === "string" && item.startsWith(CWD_ARG_PREFIX)));
+function visibleArgs(args: unknown[], hints: ToolArgsPresentation): unknown[] {
+  return args.filter(
+    (item) => !(typeof item === "string" && hints.hidden_value_prefixes.some((prefix) => item.startsWith(prefix))),
+  );
 }
 
 /**
- * 通用参数摘要：位置参数取各字符串项，对象参数
- * 取 `键=值`（`action` 在前，跳过环境/配置键），不按工具名区分。
+ * 通用参数摘要：位置参数取各字符串项，对象参数取 `键=值`。排在前面的参数、
+ * 跳过的配置参数与隐藏的内部取值均来自运行时提供的展示提示，不按工具名区分。
  */
-export function argsSummary(args: unknown): string | null {
+export function argsSummary(
+  args: unknown,
+  hints: ToolArgsPresentation = EMPTY_ARGS_PRESENTATION,
+): string | null {
   if (args === undefined || args === null) return null;
   if (typeof args === "string") return args ? clamp(squeezeToSingleLine(args), SUMMARY_MAX_CHARS) : null;
   if (Array.isArray(args)) {
-    const parts = visibleArgs(args)
+    const parts = visibleArgs(args, hints)
       .filter((item): item is string => typeof item === "string" && item.length > 0)
       .map(squeezeToSingleLine);
     return parts.length ? clamp(parts.join(" "), SUMMARY_MAX_CHARS) : null;
   }
   if (typeof args !== "object") return null;
+  const lead = (key: string) => {
+    const index = hints.lead_args.indexOf(key);
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+  };
   const entries = Object.entries(args as Record<string, unknown>)
-    .filter(([key, value]) => !CONFIG_ARG_KEYS.has(key) && value !== null && value !== undefined && value !== "")
-    .sort(([a], [b]) => (a === "action" ? -1 : b === "action" ? 1 : 0));
+    .filter(([key, value]) => !hints.skip_args.includes(key) && value !== null && value !== undefined && value !== "")
+    .sort(([a], [b]) => lead(a) - lead(b));
   if (entries.length === 0) return null;
   const parts = entries.map(([key, value]) => {
     const text = typeof value === "string" ? value : JSON.stringify(value);
-    return key === "action" ? squeezeToSingleLine(text) : `${key}=${squeezeToSingleLine(text ?? "")}`;
+    return hints.lead_args.includes(key) ? squeezeToSingleLine(text) : `${key}=${squeezeToSingleLine(text ?? "")}`;
   });
   return clamp(parts.join(" "), SUMMARY_MAX_CHARS);
 }
@@ -146,8 +139,8 @@ function argsToText(args: unknown): string | null {
 }
 
 /** 调用部分（标题、参数摘要、参数文本）。 */
-function callPart(toolName: string, args: unknown) {
-  return { title: toolName || "工具调用", summary: argsSummary(args) ?? "", argsText: argsToText(args) };
+function callPart(toolName: string, args: unknown, hints: ToolArgsPresentation) {
+  return { title: toolName || "工具调用", summary: argsSummary(args, hints) ?? "", argsText: argsToText(args) };
 }
 
 /** 解析后端系统 trace 消息（旧会话 formatting.rs 产出的「工具执行 [...]」格式）。 */
@@ -169,14 +162,18 @@ function parseTrace(content: string) {
  * @param msg 工具结果消息（role:'tool'，或旧会话的工具 trace / 插件注入系统消息）。
  * @param args 配对到的调用参数（来自 assistant.tool_calls，按 tool_call_id 配对）。
  */
-export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDisplayModel {
+export function buildToolDisplayModel(
+  msg: MessageItem,
+  args?: unknown,
+  hints: ToolArgsPresentation = EMPTY_ARGS_PRESENTATION,
+): ToolDisplayModel {
   const content = textContent(msg);
   const toolName = toolNameOf(msg) || "";
 
   // 旧会话的系统 trace 消息：通用展示。
   const trace = messageKind(msg) === "system" ? parseTrace(content) : null;
   if (trace) {
-    const call = callPart(trace.toolName, args);
+    const call = callPart(trace.toolName, args, hints);
     return {
       toolName: trace.toolName,
       ...call,
@@ -190,7 +187,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 
   const isError = toolIsError(msg);
   const outputText = (messageKind(msg) === "tool" ? stripToolResultHeader(content) : content) || null;
-  const call = callPart(toolName, args);
+  const call = callPart(toolName, args, hints);
   return {
     toolName,
     ...call,
@@ -203,10 +200,14 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 }
 
 /** 运行中工具调用的展示模型（结果未到达，展开查看调用）。 */
-export function buildRunningToolModel(name: string, args?: unknown): ToolDisplayModel {
+export function buildRunningToolModel(
+  name: string,
+  args?: unknown,
+  hints: ToolArgsPresentation = EMPTY_ARGS_PRESENTATION,
+): ToolDisplayModel {
   return {
     toolName: name,
-    ...callPart(name, args),
+    ...callPart(name, args, hints),
     state: "running",
     errorSummary: null,
     outputText: null,
@@ -225,8 +226,9 @@ export function buildFinishedToolModel(
   name: string,
   args: unknown,
   finished: { ok: boolean; durationMs: number | null },
+  hints: ToolArgsPresentation = EMPTY_ARGS_PRESENTATION,
 ): ToolDisplayModel {
-  const model = buildRunningToolModel(name, args);
+  const model = buildRunningToolModel(name, args, hints);
   return {
     ...model,
     state: finished.ok ? "ok" : "error",

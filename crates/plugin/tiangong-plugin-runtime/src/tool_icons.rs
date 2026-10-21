@@ -3,7 +3,7 @@
 //! 优先级（高 → 低）：
 //! 1. 插件在 `plugin.json` 的 `tool_icons` 中为该工具声明的图标；
 //! 2. 插件在 `tool_icons` 中用 `*` 声明的默认图标；
-//! 3. runtime 内置表（按工具原名，短期在此维护，插件普遍声明后逐步收缩）；
+//! 3. runtime 内置表（按工具原名，集中在 [`crate::builtin_tables`]，插件普遍声明后整体删除）；
 //! 4. 都没有时不给出，前端使用默认图标（工具交叉）。
 //!
 //! 通用 + 特指：键 `工具名` 为该工具的通用图标；键 `工具名:参数=取值`
@@ -20,6 +20,8 @@ use std::path::{Component, Path};
 use serde::Serialize;
 use tiangong_core::tools::extension::namespaced_tool_name;
 
+use crate::builtin_tables::{BUILTIN_TOOL_ICONS, builtin_tool_icon};
+
 /// `tool_icons` 中表示「本插件其余工具」的键。
 pub const PLUGIN_DEFAULT_ICON_KEY: &str = "*";
 
@@ -31,94 +33,6 @@ const MAX_ARG_NAME_LEN: usize = 64;
 
 /// 图标资源扩展名白名单（与 UI 贡献图标一致）。
 const ICON_RESOURCE_EXTENSIONS: &[&str] = &["png", "svg", "jpg", "jpeg"];
-
-/// runtime 内置图标表：工具原名 → 图标名。
-const BUILTIN_TOOL_ICONS: &[(&str, &str)] = &[
-    // 终端
-    ("run_command", "square-terminal"),
-    ("run_shell", "square-terminal"),
-    ("terminal_send", "square-terminal"),
-    ("terminal_open", "square-terminal"),
-    ("terminal_close", "square-terminal"),
-    ("terminal_status", "square-terminal"),
-    // 检索
-    ("index_search", "search"),
-    ("search_code", "search"),
-    ("grep", "search"),
-    ("glob", "search"),
-    ("search", "search"),
-    // 网页与浏览器
-    ("web_fetch", "globe"),
-    ("web_search", "globe"),
-    ("web_page_text", "globe"),
-    ("web_query_dom", "globe"),
-    ("web_click", "globe"),
-    ("web_form_extract", "globe"),
-    ("web_form_fill", "globe"),
-    ("web_locate_element", "globe"),
-    ("browser_open", "globe"),
-    ("browser_navigate", "globe"),
-    ("browser_close", "globe"),
-    ("browser_eval", "globe"),
-    // 记忆
-    ("recall_memory", "brain"),
-    // 媒体
-    ("generate_image", "image"),
-    ("generate_video", "video"),
-    ("text_to_speech", "volume-2"),
-    ("speech_to_text", "mic"),
-    ("analyze_attachment", "scan-eye"),
-    // 桌面操作
-    ("desktop_app", "monitor"),
-    ("desktop_screenshot", "camera"),
-    ("desktop_input", "monitor"),
-    ("desktop_ui", "monitor"),
-    ("desktop_wait", "monitor"),
-    // 定时任务
-    ("scheduler_create_job", "calendar-clock"),
-    ("scheduler_list_jobs", "calendar-clock"),
-    ("scheduler_update_job", "calendar-clock"),
-    ("scheduler_delete_job", "calendar-clock"),
-    ("scheduler_trigger_job", "calendar-clock"),
-    ("scheduler_get_job_runs", "calendar-clock"),
-    // Skill 与编码工作流
-    ("get_skill_detail", "book-open"),
-    ("coding_project_context", "code"),
-    ("coding_preflight", "code"),
-    ("coding_checkpoint", "code"),
-    ("coding_review", "code"),
-    // Subagent
-    ("create_agent", "bot"),
-    ("list_agents", "bot"),
-    ("get_agent", "bot"),
-    ("activate_agent", "bot"),
-    ("deactivate_agent", "bot"),
-    ("list_active_agents", "bot"),
-    ("send_agent_message", "bot"),
-    ("submit_agent_task", "bot"),
-    ("get_agent_task", "bot"),
-    ("list_agent_tasks", "bot"),
-    ("get_agent_run", "bot"),
-    ("interrupt_agent_run", "bot"),
-    ("cancel_agent_run", "bot"),
-    ("list_agent_events", "bot"),
-    ("get_agent_artifacts", "bot"),
-    ("get_agent_memory", "bot"),
-    ("append_agent_memory", "bot"),
-    ("append_agent_instructions", "bot"),
-    ("report_agent_result", "bot"),
-    ("list_pending_work", "bot"),
-    ("load_workspace_state", "bot"),
-    ("update_workspace_state", "bot"),
-    // 交互与插件
-    ("request_user", "message-circle-question"),
-    ("plugin_init", "package"),
-    ("plugin_devkit", "package"),
-    ("plugin_install", "package"),
-    ("call_local_plugin", "puzzle"),
-    ("list_local_plugins", "puzzle"),
-    ("plugin_injection", "plug"),
-];
 
 /// 查询表中的一项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,14 +92,6 @@ pub struct PluginToolIcons<'a> {
     pub plugin_id: &'a str,
     pub declared: Option<&'a BTreeMap<String, String>>,
     pub tools: Vec<String>,
-}
-
-/// 内置表查询（按工具原名）。
-pub fn builtin_tool_icon(tool: &str) -> Option<&'static str> {
-    BUILTIN_TOOL_ICONS
-        .iter()
-        .find(|(name, _)| *name == tool)
-        .map(|(_, icon)| *icon)
 }
 
 /// 图标值是否为资源路径形态（含 `/` 或 `.`）。
@@ -315,6 +221,21 @@ pub fn build_tool_icon_table<'a>(
     table
 }
 
+/// 工具在终端（CLI）中的字形：按查询表取图标（对外名优先，其次原名），
+/// 再经 [`crate::builtin_tables::terminal_glyph`] 换成字形；查不到或为资源
+/// 图标时用默认字形。
+pub fn terminal_glyph_for(table: &BTreeMap<String, ToolIcon>, tool_name: &str) -> &'static str {
+    let base = tool_name
+        .split_once("__")
+        .filter(|_| !tool_name.starts_with("mcp__"))
+        .map_or(tool_name, |(_, base)| base);
+    table
+        .get(tool_name)
+        .or_else(|| table.get(base))
+        .and_then(|entry| crate::builtin_tables::terminal_glyph(&entry.icon))
+        .unwrap_or(crate::builtin_tables::DEFAULT_TERMINAL_GLYPH)
+}
+
 /// 资源图标是否确为该插件 `tool_icons` 中声明的值（读取文件前的校验；
 /// 通用与特指声明均覆盖）。
 pub fn declares_icon_resource(declared: Option<&BTreeMap<String, String>>, icon: &str) -> bool {
@@ -429,6 +350,38 @@ mod tests {
             "无插件归属的工具用内置表"
         );
         assert!(!table.contains_key("unknown_tool"));
+    }
+
+    #[test]
+    fn 终端字形按查询表取_资源图标与未知工具用默认字形() {
+        let volc = declared(&[("generate_image", "icons/seedream.svg")]);
+        let table = build_tool_icon_table([
+            PluginToolIcons {
+                plugin_id: "terminal",
+                declared: None,
+                tools: vec!["run_shell".to_string()],
+            },
+            PluginToolIcons {
+                plugin_id: "volcengine",
+                declared: Some(&volc),
+                tools: vec!["generate_image".to_string()],
+            },
+        ]);
+        assert_eq!(terminal_glyph_for(&table, "terminal__run_shell"), "⚡");
+        assert_eq!(
+            terminal_glyph_for(&table, "other__run_shell"),
+            "⚡",
+            "按原名回落"
+        );
+        assert_eq!(
+            terminal_glyph_for(&table, "volcengine__generate_image"),
+            crate::builtin_tables::DEFAULT_TERMINAL_GLYPH,
+            "资源图标无终端字形"
+        );
+        assert_eq!(
+            terminal_glyph_for(&table, "unknown"),
+            crate::builtin_tables::DEFAULT_TERMINAL_GLYPH
+        );
     }
 
     #[test]
