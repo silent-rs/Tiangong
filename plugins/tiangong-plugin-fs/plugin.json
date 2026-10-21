@@ -26,7 +26,42 @@
   ],
   "tool_icons": {
     "file_read": "assets/tool-file-read.svg",
+    "file_read:action=list": "assets/tool-folder.svg",
+    "file_read:action=tree": "assets/tool-folder.svg",
+    "file_read:action=image": "assets/tool-image.svg",
     "file_write": "assets/tool-file-write.svg",
     "current_time": "assets/tool-clock.svg"
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "session.message-item",
+        "id": "tool-view",
+        "title": "文件工具调用",
+        "description": "文件读写工具的调用与结果展示",
+        "entry": "app/tool-view.html",
+        "context": [
+          "session",
+          "message"
+        ],
+        "render": "replace",
+        "tools": [
+          "file_read",
+          "file_write",
+          "current_time"
+        ],
+        "titles": {
+          "file_read": "读取文件",
+          "file_read:action=list": "列出目录",
+          "file_read:action=tree": "目录树",
+          "file_read:action=image": "读取图片",
+          "file_write": "写入文件",
+          "file_write:action=replace": "替换文本",
+          "file_write:action=patch": "应用补丁",
+          "current_time": "当前时间"
+        }
+      }
+    ]
   }
 }

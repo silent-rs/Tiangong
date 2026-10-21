@@ -193,7 +193,7 @@ fn skill_creation_guide(root: &str) -> String {
         r#"创建新 Skill 的规范：
 - Skill 存储目录：{root}
 - 每个 Skill 是一个子目录，目录名即 skill id，需含 `skill.toml` 与 `SKILL.md` 两个文件。
-- 不要调用任何专用安装工具，直接用 write_file 在存储目录下创建文件即可。
+- 不要调用任何专用安装工具，直接用文件写入工具（fs 插件 file_write，action=write）在存储目录下创建文件即可。
 
 创建步骤：
 1. 在 `{root}` 下创建子目录（目录名即 skill id，只允许小写字母、数字、短横线）。

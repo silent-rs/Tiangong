@@ -385,6 +385,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "coding" => &["app/index.html"],
         "computer-use" => &["app/restore-window.html"],
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
+        // 工具视图（session.message-item replace + tools）。
+        "fs" => &["app/tool-view.html"],
         "bot" => &["app/im-message.html", "app/settings.html"],
         "volcengine" => &[
             "app/settings.html",

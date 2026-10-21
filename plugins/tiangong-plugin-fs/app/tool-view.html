@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>文件工具调用</title>
+  <style>
+    /* all: initial 隔离宿主样式，但 visibility / pointer-events 必须继承宿主容器。 */
+    :host, .fv-root { all: initial; visibility: inherit; pointer-events: inherit; }
+    .fv-root [hidden] { display: none !important; }
+    .fv-root {
+      display: block; font-family: var(--host-font-family, inherit);
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    .fv-card {
+      overflow: hidden; border-radius: 6px;
+      border: 1px solid hsl(var(--border, 214 18% 88%) / .6);
+      background: hsl(var(--muted, 210 40% 96%) / .3);
+    }
+    .fv-head {
+      display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+      border-bottom: 1px solid hsl(var(--border, 214 18% 88%) / .5);
+      font-size: 12px;
+    }
+    .fv-title { font-weight: 600; flex-shrink: 0; }
+    .fv-path {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: hsl(var(--muted-foreground, 215 16% 47%));
+    }
+    .fv-meta { margin-left: auto; flex-shrink: 0; font-size: 11px; color: hsl(var(--muted-foreground, 215 16% 47%) / .8); }
+    .fv-section + .fv-section { border-top: 1px solid hsl(var(--border, 214 18% 88%) / .5); }
+    .fv-label {
+      padding: 6px 12px 0; font-size: 10px; font-weight: 600; letter-spacing: .05em;
+      text-transform: uppercase; color: hsl(var(--muted-foreground, 215 16% 47%) / .7);
+    }
+    .fv-pre {
+      margin: 0; padding: 6px 12px 8px; max-height: 288px; overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .fv-ln { user-select: none; color: hsl(var(--muted-foreground, 215 16% 47%) / .6); padding-right: 12px; }
+    .fv-add { color: hsl(142 70% 35%); }
+    .fv-del { color: hsl(var(--destructive, 0 72% 51%)); }
+    .fv-hunk { color: hsl(var(--primary, 222 47% 11%) / .8); }
+    .fv-error { color: hsl(var(--destructive, 0 72% 51%)); }
+    .fv-running { color: hsl(var(--muted-foreground, 215 16% 47%)); font-style: italic; }
+  </style>
+</head>
+<body>
+  <div class="fv-root">
+    <div class="fv-card">
+      <div class="fv-head">
+        <span class="fv-title" id="fv-title"></span>
+        <span class="fv-path" id="fv-path"></span>
+        <span class="fv-meta" id="fv-meta"></span>
+      </div>
+      <div id="fv-body"></div>
+    </div>
+  </div>
+  <script>
+    // fs 工具视图（session.message-item，render=replace，tools 声明接管 fs 工具）：
+    // 宿主展开工具行时挂载，context.message.render.data 为调用原始数据
+    // {tool_call_id, tool_name, arguments, status, output, duration_ms}。
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const $ = (id) => uiRoot.getElementById(id);
+    const MAX_LINES = 400;
+
+    const TITLES = {
+      'file_read:read': '读取文件',
+      'file_read:list': '列出目录',
+      'file_read:tree': '目录树',
+      'file_read:image': '读取图片',
+      'file_write:write': '写入文件',
+      'file_write:replace': '替换文本',
+      'file_write:patch': '应用补丁',
+      current_time: '当前时间',
+    };
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function clip(text) {
+      const lines = String(text ?? '').split('\n');
+      return lines.length > MAX_LINES
+        ? `${lines.slice(0, MAX_LINES).join('\n')}\n…（共 ${lines.length} 行，已截断）`
+        : lines.join('\n');
+    }
+
+    function section(label, build) {
+      const box = el('div', 'fv-section');
+      if (label) box.appendChild(el('div', 'fv-label', label));
+      const pre = el('pre', 'fv-pre');
+      build(pre);
+      box.appendChild(pre);
+      return box;
+    }
+
+    function plain(label, text, className) {
+      return section(label, (pre) => {
+        if (className) pre.classList.add(className);
+        pre.textContent = clip(text);
+      });
+    }
+
+    /** read 输出为「行号\t内容」：行号单独着色。 */
+    function numbered(text) {
+      return section('', (pre) => {
+        clip(text).split('\n').forEach((line, index, all) => {
+          const match = line.match(/^\s*(\d+)\t(.*)$/);
+          if (match) {
+            pre.appendChild(el('span', 'fv-ln', match[1].padStart(5, ' ')));
+            pre.appendChild(document.createTextNode(match[2]));
+          } else {
+            pre.appendChild(document.createTextNode(line));
+          }
+          if (index < all.length - 1) pre.appendChild(document.createTextNode('\n'));
+        });
+      });
+    }
+
+    function diff(label, lines) {
+      return section(label, (pre) => {
+        lines.forEach((line, index) => {
+          const cls = line.startsWith('+') && !line.startsWith('+++') ? 'fv-add'
+            : line.startsWith('-') && !line.startsWith('---') ? 'fv-del'
+            : line.startsWith('@@') ? 'fv-hunk' : '';
+          pre.appendChild(el('span', cls, line));
+          if (index < lines.length - 1) pre.appendChild(document.createTextNode('\n'));
+        });
+      });
+    }
+
+    function prefixed(text, sign) {
+      return clip(text).split('\n').map((line) => `${sign}${line}`);
+    }
+
+    function render(context) {
+      const message = (context && context.message) || {};
+      const data = (message.render && message.render.data) || {};
+      const args = (data.arguments && typeof data.arguments === 'object') ? data.arguments : {};
+      const tool = String(data.tool_name || '').replace(/^.*__/, '');
+      const action = args.action || '';
+      const key = tool === 'current_time' ? tool : `${tool}:${action}`;
+      $('fv-title').textContent = TITLES[key] || `${tool}${action ? ` · ${action}` : ''}`;
+      $('fv-path').textContent = args.path || args.workdir || '';
+      $('fv-meta').textContent = data.duration_ms ? `${data.duration_ms} ms` : '';
+
+      const body = $('fv-body');
+      body.replaceChildren();
+      const output = data.output;
+      const failed = data.status === 'error';
+
+      // 调用内容（运行中即可查看）。
+      if (key === 'file_write:write' && args.content != null) {
+        body.appendChild(diff(args.append ? '追加内容' : '写入内容', prefixed(args.content, '+')));
+      } else if (key === 'file_write:replace') {
+        body.appendChild(diff('替换', [...prefixed(args.old ?? '', '-'), ...prefixed(args.new ?? '', '+')]));
+      } else if (key === 'file_write:patch' && args.patch) {
+        body.appendChild(diff(args.verify ? '补丁（仅校验）' : '补丁', clip(args.patch).split('\n')));
+      }
+
+      // 结果（完成后）。
+      if (output == null) {
+        if (!body.childNodes.length) body.appendChild(plain('', '执行中…', 'fv-running'));
+        return;
+      }
+      if (failed) {
+        body.appendChild(plain('错误', output, 'fv-error'));
+      } else if (key === 'file_read:read') {
+        body.appendChild(numbered(output));
+      } else if (tool === 'file_write') {
+        if (output.trim()) body.appendChild(plain('结果', output));
+      } else {
+        body.appendChild(plain('', output));
+      }
+    }
+
+    if (typeof onHostContextChange === 'function') {
+      onHostContextChange(render);
+    } else {
+      render(typeof hostContext !== 'undefined' ? hostContext : null);
+    }
+  </script>
+</body>
+</html>

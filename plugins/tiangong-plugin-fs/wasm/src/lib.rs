@@ -26,6 +26,7 @@ use dispatch::{DispatchError, FsCall};
 use tiangong_plugin_fs_protocol::tools::{
     ApplyPatch, DEFAULT_READ_IMAGE_MAX_DIMENSION, FsToolResponse, ListDir,
     MAX_READ_IMAGE_MAX_DIMENSION, ReadFile, ReadImage, ReplaceInFile, TreeDir, WriteFile,
+    operation_label,
 };
 use tiangong_plugin_fs_protocol::{
     FsOperation, READ_ACTIONS, TOOL_CURRENT_TIME, TOOL_FILE_READ, TOOL_FILE_WRITE, WRITE_ACTIONS,
@@ -238,7 +239,7 @@ where
     O: FsOperation<Response = FsToolResponse>,
 {
     let resp = sidecar_client::invoke::<O>(request)
-        .map_err(|e| plugin_err(format!("{} 执行失败: {e}", O::NAME)))?;
+        .map_err(|e| plugin_err(format!("{} 执行失败: {e}", operation_label(O::NAME))))?;
     Ok(to_tool_result(resp))
 }
 
@@ -249,7 +250,7 @@ where
     O: FsOperation<Response = FsToolResponse>,
 {
     let resp = sidecar_client::invoke::<O>(request)
-        .map_err(|e| plugin_err(format!("{} 执行失败: {e}", O::NAME)))?;
+        .map_err(|e| plugin_err(format!("{} 执行失败: {e}", operation_label(O::NAME))))?;
     // 发锁事件（保留原 GUI 锁面板能力）。失败静默忽略——锁事件是辅助反馈，
     // 不应阻塞工具结果返回。
     for path in &resp.locked_paths {

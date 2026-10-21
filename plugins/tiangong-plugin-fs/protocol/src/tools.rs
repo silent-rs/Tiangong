@@ -23,6 +23,30 @@ pub const APPLY_PATCH_OPERATION: &str = "fs.apply_patch";
 pub const READ_IMAGE_OPERATION: &str = "fs.read_image";
 pub const SET_WORKSPACE_OPERATION: &str = "fs.set_workspace";
 
+/// 文件操作在结果文案中的名称：对模型暴露的「工具(action)」形态，与调用
+/// 一一对应（sidecar 按单一操作粒度处理，文案不再出现合并前的旧工具名）。
+pub const LIST_DIR_LABEL: &str = "file_read(list)";
+pub const TREE_DIR_LABEL: &str = "file_read(tree)";
+pub const READ_FILE_LABEL: &str = "file_read(read)";
+pub const READ_IMAGE_LABEL: &str = "file_read(image)";
+pub const WRITE_FILE_LABEL: &str = "file_write(write)";
+pub const REPLACE_IN_FILE_LABEL: &str = "file_write(replace)";
+pub const APPLY_PATCH_LABEL: &str = "file_write(patch)";
+
+/// sidecar 操作名 → 结果文案中的调用标签；非文件操作原样返回。
+pub fn operation_label(operation: &str) -> &str {
+    match operation {
+        LIST_DIR_OPERATION => LIST_DIR_LABEL,
+        TREE_DIR_OPERATION => TREE_DIR_LABEL,
+        READ_FILE_OPERATION => READ_FILE_LABEL,
+        READ_IMAGE_OPERATION => READ_IMAGE_LABEL,
+        WRITE_FILE_OPERATION => WRITE_FILE_LABEL,
+        REPLACE_IN_FILE_OPERATION => REPLACE_IN_FILE_LABEL,
+        APPLY_PATCH_OPERATION => APPLY_PATCH_LABEL,
+        other => other,
+    }
+}
+
 /// `read_image` 产物长边默认上限（与 computer-use 截图一致）。
 pub const DEFAULT_READ_IMAGE_MAX_DIMENSION: u32 = 1568;
 /// `read_image` 产物长边可设置的最大值（主流多模态接口的单边上限）。

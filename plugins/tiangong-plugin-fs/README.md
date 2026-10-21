@@ -6,7 +6,7 @@ Fs 插件对模型暴露 3 个工具：
 - `file_write`：写入，`action` 取 `write`（写入/追加）/ `replace`（文本替换）/ `patch`（应用 unified diff）；
 - `current_time`：当前时间。
 
-每个工具在 plugin.json `tool_icons` 中声明一个自带 SVG 图标。插件由三个独立 crate 组成：
+工具图标在 plugin.json `tool_icons` 中声明为自带 SVG：通用键 `file_read` 为读文件图标，特指键 `file_read:action=list` / `file_read:action=tree` 为目录图标、`file_read:action=image` 为图片图标；`file_write`、`current_time` 各一个图标。不支持特指键的旧版宿主只使用通用键。工具调用的展开区由工具视图 `app/tool-view.html` 渲染（`session.message-item` replace 贡献，`tools` 声明接管 `file_read` / `file_write` / `current_time`）：按 action 显示读取内容（带行号）、写入内容、替换前后与补丁 diff 以及结果；`titles` 按 action 声明工具行标题（如 `file_read:action=list` 为「列出目录」）。宿主未支持工具视图时以文本默认显示。插件由三个独立 crate 组成：
 
 - `protocol`：WASM 与 sidecar 共用的私有业务协议（含 `FsAccessContext` 访问能力上下文，为后续沙箱能力预留）；
 - `wasm`：工具规格、参数解析与生命周期入口，桥接 sidecar（`current_time` 例外，用 clock host import 本地实现）；
