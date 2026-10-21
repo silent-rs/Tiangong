@@ -33,7 +33,7 @@ pub use trust::{
 /// 开发目录名（位于存储根下，与 plugins/ 平级）。
 pub const PLUGIN_DEV_DIR: &str = "plugins-dev";
 /// 项目元数据文件名（位于项目目录根部）。
-const PROJECT_META_FILE: &str = ".plugin-dev.json";
+pub(crate) const PROJECT_META_FILE: &str = ".plugin-dev.json";
 
 pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
     let install_dir = crate::registry::plugin_install_directory(plugin_id)
@@ -102,8 +102,8 @@ struct ProjectEntry {
 }
 
 #[derive(Debug, Serialize)]
-struct InstallResult {
-    plugin_id: String,
+pub(crate) struct InstallResult {
+    pub(crate) plugin_id: String,
     version: String,
     state: String,
     enabled: bool,
@@ -196,9 +196,9 @@ fn installed_plugin_manifest(storage_root: &Path, plugin_id: &str) -> Option<Plu
 
 /// 指纹核验期望：`(发起受信插件 ID, 登记的产物指纹)`。直调（测试/内部
 /// 流程）传 None 跳过核验。
-type TrustedBuildExpectation<'a> = Option<(&'a str, &'a str)>;
+pub(crate) type TrustedBuildExpectation<'a> = Option<(&'a str, &'a str)>;
 
-fn install(
+pub(crate) fn install(
     storage_root: &Path,
     project_id: &str,
     trusted_build: TrustedBuildExpectation<'_>,

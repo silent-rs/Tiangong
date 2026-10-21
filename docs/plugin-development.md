@@ -137,7 +137,8 @@ tiangong-plugin-runtime ──────┴──> 以上两者
 - `tiangong-plugin-sidecar` 不得依赖 `tiangong-plugin-runtime` 或 `tiangong-plugin-update`：更新约定变化时只影响宿主与自更新插件，不牵动全部插件。
 - 新增双方共用的协议或常量时，按用途定义在 `tiangong-plugin-sidecar` 或 `tiangong-plugin-update`，Runtime 按原路径重新导出。
 - Plugin CI 按依赖选择插件：`tiangong-plugin-sidecar` 变化检查全部带 sidecar 的插件；`tiangong-plugin-update` 变化只检查依赖它的插件；`tiangong-plugin-runtime` 变化不触发插件检查。
-- 宿主与 sidecar 对接的端到端测试与依赖方向护栏放在 `tests/plugin-sidecar-e2e`（crate `tiangong-plugin-sidecar-e2e`，只用于测试，不被任何 crate 依赖）。
+- 宿主与插件对接的端到端测试与依赖方向护栏放在 `tests/plugin-sidecar-e2e`（crate `tiangong-plugin-sidecar-e2e`，只用于测试，不被任何 crate 依赖）：Rust sidecar 运行库与 Node SDK 的协议往返、官方插件清单校验、Plugin Creator 真实产物安装、官方目录安装链。
+- `tiangong-plugin-runtime` 的测试不读取 `plugins/` 下的任何目录，只使用仓库级 fixture（`tests/fixtures/`，经 `test_support` 取路径）。Node SDK 的测试副本位于 `tests/fixtures/node-sidecar-sdk/`，与 `plugins/sdk-sidecar/index.mjs` 的一致性由 e2e 的 `fixture_sync` 测试保证。
 
 ## 开发环境
 

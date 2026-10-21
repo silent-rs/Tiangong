@@ -208,8 +208,7 @@ fn make_node_sidecar_release(root: &Path, id: &str) -> PathBuf {
         )
         .unwrap();
     std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
-    let sdk =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
+    let sdk = crate::test_support::node_sidecar_sdk();
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -315,8 +314,7 @@ fn integration_按需sidecar_新版上下文工作区成为沙箱写域() {
             r#"{"schema_version":2,"id":"workspace-probe","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"write_probe","description":"写域探测","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
         )
         .unwrap();
-    let sdk =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
+    let sdk = crate::test_support::node_sidecar_sdk();
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1017,137 +1015,6 @@ fn integration_解释器sidecar_官方签名与本地信任混用拒绝() {
     );
 }
 
-/// 真实 creator 产物全链路：package → plugin-dev 安装（原生确认 + 暂存 +
-/// 双向完整性 + 本地信任落锚）→ 按需 sidecar 真实执行 devkit.init（验证
-/// templates 随行资源经 resources 声明进入安装目录并被 devkit 使用）。
-/// 产物（release/）由 `yarn package` 生成、不入库：CI 无产物时跳过。
-#[test]
-#[serial_test::serial]
-fn integration_creator真实产物_安装与devkit_init全链路() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let release_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../plugins/tiangong-plugin-creator/release");
-    if !release_source.join("plugin.json").is_file() {
-        eprintln!(
-            "跳过：缺少真实构建产物 {}（先 yarn package）",
-            release_source.display()
-        );
-        return;
-    }
-    let root = tempfile::tempdir().unwrap();
-    // 安装链的可用性探测读取全局模型配置；测试进程用隔离目录初始化。
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let id = "plugin-creator";
-    let dev_root = root.path().join(PLUGIN_DEV_DIR).join(id);
-    copy_tree_for_test(&release_source, &dev_root.join("release"));
-    make_project(root.path(), id);
-
-    let result = install(root.path(), id, None).expect("creator 真实产物安装");
-    assert_eq!(result.plugin_id, id);
-
-    // 按需 sidecar 真实执行 devkit.init：安装目录内的 templates 必须可用。
-    let init_root = root.path().join("init-output");
-    let response = crate::registry::invoke_sidecar(
-        root.path(),
-        id,
-        "devkit.init",
-        json!({"args": ["ui-app", "chain-probe", "--name", "链路探针"], "root": init_root}),
-    )
-    .expect("devkit.init 经按需 sidecar 执行");
-    assert_eq!(
-        response["ok"],
-        json!(true),
-        "devkit.init 应成功: {response}"
-    );
-    assert!(
-        init_root.join("chain-probe/plugin.json").is_file(),
-        "模板项目应真实创建（templates 随行资源可用）"
-    );
-}
-/// 完整用户旅程（显式运行：`cargo test -p tiangong-plugin-runtime --lib
-/// -- --ignored`）：经 creator 的按需 sidecar 从零创建 node-sidecar 插件
-/// → 注入自定义操作 → devkit 真实构建（yarn 工程链）→ 自动签名安装 →
-/// 宿主连接新插件的 sidecar 真实调用。全程不经 GUI，等价于 Agent 操作序列。
-#[test]
-#[ignore = "真实 yarn 构建需数分钟与网络，按需显式运行"]
-#[serial_test::serial]
-fn integration_从零创建node_sidecar插件_完整旅程() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let release_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../plugins/tiangong-plugin-creator/release");
-    if !release_source.join("plugin.json").is_file() {
-        eprintln!("跳过：缺少真实构建产物（先在 creator 目录 yarn package）");
-        return;
-    }
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let creator = "plugin-creator";
-    let dev_root = root.path().join(PLUGIN_DEV_DIR).join(creator);
-    copy_tree_for_test(&release_source, &dev_root.join("release"));
-    make_project(root.path(), creator);
-    install(root.path(), creator, None).expect("creator 安装");
-
-    let devkit = |command: &str, args: serde_json::Value| {
-        crate::registry::invoke_sidecar(root.path(), creator, &format!("devkit.{command}"), args)
-    };
-
-    // 1) 初始化 node-sidecar 模板项目（真实模板，写入受控开发根）。
-    let project_id = "journey-demo";
-    let response = devkit(
-            "init",
-            json!({"args": ["node-sidecar", project_id, "--name", "旅程验证"], "root": root.path().join(PLUGIN_DEV_DIR)}),
-        )
-        .expect("devkit.init");
-    assert_eq!(response["ok"], json!(true), "init 失败: {response}");
-
-    // 2) 修改 sidecar 源码：注入自定义操作（模拟用户/Agent 编码）。
-    let entry = root
-        .path()
-        .join(PLUGIN_DEV_DIR)
-        .join(project_id)
-        .join("sidecar/main.mjs");
-    let source = std::fs::read_to_string(&entry).unwrap();
-    let patched = source.replace(
-            "    if (operation === 'demo.echo') {",
-            "    if (operation === 'journey.greet') {\n      return { payload: { message: `你好，${payload?.who ?? '天工'}！` } };\n    }\n    if (operation === 'demo.echo') {",
-        );
-    assert!(patched != source, "应成功注入自定义操作");
-    std::fs::write(&entry, patched).unwrap();
-
-    // 3) 真实构建（yarn install + 类型检查 + vite/esbuild 双端打包）。
-    let response = devkit(
-        "build",
-        json!({"args": [project_id], "root": root.path().join(PLUGIN_DEV_DIR)}),
-    )
-    .expect("devkit.build");
-    assert_eq!(response["ok"], json!(true), "build 失败: {response}");
-
-    // 4) 安装新插件（原生确认通道 + 完整性 + 本地信任）。
-    let result = install(root.path(), project_id, None).expect("新插件安装");
-    assert_eq!(result.plugin_id, project_id);
-
-    // 5) 宿主连接新插件 sidecar，真实调用自定义操作。
-    let response = crate::registry::invoke_sidecar(
-        root.path(),
-        project_id,
-        "journey.greet",
-        json!({"who": "完整旅程"}),
-    )
-    .expect("自定义操作调用");
-    assert_eq!(
-        response["message"],
-        json!("你好，完整旅程！"),
-        "响应: {response}"
-    );
-}
 /// 与任何真实指纹都不可能相等的占位（拒绝路径用）。
 fn unreachable_fingerprint() -> String {
     "0".repeat(64)
@@ -1221,8 +1088,7 @@ fn integration_无界面纯工具插件_安装与工具契约() {
             r#"{"schema_version":2,"id":"pure-tool-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"text_analyze","description":"文本分析","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"},"mention":{"hint":"纯工具"}}"#,
         )
         .unwrap();
-    let sdk =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
+    let sdk = crate::test_support::node_sidecar_sdk();
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1305,8 +1171,7 @@ fn sidecar连接停止后wasm调用与取消自动换代() {
             r#"{"schema_version":2,"id":"stale-ref-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"capabilities":{"prompt":true},"prompt":["占位贡献（本测试经 runtime-probe 组件走调用链）"],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","lifecycle":"resident"}}"#,
         )
         .unwrap();
-    let sdk =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
+    let sdk = crate::test_support::node_sidecar_sdk();
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1490,8 +1355,7 @@ fn integration_直连工具_超时终止进程() {
             r#"{"schema_version":2,"id":"blocking-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"slow_job","description":"慢任务","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
         )
         .unwrap();
-    let sdk =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
+    let sdk = crate::test_support::node_sidecar_sdk();
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1594,8 +1458,7 @@ fn integration_直连工具_并发隔离与取消归属() {
             r#"{"schema_version":2,"id":"concurrent-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"quick_job","description":"快","input_schema":{"type":"object"},"timeout_ms":60000},{"name":"slow_job","description":"慢","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
         )
         .unwrap();
-    let sdk =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
+    let sdk = crate::test_support::node_sidecar_sdk();
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),

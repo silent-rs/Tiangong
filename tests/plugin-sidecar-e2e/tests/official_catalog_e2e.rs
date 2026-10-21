@@ -14,12 +14,12 @@
 use std::path::{Path, PathBuf};
 
 fn workspace_target_dist() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/plugin-dist")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugin-dist")
 }
 
 fn plugin_creator_version() -> String {
     let manifest: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../plugins/tiangong-plugin-creator/plugin.json"
+        "../../../plugins/tiangong-plugin-creator/plugin.json"
     ))
     .expect("解析 Plugin Creator 清单");
     manifest["version"]
