@@ -1,6 +1,7 @@
 //! 请求级取消与超时收尾：中断确认、终端保活与复用池恢复。
 
 use super::*;
+use crate::service::readiness::{Foreground, foreground_of};
 
 /// 取消链路：宿主超时/会话取消后 Cancel 帧到达，dispatch future 已被
 /// runner 丢弃——cancel 钩子必须把 Ctrl+C 落到执行中的终端并复位
@@ -515,6 +516,22 @@ async fn 取消发生在命令启动前时终端回到空闲() {
         .expect("终端应存活");
     assert_eq!(phase, SessionPhase::Idle, "启动前取消必须释放预留回到空闲");
 
+    // 取消发生在登录 shell 初始化期间：rc 可能仍在前台运行子程序，此时
+    // 选终端按 #673 的规则跳过它并新开终端，属正常保护行为。这里要验证
+    // 的是「预留已释放、终端回到复用池」，因此先等它回到提示符。
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let at_prompt = service
+            .with_session(&terminal, |session| {
+                Ok(matches!(foreground_of(session), Some(Foreground::Shell)))
+            })
+            .expect("终端应存活");
+        if at_prompt {
+            break;
+        }
+        assert!(Instant::now() < deadline, "登录 shell 应在限时内回到提示符");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     // 后续命令应能复用该终端（它干净且空闲）。
     let after = outcome_of(
         service
