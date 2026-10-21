@@ -37,14 +37,18 @@ pub enum SandboxCapability {
     /// 运行无头浏览器（Chrome/Chromium）：macOS 上放行 IOKit 与
     /// `org.chromium.*` 的 mach 注册/查询（MachPortRendezvous）。
     BrowserRuntime,
+    /// 进程表查询服务（macOS `com.apple.sysmond`）：`pgrep` / `pkill` 经
+    /// libsysmon 向它查询进程列表。只读进程信息，不扩大信号或文件权限。
+    ProcessInspection,
 }
 
 impl SandboxCapability {
     /// 全部已定义能力。
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::CredentialServices,
         Self::AudioInput,
         Self::BrowserRuntime,
+        Self::ProcessInspection,
     ];
 
     /// 序列化名（与 JSON 表示一致）。
@@ -53,6 +57,7 @@ impl SandboxCapability {
             Self::CredentialServices => "credential_services",
             Self::AudioInput => "audio_input",
             Self::BrowserRuntime => "browser_runtime",
+            Self::ProcessInspection => "process_inspection",
         }
     }
 
@@ -64,7 +69,10 @@ impl SandboxCapability {
     /// 必须逐平台显式判定，不得默认放行。
     pub fn supported_on_current_platform(self) -> bool {
         match self {
-            Self::CredentialServices | Self::AudioInput | Self::BrowserRuntime => true,
+            Self::CredentialServices
+            | Self::AudioInput
+            | Self::BrowserRuntime
+            | Self::ProcessInspection => true,
         }
     }
 }

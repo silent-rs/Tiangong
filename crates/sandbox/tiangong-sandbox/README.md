@@ -133,7 +133,8 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
 - 目标程序会校验普通文件形态、摘要和平台权限。
 - 平台沙箱不可用时拒绝执行，不静默降级。
 - 敏感路径不会由通用核心隐式猜测；宿主应通过 `protected_paths` 和 `denied_read_paths` 明确传入。crate 另提供可选的常见凭据与天工宿主预设。
-- 特殊能力（`capabilities`）默认为空，只能取 Launcher 内置的封闭集合：`credential_services`（系统凭据服务）、`audio_input`（音频输入）、`browser_runtime`（无头浏览器）。未知能力导致策略解析失败，当前平台不支持的能力会被拒绝，均不会静默忽略。
+- 特殊能力（`capabilities`）默认为空，只能取 Launcher 内置的封闭集合：`credential_services`（系统凭据服务）、`audio_input`（音频输入）、`browser_runtime`（无头浏览器）、`process_inspection`（进程查看：macOS 放行 `com.apple.sysmond`，使 `pgrep`/`pkill` 可用）。未知能力导致策略解析失败，当前平台不支持的能力会被拒绝，均不会静默忽略。
+- 平台限制：macOS 上 `ps`、`top` 是 setuid 程序，Seatbelt 禁止执行 setuid 程序，`top` 还需要 root 与 `com.apple.system-task-ports.read` entitlement，因此即使授予 `process_inspection` 也无法在沙箱内运行。天工终端插件改由 `terminal_status` 返回终端内进程树（pid、父进程、命令行）替代。
 
 ## 宿主协议
 

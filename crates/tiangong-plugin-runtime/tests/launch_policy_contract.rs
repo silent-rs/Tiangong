@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tiangong_plugin_runtime::launch_policy::{
-    CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_CREDENTIAL_SERVICES, LaunchMode,
-    LaunchPolicy, ResourceLimits,
+    CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_CREDENTIAL_SERVICES,
+    CAPABILITY_PROCESS_INSPECTION, LaunchMode, LaunchPolicy, ResourceLimits,
 };
 use tiangong_sandbox::{SandboxCapability, SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
@@ -92,6 +92,10 @@ fn capability_names_are_known_to_launcher() {
             CAPABILITY_BROWSER_RUNTIME,
             SandboxCapability::BrowserRuntime,
         ),
+        (
+            CAPABILITY_PROCESS_INSPECTION,
+            SandboxCapability::ProcessInspection,
+        ),
     ];
     for (name, capability) in pairs {
         assert_eq!(name, capability.as_str());
@@ -135,10 +139,11 @@ fn seatbelt_profile_is_identical_for_every_capability_combination() {
         CAPABILITY_CREDENTIAL_SERVICES,
         CAPABILITY_AUDIO_INPUT,
         CAPABILITY_BROWSER_RUNTIME,
+        CAPABILITY_PROCESS_INSPECTION,
     ];
-    for mask in 0u8..8 {
+    for mask in 0u8..32 {
         let mut host = full_host_policy();
-        host.allow_network = mask & 1 == 0;
+        host.allow_network = mask & 16 == 0;
         let mut direct = to_launcher(&full_host_policy());
         direct.allow_network = host.allow_network;
         for (bit, name) in names.iter().enumerate() {

@@ -17,6 +17,8 @@ pub const CAPABILITY_CREDENTIAL_SERVICES: &str = "credential_services";
 pub const CAPABILITY_AUDIO_INPUT: &str = "audio_input";
 /// 沙箱内运行无头浏览器（Chrome/Chromium）。
 pub const CAPABILITY_BROWSER_RUNTIME: &str = "browser_runtime";
+/// 进程表查询服务（macOS sysmond）：沙箱内 `pgrep` / `pkill` 可用。
+pub const CAPABILITY_PROCESS_INSPECTION: &str = "process_inspection";
 
 /// 沙箱模式（宿主只使用 `workspace_write`，`read_only` 保留与 Launcher 对齐）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

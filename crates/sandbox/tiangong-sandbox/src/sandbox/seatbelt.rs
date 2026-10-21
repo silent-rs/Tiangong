@@ -245,6 +245,11 @@ fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
         // 必须位于兜底 (deny mach-lookup) 之前才生效。
         sbpl.push_str(BROWSER_RUNTIME_MACH_RULES);
     }
+    if policy.has(SandboxCapability::ProcessInspection) {
+        // pgrep/pkill 经 libsysmon 查询进程表（#677）。ps/top 是 setuid
+        // 程序，Seatbelt 禁止沙箱进程执行 setuid，无法靠规则放行。
+        sbpl.push_str("(allow mach-lookup (global-name \"com.apple.sysmond\"))\n");
+    }
     // 显式拒绝名单之外的服务，也约束未提及类别默认放行的旧系统。
     sbpl.push_str("(deny mach-lookup)\n");
 }
@@ -404,6 +409,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn process_inspection_rule_follows_explicit_authorization() {
+        let rule = "(allow mach-lookup (global-name \"com.apple.sysmond\"))";
+        for granted in [false, true] {
+            let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
+            policy.set_capability(SandboxCapability::ProcessInspection, granted);
+            for sbpl in [
+                compile_profile_explicit_categories(&policy, &policy.writable_roots()),
+                compile_profile_legacy(&policy, &policy.writable_roots()),
+            ] {
+                assert_eq!(sbpl.contains(rule), granted, "sysmond 必须只随授权开放");
+                // 放行位于兜底拒绝之前才生效，且不放宽信号与任意服务查询。
+                if granted {
+                    assert!(sbpl.find(rule) < sbpl.find("(deny mach-lookup)"));
+                }
+                assert!(!sbpl.contains("(allow mach-lookup)"));
+                assert!(!sbpl.contains("(allow signal)"));
+            }
+        }
+    }
     #[test]
     fn legacy_boolean_policy_compiles_to_identical_profile() {
         // 已发布 App 的旧布尔格式经兼容层解析后，与新格式生成逐字一致的 profile。
