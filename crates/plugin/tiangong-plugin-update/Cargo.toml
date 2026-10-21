@@ -1,0 +1,14 @@
+[package]
+name = "tiangong-plugin-update"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "插件发布与更新约定：官方目录、签名发布清单的数据结构与信任根常量"
+publish = false
+
+# 宿主（tiangong-plugin-runtime）的插件安装/更新与需要自更新的插件 sidecar
+# 共用本 crate。与 tiangong-plugin-sidecar 分开：更新约定变化时只影响宿主与
+# 自更新插件，不牵动全部插件。
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }

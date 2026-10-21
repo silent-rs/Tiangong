@@ -80,7 +80,7 @@ jobs:
                 ;;
             esac
             case "$file" in
-              plugins/tiangong-plugin-creator/*|xtask/*|.github/workflows/ci.yml|crates/tiangong-plugin-runtime/src/artifacts.rs|crates/tiangong-plugin-runtime/src/registry.rs|crates/tiangong-plugin-runtime/src/signature.rs|crates/tiangong-plugin-runtime/tests/official_catalog_e2e.rs)
+              plugins/tiangong-plugin-creator/*|xtask/*|.github/workflows/ci.yml|crates/plugin/tiangong-plugin-update/*|crates/plugin/tiangong-plugin-runtime/src/artifacts.rs|crates/plugin/tiangong-plugin-runtime/src/registry/*|crates/plugin/tiangong-plugin-runtime/src/signature.rs|tests/plugin-sidecar-e2e/tests/official_catalog_e2e.rs)
                 interpreter_e2e=true
                 ;;
             esac
@@ -130,6 +130,21 @@ jobs:
               affected="$(jq -c --arg name "$name" '. + [$name] | unique' <<< "$affected")"
             fi
           done
+          # 宿主与插件对接的 e2e 读取 plugins/ 下的 SDK、官方插件清单与
+          # Creator 产物（App 包矩阵排除 plugins/），这些文件变化时单独选中；
+          # tests/fixtures/ 由 runtime 测试读取，变化时同时选中 runtime。
+          if [[ "$check_all" != "true" ]]; then
+            for file in "${files[@]}"; do
+              case "$file" in
+                tests/fixtures/*)
+                  affected="$(jq -c '. + ["tiangong-plugin-runtime", "tiangong-plugin-sidecar-e2e"] | unique' <<< "$affected")"
+                  ;;
+                plugins/sdk-sidecar/*|plugins/tiangong-plugin-creator/*|plugins/*/plugin.json|plugins/*/assets/*)
+                  affected="$(jq -c '. + ["tiangong-plugin-sidecar-e2e"] | unique' <<< "$affected")"
+                  ;;
+              esac
+            done
+          fi
 
           echo "App crates: $affected"
           echo "Frontend: $frontend"
@@ -217,7 +232,7 @@ jobs:
           matrix: ${{ needs.changes.outputs.matrix }}
           install-nextest: true
       - name: Prepare plugin runtime sandbox tests
-        if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-plugin-runtime')
+        if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-plugin-runtime') || contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-plugin-sidecar-e2e')
         env:
           RUSTFLAGS: "-C linker-features=-lld"
         run: |
@@ -306,7 +321,7 @@ jobs:
           # 测试存储的信任登记表导入公钥（不经环境变量）。
           TIANGONG_PLUGIN_E2E_REQUIRED: "1"
         run: >
-          cargo test -p tiangong-plugin-runtime --test official_catalog_e2e
+          cargo test -p tiangong-plugin-sidecar-e2e --test official_catalog_e2e
           -- --nocapture
 
   tauri:

@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::CONTENT_MANIFEST_FILE;
 
-pub use tiangong_plugin_sidecar::release::{
+pub use tiangong_plugin_update::{
     OFFICIAL_PUBKEY_B64, SIGNATURE_FILE, SIGNED_RELEASE_FILE, SIGNED_RELEASE_SCHEMA_VERSION,
     SignedArtifact, SignedPluginRelease,
 };

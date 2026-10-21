@@ -3,7 +3,7 @@ name = "tiangong-plugin-sidecar-e2e"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
-description = "宿主 Runtime 与插件 sidecar 运行库的端到端测试（含测试用宿主与 echo sidecar）"
+description = "宿主 Runtime 与插件（sidecar 运行库、Node SDK、官方插件产物）的端到端测试"
 publish = false
 
 # 本 crate 同时依赖宿主（tiangong-plugin-runtime）与插件侧运行库
@@ -21,6 +21,11 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 libc = { workspace = true }
 
 [dev-dependencies]
+tiangong-config = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 serial_test = { workspace = true }
+tempfile = { workspace = true }
+# official_catalog_e2e：三方发布者签名与签名文件编码
+minisign = "0.9"
+base64 = { workspace = true }

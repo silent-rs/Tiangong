@@ -2,7 +2,7 @@
 
 本文说明当前插件化试开发阶段如何创建、构建和本地导入 UI、TypeScript 与
 WASM 插件。WASM 宿主接口位于
-[`plugin.wit`](../crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，UI 运行时
+[`plugin.wit`](../crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，UI 运行时
 类型位于 [`plugins/sdk`](../plugins/sdk)。
 
 ## 开发流程总览
@@ -117,17 +117,28 @@ WASM Component
 
 ### 依赖方向
 
-宿主与插件共用的约定放在 `tiangong-plugin-sidecar`：通信协议（`protocol`）、宿主注入的环境变量（`env`）、插件发布约定（`release`：官方目录、签名清单数据结构、信任根常量）。依赖方向固定为：
+插件基础设施位于 `crates/plugin/`：
+
+| crate | 职责 |
+|---|---|
+| `tiangong-plugin-sidecar` | 宿主与插件共用的通信协议（`protocol`）、宿主注入的环境变量（`env`），以及插件侧 sidecar 运行库 |
+| `tiangong-plugin-update` | 插件发布与更新约定：官方目录、签名清单数据结构、官方公钥与发布者标识 |
+| `tiangong-plugin-runtime` | 宿主运行时：WASM 加载、sidecar 进程管理、插件安装/更新与验签 |
+
+依赖方向固定为：
 
 ```text
-插件 sidecar ───────────────┐
-                            ├──> tiangong-plugin-sidecar
-tiangong-plugin-runtime ────┘
+插件 sidecar ─────────────────┬──> tiangong-plugin-sidecar
+（仅自更新插件，如 memory）───┼──> tiangong-plugin-update
+tiangong-plugin-runtime ──────┴──> 以上两者
 ```
 
-- 插件 crate（`plugins/**`）只依赖 `tiangong-plugin-sidecar`，不得依赖 `tiangong-plugin-runtime`。需要读取用户模型配置的插件开启 `features = ["model"]`。
-- `tiangong-plugin-sidecar` 不得依赖 `tiangong-plugin-runtime`。新增双方共用的协议或常量时，定义在 `tiangong-plugin-sidecar`，Runtime 按原路径重新导出。
-- 宿主与 sidecar 对接的端到端测试放在 `tests/plugin-sidecar-e2e`（crate `tiangong-plugin-sidecar-e2e`，只用于测试，不被任何 crate 依赖）。
+- 插件 crate（`plugins/**`）只依赖 `tiangong-plugin-sidecar`，不得依赖 `tiangong-plugin-runtime`；需要自更新的插件另依赖 `tiangong-plugin-update`。需要读取用户模型配置的插件开启 `features = ["model"]`。
+- `tiangong-plugin-sidecar` 不得依赖 `tiangong-plugin-runtime` 或 `tiangong-plugin-update`：更新约定变化时只影响宿主与自更新插件，不牵动全部插件。
+- 新增双方共用的协议或常量时，按用途定义在 `tiangong-plugin-sidecar` 或 `tiangong-plugin-update`，Runtime 按原路径重新导出。
+- Plugin CI 按依赖选择插件：`tiangong-plugin-sidecar` 变化检查全部带 sidecar 的插件；`tiangong-plugin-update` 变化只检查依赖它的插件；`tiangong-plugin-runtime` 变化不触发插件检查。
+- 宿主与插件对接的端到端测试与依赖方向护栏放在 `tests/plugin-sidecar-e2e`（crate `tiangong-plugin-sidecar-e2e`，只用于测试，不被任何 crate 依赖）：Rust sidecar 运行库与 Node SDK 的协议往返、官方插件清单校验、Plugin Creator 真实产物安装、官方目录安装链。
+- `tiangong-plugin-runtime` 的测试不读取 `plugins/` 下的任何目录，只使用仓库级 fixture（`tests/fixtures/`，经 `test_support` 取路径）。Node SDK 的测试副本位于 `tests/fixtures/node-sidecar-sdk/`，与 `plugins/sdk-sidecar/index.mjs` 的一致性由 e2e 的 `fixture_sync` 测试保证。
 
 ## 开发环境
 
@@ -227,7 +238,7 @@ example-plugin/
 
 ## 实现 WASM Component
 
-插件必须实现 [`tiangong-plugin` world](../crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，包括 `plugin` 与 `plugin-ui` 两组导出。即使插件没有页面，也需要实现 `plugin-ui` 并返回空贡献列表。
+插件必须实现 [`tiangong-plugin` world](../crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，包括 `plugin` 与 `plugin-ui` 两组导出。即使插件没有页面，也需要实现 `plugin-ui` 并返回空贡献列表。
 
 最小 crate 配置：
 
@@ -344,7 +355,7 @@ sidecar 必须：
 5. 保证握手中的插件版本与 `plugin.json`、WASM `describe()` 一致。
 6. 只写沙箱可写域（见上文“沙箱写域”）。启动阶段任一写入失败都会让握手超时，宿主报“就绪握手失败”。
 
-协议类型见 [`protocol.rs`](../crates/tiangong-plugin-sidecar/src/protocol.rs)，环境变量约定见 [`env.rs`](../crates/tiangong-plugin-sidecar/src/env.rs)，宿主侧进程行为见 [`sidecar.rs`](../crates/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
+协议类型见 [`protocol.rs`](../crates/plugin/tiangong-plugin-sidecar/src/protocol.rs)，环境变量约定见 [`env.rs`](../crates/plugin/tiangong-plugin-sidecar/src/env.rs)，宿主侧进程行为见 [`sidecar.rs`](../crates/plugin/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
 
 ## 本地导入与调试
 

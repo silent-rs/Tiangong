@@ -194,13 +194,31 @@ pub fn finish_stdio_connection(
     }
 }
 
+/// 仓库级测试 fixture 目录（`tests/fixtures/`）。runtime 测试只读这里，
+/// 不直接引用 `plugins/` 下的插件或 SDK 目录。
+pub fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tests/fixtures")
+}
+
+/// Node sidecar 协议库测试副本（`tests/fixtures/node-sidecar-sdk/index.mjs`），
+/// 供测试拼装 Node 插件；与 `plugins/sdk-sidecar/index.mjs` 的一致性由
+/// `tiangong-plugin-sidecar-e2e` 校验。
+pub fn node_sidecar_sdk() -> PathBuf {
+    let sdk = fixtures_dir().join("node-sidecar-sdk/index.mjs");
+    assert!(
+        sdk.is_file(),
+        "缺少 Node sidecar SDK 测试副本：{}",
+        sdk.display()
+    );
+    sdk
+}
+
 /// 运行时测试专用插件 `runtime-probe` 的制品路径（仓库 `tests/fixtures/plugins/runtime-probe/`）。
 ///
 /// 制品随仓库提交（源码在同目录，见其 README），测试直接加载，不在测试时编译；
 /// 缺失或被篡改时直接 panic，不允许静默跳过（否则 CI 会把未执行的测试当成通过）。
 pub fn runtime_probe_wasm() -> PathBuf {
-    let dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plugins/runtime-probe");
+    let dir = fixtures_dir().join("plugins/runtime-probe");
     let wasm = dir.join("runtime_probe.wasm");
     let bytes = std::fs::read(&wasm)
         .unwrap_or_else(|error| panic!("读取测试插件制品失败 {}: {error}", wasm.display()));
@@ -242,4 +260,31 @@ pub fn runtime_probe_plugin(
         false,
     )
     .expect("实例化测试插件失败")
+}
+
+/// 写入最小的 plugin-dev 项目元数据（`<存储根>/plugins-dev/<id>/`），
+/// 与 devkit init 产出的项目登记形态一致。
+pub fn write_dev_project(storage_root: &Path, project_id: &str) -> PathBuf {
+    let dir = storage_root
+        .join(crate::plugin_dev::PLUGIN_DEV_DIR)
+        .join(project_id);
+    std::fs::create_dir_all(&dir).expect("创建开发项目目录失败");
+    std::fs::write(
+        dir.join(crate::plugin_dev::PROJECT_META_FILE),
+        serde_json::json!({
+            "plugin_id": project_id,
+            "name": project_id,
+            "template": "ts-npx",
+            "created_at": "2026-08-25 00:00:00"
+        })
+        .to_string(),
+    )
+    .expect("写入开发项目元数据失败");
+    dir
+}
+
+/// 安装 plugin-dev 项目的 `release/` 构建产物（跳过受信构建登记核验，
+/// 其余签名、完整性与导入链路与正式安装一致）。返回安装的插件 ID。
+pub fn install_dev_project(storage_root: &Path, project_id: &str) -> anyhow::Result<String> {
+    crate::plugin_dev::install(storage_root, project_id, None).map(|result| result.plugin_id)
 }

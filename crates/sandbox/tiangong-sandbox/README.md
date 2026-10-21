@@ -29,7 +29,7 @@ Sandbox 不决定宿主的存储布局。安装目录由 App、服务或其他�
 - 安装、更新、验签与自检使用 `tiangong-sandbox-update`；
 - Windows 持久授权的撤销调用 Launcher 的 `revoke-grants <授权记录绝对路径>` 子命令。
 
-宿主一侧可用 dev-dependency 引入本 crate 做契约测试，保证双方对请求的解析语义一致（天工见 `crates/tiangong-plugin-runtime/tests/launch_policy_contract.rs`）。
+宿主一侧可用 dev-dependency 引入本 crate 做契约测试，保证双方对请求的解析语义一致（天工见 `crates/plugin/tiangong-plugin-runtime/tests/launch_policy_contract.rs`）。
 
 ## 正式版本下载
 

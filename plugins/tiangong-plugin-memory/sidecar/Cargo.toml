@@ -14,6 +14,8 @@ path = "src/main.rs"
 tiangong-memory = { workspace = true }
 tiangong-plugin-memory-protocol = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
+# --update：官方目录与签名清单约定
+tiangong-plugin-update = { workspace = true }
 # 进程创建不弹窗（Windows）
 tiangong-toolkit = { workspace = true }
 anyhow = { workspace = true }

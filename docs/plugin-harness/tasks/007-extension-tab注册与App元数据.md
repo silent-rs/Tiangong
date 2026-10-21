@@ -6,7 +6,7 @@
 
 ## 范围
 
-- 后端：`crates/tiangong-plugin-runtime/src/registry.rs` 新增 App 元数据聚合；`src-tauri/src/commands.rs` 新增 `list_extension_apps` 命令。
+- 后端：`crates/plugin/tiangong-plugin-runtime/src/registry.rs` 新增 App 元数据聚合；`src-tauri/src/commands.rs` 新增 `list_extension_apps` 命令。
 - 前端：`frontend/src/api/tauri.ts` 补 `AppEntry` 类型与 `listExtensionApps` 封装。
 
 ## 依赖

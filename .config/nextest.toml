@@ -10,9 +10,9 @@ test-group = 'memory-integration'
 # 规则、状态处理、文件保存等普通单元测试继续按默认并发运行。
 [[profile.default.overrides]]
 filter = '''
-package(=tiangong-plugin-runtime) & (
+(package(=tiangong-plugin-runtime) & (
     test(plugin_dev::tests::integration_) |
-    binary(/^(load_and_call|ephemeral_route|official_catalog_e2e|m0_slot_bridge|v2_manifest_contribution|tool_ui_launcher)$/)
-)
+    binary(/^(load_and_call|ephemeral_route|m0_slot_bridge|v2_manifest_contribution|tool_ui_launcher)$/)
+)) | (package(=tiangong-plugin-sidecar-e2e) & binary(/^(official_catalog_e2e|plugin_creator_e2e)$/))
 '''
 test-group = 'plugin-runtime-integration'

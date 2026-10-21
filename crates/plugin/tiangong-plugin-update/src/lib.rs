@@ -1,8 +1,11 @@
-//! 插件发布约定：官方目录、签名发布清单的数据结构与信任根常量。
+//! 插件发布与更新约定：官方目录、签名发布清单的数据结构与信任根常量。
 //!
 //! 宿主按这些约定发现、安装和验签插件；需要自更新的 sidecar（如 memory）
 //! 按同一约定下载并验签自身制品。这里只定义数据形态和常量，校验逻辑由
 //! 使用方实现（宿主见 `tiangong_plugin_runtime::signature`）。
+//!
+//! 与 `tiangong-plugin-sidecar` 分开维护：更新约定变化时只影响宿主与自更新
+//! 插件，不牵动全部插件。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

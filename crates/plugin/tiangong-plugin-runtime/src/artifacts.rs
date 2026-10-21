@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
 
-pub use tiangong_plugin_sidecar::release::{
+pub use tiangong_plugin_update::{
     PLUGIN_CATALOG_ENDPOINT, PluginCatalog, PluginRelease, RemoteArtifact, RemoteSignedRelease,
     current_platform_key,
 };

@@ -11849,6 +11849,7 @@ dependencies = [
  "tiangong-memory",
  "tiangong-plugin-memory-protocol",
  "tiangong-plugin-sidecar",
+ "tiangong-plugin-update",
  "tiangong-toolkit",
  "tokio",
  "tracing",
@@ -11913,6 +11914,7 @@ dependencies = [
  "tiangong-llm",
  "tiangong-plugin-command-protocol",
  "tiangong-plugin-sidecar",
+ "tiangong-plugin-update",
  "tiangong-sandbox",
  "tiangong-sandbox-update",
  "tiangong-types",
@@ -12023,11 +12025,15 @@ version = "0.17.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.23.1",
  "hex",
  "libc",
+ "minisign",
  "serde_json",
  "serial_test",
  "sha2 0.11.0",
+ "tempfile",
+ "tiangong-config",
  "tiangong-plugin-command-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
@@ -12127,6 +12133,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vte",
+]
+
+[[package]]
+name = "tiangong-plugin-update"
+version = "0.17.5"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

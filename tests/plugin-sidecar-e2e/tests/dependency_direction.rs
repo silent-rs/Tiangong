@@ -1,5 +1,6 @@
-//! 依赖方向护栏：插件与 `tiangong-plugin-sidecar` 不得依赖宿主
-//! `tiangong-plugin-runtime`。
+//! 依赖方向护栏：插件、`tiangong-plugin-sidecar` 与 `tiangong-plugin-update`
+//! 不得依赖宿主 `tiangong-plugin-runtime`；`tiangong-plugin-sidecar` 也不得依赖
+//! `tiangong-plugin-update`（更新约定变化不应牵动全部插件）。
 //!
 //! 宿主与插件共用的约定（协议、环境变量、发布约定）定义在
 //! `tiangong-plugin-sidecar`，Runtime 依赖并重新导出它；反向依赖会把整个
@@ -8,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 const HOST_CRATE: &str = "tiangong-plugin-runtime";
+const UPDATE_CRATE: &str = "tiangong-plugin-update";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -36,10 +38,9 @@ fn cargo_manifests(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// 任一依赖表（含 target 专属与 dev/build 依赖）中出现宿主 crate 即视为违规：
-/// 覆盖 `tiangong-plugin-runtime = ...`、`tiangong-plugin-runtime.workspace = true`
-/// 与 `[dev-dependencies.tiangong-plugin-runtime]` 三种写法。
-fn depends_on_host(manifest: &Path) -> bool {
+/// 任一依赖表（含 target 专属与 dev/build 依赖）中出现指定 crate 即视为依赖：
+/// 覆盖 `name = ...`、`name.workspace = true` 与 `[dev-dependencies.name]` 三种写法。
+fn depends_on(manifest: &Path, dependency: &str) -> bool {
     let text = std::fs::read_to_string(manifest).expect("读取 Cargo.toml 失败");
     text.lines().any(|line| {
         let line = line.trim();
@@ -50,27 +51,45 @@ fn depends_on_host(manifest: &Path) -> bool {
             return header
                 .trim_end_matches(']')
                 .split('.')
-                .any(|part| part.trim().trim_matches('"') == HOST_CRATE);
+                .any(|part| part.trim().trim_matches('"') == dependency);
         }
         line.split(['=', ' ', '.'])
             .next()
-            .is_some_and(|key| key.trim_matches('"') == HOST_CRATE)
+            .is_some_and(|key| key.trim_matches('"') == dependency)
     })
 }
 
+fn violations(manifests: &[PathBuf], dependency: &str) -> Vec<String> {
+    manifests
+        .iter()
+        .filter(|manifest| depends_on(manifest, dependency))
+        .map(|manifest| manifest.display().to_string())
+        .collect()
+}
+
 #[test]
-fn 插件与_sidecar_运行库不依赖宿主_runtime() {
+fn 插件与插件基础库不依赖宿主_runtime() {
     let root = workspace_root();
-    let mut manifests = vec![root.join("crates/tiangong-plugin-sidecar/Cargo.toml")];
+    let mut manifests = vec![
+        root.join("crates/plugin/tiangong-plugin-sidecar/Cargo.toml"),
+        root.join("crates/plugin/tiangong-plugin-update/Cargo.toml"),
+    ];
     cargo_manifests(&root.join("plugins"), &mut manifests);
     assert!(manifests.len() > 10, "应扫描到插件 crate: {manifests:?}");
-    let violations: Vec<String> = manifests
-        .iter()
-        .filter(|manifest| depends_on_host(manifest))
-        .map(|manifest| manifest.display().to_string())
-        .collect();
+    let found = violations(&manifests, HOST_CRATE);
     assert!(
-        violations.is_empty(),
-        "以下 crate 依赖了宿主 {HOST_CRATE}，共用约定应放在 tiangong-plugin-sidecar：{violations:#?}"
+        found.is_empty(),
+        "以下 crate 依赖了宿主 {HOST_CRATE}，共用约定应放在 tiangong-plugin-sidecar 或 tiangong-plugin-update：{found:#?}"
+    );
+}
+
+#[test]
+fn sidecar_运行库不依赖更新约定() {
+    let root = workspace_root();
+    let manifests = vec![root.join("crates/plugin/tiangong-plugin-sidecar/Cargo.toml")];
+    let found = violations(&manifests, UPDATE_CRATE);
+    assert!(
+        found.is_empty(),
+        "tiangong-plugin-sidecar 不得依赖 {UPDATE_CRATE}：更新约定变化会牵动全部插件"
     );
 }

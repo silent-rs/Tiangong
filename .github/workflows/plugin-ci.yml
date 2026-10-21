@@ -67,6 +67,7 @@ jobs:
           check_all=false
           sdk_changed=false
           sidecar_shared_changed=false
+          update_shared_changed=false
           fallback_all=false
           scoped_change=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
@@ -83,10 +84,18 @@ jobs:
               tests/plugin-sidecar-e2e/*)
                 # 宿主与 sidecar 对接的端到端测试由 App CI 覆盖，不影响插件 Sidecar 共享库。
                 ;;
-              crates/tiangong-plugin-sidecar/Cargo.toml|crates/tiangong-plugin-sidecar/src/*.rs)
+              crates/plugin/tiangong-plugin-sidecar/Cargo.toml|crates/plugin/tiangong-plugin-sidecar/src/*)
+                # 插件共享运行库：全部带 sidecar 的插件都要重新检查。
                 sidecar_shared_changed=true
                 ;;
-              Cargo.toml|Cargo.lock|.github/workflows/plugin-ci.yml|xtask/*|crates/tiangong-plugin-runtime/*)
+              crates/plugin/tiangong-plugin-update/*)
+                # 发布/更新约定：只选中 sidecar 声明依赖它的插件（如 memory 自更新）。
+                update_shared_changed=true
+                ;;
+              crates/plugin/tiangong-plugin-runtime/*)
+                # 宿主 Runtime：插件不依赖它（见依赖方向护栏测试），不触发插件检查。
+                ;;
+              Cargo.toml|Cargo.lock|.github/workflows/plugin-ci.yml|xtask/*)
                 fallback_all=true
                 ;;
             esac
@@ -194,9 +203,17 @@ jobs:
             if [[ "$sdk_changed" == "true" && "$uses_sdk" == "true" ]]; then
               plugin_selected=true
             fi
+            uses_update=false
+            if [[ "$has_sidecar" == "true" ]] \
+              && grep -qE '^tiangong-plugin-update([ .=]|$)' "$sidecar_manifest"; then
+              uses_update=true
+            fi
             sidecar_selected=false
             if [[ "$has_sidecar" == "true" ]] \
               && [[ "$direct_change" == "true" || "$sidecar_shared_changed" == "true" ]]; then
+              sidecar_selected=true
+            fi
+            if [[ "$update_shared_changed" == "true" && "$uses_update" == "true" ]]; then
               sidecar_selected=true
             fi
             if [[ "$plugin_selected" != "true" && "$sidecar_selected" != "true" ]]; then

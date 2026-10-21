@@ -31,7 +31,7 @@
 
 ## 阶段 1：runtime 统一事件发布
 
-`crates/tiangong-plugin-runtime/src/events.rs`：
+`crates/plugin/tiangong-plugin-runtime/src/events.rs`：
 
 - `PluginChangeEvent { kind, plugin_id, fingerprint }`——`fingerprint` 为发布时刻
   的启用插件指纹（id@version），订阅者免重算（回调内再取注册表锁有锁序风险）。
@@ -56,7 +56,7 @@ emit + `mark_all_sessions_for_plugin_change(&event.fingerprint)`。
 ## 阶段 2：Core 插件列表只持有 runtime 聚合桥
 
 新装插件的送入缺口用**集合收敛**解决：Core 的 `plugins` 列表只持有一个
-编译期成员——`RuntimeCorePlugin`（`crates/tiangong-plugin-runtime/src/core_bridge.rs`）。
+编译期成员——`RuntimeCorePlugin`（`crates/plugin/tiangong-plugin-runtime/src/core_bridge.rs`）。
 对 Core 而言插件集合构造后**永不变化**（agent 执行中自持的 Core 锁不再与
 任何插件集合变化交互）；已安装插件（WASM/TS 工具）的能力由桥在被调用时
 向 runtime 注册表聚合：

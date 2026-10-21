@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
-    // tests/ → tiangong-plugin-runtime/ → crates/ → 仓库根
+    // plugin-sidecar-e2e/ → tests/ → 仓库根
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
