@@ -57,11 +57,11 @@ pub(super) fn prepare_policy_fd(
     use std::os::fd::AsRawFd;
 
     let policy_bytes = policy_json.as_bytes();
-    if policy_bytes.len() > tiangong_sandbox::MAX_POLICY_FRAME_BYTES {
+    if policy_bytes.len() > tiangong_sandbox_update::MAX_POLICY_FRAME_BYTES {
         bail!(
             "Launcher 策略超过长度上限: actual={}, max={}",
             policy_bytes.len(),
-            tiangong_sandbox::MAX_POLICY_FRAME_BYTES
+            tiangong_sandbox_update::MAX_POLICY_FRAME_BYTES
         );
     }
     let length = u32::try_from(policy_bytes.len()).context("Launcher 策略长度无法编码")?;
@@ -105,7 +105,7 @@ pub(super) fn prepare_policy_fd(
     command: &mut Command,
     policy_json: String,
 ) -> Result<PolicyFdGuard> {
-    command.env(tiangong_sandbox::POLICY_ENV, policy_json);
+    command.env(tiangong_sandbox_update::POLICY_ENV, policy_json);
     Ok(PolicyFdGuard)
 }
 
@@ -351,7 +351,7 @@ pub(super) struct WindowsJob {
 #[cfg(windows)]
 impl WindowsJob {
     pub(super) fn new(
-        resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+        resource_limits: Option<crate::launch_policy::ResourceLimits>,
     ) -> std::io::Result<Self> {
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Win32::System::JobObjects::{
@@ -433,7 +433,7 @@ mod windows_tests {
             QueryInformationJobObject,
         };
 
-        let expected = tiangong_sandbox::SandboxResourceLimits::default();
+        let expected = crate::launch_policy::ResourceLimits::default();
         let job = WindowsJob::new(Some(expected)).unwrap();
         let mut actual: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         let queried = unsafe {

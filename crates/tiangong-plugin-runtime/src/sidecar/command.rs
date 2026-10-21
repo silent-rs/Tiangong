@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use crate::launch_policy::canonicalize_path;
 use anyhow::{Context, Result, anyhow, bail};
-use tiangong_sandbox::canonicalize_path;
 
 use super::{
     SidecarConfig, SidecarConnection, SidecarInvocationContext, SidecarInvokeError,
@@ -331,7 +331,7 @@ fn annotate_sandbox_violation(response: String) -> Result<String> {
         && let Some(hint) = value
             .get("stderr")
             .and_then(serde_json::Value::as_str)
-            .and_then(tiangong_sandbox::explain_violation)
+            .and_then(crate::launch_policy::explain_violation)
     {
         let stderr = value
             .get("stderr")

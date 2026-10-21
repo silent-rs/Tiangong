@@ -42,7 +42,7 @@ jobs:
       - name: Resolve crate and tag versions
         id: version
         run: |
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/sandbox/tiangong-sandbox/Cargo.toml | head -1)"
           test -n "$version"
           git fetch origin main:refs/remotes/origin/main
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then

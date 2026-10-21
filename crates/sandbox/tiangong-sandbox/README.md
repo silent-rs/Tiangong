@@ -19,7 +19,17 @@ Sandbox 不决定宿主的存储布局。安装目录由 App、服务或其他�
 <宿主选择的目录>/tiangong-sandbox[.exe].sig
 ```
 
-库提供程序定位、签名验证和自检能力，但不会自动拼接天工的存储根或 `sandbox` 目录。
+程序定位、签名验证、自检与在线更新位于轻量 crate `tiangong-sandbox-update`（不含平台沙箱实现），不会自动拼接天工的存储根或 `sandbox` 目录。
+
+## 宿主集成
+
+宿主（如天工 App）只依赖 `tiangong-sandbox-update`，不链接本 crate 的平台沙箱实现：
+
+- 启动请求按 JSON 约定构造（策略字段与 `SandboxPolicy` 一一对应，能力用字符串名），由签名的 Launcher 解析与执行；
+- 安装、更新、验签与自检使用 `tiangong-sandbox-update`；
+- Windows 持久授权的撤销调用 Launcher 的 `revoke-grants <授权记录绝对路径>` 子命令。
+
+宿主一侧可用 dev-dependency 引入本 crate 做契约测试，保证双方对请求的解析语义一致（天工见 `crates/tiangong-plugin-runtime/tests/launch_policy_contract.rs`）。
 
 ## 正式版本下载
 
@@ -166,17 +176,17 @@ tiangong-sandbox update --root /absolute/install-directory
 
 ```bash
 cargo build --locked -p tiangong-sandbox --bin tiangong-sandbox
-cargo check --locked -p tiangong-sandbox --all-targets
-cargo test --locked -p tiangong-sandbox
-cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+cargo check --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets
+cargo test --locked -p tiangong-sandbox -p tiangong-sandbox-update
+cargo clippy --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targets -- -D warnings
 ```
 
 真实隔离测试需要当前环境允许应用对应平台的沙箱。已经处于受限沙箱中的开发环境可能无法再次嵌套，此时 Launcher 会报告平台不可用并拒绝执行。
 
 ## 设计资料
 
-- [Sandbox 通用化与宿主安装目录](../../docs/sandbox-direct-storage.md)
-- [Sandbox 自管理与首版发布](../../docs/sandbox-self-management.md)
+- [Sandbox 通用化与宿主安装目录](../../../docs/sandbox-direct-storage.md)
+- [Sandbox 自管理与首版发布](../../../docs/sandbox-self-management.md)
 
 ## 许可证
 

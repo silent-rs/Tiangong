@@ -9,11 +9,7 @@ use std::sync::Arc;
 /// kill 子进程同样被拒——真实沙箱链路测试在此类环境必然失败或
 /// 卡死，统一跳过并打印原因。
 fn native_sandbox_skip_reason() -> Option<String> {
-    match tiangong_sandbox::sandbox::availability() {
-        tiangong_sandbox::sandbox::SandboxAvailability::Available => None,
-        tiangong_sandbox::sandbox::SandboxAvailability::EnvironmentRestricted(reason)
-        | tiangong_sandbox::sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
-    }
+    crate::test_support::native_sandbox_skip_reason()
 }
 
 /// 真实沙箱链路测试的环境门槛：不可用环境跳过当前测试。

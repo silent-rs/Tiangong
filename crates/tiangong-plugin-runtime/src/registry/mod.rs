@@ -117,7 +117,7 @@ pub fn invalidate_persistent_grants(storage_root: &Path) -> Result<()> {
                     value.len() == 64 && value.bytes().all(|value| value.is_ascii_hexdigit())
                 })
         {
-            tiangong_sandbox::sandbox::windows::revoke_persistent_grants(&path)?;
+            crate::launcher_update::revoke_persistent_grants(storage_root, &path)?;
         }
     }
     let mut failures = Vec::new();

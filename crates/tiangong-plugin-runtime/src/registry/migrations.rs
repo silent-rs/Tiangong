@@ -499,7 +499,7 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
         if cache.is_file() {
             stop_loaded_sidecar(plugin_id)?;
             stop_connection_for_directory(&plugin_directory(storage_root, plugin_id))?;
-            tiangong_sandbox::sandbox::windows::revoke_persistent_grants(&cache)?;
+            crate::launcher_update::revoke_persistent_grants(storage_root, &cache)?;
         }
     }
     if remove_invalid_plugin_if_registered(storage_root, plugin_id, keep_data)? {

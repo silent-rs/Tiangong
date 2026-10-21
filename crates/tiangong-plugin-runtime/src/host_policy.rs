@@ -18,8 +18,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tiangong_sandbox::SandboxCapability;
-
+use crate::launch_policy::{
+    CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_CREDENTIAL_SERVICES,
+};
 /// sidecar 与宿主的通信通道（宿主权威决定，插件不声明——spawn 时由
 /// 宿主注入环境变量选择，sidecar 通用库自动适配）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,15 +60,15 @@ pub struct HostExecutionPolicy {
     pub user_credential_reads: UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub allow_user_cache_write: bool,
-    /// 沙箱内授予的特殊能力（凭据服务、录音、无头浏览器等）。整条链路只
-    /// 传这一个集合；能力怎样变成系统规则由 Launcher 定义。
-    pub capabilities: BTreeSet<SandboxCapability>,
+    /// 沙箱内授予的特殊能力名（凭据服务、录音、无头浏览器等，见
+    /// `launch_policy::CAPABILITY_*`）。整条链路只传这一个集合；能力怎样
+    /// 变成系统规则由 Launcher 定义。
+    pub capabilities: BTreeSet<String>,
 }
-
 impl HostExecutionPolicy {
     /// 是否授予了指定沙箱能力。
-    pub fn has(&self, capability: SandboxCapability) -> bool {
-        self.capabilities.contains(&capability)
+    pub fn has(&self, capability: &str) -> bool {
+        self.capabilities.contains(capability)
     }
 }
 
@@ -105,12 +106,13 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     // 目录读取能力一并授予；证书验证由网络授权独立开放。
     let credential_services = user_credential_reads.ssh || user_credential_reads.github_cli;
     let capabilities = [
-        (SandboxCapability::CredentialServices, credential_services),
-        (SandboxCapability::AudioInput, audio_input),
-        (SandboxCapability::BrowserRuntime, browser_runtime),
+        (CAPABILITY_CREDENTIAL_SERVICES, credential_services),
+        (CAPABILITY_AUDIO_INPUT, audio_input),
+        (CAPABILITY_BROWSER_RUNTIME, browser_runtime),
     ]
     .into_iter()
-    .filter_map(|(capability, granted)| granted.then_some(capability))
+    .filter(|(_, granted)| *granted)
+    .map(|(capability, _)| capability.to_string())
     .collect();
     HostExecutionPolicy {
         sandbox: !accessibility_host_child,
@@ -229,17 +231,17 @@ mod tests {
     fn audio_input_is_granted_only_to_official_volcengine() {
         let official = resolve("volcengine", true);
         assert!(
-            official.has(SandboxCapability::AudioInput),
+            official.has(CAPABILITY_AUDIO_INPUT),
             "官方 volcengine 需要录音能力"
         );
         assert!(official.sandbox, "录音授权不改变沙箱基线");
         assert!(
-            !resolve("volcengine", false).has(SandboxCapability::AudioInput),
+            !resolve("volcengine", false).has(CAPABILITY_AUDIO_INPUT),
             "非官方同名插件不得按名称获得录音能力"
         );
         for id in ["terminal", "command", "computer-use", "unknown-third-party"] {
             assert!(
-                !resolve(id, true).has(SandboxCapability::AudioInput),
+                !resolve(id, true).has(CAPABILITY_AUDIO_INPUT),
                 "{id} 不需要录音能力"
             );
         }
@@ -250,12 +252,12 @@ mod tests {
         for id in ["terminal", "command"] {
             let official = resolve(id, true);
             assert!(
-                official.has(SandboxCapability::BrowserRuntime),
+                official.has(CAPABILITY_BROWSER_RUNTIME),
                 "官方 {id} 需要无头浏览器能力"
             );
             assert!(official.sandbox, "浏览器授权不改变沙箱基线");
             assert!(
-                !resolve(id, false).has(SandboxCapability::BrowserRuntime),
+                !resolve(id, false).has(CAPABILITY_BROWSER_RUNTIME),
                 "非官方同名 {id} 不得按名称获得无头浏览器能力"
             );
         }
@@ -267,7 +269,7 @@ mod tests {
             "unknown-third-party",
         ] {
             assert!(
-                !resolve(id, true).has(SandboxCapability::BrowserRuntime),
+                !resolve(id, true).has(CAPABILITY_BROWSER_RUNTIME),
                 "{id} 不需要无头浏览器能力"
             );
         }
@@ -292,11 +294,11 @@ mod tests {
                 let git = official && matches!(id, "terminal" | "command");
                 let mut expected = BTreeSet::new();
                 if git {
-                    expected.insert(SandboxCapability::CredentialServices);
-                    expected.insert(SandboxCapability::BrowserRuntime);
+                    expected.insert(CAPABILITY_CREDENTIAL_SERVICES.to_string());
+                    expected.insert(CAPABILITY_BROWSER_RUNTIME.to_string());
                 }
                 if official && id == "volcengine" {
-                    expected.insert(SandboxCapability::AudioInput);
+                    expected.insert(CAPABILITY_AUDIO_INPUT.to_string());
                 }
                 assert_eq!(
                     resolve(id, official).capabilities,

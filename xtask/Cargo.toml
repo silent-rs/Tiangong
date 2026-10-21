@@ -7,7 +7,7 @@ publish = false
 description = "辅助构建任务：插件与桌面附带程序的构建部署"
 
 [dependencies]
-tiangong-sandbox = { workspace = true }
+tiangong-sandbox-update = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 minisign = "0.9"

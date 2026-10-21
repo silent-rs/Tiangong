@@ -91,7 +91,10 @@ pub enum UpdateStatus {
 /// 构建更新客户端；`no_proxy` 为 true 时禁用代理（含环境变量代理）。
 fn update_client(no_proxy: bool) -> reqwest::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
-        .user_agent(format!("tiangong-sandbox/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "tiangong-sandbox-update/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300));
     if no_proxy {
@@ -135,10 +138,11 @@ impl SelfUpdater {
         Self::with_public_key(manifest_url, pubkey_b64)
     }
 
-    /// 只检查官方更新，不读写安装目录。
-    pub async fn check(&self) -> Result<UpdateStatus> {
+    /// 只检查官方更新，不读写安装目录。`current` 为调用方（Launcher）
+    /// 自身的产品版本。
+    pub async fn check(&self, current: &str) -> Result<UpdateStatus> {
         let manifest = self.fetch_valid_manifest().await?;
-        let current = env!("CARGO_PKG_VERSION").to_string();
+        let current = current.to_string();
         if Version::parse(&manifest.version)? <= Version::parse(&current)? {
             return Ok(UpdateStatus::UpToDate { current });
         }
@@ -153,11 +157,14 @@ impl SelfUpdater {
         Ok(self.fetch_valid_manifest().await?.version)
     }
 
-    /// 更新当前正在执行的 Sandbox 自身。
-    pub async fn update_current(&self) -> Result<UpdateStatus> {
+    /// 更新当前正在执行的 Sandbox 自身。`running` 为调用方（Launcher）
+    /// 自身的产品版本，用于判定是否需要更新。
+    pub async fn update_current(&self, running: &str) -> Result<UpdateStatus> {
         let target = std::env::current_exe().context("定位当前 Sandbox 可执行文件失败")?;
         ensure_regular_file(&target, "当前 Sandbox")?;
-        self.update_target(&target, UpdateMode::Current).await
+        let running = Version::parse(running).context("当前 Sandbox 版本非法")?;
+        self.update_target(&target, UpdateMode::Current(running))
+            .await
     }
 
     /// 把官方最新版安装到指定目录；目标名固定为 tiangong-sandbox[.exe]。
@@ -174,9 +181,10 @@ impl SelfUpdater {
         cleanup_stale_transactions(parent);
 
         let manifest = self.fetch_valid_manifest().await?;
-        let running = Version::parse(env!("CARGO_PKG_VERSION"))?;
         let candidate = Version::parse(&manifest.version)?;
-        if mode == UpdateMode::Current && candidate <= running {
+        if let UpdateMode::Current(running) = &mode
+            && candidate <= *running
+        {
             return Ok(UpdateStatus::UpToDate {
                 current: running.to_string(),
             });
@@ -239,7 +247,9 @@ impl SelfUpdater {
                     path: target.to_path_buf(),
                 })
             }
-            UpdateMode::Current => {
+            UpdateMode::Current(running) => {
+                #[cfg(not(any(unix, windows)))]
+                let _ = running;
                 #[cfg(unix)]
                 {
                     install_verified_pair(
@@ -350,9 +360,10 @@ impl SelfUpdater {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum UpdateMode {
-    Current,
+    /// 替换当前正在执行的程序；携带其产品版本，用于判定是否需要更新。
+    Current(Version),
     Install,
 }
 
@@ -773,6 +784,9 @@ pub fn current_platform_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 测试中模拟的"当前运行 Launcher"版本（低于清单的 0.2.0）。
+    #[cfg(unix)]
+    const RUNNING_TEST_VERSION: &str = "0.1.0";
 
     #[test]
     fn manifest_ignores_legacy_version_fields() {
@@ -971,14 +985,17 @@ mod tests {
         std::fs::write(&current, b"old").unwrap();
         std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = updater
-            .update_target(&current, UpdateMode::Current)
+            .update_target(
+                &current,
+                UpdateMode::Current(Version::parse(RUNNING_TEST_VERSION).unwrap()),
+            )
             .await
             .unwrap();
         server.join().unwrap();
         assert_eq!(
             status,
             UpdateStatus::Updated {
-                previous: env!("CARGO_PKG_VERSION").into(),
+                previous: RUNNING_TEST_VERSION.into(),
                 version: "0.2.0".into(),
                 path: current.clone(),
             }

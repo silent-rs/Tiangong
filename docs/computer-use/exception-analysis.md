@@ -30,7 +30,7 @@
 - `registry/connections.rs:284-345`：spawn 时按宿主权威策略表
   `.with_sandbox(host_policy.sandbox)` 组装，插件的 manifest 自声明不构成提权。
 
-### 2.2 seatbelt 策略内容（crates/tiangong-sandbox/src/sandbox/seatbelt.rs）
+### 2.2 seatbelt 策略内容（crates/sandbox/tiangong-sandbox/src/sandbox/seatbelt.rs）
 
 - 写侧：`allow file-write*` 仅限工作区与显式授予根，随后
   `(deny file-write*)` 兜底（seatbelt.rs:125-138 / 174-183）；

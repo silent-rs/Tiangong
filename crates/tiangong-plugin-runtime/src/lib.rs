@@ -21,6 +21,7 @@ mod execution;
 pub mod host_state;
 pub mod interpreter_env;
 mod invocation;
+pub mod launch_policy;
 pub mod launcher_update;
 pub mod loader;
 pub mod manifest;

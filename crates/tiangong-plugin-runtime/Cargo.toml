@@ -29,7 +29,8 @@ semver = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
 scru128 = { workspace = true }
-tiangong-sandbox = { workspace = true }
+# Launcher 安装/更新与宿主交互约定（不含平台沙箱实现）。
+tiangong-sandbox-update = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 minisign-verify = "0.2"
@@ -37,6 +38,8 @@ minisign = "0.9"
 tempfile = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+# AppContainer 内的路径规范化（launch_policy::canonicalize_path）。
+dunce = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Wdk_System_SystemInformation",
     "Win32_Foundation",
@@ -48,6 +51,9 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# 仅测试：契约测试校验宿主请求能被 Launcher 按相同语义解析；Windows 探针
+# 读取 Job 限额。不进入 App 构建。
+tiangong-sandbox = { workspace = true }
 serial_test = { workspace = true }
 tiangong-plugin-command-protocol = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

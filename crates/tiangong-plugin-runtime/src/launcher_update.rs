@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 #[cfg(windows)]
 mod windows_cache;
 
-pub const LAUNCHER_MANIFEST_ENDPOINT: &str = tiangong_sandbox::update::DEFAULT_MANIFEST_URL;
+pub const LAUNCHER_MANIFEST_ENDPOINT: &str = tiangong_sandbox_update::update::DEFAULT_MANIFEST_URL;
 const MANIFEST_URL_OVERRIDE: &str = "TIANGONG_LAUNCHER_MANIFEST_URL";
 
 fn launcher_update_lock() -> &'static tokio::sync::Mutex<()> {
@@ -147,16 +147,18 @@ impl LauncherUpdater {
         #[cfg(windows)]
         windows_cache::invalidate(storage_root)?;
         let directory = host_install_directory(storage_root);
-        let status = tiangong_sandbox::update::SelfUpdater::new(self.manifest_url.clone())?
+        let status = tiangong_sandbox_update::update::SelfUpdater::new(self.manifest_url.clone())?
             .install_to(&directory)
             .await?;
         let version = match status {
-            tiangong_sandbox::update::UpdateStatus::Installed { version, .. }
-            | tiangong_sandbox::update::UpdateStatus::Updated { version, .. } => version,
-            tiangong_sandbox::update::UpdateStatus::UpToDate { current } => current,
-            tiangong_sandbox::update::UpdateStatus::Available { version, .. } => version,
+            tiangong_sandbox_update::update::UpdateStatus::Installed { version, .. }
+            | tiangong_sandbox_update::update::UpdateStatus::Updated { version, .. } => version,
+            tiangong_sandbox_update::update::UpdateStatus::UpToDate { current } => current,
+            tiangong_sandbox_update::update::UpdateStatus::Available { version, .. } => version,
             #[cfg(windows)]
-            tiangong_sandbox::update::UpdateStatus::UpdateScheduled { version, .. } => version,
+            tiangong_sandbox_update::update::UpdateStatus::UpdateScheduled { version, .. } => {
+                version
+            }
         };
         cleanup_legacy_layout(storage_root);
         invalidate_launcher_check();
@@ -173,7 +175,7 @@ impl LauncherUpdater {
         let Ok(installed) = installed else {
             return Ok(AutoUpdateOutcome::NotInstalled);
         };
-        let latest = tiangong_sandbox::update::SelfUpdater::new(self.manifest_url.clone())?
+        let latest = tiangong_sandbox_update::update::SelfUpdater::new(self.manifest_url.clone())?
             .latest_version()
             .await?;
         if !is_newer_version(&installed, &latest)? {
@@ -232,7 +234,7 @@ pub fn installed_version(storage_root: &Path) -> Option<String> {
 }
 
 fn verified_launcher_version(storage_root: &Path) -> Result<String> {
-    let Some(launcher) = tiangong_sandbox::launcher_manager::resolve_installed_program(
+    let Some(launcher) = tiangong_sandbox_update::launcher_manager::resolve_installed_program(
         &host_install_directory(storage_root),
     ) else {
         bail!("Sandbox 程序不存在");
@@ -286,6 +288,52 @@ fn checked_launcher(launcher: &Path, storage_root: &Path) -> Result<LauncherInfo
         *cache = Some((key, info.clone()));
     }
     Ok(info)
+}
+
+/// Launcher `revoke-grants` 子命令自身失败时的错误前缀（区分"旧 Launcher
+/// 不支持该子命令"与"撤销本身失败"）。
+#[cfg(windows)]
+const REVOKE_GRANTS_ERROR_PREFIX: &str = "撤销持久授权失败";
+
+/// 撤销 Launcher 为插件登记的 Windows 持久授权（ACL 与身份）。
+///
+/// 授权的创建与撤销都由 Launcher 完成，宿主不链接 AppContainer 实现：
+/// 这里经已验签的 Launcher `revoke-grants` 子命令撤销。Launcher 缺失或
+/// 过旧（不认识该子命令）时只记日志并保留记录——授权留到 Launcher 可用
+/// 后的下一次撤权/卸载时回收，不阻断卸载或配置变更。
+#[cfg(windows)]
+pub fn revoke_persistent_grants(storage_root: &Path, record: &Path) -> Result<()> {
+    if !record.exists() {
+        return Ok(());
+    }
+    let Some(launcher) = tiangong_sandbox_update::launcher_manager::resolve_installed_program(
+        &host_install_directory(storage_root),
+    ) else {
+        tracing::warn!(record = %record.display(), "Sandbox 未安装，暂不撤销持久授权");
+        return Ok(());
+    };
+    crate::signature::verify_launcher_signature(&launcher, storage_root)
+        .context("沙箱 Launcher 验签失败，拒绝撤销持久授权")?;
+    let mut command = std::process::Command::new(&launcher);
+    command.arg("revoke-grants").arg(record);
+    let output = crate::platform::configure_no_window(&mut command)
+        .output()
+        .with_context(|| format!("运行 Sandbox 撤销授权失败: {}", launcher.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains(REVOKE_GRANTS_ERROR_PREFIX) {
+        // 旧 Launcher 不认识该子命令，会把它当作启动请求处理并因缺少
+        // 策略信封拒绝：降级为日志。
+        tracing::warn!(
+            record = %record.display(),
+            %stderr,
+            "当前 Sandbox 不支持撤销持久授权，更新 Sandbox 后再回收"
+        );
+        return Ok(());
+    }
+    bail!("Sandbox 撤销持久授权失败: {}", stderr.trim())
 }
 
 fn launcher_cache_key(launcher: &Path) -> Result<LauncherCacheKey> {
@@ -417,7 +465,7 @@ mod tests {
         std::fs::create_dir_all(sandbox.join("versions/0.1.0")).unwrap();
         std::fs::create_dir_all(sandbox.join(".transactions/a")).unwrap();
         std::fs::write(sandbox.join("active"), "0.1.0").unwrap();
-        let program = tiangong_sandbox::launcher_manager::installed_program(
+        let program = tiangong_sandbox_update::launcher_manager::installed_program(
             &host_install_directory(root.path()),
         );
         std::fs::write(&program, b"program").unwrap();

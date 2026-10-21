@@ -597,7 +597,7 @@ impl StdioSidecarConnection {
             // 才回退存储根。敏感清单读写双禁，其余目录只读。
             let workspace =
                 sandbox_workspace_for_spawn(&self.config, sandbox_workspace, &storage_data_dir);
-            let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
+            let mut policy = crate::launch_policy::LaunchPolicy::workspace_write(workspace);
             policy.extra_writable = self.config.sandbox_extra_writable.clone();
             // 存储根按插件 ID 收拢写域：只有 data/<id>、插件安装目录 data/、
             // media、tmp 可写；根目录、logs 与其他插件数据只读（见
@@ -637,7 +637,7 @@ impl StdioSidecarConnection {
             // 进程必须够不到 Launcher 与信任锚，防替换逃逸）；家目录
             // 凭据默认同禁，随后仅按宿主验证过的插件身份移除读取禁令。
             policy.protected_paths = tiangong_protected_paths(&self.config.storage_root);
-            tiangong_sandbox::sandbox::presets::apply_tiangong(
+            crate::launch_policy::apply_tiangong_denied_reads(
                 &mut policy,
                 &self.config.storage_root,
             );
@@ -716,10 +716,7 @@ impl StdioSidecarConnection {
                         .context("查询沙箱 Launcher 支持的能力失败"),
                     )?;
                     let missing = crate::launcher_update::missing_capabilities(
-                        policy
-                            .capabilities
-                            .iter()
-                            .map(|capability| capability.as_str()),
+                        policy.capabilities.iter().map(String::as_str),
                         &supported,
                     );
                     if !missing.is_empty() {
@@ -755,8 +752,8 @@ impl StdioSidecarConnection {
                 let request = serde_json::json!({
                     // 请求已不按版本化；两个字段仅为已发布 Launcher
                     // （≤ 0.1.15，必填且须等值）保留冻结值，新 Launcher 忽略。
-                    "protocol_version": tiangong_sandbox::legacy::PROTOCOL_VERSION,
-                    "policy_schema": tiangong_sandbox::legacy::POLICY_SCHEMA,
+                    "protocol_version": tiangong_sandbox_update::legacy::PROTOCOL_VERSION,
+                    "policy_schema": tiangong_sandbox_update::legacy::POLICY_SCHEMA,
                     "policy": policy,
                     "plugin_id": self.config.plugin_id,
                     "program": program.display().to_string(),
@@ -854,7 +851,7 @@ impl StdioSidecarConnection {
         )?;
         #[cfg(windows)]
         if let Some(stop) = &sandbox_stop {
-            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, stop.name());
+            command.env(tiangong_sandbox_update::WINDOWS_STOP_EVENT_ENV, stop.name());
         }
         // 与 tcp sidecar 的 spawn 同口径：免沙箱 sidecar 无条件注入存储根
         //（路径指针而非提权），保证其媒体产物进入统一媒体目录而非系统

@@ -125,6 +125,30 @@ fn main() {
         return;
     }
     #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("revoke-grants") {
+        // 宿主卸载插件或配置撤权时撤销 Launcher 登记的持久授权（ACL 与
+        // 身份），宿主不再直接链接 AppContainer 实现。
+        let result = match args.get(1) {
+            Some(path) if args.len() == 2 => {
+                tiangong_sandbox::sandbox::windows::revoke_persistent_grants(Path::new(path))
+            }
+            _ => Err(anyhow::anyhow!("用法: revoke-grants <授权记录绝对路径>")),
+        };
+        if let Err(error) = result {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "launcher": "tiangong-sandbox",
+                    "product_version": env!("CARGO_PKG_VERSION"),
+                    // 前缀供宿主区分"撤销失败"与"旧 Launcher 不支持该子命令"。
+                    "error": format!("撤销持久授权失败: {error:#}"),
+                })
+            );
+            std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
+        }
+        return;
+    }
+    #[cfg(windows)]
     if args.first().map(String::as_str) == Some("complete-update") {
         if let Err(error) = run_windows_update_completer(&args) {
             eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
@@ -448,8 +472,8 @@ fn run_self_update(args: &[String]) -> Result<()> {
     };
     let status = runtime.block_on(async {
         match (command, root) {
-            ("check-update", None) => updater.check().await,
-            ("update", None) => updater.update_current().await,
+            ("check-update", None) => updater.check(env!("CARGO_PKG_VERSION")).await,
+            ("update", None) => updater.update_current(env!("CARGO_PKG_VERSION")).await,
             ("update", Some(directory)) => updater.install_to(&directory).await,
             _ => unreachable!(),
         }

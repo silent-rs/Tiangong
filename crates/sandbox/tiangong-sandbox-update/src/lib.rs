@@ -1,18 +1,16 @@
-//! 沙箱执行层（RFC 0017，任务边界收敛版）。
+//! Sandbox Launcher 的安装、更新与宿主交互约定（轻量，不含平台沙箱实现）。
 //!
-//! 职责：命令套壳沙箱——策略编译（macOS Seatbelt / Linux bubblewrap /
-//! Windows AppContainer）、命令包装、平台能力探测、fail-closed、
-//! 宿主策略表与沙箱程序（bin）。
+//! 宿主（App）与 Launcher 共同依赖本 crate：
+//! - [`update`]：官方清单拉取、下载、验签、候选自检与原子替换；
+//! - [`installed`]：已安装 Launcher 的官方签名与自检验证；
+//! - [`launcher_manager`]：安装目录内的程序名与伴生签名名约定；
+//! - 宿主 ↔ Launcher 的传输约定常量（环境变量名、帧长度上限、冻结兼容值）。
 //!
-//! 已拆分到独立分支：
-//! - 插件信任模型 → feature/plugin-trust-model
-//! - 工作区快照恢复 → feature/workspace-snapshots
-//! - 无沙箱审批升级 → feature/sandbox-escalation
-
+//! 平台沙箱实现（Seatbelt / bubblewrap / AppContainer）只在
+//! `tiangong-sandbox` 中，宿主不依赖它：宿主按 JSON 约定构造启动请求，
+//! 由 Launcher 负责解析与执行。
 pub mod installed;
 pub mod launcher_manager;
-mod path;
-pub mod sandbox;
 pub mod update;
 
 /// Windows 上通过进程环境传递一次性 Launcher 请求；Launcher 启动目标前会移除。
@@ -42,9 +40,3 @@ pub mod legacy {
     /// 冻结的 `policy_schema` / `policy_schema_max` 取值。
     pub const POLICY_SCHEMA: u32 = 2;
 }
-
-pub use path::canonicalize_path;
-pub use sandbox::{
-    SandboxAvailability, SandboxCapability, SandboxMode, SandboxPolicy, SandboxResourceLimits,
-    SandboxedProgram, availability, explain_violation, supported_capabilities, wrap,
-};

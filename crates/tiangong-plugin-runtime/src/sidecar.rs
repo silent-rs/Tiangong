@@ -319,7 +319,7 @@ pub struct SidecarConfig {
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
     /// 宿主授予的沙箱特殊能力；原样写入 Launcher 策略。
-    pub sandbox_capabilities: std::collections::BTreeSet<tiangong_sandbox::SandboxCapability>,
+    pub sandbox_capabilities: std::collections::BTreeSet<String>,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
     /// 本机 server 的 HTTP 地址（供需要回调 host 的 sidecar 使用，如 scheduler）。
@@ -355,7 +355,7 @@ pub struct SidecarConfig {
     /// 沙箱内进程使用的专用临时目录。
     pub sandbox_temp_dir: Option<PathBuf>,
     /// 覆盖单次执行的资源上限（None 用沙箱默认值；Launcher 与 sidecar 双层施加）。
-    pub sandbox_resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    pub sandbox_resource_limits: Option<crate::launch_policy::ResourceLimits>,
     /// Launcher 允许启动目标程序的插件权威目录。
     #[allow(dead_code)]
     pub sandbox_program_root: Option<PathBuf>,
@@ -431,7 +431,7 @@ impl SidecarConfig {
     /// 设置宿主授予的沙箱特殊能力（新增能力无需再加字段与方法）。
     pub fn with_sandbox_capabilities(
         mut self,
-        capabilities: std::collections::BTreeSet<tiangong_sandbox::SandboxCapability>,
+        capabilities: std::collections::BTreeSet<String>,
     ) -> Self {
         self.sandbox_capabilities = capabilities;
         self
@@ -669,7 +669,7 @@ impl SidecarConfig {
     /// 覆盖单次执行的沙箱资源上限（Launcher 强制施加，sidecar 层纵深防御）。
     pub fn with_sandbox_resource_limits(
         mut self,
-        limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+        limits: Option<crate::launch_policy::ResourceLimits>,
     ) -> Self {
         self.sandbox_resource_limits = limits;
         self
