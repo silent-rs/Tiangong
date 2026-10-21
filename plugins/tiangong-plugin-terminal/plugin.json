@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terminal",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "entrypoints": [
     "desktop"
   ],
@@ -187,5 +187,13 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 300000,
     "lifecycle": "resident"
+  },
+  "tool_icons": {
+    "run_command": "assets/tool-run-command.svg",
+    "run_shell": "assets/tool-run-shell.svg",
+    "terminal_send": "assets/tool-terminal-send.svg",
+    "terminal_open": "assets/tool-terminal-open.svg",
+    "terminal_close": "assets/tool-terminal-close.svg",
+    "terminal_status": "assets/tool-terminal-status.svg"
   }
 }

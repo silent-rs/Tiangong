@@ -402,9 +402,17 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
 /// 暂存、签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
 fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "workspace-files" | "browser" | "plugin-creator" | "terminal" | "subagent" => {
-            &["assets/icon.svg"]
-        }
+        "workspace-files" | "browser" | "plugin-creator" | "subagent" => &["assets/icon.svg"],
+        // App 图标与 plugin.json tool_icons 引用的工具图标。
+        "terminal" => &[
+            "assets/icon.svg",
+            "assets/tool-run-command.svg",
+            "assets/tool-run-shell.svg",
+            "assets/tool-terminal-send.svg",
+            "assets/tool-terminal-open.svg",
+            "assets/tool-terminal-close.svg",
+            "assets/tool-terminal-status.svg",
+        ],
         // plugin.json tool_icons 引用的工具图标。
         "fs" => &[
             "assets/tool-folder.svg",
