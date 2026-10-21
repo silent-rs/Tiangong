@@ -405,6 +405,29 @@ mod tests {
     }
 
     #[test]
+    fn legacy_boolean_policy_compiles_to_identical_profile() {
+        // 已发布 App 的旧布尔格式经兼容层解析后，与新格式生成逐字一致的 profile。
+        for mask in 0u8..8 {
+            let mut legacy =
+                serde_json::to_value(SandboxPolicy::workspace_write("/tmp/ws")).unwrap();
+            let object = legacy.as_object_mut().unwrap();
+            object.remove("capabilities");
+            object.insert("allow_credential_services".into(), (mask & 1 != 0).into());
+            object.insert("allow_audio_input".into(), (mask & 2 != 0).into());
+            object.insert("allow_browser_runtime".into(), (mask & 4 != 0).into());
+            let legacy: SandboxPolicy = serde_json::from_value(legacy).unwrap();
+            let mut current = SandboxPolicy::workspace_write("/tmp/ws");
+            current.set_capability(SandboxCapability::CredentialServices, mask & 1 != 0);
+            current.set_capability(SandboxCapability::AudioInput, mask & 2 != 0);
+            current.set_capability(SandboxCapability::BrowserRuntime, mask & 4 != 0);
+            assert_eq!(
+                compile_profile(&legacy),
+                compile_profile(&current),
+                "mask={mask}"
+            );
+        }
+    }
+    #[test]
     fn profile_denies_write_outside_roots_and_network() {
         let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
         policy.protected_paths = vec!["/tmp/ws/protected".into()];

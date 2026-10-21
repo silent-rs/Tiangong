@@ -37,7 +37,11 @@ tiangong-sandbox run \
 - fd3 / Windows 信封协议继续可用。
 - 新增的目标校验字段缺省为通用摘要校验；旧 `interpreter` 字段继续兼容。
 - 策略中新增默认值，旧策略缺少额外可写、保护/禁读、网络和资源限制字段时仍可解析。
-- 策略 Schema 3 起特殊能力改为 `capabilities` 集合，取代 Schema 2 的 `allow_credential_services` / `allow_audio_input` / `allow_browser_runtime` 布尔字段；App 与 Launcher 需配套发版。
+- 请求不再按协议版本或策略 Schema 版本化：新增字段一律带默认值，Launcher 忽略请求中的 `protocol_version` / `policy_schema`，宿主也不再据自检报告中的这两个字段判断兼容性。
+- 特殊能力改用 `capabilities` 集合表达。Launcher 内置临时兼容层，继续接受已发布 App（≤ v0.17.5）的 `allow_credential_services` / `allow_audio_input` / `allow_browser_runtime` 布尔字段（并入能力集合），因此可以**先发布 Launcher、后发布 App**。
+- 为兼容已发布组件，Launcher 自检报告与更新清单仍输出冻结值 `protocol_version = 1`、`policy_schema` / `policy_schema_max = 2`，宿主请求也继续携带这两个值（已发布 Launcher ≤ 0.1.15 要求必填且等值）；定义见 `tiangong_sandbox::legacy`，新代码不读取。
+- 新 App 遇到能力协商之前的旧 Launcher（自检报告无 `capabilities`）时视为不支持任何特殊能力：无需特殊能力的插件照常运行，需要的插件提示更新沙箱组件。
+- 已发布 App 与 Launcher 全部退出支持后，可移除布尔兼容层与上述冻结字段，或决定永久保留。
 
 ## 策略示例
 

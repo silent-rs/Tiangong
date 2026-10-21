@@ -706,13 +706,20 @@ impl StdioSidecarConnection {
                 // 授予的能力必须是 Launcher 上报支持的子集：App 升级而
                 // Launcher 未升级时，在此给出明确提示，而不是让目标进程
                 // 在沙箱内以难以归因的方式失败（如 Chrome 段错误）。
+                // 支持集合取自已缓存的自检报告，不额外启动进程。
                 if !policy.capabilities.is_empty() {
                     let supported = preparation(
-                        crate::launcher_update::launcher_capabilities(&sandbox_bin)
-                            .context("查询沙箱 Launcher 支持的能力失败"),
+                        crate::launcher_update::launcher_capabilities(
+                            &sandbox_bin,
+                            &self.config.storage_root,
+                        )
+                        .context("查询沙箱 Launcher 支持的能力失败"),
                     )?;
                     let missing = crate::launcher_update::missing_capabilities(
-                        &policy.capabilities,
+                        policy
+                            .capabilities
+                            .iter()
+                            .map(|capability| capability.as_str()),
                         &supported,
                     );
                     if !missing.is_empty() {
@@ -746,8 +753,10 @@ impl StdioSidecarConnection {
                     .ok_or_else(|| anyhow!("sidecar 目标程序缺少权威目录")),
                 )?;
                 let request = serde_json::json!({
-                    "protocol_version": tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
-                    "policy_schema": tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
+                    // 请求已不按版本化；两个字段仅为已发布 Launcher
+                    // （≤ 0.1.15，必填且须等值）保留冻结值，新 Launcher 忽略。
+                    "protocol_version": tiangong_sandbox::legacy::PROTOCOL_VERSION,
+                    "policy_schema": tiangong_sandbox::legacy::POLICY_SCHEMA,
                     "policy": policy,
                     "plugin_id": self.config.plugin_id,
                     "program": program.display().to_string(),

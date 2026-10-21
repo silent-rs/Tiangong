@@ -13,10 +13,11 @@
 //! - **fail-closed**：协议版本不符、策略非法、平台沙箱不可用一律拒绝
 //!   （结构化错误 + 非零退出码），绝不静默降级为无沙箱执行。
 //!
-//! 版本化三层（RFC 0017 §九）：
-//! - 产品版本：本 crate 版本；
-//! - `protocol_version`：App↔Launcher 通信协议；
-//! - `policy_schema`：策略字段与安全语义。
+//! 版本化：只保留产品版本（本 crate 版本）。请求不再按协议版本或策略
+//! Schema 版本化：新增字段一律带默认值，旧格式由策略兼容层转换，特殊
+//! 能力经自检报告的 `capabilities` 协商，未知能力 fail-closed。请求中的
+//! `protocol_version` / `policy_schema` 被忽略；自检报告仍输出
+//! [`tiangong_sandbox::legacy`] 中的冻结值供已发布 App 校验。
 //!
 //! 子命令：
 //! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项），报告含 `capabilities`；
@@ -40,10 +41,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-/// App ↔ Launcher 通信协议版本（唯一定义在库层，宿主与 bin 共同引用）。
-const PROTOCOL_VERSION: u32 = tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION;
-/// 策略 Schema 版本（同上，库层唯一）。
-const POLICY_SCHEMA: u32 = tiangong_sandbox::LAUNCHER_POLICY_SCHEMA;
 /// 策略经此继承描述符传入。
 #[cfg(unix)]
 const POLICY_FD: i32 = 3;
@@ -60,8 +57,8 @@ const GIT_METADATA_PROBE_MARKER: &str = "GITWRITE";
 struct LaunchRequest {
     #[serde(default)]
     grant_cache: Option<PathBuf>,
-    protocol_version: u32,
-    policy_schema: u32,
+    // `protocol_version` / `policy_schema`（已发布 App 仍会携带）不再参与
+    // 校验，按未知字段忽略。
     policy: tiangong_sandbox::SandboxPolicy,
     #[serde(default)]
     plugin_id: String,
@@ -243,8 +240,6 @@ fn run_policy_file(args: &[String]) -> Result<()> {
     let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
     let request = LaunchRequest {
         grant_cache: parsed.grant_cache,
-        protocol_version: PROTOCOL_VERSION,
-        policy_schema: POLICY_SCHEMA,
         policy: parsed.policy,
         plugin_id: String::new(),
         program: program.display().to_string(),
@@ -489,18 +484,6 @@ fn run_launch() -> Result<()> {
 }
 
 fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()> {
-    if request.protocol_version != PROTOCOL_VERSION {
-        bail!(
-            "Launcher 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
-            request.protocol_version
-        );
-    }
-    if request.policy_schema != POLICY_SCHEMA {
-        bail!(
-            "策略 Schema 版本不匹配: expected={POLICY_SCHEMA}, actual={}",
-            request.policy_schema
-        );
-    }
     if request.policy.mode == tiangong_sandbox::SandboxMode::FullAccess {
         bail!("当前 command Launcher 不接受 full_access 策略");
     }
@@ -849,8 +832,6 @@ fn validate_unix_permissions(_path: &Path, _metadata: &std::fs::Metadata) -> Res
 fn capabilities_report() -> serde_json::Value {
     serde_json::json!({
         "product_version": env!("CARGO_PKG_VERSION"),
-        "protocol_version": PROTOCOL_VERSION,
-        "policy_schema": POLICY_SCHEMA,
         "capabilities": tiangong_sandbox::supported_capabilities()
             .into_iter()
             .map(|capability| capability.as_str())
@@ -866,13 +847,14 @@ fn run_self_check() -> i32 {
         "product_version".into(),
         serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string()),
     );
+    // 兼容已发布 App（≤ v0.17.5）：它们要求自检报告带这两个冻结值。
     report.insert(
         "protocol_version".into(),
-        serde_json::Value::from(PROTOCOL_VERSION),
+        serde_json::Value::from(tiangong_sandbox::legacy::PROTOCOL_VERSION),
     );
     report.insert(
         "policy_schema".into(),
-        serde_json::Value::from(POLICY_SCHEMA),
+        serde_json::Value::from(tiangong_sandbox::legacy::POLICY_SCHEMA),
     );
     // 本 Launcher 支持的特殊能力：宿主据此在启动前比对授予的能力，
     // 缺失时提示更新沙箱组件，而不是等到目标进程内出现难以归因的故障。
@@ -2381,8 +2363,6 @@ mod tests {
     fn request(root: &Path, program: &Path) -> LaunchRequest {
         LaunchRequest {
             grant_cache: None,
-            protocol_version: PROTOCOL_VERSION,
-            policy_schema: POLICY_SCHEMA,
             policy: tiangong_sandbox::SandboxPolicy::workspace_write(root),
             plugin_id: "command".to_string(),
             program: program.display().to_string(),
@@ -2557,8 +2537,6 @@ mod tests {
         .unwrap();
         policy["capabilities"] = serde_json::json!(["future_capability"]);
         let value = serde_json::json!({
-            "protocol_version": PROTOCOL_VERSION,
-            "policy_schema": POLICY_SCHEMA,
             "policy": policy,
             "program": "/bin/sh",
             "program_root": "/bin",
@@ -2579,8 +2557,6 @@ mod tests {
     #[test]
     fn missing_target_validation_defaults_to_digest_only() {
         let value = serde_json::json!({
-            "protocol_version": PROTOCOL_VERSION,
-            "policy_schema": POLICY_SCHEMA,
             "policy": tiangong_sandbox::SandboxPolicy::workspace_write("/workspace"),
             "program": "/bin/sh",
             "program_root": "/bin",

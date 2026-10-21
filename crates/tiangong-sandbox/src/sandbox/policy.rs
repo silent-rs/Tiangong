@@ -79,6 +79,7 @@ pub fn supported_capabilities() -> BTreeSet<SandboxCapability> {
 
 /// 平台无关的沙箱策略（可序列化，经 Launcher 协议传输）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "compat::PolicyWire")]
 pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// 会话工作区（WorkspaceWrite 模式下的主可写根）。
@@ -246,6 +247,73 @@ pub fn canonical_or_keep(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
 }
 
+/// 旧策略格式兼容层（临时）。
+///
+/// 已发布的 App（≤ v0.17.5）以 `allow_credential_services` /
+/// `allow_audio_input` / `allow_browser_runtime` 布尔字段授予特殊能力。
+/// 先升级 Launcher、后升级 App 的过渡期内，Launcher 必须继续理解这些
+/// 字段：解析时把为 true 的布尔并入 `capabilities`（与新字段取并集），
+/// 序列化只输出新格式。旧 App 全部退出支持后可删除本模块与
+/// `#[serde(from)]`，或决定永久保留。
+mod compat {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    pub(super) struct PolicyWire {
+        mode: SandboxMode,
+        workspace: PathBuf,
+        #[serde(default)]
+        extra_writable: Vec<PathBuf>,
+        #[serde(default)]
+        protected_paths: Vec<PathBuf>,
+        #[serde(default)]
+        denied_read_paths: Vec<PathBuf>,
+        #[serde(default)]
+        allow_network: bool,
+        #[serde(default)]
+        capabilities: BTreeSet<SandboxCapability>,
+        #[serde(default)]
+        resource_limits: SandboxResourceLimits,
+        #[serde(default)]
+        allow_credential_services: bool,
+        #[serde(default)]
+        allow_audio_input: bool,
+        #[serde(default)]
+        allow_browser_runtime: bool,
+    }
+
+    impl From<PolicyWire> for SandboxPolicy {
+        fn from(wire: PolicyWire) -> Self {
+            let mut capabilities = wire.capabilities;
+            for (granted, capability) in [
+                (
+                    wire.allow_credential_services,
+                    SandboxCapability::CredentialServices,
+                ),
+                (wire.allow_audio_input, SandboxCapability::AudioInput),
+                (
+                    wire.allow_browser_runtime,
+                    SandboxCapability::BrowserRuntime,
+                ),
+            ] {
+                if granted {
+                    capabilities.insert(capability);
+                }
+            }
+            Self {
+                mode: wire.mode,
+                workspace: wire.workspace,
+                extra_writable: wire.extra_writable,
+                protected_paths: wire.protected_paths,
+                denied_read_paths: wire.denied_read_paths,
+                allow_network: wire.allow_network,
+                capabilities,
+                resource_limits: wire.resource_limits,
+            }
+        }
+    }
+}
+
 /// 无需文件系统访问的路径规范化：拆段、处理 `.` 与 `..`、去尾部 `/`。
 fn normalize(path: &Path) -> PathBuf {
     let mut parts: Vec<std::ffi::OsString> = Vec::new();
@@ -352,6 +420,37 @@ mod tests {
         let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
         value["capabilities"] = serde_json::json!(["browser_runtime", "future_capability"]);
         assert!(serde_json::from_value::<SandboxPolicy>(value).is_err());
+    }
+
+    #[test]
+    fn legacy_boolean_grants_merge_into_capabilities() {
+        // 已发布 App（≤ v0.17.5）发出的旧格式策略仍可解析，布尔授予并入能力集合。
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("capabilities");
+        object.insert("allow_credential_services".into(), true.into());
+        object.insert("allow_audio_input".into(), false.into());
+        object.insert("allow_browser_runtime".into(), true.into());
+        let decoded: SandboxPolicy = serde_json::from_value(value.clone()).unwrap();
+        let mut expected = SandboxPolicy::workspace_write("/workspace");
+        expected.set_capability(SandboxCapability::CredentialServices, true);
+        expected.set_capability(SandboxCapability::BrowserRuntime, true);
+        assert_eq!(decoded, expected);
+        // 新旧字段并存时取并集。
+        value["capabilities"] = serde_json::json!(["audio_input"]);
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert!(decoded.has(SandboxCapability::AudioInput));
+        assert!(decoded.has(SandboxCapability::BrowserRuntime));
+        // 序列化只输出新格式。
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert!(encoded.get("allow_browser_runtime").is_none());
+        // 全部旧布尔为 false 与缺省等价：不授予任何能力。
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("capabilities");
+        object.insert("allow_audio_input".into(), false.into());
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert!(decoded.capabilities.is_empty());
     }
 
     #[test]

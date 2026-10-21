@@ -281,6 +281,8 @@ jobs:
             *) test "$status" -eq 0 ;;
           esac
           [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
-          # 协议断言以 release-info.json（crate 常量直引）为准，不做源码正则提取。
+          # protocol_version / policy_schema 已不再版本化，仅为兼容已发布 App
+          # （≤ v0.17.5）保留冻结值；断言自检报告与清单的兼容值一致（以
+          # release-info.json 的 crate 常量为准），避免旧 App 拒绝新 Launcher。
           [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]
           [[ "$(jq -r .policy_schema <<< "$report")" == "$schema" ]]

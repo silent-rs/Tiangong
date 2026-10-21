@@ -28,8 +28,16 @@ struct LauncherCacheKey {
     modified: Option<SystemTime>,
 }
 
-fn launcher_check_cache() -> &'static std::sync::Mutex<Option<(LauncherCacheKey, String)>> {
-    static CACHE: OnceLock<std::sync::Mutex<Option<(LauncherCacheKey, String)>>> = OnceLock::new();
+/// 已验签且自检通过的 Launcher 信息（来自 `--self-check` 报告）。
+#[derive(Clone)]
+struct LauncherInfo {
+    version: String,
+    /// Launcher 上报支持的特殊能力名。
+    capabilities: BTreeSet<String>,
+}
+fn launcher_check_cache() -> &'static std::sync::Mutex<Option<(LauncherCacheKey, LauncherInfo)>> {
+    static CACHE: OnceLock<std::sync::Mutex<Option<(LauncherCacheKey, LauncherInfo)>>> =
+        OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -230,41 +238,54 @@ fn verified_launcher_version(storage_root: &Path) -> Result<String> {
         bail!("Sandbox 程序不存在");
     };
     crate::signature::verify_launcher_signature(&launcher, storage_root)?;
-    let key = launcher_cache_key(&launcher)?;
+    Ok(checked_launcher(&launcher, storage_root)?.version)
+}
+
+/// 对（调用方已验签的）Launcher 运行自检并缓存结果；按程序路径、大小与
+/// 修改时间缓存，Launcher 更新后自动重新自检。
+fn checked_launcher(launcher: &Path, storage_root: &Path) -> Result<LauncherInfo> {
+    #[cfg(not(windows))]
+    let _ = storage_root;
+    let key = launcher_cache_key(launcher)?;
     let mut cache = launcher_check_cache()
         .lock()
         .map_err(|_| anyhow::anyhow!("Sandbox 自检缓存锁已损坏"))?;
-    if let Some((cached_key, version)) = cache.as_ref()
+    if let Some((cached_key, info)) = cache.as_ref()
         && cached_key == &key
     {
-        return Ok(version.clone());
+        return Ok(info.clone());
     }
     #[cfg(windows)]
-    let persistent_key = windows_cache::Key::new(&launcher).ok();
+    let persistent_key = windows_cache::Key::new(launcher).ok();
     #[cfg(windows)]
     if let Some(fingerprint) = &persistent_key
-        && let Some(version) = windows_cache::read(storage_root, fingerprint)
-        && launcher_cache_key(&launcher).is_ok_and(|current| current == key)
+        && let Some((version, capabilities)) = windows_cache::read(storage_root, fingerprint)
+        && launcher_cache_key(launcher).is_ok_and(|current| current == key)
     {
         tracing::info!("复用本次系统启动内的 Sandbox 完整自检结果");
-        *cache = Some((key, version.clone()));
-        return Ok(version);
+        let info = LauncherInfo {
+            version,
+            capabilities,
+        };
+        *cache = Some((key, info.clone()));
+        return Ok(info);
     }
-    let (version, fully_checked) = verify_launcher_self_check(&launcher)?;
+    let (info, fully_checked) = verify_launcher_self_check(launcher)?;
     #[cfg(not(windows))]
     let _ = fully_checked;
     #[cfg(windows)]
     if fully_checked
         && let Some(key) = persistent_key
-        && windows_cache::Key::new(&launcher).is_ok_and(|current| current == key)
-        && let Err(error) = windows_cache::save(storage_root, key, &version)
+        && windows_cache::Key::new(launcher).is_ok_and(|current| current == key)
+        && let Err(error) =
+            windows_cache::save(storage_root, key, &info.version, &info.capabilities)
     {
         tracing::warn!(%error, "保存 Sandbox 自检复用记录失败，下次重新检查");
     }
-    if launcher_cache_key(&launcher).is_ok_and(|current| current == key) {
-        *cache = Some((key, version.clone()));
+    if launcher_cache_key(launcher).is_ok_and(|current| current == key) {
+        *cache = Some((key, info.clone()));
     }
-    Ok(version)
+    Ok(info)
 }
 
 fn launcher_cache_key(launcher: &Path) -> Result<LauncherCacheKey> {
@@ -277,73 +298,31 @@ fn launcher_cache_key(launcher: &Path) -> Result<LauncherCacheKey> {
     })
 }
 
-type CapabilitySet = BTreeSet<tiangong_sandbox::SandboxCapability>;
-
-fn launcher_capability_cache()
--> &'static std::sync::Mutex<Option<(LauncherCacheKey, CapabilitySet)>> {
-    static CACHE: OnceLock<std::sync::Mutex<Option<(LauncherCacheKey, CapabilitySet)>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+/// （调用方已验签的）Launcher 上报支持的特殊能力名，复用缓存的自检报告。
+pub fn launcher_capabilities(launcher: &Path, storage_root: &Path) -> Result<BTreeSet<String>> {
+    Ok(checked_launcher(launcher, storage_root)?.capabilities)
 }
 
-/// 查询（已验签的）Launcher 支持的沙箱能力。按程序路径、大小与修改时间
-/// 缓存，Launcher 更新后自动重新查询。
-pub fn launcher_capabilities(launcher: &Path) -> Result<CapabilitySet> {
-    let key = launcher_cache_key(launcher)?;
-    if let Ok(cache) = launcher_capability_cache().lock()
-        && let Some((cached_key, capabilities)) = cache.as_ref()
-        && cached_key == &key
-    {
-        return Ok(capabilities.clone());
-    }
-    let mut command = std::process::Command::new(launcher);
-    command.arg("--capabilities");
-    let output = crate::platform::configure_no_window(&mut command)
-        .output()
-        .with_context(|| format!("查询 Sandbox 能力失败: {}", launcher.display()))?;
-    // 不认识 `--capabilities` 的旧 Launcher 会把它当作启动请求处理并以
-    // 非零码退出（或输出无法解析的内容），统一视为"未上报任何能力"。
-    let capabilities = if output.status.success() {
-        parse_reported_capabilities(&output.stdout)
-    } else {
-        CapabilitySet::new()
-    };
-    if let Ok(mut cache) = launcher_capability_cache().lock() {
-        *cache = Some((key, capabilities.clone()));
-    }
-    Ok(capabilities)
-}
-
-/// 解析能力报告。未知能力名（更新的 Launcher）忽略：宿主不会授予它不认识的能力。
-fn parse_reported_capabilities(stdout: &[u8]) -> CapabilitySet {
-    let Ok(report) = serde_json::from_slice::<serde_json::Value>(stdout) else {
-        return CapabilitySet::new();
-    };
-    report["capabilities"]
-        .as_array()
+/// 授予但 Launcher 未上报支持的能力名。
+pub fn missing_capabilities<'a>(
+    granted: impl IntoIterator<Item = &'a str>,
+    supported: &BTreeSet<String>,
+) -> Vec<&'a str> {
+    granted
         .into_iter()
-        .flatten()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .filter(|name| !supported.contains(*name))
         .collect()
 }
 
-/// 授予但 Launcher 未上报支持的能力。
-pub fn missing_capabilities(granted: &CapabilitySet, supported: &CapabilitySet) -> CapabilitySet {
-    granted.difference(supported).copied().collect()
-}
-
 /// 能力缺失时给用户与日志的提示。
-pub fn missing_capabilities_message(plugin_id: &str, missing: &CapabilitySet) -> String {
-    let names = missing
-        .iter()
-        .map(|capability| capability.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+pub fn missing_capabilities_message(plugin_id: &str, missing: &[&str]) -> String {
     format!(
-        "插件 {plugin_id} 需要的沙箱能力（{names}）当前沙箱组件不支持，需要更新沙箱组件：请在设置中更新 Sandbox 后重试"
+        "插件 {plugin_id} 需要的沙箱能力（{}）当前沙箱组件不支持，需要更新沙箱组件：请在设置中更新 Sandbox 后重试",
+        missing.join(", ")
     )
 }
-fn verify_launcher_self_check(binary: &Path) -> Result<(String, bool)> {
+
+fn verify_launcher_self_check(binary: &Path) -> Result<(LauncherInfo, bool)> {
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
     let output = crate::platform::configure_no_window(&mut command)
@@ -356,47 +335,69 @@ fn verify_launcher_self_check(binary: &Path) -> Result<(String, bool)> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    let info = parse_self_check_report(&output.stdout)?;
+    Ok((info, output.status.success()))
+}
+
+/// 解析自检报告。App ↔ Launcher 不再做协议或策略 Schema 版本化
+/// （`protocol_version` / `policy_schema` 不参与判断），只取产品版本与
+/// 支持的能力。能力协商之前的旧 Launcher 不上报 `capabilities`，视为不
+/// 支持任何特殊能力：无需特殊能力的插件照常运行，需要的插件在 spawn 前
+/// 得到"需要更新沙箱组件"的提示。
+fn parse_self_check_report(stdout: &[u8]) -> Result<LauncherInfo> {
     let report: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("解析 Sandbox 自检报告失败")?;
-    if report["protocol_version"].as_u64()
-        != Some(u64::from(tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION))
-        || report["policy_schema"].as_u64()
-            != Some(u64::from(tiangong_sandbox::LAUNCHER_POLICY_SCHEMA))
-    {
-        bail!("Sandbox 自报协议或策略版本与宿主不兼容");
-    }
+        serde_json::from_slice(stdout).context("解析 Sandbox 自检报告失败")?;
     let version = report["product_version"]
         .as_str()
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
         .context("Sandbox 自检报告缺少产品版本")?;
-    Ok((version, output.status.success()))
+    let capabilities = report["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect();
+    Ok(LauncherInfo {
+        version,
+        capabilities,
+    })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn reported_capabilities_parse_and_diff() {
-        use tiangong_sandbox::SandboxCapability as C;
-        let supported = parse_reported_capabilities(
-            br#"{"capabilities":["credential_services","browser_runtime","future_capability"]}"#,
-        );
-        // 未知能力名（更新的 Launcher）被忽略。
-        assert_eq!(
-            supported,
-            [C::CredentialServices, C::BrowserRuntime]
-                .into_iter()
-                .collect()
-        );
-        // 旧 Launcher：缺字段或输出无法解析，视为不支持任何能力。
-        assert!(parse_reported_capabilities(br#"{"policy_schema":2}"#).is_empty());
-        assert!(parse_reported_capabilities(b"not json").is_empty());
-
-        let granted: CapabilitySet = [C::AudioInput, C::BrowserRuntime].into_iter().collect();
-        let missing = missing_capabilities(&granted, &supported);
-        assert_eq!(missing, [C::AudioInput].into_iter().collect());
-        assert!(missing_capabilities(&CapabilitySet::new(), &CapabilitySet::new()).is_empty());
+    fn self_check_report_parses_capabilities_and_ignores_versions() {
+        let info = parse_self_check_report(
+            br#"{"product_version":"0.1.16","protocol_version":1,"policy_schema":2,"capabilities":["credential_services","browser_runtime","future_capability"]}"#,
+        )
+        .unwrap();
+        assert_eq!(info.version, "0.1.16");
+        // 更新的 Launcher 上报的未知能力原样保留，宿主不会授予它不认识的能力。
+        assert!(info.capabilities.contains("future_capability"));
+        // 协议版本与策略 Schema 不再参与判断：任意值或缺省均可。
+        for report in [
+            br#"{"product_version":"0.2.0","capabilities":[]}"#.as_slice(),
+            br#"{"product_version":"0.2.0","protocol_version":9,"policy_schema":9,"capabilities":[]}"#,
+        ] {
+            assert!(parse_self_check_report(report).is_ok());
+        }
+        // 能力协商之前的旧 Launcher（无 capabilities 字段）可用，但不支持任何能力。
+        let legacy = parse_self_check_report(
+            br#"{"product_version":"0.1.15","protocol_version":1,"policy_schema":2}"#,
+        )
+        .unwrap();
+        assert!(legacy.capabilities.is_empty());
+        // 缺少产品版本或报告不可解析仍拒绝。
+        assert!(parse_self_check_report(br#"{"capabilities":[]}"#).is_err());
+        assert!(parse_self_check_report(b"not json").is_err());
+    }
+    #[test]
+    fn missing_capabilities_are_reported() {
+        let supported: BTreeSet<String> = ["credential_services".to_string()].into();
+        let missing = missing_capabilities(["credential_services", "audio_input"], &supported);
+        assert_eq!(missing, ["audio_input"]);
+        assert!(missing_capabilities([], &supported).is_empty());
         let message = missing_capabilities_message("volcengine", &missing);
         assert!(message.contains("audio_input") && message.contains("更新沙箱组件"));
     }

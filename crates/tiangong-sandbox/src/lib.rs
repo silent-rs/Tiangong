@@ -25,12 +25,23 @@ pub const HOST_PID_ENV: &str = "TIANGONG_PLUGIN_HOST_PID";
 /// Unix fd3 策略帧允许的最大 JSON 长度，防止 Launcher 按不可信长度分配内存。
 pub const MAX_POLICY_FRAME_BYTES: usize = 1024 * 1024;
 
-/// App ↔ Launcher 通信协议版本（宿主与 Launcher 双侧引用的唯一定义）。
-/// 在线更新清单按此字段判定兼容性：宿主只接受与自身相等的新 Launcher。
-pub const LAUNCHER_PROTOCOL_VERSION: u32 = 1;
-/// 策略 Schema 版本（安全语义层）。与协议版本分开演进；在线更新同样
-/// 只接受相等值，杜绝新旧策略语义错位。
-pub const LAUNCHER_POLICY_SCHEMA: u32 = 3;
+/// 已废弃版本字段的冻结取值（临时兼容层）。
+///
+/// App ↔ Launcher 不再做协议版本与策略 Schema 版本化：请求新增字段一律
+/// 带默认值，旧格式由兼容层转换，特殊能力经自检报告的 `capabilities`
+/// 协商，未知能力 fail-closed。这些字段的值冻结不变，新代码不得据此做
+/// 兼容性判断，仅为以下旧组件保留：
+/// - 已发布 App（≤ v0.17.5）要求 Launcher 自检报告与更新清单的
+///   `protocol_version` 恰为 1、`policy_schema`/`policy_schema_max` 恰为 2；
+/// - 已发布 Launcher（≤ 0.1.15）要求启动请求携带这两个字段且取值相等。
+///
+/// 旧组件全部退出支持后连同这些字段一并移除，或决定永久保留。
+pub mod legacy {
+    /// 冻结的 `protocol_version` 取值。
+    pub const PROTOCOL_VERSION: u32 = 1;
+    /// 冻结的 `policy_schema` / `policy_schema_max` 取值。
+    pub const POLICY_SCHEMA: u32 = 2;
+}
 
 pub use path::canonicalize_path;
 pub use sandbox::{

@@ -52,11 +52,6 @@ pub fn verify_official_install(program: &Path) -> Result<String> {
     }
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("解析 Sandbox 自检报告失败")?;
-    if report["protocol_version"].as_u64() != Some(u64::from(crate::LAUNCHER_PROTOCOL_VERSION))
-        || report["policy_schema"].as_u64() != Some(u64::from(crate::LAUNCHER_POLICY_SCHEMA))
-    {
-        bail!("Sandbox 自报协议或策略 Schema 与宿主不兼容");
-    }
     report["product_version"]
         .as_str()
         .filter(|version| !version.is_empty())

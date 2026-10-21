@@ -2019,8 +2019,9 @@ fn prepare_sandbox_release() -> io::Result<()> {
     // workflow 读取本文件组清单与断言，不做源码正则提取。
     let release_info = serde_json::json!({
         "version": version,
-        "protocol_version": tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
-        "policy_schema_max": tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
+        // 冻结兼容值：已发布 App（≤ v0.17.5）要求清单带这两个字段且取值不变。
+        "protocol_version": tiangong_sandbox::legacy::PROTOCOL_VERSION,
+        "policy_schema_max": tiangong_sandbox::legacy::POLICY_SCHEMA,
     });
     std::fs::write(
         dist.join("release-info.json"),

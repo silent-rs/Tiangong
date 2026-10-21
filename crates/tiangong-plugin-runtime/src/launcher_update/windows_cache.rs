@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -11,8 +12,6 @@ pub(super) struct Key {
     program: PathBuf,
     digest: String,
     boot: [u8; 16],
-    protocol: u32,
-    policy: u32,
 }
 
 impl Key {
@@ -52,8 +51,6 @@ impl Key {
             program: program.canonicalize()?,
             digest: hex::encode(Sha256::digest(std::fs::read(program)?)),
             boot,
-            protocol: tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
-            policy: tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
         })
     }
 }
@@ -63,6 +60,7 @@ impl Key {
 struct Record {
     key: Key,
     version: String,
+    capabilities: BTreeSet<String>,
 }
 
 fn path(storage_root: &Path) -> PathBuf {
@@ -77,7 +75,7 @@ pub(super) fn invalidate(storage_root: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn read(storage_root: &Path, key: &Key) -> Option<String> {
+pub(super) fn read(storage_root: &Path, key: &Key) -> Option<(String, BTreeSet<String>)> {
     use std::os::windows::fs::MetadataExt;
     let path = path(storage_root);
     let metadata = std::fs::symlink_metadata(&path).ok()?;
@@ -91,10 +89,15 @@ pub(super) fn read(storage_root: &Path, key: &Key) -> Option<String> {
     }
     let record: Record = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     (record.key == *key && record.version.parse::<semver::Version>().is_ok())
-        .then_some(record.version)
+        .then_some((record.version, record.capabilities))
 }
 
-pub(super) fn save(storage_root: &Path, key: Key, version: &str) -> Result<()> {
+pub(super) fn save(
+    storage_root: &Path,
+    key: Key,
+    version: &str,
+    capabilities: &BTreeSet<String>,
+) -> Result<()> {
     let path = path(storage_root);
     let parent = path.parent().context("自检记录缺少父目录")?;
     std::fs::create_dir_all(parent)?;
@@ -104,6 +107,7 @@ pub(super) fn save(storage_root: &Path, key: Key, version: &str) -> Result<()> {
         &Record {
             key,
             version: version.into(),
+            capabilities: capabilities.clone(),
         },
     )?;
     file.as_file().sync_all()?;
@@ -121,13 +125,23 @@ mod tests {
         let program = root.path().join("sandbox.exe");
         std::fs::write(&program, b"first").unwrap();
         let key = Key::new(&program).unwrap();
+        let capabilities: BTreeSet<String> = ["browser_runtime".to_string()].into();
         assert!(read(root.path(), &key).is_none());
-        save(root.path(), key, "0.1.4").unwrap();
+        save(root.path(), key, "0.1.4", &capabilities).unwrap();
         let mut same = Key::new(&program).unwrap();
-        assert_eq!(read(root.path(), &same).as_deref(), Some("0.1.4"));
+        assert_eq!(
+            read(root.path(), &same),
+            Some(("0.1.4".to_string(), capabilities.clone()))
+        );
         invalidate(root.path()).unwrap();
         assert!(read(root.path(), &same).is_none());
-        save(root.path(), Key::new(&program).unwrap(), "0.1.4").unwrap();
+        save(
+            root.path(),
+            Key::new(&program).unwrap(),
+            "0.1.4",
+            &capabilities,
+        )
+        .unwrap();
         same.boot[0] ^= 1;
         assert!(read(root.path(), &same).is_none());
         std::fs::write(&program, b"other").unwrap();

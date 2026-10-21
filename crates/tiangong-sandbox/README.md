@@ -23,7 +23,7 @@ Sandbox 不决定宿主的存储布局。安装目录由 App、服务或其他�
 
 ## 正式版本下载
 
-正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、协议版本、各平台下载地址、SHA-256 和签名地址。
+正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、各平台下载地址、SHA-256 和签名地址。
 
 当前正式版为 `0.1.3`：
 
@@ -132,11 +132,11 @@ tiangong-sandbox run --policy /absolute/policy.json -- command arg1 arg2
 - Unix：通过继承的文件描述符 3 传入长度前缀 JSON 帧。
 - Windows：通过一次性环境信封传入请求，并可关联宿主进程和停止事件。
 
-请求包含独立的协议版本和策略 Schema。版本不兼容时 Launcher 会拒绝启动。目标校验默认使用路径、摘要和权限；需要天工插件清单比对时，宿主可以显式选择对应校验方式。
+请求不按协议版本或策略 Schema 版本化：新增字段一律带默认值，旧的 `allow_*` 布尔能力字段由兼容层并入 `capabilities`；请求中的 `protocol_version` / `policy_schema` 字段被忽略（已发布宿主仍会携带）。目标校验默认使用路径、摘要和权限；需要天工插件清单比对时，宿主可以显式选择对应校验方式。
 
 ## 签名、自检与更新
 
-检查当前平台能力和协议信息：
+检查当前平台能力：
 
 ```bash
 tiangong-sandbox --self-check
