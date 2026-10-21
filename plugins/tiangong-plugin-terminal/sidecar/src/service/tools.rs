@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tiangong_plugin_runtime::protocol::RequestInvocationContext;
 
 use super::advice;
-use super::jobs::BackgroundJob;
+use super::jobs::{BackgroundJob, session_processes};
 use super::types::{
     AcquireRequest, CloseRequest, ExecRequest, SendRequest, SessionIdRequest, SpawnRequest,
     default_cols, default_rows,
@@ -656,10 +656,20 @@ impl TerminalService {
         let reversed_tail = visible.chars().rev().take(2000).collect::<String>();
         let recent_output = reversed_tail.chars().rev().collect::<String>();
         let running_command = session.running_command.clone();
-        let summary = match &running_command {
+        let exited_code = session.exited_code;
+        let shell_pid = session.shell_pid.filter(|_| exited_code.is_none());
+        // 枚举进程在会话表锁外完成，避免阻塞其他终端操作。
+        drop(sessions);
+        // 终端会话内的进程树（含登录 shell）：沙箱内 ps/top 不可用
+        // （issue #677），Agent 据此查看终端里跑着什么、按 pid 结束。
+        let processes = shell_pid.map(session_processes).unwrap_or_default();
+        let mut summary = match &running_command {
             Some(command) => format!("终端 {target} 状态：{}（{command}）", phase_label_cn(label)),
             None => format!("终端 {target} 状态：{}", phase_label_cn(label)),
         };
+        if !processes.is_empty() {
+            summary.push_str(&format!("；会话内进程 {} 个", processes.len()));
+        }
         ToolOutcome {
             ok: true,
             summary,
@@ -668,8 +678,9 @@ impl TerminalService {
                     "terminal_id": target,
                     "status": label,
                     "command": running_command,
-                    "exited_code": session.exited_code,
+                    "exited_code": exited_code,
                     "recent_output": recent_output,
+                    "processes": processes,
                 }))
                 .unwrap_or_default(),
             ),
