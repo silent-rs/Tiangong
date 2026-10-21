@@ -60,7 +60,7 @@ pub use tiangong_plugin_sidecar::env::{
     PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_STORAGE_DATA_DIR_ENV,
     PLUGIN_VERSION_ENV, SERVER_TOKEN_ENV, SERVER_URL_ENV, STORAGE_ROOT_ENV,
 };
-pub use tiangong_plugin_sidecar::release::CONTENT_MANIFEST_FILE;
+pub use tiangong_plugin_update::CONTENT_MANIFEST_FILE;
 
 /// 宿主在单次工具调用边界确定的权威上下文。
 ///

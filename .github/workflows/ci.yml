@@ -80,7 +80,7 @@ jobs:
                 ;;
             esac
             case "$file" in
-              plugins/tiangong-plugin-creator/*|xtask/*|.github/workflows/ci.yml|crates/tiangong-plugin-runtime/src/artifacts.rs|crates/tiangong-plugin-runtime/src/registry.rs|crates/tiangong-plugin-runtime/src/signature.rs|crates/tiangong-plugin-runtime/tests/official_catalog_e2e.rs)
+              plugins/tiangong-plugin-creator/*|xtask/*|.github/workflows/ci.yml|crates/plugin/tiangong-plugin-update/*|crates/plugin/tiangong-plugin-runtime/src/artifacts.rs|crates/plugin/tiangong-plugin-runtime/src/registry/*|crates/plugin/tiangong-plugin-runtime/src/signature.rs|crates/plugin/tiangong-plugin-runtime/tests/official_catalog_e2e.rs)
                 interpreter_e2e=true
                 ;;
             esac

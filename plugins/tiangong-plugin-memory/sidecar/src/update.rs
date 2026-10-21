@@ -20,8 +20,8 @@ use minisign_verify::{PublicKey, Signature};
 use semver::Version;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tiangong_plugin_sidecar::release::{OFFICIAL_PUBKEY_B64, SignedPluginRelease};
-use tiangong_plugin_sidecar::release::{PluginCatalog, PluginRelease, current_platform_key};
+use tiangong_plugin_update::{OFFICIAL_PUBKEY_B64, SignedPluginRelease};
+use tiangong_plugin_update::{PluginCatalog, PluginRelease, current_platform_key};
 
 const PLUGIN_ID: &str = tiangong_plugin_memory_protocol::PLUGIN_ID;
 const CATALOG_URL_ENV: &str = "TIANGONG_PLUGIN_CATALOG_URL";
@@ -61,9 +61,7 @@ impl SelfUpdater {
         let catalog_url = std::env::var(CATALOG_URL_ENV)
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| {
-                tiangong_plugin_sidecar::release::PLUGIN_CATALOG_ENDPOINT.to_string()
-            });
+            .unwrap_or_else(|| tiangong_plugin_update::PLUGIN_CATALOG_ENDPOINT.to_string());
         Self::with_trust(catalog_url, OFFICIAL_PUBKEY_B64, env!("CARGO_PKG_VERSION"))
     }
 
@@ -282,7 +280,7 @@ fn verify_release(
         .context("官方签名验证不通过")?;
     let release: SignedPluginRelease =
         serde_json::from_slice(content).context("解析签名清单失败")?;
-    if release.publisher != tiangong_plugin_sidecar::release::OFFICIAL_PUBLISHER {
+    if release.publisher != tiangong_plugin_update::OFFICIAL_PUBLISHER {
         bail!("签名清单发布者不是官方：{}", release.publisher);
     }
     if release.id != PLUGIN_ID {
@@ -327,7 +325,7 @@ fn ensure_standalone_install(target: &Path) -> Result<()> {
     }
     let parent = target.parent().context("可执行文件缺少父目录")?;
     if parent
-        .join(tiangong_plugin_sidecar::release::SIGNED_RELEASE_FILE)
+        .join(tiangong_plugin_update::SIGNED_RELEASE_FILE)
         .exists()
     {
         bail!(

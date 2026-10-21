@@ -20,7 +20,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use tiangong_plugin_sidecar::release::{LOCAL_PUBLISHER, OFFICIAL_PUBLISHER};
+pub use tiangong_plugin_update::{LOCAL_PUBLISHER, OFFICIAL_PUBLISHER};
 
 const USER_SIGNING_KEY_FILE: &str = "user-signing.key";
 const TRUSTED_PUBLISHERS_FILE: &str = "trusted-publishers.json";

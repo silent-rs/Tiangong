@@ -111,7 +111,7 @@
 
 ### 4.4 涉及改动
 
-- `crates/tiangong-plugin-runtime/src/registry.rs`：`collect_mention_candidates` 增加分组/过滤/截断。
+- `crates/plugin/tiangong-plugin-runtime/src/registry.rs`：`collect_mention_candidates` 增加分组/过滤/截断。
 - `crates/tiangong-core/src/core/mod.rs`：`get_mentions` 返回分组结构。
 - `frontend/src/components/MessageInput.tsx`：接收分组数据，按组渲染。
 - `frontend/src/api/tauri.ts`：`getMentionCandidates` 返回类型改为分组结构。

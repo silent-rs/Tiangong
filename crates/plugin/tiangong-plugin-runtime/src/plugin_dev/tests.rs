@@ -208,7 +208,8 @@ fn make_node_sidecar_release(root: &Path, id: &str) -> PathBuf {
         )
         .unwrap();
     std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
-    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+    let sdk =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -314,7 +315,8 @@ fn integration_按需sidecar_新版上下文工作区成为沙箱写域() {
             r#"{"schema_version":2,"id":"workspace-probe","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"write_probe","description":"写域探测","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
         )
         .unwrap();
-    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+    let sdk =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1027,7 +1029,7 @@ fn integration_creator真实产物_安装与devkit_init全链路() {
         return;
     };
     let release_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../plugins/tiangong-plugin-creator/release");
+        .join("../../../plugins/tiangong-plugin-creator/release");
     if !release_source.join("plugin.json").is_file() {
         eprintln!(
             "跳过：缺少真实构建产物 {}（先 yarn package）",
@@ -1079,7 +1081,7 @@ fn integration_从零创建node_sidecar插件_完整旅程() {
         return;
     };
     let release_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../plugins/tiangong-plugin-creator/release");
+        .join("../../../plugins/tiangong-plugin-creator/release");
     if !release_source.join("plugin.json").is_file() {
         eprintln!("跳过：缺少真实构建产物（先在 creator 目录 yarn package）");
         return;
@@ -1219,7 +1221,8 @@ fn integration_无界面纯工具插件_安装与工具契约() {
             r#"{"schema_version":2,"id":"pure-tool-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"text_analyze","description":"文本分析","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"},"mention":{"hint":"纯工具"}}"#,
         )
         .unwrap();
-    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+    let sdk =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1302,7 +1305,8 @@ fn sidecar连接停止后wasm调用与取消自动换代() {
             r#"{"schema_version":2,"id":"stale-ref-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"capabilities":{"prompt":true},"prompt":["占位贡献（本测试经 runtime-probe 组件走调用链）"],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","lifecycle":"resident"}}"#,
         )
         .unwrap();
-    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+    let sdk =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1486,7 +1490,8 @@ fn integration_直连工具_超时终止进程() {
             r#"{"schema_version":2,"id":"blocking-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"slow_job","description":"慢任务","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
         )
         .unwrap();
-    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+    let sdk =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
@@ -1589,7 +1594,8 @@ fn integration_直连工具_并发隔离与取消归属() {
             r#"{"schema_version":2,"id":"concurrent-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"quick_job","description":"快","input_schema":{"type":"object"},"timeout_ms":60000},{"name":"slow_job","description":"慢","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
         )
         .unwrap();
-    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+    let sdk =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/sdk-sidecar/index.mjs");
     std::fs::copy(
         &sdk,
         release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),

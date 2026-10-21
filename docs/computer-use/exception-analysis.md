@@ -21,7 +21,7 @@
 
 ### 2.1 分层隔离模型
 
-`crates/tiangong-plugin-runtime/src/host_policy.rs`：
+`crates/plugin/tiangong-plugin-runtime/src/host_policy.rs`：
 
 - 所有插件 sidecar 默认经 Launcher 进 OS 沙箱（`sandbox: true`）；
 - **唯一例外**（host_policy.rs:77-82）：macOS + 官方签名的 `computer-use`

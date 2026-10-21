@@ -5,7 +5,7 @@
 
 源码与制品一起提交：
 
-- `src/lib.rs`、`Cargo.toml`、`Cargo.lock`：源码，WIT 直接引用 `crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit`。
+- `src/lib.rs`、`Cargo.toml`、`Cargo.lock`：源码，WIT 直接引用 `crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit`。
 - `runtime_probe.wasm`：测试直接加载的制品。
 - `runtime_probe.wasm.sha256`：制品摘要，测试加载前校验，不一致时直接失败（不会静默跳过）。
 

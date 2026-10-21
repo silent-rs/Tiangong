@@ -200,7 +200,7 @@ pub fn finish_stdio_connection(
 /// 缺失或被篡改时直接 panic，不允许静默跳过（否则 CI 会把未执行的测试当成通过）。
 pub fn runtime_probe_wasm() -> PathBuf {
     let dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plugins/runtime-probe");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tests/fixtures/plugins/runtime-probe");
     let wasm = dir.join("runtime_probe.wasm");
     let bytes = std::fs::read(&wasm)
         .unwrap_or_else(|error| panic!("读取测试插件制品失败 {}: {error}", wasm.display()));

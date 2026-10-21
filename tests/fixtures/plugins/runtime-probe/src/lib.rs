@@ -9,7 +9,7 @@
 #![no_main]
 
 wit_bindgen::generate!({
-    path: "../../../../crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit",
+    path: "../../../../crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit",
 });
 
 use exports::tiangong::plugin::plugin::{

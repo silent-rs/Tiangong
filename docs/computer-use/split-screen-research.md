@@ -31,7 +31,7 @@ computer-use 插件在 `plugins/tiangong-plugin-computer-use/`，sidecar 为独�
   - `windows` crate 已启用 `Win32_UI_WindowsAndMessaging`、`Win32_Graphics_Dwm`、`Win32_UI_HiDpi`，`SetWindowPos` 和 `MonitorFromWindow/GetMonitorInfoW` 都能用，不用加新依赖。
 - Linux：`backend/linux.rs` 只接了 AT-SPI（zbus），明确不依赖 xdotool/wmctrl。
 - 天工主窗口：`src-tauri/tauri.conf.json` 里 `minWidth: 400`、`titleBarStyle: Overlay`。400px 刚好等于最小宽度，可以缩到这个宽度，但**前端在 400px 下的布局要单独检查**（侧边栏、标签页、输入框）。
-- 宿主 PID：sidecar 启动时会拿到环境变量 `TIANGONG_PLUGIN_HOST_PID`（`crates/tiangong-plugin-runtime/src/sidecar/stdio/mod.rs:56`）。sidecar 可以据此找到天工窗口，用同一套 AX/Win32 逻辑摆放它，不需要额外打通 Tauri 命令。
+- 宿主 PID：sidecar 启动时会拿到环境变量 `TIANGONG_PLUGIN_HOST_PID`（`crates/plugin/tiangong-plugin-runtime/src/sidecar/stdio/mod.rs:56`）。sidecar 可以据此找到天工窗口，用同一套 AX/Win32 逻辑摆放它，不需要额外打通 Tauri 命令。
   - 需要确认：这个 PID 在打包版和开发版里是不是都是持有主窗口的进程。
 
 ## 3. 各平台细节

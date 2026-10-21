@@ -16,6 +16,7 @@ shift || true
 #   crates/<name>/...           → <name>
 #   plugins/tiangong-plugin-memory/<part>/... → tiangong-plugin-memory-<part>
 #   crates/plugins/<name>/...   → <name>（插件 crate 嵌套在 plugins/ 子目录下）
+#   crates/plugin/<name>/...    → <name>（插件基础设施 crate 嵌套在 plugin/ 子目录下）
 #   crates/sandbox/<name>/...   → <name>（沙箱 crate 嵌套在 sandbox/ 子目录下）
 #   tests/plugin-sidecar-e2e/...→ tiangong-plugin-sidecar-e2e
 #   src-tauri/...               → tiangong-app
@@ -51,6 +52,9 @@ crates="$(
       printf '%s\n' "${rest%%/*}"
     elif [[ "$f" == crates/plugins/*/* ]]; then
       rest="${f#crates/plugins/}"
+      printf '%s\n' "${rest%%/*}"
+    elif [[ "$f" == crates/plugin/*/* ]]; then
+      rest="${f#crates/plugin/}"
       printf '%s\n' "${rest%%/*}"
     elif [[ "$f" == crates/sandbox/*/* ]]; then
       rest="${f#crates/sandbox/}"

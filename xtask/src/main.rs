@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const WASM_TARGET: &str = "wasm32-wasip2";
-const RUNTIME_MANIFEST: &str = "crates/tiangong-plugin-runtime/Cargo.toml";
+const RUNTIME_MANIFEST: &str = "crates/plugin/tiangong-plugin-runtime/Cargo.toml";
 const PLUGIN_DIST: &str = "target/plugin-dist";
 const DEFAULT_OSS_BASE_URL: &str = "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com";
 const PLUGIN_CATALOG_VERSION: u32 = 1;
@@ -1778,7 +1778,7 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
 /// 官方公钥单一来源：与运行时共用同一文件（include_str!），杜绝两份
 /// 常量漂移导致发布验签与运行时信任根不一致。
 const OFFICIAL_PLUGIN_PUBKEY_B64: &str =
-    include_str!("../../crates/tiangong-plugin-sidecar/src/official-pubkey.b64");
+    include_str!("../../crates/plugin/tiangong-plugin-update/src/official-pubkey.b64");
 /// Sandbox 自管理官方根：发布守卫与 Sandbox 内置验证共用此文件，
 /// 不随插件签名根的后续轮换漂移。
 const OFFICIAL_SANDBOX_PUBKEY_B64: &str =

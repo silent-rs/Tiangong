@@ -6,7 +6,7 @@
 
 ## 范围
 
-- 后端：`crates/tiangong-plugin-runtime/src/manifest.rs`（或对应清单解析模块）扩展 schema v2 字段解析与校验。
+- 后端：`crates/plugin/tiangong-plugin-runtime/src/manifest.rs`（或对应清单解析模块）扩展 schema v2 字段解析与校验。
 - 相关：`registry.rs` 中导入时的清单校验调用链。
 
 ## 依赖

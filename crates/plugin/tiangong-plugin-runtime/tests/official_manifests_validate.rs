@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
-    // tests/ → tiangong-plugin-runtime/ → crates/ → 仓库根
+    // tiangong-plugin-runtime/ → plugin/ → crates/ → 仓库根
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("../../..")
         .canonicalize()
         .expect("定位仓库根失败")
 }

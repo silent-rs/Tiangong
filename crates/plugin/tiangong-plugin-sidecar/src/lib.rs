@@ -7,7 +7,6 @@
 //! # 包含
 //! - [`protocol`]：宿主与 sidecar 共用的请求信封、握手与帧协议
 //! - [`env`]：宿主注入 sidecar 进程的环境变量约定
-//! - [`release`]：插件发布约定（官方目录、签名清单数据结构、信任根常量）
 //! - [`singleton`]：进程单例（淘汰制：已有健康实例则退出，不存在时才启动）
 //! - [`identity`]：sidecar 配置与实例身份
 //! - [`endpoint`]：运行时目录解析、endpoint 文件发布/读取/清理、TCP 可达性探测
@@ -42,7 +41,6 @@ pub mod identity;
 #[cfg(feature = "model")]
 pub mod model;
 pub mod protocol;
-pub mod release;
 pub mod server;
 pub mod shutdown;
 pub mod singleton;

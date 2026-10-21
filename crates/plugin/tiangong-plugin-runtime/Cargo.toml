@@ -10,6 +10,8 @@ transport-protocol = "0.1.0"
 [dependencies]
 # 宿主与 sidecar 共用约定（协议、环境变量、发布约定）。
 tiangong-plugin-sidecar = { workspace = true }
+# 插件发布与更新约定（目录、签名清单、信任根）。
+tiangong-plugin-update = { workspace = true }
 tiangong-core = { workspace = true }
 tiangong-core-manager = { workspace = true }
 tiangong-config = { workspace = true }
