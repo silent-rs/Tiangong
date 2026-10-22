@@ -702,3 +702,59 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
         tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), id, false).unwrap();
     }
 }
+
+#[test]
+fn 工具视图_贡献的工具键与模型可见的对外名一致() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+    let dir = root.path().join("plugins").join("view-fs");
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/tool-view.html"), "<div></div>").unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        r#"{"schema_version":2,"id":"view-fs","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true},
+            "tools":[
+              {"name":"file_read","description":"测试","input_schema":{"type":"object"}},
+              {"name":"file_write","description":"测试","input_schema":{"type":"object"}}
+            ],
+            "ui":{"sandbox":"shadow","contributions":[{"slot":"session.message-item","id":"tool-view","entry":"app/tool-view.html",
+              "context":["session","message"],"render":"replace","tools":["file_read","file_write:action=replace"],
+              "titles":{"file_read":"读取文件","file_read:action=list":"列出目录"}}]}}"#,
+    )
+    .unwrap();
+    tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "tool-view-session",
+    );
+    let names = tool_names(&bridge);
+    assert!(
+        names.contains(&"view-fs__file_read".to_string()),
+        "{names:?}"
+    );
+
+    let view = tiangong_plugin_runtime::registry::list_slot_contributions("session.message-item")
+        .into_iter()
+        .find(|item| item.plugin_id == "view-fs")
+        .expect("工具视图贡献");
+    assert_eq!(
+        view.tools,
+        vec!["view-fs__file_read", "view-fs__file_write:action=replace"],
+        "贡献的工具键须换成带插件前缀的对外名，与模型调用名一致"
+    );
+    assert_eq!(
+        view.titles["view-fs__file_read"], "读取文件",
+        "标题键同样换成对外名"
+    );
+    assert_eq!(view.titles["view-fs__file_read:action=list"], "列出目录");
+    for key in &view.tools {
+        let tool = key.split(':').next().unwrap();
+        assert!(
+            names.iter().any(|name| name == tool),
+            "{key} 未对应任何对外工具：{names:?}"
+        );
+    }
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "view-fs", false).unwrap();
+}

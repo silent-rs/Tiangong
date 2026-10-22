@@ -19,8 +19,8 @@ export interface ToolViewData {
   duration_ms: number | null;
 }
 
-/** 特指键 `对外名:参数=取值` 是否命中本次调用参数。 */
-function matchesKey(key: string, toolName: string, args: unknown): 0 | 1 | 2 {
+/** 特指键 `对外名:参数=取值` 是否命中本次调用参数（0 未命中，1 通用，2 特指）。 */
+export function matchesKey(key: string, toolName: string, args: unknown): 0 | 1 | 2 {
   const separator = key.indexOf(":");
   if (separator < 0) return key === toolName ? 1 : 0;
   if (key.slice(0, separator) !== toolName) return 0;
@@ -51,6 +51,32 @@ export function findToolView(
     }
   });
   return best === null ? null : (best as { index: number }).index;
+}
+
+/**
+ * 插件在工具视图中声明的工具行标题：特指声明优先于通用声明，未声明返回 null
+ * （宿主显示工具名）。
+ */
+export function findToolTitle(
+  items: Pick<LoadedSlotContribution, "render" | "titles">[],
+  toolName: string,
+  args: unknown,
+): string | null {
+  let best: { title: string; score: number } | null = null;
+  for (const item of items) {
+    if (item.render !== "replace") continue;
+    for (const [key, title] of Object.entries(item.titles ?? {})) {
+      const score = matchesKey(key, toolName, args);
+      if (title && score > (best?.score ?? 0)) best = { title, score };
+    }
+  }
+  return best === null ? null : (best as { title: string }).title;
+}
+
+/** 当前已加载工具视图声明的工具行标题查询函数。 */
+export function useToolTitle(): (toolName: string, args: unknown) => string | null {
+  const items = useSlotContributions(MESSAGE_ITEM_SLOT);
+  return useMemo(() => (toolName: string, args: unknown) => findToolTitle(items, toolName, args), [items]);
 }
 
 interface ToolViewHostProps {

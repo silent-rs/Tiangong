@@ -69,6 +69,7 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     source: ContributionSource::Manifest,
                     render: contribution.render,
                     tools: exposed_tool_keys(plugin_id, &contribution.tools),
+                    titles: exposed_tool_titles(plugin_id, &contribution.titles),
                 });
             }
         }
@@ -94,6 +95,7 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     source: ContributionSource::Wasm,
                     render: crate::slots::MessageItemRender::Append,
                     tools: Vec::new(),
+                    titles: Default::default(),
                 });
             }
         }
@@ -106,21 +108,35 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
     result
 }
 
-/// 工具视图贡献的工具键换成对外名（`工具名[:参数=取值]` →
-/// `{插件id}__工具名[:参数=取值]`），与界面拿到的工具调用名一致。
+/// 工具键换成对外名（`工具名[:参数=取值]` → `{插件id}__工具名[:参数=取值]`），
+/// 与界面拿到的工具调用名一致。
+fn exposed_tool_key(plugin_id: &str, key: &str) -> Option<String> {
+    let (tool, condition) = match key.split_once(':') {
+        Some((tool, condition)) => (tool, Some(condition)),
+        None => (key, None),
+    };
+    let exposed = tiangong_core::tools::extension::namespaced_tool_name(plugin_id, tool)?;
+    Some(match condition {
+        Some(condition) => format!("{exposed}:{condition}"),
+        None => exposed,
+    })
+}
+
+/// 工具视图贡献的工具键换成对外名。
 fn exposed_tool_keys(plugin_id: &str, keys: &[String]) -> Vec<String> {
     keys.iter()
-        .filter_map(|key| {
-            let (tool, condition) = match key.split_once(':') {
-                Some((tool, condition)) => (tool, Some(condition)),
-                None => (key.as_str(), None),
-            };
-            let exposed = tiangong_core::tools::extension::namespaced_tool_name(plugin_id, tool)?;
-            Some(match condition {
-                Some(condition) => format!("{exposed}:{condition}"),
-                None => exposed,
-            })
-        })
+        .filter_map(|key| exposed_tool_key(plugin_id, key))
+        .collect()
+}
+
+/// 工具视图贡献的标题键换成对外名。
+fn exposed_tool_titles(
+    plugin_id: &str,
+    titles: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    titles
+        .iter()
+        .filter_map(|(key, title)| Some((exposed_tool_key(plugin_id, key)?, title.clone())))
         .collect()
 }
 
@@ -311,6 +327,9 @@ pub struct SlotContribution {
     /// `{插件id}__{工具名}:参数=取值`；界面按调用匹配后挂载本贡献。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// 工具行标题：键同 `tools`（对外名形式），值为插件声明的固定标题。
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub titles: std::collections::BTreeMap<String, String>,
 }
 
 /// UI 贡献的声明来源。

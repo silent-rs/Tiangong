@@ -489,6 +489,8 @@ export interface SlotContributionEntry {
    * `对外名:参数=取值`。未声明的工具调用以文本默认显示。
    */
   tools?: string[];
+  /** 工具视图声明的工具行标题：键同 `tools`，特指键优先。 */
+  titles?: Record<string, string>;
 }
 
 export interface SessionInputAttachmentPayload {

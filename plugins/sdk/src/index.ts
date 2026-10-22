@@ -60,6 +60,11 @@ export interface UiContribution {
    * 本插件工具原名，或 `工具名:参数=取值` 特指某类调用。
    */
   tools?: string[];
+  /**
+   * 工具行标题（仅声明了 `tools` 的工具视图）：键同 `tools`（特指键优先），
+   * 值为固定标题；未声明的调用以工具名显示。
+   */
+  titles?: Record<string, string>;
 }
 
 /**

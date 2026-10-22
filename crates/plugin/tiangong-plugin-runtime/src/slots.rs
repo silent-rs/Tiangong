@@ -286,6 +286,9 @@ pub struct UiContribution {
     /// 接管展示的工具（见 manifest 同名字段）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// 工具行标题（见 manifest 同名字段）。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub titles: std::collections::BTreeMap<String, String>,
 }
 
 /// `session.message-item` 贡献的渲染方式。
@@ -453,6 +456,7 @@ mod tests {
             instance_resources: false,
             render: MessageItemRender::Append,
             tools: Vec::new(),
+            titles: Default::default(),
         };
         let json = serde_json::to_string(&contribution).unwrap();
         assert!(json.contains("\"open_mode\":\"multi\""));

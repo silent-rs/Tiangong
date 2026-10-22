@@ -12,7 +12,7 @@ import {
 } from "./toolDisplayModel";
 import { ToolIcon } from "./ToolIcon";
 import { ToolCallCard } from "./toolViews/ToolCallCard";
-import { ToolViewHost } from "./toolViews/ToolViewHost";
+import { ToolViewHost, useToolTitle } from "./toolViews/ToolViewHost";
 import { useToolArgsPresentation } from "./toolArgsPresentation";
 
 /** 运行中工具调用（结果未到达）。 */
@@ -171,6 +171,12 @@ function ToolRunRow({
 
 export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupProps) {
   const hints = useToolArgsPresentation();
+  const titleOf = useToolTitle();
+  // 插件声明了标题时替换工具名，摘要仍为通用参数摘要。
+  const withTitle = (model: ToolDisplayModel, args: unknown): ToolDisplayModel => {
+    const title = titleOf(model.toolName, args);
+    return title ? { ...model, title } : model;
+  };
   if (tools.length === 0 && !runningCalls?.length) return null;
   const brief = summarizeToolGroup(tools);
 
@@ -180,7 +186,7 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       <ToolRunRow
         key={tool.id}
         callId={toolCallIdOf(tool) ?? tool.id}
-        model={buildToolDisplayModel(tool, args, hints)}
+        model={withTitle(buildToolDisplayModel(tool, args, hints), args)}
         args={args}
         expanded={expansion.isExpanded(tool.id)}
         onToggle={() => expansion.toggle(tool.id)}
@@ -203,11 +209,12 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
         <div key={`running-${call.id}`} className="ml-4">
           <ToolRunRow
             callId={call.id}
-            model={
+            model={withTitle(
               call.finished
                 ? buildFinishedToolModel(call.name, call.arguments, call.finished, hints)
-                : buildRunningToolModel(call.name, call.arguments, hints)
-            }
+                : buildRunningToolModel(call.name, call.arguments, hints),
+              call.arguments,
+            )}
             args={call.arguments}
             expanded={expansion.isExpanded(`running-${call.id}`)}
             onToggle={() => expansion.toggle(`running-${call.id}`)}

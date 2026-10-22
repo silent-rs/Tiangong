@@ -63,7 +63,7 @@ vi.mock('@/components/PluginSandbox', () => ({
   ),
 }));
 
-const { ToolViewHost, findToolView } = await import('@/components/message/toolViews/ToolViewHost');
+const { ToolViewHost, findToolView, findToolTitle } = await import('@/components/message/toolViews/ToolViewHost');
 const { resetSlotContributionCache } = await import('@/hooks/useSlotContributions');
 
 describe('工具视图匹配', () => {
@@ -82,6 +82,27 @@ describe('工具视图匹配', () => {
   it('未声明的工具与附加区贡献不接管', () => {
     expect(findToolView(items, 'fs__file_read', {})).toBeNull();
     expect(findToolView(items, 'terminal__run_shell', {})).toBeNull();
+  });
+});
+
+describe('工具行标题', () => {
+  const items = [
+    {
+      ...mocks.entry('fs', 'tool-view', ['fs__file_read']),
+      titles: { fs__file_read: '读取文件', 'fs__file_read:action=list': '列出目录' },
+    },
+    { ...mocks.entry('x', 'append-only', [], 'append'), titles: { x__t: '不应生效' } },
+  ];
+
+  it('特指标题优先于通用标题，未命中回落通用', () => {
+    expect(findToolTitle(items, 'fs__file_read', { action: 'list' })).toBe('列出目录');
+    expect(findToolTitle(items, 'fs__file_read', { action: 'read' })).toBe('读取文件');
+    expect(findToolTitle(items, 'fs__file_read', undefined)).toBe('读取文件');
+  });
+
+  it('未声明标题或非 replace 贡献返回 null（宿主显示工具名）', () => {
+    expect(findToolTitle(items, 'fs__file_write', {})).toBeNull();
+    expect(findToolTitle(items, 'x__t', {})).toBeNull();
   });
 });
 
