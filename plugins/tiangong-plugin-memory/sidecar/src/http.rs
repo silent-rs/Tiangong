@@ -20,9 +20,9 @@ use crate::daemon::{self, DaemonInfo};
 use crate::mcp;
 use crate::service::{MemoryService, ServiceError, parse_input};
 
-const CONFIG_PAGE_TEMPLATE: &str = include_str!("../../wasm/src/memory.html");
-const CONFIG_PAGE_CSS: &str = include_str!("../../wasm/src/memory.css");
-const CONFIG_PAGE_JS: &str = include_str!("../../wasm/src/memory.js");
+const CONFIG_PAGE_TEMPLATE: &str = include_str!("../../ui/memory.html");
+const CONFIG_PAGE_CSS: &str = include_str!("../../ui/memory.css");
+const CONFIG_PAGE_JS: &str = include_str!("../../ui/memory.js");
 /// 独立配置页注入的宿主标记：memory.js 据此改走 HTTP 而非 postMessage。
 const STANDALONE_SHIM: &str = "window.__MEMORY_STANDALONE__ = { token: __TOKEN__ };";
 const TOKEN_HEADER: &str = "x-memory-token";

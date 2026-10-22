@@ -187,11 +187,14 @@
     return data;
   }
 
-  async function callHost(method, payload = '') {
-    if (standalone) {
-      const result = await callStandalone(`/view/${encodeURIComponent(method)}`, { payload });
-      return result == null ? '' : JSON.stringify(result);
-    }
+  // 天工内嵌（v2 无 WASM 桥接）：宿主方法经宿主桥 sidecar.* 直达插件 sidecar。
+  // 独立配置页（standalone）仍走本机 HTTP /view/<method>，方法名保持不变。
+  const SIDECAR_METHODS = {
+    bootstrap: 'sidecar.ui.memory.config.get',
+    save_config: 'sidecar.ui.memory.config.set',
+    probe_config: 'sidecar.ui.memory.config.probe',
+  };
+  async function callHostBridge(bridgeMethod, payload = '{}') {
     if (!hostChannel) await hostReady;
     return new Promise((resolve, reject) => {
       const id = `memory-${Date.now()}-${++requestSequence}`;
@@ -216,12 +219,28 @@
         }
       };
       window.addEventListener('message', handler);
-      window.parent.postMessage({ type: 'plugin_call', channel, id, method, payload }, '*');
+      window.parent.postMessage({ type: 'plugin_call', channel, id, method: bridgeMethod, payload }, '*');
     });
+  }
+  async function callHost(method, payload = '') {
+    if (standalone) {
+      const result = await callStandalone(`/view/${encodeURIComponent(method)}`, { payload });
+      return result == null ? '' : JSON.stringify(result);
+    }
+    const bridgeMethod = SIDECAR_METHODS[method];
+    if (!bridgeMethod) {
+      throw new Error(`未知宿主方法: ${method}`);
+    }
+    return callHostBridge(bridgeMethod, payload === '' ? '{}' : payload);
   }
 
   async function memoryRequest(payload) {
-    const raw = await callHost('memory_request', JSON.stringify(payload));
+    if (standalone) {
+      const raw = await callHost('memory_request', JSON.stringify(payload));
+      return raw ? JSON.parse(raw) : {};
+    }
+    const { method, ...rest } = payload;
+    const raw = await callHostBridge(`sidecar.${method}`, JSON.stringify(rest));
     return raw ? JSON.parse(raw) : {};
   }
 

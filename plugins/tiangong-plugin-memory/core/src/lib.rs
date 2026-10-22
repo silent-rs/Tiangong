@@ -34,6 +34,7 @@ mod recovery;
 mod rumination;
 mod search;
 mod store;
+mod turn_extract;
 mod writer;
 
 pub use actor::{start_memory as start, start_memory_with_options as start_with_options};

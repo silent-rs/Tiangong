@@ -64,9 +64,9 @@
 | screenshot-input | 151 | v2，UI slot（session.input-action）需保留 |
 
 ### 阶段四：大体积/多工具（v1 → v2 一起做）
-| 插件 | wasm 行数 | 说明 |
+| 插件 | wasm 行数 | 状态 |
 | --- | --- | --- |
-| memory | 1270 | recall/append 等多工具，含 recall_anchor 逻辑（issue #709 在 core） |
+| memory | 1270 | ✅ 已迁移（v0.2.0，分支 `feature/issue-709-wasm-sunset`；含运行时 lifecycle→sidecar 转发、recall_memory 直连、设置页迁 `ui.contributions`） |
 | subagent | 611 | v2，多工具 |
 | computer-use | 1216 | v2，5 个工具，桌面输入/控件树 |
 

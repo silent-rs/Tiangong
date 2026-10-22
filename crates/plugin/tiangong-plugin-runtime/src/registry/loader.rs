@@ -552,6 +552,7 @@ pub fn load_core_plugin(
             enabled,
             verified_sidecar,
         ));
+        adapter.set_session_id(session_id);
         if let Ok(mut plugins) = loaded_plugins().lock()
             && let Some(loaded) = plugins.get_mut(plugin_id)
         {

@@ -1,24 +1,83 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "memory",
-  "version": "0.1.17",
-  "wasm": {
-    "binary": "tiangong_plugin_memory_wasm.wasm"
+  "version": "0.2.0",
+  "capabilities": {
+    "tools": true,
+    "lifecycle": true
   },
+  "tools": [
+    {
+      "name": "recall_memory",
+      "description": "按需回忆历史上下文、跨会话结果、之前的工具输出或生成产物。用户提到刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片等历史指代时，应先调用此工具。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "要回忆的内容，结合用户当前请求改写成可检索查询"
+          },
+          "reason": {
+            "type": "string",
+            "description": "为什么需要回忆，简述当前任务依赖的历史语境"
+          },
+          "expected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "期望找回的内容类型，如 media、file、tool_result、decision、code_context"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "最多返回多少条记忆，默认 5，最大 10",
+            "minimum": 1,
+            "maximum": 10
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "timeout_ms": 60000
+    }
+  ],
   "sidecar": {
     "binary": "tiangong-memory-sidecar",
     "transport_protocol": "0.1.0",
     "business_protocol": 1,
+    "lifecycle": "resident",
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
   "permissions": [
     "model-config.read",
-    "sidecar.invoke"
+    "sidecar.invoke",
+    "tool.provide"
   ],
   "entrypoints": [
     "desktop",
     "cli",
     "server"
+  ],
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "memory",
+        "title": "记忆",
+        "description": "记忆系统配置（模型端点、向量检索等）",
+        "icon": "brain",
+        "entry": "app/memory.html",
+        "context": []
+      }
+    ]
+  },
+  "model_requirements": [
+    {
+      "kind": "chat",
+      "required": false
+    }
   ]
 }

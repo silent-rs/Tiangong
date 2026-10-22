@@ -7,6 +7,7 @@
 
 pub mod protocol;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -23,6 +24,8 @@ use tiangong_plugin_memory_protocol::control::{
     DISABLE_OPERATION, ENABLE_OPERATION, STATUS_OPERATION, TEST_OPERATION,
 };
 use tiangong_plugin_memory_protocol::{
+    LIFECYCLE_SESSION_ENDED_OPERATION, LIFECYCLE_SESSION_READY_OPERATION,
+    LIFECYCLE_TURN_FINISHED_OPERATION, LIFECYCLE_TURN_STARTED_OPERATION, TOOL_RECALL_MEMORY,
     injection as plugin_injection, recall as plugin_recall, rumination as plugin_rumination,
     ui as plugin_ui,
 };
@@ -36,6 +39,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::handle::MemoryHandle;
+use tiangong_types::PluginSession;
 
 /// 监听中的 IPC 服务端。
 pub struct IpcServer {
@@ -460,7 +464,7 @@ async fn dispatch_plugin_request(
             sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: PROTOCOL_VERSION.to_string(),
             business_protocol: tiangong_plugin_memory_protocol::MEMORY_PROTOCOL_VERSION,
-            capabilities: vec!["memory".to_string()],
+            capabilities: vec!["memory".to_string(), format!("tool:{TOOL_RECALL_MEMORY}")],
             instance_id: format!("memory-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
         })
@@ -504,6 +508,23 @@ async fn dispatch_plugin_request(
             let response = memory_config_probe(probe).await;
             serde_json::to_value(response).with_context(|| "序列化 Memory 探测响应失败")
         }
+        LIFECYCLE_SESSION_READY_OPERATION | LIFECYCLE_TURN_STARTED_OPERATION => {
+            // 会话就绪 / 轮次开始：重置该会话的本轮召回标志（每轮只召回一次）。
+            let session: PluginSession = decode(&request.payload, "lifecycle 会话快照")?;
+            lifecycle_reset_recall(&session);
+            Ok(serde_json::json!({"ok": true}))
+        }
+        LIFECYCLE_TURN_FINISHED_OPERATION => {
+            let session: PluginSession = decode(&request.payload, "lifecycle 轮次快照")?;
+            lifecycle_turn_finished(handle, &session).await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        LIFECYCLE_SESSION_ENDED_OPERATION => {
+            let session: PluginSession = decode(&request.payload, "lifecycle 会话结束")?;
+            lifecycle_session_ended(handle, &session).await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        TOOL_RECALL_MEMORY => recall_memory_tool(handle, request.payload).await,
         operation => {
             let memory_request = decode_plugin_memory_request(operation, &request.payload)?
                 .ok_or_else(|| anyhow!("不支持的 Memory 操作: {operation}"))?;
@@ -1380,5 +1401,402 @@ mod tests {
         assert_eq!(resp.payload["ok"], true);
 
         server_task.await.expect("服务端任务失败");
+    }
+}
+
+// ── 宿主生命周期转发与直连工具（原 WASM 桥接逻辑内聚，见 wasm-sunset 计划）──
+
+/// recall_memory 工具参数（与原 WASM 桥接的解析保持一致）。
+#[derive(Debug, Default, serde::Deserialize)]
+struct RecallToolArguments {
+    query: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    expected: Vec<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// 每个宿主会话的插件侧状态：本轮是否已召回、累计轮次（每 10 轮 Meta 反刍）。
+#[derive(Default)]
+struct PluginSessionState {
+    recall_attempted: bool,
+    turn_count: u32,
+}
+
+fn plugin_session_states() -> &'static std::sync::Mutex<HashMap<String, PluginSessionState>> {
+    static STATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PluginSessionState>>> =
+        std::sync::OnceLock::new();
+    STATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// 会话状态键：优先宿主注入的调用上下文会话 ID，退回快照 id。
+fn plugin_session_key(session: &PluginSession) -> String {
+    let invocation = tiangong_plugin_sidecar::invocation_context();
+    let id = invocation
+        .as_ref()
+        .map(|context| context.session_id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| session.id.clone());
+    if id.is_empty() {
+        "default".to_string()
+    } else {
+        id
+    }
+}
+
+/// 构造 ToolOutcome 形状的工具结果（ok/summary/stdout/stderr/exit_code）。
+fn tool_outcome(
+    ok: bool,
+    summary: &str,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": ok,
+        "summary": summary,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+    })
+}
+
+/// 会话就绪 / 轮次开始：重置该会话的本轮召回标志。
+fn lifecycle_reset_recall(session: &PluginSession) {
+    let key = plugin_session_key(session);
+    if let Ok(mut states) = plugin_session_states().lock() {
+        states.entry(key).or_default().recall_attempted = false;
+    }
+}
+
+/// 轮次结束：从本轮只读快照提取信息做 enhanced micro 反刍；每 10 轮触发 Meta。
+async fn lifecycle_turn_finished(handle: MemoryHandle, session: &PluginSession) {
+    if crate::is_memory_disabled() {
+        return;
+    }
+    let key = plugin_session_key(session);
+    // micro 反刍：宿主快照只含本轮消息，首条即本轮起点；起点必须是用户真实输入。
+    if let Some(start) = turn_start(session) {
+        let user_input = extract_message_text(start);
+        let messages = session
+            .messages
+            .iter()
+            .filter(|message| {
+                !matches!(
+                    message.kind(),
+                    tiangong_types::MessageRole::System | tiangong_types::MessageRole::Notice
+                )
+            })
+            .collect::<Vec<_>>();
+        let turn_status = messages
+            .iter()
+            .rev()
+            .find_map(|message| match message.turn_status() {
+                Some(tiangong_types::TurnStatus::Success) => {
+                    Some(plugin_rumination::TurnStatus::Completed)
+                }
+                Some(tiangong_types::TurnStatus::Failed) => {
+                    Some(plugin_rumination::TurnStatus::Failed)
+                }
+                Some(tiangong_types::TurnStatus::Cancelled) => {
+                    Some(plugin_rumination::TurnStatus::Cancelled)
+                }
+                // 收尾通知时起轮消息已写入终态；未收尾状态不参与。
+                Some(tiangong_types::TurnStatus::Processing) | None => None,
+            })
+            .unwrap_or_default();
+        let turn_result = crate::turn_extract::build_turn_memory_result(
+            session,
+            &messages,
+            &user_input,
+            turn_status,
+        );
+        let payload = match transcode::<_, crate::types::EnhancedTurnResult>(turn_result) {
+            Ok(turn_result) => MemoryIpcRequestPayload::RunEnhancedMicroRumination { turn_result },
+            Err(error) => {
+                tracing::warn!(%error, "Memory 轮次快照转码失败，跳过 micro 反刍");
+                return;
+            }
+        };
+        if let Err(error) = handle_memory_request(handle.clone(), payload).await {
+            tracing::warn!(%error, "Memory 增强反刍任务提交失败");
+        }
+    }
+    // 每 10 轮触发 Meta 反刍（与原 WASM 桥接一致）。
+    let trigger_meta = plugin_session_states()
+        .lock()
+        .map(|mut states| {
+            let state = states.entry(key).or_default();
+            state.turn_count += 1;
+            state.turn_count.is_multiple_of(10)
+        })
+        .unwrap_or(false);
+    if trigger_meta
+        && let Err(error) =
+            handle_memory_request(handle, MemoryIpcRequestPayload::RunMetaRumination).await
+    {
+        tracing::warn!(%error, "Memory Meta 反刍任务提交失败");
+    }
+}
+
+/// 会话结束：meso 反刍并清理该会话状态。
+async fn lifecycle_session_ended(handle: MemoryHandle, session: &PluginSession) {
+    let key = plugin_session_key(session);
+    if !crate::is_memory_disabled() {
+        let payload = MemoryIpcRequestPayload::RunMesoRumination {
+            session_id: session.id.clone(),
+            workspace_id: session.workspace_id.clone(),
+        };
+        if let Err(error) = handle_memory_request(handle, payload).await {
+            tracing::warn!(%error, "Memory meso 反刍任务提交失败");
+        }
+    }
+    if let Ok(mut states) = plugin_session_states().lock() {
+        states.remove(&key);
+    }
+}
+
+/// 取本轮起始消息：必须为用户真实输入（排除 HostInjected / CompressedResume）。
+fn turn_start(session: &PluginSession) -> Option<&tiangong_types::Message> {
+    session
+        .messages
+        .first()
+        .filter(|message| message.is_user_input())
+}
+
+/// 从消息内容块提取文本。
+fn extract_message_text(message: &tiangong_types::Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            tiangong_types::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// recall_memory 直连工具：每轮去重、参数解析、转发 recall_context 并组装结果。
+async fn recall_memory_tool(
+    handle: MemoryHandle,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value> {
+    if crate::is_memory_disabled() {
+        return Ok(tool_outcome(
+            false,
+            "记忆系统未启用",
+            String::new(),
+            "memory disabled".to_string(),
+            1,
+        ));
+    }
+    // 每轮只召回一次：重复调用直接返回跳过说明（与原 WASM 桥接一致）。
+    // 直连工具没有会话快照，会话键只取宿主注入的调用上下文。
+    let key = tiangong_plugin_sidecar::invocation_context()
+        .map(|context| context.session_id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    let duplicate = plugin_session_states()
+        .lock()
+        .map(|mut states| {
+            let state = states.entry(key).or_default();
+            if state.recall_attempted {
+                true
+            } else {
+                state.recall_attempted = true;
+                false
+            }
+        })
+        .unwrap_or(false);
+    if duplicate {
+        return Ok(tool_outcome(
+            true,
+            "本轮已完成回忆，跳过重复调用",
+            "recall_memory 本轮已经执行过，回忆结果已经注入当前上下文。请直接基于已有回忆结果完成用户原始目标，不要再次调用 recall_memory。".to_string(),
+            String::new(),
+            0,
+        ));
+    }
+    let arguments: RecallToolArguments = decode(&payload, "recall_memory 参数")?;
+    let query = arguments.query.trim().to_string();
+    if query.is_empty() {
+        return Ok(tool_outcome(
+            false,
+            "缺少回忆查询",
+            String::new(),
+            "recall_memory.query is empty".to_string(),
+            1,
+        ));
+    }
+    let request = plugin_recall::RecallQuery {
+        query: query.clone(),
+        reason: arguments
+            .reason
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty()),
+        expected: arguments
+            .expected
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        context: Vec::new(),
+        limit: arguments.limit.unwrap_or(5).clamp(1, 10),
+    };
+    let request = transcode::<_, crate::types::MemoryRecallRequest>(request)?;
+    let response = handle.recall_context(request).await;
+    let encoded = encode_plugin_memory_response(
+        plugin_recall::RECALL_CONTEXT_OPERATION,
+        MemoryIpcResponsePayload::RecallContext { response },
+    )?;
+    let response: plugin_recall::RecallContextResponse = serde_json::from_value(encoded)?;
+    Ok(assemble_recall_outcome(response, query))
+}
+
+/// 组装 recall_memory 的工具结果文案（与原 WASM 桥接一致）。
+fn assemble_recall_outcome(
+    response: plugin_recall::RecallContextResponse,
+    query: String,
+) -> serde_json::Value {
+    if response.hits.is_empty() {
+        let stdout = if response.content.trim().is_empty() {
+            format!("未找到与「{query}」相关的历史记忆。")
+        } else {
+            response.content
+        };
+        return tool_outcome(
+            true,
+            "未找到相关记忆",
+            format!(
+                "recall_memory 已完成，但没有可用的增量历史记忆。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。\n\n{stdout}"
+            ),
+            String::new(),
+            0,
+        );
+    }
+    let stdout = if response.content.trim().is_empty() {
+        "没有发现当前上下文之外的增量记忆。".to_string()
+    } else {
+        response.content
+    };
+    let header = if stdout
+        .trim()
+        .starts_with("没有发现当前上下文之外的增量记忆")
+    {
+        "recall_memory 已完成，结果如下。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
+    } else {
+        "recall_memory 已完成。以下是可直接使用的回忆结果，请基于这些内容继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
+    };
+    tool_outcome(
+        true,
+        &format!("命中 {} 条相关记忆并完成整理", response.hits.len()),
+        format!("{header}\n\n{stdout}"),
+        String::new(),
+        0,
+    )
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn test_session(messages: Vec<tiangong_types::Message>) -> PluginSession {
+        PluginSession {
+            id: "s-1".to_string(),
+            title: String::new(),
+            cwd: "/tmp/ws".to_string(),
+            workspace_id: "ws".to_string(),
+            reasoning_effort: None,
+            messages,
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 构造 RFC 0017 的插件反馈图片注入消息：role=User、phase=HostInjected，
+    /// 内容为 ModelInstruction（provenance）+ Image 块，`text_content()` 为空。
+    fn host_injected_image_message() -> tiangong_types::Message {
+        let mut message =
+            tiangong_types::Message::new(tiangong_types::MessageRole::User, String::new());
+        message.content = vec![
+            tiangong_types::ContentBlock::model_instruction(
+                "[injected-images provenance]\n- 工具 desktop_screenshot（call-1）产出图片 shot.png",
+            ),
+            tiangong_types::ContentBlock::image(
+                tiangong_types::StoredAsset {
+                    asset_id: "a-1".to_string(),
+                    local_path: "/media/shot.png".to_string(),
+                    original_name: "shot.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 1024,
+                    kind: tiangong_types::MediaKind::Image,
+                },
+                None,
+            ),
+        ];
+        message.with_source(tiangong_types::UserSource::HostInjected)
+    }
+
+    #[test]
+    fn 轮次起点拒绝注入消息与压缩恢复锚点() {
+        let user = tiangong_types::Message::new(tiangong_types::MessageRole::User, "真实用户输入");
+        // 首条为注入消息：不得作为轮次锚点。
+        let session = test_session(vec![host_injected_image_message(), user.clone()]);
+        assert!(turn_start(&session).is_none());
+        // 首条为真实用户输入：正常放行。
+        let session = test_session(vec![user, host_injected_image_message()]);
+        assert!(turn_start(&session).is_some());
+        // 压缩恢复锚点同样拒绝。
+        let resume =
+            tiangong_types::Message::new(tiangong_types::MessageRole::User, "压缩恢复锚点")
+                .with_source(tiangong_types::UserSource::CompressedResume);
+        let session = test_session(vec![resume]);
+        assert!(turn_start(&session).is_none());
+    }
+
+    #[test]
+    fn 文本提取只拼接文本块() {
+        let message = tiangong_types::Message::new(tiangong_types::MessageRole::User, "第一段");
+        assert_eq!(extract_message_text(&message), "第一段");
+        let injected = host_injected_image_message();
+        assert_eq!(extract_message_text(&injected), "");
+    }
+
+    #[test]
+    fn 召回结果文案与原桥接一致() {
+        let empty = plugin_recall::RecallContextResponse::default();
+        let outcome = assemble_recall_outcome(empty, "查询词".to_string());
+        assert_eq!(outcome["ok"], serde_json::json!(true));
+        assert_eq!(outcome["summary"], serde_json::json!("未找到相关记忆"));
+        assert!(
+            outcome["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("未找到与「查询词」相关的历史记忆")
+        );
+
+        let hit = plugin_recall::RecallContextResponse {
+            content: "记忆内容".to_string(),
+            hits: vec![plugin_recall::RecallHit {
+                node_id: "n-1".to_string(),
+                title: "标题".to_string(),
+                summary: "摘要".to_string(),
+                score: 0.9,
+                kind: plugin_recall::MemoryKind::Episode,
+                importance: 0.5,
+                depth1_loaded: false,
+            }],
+            ..Default::default()
+        };
+        let outcome = assemble_recall_outcome(hit, "查询词".to_string());
+        assert_eq!(
+            outcome["summary"],
+            serde_json::json!("命中 1 条相关记忆并完成整理")
+        );
+        assert!(outcome["stdout"].as_str().unwrap().contains("记忆内容"));
     }
 }
