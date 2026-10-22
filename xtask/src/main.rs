@@ -387,6 +387,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
         // 工具视图（session.message-item replace + tools）。
         "fs" => &["app/tool-view.html"],
+        // 记忆设置页（settings.plugin-page，自包含单文件）。
+        "memory" => &["app/memory.html"],
         "bot" => &["app/im-message.html", "app/settings.html"],
         "volcengine" => &[
             "app/settings.html",
@@ -423,6 +425,7 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
             "assets/tool-file-write.svg",
             "assets/tool-clock.svg",
         ],
+        "memory" => &["assets/tool-recall-memory.svg"],
         _ => &[],
     }
 }

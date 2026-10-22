@@ -60,6 +60,12 @@
     "cli",
     "server"
   ],
+  "resources": [
+    "assets"
+  ],
+  "tool_icons": {
+    "recall_memory": "assets/tool-recall-memory.svg"
+  },
   "ui": {
     "sandbox": "shadow",
     "contributions": [
