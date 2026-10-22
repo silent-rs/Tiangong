@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-fs-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Fs 独立 sidecar 进程（承载文件读写、进程级锁表、路径解析与沙箱策略）"
