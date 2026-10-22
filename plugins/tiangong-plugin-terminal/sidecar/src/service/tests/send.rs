@@ -42,8 +42,8 @@ async fn send(
     outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": input,
                     "enter": enter,
@@ -87,8 +87,8 @@ async fn 静默长命令返回仍在执行且不接受新命令() {
     // 命令未结束时发送新命令：必须拒绝且不写入 PTY。
     let rejected = service
         .dispatch_test(tool_request(
-            "terminal_send",
-            serde_json::json!({
+            "terminal",
+            serde_json::json!({"action": "send",
                 "terminal_id": terminal,
                 "input": "echo should-not-run",
                 "enter": true,
@@ -509,8 +509,8 @@ async fn 终端关闭后遗留的后台作业可查询并结束() {
     let status = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "status",}),
                 Some((SCOPE, workspace.as_str())),
             ))
             .await,
@@ -536,8 +536,8 @@ async fn 终端关闭后遗留的后台作业可查询并结束() {
     let other = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "status",}),
                 Some(("session-other", workspace.as_str())),
             ))
             .await,
@@ -597,7 +597,7 @@ async fn 后台启动与多行脚本附带用法提示且照常执行() {
     assert_eq!(background["ok"], true, "{background}");
     assert!(stdout(&background).contains("started"), "命令照常执行");
     assert!(
-        summary(&background).contains("terminal_open"),
+        summary(&background).contains("terminal(action=open)"),
         "后台启动应提示改用独立终端: {background}"
     );
 

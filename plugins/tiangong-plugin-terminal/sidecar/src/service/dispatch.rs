@@ -178,23 +178,13 @@ async fn dispatch_operation(
 ) -> Result<serde_json::Value> {
     // Agent 工具入口（宿主直连）：会话归属来自宿主注入的请求上下文，
     // 缺失即拒绝——不允许脱离会话真相源执行终端操作。
-    if matches!(
-        operation,
-        "run_command"
-            | "run_shell"
-            | "terminal_open"
-            | "terminal_send"
-            | "terminal_close"
-            | "terminal_status"
-    ) {
+    if matches!(operation, "run_command" | "run_shell" | "terminal") {
         let scope = tool_scope(request_id, context)?;
         let outcome = match operation {
             "run_command" => service.tool_run_command(&scope, false, payload).await,
             "run_shell" => service.tool_run_command(&scope, true, payload).await,
-            "terminal_open" => service.tool_terminal_open(&scope).await,
-            "terminal_send" => service.tool_terminal_send(&scope, payload).await,
-            "terminal_status" => service.tool_terminal_status(&scope, payload),
-            _ => service.tool_terminal_close(&scope, payload).await,
+            // 终端管理统一入口（action 模式）：open / send / close / status。
+            _ => service.tool_terminal(&scope, payload).await,
         };
         return Ok(serde_json::to_value(outcome)?);
     }
@@ -208,10 +198,7 @@ async fn dispatch_operation(
             "capabilities": [
                 "tool:run_command",
                 "tool:run_shell",
-                "tool:terminal_open",
-                "tool:terminal_send",
-                "tool:terminal_close",
-                "tool:terminal_status",
+                "tool:terminal",
             ],
             "instance_id": format!("terminal-sidecar-{}", std::process::id()),
             "status": "ready",

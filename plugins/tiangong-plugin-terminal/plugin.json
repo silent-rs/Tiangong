@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terminal",
-  "version": "0.3.16",
+  "version": "0.4.0",
   "entrypoints": [
     "desktop"
   ],
@@ -51,7 +51,7 @@
     },
     {
       "name": "run_shell",
-      "description": "在终端执行 shell 命令文本（通过 PTY，支持交互式程序）。仅用于需要管道、重定向、变量展开等 shell 语法的单条命令或执行已有脚本；多步操作请用多次 run_command，不要现写多行脚本，也不要用 nohup / & 后台启动（长期服务请用 terminal_open 新开终端前台运行）。",
+      "description": "在终端执行 shell 命令文本（通过 PTY，支持交互式程序）。仅用于需要管道、重定向、变量展开等 shell 语法的单条命令或执行已有脚本；多步操作请用多次 run_command，不要现写多行脚本，也不要用 nohup / & 后台启动（长期服务请用 terminal 的 action=open 新开终端前台运行）。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -80,75 +80,44 @@
       "timeout_ms": 300000
     },
     {
-      "name": "terminal_send",
-      "description": "向指定终端发送按键/文本输入；结果会告知实际送达的终端编号。enter=true 执行命令时会等到命令真正结束（本地按前台进程判定，SSH 等交互程序内按提示符重新出现判定；提示符变化（cd、REPL 续行、密码提示）时静默后返回 interactive）再返回 completed；超过 wait 仍未结束返回 still_running 及新增输出，此时不要发送新命令，用空 input（不设 enter）继续等待；上一条命令未结束时 enter=true 的新命令会被拒绝且不写入；要中断可发送 \\x03（只含控制键的输入即使设了 enter 也直接写入），程序真正结束后才能发送新命令。",
+      "name": "terminal",
+      "description": "终端管理统一入口（action 模式）。action=open：打开一个新终端并展开面板（向用户展示命令执行、跟踪长任务时使用）；需要长期运行的服务（开发服务器、联调后端等）用它新开终端，再用 action=send 在前台运行，代替 nohup / & 后台启动；面板编号由插件管理并在结果中告知。action=send：向指定终端发送按键/文本输入；结果会告知实际送达的终端编号。enter=true 执行命令时会等到命令真正结束（本地按前台进程判定，SSH 等交互程序内按提示符重新出现判定；提示符变化（cd、REPL 续行、密码提示）时静默后返回 interactive）再返回 completed；超过 wait 仍未结束返回 still_running 及新增输出，此时不要发送新命令，用空 input（不设 enter）继续等待；上一条命令未结束时 enter=true 的新命令会被拒绝且不写入；要中断可发送 \\x03（只含控制键的输入即使设了 enter 也直接写入），程序真正结束后才能发送新命令。 action=close：关闭指定终端及其面板（terminal_id 必填）。action=status：查询当前会话的终端状态；不带 terminal_id 返回全部终端概要（编号与忙闲）以及终端遗留的后台进程（& / nohup 启动，含 pid，可用 kill 结束）；带 terminal_id 返回该终端详情（含最近输出尾部，以及终端内进程树：pid、ppid、命令行；沙箱内 ps/top 不可用时据此查看进程）；只读，不触碰终端。",
       "input_schema": {
         "type": "object",
         "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "open",
+              "send",
+              "close",
+              "status"
+            ],
+            "description": "open 打开新终端并展开面板；send 向终端发送按键/文本；close 关闭终端及面板；status 查询终端状态"
+          },
           "input": {
             "type": "string",
-            "description": "要发送的按键/文本；为空且不设 enter 时不写入任何内容，只继续等待上一条命令并返回新增输出"
+            "description": "send：要发送的按键/文本；为空且不设 enter 时不写入任何内容，只继续等待上一条命令并返回新增输出"
           },
           "terminal_id": {
             "type": "string",
-            "description": "目标终端编号（run_command、run_shell、terminal_open 或 terminal_send 结果中告知）"
+            "description": "send/close：目标终端编号（必填，各工具结果中告知）；status：要查询的终端编号（可选，不填返回当前会话全部终端概要）"
           },
           "wait": {
             "type": "integer",
-            "description": "等待命令完成的最长秒数（默认 10，最大 110）；命令提前完成即提前返回",
+            "description": "send：等待命令完成的最长秒数（默认 10，最大 110）；命令提前完成即提前返回",
             "minimum": 1
           },
           "enter": {
             "type": "boolean",
-            "description": "是否在输入后自动补发回车执行，默认 false。执行 shell/SSH 命令时设为 true（input 末尾无需再带 \\r 或 \\n）；向 vi 等编辑器写入纯文本或发送控制按键时保持 false，原样写入"
+            "description": "send：是否在输入后自动补发回车执行，默认 false。执行 shell/SSH 命令时设为 true（input 末尾无需再带 \\r 或 \\n）；向 vi 等编辑器写入纯文本或发送控制按键时保持 false，原样写入"
           }
         },
         "required": [
-          "input",
-          "terminal_id"
+          "action"
         ]
       },
-      "timeout_ms": 120000
-    },
-    {
-      "name": "terminal_open",
-      "description": "打开一个新终端并展开面板（向用户展示命令执行、跟踪长任务时使用）。需要长期运行的服务（开发服务器、联调后端等）用它新开终端，再用 terminal_send 在前台运行，代替 nohup / & 后台启动；面板编号由插件管理并在结果中告知。",
-      "input_schema": {
-        "type": "object",
-        "properties": {}
-      },
-      "timeout_ms": 30000
-    },
-    {
-      "name": "terminal_close",
-      "description": "关闭指定终端及其面板。",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "terminal_id": {
-            "type": "string",
-            "description": "要关闭的终端编号（终端工具结果中告知）"
-          }
-        },
-        "required": [
-          "terminal_id"
-        ]
-      },
-      "timeout_ms": 30000
-    },
-    {
-      "name": "terminal_status",
-      "description": "查询当前会话的终端状态。不带 terminal_id 返回全部终端概要（编号与忙闲）以及终端遗留的后台进程（& / nohup 启动，含 pid，可用 kill 结束）；带 terminal_id 返回该终端详情（含最近输出尾部，以及终端内进程树：pid、ppid、命令行；沙箱内 ps/top 不可用时据此查看进程）。只读，不触碰终端。",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "terminal_id": {
-            "type": "string",
-            "description": "要查询的终端编号（可选；不填则返回当前会话全部终端概要）"
-          }
-        }
-      },
-      "timeout_ms": 30000
+      "timeout_ms": 300000
     }
   ],
   "prompt": [
@@ -189,11 +158,12 @@
     "lifecycle": "resident"
   },
   "tool_icons": {
-    "run_command": "assets/tool-run-command.svg",
     "run_shell": "assets/tool-run-shell.svg",
-    "terminal_send": "assets/tool-terminal-send.svg",
-    "terminal_open": "assets/tool-terminal-open.svg",
-    "terminal_close": "assets/tool-terminal-close.svg",
-    "terminal_status": "assets/tool-terminal-status.svg"
+    "terminal": "assets/tool-terminal-open.svg",
+    "terminal:action=open": "assets/tool-terminal-open.svg",
+    "terminal:action=send": "assets/tool-terminal-send.svg",
+    "terminal:action=close": "assets/tool-terminal-close.svg",
+    "terminal:action=status": "assets/tool-terminal-status.svg",
+    "run_command": "assets/tool-run-command.svg"
   }
 }

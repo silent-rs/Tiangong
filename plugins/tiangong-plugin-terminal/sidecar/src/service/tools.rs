@@ -446,10 +446,35 @@ impl TerminalService {
             tracing::debug!(
                 terminal_id = instance_id,
                 scope_id = scope.session_id,
-                "terminal_open 未等到前端附着，按无前台页面继续"
+                "terminal(action=open) 未等到前端附着，按无前台页面继续"
             );
         }
         ToolOutcome::ok(format!("已打开终端 {instance_id}"))
+    }
+
+    /// terminal：终端管理统一入口（action 模式：open/send/close/status）。
+    ///
+    /// 参数结构体不使用 deny_unknown_fields，`action` 字段可随负载透传给
+    /// 各子处理（与 fs 插件的 file_read action 模式一致）。
+    pub(super) async fn tool_terminal(
+        &self,
+        scope: &ToolScope,
+        payload: serde_json::Value,
+    ) -> ToolOutcome {
+        let action = payload
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        match action {
+            "open" => self.tool_terminal_open(scope).await,
+            "send" => self.tool_terminal_send(scope, payload).await,
+            "close" => self.tool_terminal_close(scope, payload).await,
+            "status" => self.tool_terminal_status(scope, payload),
+            other => ToolOutcome::fail(format!(
+                "terminal 缺少或未知 action（{other:?}）：应为 open / send / close / status"
+            )),
+        }
     }
 
     /// terminal_send：向指定终端发送输入；目标必须属于当前会话。
@@ -460,11 +485,13 @@ impl TerminalService {
     ) -> ToolOutcome {
         let parsed = match serde_json::from_value::<TerminalSendArgs>(payload) {
             Ok(parsed) => parsed,
-            Err(error) => return ToolOutcome::fail(format!("terminal_send 参数无效：{error}")),
+            Err(error) => {
+                return ToolOutcome::fail(format!("terminal(action=send) 参数无效：{error}"));
+            }
         };
         let target = parsed.terminal_id.trim().to_string();
         if target.is_empty() {
-            return ToolOutcome::fail("terminal_send 缺少 terminal_id".to_string());
+            return ToolOutcome::fail("terminal(action=send) 缺少 terminal_id".to_string());
         }
         let sent = self
             .send_to_session(SendRequest {
@@ -494,7 +521,7 @@ impl TerminalService {
                         Some("completed") => format!("终端 {target} 命令已执行完成，输出见 stdout"),
                         Some("interactive") => format!(
                             "终端 {target} 已进入交互程序（如 ssh 登录、vi、REPL），正在等待输入；\
-后续命令继续用 terminal_send 发送"
+后续命令继续用 terminal（action=send）发送"
                         ),
                         Some(_) => format!(
                             "终端 {target} 命令 `{command}` 仍在执行（已 {elapsed} 秒），stdout 为截至目前的新增输出；\
@@ -523,12 +550,14 @@ impl TerminalService {
     ) -> ToolOutcome {
         let parsed = match serde_json::from_value::<TerminalCloseArgs>(payload) {
             Ok(parsed) => parsed,
-            Err(error) => return ToolOutcome::fail(format!("terminal_close 参数无效：{error}")),
+            Err(error) => {
+                return ToolOutcome::fail(format!("terminal(action=close) 参数无效：{error}"));
+            }
         };
         let target = parsed.terminal_id.trim().to_string();
         if target.is_empty() {
             return ToolOutcome::fail(
-                "terminal_close 缺少 terminal_id，未关闭任何终端".to_string(),
+                "terminal(action=close) 缺少 terminal_id，未关闭任何终端".to_string(),
             );
         }
         // App 标签可能先于 PTY 退出被用户关闭，关闭操作幂等；但归属

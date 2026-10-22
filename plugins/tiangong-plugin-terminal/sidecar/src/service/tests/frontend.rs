@@ -15,8 +15,8 @@ async fn instance_closed_兜底回收幂等且校验归属() {
     let opened = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_open",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "open",}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,

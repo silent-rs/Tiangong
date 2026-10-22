@@ -3,8 +3,8 @@ import type { HostBridge } from '@tiangong/plugin-sdk';
 /**
  * 终端插件 TS 壳（视图辅助层）。
  *
- * 工具编排（run_command/run_shell/terminal_open/terminal_send/
- * terminal_close）已下沉 sidecar，并由握手 capabilities 注册 Handler：
+ * 工具编排（command/run_shell/terminal 的 action 模式）已下沉 sidecar，
+ * 并由握手 capabilities 注册 Handler：
  * 宿主直连 sidecar 执行，不经 tool.requested 页面竞争接应。本文件只保留
  * 视图共用的 sidecar 直调封装与 PTY 会话注册表。
  */

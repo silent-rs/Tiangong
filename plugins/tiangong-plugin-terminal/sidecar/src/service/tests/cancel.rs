@@ -589,8 +589,8 @@ async fn 超时未收尾的终端不得错报空闲() {
     let status = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "status",}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,

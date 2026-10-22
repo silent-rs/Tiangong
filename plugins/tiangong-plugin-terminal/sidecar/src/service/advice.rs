@@ -18,8 +18,8 @@ pub(super) fn command_hints(command: &str, is_shell: bool) -> Vec<&'static str> 
     if launches_background(command) {
         hints.push(
             "检测到 nohup / & 后台启动：后台进程看不到输出、容易遗留。终端插件支持多终端并行，\
-长期运行的服务请用 terminal_open 新开终端，再用 terminal_send（enter=true）在前台运行，\
-用完发送 \\x03 停止并 terminal_close；已启动的后台进程可在 terminal_status 概要中查到 pid 并 kill",
+长期运行的服务请用 terminal(action=open) 新开终端，再用 terminal(action=send)（enter=true）在前台运行，\
+用完发送 \\x03 停止并 terminal(action=close)；已启动的后台进程可在 terminal(action=status) 概要中查到 pid 并 kill",
         );
     }
     if is_shell && script_lines(command) > SCRIPT_LINE_THRESHOLD {
