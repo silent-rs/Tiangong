@@ -23,7 +23,7 @@ export type ToolDisplayState = "running" | "ok" | "error";
 export interface ToolDisplayModel {
   /** 工具对外名（可能带插件前缀），按此查插件提供的图标；未知为空串。 */
   toolName: string;
-  /** 行标题：工具名。 */
+  /** 行标题：插件声明的标题，未声明时为通用标题「工具调用」。 */
   title: string;
   /** 单行摘要：参数摘要（无参数时取结果首行）；失败时被 errorSummary 顶替显示。 */
   summary: string;
@@ -138,9 +138,12 @@ function argsToText(args: unknown): string | null {
   return null;
 }
 
+/** 插件未声明工具行标题时的通用标题（工具名在悬停提示与分组摘要中可见）。 */
+export const DEFAULT_TOOL_TITLE = "工具调用";
+
 /** 调用部分（标题、参数摘要、参数文本）。 */
-function callPart(toolName: string, args: unknown, hints: ToolArgsPresentation) {
-  return { title: toolName || "工具调用", summary: argsSummary(args, hints) ?? "", argsText: argsToText(args) };
+function callPart(args: unknown, hints: ToolArgsPresentation) {
+  return { title: DEFAULT_TOOL_TITLE, summary: argsSummary(args, hints) ?? "", argsText: argsToText(args) };
 }
 
 /** 解析后端系统 trace 消息（旧会话 formatting.rs 产出的「工具执行 [...]」格式）。 */
@@ -173,7 +176,7 @@ export function buildToolDisplayModel(
   // 旧会话的系统 trace 消息：通用展示。
   const trace = messageKind(msg) === "system" ? parseTrace(content) : null;
   if (trace) {
-    const call = callPart(trace.toolName, args, hints);
+    const call = callPart(args, hints);
     return {
       toolName: trace.toolName,
       ...call,
@@ -187,7 +190,7 @@ export function buildToolDisplayModel(
 
   const isError = toolIsError(msg);
   const outputText = (messageKind(msg) === "tool" ? stripToolResultHeader(content) : content) || null;
-  const call = callPart(toolName, args, hints);
+  const call = callPart(args, hints);
   return {
     toolName,
     ...call,
@@ -207,7 +210,7 @@ export function buildRunningToolModel(
 ): ToolDisplayModel {
   return {
     toolName: name,
-    ...callPart(name, args, hints),
+    ...callPart(args, hints),
     state: "running",
     errorSummary: null,
     outputText: null,

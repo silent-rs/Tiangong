@@ -56,13 +56,14 @@ describe("通用工具行", () => {
       { path: "docs/a.md", action: "replace", cwd: "/ws" },
       hints,
     );
-    expect(model.title).toBe("fs__file_write");
+    expect(model.title).toBe("工具调用");
+    expect(model.toolName).toBe("fs__file_write");
     expect(model.summary).toBe("replace path=docs/a.md");
     expect(model.argsText).toContain('"path": "docs/a.md"');
     expect(model.outputText).toBeNull();
     expect(model.state).toBe("running");
     // 不按工具名推断展示（旧工具名同样通用展示）。
-    expect(buildRunningToolModel("read_file", { path: "a.rs" }, hints).title).toBe("read_file");
+    expect(buildRunningToolModel("read_file", { path: "a.rs" }, hints).title).toBe("工具调用");
   });
 
   it("没有提示时按全部参数通用拼接", () => {

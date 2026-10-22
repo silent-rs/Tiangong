@@ -191,7 +191,7 @@ sendText 发送的录音等）由插件从 `context.message.attachments` 读取�
 
 - `tools` 项为本插件工具原名，或 `工具名:参数=取值` 特指某类调用；特指优先于通用。
 - 可选 `titles`：工具行标题，键与 `tools` 同格式（如 `{"file_read": "读取文件", "file_read:action=list": "列出目录"}`），
-  键的工具名须在 `tools` 中，标题 1-32 字；未声明时工具行显示工具名。摘要仍由宿主按参数通用生成。
+  键的工具名须在 `tools` 中，标题 1-32 字；未声明时工具行显示通用标题「工具调用」（悬停可见工具名）。摘要仍由宿主按参数通用生成。
 - 视图从 `context.message.render.data` 读取调用原始数据（见 SDK `ToolViewData`：
   `tool_call_id`、`tool_name`、`arguments`、`status`、`output`、`duration_ms`），
   状态变化时经 `onContextChange` 收到更新。

@@ -196,7 +196,7 @@ pub struct UiContributionDecl {
     pub tools: Vec<String>,
     /// 工具行标题（仅声明了 `tools` 的工具视图）：键与 `tools` 同格式
     /// （`工具名` 或 `工具名:参数=取值`，特指优先），值为固定标题文本。
-    /// 键的工具名必须在 `tools` 中；未声明标题的调用以工具名显示。
+    /// 键的工具名必须在 `tools` 中；未声明标题的调用显示通用标题「工具调用」。
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub titles: std::collections::BTreeMap<String, String>,
 }

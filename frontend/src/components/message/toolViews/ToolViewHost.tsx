@@ -55,7 +55,7 @@ export function findToolView(
 
 /**
  * 插件在工具视图中声明的工具行标题：特指声明优先于通用声明，未声明返回 null
- * （宿主显示工具名）。
+ * （宿主显示通用标题「工具调用」）。
  */
 export function findToolTitle(
   items: Pick<LoadedSlotContribution, "render" | "titles">[],

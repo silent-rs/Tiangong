@@ -134,7 +134,7 @@ function ToolRunRow({
           args={args}
           className={`w-3 h-3 shrink-0 ${isError ? "text-destructive" : ""}`}
         />
-        <span className="font-medium shrink-0">{model.title}</span>
+        <span className="font-medium shrink-0" title={model.toolName || undefined}>{model.title}</span>
         {summaryText && (
           <span
             className={`truncate ${
@@ -172,7 +172,7 @@ function ToolRunRow({
 export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupProps) {
   const hints = useToolArgsPresentation();
   const titleOf = useToolTitle();
-  // 插件声明了标题时替换工具名，摘要仍为通用参数摘要。
+  // 插件声明了标题时替换通用标题「工具调用」，摘要仍为通用参数摘要。
   const withTitle = (model: ToolDisplayModel, args: unknown): ToolDisplayModel => {
     const title = titleOf(model.toolName, args);
     return title ? { ...model, title } : model;

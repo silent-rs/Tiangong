@@ -62,7 +62,7 @@ export interface UiContribution {
   tools?: string[];
   /**
    * 工具行标题（仅声明了 `tools` 的工具视图）：键同 `tools`（特指键优先），
-   * 值为固定标题；未声明的调用以工具名显示。
+   * 值为固定标题；未声明的调用显示通用标题「工具调用」。
    */
   titles?: Record<string, string>;
 }

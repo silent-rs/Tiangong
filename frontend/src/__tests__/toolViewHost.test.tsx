@@ -100,7 +100,7 @@ describe('工具行标题', () => {
     expect(findToolTitle(items, 'fs__file_read', undefined)).toBe('读取文件');
   });
 
-  it('未声明标题或非 replace 贡献返回 null（宿主显示工具名）', () => {
+  it('未声明标题或非 replace 贡献返回 null（宿主显示通用标题「工具调用」）', () => {
     expect(findToolTitle(items, 'fs__file_write', {})).toBeNull();
     expect(findToolTitle(items, 'x__t', {})).toBeNull();
   });
