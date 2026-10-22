@@ -75,6 +75,9 @@ ignore = [
     { id = "RUSTSEC-2025-0012", reason = "async-openai 间接依赖 backoff，当前版本链路无可用替代；阶段性忽略" },
     { id = "RUSTSEC-2024-0384", reason = "async-openai->backoff 间接依赖 instant，无可用安全升级；阶段性忽略" },
     { id = "RUSTSEC-2026-0002", reason = "ratatui 间接依赖 lru，当前依赖链暂未提供可直接升级路径；阶段性忽略并后续跟进上游升级" },
+    { id = "RUSTSEC-2026-0367", reason = "tauri-plugin-updater 上游仍要求 zip ^4，4.x 线无回移；跟踪上游升级到 zip 9 后移除" },
+    { id = "RUSTSEC-2026-0368", reason = "tauri-plugin-updater 上游仍要求 zip ^4，4.x 线无回移；跟踪上游升级到 zip 9 后移除" },
+    { id = "RUSTSEC-2026-0369", reason = "tauri-plugin-updater 上游仍要求 zip ^4，4.x 线无回移；跟踪上游升级到 zip 9 后移除" },
     #"RUSTSEC-0000-0000",
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
