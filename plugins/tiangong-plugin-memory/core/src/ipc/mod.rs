@@ -1648,11 +1648,12 @@ async fn recall_memory_tool(
     };
     let request = transcode::<_, crate::types::MemoryRecallRequest>(request)?;
     let response = handle.recall_context(request).await;
-    let encoded = encode_plugin_memory_response(
-        plugin_recall::RECALL_CONTEXT_OPERATION,
-        MemoryIpcResponsePayload::RecallContext { response },
-    )?;
-    let response: plugin_recall::RecallContextResponse = serde_json::from_value(encoded)?;
+    let hits: Vec<plugin_recall::RecallHit> = transcode(response.hits)?;
+    let response = plugin_recall::RecallContextResponse {
+        content: response.content,
+        hits,
+        ..Default::default()
+    };
     Ok(assemble_recall_outcome(response, query))
 }
 
