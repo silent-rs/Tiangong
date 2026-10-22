@@ -25,8 +25,8 @@ pub use mention::{
 };
 pub use message::{
     ContentBlock, DeferredToolInjection, MESSAGE_RENDER_MAX_BYTES, MediaAsset, MediaKind, Message,
-    MessageMeta, MessageRender, MessageRole, MessageToolCall, Role, TurnStatus, UserSource,
-    deserialize_messages, now_text, serialize_messages_flat,
+    MessageMeta, MessageRender, MessageRole, MessageToolCall, Role, ToolContinuation, TurnStatus,
+    UserSource, deserialize_messages, now_text, serialize_messages_flat,
 };
 pub use plugin_session::PluginSession;
 pub use session::Session;

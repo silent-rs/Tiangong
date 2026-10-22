@@ -675,6 +675,7 @@ impl crate::tools::extension::ToolOverrideHandler for RecordingTool {
                 stderr: String::new(),
                 exit_code: i32::from(!ok),
                 execution: None,
+                continuation: None,
             })
         })
     }

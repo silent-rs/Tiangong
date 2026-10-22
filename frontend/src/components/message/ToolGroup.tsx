@@ -1,22 +1,19 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
 import type { MessageItem } from "./types";
-import { toolCallIdOf, toolNameOf } from "@/api/message";
+import { continuationOf, toolCallIdOf, toolNameOf } from "@/api/message";
+import type { ToolContinuation } from "@/api/message";
 import { formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
   buildFinishedToolModel,
   buildRunningToolModel,
   buildToolDisplayModel,
-  isTerminalSendCall,
-  parseTerminalSendStatus,
-  readableTerminalInput,
   type ToolDisplayModel,
-  type TerminalSendStatus,
 } from "./toolDisplayModel";
 import { ToolIcon } from "./ToolIcon";
 import { ToolCallCard } from "./toolViews/ToolCallCard";
-import { TerminalCard } from "./toolViews/TerminalCard";
+import { ContinuationCard } from "./toolViews/ContinuationCard";
 import { ToolViewHost, useToolTitle } from "./toolViews/ToolViewHost";
 import { useToolArgsPresentation } from "./toolArgsPresentation";
 
@@ -178,61 +175,34 @@ function ToolRunRow({
   );
 }
 
-/** 终端 send 一轮（含配对参数与解析后的状态）。 */
-interface TerminalRound {
-  tool: MessageItem;
-  args: Record<string, unknown>;
-  status: TerminalSendStatus | null;
-  body: string;
-}
-
-/** 从参数取终端编号（同编号的连续 send 合并为一次逻辑执行）。 */
-function terminalIdOf(args: Record<string, unknown> | null | undefined): string | null {
-  return typeof args?.terminal_id === "string" && args.terminal_id ? args.terminal_id : null;
-}
-
-function statusBadgeLabel(status: TerminalSendStatus | null): string {
-  switch (status?.kind) {
-    case "running":
-      return "运行中";
-    case "completed":
-      return `已完成 · 退出码 ${status.exitCode ?? 0}`;
-    case "interactive":
-      return "交互中";
-    case "updated":
-      return "已更新";
-    default:
-      return "";
-  }
-}
-
 /**
- * 终端执行的合并行（issue #707）：同一终端上「带命令的发送 + 后续空输入
- * 续等」合并为一个逻辑条目。折叠行显示原命令、状态与续等次数，耗时用状态
- * 行携带的命令累计秒数；展开由 TerminalCard 按轮次展示。
+ * 延续条目的合并行（通用展示机制）：工具结果携带延续声明时，同一 key 的
+ * 连续结果合并为一个逻辑条目（如终端命令的「执行 + 空输入续等」）。
+ * 折叠行显示逻辑标题（原命令）、状态标签、延续次数与累计耗时；展开由
+ * ContinuationCard 按轮次展示。所有展示语义来自延续声明，宿主不按工具名
+ * 解释，任何插件的长任务轮次（构建进度、生成轮次等）都可复用。
  */
-function TerminalRunRow({
+function ContinuationRow({
   rounds,
   expansion,
+  titleOf,
 }: {
-  rounds: TerminalRound[];
+  rounds: { tool: MessageItem; continuation: ToolContinuation }[];
   expansion: ExpansionState;
+  titleOf?: (toolName: string, args: unknown) => string | null;
 }) {
   const first = rounds[0];
   const last = rounds[rounds.length - 1];
-  const command =
-    rounds
-      .map((round) => readableTerminalInput(typeof round.args.input === "string" ? round.args.input : null))
-      .find(Boolean) ??
-    last.status?.command ??
-    terminalIdOf(first.args) ??
-    "";
-  const waitCount = rounds.filter((round) => !String(round.args.input ?? "")).length;
+  const title = last.continuation.title?.trim() || first.continuation.title?.trim() || "";
+  const badge = last.continuation.status_label?.trim() ?? "";
+  const waitCount = rounds.slice(1).filter((round) => !round.continuation.round_label?.trim()).length;
   const totalMs =
-    last.status?.elapsedSecs != null ? last.status.elapsedSecs * 1000 : null;
+    last.continuation.elapsed_ms != null && last.continuation.elapsed_ms > 0
+      ? last.continuation.elapsed_ms
+      : null;
   const expandKey = first.tool.id;
   const expanded = expansion.isExpanded(expandKey);
-  const badge = statusBadgeLabel(last.status);
+  const args = undefined;
   return (
     <div>
       <button
@@ -241,21 +211,23 @@ function TerminalRunRow({
         onClick={() => expansion.toggle(expandKey)}
       >
         {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
-        <ToolIcon toolName={toolNameOf(first.tool) || ""} args={first.args} className="w-3 h-3 shrink-0" />
-        <span className="font-medium shrink-0" title="命令执行">命令执行</span>
-        {command && <span className="truncate opacity-60">{command}</span>}
+        <ToolIcon toolName={toolNameOf(first.tool) || ""} args={args} className="w-3 h-3 shrink-0" />
+        <span className="font-medium shrink-0" title={titleOf?.(toolNameOf(first.tool) || "", args) || "工具执行"}>
+          {titleOf?.(toolNameOf(first.tool) || "", args) || "工具执行"}
+        </span>
+        {title && <span className="truncate opacity-60">{title}</span>}
         {badge && (
           <span className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground/70">{badge}</span>
         )}
         {waitCount > 0 && (
-          <span className="shrink-0 pl-1 text-[11px] text-muted-foreground/70" title="空输入续等次数">
+          <span className="shrink-0 pl-1 text-[11px] text-muted-foreground/70" title="空输入延续次数">
             续等 {waitCount} 次
           </span>
         )}
-        {totalMs != null && totalMs > 0 && (
+        {totalMs != null && (
           <span
             className={`${badge || waitCount > 0 ? "" : "ml-auto "}shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums`}
-            title="命令累计运行时长"
+            title="逻辑执行累计时长"
           >
             {formatToolDuration(totalMs)}
           </span>
@@ -263,13 +235,9 @@ function TerminalRunRow({
       </button>
       {expanded && (
         <div className="ml-5 mt-0.5 mb-1">
-          <TerminalCard
-            command={last.status?.command ?? command}
-            rounds={rounds.map((round) => ({
-              input: typeof round.args.input === "string" ? round.args.input : "",
-              status: round.status,
-              body: round.status ? round.status.body : round.body,
-            }))}
+          <ContinuationCard
+            command={title || null}
+            rounds={rounds.map((round) => round.continuation)}
           />
         </div>
       )}
@@ -301,28 +269,23 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       />
     );
   };
-  // 终端 send 合并预处理（issue #707）：同一终端上连续的发送/空输入续等
-  // 合并为一个逻辑条目；其余工具保持单条（run_command / run_shell 不受影响）。
+  // 延续合并预处理（通用机制）：工具结果携带延续声明时，同一 key 的连续
+  // 结果合并为一个逻辑条目；其余工具保持单条。
   type GroupItem =
     | { kind: "tool"; tool: MessageItem }
-    | { kind: "terminal-run"; rounds: TerminalRound[] };
+    | { kind: "continuation"; rounds: { tool: MessageItem; continuation: ToolContinuation }[] };
   const items: GroupItem[] = [];
   for (const tool of tools) {
-    const args = (argsOf?.(tool) ?? null) as Record<string, unknown> | null;
-    const isSend = isTerminalSendCall(toolNameOf(tool) || "", args);
-    if (isSend) {
-      const output = buildToolDisplayModel(tool, args, hints).outputText;
-      const status = parseTerminalSendStatus(output);
-      const round: TerminalRound = { tool, args: args ?? {}, status, body: output ?? "" };
+    const continuation = continuationOf(tool);
+    if (continuation?.key) {
       const previous = items[items.length - 1];
       if (
-        previous?.kind === "terminal-run" &&
-        terminalIdOf(args) != null &&
-        terminalIdOf(args) === terminalIdOf(previous.rounds[previous.rounds.length - 1].args)
+        previous?.kind === "continuation" &&
+        previous.rounds[previous.rounds.length - 1].continuation.key === continuation.key
       ) {
-        previous.rounds.push(round);
+        previous.rounds.push({ tool, continuation });
       } else {
-        items.push({ kind: "terminal-run", rounds: [round] });
+        items.push({ kind: "continuation", rounds: [{ tool, continuation }] });
       }
       continue;
     }
@@ -344,7 +307,12 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
           item.kind === "tool" ? (
             renderToolItem(item.tool)
           ) : (
-            <TerminalRunRow key={item.rounds[0].tool.id} rounds={item.rounds} expansion={expansion} />
+            <ContinuationRow
+              key={item.rounds[0].tool.id}
+              rounds={item.rounds}
+              expansion={expansion}
+              titleOf={titleOf}
+            />
           ),
         )}
       </div>

@@ -164,6 +164,7 @@ pub(super) async fn execute_tool_batch(
                             stderr: message,
                             exit_code: 1,
                             execution: None,
+                            continuation: None,
                         },
                         duration_ms: running_record.started_at.elapsed().as_millis() as u64,
                     },

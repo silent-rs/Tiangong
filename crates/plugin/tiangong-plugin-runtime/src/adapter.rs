@@ -641,6 +641,8 @@ impl ToolOverrideHandler for WasmPluginAdapter {
                     stdout: result.stdout,
                     stderr: result.stderr,
                     exit_code: result.exit_code,
+                    // WASM 桥接结果暂不提供延续声明（WASM 插件逐步淘汰中）。
+                    continuation: None,
                     execution: result.execution.map(|execution| ToolExecutionRecord {
                         tool_name: execution.tool_name,
                         args: execution.args,
@@ -711,6 +713,7 @@ fn unavailable_tool_result(message: String) -> ToolResult {
         stdout: String::new(),
         stderr: message,
         exit_code: 1,
+        continuation: None,
         execution: None,
     }
 }

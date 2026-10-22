@@ -396,6 +396,7 @@ fn failure_result(message: impl Into<String>) -> ToolResult {
         stdout: String::new(),
         stderr: message,
         exit_code: 1,
+        continuation: None,
         execution: None,
     }
 }
@@ -412,6 +413,7 @@ impl TsToolResult {
             stdout: self.stdout,
             stderr: self.stderr,
             exit_code: self.exit_code,
+            continuation: None,
             execution: None,
         }
     }

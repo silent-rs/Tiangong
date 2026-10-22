@@ -19,6 +19,11 @@ pub struct ToolResult {
     pub exit_code: i32,
     #[serde(default)]
     pub execution: Option<ToolExecutionRecord>,
+    /// 延续声明（通用展示机制）：本结果是同一逻辑执行的延续轮次，宿主把它
+    /// 原样落到 Tool 消息，界面按 `key` 合并展示（如终端命令续等）。
+    /// 见 `tiangong_types::ToolContinuation`。
+    #[serde(default)]
+    pub continuation: Option<Box<tiangong_types::ToolContinuation>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

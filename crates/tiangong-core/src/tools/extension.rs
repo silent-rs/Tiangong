@@ -266,6 +266,7 @@ mod tests {
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 })
             })
         }

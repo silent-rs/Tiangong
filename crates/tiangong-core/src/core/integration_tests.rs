@@ -1469,6 +1469,7 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 })
             })
         }

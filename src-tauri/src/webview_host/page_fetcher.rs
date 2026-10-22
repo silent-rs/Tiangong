@@ -469,6 +469,7 @@ impl BrowserToolOverride {
                         stderr: "浏览器无法获取页面内容".to_string(),
                         exit_code: 1,
                         execution: None,
+                        continuation: None,
                     });
                 }
             };
@@ -483,6 +484,7 @@ impl BrowserToolOverride {
                     stderr: result.error.unwrap_or_default(),
                     exit_code: 1,
                     execution: None,
+                    continuation: None,
                 });
             }
             // 浏览器已导航到目标 URL。立即 observe_page 取渲染后的页面快照放入 ToolResult，
@@ -514,6 +516,7 @@ impl BrowserToolOverride {
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,
+                continuation: None,
             })
         })
     }
@@ -538,6 +541,7 @@ impl BrowserToolOverride {
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
                         execution: None,
+                        continuation: None,
                     });
                 }
             };
@@ -608,6 +612,7 @@ impl BrowserToolOverride {
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,
+                continuation: None,
             })
         })
     }
@@ -659,6 +664,7 @@ impl BrowserToolOverride {
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
                         execution: None,
+                        continuation: None,
                     });
                 }
             };
@@ -684,6 +690,7 @@ impl BrowserToolOverride {
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 })
             } else {
                 Some(tiangong_core::tools::result::ToolResult {
@@ -693,6 +700,7 @@ impl BrowserToolOverride {
                     stderr: result.error.unwrap_or_default(),
                     exit_code: 1,
                     execution: None,
+                    continuation: None,
                 })
             }
         })
@@ -730,6 +738,7 @@ impl BrowserToolOverride {
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
                         execution: None,
+                        continuation: None,
                     });
                 }
             };
@@ -752,6 +761,7 @@ impl BrowserToolOverride {
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 })
             } else {
                 let candidates_info = if result.candidates.is_empty() {
@@ -771,6 +781,7 @@ impl BrowserToolOverride {
                     stderr: format!("{}{candidates_info}", result.error.unwrap_or_default()),
                     exit_code: 1,
                     execution: None,
+                    continuation: None,
                 })
             }
         })
@@ -808,6 +819,7 @@ impl BrowserToolOverride {
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
                         execution: None,
+                        continuation: None,
                     });
                 }
             };
@@ -819,6 +831,7 @@ impl BrowserToolOverride {
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 });
             }
             let mut lines = Vec::new();
@@ -857,6 +870,7 @@ impl BrowserToolOverride {
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,
+                continuation: None,
             })
         })
     }
@@ -888,6 +902,7 @@ impl BrowserToolOverride {
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
                         execution: None,
+                        continuation: None,
                     });
                 }
             };
@@ -910,6 +925,7 @@ impl BrowserToolOverride {
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 })
             } else {
                 let candidates = Self::format_candidates(&result.candidates);
@@ -926,6 +942,7 @@ impl BrowserToolOverride {
                     stderr: error,
                     exit_code: 0,
                     execution: None,
+                    continuation: None,
                 })
             }
         })

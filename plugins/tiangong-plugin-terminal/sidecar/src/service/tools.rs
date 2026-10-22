@@ -55,7 +55,9 @@ pub(super) fn tool_scope(
     })
 }
 
-/// 工具结果（对齐宿主 ToolOutcome 形状）。
+/// 工具结果（对齐宿主 ToolOutcome 形状）。`continuation` 为通用延续声明
+/// （见 tiangong_types::ToolContinuation）：声明本结果是同一逻辑执行的
+/// 延续轮次，宿主界面按 key 合并展示。
 #[derive(Debug, Serialize)]
 pub(super) struct ToolOutcome {
     pub(super) ok: bool,
@@ -65,8 +67,9 @@ pub(super) struct ToolOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) stderr: Option<String>,
     pub(super) exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) continuation: Option<serde_json::Value>,
 }
-
 impl ToolOutcome {
     pub(super) fn ok(summary: String) -> Self {
         Self {
@@ -75,6 +78,7 @@ impl ToolOutcome {
             stdout: None,
             stderr: None,
             exit_code: 0,
+            continuation: None,
         }
     }
 
@@ -85,8 +89,51 @@ impl ToolOutcome {
             stdout: None,
             stderr: None,
             exit_code: 1,
+            continuation: None,
         }
     }
+}
+
+/// 控制键的可读名（延续声明的 round_label 用）。
+fn control_key_name(ch: char) -> Option<&'static str> {
+    match ch {
+        '\x03' => Some("Ctrl+C"),
+        '\x04' => Some("Ctrl+D"),
+        '\x1a' => Some("Ctrl+Z"),
+        '\x15' => Some("Ctrl+U"),
+        '\x17' => Some("Ctrl+W"),
+        '\x12' => Some("Ctrl+R"),
+        '\x0c' => Some("Ctrl+L"),
+        '\x01' => Some("Ctrl+A"),
+        '\x05' => Some("Ctrl+E"),
+        '\x02' => Some("Ctrl+B"),
+        '\x06' => Some("Ctrl+F"),
+        '\x0e' => Some("Ctrl+N"),
+        '\x10' => Some("Ctrl+P"),
+        _ => None,
+    }
+}
+
+/// 终端输入的可读轮次标签：纯控制键 →「发送 Ctrl+C」，带回车的作答 →
+/// 「输入：y」，普通文本原样；空输入返回空串（界面按续等展示）。
+fn send_round_label(input: &str) -> String {
+    let decoded = super::input::decode_terminal_escapes(input);
+    let body = decoded.trim_end_matches(['\r', '\n']);
+    if body.is_empty() {
+        return String::new();
+    }
+    if super::input::is_control_keys(body) {
+        let names = body
+            .chars()
+            .filter_map(control_key_name)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        return format!("发送 {names}");
+    }
+    if decoded.ends_with('\r') || decoded.ends_with('\n') {
+        return format!("输入：{body}");
+    }
+    body.to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +463,7 @@ impl TerminalService {
             stdout: Some(executed.stdout),
             stderr: Some(executed.stderr),
             exit_code,
+            continuation: None,
         }
     }
 
@@ -493,6 +541,7 @@ impl TerminalService {
         if target.is_empty() {
             return ToolOutcome::fail("terminal(action=send) 缺少 terminal_id".to_string());
         }
+        let round_label = send_round_label(&parsed.input);
         let sent = self
             .send_to_session(SendRequest {
                 scope_id: scope.session_id.clone(),
@@ -533,31 +582,42 @@ impl TerminalService {
                 // stdout 首行放状态行（含原命令与已执行秒数）：续等等待轮次
                 // 有真实输出时模型仍能看到「仍在执行」，不再只能从输出猜测
                 //（issue #673/#707）；前端据此渲染状态标签并隐藏给模型的提示。
+                // stdout 首行放状态行（含原命令与已执行秒数）：续等等待轮次
+                // 有真实输出时模型仍能看到「仍在执行」，不再只能从输出猜测
+                //（issue #673/#707）。
+                // continuation 为宿主界面的通用延续声明（不进模型上下文）：
+                // 同一终端的连续 send 结果合并为一个逻辑条目展示。
+                let command = sent.command.clone().unwrap_or_default();
+                let trimmed_command = command.trim().to_string();
+                let mut continuation = None;
                 let stdout = if sent.rejected {
                     sent.stdout
                 } else {
-                    let command = sent.command.as_deref().unwrap_or("").trim();
-                    let status_line = match sent.status {
+                    let (kind, label) = match sent.status {
                         Some("completed") => {
-                            let line = format!("[已完成 · 退出码 {}]", sent.exit_code);
-                            if command.is_empty() {
-                                line
-                            } else {
-                                format!("{line} · {command}")
-                            }
+                            ("completed", format!("已完成 · 退出码 {}", sent.exit_code))
                         }
-                        Some("interactive") => "[交互中 · 等待输入]".to_string(),
-                        Some(_) => {
-                            let elapsed = sent.elapsed_secs.unwrap_or_default();
-                            let line = format!("[仍在执行 · 已 {elapsed} 秒]");
-                            if command.is_empty() {
-                                line
-                            } else {
-                                format!("{line} · {command}")
-                            }
-                        }
-                        None => "[已更新]".to_string(),
+                        Some("interactive") => ("interactive", "交互中 · 等待输入".to_string()),
+                        Some(_) => (
+                            "running",
+                            format!("仍在执行 · 已 {} 秒", sent.elapsed_secs.unwrap_or_default()),
+                        ),
+                        None => ("updated", "已更新".to_string()),
                     };
+                    let status_line = if trimmed_command.is_empty() {
+                        format!("[{label}]")
+                    } else {
+                        format!("[{label}] · {trimmed_command}")
+                    };
+                    continuation = Some(serde_json::json!({
+                        "key": format!("terminal-send:{target}"),
+                        "title": trimmed_command,
+                        "status": kind,
+                        "status_label": label,
+                        "elapsed_ms": sent.elapsed_secs.map(|secs| secs * 1000),
+                        "round_label": round_label,
+                        "output": sent.stdout,
+                    }));
                     if sent.stdout.is_empty() {
                         status_line
                     } else {
@@ -570,6 +630,7 @@ impl TerminalService {
                     stdout: Some(stdout),
                     stderr: None,
                     exit_code: sent.exit_code,
+                    continuation,
                 }
             }
             Err(error) => ToolOutcome::fail(format!("{error:#}")),
@@ -676,6 +737,7 @@ impl TerminalService {
             ),
             stderr: None,
             exit_code: 0,
+            continuation: None,
         }
     }
 
@@ -749,6 +811,7 @@ impl TerminalService {
             ),
             stderr: None,
             exit_code: 0,
+            continuation: None,
         }
     }
 }

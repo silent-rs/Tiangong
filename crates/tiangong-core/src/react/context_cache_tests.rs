@@ -262,6 +262,7 @@ impl ToolOverrideHandler for CacheProbeTool {
                 },
                 exit_code: i32::from(failed),
                 execution: None,
+                continuation: None,
             })
         })
     }

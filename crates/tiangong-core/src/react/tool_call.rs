@@ -37,5 +37,6 @@ fn unregistered_tool_result(tool_name: String) -> ToolResult {
         stderr: format!("tool {tool_name} not handled by any plugin"),
         exit_code: 1,
         execution: None,
+        continuation: None,
     }
 }

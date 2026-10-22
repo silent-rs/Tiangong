@@ -187,6 +187,7 @@ impl ToolOverrideHandler for EchoTool {
                 stdout: "done".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
+                continuation: None,
                 execution: None,
             })
         })
@@ -241,6 +242,7 @@ impl ToolOverrideHandler for PausedTool {
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,
+                continuation: None,
             })
         })
     }
@@ -263,6 +265,7 @@ impl ToolOverrideHandler for FailingTool {
                 stderr: "test failure".to_string(),
                 exit_code: 1,
                 execution: None,
+                continuation: None,
             })
         })
     }
@@ -2710,6 +2713,7 @@ async fn failed_tool_call_does_not_inject_images() {
         stderr: String::new(),
         exit_code: 1,
         execution: None,
+        continuation: None,
     };
     let mut pending = Vec::new();
     record_completed_tool_call(
@@ -2732,6 +2736,7 @@ async fn failed_tool_call_does_not_inject_images() {
         stderr: String::new(),
         exit_code: 0,
         execution: None,
+        continuation: None,
     };
     record_completed_tool_call(
         &mut ctx,

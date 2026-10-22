@@ -104,7 +104,7 @@ impl SendStatus {
     }
 }
 
-fn decode_terminal_escapes(input: &str) -> String {
+pub(super) fn decode_terminal_escapes(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -169,7 +169,7 @@ fn strip_trailing_line_ending(input: &str) -> &str {
 
 /// 非空且只含控制键（C0 控制字符，不含构成命令行的 `\r` `\n` `\t`，
 /// 也不含引出方向键等转义序列的 `\x1b`）。
-fn is_control_keys(input: &str) -> bool {
+pub(super) fn is_control_keys(input: &str) -> bool {
     !input.is_empty()
         && input
             .chars()
