@@ -11684,17 +11684,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-fs-wasm"
-version = "0.1.1"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tiangong-plugin-fs-protocol",
- "wit-bindgen 0.60.0",
-]
-
-[[package]]
 name = "tiangong-plugin-generate-image-openai-protocol"
 version = "0.2.11"
 dependencies = [

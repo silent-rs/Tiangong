@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { FileText, ChevronRight, ChevronDown, Camera } from "lucide-react";
+import { FileText, ChevronRight, ChevronDown, Image as ImageIcon, Paperclip } from "lucide-react";
 import { useSearchStore } from "@/store/useSearchStore";
 import { useStore } from "@/store/useStore";
 import { findTextOccurrences } from "@/utils/search";
@@ -366,8 +366,8 @@ function AgentTurnView({
           return (
             <div key={msg.id} className="my-1.5 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Camera className="h-3.5 w-3.5 shrink-0" />
-                <span>{hasImage ? "截图已注入 · 模型可见" : "媒体已注入 · 模型可见"}</span>
+                {hasImage ? <ImageIcon className="h-3.5 w-3.5 shrink-0" /> : <Paperclip className="h-3.5 w-3.5 shrink-0" />}
+                <span>{hasImage ? "图片已注入 · 模型可见" : "媒体已注入 · 模型可见"}</span>
               </div>
               <ContentMedia message={msg} />
             </div>

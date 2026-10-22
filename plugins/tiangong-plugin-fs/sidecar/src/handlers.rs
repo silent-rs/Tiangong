@@ -5,7 +5,7 @@
 //! - 输出由 core `ToolResult` 改为 protocol `FsToolResponse`
 //! - 路径只解析为绝对路径（toolkit），读写范围由 OS 沙箱裁决
 //! - 锁的 acquire/release 在写工具内部完成（一次调用完成加锁+写+解锁，避免锁泄漏），
-//!   响应里带回 locked/unlocked 路径供 wasm 发 StreamEvent
+//!   响应里带回 locked/unlocked 路径，由 service 上报 file_lock_changed 事件
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -414,7 +414,7 @@ where
 }
 
 /// 把锁包装的结果组装成最终响应：业务结果失败时仍带上 locked/unlocked 路径，
-/// 这样 wasm 侧无论业务成败都能正确发 locked/unlocked 事件。
+/// 这样无论业务成败都能正确上报 locked/unlocked 事件。
 fn finalize_write(
     label: &str,
     result: Result<FsToolResponse>,

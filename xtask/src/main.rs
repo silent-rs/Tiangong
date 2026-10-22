@@ -185,8 +185,8 @@ const FS: PluginConfig = PluginConfig {
     name: "Fs",
     description: "基础文件工具（读写/补丁/目录树）+ 进程级文件锁表",
     protocol_crate: Some("tiangong-plugin-fs-protocol"),
-    wasm_crate: Some("tiangong-plugin-fs-wasm"),
-    wasm_artifact: Some("tiangong_plugin_fs_wasm.wasm"),
+    wasm_crate: None,
+    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-fs-sidecar"),
     sidecar_artifact: Some("tiangong-fs-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fs",
@@ -2733,17 +2733,17 @@ fn merge_plugin_catalog(
 mod tests {
     use super::*;
 
-    /// 无页面入口的插件（fs）随行资产也要进入暂存目录，否则签名清单与
-    /// OSS 制品会引用不存在的文件，插件安装后工具图标丢失。
+    /// 手写单文件页面的插件（fs）页面入口与随行资产都要进入暂存目录，否则
+    /// 签名清单与 OSS 制品会引用不存在的文件，安装后工具视图或图标丢失。
     #[test]
-    fn 无页面入口插件_随行资产进入暂存() {
+    fn 手写页面插件_页面入口与随行资产进入暂存() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let staging = std::env::temp_dir().join(format!("xtask-assets-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging).unwrap();
-        assert!(plugin_ui_entries(&FS).is_empty());
+        assert_eq!(plugin_ui_entries(&FS), ["app/tool-view.html"]);
         stage_plugin_ui(&workspace, &staging, &FS).unwrap();
-        for asset in plugin_ui_assets(&FS) {
+        for asset in plugin_ui_artifacts(&FS) {
             assert!(staging.join(asset).is_file(), "缺少 {asset}");
         }
         let _ = std::fs::remove_dir_all(&staging);

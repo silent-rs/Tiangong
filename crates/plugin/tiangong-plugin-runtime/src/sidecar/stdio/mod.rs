@@ -1056,6 +1056,11 @@ impl StdioSidecarConnection {
             }
             match response_rx.recv_timeout(wait.poll_interval()) {
                 Ok(result) => {
+                    // 读线程按帧序先投递进度、后投递响应：响应到达时队列里
+                    // 可能还有未取出的进度（如写操作的锁事件），返回前排空。
+                    while let Ok(message) = progress_rx.try_recv() {
+                        on_progress(message);
+                    }
                     return result.map_err(|message| {
                         let message = if message == "stdio sidecar 已关闭" {
                             format!("{message}; {}", self.failure_detail(process))
