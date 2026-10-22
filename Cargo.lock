@@ -11569,7 +11569,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-protocol"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11577,7 +11577,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-sidecar"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
