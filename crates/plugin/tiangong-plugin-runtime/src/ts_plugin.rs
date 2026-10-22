@@ -41,6 +41,12 @@ pub struct TsPluginAdapter {
     /// 安装阶段验证记录中的 sidecar 能力；None 表示记录缺失或失效
     ///（路由回退 UI 或返回不可用，不做即时探测）。
     verified_sidecar: RwLock<Option<Vec<String>>>,
+    /// 所属宿主会话 ID（生命周期钩子转发的会话身份）。
+    session_id: RwLock<String>,
+    /// 已注入的会话工作目录（生命周期钩子转发的会话身份）。
+    workspace: RwLock<String>,
+    /// 声明 lifecycle 能力且带 sidecar：生命周期钩子转发给 sidecar。
+    lifecycle_sidecar: AtomicBool,
 }
 
 impl TsPluginAdapter {
@@ -79,6 +85,85 @@ impl TsPluginAdapter {
             has_sidecar: AtomicBool::new(manifest.sidecar.is_some()),
             has_ui: AtomicBool::new(!manifest.ui_contributions().is_empty()),
             verified_sidecar: RwLock::new(verified_sidecar),
+            session_id: RwLock::new(String::new()),
+            workspace: RwLock::new(String::new()),
+            lifecycle_sidecar: AtomicBool::new(Self::lifecycle_sidecar_of(manifest)),
+        }
+    }
+
+    /// 注入所属宿主会话 ID（构造后由装载器设置）。
+    pub(crate) fn set_session_id(&self, session_id: &str) {
+        match self.session_id.write() {
+            Ok(mut slot) => *slot = session_id.to_string(),
+            Err(poisoned) => *poisoned.into_inner() = session_id.to_string(),
+        }
+    }
+
+    /// lifecycle 能力且声明 sidecar：生命周期钩子可转发给 sidecar。
+    fn lifecycle_sidecar_of(manifest: &PluginManifest) -> bool {
+        manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.lifecycle)
+            && manifest.sidecar.is_some()
+    }
+
+    /// 是否应把生命周期钩子转发给本插件 sidecar。
+    fn should_forward_lifecycle(&self) -> bool {
+        self.is_enabled() && self.lifecycle_sidecar.load(Ordering::Acquire)
+    }
+
+    /// 以会话身份快照转发生命周期钩子（session_ready/turn_started/session_ended）。
+    fn forward_lifecycle(&self, hook: &str) {
+        if !self.should_forward_lifecycle() {
+            return;
+        }
+        let session_id = self
+            .session_id
+            .read()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        let cwd = self
+            .workspace
+            .read()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        let workspace_id = cwd
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&cwd)
+            .to_string();
+        let identity = tiangong_types::PluginSession {
+            id: session_id,
+            title: String::new(),
+            cwd,
+            workspace_id,
+            reasoning_effort: None,
+            messages: Vec::new(),
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        self.forward_lifecycle_payload(hook, serde_json::to_value(identity).ok());
+    }
+
+    /// 把生命周期钩子作为 sidecar 操作转发（operation = lifecycle.<钩子>）。
+    ///
+    /// 钩子在 Core 通知线程同步转发（与 WASM 桥接一致），sidecar 入队即返回；
+    /// 失败只告警，不影响宿主流程。
+    fn forward_lifecycle_payload(&self, hook: &str, payload: Option<serde_json::Value>) {
+        if !self.should_forward_lifecycle() {
+            return;
+        }
+        let Some(payload) = payload else {
+            return;
+        };
+        let operation = format!("lifecycle.{hook}");
+        if let Err(error) =
+            crate::bridge::invoke_plugin_sidecar(&self.id, &operation, payload, None)
+        {
+            tracing::warn!(plugin_id = %self.id, %error, operation, "生命周期钩子转发失败");
         }
     }
 
@@ -107,6 +192,8 @@ impl TsPluginAdapter {
             .store(manifest.sidecar.is_some(), Ordering::Release);
         self.has_ui
             .store(!manifest.ui_contributions().is_empty(), Ordering::Release);
+        self.lifecycle_sidecar
+            .store(Self::lifecycle_sidecar_of(manifest), Ordering::Release);
         match self.verified_sidecar.write() {
             Ok(mut verified) => *verified = verified_sidecar,
             Err(poisoned) => *poisoned.into_inner() = verified_sidecar,
@@ -168,11 +255,31 @@ impl Plugin for TsPluginAdapter {
     fn id(&self) -> &str {
         &self.id
     }
-
     fn set_feedback_tx(&self, tx: tiangong_core::core::plugin::PluginFeedbackTx) {
         if let Ok(mut feedback) = self.feedback_tx.write() {
             *feedback = Some(tx);
         }
+    }
+    fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        let value = workspace
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        match self.workspace.write() {
+            Ok(mut slot) => *slot = value,
+            Err(poisoned) => *poisoned.into_inner() = value,
+        }
+    }
+    fn on_session_ready(&self) {
+        self.forward_lifecycle("on_session_ready");
+    }
+    fn on_turn_started(&self) {
+        self.forward_lifecycle("on_turn_started");
+    }
+    fn on_turn_finished(&self, session: &tiangong_types::PluginSession) {
+        self.forward_lifecycle_payload("on_turn_finished", serde_json::to_value(session).ok());
+    }
+    fn on_session_ended(&self) {
+        self.forward_lifecycle("on_session_ended");
     }
 }
 

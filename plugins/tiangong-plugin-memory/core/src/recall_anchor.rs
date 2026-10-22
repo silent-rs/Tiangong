@@ -145,7 +145,7 @@ fn fallback_keywords(request: &MemoryRecallRequest) -> Vec<String> {
 
     keywords.extend(extract_urls(&text));
     keywords.extend(extract_paths(&text));
-    keywords.extend(extract_tool_names(&text));
+    keywords.extend(extract_identifiers(&text, IDENTIFIER_LIMIT));
     keywords.extend(extract_code_symbols(&text));
     keywords.extend(extract_media_markers(&text));
     keywords.extend(extract_text_terms(&request.query, 8));
@@ -295,22 +295,32 @@ fn extract_paths(text: &str) -> Vec<String> {
         .pipe(dedupe_strings)
 }
 
-fn extract_tool_names(text: &str) -> Vec<String> {
-    let known = [
-        "recall_memory",
-        "generate_image",
-        "write_file",
-        "replace_in_file",
-        "read_file",
-        "run_command",
-        "apply_patch",
-        "cargo_test",
-    ];
-    known
-        .iter()
-        .filter(|name| text.contains(**name))
-        .map(|name| (*name).to_string())
-        .collect()
+/// 通用标识符提取的数量上限：与 `extract_text_terms` 的 8 个词条上限协同，
+/// 避免普通下划线词挤占关键词名额。
+const IDENTIFIER_LIMIT: usize = 6;
+
+/// 通用标识符提取的最短长度：过滤掉 `a_b` 这类过短的普通下划线词。
+const IDENTIFIER_MIN_LEN: usize = 5;
+
+/// 从文本中提取形如 `xxx_yyy` 的通用标识符作为关键词。
+///
+/// 不再维护写死的工具名列表（#709）：ASCII 字母数字与下划线组成、至少含一个
+/// `_`、长度达到 [`IDENTIFIER_MIN_LEN`] 的词都视为标识符，可带 `插件id__`
+/// 前缀（如 `fs__file_read`），不区分是否为工具名。
+///
+/// 这类标识符不计入 `is_precise_anchor`，兜底策略在 keyword / hybrid 之间的
+/// 选择保持原有行为。
+fn extract_identifiers(text: &str, limit: usize) -> Vec<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| {
+            token.len() >= IDENTIFIER_MIN_LEN
+                && token.contains('_')
+                && token.chars().any(|c| c.is_ascii_alphabetic())
+        })
+        .take(limit)
+        .map(String::from)
+        .collect::<Vec<_>>()
+        .pipe(dedupe_strings)
 }
 
 fn extract_code_symbols(text: &str) -> Vec<String> {
@@ -431,5 +441,53 @@ mod tests {
         let req = request("");
         let plan = fallback_plan(&req);
         assert_eq!(plan.anchors.strategy, Some(SearchStrategy::Skip));
+    }
+
+    #[test]
+    fn fallback_extracts_old_tool_name_as_identifier() {
+        let req = request("查看上次 read_file 的输出");
+        let keywords = fallback_keywords(&req);
+        assert!(keywords.iter().any(|item| item == "read_file"));
+    }
+
+    #[test]
+    fn fallback_extracts_new_tool_name_as_identifier() {
+        let req = request("用 file_read 重新看一下这张图");
+        let keywords = fallback_keywords(&req);
+        assert!(keywords.iter().any(|item| item == "file_read"));
+    }
+
+    #[test]
+    fn fallback_extracts_plugin_prefixed_tool_name() {
+        let req = request("继续执行 fs__file_write 的写入任务");
+        let keywords = fallback_keywords(&req);
+        assert!(keywords.iter().any(|item| item == "fs__file_write"));
+    }
+
+    #[test]
+    fn fallback_extracts_no_identifier_from_plain_chinese() {
+        let req = request("帮我把上次的方案再完善一下，重点补充风险说明");
+        assert!(extract_identifiers(&req.query, IDENTIFIER_LIMIT).is_empty());
+    }
+
+    #[test]
+    fn fallback_identifier_is_not_precise_anchor() {
+        let req = request("继续跑 run_command 这个任务");
+        let keywords = fallback_keywords(&req);
+        let identifier = keywords
+            .iter()
+            .find(|item| item.as_str() == "run_command")
+            .expect("run_command 应作为标识符提取");
+        assert!(!is_precise_anchor(identifier));
+    }
+
+    #[test]
+    fn fallback_skips_short_underscore_tokens() {
+        let identifiers =
+            extract_identifiers("看看 a_b 和 ab_c 这两个变量的记录", IDENTIFIER_LIMIT);
+        assert!(!identifiers.iter().any(|item| item == "a_b"));
+        assert!(!identifiers.iter().any(|item| item == "ab_c"));
+        let identifiers = extract_identifiers("看看 abc_de 这个变量的记录", IDENTIFIER_LIMIT);
+        assert!(identifiers.iter().any(|item| item == "abc_de"));
     }
 }

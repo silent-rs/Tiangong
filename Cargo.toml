@@ -45,7 +45,6 @@ members = [
     "plugins/screenshot-input/wasm",
     "plugins/tiangong-plugin-memory/core",
     "plugins/tiangong-plugin-memory/protocol",
-    "plugins/tiangong-plugin-memory/wasm",
     "plugins/tiangong-plugin-memory/sidecar",
     "plugins/tiangong-plugin-scheduler/core",
     "plugins/tiangong-plugin-scheduler/protocol",
@@ -134,7 +133,6 @@ tiangong-plugin-skill-wasm = { path = "plugins/tiangong-plugin-skill/wasm" }
 tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
 tiangong-plugin-prompt-wasm = { path = "plugins/tiangong-plugin-prompt/wasm" }
-tiangong-plugin-memory-wasm = { path = "plugins/tiangong-plugin-memory/wasm" }
 tiangong-plugin-runtime = { path = "crates/plugin/tiangong-plugin-runtime" }
 tiangong-plugin-sidecar = { path = "crates/plugin/tiangong-plugin-sidecar" }
 tiangong-plugin-update = { path = "crates/plugin/tiangong-plugin-update" }

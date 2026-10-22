@@ -73,8 +73,8 @@ const MEMORY: PluginConfig = PluginConfig {
     name: "Memory",
     description: "对话记忆、召回与数据管理",
     protocol_crate: Some("tiangong-plugin-memory-protocol"),
-    wasm_crate: Some("tiangong-plugin-memory-wasm"),
-    wasm_artifact: Some("tiangong_plugin_memory_wasm.wasm"),
+    wasm_crate: None,
+    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-memory-sidecar"),
     sidecar_artifact: Some("tiangong-memory-sidecar"),
     plugin_root: "plugins/tiangong-plugin-memory",
@@ -387,6 +387,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
         // 工具视图（session.message-item replace + tools）。
         "fs" => &["app/tool-view.html"],
+        // 记忆设置页（settings.plugin-page，自包含单文件）。
+        "memory" => &["app/memory.html"],
         "bot" => &["app/im-message.html", "app/settings.html"],
         "volcengine" => &[
             "app/settings.html",
@@ -423,6 +425,7 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
             "assets/tool-file-write.svg",
             "assets/tool-clock.svg",
         ],
+        "memory" => &["assets/tool-recall-memory.svg"],
         _ => &[],
     }
 }
