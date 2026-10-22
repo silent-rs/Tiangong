@@ -3947,6 +3947,13 @@ pub async fn list_tool_icons(
         .map_err(|error| error.to_string())
 }
 
+/// 工具参数摘要的展示提示（过渡期由运行时内置表提供，见
+/// `tiangong_plugin_runtime::builtin_tables`）。
+#[tauri::command]
+pub fn tool_args_presentation() -> tiangong_plugin_runtime::builtin_tables::ToolArgsPresentation {
+    tiangong_plugin_runtime::builtin_tables::tool_args_presentation()
+}
+
 /// 读取插件声明的工具图标资源（仅限 `tool_icons` 中声明过的路径）。
 #[tauri::command]
 pub async fn plugin_read_tool_icon(

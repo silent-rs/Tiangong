@@ -68,6 +68,8 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     sandbox: contribution.sandbox,
                     source: ContributionSource::Manifest,
                     render: contribution.render,
+                    tools: exposed_tool_keys(plugin_id, &contribution.tools),
+                    titles: exposed_tool_titles(plugin_id, &contribution.titles),
                 });
             }
         }
@@ -92,6 +94,8 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     sandbox: crate::slots::SandboxKind::Iframe,
                     source: ContributionSource::Wasm,
                     render: crate::slots::MessageItemRender::Append,
+                    tools: Vec::new(),
+                    titles: Default::default(),
                 });
             }
         }
@@ -102,6 +106,38 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
             .then(left.contribution_id.cmp(&right.contribution_id))
     });
     result
+}
+
+/// 工具键换成对外名（`工具名[:参数=取值]` → `{插件id}__工具名[:参数=取值]`），
+/// 与界面拿到的工具调用名一致。
+fn exposed_tool_key(plugin_id: &str, key: &str) -> Option<String> {
+    let (tool, condition) = match key.split_once(':') {
+        Some((tool, condition)) => (tool, Some(condition)),
+        None => (key, None),
+    };
+    let exposed = tiangong_core::tools::extension::namespaced_tool_name(plugin_id, tool)?;
+    Some(match condition {
+        Some(condition) => format!("{exposed}:{condition}"),
+        None => exposed,
+    })
+}
+
+/// 工具视图贡献的工具键换成对外名。
+fn exposed_tool_keys(plugin_id: &str, keys: &[String]) -> Vec<String> {
+    keys.iter()
+        .filter_map(|key| exposed_tool_key(plugin_id, key))
+        .collect()
+}
+
+/// 工具视图贡献的标题键换成对外名。
+fn exposed_tool_titles(
+    plugin_id: &str,
+    titles: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    titles
+        .iter()
+        .filter_map(|(key, title)| Some((exposed_tool_key(plugin_id, key)?, title.clone())))
+        .collect()
 }
 
 /// 读取 v2 manifest UI 贡献声明的入口 HTML 文件。
@@ -287,6 +323,13 @@ pub struct SlotContribution {
     pub source: ContributionSource,
     /// `session.message-item` 的渲染方式（附加区或替换默认显示）。
     pub render: crate::slots::MessageItemRender,
+    /// 接管展示的工具调用：键为工具对外名 `{插件id}__{工具名}`，特指键为
+    /// `{插件id}__{工具名}:参数=取值`；界面按调用匹配后挂载本贡献。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// 工具行标题：键同 `tools`（对外名形式），值为插件声明的固定标题。
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub titles: std::collections::BTreeMap<String, String>,
 }
 
 /// UI 贡献的声明来源。
@@ -372,9 +415,15 @@ pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons
                 }
             }
             if let Some(declared) = &manifest.tool_icons {
+                // 特指键 `工具名:参数=取值` 归到工具名，不单独成为工具。
                 for key in declared.keys() {
-                    if key != crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY && !tools.contains(key) {
-                        tools.push(key.clone());
+                    let Some((tool, _)) = crate::tool_icons::parse_tool_key(key) else {
+                        continue;
+                    };
+                    if tool != crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
+                        && !tools.iter().any(|name| name == tool)
+                    {
+                        tools.push(tool.to_string());
                     }
                 }
             }

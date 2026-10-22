@@ -53,6 +53,33 @@ export interface UiContribution {
   open_mode?: OpenMode;
   context?: string[];
   sandbox?: SandboxKind;
+  /** 仅 `session.message-item`：`replace` 时按渲染声明或工具视图接管显示。 */
+  render?: 'append' | 'replace';
+  /**
+   * 工具视图（仅 `render: "replace"` 的 `session.message-item`）：接管展示的
+   * 本插件工具原名，或 `工具名:参数=取值` 特指某类调用。
+   */
+  tools?: string[];
+  /**
+   * 工具行标题（仅声明了 `tools` 的工具视图）：键同 `tools`（特指键优先），
+   * 值为固定标题；未声明的调用显示通用标题「工具调用」。
+   */
+  titles?: Record<string, string>;
+}
+
+/**
+ * 工具视图收到的调用数据（`context.message.render.data`）：工具调用的原始
+ * 信息，宿主不加工；`context.message.id` 为 tool_call_id。
+ */
+export interface ToolViewData {
+  tool_call_id: string;
+  /** 工具对外名（`{插件id}__{工具名}`）。 */
+  tool_name: string;
+  arguments: unknown;
+  status: 'running' | 'ok' | 'error';
+  /** 工具原始输出；运行中为 null。 */
+  output: string | null;
+  duration_ms: number | null;
 }
 
 /** manifest v2 `capabilities` 声明。 */

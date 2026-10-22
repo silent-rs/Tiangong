@@ -15,7 +15,7 @@ vi.mock('@/api/tauri', async (importOriginal) => {
   };
 });
 
-import { ToolIcon, lookupToolIcon, resetToolIconCache } from '@/components/message/ToolIcon';
+import { ToolIcon, iconForArgs, lookupToolIcon, resetToolIconCache } from '@/components/message/ToolIcon';
 
 /**
  * 工具行图标：插件运行时的查询表优先（插件声明 > runtime 内置表），
@@ -41,9 +41,9 @@ describe('工具行图标', () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  const render = async (toolName: string) => {
+  const render = async (toolName: string, args?: unknown) => {
     await act(async () => {
-      root.render(<ToolIcon toolName={toolName} className="w-3 h-3" />);
+      root.render(<ToolIcon toolName={toolName} args={args} className="w-3 h-3" />);
     });
     // 等待查表与动态图标加载。
     for (let i = 0; i < 5; i++) {
@@ -106,6 +106,34 @@ describe('工具行图标', () => {
 
     await render('broken');
     expect(container.querySelector('img')).toBeNull();
+    expect(iconClass()).toBe('tools-crossed');
+  });
+
+  it('按调用参数选特指图标，未命中或参数未到时用通用图标', () => {
+    const entry = {
+      icon: 'file-text',
+      variants: { action: { list: 'folder-tree', image: 'image' } },
+    };
+    expect(iconForArgs(entry, { action: 'list' })).toBe('folder-tree');
+    expect(iconForArgs(entry, { action: 'image' })).toBe('image');
+    expect(iconForArgs(entry, { action: 'read' })).toBe('file-text');
+    expect(iconForArgs(entry, undefined)).toBe('file-text');
+    expect(iconForArgs({ icon: 'clock' }, { action: 'list' })).toBe('clock');
+  });
+
+  it('工具行按参数渲染特指图标', async () => {
+    listToolIcons.mockResolvedValue({
+      fs__file_read: { icon: 'file-text', plugin_id: 'fs', variants: { action: { list: 'folder-tree' } } },
+    });
+    await render('fs__file_read', { action: 'list' });
+    expect(iconClass()).toBe('folder-tree');
+    await render('fs__file_read', { action: 'read' });
+    expect(iconClass()).toBe('file-text');
+  });
+
+  it('只有特指图标时未命中使用默认图标', async () => {
+    listToolIcons.mockResolvedValue({ speak: { icon: '', variants: { voice: { a: 'mic' } } } });
+    await render('speak', { voice: 'b' });
     expect(iconClass()).toBe('tools-crossed');
   });
 });

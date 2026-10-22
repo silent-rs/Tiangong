@@ -20,7 +20,7 @@ const msg = (role: string, content: string, extra: LegacyMessageFields = {}): Me
   ...extra,
 });
 
-const call = (id: string, name: string, prompt = '太一大战花仙子') => ({ id, name, arguments: { prompt, path: prompt } });
+const call = (id: string, name: string, prompt = '太一大战花仙子') => ({ id, name, arguments: { prompt } });
 
 describe('执行中的工具调用', () => {
   let container: HTMLDivElement;

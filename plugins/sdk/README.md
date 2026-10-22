@@ -178,6 +178,25 @@ sendText 发送的录音等）由插件从 `context.message.attachments` 读取�
 显示时附件按普通文件显示。
 带渲染声明的用户消息不可编辑。
 
+## 工具视图（`session.message-item` + `render: "replace"` + `tools`）
+
+工具行统一显示「工具名 + 参数摘要」，展开区默认以文本显示参数与结果。插件可为
+自己的工具声明视图，接管展开区的渲染（运行中与完成后都由该视图渲染）：
+
+```json
+{ "slot": "session.message-item", "id": "diff-view", "entry": "app/diff-view.html",
+  "sandbox": "shadow", "context": ["session", "message"], "render": "replace",
+  "tools": ["file_write:action=replace", "file_write:action=patch"] }
+```
+
+- `tools` 项为本插件工具原名，或 `工具名:参数=取值` 特指某类调用；特指优先于通用。
+- 可选 `titles`：工具行标题，键与 `tools` 同格式（如 `{"file_read": "读取文件", "file_read:action=list": "列出目录"}`），
+  键的工具名须在 `tools` 中，标题 1-32 字；未声明时工具行显示通用标题「工具调用」（悬停可见工具名）。摘要仍由宿主按参数通用生成。
+- 视图从 `context.message.render.data` 读取调用原始数据（见 SDK `ToolViewData`：
+  `tool_call_id`、`tool_name`、`arguments`、`status`、`output`、`duration_ms`），
+  状态变化时经 `onContextChange` 收到更新。
+- 未声明视图、插件缺失或停用时宿主以文本默认显示，插件无需为此兜底。
+
 ## 主题
 
 iframe 容器在挂载及主题、会话切换时通过 `tiangong_host_context` postMessage

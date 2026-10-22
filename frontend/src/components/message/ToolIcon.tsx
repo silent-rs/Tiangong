@@ -80,6 +80,21 @@ export function useToolIconTable(): ToolIconTable {
   return table;
 }
 
+/**
+ * 按调用参数选图标：命中特指声明（`工具名:参数=取值`）时用特指图标，否则用
+ * 通用图标；运行中参数未到时同样用通用图标。
+ */
+export function iconForArgs(entry: ToolIconEntry, args?: unknown): string {
+  if (entry.variants && args && typeof args === "object" && !Array.isArray(args)) {
+    const record = args as Record<string, unknown>;
+    for (const [arg, values] of Object.entries(entry.variants)) {
+      const value = record[arg];
+      if (typeof value === "string" && values[value]) return values[value];
+    }
+  }
+  return entry.icon;
+}
+
 /** 按工具名查表：先对外名（可能带插件前缀），再按原名；查不到返回 null。 */
 export function lookupToolIcon(table: ToolIconTable, toolName: string): ToolIconEntry | null {
   if (!toolName) return null;
@@ -129,23 +144,24 @@ function ResourceIcon({ pluginId, icon, className }: { pluginId: string; icon: s
   );
 }
 
-/** 工具行图标：查表得到的图标名/资源，查不到或加载失败时为默认图标。 */
-export function ToolIcon({ toolName, className }: { toolName: string; className: string }) {
+/** 工具行图标：查表得到的图标名/资源（按调用参数选特指图标），查不到或加载失败时为默认图标。 */
+export function ToolIcon({ toolName, args, className }: { toolName: string; args?: unknown; className: string }) {
   const table = useToolIconTable();
   const entry = lookupToolIcon(table, toolName);
-  if (entry && isIconResource(entry.icon)) {
+  const icon = entry ? iconForArgs(entry, args) : "";
+  if (entry && icon && isIconResource(icon)) {
     return entry.plugin_id ? (
-      <ResourceIcon pluginId={entry.plugin_id} icon={entry.icon} className={className} />
+      <ResourceIcon pluginId={entry.plugin_id} icon={icon} className={className} />
     ) : (
       <ToolsCrossedIcon className={className} data-tool-icon={DEFAULT_ICON} />
     );
   }
-  if (entry && ICON_NAMES.has(entry.icon)) {
+  if (icon && ICON_NAMES.has(icon)) {
     return (
       <DynamicIcon
-        name={entry.icon as IconName}
+        name={icon as IconName}
         className={className}
-        data-tool-icon={entry.icon}
+        data-tool-icon={icon}
         fallback={() => <ToolsCrossedIcon className={className} data-tool-icon={DEFAULT_ICON} />}
       />
     );

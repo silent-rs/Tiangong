@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Bot, Globe, Puzzle, TerminalSquare } from 'lucide-react';
+import { Puzzle } from 'lucide-react';
+import { DynamicIcon, iconNames, type IconName } from 'lucide-react/dynamic';
 import { api } from '@/api/tauri';
 import type { AppEntry } from '@/api/tauri';
 import {
@@ -25,12 +26,13 @@ export interface ExtensionMatrixProps {
   onOpenPluginApp?: (app: AppEntry, opts?: { newInstance?: boolean }) => void;
 }
 
-/** App 图标：按 icon 标识映射（插件贡献声明），未识别用拼图。 */
-function appIcon(app: AppEntry): typeof Globe {
-  if (app.icon === 'globe') return Globe;
-  if (app.icon === 'terminal') return TerminalSquare;
-  if (app.icon === 'bot') return Bot;
-  return Puzzle;
+const ICON_NAMES: ReadonlySet<string> = new Set(iconNames);
+
+/** App 图标：插件贡献声明的宿主图标名（lucide 名称）通用渲染，未识别用拼图。 */
+function AppNamedIcon({ icon }: { icon: string }) {
+  const className = 'h-6 w-6 text-muted-foreground group-hover:text-foreground';
+  if (!ICON_NAMES.has(icon)) return <Puzzle className={className} />;
+  return <DynamicIcon name={icon as IconName} className={className} fallback={() => <Puzzle className={className} />} />;
 }
 
 /** icon 是否为自定义资源路径（如 "icons/app.png"；含 / 或 . 视为资源）。 */
@@ -107,7 +109,6 @@ export function ExtensionMatrix({
   return (
     <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(80px,1fr))] place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3">
       {apps.map((app) => {
-        const Icon = appIcon(app);
         const appKey = `${app.plugin_id}:${app.contribution_id}`;
         const running = runningPluginApps.includes(appKey);
         const multi = app.open_mode === 'multi';
@@ -127,7 +128,7 @@ export function ExtensionMatrix({
                   {isIconResource(app.icon) ? (
                     <AppIconImage app={app} />
                   ) : (
-                    <Icon className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />
+                    <AppNamedIcon icon={app.icon} />
                   )}
                   {running && (
                     <span

@@ -74,31 +74,8 @@ fn format_tool_command(record: &ToolExecutionRecord) -> Option<String> {
         return None;
     }
 
-    if record.tool_name == "run_command" {
-        if args.first().map(String::as_str) == Some("__tiangong_shell__") {
-            let script = args.get(1).cloned().unwrap_or_default();
-            let shell = args.get(2).cloned().unwrap_or_else(|| "auto".to_string());
-            return Some(format!("shell={shell} script={script}"));
-        }
-        let cmd = args.first().cloned().unwrap_or_default();
-        let rest = args.into_iter().skip(1).collect::<Vec<_>>();
-        if rest.is_empty() {
-            return Some(cmd);
-        }
-        return Some(format!("{cmd} {}", rest.join(" ")));
-    }
-
-    if record.tool_name == "write_file" {
-        let path = args.first().cloned().unwrap_or_default();
-        let content_bytes = args.get(1).map(|content| content.len()).unwrap_or(0usize);
-        let append = args.get(2).cloned().unwrap_or_else(|| "false".to_string());
-        return Some(format!(
-            "path={} content=...({content_bytes} bytes) append={append}",
-            single_line_ellipsis(path.as_str(), 120)
-        ));
-    }
-
-    Some(args.join(" "))
+    // 通用格式：不按工具名区分，整体压成单行并截断（只进运行日志）。
+    Some(single_line_ellipsis(&args.join(" "), 240))
 }
 
 fn single_line_ellipsis(text: &str, max_chars: usize) -> String {
