@@ -23,7 +23,7 @@
 
 ### 二、创建 Skill 文件
 
-在 `~/.tiangong/skills/<skill-id>/` 下用 `write_file` 等文件工具创建以下文件。
+在 `~/.tiangong/skills/<skill-id>/` 下用文件写入工具（`file_write`，action=write）创建以下文件。
 
 #### 必需文件
 

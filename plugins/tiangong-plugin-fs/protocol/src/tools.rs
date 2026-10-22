@@ -1,27 +1,24 @@
-//! Fs sidecar 业务操作（7 个文件操作 + set_workspace）。
+//! Fs 文件操作的请求与响应（7 个文件操作）。
 //!
 //! 对模型暴露的是 `file_read` / `file_write` 两个按 action 分派的工具
-//! （见 crate 根的工具名常量）；sidecar 侧仍按单一操作粒度处理。
+//! （见 crate 根的工具名常量）；sidecar 解析参数后按单一操作粒度处理。
 //!
 //! 所有读写请求都内嵌 [`FsAccessContext`]（沙箱预留点 B），sidecar 据此
-//! 做路径解析与信任模式判定。`current_time` 不经 sidecar（wasm 内部用
-//! clock host import 实现），故本模块不为其定义操作。
+//! 做路径解析。
 
 use serde::{Deserialize, Serialize};
 use tiangong_types::InjectedAsset;
 
-use crate::{Ack, FsAccessContext, FsOperation};
+use crate::FsAccessContext;
 
-// ── 操作名常量 ────────────────────────────────────────────────
-
-pub const LIST_DIR_OPERATION: &str = "fs.list_dir";
-pub const TREE_DIR_OPERATION: &str = "fs.tree_dir";
-pub const READ_FILE_OPERATION: &str = "fs.read_file";
-pub const WRITE_FILE_OPERATION: &str = "fs.write_file";
-pub const REPLACE_IN_FILE_OPERATION: &str = "fs.replace_in_file";
-pub const APPLY_PATCH_OPERATION: &str = "fs.apply_patch";
-pub const READ_IMAGE_OPERATION: &str = "fs.read_image";
-pub const SET_WORKSPACE_OPERATION: &str = "fs.set_workspace";
+/// 文件操作在结果文案中的名称：对模型暴露的「工具(action)」形态。
+pub const LIST_DIR_LABEL: &str = "file_read(list)";
+pub const TREE_DIR_LABEL: &str = "file_read(tree)";
+pub const READ_FILE_LABEL: &str = "file_read(read)";
+pub const READ_IMAGE_LABEL: &str = "file_read(image)";
+pub const WRITE_FILE_LABEL: &str = "file_write(write)";
+pub const REPLACE_IN_FILE_LABEL: &str = "file_write(replace)";
+pub const APPLY_PATCH_LABEL: &str = "file_write(patch)";
 
 /// `read_image` 产物长边默认上限（与 computer-use 截图一致）。
 pub const DEFAULT_READ_IMAGE_MAX_DIMENSION: u32 = 1568;
@@ -40,10 +37,10 @@ pub struct FsToolResponse {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
-    /// 写工具返回：本次操作实际加锁的路径（供 wasm 发 locked 事件）。
+    /// 写工具返回：本次操作实际加锁的路径（供 sidecar 上报 locked 事件）。
     #[serde(default)]
     pub locked_paths: Vec<String>,
-    /// 写工具返回：本次操作实际解锁的路径（供 wasm 发 unlocked 事件）。
+    /// 写工具返回：本次操作实际解锁的路径（供 sidecar 上报 unlocked 事件）。
     #[serde(default)]
     pub unlocked_paths: Vec<String>,
 }
@@ -58,13 +55,6 @@ pub struct ListDirRequest {
     #[serde(flatten)]
     pub access: FsAccessContext,
 }
-pub struct ListDir;
-impl FsOperation for ListDir {
-    const NAME: &'static str = LIST_DIR_OPERATION;
-    type Request = ListDirRequest;
-    type Response = FsToolResponse;
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TreeDirRequest {
     #[serde(default)]
@@ -74,13 +64,6 @@ pub struct TreeDirRequest {
     #[serde(flatten)]
     pub access: FsAccessContext,
 }
-pub struct TreeDir;
-impl FsOperation for TreeDir {
-    const NAME: &'static str = TREE_DIR_OPERATION;
-    type Request = TreeDirRequest;
-    type Response = FsToolResponse;
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReadFileRequest {
     pub path: String,
@@ -91,13 +74,6 @@ pub struct ReadFileRequest {
     #[serde(flatten)]
     pub access: FsAccessContext,
 }
-pub struct ReadFile;
-impl FsOperation for ReadFile {
-    const NAME: &'static str = READ_FILE_OPERATION;
-    type Request = ReadFileRequest;
-    type Response = FsToolResponse;
-}
-
 /// `read_image` 请求：把本地图片规范化后放进媒体目录并声明注入。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReadImageRequest {
@@ -108,13 +84,6 @@ pub struct ReadImageRequest {
     #[serde(flatten)]
     pub access: FsAccessContext,
 }
-pub struct ReadImage;
-impl FsOperation for ReadImage {
-    const NAME: &'static str = READ_IMAGE_OPERATION;
-    type Request = ReadImageRequest;
-    type Response = FsToolResponse;
-}
-
 /// `read_image` 成功时写入 [`FsToolResponse::stdout`] 的 JSON 结构。
 ///
 /// 字段本身是给模型的「知道」；`injected_assets` 非空时 core 在工具批次
@@ -156,13 +125,6 @@ pub struct WriteFileRequest {
     #[serde(flatten)]
     pub access: FsAccessContext,
 }
-pub struct WriteFile;
-impl FsOperation for WriteFile {
-    const NAME: &'static str = WRITE_FILE_OPERATION;
-    type Request = WriteFileRequest;
-    type Response = FsToolResponse;
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReplaceInFileRequest {
     pub path: String,
@@ -176,13 +138,6 @@ pub struct ReplaceInFileRequest {
     #[serde(flatten)]
     pub access: FsAccessContext,
 }
-pub struct ReplaceInFile;
-impl FsOperation for ReplaceInFile {
-    const NAME: &'static str = REPLACE_IN_FILE_OPERATION;
-    type Request = ReplaceInFileRequest;
-    type Response = FsToolResponse;
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApplyPatchRequest {
     pub patch: String,
@@ -192,29 +147,4 @@ pub struct ApplyPatchRequest {
     pub workdir: Option<String>,
     #[serde(flatten)]
     pub access: FsAccessContext,
-}
-pub struct ApplyPatch;
-impl FsOperation for ApplyPatch {
-    const NAME: &'static str = APPLY_PATCH_OPERATION;
-    type Request = ApplyPatchRequest;
-    type Response = FsToolResponse;
-}
-
-// ── 生命周期 ─────────────────────────────────────────────────
-
-/// `set_workspace` 钩子请求：通知 sidecar 工作区变更（写盘/路径解析基准）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetWorkspaceRequest {
-    /// 新工作目录；None 表示清除。
-    #[serde(default)]
-    pub workspace: Option<String>,
-    /// 是否完全信任模式。
-    #[serde(default)]
-    pub full_trust: bool,
-}
-pub struct SetWorkspace;
-impl FsOperation for SetWorkspace {
-    const NAME: &'static str = SET_WORKSPACE_OPERATION;
-    type Request = SetWorkspaceRequest;
-    type Response = Ack;
 }

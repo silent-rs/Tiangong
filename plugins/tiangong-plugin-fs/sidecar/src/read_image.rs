@@ -19,7 +19,7 @@ use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use tiangong_plugin_fs_protocol::tools::{
     DEFAULT_READ_IMAGE_MAX_DIMENSION, FsToolResponse, MAX_READ_IMAGE_MAX_DIMENSION,
-    READ_IMAGE_INJECTION_SOURCE, ReadImageOutput, ReadImageRequest,
+    READ_IMAGE_INJECTION_SOURCE, READ_IMAGE_LABEL, ReadImageOutput, ReadImageRequest,
 };
 use tiangong_toolkit as shared;
 use tiangong_types::{InjectedAsset, MediaKind};
@@ -178,7 +178,7 @@ pub(crate) fn handle_read_image_in(req: ReadImageRequest, storage_root: &Path) -
     match read_image(&req, storage_root) {
         Ok((output, base)) => success_response(output, &base),
         Err(error) => {
-            let summary = format!("read_image 失败：{error:#}");
+            let summary = format!("{READ_IMAGE_LABEL} 失败：{error:#}");
             FsToolResponse {
                 ok: false,
                 summary: summary.clone(),
@@ -849,7 +849,7 @@ mod tests {
             "stderr={}",
             response.stderr
         );
-        assert_failed_without_injection(&response, storage.path(), "read_image 失败");
+        assert_failed_without_injection(&response, storage.path(), "file_read(image) 失败");
     }
 
     #[cfg(unix)]

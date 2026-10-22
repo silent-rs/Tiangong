@@ -5,7 +5,7 @@
 //! - 输出由 core `ToolResult` 改为 protocol `FsToolResponse`
 //! - 路径只解析为绝对路径（toolkit），读写范围由 OS 沙箱裁决
 //! - 锁的 acquire/release 在写工具内部完成（一次调用完成加锁+写+解锁，避免锁泄漏），
-//!   响应里带回 locked/unlocked 路径供 wasm 发 StreamEvent
+//!   响应里带回 locked/unlocked 路径，由 service 上报 file_lock_changed 事件
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,9 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tiangong_plugin_fs_protocol::FsAccessContext;
 use tiangong_plugin_fs_protocol::tools::{
-    ApplyPatchRequest, FsToolResponse, ListDirRequest, ReadFileRequest, ReplaceInFileRequest,
-    TreeDirRequest, WriteFileRequest,
+    APPLY_PATCH_LABEL, ApplyPatchRequest, FsToolResponse, LIST_DIR_LABEL, ListDirRequest,
+    READ_FILE_LABEL, REPLACE_IN_FILE_LABEL, ReadFileRequest, ReplaceInFileRequest, TREE_DIR_LABEL,
+    TreeDirRequest, WRITE_FILE_LABEL, WriteFileRequest,
 };
 use tiangong_toolkit as shared;
 
@@ -36,14 +37,18 @@ fn base_of(access: &FsAccessContext) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("会话工作目录未注入，无法执行文件工具"))
 }
 
-/// 在工具结果 summary 头部回显工作目录与可写范围（规范化绝对路径）。
+/// 在成功结果的 summary 头部回显工作目录与可写范围（规范化绝对路径）。
 ///
 /// 工作目录与允许目录不进入 system prompt（会话动态信息，cwd 迟落定/变更时
 /// 改写已发送前缀会作废对话缓存），模型经 fs 工具调用获知。可写范围与宿主
 /// 沙箱策略的统一写域一致：存储根只开放 data/<插件 id>、media、tmp，临时
 /// 文件引导至 /tmp，避免模型把临时脚本堆进存储根。写进 summary 而非
-/// stdout，避免污染 read_file 等工具的文件正文。无状态设计：每次调用都回显。
+/// stdout，避免污染读文件的正文。无状态设计：每次成功调用都回显；失败结果
+/// 不加前缀，避免错误原因被工作目录说明淹没。
 pub fn annotate_workdir(mut resp: FsToolResponse, access: &FsAccessContext) -> FsToolResponse {
+    if !resp.ok {
+        return resp;
+    }
     if let Some(base) = access.workspace.as_deref() {
         let canonical = std::fs::canonicalize(base).unwrap_or_else(|_| PathBuf::from(base));
         let storage = shared::app_storage_root();
@@ -86,7 +91,7 @@ pub fn handle_list_dir(req: ListDirRequest) -> FsToolResponse {
             ..Default::default()
         })
     })();
-    result.unwrap_or_else(|e| error_response("list_dir", e))
+    result.unwrap_or_else(|e| error_response(LIST_DIR_LABEL, e))
 }
 
 // ── tree_dir ─────────────────────────────────────────────────
@@ -132,7 +137,7 @@ pub fn handle_tree_dir(req: TreeDirRequest) -> FsToolResponse {
             ..Default::default()
         })
     })();
-    result.unwrap_or_else(|e| error_response("tree_dir", e))
+    result.unwrap_or_else(|e| error_response(TREE_DIR_LABEL, e))
 }
 
 // ── read_file ────────────────────────────────────────────────
@@ -185,7 +190,7 @@ pub fn handle_read_file(req: ReadFileRequest) -> FsToolResponse {
             ..Default::default()
         })
     })();
-    result.unwrap_or_else(|e| error_response("read_file", e))
+    result.unwrap_or_else(|e| error_response(READ_FILE_LABEL, e))
 }
 
 // ── write_file ───────────────────────────────────────────────
@@ -229,7 +234,7 @@ pub fn handle_write_file(req: WriteFileRequest) -> FsToolResponse {
                 ..Default::default()
             })
         });
-    finalize_write(result, locked, unlocked)
+    finalize_write(WRITE_FILE_LABEL, result, locked, unlocked)
 }
 
 // ── replace_in_file ──────────────────────────────────────────
@@ -288,11 +293,15 @@ pub fn handle_replace_in_file(req: ReplaceInFileRequest) -> FsToolResponse {
                     replaced_count,
                     req.replace_all
                 ),
+                stdout: format!(
+                    "replacements={replaced_count},replace_all={}",
+                    req.replace_all
+                ),
                 exit_code: 0,
                 ..Default::default()
             })
         });
-    finalize_write(result, locked, unlocked)
+    finalize_write(REPLACE_IN_FILE_LABEL, result, locked, unlocked)
 }
 
 // ── apply_patch ──────────────────────────────────────────────
@@ -310,7 +319,7 @@ pub fn handle_apply_patch(req: ApplyPatchRequest) -> FsToolResponse {
     })();
     let targets = match targets_result {
         Ok(t) => t,
-        Err(e) => return error_response("apply_patch", e),
+        Err(e) => return error_response(APPLY_PATCH_LABEL, e),
     };
     let target_strs: Vec<String> = targets
         .iter()
@@ -349,7 +358,7 @@ pub fn handle_apply_patch(req: ApplyPatchRequest) -> FsToolResponse {
             ..Default::default()
         })
     });
-    finalize_write(result, locked, unlocked)
+    finalize_write(APPLY_PATCH_LABEL, result, locked, unlocked)
 }
 
 // ── 写工具锁包装 ─────────────────────────────────────────────
@@ -405,8 +414,9 @@ where
 }
 
 /// 把锁包装的结果组装成最终响应：业务结果失败时仍带上 locked/unlocked 路径，
-/// 这样 wasm 侧无论业务成败都能正确发 locked/unlocked 事件。
+/// 这样无论业务成败都能正确上报 locked/unlocked 事件。
 fn finalize_write(
+    label: &str,
     result: Result<FsToolResponse>,
     locked: Vec<PathBuf>,
     unlocked: Vec<PathBuf>,
@@ -420,7 +430,7 @@ fn finalize_write(
             resp
         }
         Err(e) => {
-            let resp = error_response("write", e);
+            let resp = error_response(label, e);
             FsToolResponse {
                 locked_paths: locked_str,
                 unlocked_paths: unlocked_str,
@@ -819,6 +829,46 @@ mod tests {
             workspace: Some(root.to_string_lossy().into_owned()),
             full_trust: false,
         }
+    }
+
+    #[test]
+    fn 结果文案使用对外工具名与_action_并且失败不加工作目录前缀() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hello").unwrap();
+        let replace = |old: &str| {
+            annotate_workdir(
+                handle_replace_in_file(ReplaceInFileRequest {
+                    path: "a.txt".to_string(),
+                    old: old.to_string(),
+                    new: "world".to_string(),
+                    replace_all: false,
+                    expected_count: None,
+                    access: access(root.path()),
+                }),
+                &access(root.path()),
+            )
+        };
+        let failed = replace("missing");
+        assert!(!failed.ok);
+        assert!(
+            failed.summary.starts_with("file_write(replace) 失败："),
+            "{}",
+            failed.summary
+        );
+        assert!(!failed.summary.contains("工作目录："), "{}", failed.summary);
+        let ok = replace("hello");
+        assert!(ok.ok);
+        assert!(ok.summary.starts_with("工作目录："), "{}", ok.summary);
+        assert_eq!(ok.stdout, "replacements=1,replace_all=false");
+        let missing = handle_list_dir(ListDirRequest {
+            path: Some("nope".to_string()),
+            access: access(root.path()),
+        });
+        assert!(
+            missing.stderr.starts_with("file_read(list) 失败："),
+            "{}",
+            missing.stderr
+        );
     }
 
     #[test]

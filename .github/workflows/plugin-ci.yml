@@ -220,8 +220,14 @@ jobs:
               continue
             fi
 
-            if [[ "$has_protocol" != "$has_wasm" ]]; then
-              echo "Plugin $id must provide protocol and WASM together" >&2
+            # WASM 桥接必须配私有协议；protocol 也可只服务于宿主直连的
+            # sidecar（无 WASM 层，如 fs）。
+            if [[ "$has_wasm" == "true" && "$has_protocol" != "true" ]]; then
+              echo "Plugin $id must provide protocol with WASM" >&2
+              exit 1
+            fi
+            if [[ "$has_protocol" == "true" && "$has_wasm" != "true" && "$has_sidecar" != "true" ]]; then
+              echo "Plugin $id protocol must accompany WASM or sidecar" >&2
               exit 1
             fi
             manifest_has_ui="$(jq -r '.ui != null' "$manifest")"
@@ -262,6 +268,8 @@ jobs:
             fi
             if [[ "$has_protocol" == "true" ]]; then
               protocol="$(package_name "$protocol_manifest")"
+            fi
+            if [[ "$has_wasm" == "true" ]]; then
               wasm="$(package_name "$wasm_manifest")"
             fi
             if [[ "$has_sidecar" == "true" ]]; then
@@ -395,7 +403,10 @@ jobs:
           WASM: ${{ matrix.plugin.wasm }}
           SIDECAR: ${{ matrix.plugin.sidecar }}
         run: |
-          packages=(-p "$PROTOCOL" -p "$WASM")
+          packages=(-p "$PROTOCOL")
+          if [[ -n "$WASM" ]]; then
+            packages+=(-p "$WASM")
+          fi
           if [[ -n "$SIDECAR" ]]; then
             packages+=(-p "$SIDECAR")
           fi

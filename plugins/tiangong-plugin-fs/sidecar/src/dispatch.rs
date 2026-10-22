@@ -1,8 +1,7 @@
-//! 工具调用分派：把 `file_read` / `file_write` / `current_time` 的调用参数
-//! 解析为具体的 sidecar 操作请求。
+//! 工具调用分派：把宿主直连送来的 `file_read` / `file_write` / `current_time`
+//! 调用参数解析为具体的文件操作请求。
 //!
-//! 纯函数、无 WIT 依赖，便于在本机单测；参数缺失或类型不符时返回给模型的
-//! 中文错误（不发起 sidecar 调用）。
+//! 纯函数，便于单测；参数缺失或类型不符时返回给模型的中文错误（不执行操作）。
 
 use serde_json::{Map, Value};
 use tiangong_plugin_fs_protocol::tools::{
@@ -40,7 +39,7 @@ pub enum DispatchError {
 /// 解析一次工具调用。
 pub fn parse_call(
     tool: &str,
-    arguments: &str,
+    arguments: &Value,
     access: FsAccessContext,
 ) -> Result<FsCall, DispatchError> {
     match tool {
@@ -124,27 +123,19 @@ struct Args<'a> {
 impl<'a> Args<'a> {
     /// 解析参数对象并校验 action（必须是 allowed 之一）。
     ///
-    /// 参数为空串时视为空对象（随后因缺少 action 报错）；其余必须是 JSON 对象。
+    /// 参数为 null 时视为空对象（随后因缺少 action 报错）；其余必须是 JSON 对象。
     fn parse(
         tool: &'a str,
-        arguments: &str,
+        arguments: &Value,
         allowed: &[&'static str],
     ) -> Result<Self, DispatchError> {
-        let map = if arguments.trim().is_empty() {
-            Map::new()
-        } else {
-            match serde_json::from_str::<Value>(arguments) {
-                Ok(Value::Object(map)) => map,
-                Ok(_) => {
-                    return Err(DispatchError::InvalidArgument(format!(
-                        "{tool} 的参数需为 JSON 对象"
-                    )));
-                }
-                Err(error) => {
-                    return Err(DispatchError::InvalidArgument(format!(
-                        "{tool} 的参数不是合法 JSON：{error}"
-                    )));
-                }
+        let map = match arguments {
+            Value::Object(map) => map.clone(),
+            Value::Null => Map::new(),
+            _ => {
+                return Err(DispatchError::InvalidArgument(format!(
+                    "{tool} 的参数需为 JSON 对象"
+                )));
             }
         };
         let expected = allowed.join("/");
@@ -220,8 +211,14 @@ mod tests {
         }
     }
 
+    /// 测试用：空串表示无参数（宿主对空参数传 null）。
     fn parse(tool: &str, arguments: &str) -> Result<FsCall, DispatchError> {
-        parse_call(tool, arguments, access())
+        let value = if arguments.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(arguments).expect("测试参数应为合法 JSON")
+        };
+        parse_call(tool, &value, access())
     }
 
     fn invalid(tool: &str, arguments: &str) -> String {
@@ -359,7 +356,6 @@ mod tests {
     #[test]
     fn 参数类型不符时报错() {
         assert!(invalid("file_read", "[1]").contains("需为 JSON 对象"));
-        assert!(invalid("file_read", "{").contains("不是合法 JSON"));
         assert!(invalid("file_read", r#"{"action":"read","path":1}"#).contains("path 需为字符串"));
         assert!(
             invalid("file_read", r#"{"action":"tree","max_depth":-1}"#)

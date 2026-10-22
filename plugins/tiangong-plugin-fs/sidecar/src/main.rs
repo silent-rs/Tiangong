@@ -1,17 +1,10 @@
-//! Fs 独立 sidecar 进程。
+//! Fs sidecar 进程：fs 插件的全部逻辑。
 //!
-//! 作为 Fs 的唯一常驻进程运行，承载全部文件读写（`std::fs`）、进程级文件锁表
-//! （跨 wasm 实例共享）、路径解析与沙箱策略。通过 TCP IPC 暴露给运行时访问。
-//!
-//! 工作流程：
-//! 1. 淘汰制单例判定（endpoint 文件 + TCP 端口可达性）
-//! 2. 端口可达 → 已有实例，优雅退出（不重复运行）
-//! 3. 端口不可达 → 起 IPC server + FsService → 阻塞运行
-//!
-//! 单例与 IPC 由 `tiangong-plugin-sidecar` 通用运行库提供，运行时按 `plugin.json`
-//! 启动本进程。锁表天然落在 sidecar 进程内即保持全局唯一——主 Agent 与子 Agent
-//! 各自独立的 wasm 实例经 host 路由到同一个 sidecar，共享同一份锁表。
-
+//! 宿主按清单 `tools` 把 `file_read` / `file_write` / `current_time` 直连到
+//! 本进程（无 WASM 桥接层）：参数解析、文件读写（`std::fs`）、写操作锁、
+//! 路径解析与读图规范化都在这里完成。生命周期为按需（每次调用独立进程，
+//! 无跨请求状态），工作目录取自宿主注入的请求上下文。
+mod dispatch;
 mod file_lock;
 mod handlers;
 mod read_image;
