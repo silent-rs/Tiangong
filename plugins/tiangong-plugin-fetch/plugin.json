@@ -1,18 +1,80 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "fetch",
-  "version": "0.1.3",
-  "wasm": {
-    "binary": "tiangong_plugin_fetch_wasm.wasm"
+  "version": "0.2.0",
+  "capabilities": {
+    "tools": true
   },
+  "tools": [
+    {
+      "name": "web_fetch",
+      "description": "获取 URL 内容。支持 HTTP/HTTPS 网页（text 模式提取正文 / download 模式落盘），含 SSRF 防护。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "要获取的 HTTP/HTTPS URL"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "text",
+              "download"
+            ],
+            "description": "执行模式，默认 text"
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "text 模式最多返回字符数，默认 12000，最大 50000",
+            "minimum": 1,
+            "maximum": 50000
+          },
+          "output_path": {
+            "type": "string",
+            "description": "download 模式目标文件路径，必须位于允许写入目录"
+          },
+          "overwrite": {
+            "type": "boolean",
+            "description": "download 模式是否覆盖已有文件，默认 false"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "请求超时时间，默认 15000，最大 60000",
+            "minimum": 1000,
+            "maximum": 60000
+          },
+          "follow_redirects": {
+            "type": "boolean",
+            "description": "是否跟随重定向，默认 true"
+          },
+          "extract_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "text",
+              "raw"
+            ],
+            "description": "text 模式提取方式，默认 auto"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "timeout_ms": 60000
+    }
+  ],
   "sidecar": {
     "binary": "tiangong-fetch-sidecar",
     "transport_protocol": "0.1.0",
     "business_protocol": 1,
+    "lifecycle": "resident",
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
   "permissions": [
+    "tool.provide",
     "sidecar.invoke"
   ],
   "entrypoints": [
