@@ -119,6 +119,148 @@ export function argsSummary(
   return clamp(parts.join(" "), SUMMARY_MAX_CHARS);
 }
 
+// ── 终端 send 调用的专用解析（issue #707）──
+//
+// 续等（空输入等待）调用的参数里没有命令，摘要退化为终端 id；且结果 stdout
+// 首行是插件写的状态行（[仍在执行 · 已 N 秒 · 命令] 等），写给模型的操作
+// 提示在 summary 里。这里把状态行解析出来供折叠行与展开卡片使用。
+
+/** 终端 send 结果首行状态行的解析结果。 */
+export interface TerminalSendStatus {
+  kind: "running" | "completed" | "interactive" | "updated";
+  /** 命令已执行秒数（运行中状态行携带，自命令启动累计）。 */
+  elapsedSecs: number | null;
+  exitCode: number | null;
+  /** 状态行携带的原命令（续等行据此显示原命令）。 */
+  command: string | null;
+  /** 去掉状态行后的真实输出。 */
+  body: string;
+}
+
+/** 解析终端 send 结果首部的状态行；非状态行开头时返回 null。 */
+export function parseTerminalSendStatus(
+  output: string | null | undefined,
+): TerminalSendStatus | null {
+  if (!output) return null;
+  const line = output.split(/\r?\n/, 1)[0] ?? "";
+  const rest = output.slice(line.length).replace(/^\r?\n/, "");
+  let match = line.match(/^\[仍在执行 · 已 (\d+) 秒\](?: · (.+))?$/);
+  if (match) {
+    return {
+      kind: "running",
+      elapsedSecs: Number(match[1]),
+      exitCode: null,
+      command: match[2] ?? null,
+      body: rest,
+    };
+  }
+  match = line.match(/^\[已完成 · 退出码 (-?\d+)\](?: · (.+))?$/);
+  if (match) {
+    return {
+      kind: "completed",
+      elapsedSecs: null,
+      exitCode: Number(match[1]),
+      command: match[2] ?? null,
+      body: rest,
+    };
+  }
+  if (line === "[交互中 · 等待输入]") {
+    return { kind: "interactive", elapsedSecs: null, exitCode: null, command: null, body: rest };
+  }
+  if (line === "[已更新]") {
+    return { kind: "updated", elapsedSecs: null, exitCode: null, command: null, body: rest };
+  }
+  return null;
+}
+
+/** 控制键的可读名（模型以字面 `\xHH` 转义发送，先解码再命名）。 */
+const CONTROL_KEY_NAMES: Record<string, string> = {
+  "\r": "回车",
+  "\n": "回车",
+  "\t": "Tab",
+  "\x7f": "退格",
+  "\x1b": "Esc",
+  "\x03": "Ctrl+C",
+  "\x04": "Ctrl+D",
+  "\x1a": "Ctrl+Z",
+  "\x15": "Ctrl+U",
+  "\x17": "Ctrl+W",
+  "\x12": "Ctrl+R",
+  "\x0c": "Ctrl+L",
+  "\x01": "Ctrl+A",
+  "\x05": "Ctrl+E",
+  "\x02": "Ctrl+B",
+  "\x06": "Ctrl+F",
+  "\x0e": "Ctrl+N",
+  "\x10": "Ctrl+P",
+};
+
+/** 解码模型写的字面转义（\xHH / \r / \n / \e / \t）。 */
+function decodeLiteralEscapes(text: string): string {
+  return text.replace(/\\x[0-9a-fA-F]{2}|\\r|\\n|\\e|\\t/g, (sequence) => {
+    switch (sequence) {
+      case "\\r":
+        return "\r";
+      case "\\n":
+        return "\n";
+      case "\\e":
+        return "\x1b";
+      case "\\t":
+        return "\t";
+      default: {
+        const code = Number.parseInt(sequence.slice(2), 16);
+        return Number.isNaN(code) ? sequence : String.fromCharCode(code);
+      }
+    }
+  });
+}
+
+function controlKeyName(ch: string): string | null {
+  if (CONTROL_KEY_NAMES[ch]) return CONTROL_KEY_NAMES[ch];
+  const code = ch.charCodeAt(0);
+  if (code < 0x20) return `Ctrl+${String.fromCharCode(code + 64)}`;
+  return null;
+}
+
+/**
+ * 终端输入的可读展示：`\x03` → 「发送 Ctrl+C」，`y\r` → 「输入：y」；
+ * 普通文本原样返回；空输入返回 null（交给状态行/终端 id 兜底）。
+ */
+export function readableTerminalInput(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const decoded = decodeLiteralEscapes(raw);
+  const body = decoded.replace(/[\r\n]+$/, "");
+  if (body === "") {
+    return decoded.trim() ? "发送回车" : null;
+  }
+  const chars = [...body];
+  const names = chars.map(controlKeyName);
+  if (names.every(Boolean)) {
+    return `发送 ${(names as string[]).join(" + ")}`;
+  }
+  return /[\r\n]$/.test(decoded) ? `输入：${body}` : body;
+}
+
+/** 是否终端 send 调用（新版 `terminal` action=send，或旧版 `terminal_send` 历史消息）。 */
+export function isTerminalSendCall(toolName: string, args: unknown): boolean {
+  const base = baseToolName(toolName);
+  if (base === "terminal_send") return true;
+  if (base !== "terminal") return false;
+  return (args as { action?: unknown } | null | undefined)?.action === "send";
+}
+
+/** 终端 send 摘要优先级：输入（可读化）→ 状态行原命令 → 终端 id。 */
+export function terminalSendSummary(
+  args: Record<string, unknown> | null | undefined,
+  outputText: string | null,
+): string {
+  const readable = readableTerminalInput(typeof args?.input === "string" ? args.input : null);
+  if (readable) return readable;
+  const status = parseTerminalSendStatus(outputText);
+  if (status?.command) return status.command;
+  return typeof args?.terminal_id === "string" ? args.terminal_id : "";
+}
+
 /** 展开用的参数文本：对象 pretty JSON，数组逐项标注位置参数。 */
 function argsToText(args: unknown): string | null {
   if (args === undefined || args === null) return null;
@@ -191,12 +333,23 @@ export function buildToolDisplayModel(
   const isError = toolIsError(msg);
   const outputText = (messageKind(msg) === "tool" ? stripToolResultHeader(content) : content) || null;
   const call = callPart(args, hints);
+  // 终端 send：摘要按「输入 → 状态行原命令 → 终端 id」取，不退化到终端 id；
+  // 被拒绝（上一条命令仍在执行）给可读短文案，不展示写给模型的完整提示。
+  const terminalSend = isTerminalSendCall(toolName, args)
+    ? terminalSendSummary(args as Record<string, unknown>, outputText)
+    : null;
+  const terminalRejected =
+    isTerminalSendCall(toolName, args) && isError && outputText?.includes("未发送")
+      ? "未发送：上一条命令仍在执行（输入未写入）"
+      : null;
   return {
     toolName,
     ...call,
-    summary: call.summary || clamp(firstNonEmptyLine(outputText) || "执行完成", 80),
+    summary: terminalSend ?? call.summary ?? clamp(firstNonEmptyLine(outputText) || "执行完成", 80),
     state: isError ? "error" : "ok",
-    errorSummary: isError && outputText ? clamp(firstNonEmptyLine(outputText) || "执行失败", 160) : null,
+    errorSummary:
+      terminalRejected ??
+      (isError && outputText ? clamp(firstNonEmptyLine(outputText) || "执行失败", 160) : null),
     outputText,
     durationMs: durationMsOf(msg),
   };
@@ -211,6 +364,10 @@ export function buildRunningToolModel(
   return {
     toolName: name,
     ...callPart(args, hints),
+    summary:
+      (isTerminalSendCall(name, args)
+        ? terminalSendSummary(args as Record<string, unknown>, null)
+        : null) ?? callPart(args, hints).summary,
     state: "running",
     errorSummary: null,
     outputText: null,

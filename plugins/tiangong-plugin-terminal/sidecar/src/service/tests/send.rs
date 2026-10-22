@@ -108,6 +108,20 @@ async fn 静默长命令返回仍在执行且不接受新命令() {
         "命令结束后应返回完成: {waited}"
     );
     assert!(stdout(&waited).contains("sleep-done"), "{waited}");
+    // issue #707：stdout 首行是状态行（运行中含原命令、完成含退出码），
+    // 真实输出在其后——有新输出时模型也能看到命令仍在执行。
+    assert!(
+        stdout(&first).starts_with("[仍在执行 · 已 "),
+        "续等结果应以运行中状态行开头: {first}"
+    );
+    assert!(
+        stdout(&first).contains("sleep 4; echo sleep-done"),
+        "运行中状态行应带原命令: {first}"
+    );
+    assert!(
+        stdout(&waited).starts_with("[已完成 · 退出码 0]"),
+        "完成结果应以状态行开头: {waited}"
+    );
 
     // 后续命令正常执行，被拒绝的命令从未写入。
     let next = send(&service, &terminal, "echo next-$((40+2))", true, 5).await;

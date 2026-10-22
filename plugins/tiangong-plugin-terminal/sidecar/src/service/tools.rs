@@ -530,10 +530,44 @@ impl TerminalService {
                         None => format!("终端 {target} 已更新，当前内容见 stdout"),
                     }
                 };
+                // stdout 首行放状态行（含原命令与已执行秒数）：续等等待轮次
+                // 有真实输出时模型仍能看到「仍在执行」，不再只能从输出猜测
+                //（issue #673/#707）；前端据此渲染状态标签并隐藏给模型的提示。
+                let stdout = if sent.rejected {
+                    sent.stdout
+                } else {
+                    let command = sent.command.as_deref().unwrap_or("").trim();
+                    let status_line = match sent.status {
+                        Some("completed") => {
+                            let line = format!("[已完成 · 退出码 {}]", sent.exit_code);
+                            if command.is_empty() {
+                                line
+                            } else {
+                                format!("{line} · {command}")
+                            }
+                        }
+                        Some("interactive") => "[交互中 · 等待输入]".to_string(),
+                        Some(_) => {
+                            let elapsed = sent.elapsed_secs.unwrap_or_default();
+                            let line = format!("[仍在执行 · 已 {elapsed} 秒]");
+                            if command.is_empty() {
+                                line
+                            } else {
+                                format!("{line} · {command}")
+                            }
+                        }
+                        None => "[已更新]".to_string(),
+                    };
+                    if sent.stdout.is_empty() {
+                        status_line
+                    } else {
+                        format!("{status_line}\n{}", sent.stdout)
+                    }
+                };
                 ToolOutcome {
                     ok: !sent.rejected,
                     summary,
-                    stdout: Some(sent.stdout),
+                    stdout: Some(stdout),
                     stderr: None,
                     exit_code: sent.exit_code,
                 }

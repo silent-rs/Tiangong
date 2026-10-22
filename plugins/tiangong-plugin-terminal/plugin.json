@@ -51,7 +51,7 @@
     },
     {
       "name": "run_shell",
-      "description": "在终端执行 shell 命令文本（通过 PTY，支持交互式程序）。仅用于需要管道、重定向、变量展开等 shell 语法的单条命令或执行已有脚本；多步操作请用多次 run_command，不要现写多行脚本，也不要用 nohup / & 后台启动（长期服务请用 terminal 的 action=open 新开终端前台运行）。",
+      "description": "在终端执行 shell 命令文本（通过 PTY，支持交互式程序）。仅用于需要管道、重定向、变量展开等 shell 语法的单条命令或执行已有脚本；多步操作请用多次 run_command，不要现写多行脚本，也不要用 nohup / & 后台启动（长期服务请用 terminal 的 action=open 新开终端前台运行）。长构建命令避免 `… 2>&1 | tail -N`：tail 要等管道结束才输出，等待期间完全看不到进度；需要留底时改用 `| tee <日志文件>` 或直接输出。",
       "input_schema": {
         "type": "object",
         "properties": {

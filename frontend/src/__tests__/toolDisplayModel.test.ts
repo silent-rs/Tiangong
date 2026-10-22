@@ -4,6 +4,9 @@ import {
   baseToolName,
   buildRunningToolModel,
   buildToolDisplayModel,
+  isTerminalSendCall,
+  parseTerminalSendStatus,
+  readableTerminalInput,
   stripToolResultHeader,
 } from "@/components/message/toolDisplayModel";
 import type { MessageItem } from "@/components/message/types";
@@ -89,5 +92,68 @@ describe("通用工具行", () => {
     expect(argsSummary({ query: "foo", limit: 5 }, hints)).toBe("query=foo");
     expect(argsSummary({})).toBeNull();
     expect(argsSummary(undefined)).toBeNull();
+  });
+});
+
+describe("终端 send 调用展示（issue #707）", () => {
+  const sendArgs = (input: string) => ({ action: "send", terminal_id: "tty-01", input, enter: true, wait: 110 });
+  const waitOutput =
+    "[仍在执行 · 已 692 秒] · for i in 1 2 3; do make build && break; done 2>&1 | tail -14\n... 编译输出 ...";
+
+  it("解析状态行：运行中含累计秒数与原命令", () => {
+    const status = parseTerminalSendStatus(waitOutput);
+    expect(status?.kind).toBe("running");
+    expect(status?.elapsedSecs).toBe(692);
+    expect(status?.command).toContain("make build");
+    expect(status?.body).toBe("... 编译输出 ...");
+  });
+
+  it("解析状态行：完成/交互/更新与无状态行输出", () => {
+    expect(parseTerminalSendStatus("[已完成 · 退出码 0] · make build\n输出")?.kind).toBe("completed");
+    expect(parseTerminalSendStatus("[已完成 · 退出码 0] · make build\n输出")?.command).toBe("make build");
+    expect(parseTerminalSendStatus("[交互中 · 等待输入]\n输出")?.kind).toBe("interactive");
+    expect(parseTerminalSendStatus("[已更新]")?.kind).toBe("updated");
+    expect(parseTerminalSendStatus("普通输出，无状态行")).toBeNull();
+    expect(parseTerminalSendStatus(null)).toBeNull();
+  });
+
+  it("输入可读化：控制键、作答与普通文本", () => {
+    expect(readableTerminalInput("\\x03")).toBe("发送 Ctrl+C");
+    expect(readableTerminalInput("y\\r")).toBe("输入：y");
+    expect(readableTerminalInput("echo hello")).toBe("echo hello");
+    expect(readableTerminalInput("")).toBeNull();
+  });
+
+  it("续等调用摘要取状态行原命令，不退化到终端 id", () => {
+    const msg = toolMsg("terminal__terminal", "调用工具 terminal：成功\n" + waitOutput);
+    const model = buildToolDisplayModel(msg, sendArgs(""), hints);
+    expect(model.summary).toContain("make build");
+    expect(model.summary).not.toContain("tty-01");
+  });
+
+  it("带输入的发送摘要显示可读输入", () => {
+    const msg = toolMsg("terminal__terminal", "调用工具 terminal：成功\n[已完成 · 退出码 0]\nok");
+    const model = buildToolDisplayModel(msg, sendArgs("\\x03"), hints);
+    expect(model.summary).toBe("发送 Ctrl+C");
+  });
+
+  it("旧版 terminal_send 历史消息同样识别", () => {
+    expect(isTerminalSendCall("terminal__terminal_send", {})).toBe(true);
+    expect(isTerminalSendCall("terminal__terminal", sendArgs(""))).toBe(true);
+    expect(isTerminalSendCall("terminal__terminal", { action: "open" })).toBe(false);
+    expect(isTerminalSendCall("terminal__run_command", {})).toBe(false);
+  });
+
+  it("被拒绝的发送给可读短文案，不展示写给模型的提示", () => {
+    const msg = {
+      ...toolMsg(
+        "terminal__terminal",
+        "调用插件 terminal 的 terminal：失败\nsummary: 未发送：终端 tty-01 上一条命令 `make build` 仍在执行（已 10 秒），本次输入未写入…",
+      ),
+      is_error: true,
+    } as MessageItem;
+    const model = buildToolDisplayModel(msg, sendArgs("echo next"), hints);
+    expect(model.state).toBe("error");
+    expect(model.errorSummary).toBe("未发送：上一条命令仍在执行（输入未写入）");
   });
 });
