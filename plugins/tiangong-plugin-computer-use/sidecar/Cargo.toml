@@ -40,7 +40,7 @@ core-graphics = { version = "0.25", features = ["highsierra", "elcapitan"] }
 
 # Linux 后端：纯 Rust AT-SPI2 实现（zbus 基于 D-Bus）。
 [target.'cfg(target_os = "linux")'.dependencies]
-atspi = { version = "0.22", features = ["tokio", "proxies", "connection", "zbus"] }
+atspi = { version = "0.30", features = ["tokio", "proxies", "connection", "zbus"] }
 
 # Windows 后端：UI Automation 封装（基于 windows-rs）。
 [target.'cfg(target_os = "windows")'.dependencies]

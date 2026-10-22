@@ -23,7 +23,7 @@ use atspi::proxy::action::ActionProxy;
 use atspi::proxy::component::ComponentProxy;
 use atspi::proxy::editable_text::EditableTextProxy;
 use atspi::proxy::text::TextProxy;
-use atspi::{AccessibilityConnection, Interface, InterfaceSet, ObjectRef, Role, State};
+use atspi::{AccessibilityConnection, Interface, InterfaceSet, ObjectRefOwned, Role, State};
 
 use super::{ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult};
 use tiangong_plugin_computer_use_protocol::ops::{
@@ -45,7 +45,7 @@ pub struct LinuxBackend {
     snapshot_seq: AtomicU64,
     /// 快照内控件引用缓存：((snapshot, id) -> ObjectRef)。
     /// ObjectRef 含 D-Bus 服务名和路径，轻量可序列化，用于还原真实控件。
-    elements: RwLock<HashMap<(u64, String), ObjectRef>>,
+    elements: RwLock<HashMap<(u64, String), ObjectRefOwned>>,
     /// 快照节点表缓存：(snapshot -> Vec<ControlNode>)，供 find 筛选与 action 身份校验。
     snapshot_nodes: RwLock<HashMap<u64, Vec<ControlNode>>>,
     /// 已使用的快照版本，用于淘汰旧缓存。
@@ -164,7 +164,7 @@ impl LinuxBackend {
             && let Ok(action_proxy) = build_proxy::<ActionProxy<'_>>(element).await
             && let Ok(raw_actions) = action_proxy.get_actions().await
         {
-            for (name, _, _) in &raw_actions {
+            for atspi::Action { name, .. } in &raw_actions {
                 match name.to_lowercase().as_str() {
                     "click" | "press" | "activate" | "jump" => {
                         if !actions.contains(&Press) {
@@ -285,7 +285,7 @@ impl Backend for LinuxBackend {
             }
             // 缓存 ObjectRef，供 snapshot 通过窗口引用还原（而非依赖列表序号）。
             let id = format!("atspi-app-{idx}");
-            if let Ok(obj_ref) = ObjectRef::try_from(&proxy) {
+            if let Ok(obj_ref) = ObjectRefOwned::try_from(&proxy) {
                 self.elements
                     .write()
                     .unwrap()
@@ -585,8 +585,8 @@ impl Backend for LinuxBackend {
                             };
                             match p.get_actions().await {
                                 Ok(acts) => {
-                                    let idx = acts.iter().position(|(name, _, _)| {
-                                        let lower = name.to_lowercase();
+                                    let idx = acts.iter().position(|a| {
+                                        let lower = a.name.to_lowercase();
                                         needles.iter().any(|n| lower.contains(n))
                                     });
                                     match idx {
@@ -859,7 +859,7 @@ impl LinuxBackend {
         let id = format!("atspi-{snapshot}-{}", nodes.len());
         let parent_index = nodes.len();
         // 缓存 ObjectRef（从 AccessibleProxy 转换）。
-        if let Ok(obj_ref) = atspi::ObjectRef::try_from(element) {
+        if let Ok(obj_ref) = atspi::ObjectRefOwned::try_from(element) {
             self.elements
                 .write()
                 .unwrap()
