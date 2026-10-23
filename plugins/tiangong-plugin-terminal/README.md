@@ -12,11 +12,11 @@ sidecar 握手通过 `tool:<name>` capabilities 注册五个工具 Handler，宿
 
 `run_command` / `run_shell` 不接收终端编号：优先复用当前会话的第一个
 空闲终端，没有可用终端时自动新建并静默建立标签（不展开拓展区）。
-工具结果会返回实际终端编号；`terminal_send` / `terminal_close` 必须用
+工具结果会返回实际终端编号；`terminal`（action=send/close）必须用
 该编号精确操作，且目标终端必须属于当前会话——跨会话操作明确拒绝，
 不回退当前可见会话。
 
-`terminal_send` 默认原样写入 `input`（支持 `\r`、`\n`、`\e`、`\xHH` 等转义），
+`terminal`（action=send）默认原样写入 `input`（支持 `\r`、`\n`、`\e`、`\xHH` 等转义），
 适合向 vi 等编辑器写入纯文本或发送控制按键。设 `enter: true` 时先去掉
 `input` 末尾的一个换行，正文写入后间隔片刻再单独写入回车（`\r`），用于
 执行命令——SSH 等远端行编辑器在正文与回车同包到达时偶发吞掉回车，分开
@@ -39,7 +39,7 @@ SSH 等交互程序内读不到对端进程，按发送前的提示符重新停�
 
 终端里 `&` / `nohup` 启动的后台进程留在登录 shell 的会话里，sidecar 会
 登记这些会话：仍有存活的后台进程时不做空闲退出（退出后新 sidecar 在另一
-个沙箱实例中，无权向其发信号），`terminal_status` 概要以
+个沙箱实例中，无权向其发信号），`terminal(action=status)` 概要以
 `background_jobs` 列出其 pid、进程名与所属终端，供 Agent 用 `kill` 结束。
 
 sidecar 执行中经进度帧请求宿主 App 原语（`host_action`，白名单
@@ -61,7 +61,7 @@ prompt 与工具说明引导 Agent 以 PTY 终端的方式工作：
   复用并保持工作目录与环境，无需把多步拼成一段脚本。`run_shell` 只用于
   执行已有脚本，或需要管道、重定向等 shell 语法的单条命令。
 - 不用 `nohup` / `&` 后台启动。插件支持多终端并行：长期运行的服务用
-  `terminal_open` 新开终端、`terminal_send` 在前台运行，用完 `\x03` 停止。
+  `terminal`（action=open）新开终端、action=send 在前台运行，用完 `\x03` 停止。
 
 sidecar 在 `run_command` / `run_shell` 结果摘要末尾对这两类写法给出替代
 做法（`service/advice.rs`，只提示不拦截，命令照常执行）。
@@ -94,6 +94,6 @@ sidecar 插件必须带官方签名才能启动原生 sidecar（`tauri signer` �
 
 ### Windows 默认终端
 
-Windows 默认使用系统 PowerShell；已设置 `SHELL` 时沿用其选择。就绪探针、参数引用及执行结果按实际 Shell 处理。PowerShell 使用无个人配置的交互会话，避免启动脚本及 PSReadLine 干扰命令边界；不修改系统执行策略。CMD 命令可通过 `run_command` 调用 `cmd.exe` 并传入 `/d`、`/c` 和脚本参数，显式创建的 CMD 终端也可连续执行。
+Windows 默认使用系统 PowerShell；已设置 `SHELL` 时沿用其选择。就绪探针、参数引用及执行结果按实际 Shell 处理。PowerShell 使用无个人配置的交互会话，避免启动脚本及 PSReadLine 干扰命令边界；不修改系统执行策略。CMD 命令可通过 `command` 调用 `cmd.exe` 并传入 `/d`、`/c` 和脚本参数，显式创建的 CMD 终端也可连续执行。
 
 CMD 在 Windows 沙箱内需要读取磁盘根的基本信息；对应的最小权限准备见沙箱 README，不等同于开放磁盘文件访问。

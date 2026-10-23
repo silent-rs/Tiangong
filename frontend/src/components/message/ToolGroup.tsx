@@ -1,17 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
 import type { MessageItem } from "./types";
-import { toolCallIdOf } from "@/api/message";
+import { toolCallIdOf, toolNameOf } from "@/api/message";
 import { formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
   buildFinishedToolModel,
   buildRunningToolModel,
   buildToolDisplayModel,
+  parseContinuationMark,
+  type ParsedContinuation,
   type ToolDisplayModel,
 } from "./toolDisplayModel";
 import { ToolIcon } from "./ToolIcon";
 import { ToolCallCard } from "./toolViews/ToolCallCard";
+import { ContinuationCard } from "./toolViews/ContinuationCard";
 import { ToolViewHost, useToolTitle } from "./toolViews/ToolViewHost";
 import { useToolArgsPresentation } from "./toolArgsPresentation";
 
@@ -86,6 +89,7 @@ function ToolRunRow({
   onToggle,
   startedAtMs,
   pendingCommit = false,
+  extraTrailing,
 }: {
   /** 工具调用 ID（交给工具视图）；旧会话无 ID 时用消息 ID。 */
   callId: string;
@@ -97,6 +101,8 @@ function ToolRunRow({
   startedAtMs?: number;
   /** 已执行完成、结果等待前序工具按序提交。 */
   pendingCommit?: boolean;
+  /** 行尾附加展示（终端续等行的状态标签与续等次数）。 */
+  extraTrailing?: ReactNode;
 }) {
   const isError = model.state === "error";
   const isRunning = model.state === "running";
@@ -154,6 +160,7 @@ function ToolRunRow({
             等待前序结果
           </span>
         )}
+        {extraTrailing}
         {model.durationMs != null && model.durationMs > 0 && (
           <span className={`${pendingCommit ? "" : "ml-auto "}shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums`} title="本次调用耗时">
             {formatToolDuration(model.durationMs)}
@@ -163,6 +170,75 @@ function ToolRunRow({
       {open && (
         <div className="ml-5 mt-0.5 mb-1">
           <ToolCardBody model={model} callId={callId} args={args} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 延续条目的合并行（通用展示机制）：工具结果携带延续声明时，同一 key 的
+ * 连续结果合并为一个逻辑条目（如终端命令的「执行 + 空输入续等」）。
+ * 折叠行显示逻辑标题（原命令）、状态标签、延续次数与累计耗时；展开由
+ * ContinuationCard 按轮次展示。所有展示语义来自延续声明，宿主不按工具名
+ * 解释，任何插件的长任务轮次（构建进度、生成轮次等）都可复用。
+ */
+function ContinuationRow({
+  rounds,
+  expansion,
+  titleOf,
+}: {
+  rounds: { tool: MessageItem; continuation: ParsedContinuation; roundMs: number | null }[];
+  expansion: ExpansionState;
+  titleOf?: (toolName: string, args: unknown) => string | null;
+}) {
+  const first = rounds[0];
+  const last = rounds[rounds.length - 1];
+  const title = last.continuation.mark.title?.trim() || first.continuation.mark.title?.trim() || "";
+  const badge = last.continuation.mark.status_label?.trim() ?? "";
+  const waitCount = rounds.slice(1).filter((round) => !round.continuation.mark.round_label?.trim()).length;
+  // 行尾时间与普通工具行同口径：本次（最后一轮）调用的真实执行时长，
+  // 由宿主自测；命令累计运行时长已含在插件提供的 status_label 里。
+  const lastRoundMs = last.roundMs;
+  const expandKey = first.tool.id;
+  const expanded = expansion.isExpanded(expandKey);
+  const args = undefined;
+  return (
+    <div>
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs transition-colors text-left text-muted-foreground hover:bg-muted/50"
+        onClick={() => expansion.toggle(expandKey)}
+      >
+        {expanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
+        <ToolIcon toolName={toolNameOf(first.tool) || ""} args={args} className="w-3 h-3 shrink-0" />
+        <span className="font-medium shrink-0" title={titleOf?.(toolNameOf(first.tool) || "", args) || "工具执行"}>
+          {titleOf?.(toolNameOf(first.tool) || "", args) || "工具执行"}
+        </span>
+        {title && <span className="truncate opacity-60">{title}</span>}
+        {badge && (
+          <span className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground/70">{badge}</span>
+        )}
+        {waitCount > 0 && (
+          <span className="shrink-0 pl-1 text-[11px] text-muted-foreground/70" title="空输入延续次数">
+            续等 {waitCount} 次
+          </span>
+        )}
+        {lastRoundMs != null && lastRoundMs > 0 && (
+          <span
+            className={`${badge || waitCount > 0 ? "" : "ml-auto "}shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums`}
+            title="本次调用耗时"
+          >
+            {formatToolDuration(lastRoundMs)}
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div className="ml-5 mt-0.5 mb-1">
+          <ContinuationCard
+            command={title || null}
+            rounds={rounds.map((round) => round.continuation)}
+          />
         </div>
       )}
     </div>
@@ -193,6 +269,36 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       />
     );
   };
+  // 延续合并预处理（通用机制）：工具结果携带延续声明时，同一 key 的连续
+  // 结果合并为一个逻辑条目；其余工具保持单条。
+  type GroupItem =
+    | { kind: "tool"; tool: MessageItem }
+    | {
+        kind: "continuation";
+        rounds: { tool: MessageItem; continuation: ParsedContinuation; roundMs: number | null }[];
+      };
+  const items: GroupItem[] = [];
+  for (const tool of tools) {
+    const continuation = parseContinuationMark(
+      buildToolDisplayModel(tool, argsOf?.(tool), hints).outputText,
+    );
+    if (continuation) {
+      // 本轮调用耗时（等待用掉的时长）：与标记里的 elapsed_ms（命令累计
+      // 运行时长，含轮次间隙）是两个口径，展开时分别标注避免误读。
+      const roundMs = buildToolDisplayModel(tool, argsOf?.(tool), hints).durationMs;
+      const previous = items[items.length - 1];
+      if (
+        previous?.kind === "continuation" &&
+        previous.rounds[previous.rounds.length - 1].continuation.mark.key === continuation.mark.key
+      ) {
+        previous.rounds.push({ tool, continuation, roundMs });
+      } else {
+        items.push({ kind: "continuation", rounds: [{ tool, continuation, roundMs }] });
+      }
+      continue;
+    }
+    items.push({ kind: "tool", tool });
+  }
 
   return (
     <div>
@@ -204,7 +310,20 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
           <span>{brief}</span>
         </div>
       )}
-      <div className="ml-4 space-y-0">{tools.map(renderToolItem)}</div>
+      <div className="ml-4 space-y-0">
+        {items.map((item) =>
+          item.kind === "tool" ? (
+            renderToolItem(item.tool)
+          ) : (
+            <ContinuationRow
+              key={item.rounds[0].tool.id}
+              rounds={item.rounds}
+              expansion={expansion}
+              titleOf={titleOf}
+            />
+          ),
+        )}
+      </div>
       {runningCalls?.map((call) => (
         <div key={`running-${call.id}`} className="ml-4">
           <ToolRunRow

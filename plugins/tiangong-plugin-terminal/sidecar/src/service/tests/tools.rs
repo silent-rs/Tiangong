@@ -332,8 +332,8 @@ async fn terminal_send_同会话输入送达并返回画面() {
     let sent = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": "echo sent-ok\r",
                     "wait": 3,
@@ -393,8 +393,8 @@ async fn terminal_send_自动回车执行且缺省保持纯文本() {
     let typed = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": "echo plain-$((40+2))",
                     "wait": 1,
@@ -417,8 +417,8 @@ async fn terminal_send_自动回车执行且缺省保持纯文本() {
     let entered = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": "",
                     "enter": true,
@@ -442,8 +442,8 @@ async fn terminal_send_自动回车执行且缺省保持纯文本() {
     let once = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": "echo auto-$((1+1))\\n",
                     "enter": true,
@@ -474,8 +474,8 @@ async fn terminal_open后的唯一编号可继续交互() {
     let opened = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_open",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "open",}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -495,8 +495,8 @@ async fn terminal_open后的唯一编号可继续交互() {
     let sent = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": "echo opened\r",
                     "wait": 3,
@@ -555,8 +555,8 @@ async fn 跨会话操作被明确拒绝() {
     let sent = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({"terminal_id": terminal, "input": "ls"}),
+                "terminal",
+                serde_json::json!({"action": "send","terminal_id": terminal, "input": "ls"}),
                 Some(("session-b", workspace.as_str())),
             ))
             .await,
@@ -565,8 +565,8 @@ async fn 跨会话操作被明确拒绝() {
     let closed = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_close",
-                serde_json::json!({"terminal_id": terminal}),
+                "terminal",
+                serde_json::json!({"action": "close","terminal_id": terminal}),
                 Some(("session-b", workspace.as_str())),
             ))
             .await,
@@ -577,8 +577,8 @@ async fn 跨会话操作被明确拒绝() {
     let closed_by_owner = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_close",
-                serde_json::json!({"terminal_id": terminal}),
+                "terminal",
+                serde_json::json!({"action": "close","terminal_id": terminal}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -587,8 +587,8 @@ async fn 跨会话操作被明确拒绝() {
     let closed_missing = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_close",
-                serde_json::json!({"terminal_id": "tty-not-exist"}),
+                "terminal",
+                serde_json::json!({"action": "close","terminal_id": "tty-not-exist"}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -638,8 +638,8 @@ async fn 多会话各自持有独立终端() {
     let closed = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_close",
-                serde_json::json!({"terminal_id": terminal_a}),
+                "terminal",
+                serde_json::json!({"action": "close","terminal_id": terminal_a}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -680,8 +680,8 @@ async fn terminal_open_返回独立编号终端() {
     let opened = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_open",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "open",}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -710,8 +710,8 @@ async fn terminal_send_close_缺少terminal_id明确失败() {
     let sent = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({"input": "ls"}),
+                "terminal",
+                serde_json::json!({"action": "send","input": "ls"}),
                 scope,
             ))
             .await,
@@ -725,7 +725,11 @@ async fn terminal_send_close_缺少terminal_id明确失败() {
     );
     let closed = outcome_of(
         service
-            .dispatch_test(tool_request("terminal_close", serde_json::json!({}), scope))
+            .dispatch_test(tool_request(
+                "terminal",
+                serde_json::json!({"action": "close",}),
+                scope,
+            ))
             .await,
     );
     assert_eq!(closed["ok"], false);
@@ -780,8 +784,8 @@ async fn terminal_status_概要详情与跨会话拒绝() {
     let listed = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "status",}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -839,8 +843,8 @@ async fn terminal_status_概要详情与跨会话拒绝() {
     let detail = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({ "terminal_id": "status-idle" }),
+                "terminal",
+                serde_json::json!({"action": "status", "terminal_id": "status-idle" }),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -877,8 +881,8 @@ async fn terminal_status_概要详情与跨会话拒绝() {
     let denied = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({ "terminal_id": "status-idle" }),
+                "terminal",
+                serde_json::json!({"action": "status", "terminal_id": "status-idle" }),
                 Some(("session-b", workspace.as_str())),
             ))
             .await,
@@ -895,8 +899,8 @@ async fn terminal_status_概要详情与跨会话拒绝() {
     let missing = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({ "terminal_id": "status-none" }),
+                "terminal",
+                serde_json::json!({"action": "status", "terminal_id": "status-none" }),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,

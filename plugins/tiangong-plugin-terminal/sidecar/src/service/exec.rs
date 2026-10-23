@@ -256,7 +256,7 @@ impl TerminalService {
                 let mut response = parsed.into_response(false);
                 response.interactive_mode = true;
                 response.stderr =
-                    "命令长时间无输出，判定为交互程序正在等待输入；终端已转入交互状态，可用 terminal_send 继续操作"
+                    "命令长时间无输出，判定为交互程序正在等待输入；终端已转入交互状态，可用 terminal（action=send）继续操作"
                         .to_string();
                 return Ok(response);
             }

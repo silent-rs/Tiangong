@@ -89,6 +89,48 @@ impl ToolOutcome {
     }
 }
 
+/// 控制键的可读名（延续声明的 round_label 用）。
+fn control_key_name(ch: char) -> Option<&'static str> {
+    match ch {
+        '\x03' => Some("Ctrl+C"),
+        '\x04' => Some("Ctrl+D"),
+        '\x1a' => Some("Ctrl+Z"),
+        '\x15' => Some("Ctrl+U"),
+        '\x17' => Some("Ctrl+W"),
+        '\x12' => Some("Ctrl+R"),
+        '\x0c' => Some("Ctrl+L"),
+        '\x01' => Some("Ctrl+A"),
+        '\x05' => Some("Ctrl+E"),
+        '\x02' => Some("Ctrl+B"),
+        '\x06' => Some("Ctrl+F"),
+        '\x0e' => Some("Ctrl+N"),
+        '\x10' => Some("Ctrl+P"),
+        _ => None,
+    }
+}
+
+/// 终端输入的可读轮次标签：纯控制键 →「发送 Ctrl+C」，带回车的作答 →
+/// 「输入：y」，普通文本原样；空输入返回空串（界面按续等展示）。
+fn send_round_label(input: &str) -> String {
+    let decoded = super::input::decode_terminal_escapes(input);
+    let body = decoded.trim_end_matches(['\r', '\n']);
+    if body.is_empty() {
+        return String::new();
+    }
+    if super::input::is_control_keys(body) {
+        let names = body
+            .chars()
+            .filter_map(control_key_name)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        return format!("发送 {names}");
+    }
+    if decoded.ends_with('\r') || decoded.ends_with('\n') {
+        return format!("输入：{body}");
+    }
+    body.to_string()
+}
+
 #[derive(Debug, Deserialize)]
 struct RunCommandArgs {
     pub(super) cmd: String,
@@ -446,10 +488,35 @@ impl TerminalService {
             tracing::debug!(
                 terminal_id = instance_id,
                 scope_id = scope.session_id,
-                "terminal_open 未等到前端附着，按无前台页面继续"
+                "terminal(action=open) 未等到前端附着，按无前台页面继续"
             );
         }
         ToolOutcome::ok(format!("已打开终端 {instance_id}"))
+    }
+
+    /// terminal：终端管理统一入口（action 模式：open/send/close/status）。
+    ///
+    /// 参数结构体不使用 deny_unknown_fields，`action` 字段可随负载透传给
+    /// 各子处理（与 fs 插件的 file_read action 模式一致）。
+    pub(super) async fn tool_terminal(
+        &self,
+        scope: &ToolScope,
+        payload: serde_json::Value,
+    ) -> ToolOutcome {
+        let action = payload
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        match action {
+            "open" => self.tool_terminal_open(scope).await,
+            "send" => self.tool_terminal_send(scope, payload).await,
+            "close" => self.tool_terminal_close(scope, payload).await,
+            "status" => self.tool_terminal_status(scope, payload),
+            other => ToolOutcome::fail(format!(
+                "terminal 缺少或未知 action（{other:?}）：应为 open / send / close / status"
+            )),
+        }
     }
 
     /// terminal_send：向指定终端发送输入；目标必须属于当前会话。
@@ -460,12 +527,15 @@ impl TerminalService {
     ) -> ToolOutcome {
         let parsed = match serde_json::from_value::<TerminalSendArgs>(payload) {
             Ok(parsed) => parsed,
-            Err(error) => return ToolOutcome::fail(format!("terminal_send 参数无效：{error}")),
+            Err(error) => {
+                return ToolOutcome::fail(format!("terminal(action=send) 参数无效：{error}"));
+            }
         };
         let target = parsed.terminal_id.trim().to_string();
         if target.is_empty() {
-            return ToolOutcome::fail("terminal_send 缺少 terminal_id".to_string());
+            return ToolOutcome::fail("terminal(action=send) 缺少 terminal_id".to_string());
         }
+        let round_label = send_round_label(&parsed.input);
         let sent = self
             .send_to_session(SendRequest {
                 scope_id: scope.session_id.clone(),
@@ -494,7 +564,7 @@ impl TerminalService {
                         Some("completed") => format!("终端 {target} 命令已执行完成，输出见 stdout"),
                         Some("interactive") => format!(
                             "终端 {target} 已进入交互程序（如 ssh 登录、vi、REPL），正在等待输入；\
-后续命令继续用 terminal_send 发送"
+后续命令继续用 terminal（action=send）发送"
                         ),
                         Some(_) => format!(
                             "终端 {target} 命令 `{command}` 仍在执行（已 {elapsed} 秒），stdout 为截至目前的新增输出；\
@@ -503,10 +573,46 @@ impl TerminalService {
                         None => format!("终端 {target} 已更新，当前内容见 stdout"),
                     }
                 };
+                // stdout 首行为通用延续标记行（约定：`@continuation ` + 单行 JSON）：
+                // 声明本结果是同一逻辑执行的延续轮次（如终端命令续等），宿主
+                // 界面按 key 合并展示，模型也能从 status_label 看到命令状态
+                //（issue #673/#707）。字段全为展示语义，任何插件的长任务轮次
+                //（构建进度、生成轮次等）都可复用该约定。
+                let command = sent.command.clone().unwrap_or_default();
+                let trimmed_command = command.trim().to_string();
+                let stdout = if sent.rejected {
+                    sent.stdout
+                } else {
+                    let (kind, label) = match sent.status {
+                        Some("completed") => {
+                            ("completed", format!("已完成 · 退出码 {}", sent.exit_code))
+                        }
+                        Some("interactive") => ("interactive", "交互中 · 等待输入".to_string()),
+                        Some(_) => (
+                            "running",
+                            format!("仍在执行 · 已 {} 秒", sent.elapsed_secs.unwrap_or_default()),
+                        ),
+                        None => ("updated", "已更新".to_string()),
+                    };
+                    let marker = serde_json::json!({
+                        "key": format!("terminal-send:{target}"),
+                        "title": trimmed_command,
+                        "status": kind,
+                        "status_label": label,
+                        "elapsed_ms": sent.elapsed_secs.map(|secs| secs * 1000),
+                        "round_label": round_label,
+                    });
+                    let marker_line = format!("@continuation {marker}");
+                    if sent.stdout.is_empty() {
+                        marker_line
+                    } else {
+                        format!("{marker_line}\n{}", sent.stdout)
+                    }
+                };
                 ToolOutcome {
                     ok: !sent.rejected,
                     summary,
-                    stdout: Some(sent.stdout),
+                    stdout: Some(stdout),
                     stderr: None,
                     exit_code: sent.exit_code,
                 }
@@ -523,12 +629,14 @@ impl TerminalService {
     ) -> ToolOutcome {
         let parsed = match serde_json::from_value::<TerminalCloseArgs>(payload) {
             Ok(parsed) => parsed,
-            Err(error) => return ToolOutcome::fail(format!("terminal_close 参数无效：{error}")),
+            Err(error) => {
+                return ToolOutcome::fail(format!("terminal(action=close) 参数无效：{error}"));
+            }
         };
         let target = parsed.terminal_id.trim().to_string();
         if target.is_empty() {
             return ToolOutcome::fail(
-                "terminal_close 缺少 terminal_id，未关闭任何终端".to_string(),
+                "terminal(action=close) 缺少 terminal_id，未关闭任何终端".to_string(),
             );
         }
         // App 标签可能先于 PTY 退出被用户关闭，关闭操作幂等；但归属

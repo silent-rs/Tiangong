@@ -42,8 +42,8 @@ async fn send(
     outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_send",
-                serde_json::json!({
+                "terminal",
+                serde_json::json!({"action": "send",
                     "terminal_id": terminal,
                     "input": input,
                     "enter": enter,
@@ -87,8 +87,8 @@ async fn 静默长命令返回仍在执行且不接受新命令() {
     // 命令未结束时发送新命令：必须拒绝且不写入 PTY。
     let rejected = service
         .dispatch_test(tool_request(
-            "terminal_send",
-            serde_json::json!({
+            "terminal",
+            serde_json::json!({"action": "send",
                 "terminal_id": terminal,
                 "input": "echo should-not-run",
                 "enter": true,
@@ -108,6 +108,41 @@ async fn 静默长命令返回仍在执行且不接受新命令() {
         "命令结束后应返回完成: {waited}"
     );
     assert!(stdout(&waited).contains("sleep-done"), "{waited}");
+    // issue #707：stdout 首行是状态行（运行中含原命令、完成含退出码），
+    // 真实输出在其后——有新输出时模型也能看到命令仍在执行。
+    // issue #707：延续标记行（通用约定）——同 key 的连续结果由界面合并，
+    // 模型也能从 status_label 看到命令状态。
+    let out = stdout(&first);
+    assert!(
+        out.starts_with("@continuation {"),
+        "结果应以延续标记行开头: {first}"
+    );
+    assert!(
+        out.contains("\"status_label\":\"仍在执行 · 已 "),
+        "标记行应带运行中状态: {first}"
+    );
+    assert!(
+        out.contains("\"title\":\"sleep 4; echo sleep-done\""),
+        "标记行应带原命令: {first}"
+    );
+    assert!(
+        out.contains(&format!("\"key\":\"terminal-send:{terminal}\"")),
+        "标记行 key 应带终端编号: {first}"
+    );
+    assert!(
+        out.contains("\"round_label\":\"sleep 4; echo sleep-done\""),
+        "带命令的首轮 round_label 为命令文本: {first}"
+    );
+    let out = stdout(&waited);
+    assert!(
+        out.contains("\"status_label\":\"已完成 · 退出码 0\""),
+        "完成结果标记行应为已完成: {waited}"
+    );
+    assert!(
+        out.contains("\"round_label\":\"\""),
+        "空输入续等的 round_label 为空（界面按续等展示）: {waited}"
+    );
+    assert!(out.contains("sleep-done"), "{waited}");
 
     // 后续命令正常执行，被拒绝的命令从未写入。
     let next = send(&service, &terminal, "echo next-$((40+2))", true, 5).await;
@@ -509,8 +544,8 @@ async fn 终端关闭后遗留的后台作业可查询并结束() {
     let status = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "status",}),
                 Some((SCOPE, workspace.as_str())),
             ))
             .await,
@@ -536,8 +571,8 @@ async fn 终端关闭后遗留的后台作业可查询并结束() {
     let other = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal_status",
-                serde_json::json!({}),
+                "terminal",
+                serde_json::json!({"action": "status",}),
                 Some(("session-other", workspace.as_str())),
             ))
             .await,
@@ -597,7 +632,7 @@ async fn 后台启动与多行脚本附带用法提示且照常执行() {
     assert_eq!(background["ok"], true, "{background}");
     assert!(stdout(&background).contains("started"), "命令照常执行");
     assert!(
-        summary(&background).contains("terminal_open"),
+        summary(&background).contains("terminal(action=open)"),
         "后台启动应提示改用独立终端: {background}"
     );
 
