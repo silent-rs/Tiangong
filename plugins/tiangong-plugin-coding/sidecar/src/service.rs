@@ -218,6 +218,10 @@ impl CodingService {
         operation: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, DispatchError> {
+        // 宿主清单直连（v2 无 wasm 桥接）：4 个工具操作的调用参数不带
+        // workspace/full_trust（原由 WASM set_workspace 缓存注入），这里从
+        // 宿主注入的请求上下文补齐；UI 的 branches/switch 自带 workspace 不受影响。
+        let payload = inject_tool_context(payload, operation);
         macro_rules! decode {
             ($ty:ty) => {
                 serde_json::from_value::<$ty>(payload)
@@ -228,27 +232,51 @@ impl CodingService {
             HANDSHAKE_OPERATION => self.handshake().map_err(DispatchError::Internal),
             name if name == ProjectContext::NAME => {
                 let request = decode!(WorkspaceRequest);
-                serde_json::to_value(self.project_context(&request)?)
-                    .context("序列化项目上下文失败")
-                    .map_err(DispatchError::Internal)
+                tool_outcome(
+                    true,
+                    "已发现当前项目开发上下文",
+                    &self.project_context(&request)?,
+                    Vec::new(),
+                )
             }
             name if name == Preflight::NAME => {
                 let request = decode!(PreflightRequest);
-                serde_json::to_value(self.preflight(&request)?)
-                    .context("序列化开发前检查失败")
-                    .map_err(DispatchError::Internal)
+                let response = self.preflight(&request)?;
+                let ok = response.blockers.is_empty();
+                tool_outcome(
+                    ok,
+                    if ok {
+                        "开发前检查完成"
+                    } else {
+                        "开发前检查发现阻碍"
+                    },
+                    &response,
+                    response.blockers.clone(),
+                )
             }
             name if name == Checkpoint::NAME => {
                 let request = decode!(CheckpointRequest);
-                serde_json::to_value(self.save_checkpoint(&request)?)
-                    .context("序列化进度记录失败")
-                    .map_err(DispatchError::Internal)
+                tool_outcome(
+                    true,
+                    "开发进度已记录",
+                    &self.save_checkpoint(&request)?,
+                    Vec::new(),
+                )
             }
             name if name == Review::NAME => {
                 let request = decode!(ReviewRequest);
-                serde_json::to_value(review(&request)?)
-                    .context("序列化交付审查失败")
-                    .map_err(DispatchError::Internal)
+                let response = review(&request)?;
+                let ok = response.ready;
+                tool_outcome(
+                    ok,
+                    if ok {
+                        "交付审查通过"
+                    } else {
+                        "交付审查仍有未完成项；继续处理并重新审查，不要结束当前任务"
+                    },
+                    &response,
+                    response.notes.clone(),
+                )
             }
             name if name == Branches::NAME => {
                 let request = decode!(BranchesRequest);
@@ -274,10 +302,10 @@ impl CodingService {
             protocol_version: PROTOCOL_VERSION.to_string(),
             business_protocol: CODING_PROTOCOL_VERSION,
             capabilities: vec![
-                TOOL_PROJECT_CONTEXT.to_string(),
-                TOOL_PREFLIGHT.to_string(),
-                TOOL_CHECKPOINT.to_string(),
-                TOOL_REVIEW.to_string(),
+                format!("tool:{TOOL_PROJECT_CONTEXT}"),
+                format!("tool:{TOOL_PREFLIGHT}"),
+                format!("tool:{TOOL_CHECKPOINT}"),
+                format!("tool:{TOOL_REVIEW}"),
             ],
             instance_id: format!("coding-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
@@ -1791,6 +1819,47 @@ fn normalize_relative_path(path: &str) -> String {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct CheckpointStore {
     entries: Vec<SavedCheckpoint>,
+}
+
+/// 工具操作的参数补齐：注入宿主权威工作区与信任模式（载荷未携带时）。
+fn inject_tool_context(mut payload: serde_json::Value, operation: &str) -> serde_json::Value {
+    let is_tool = matches!(
+        operation,
+        "project_context" | "preflight" | "checkpoint" | "review"
+    );
+    if !is_tool || !payload.is_object() {
+        return payload;
+    }
+    if let Some(context) = tiangong_plugin_sidecar::invocation_context() {
+        let object = payload.as_object_mut().expect("is_object 已校验");
+        object
+            .entry("workspace")
+            .or_insert_with(|| serde_json::Value::String(context.workspace.clone()));
+        // 直连通道暂不携带信任模式，按受限默认；影响仅限提示文案。
+        object
+            .entry("full_trust")
+            .or_insert_with(|| serde_json::Value::Bool(false));
+    }
+    payload
+}
+
+/// 工具结果（ToolOutcome 形状；摘要与错误文案沿用原 WASM 桥接）。
+fn tool_outcome<T: serde::Serialize>(
+    ok: bool,
+    summary: &str,
+    value: &T,
+    errors: Vec<String>,
+) -> Result<serde_json::Value, DispatchError> {
+    let stdout = serde_json::to_string_pretty(value)
+        .context("序列化 Coding 工具结果失败")
+        .map_err(DispatchError::Internal)?;
+    Ok(serde_json::json!({
+        "ok": ok,
+        "summary": summary,
+        "stdout": stdout,
+        "stderr": errors.join("\n"),
+        "exit_code": if ok { 0 } else { 1 },
+    }))
 }
 
 #[cfg(test)]

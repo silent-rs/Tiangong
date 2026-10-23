@@ -3,10 +3,7 @@
   "id": "coding",
   "name": "Coding",
   "description": "开发工作流：项目上下文发现、开发前检查、任务进度记录、交付审查，输入框提供分支切换。",
-  "version": "0.2.3",
-  "wasm": {
-    "binary": "tiangong_plugin_coding_wasm.wasm"
-  },
+  "version": "0.2.4",
   "sidecar": {
     "binary": "tiangong-coding-sidecar",
     "transport_protocol": "0.1.0",
@@ -16,8 +13,9 @@
     "lifecycle": "on_demand"
   },
   "permissions": [
+    "bridge.call",
     "sidecar.invoke",
-    "bridge.call"
+    "tool.provide"
   ],
   "ui": {
     "sandbox": "shadow",
@@ -27,7 +25,9 @@
         "id": "branch-switcher",
         "title": "分支切换",
         "entry": "app/index.html",
-        "context": ["session"]
+        "context": [
+          "session"
+        ]
       }
     ]
   },
@@ -35,5 +35,205 @@
     "desktop",
     "cli",
     "server"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true
+  },
+  "tools": [
+    {
+      "name": "coding_project_context",
+      "description": "发现当前工作区的项目类型、规则与工作流文件、版本控制状态及可用检查命令。进入不熟悉的项目或需要确定验证方式时使用；此工具只读取和分析，不修改项目。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "当前任务；提供后只恢复与该任务匹配的进度"
+          }
+        }
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "coding_preflight",
+      "description": "在开始实际修改前核对任务说明、项目约定、工作区状态和完成标准。只返回阻碍与提醒，不创建分支、不修改文件。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "本次需要完成的开发任务"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "coding_checkpoint",
+      "description": "记录长任务的完成标准、进展、改动和真实验证结果，供后续轮次恢复。记录保存在插件私有目录，不写入项目仓库。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "当前任务"
+          },
+          "completion_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可验证的完成标准"
+          },
+          "completed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "已完成事项"
+          },
+          "changed_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "本任务已修改文件"
+          },
+          "verification": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "实际执行的检查或验证"
+                },
+                "passed": {
+                  "type": "boolean",
+                  "description": "是否通过"
+                },
+                "details": {
+                  "type": "string",
+                  "description": "关键结果或失败原因"
+                },
+                "evidence": {
+                  "type": "object",
+                  "description": "真实执行痕迹；声明通过但缺少有效证据（exit_code 为 0 且带命令行）时不计入验证完成",
+                  "properties": {
+                    "command": {
+                      "type": "string",
+                      "description": "实际执行的命令行"
+                    },
+                    "exit_code": {
+                      "type": "integer",
+                      "description": "命令退出码，通过应为 0"
+                    },
+                    "output_tail": {
+                      "type": "string",
+                      "description": "输出尾部摘录（可选）"
+                    }
+                  },
+                  "required": [
+                    "command",
+                    "exit_code"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "passed"
+              ]
+            },
+            "description": "已实际执行的验证结果；未运行时保持为空。声明通过必须附 evidence"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "当前外部阻碍"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "coding_review",
+      "description": "交付前核对分支与工作区的实际改动范围和验证结果。自动选择上游基线；这只是交付范围检查，不替代代码质量审查，也不修改、提交或清理改动。未通过时必须继续处理并重新审查，不能直接结束任务。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "base_ref": {
+            "type": "string",
+            "description": "可选 Git 基线引用；默认自动选择上游分支，其次远端默认分支或本地主分支"
+          },
+          "allowed_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可选的少量允许文件或目录前缀；为空时只报告实际范围，不判断越界"
+          },
+          "verification": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "实际执行的检查或验证"
+                },
+                "passed": {
+                  "type": "boolean",
+                  "description": "是否通过"
+                },
+                "details": {
+                  "type": "string",
+                  "description": "关键结果或失败原因"
+                },
+                "evidence": {
+                  "type": "object",
+                  "description": "真实执行痕迹；声明通过但缺少有效证据（exit_code 为 0 且带命令行）时不计入验证完成",
+                  "properties": {
+                    "command": {
+                      "type": "string",
+                      "description": "实际执行的命令行"
+                    },
+                    "exit_code": {
+                      "type": "integer",
+                      "description": "命令退出码，通过应为 0"
+                    },
+                    "output_tail": {
+                      "type": "string",
+                      "description": "输出尾部摘录（可选）"
+                    }
+                  },
+                  "required": [
+                    "command",
+                    "exit_code"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "passed"
+              ]
+            },
+            "description": "已实际执行的验证结果；未运行时保持为空。声明通过必须附 evidence"
+          }
+        }
+      },
+      "timeout_ms": 60000
+    }
+  ],
+  "prompt": [
+    "## Coding 工作模式\n\n处理需要修改代码、配置或工程文件的任务时，遵循以下通用流程：\n\n1. 开始前明确可验证的完成标准。先发现并遵循当前项目已有的规则、需求、规划、任务管理和贡献约定，不假设它们使用固定文件名或固定流程；只有项目确实采用相关记录时才核对和维护。\n2. 面对不熟悉的项目，先携带当前任务调用 `coding_project_context` 获取结构化上下文，再读取其中与当前任务有关的规则和项目文件。实际修改前调用 `coding_preflight` 核对任务边界与工作区风险。\n3. 先使用可用的检索能力缩小范围，再精确搜索并按需读取文件；根据真实代码和配置作出判断，不猜测项目结构、依赖或行为。\n4. 只做满足需求所需的最小改动，复用项目已有模式。不要覆盖、清理或混入用户原有工作，也不要未经授权执行提交、推送、合并或破坏性操作。\n5. 根据项目自己的清单、脚本、持续集成配置和规则选择最小充分验证，不预设语言、框架、包管理器或命令。所有命令使用合理时限；需要持续交互时才使用终端能力。\n6. 验证失败时读取真实输出，修复后重新运行。长任务可用 `coding_checkpoint` 记录进度；交付前用 `coding_review` 自动核对分支与工作区改动范围和实际验证结果。该检查不能替代代码质量审查；未通过时继续修复并重新审查。\n7. 不以单轮回复或阶段总结为任务边界。进入完成度判断或总结阶段时，只要仍有能够自行执行的工作，首行必须准确输出 `[NEED_MORE_WORK]`，让系统继续执行；不要向用户交付阶段性未完成报告，也不要要求用户发送“继续”。\n8. 未完成、编译或验证失败、审查未通过、待同步记录、工作量较大、已执行多轮、时间或上下文消耗都不是外部阻碍，必须继续处理。只有缺少必要的用户决定、授权、凭据，或无法替代的外部服务、硬件和资源时才可暂停并说明具体缺口。\n9. 只有需求全部完成且相关验证通过后才结束，并用简单直白的语言说明完成内容和结果。\n\n通用文件、检索、命令和终端能力继续由现有工具提供；Coding 插件只补充开发工作流、项目上下文、进度记录和交付审查，不重复实现这些原子能力。"
   ]
 }
