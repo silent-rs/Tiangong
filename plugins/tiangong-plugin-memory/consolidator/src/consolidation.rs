@@ -90,6 +90,8 @@ pub struct ConsolidationOptions {
     pub importance_floor: f64,
     /// 最多处理多少条记忆（0 表示全部）。
     pub max_nodes: usize,
+    /// 跳过最新的 N 条记忆再开始扫描（配合扫描上限分批处理全库）。
+    pub offset: usize,
 }
 
 impl Default for ConsolidationOptions {
@@ -106,6 +108,7 @@ impl Default for ConsolidationOptions {
             stale_days: DEFAULT_STALE_DAYS,
             importance_floor: DEFAULT_IMPORTANCE_FLOOR,
             max_nodes: 0,
+            offset: 0,
         }
     }
 }
@@ -115,9 +118,11 @@ impl Default for ConsolidationOptions {
 pub struct ConsolidationReport {
     /// 扫描到的活跃记忆数。
     pub scanned: usize,
+    /// 分批扫描的批次数（全库超过单批上限时 > 1）。
+    pub pages: usize,
     /// 实际处理（作为主记忆）的条数。
     pub processed: usize,
-    /// 未处理的剩余条数（受 `max_nodes` 上限或扫描上限影响）。
+    /// 未处理的剩余条数（受 `max_nodes` 单批上限影响）。
     pub remaining: usize,
     /// 发生合并的组数。
     pub merged_groups: usize,
@@ -162,8 +167,8 @@ impl ConsolidationReport {
         );
         let _ = writeln!(
             out,
-            "- 检索后端：{}；扫描活跃记忆：{}",
-            self.retrieval_backend, self.scanned
+            "- 检索后端：{}；扫描活跃记忆：{}（{} 批）",
+            self.retrieval_backend, self.scanned, self.pages
         );
         let _ = writeln!(
             out,
@@ -214,13 +219,45 @@ pub async fn run_consolidation(
         dry_run: options.dry_run,
         ..Default::default()
     };
-    // 先扫描全部活跃记忆；max_nodes 只约束「处理」条数，剩余量据此报告。
-    let nodes = collect_active_nodes(handle).await;
-    report.scanned = nodes.len();
+    // 全库分批：每批扫描上限内的活跃记忆，整理完再取下一批（跳过已整理的
+    // 最新若干条），直到某批不足上限即全库整理完成。`offset` 用于从指定位置
+    // 开始（断点续跑），`max_nodes` 约束单批处理条数。
+    let mut skip = options.offset;
+    loop {
+        let nodes = collect_active_nodes(handle, skip).await;
+        if nodes.is_empty() {
+            break;
+        }
+        let page = nodes.len();
+        report.pages += 1;
+        report.scanned += page;
+        if let Some(callback) = progress {
+            callback(&format!(
+                "第 {} 批：扫描到 {} 条活跃记忆（累计跳过最新 {} 条）",
+                report.pages, page, skip
+            ));
+        }
+        consolidate_page(handle, &nodes, options, progress, &mut report).await;
+        skip += page;
+        if page < PAGE_LIMIT {
+            break;
+        }
+    }
+    report
+}
+
+/// 整理一批记忆：相似检索 → 逐条处理（过滤已处理）。
+async fn consolidate_page(
+    handle: &MemoryHandle,
+    nodes: &[MemoryNode],
+    options: &ConsolidationOptions,
+    progress: Option<ConsolidationProgress<'_>>,
+    report: &mut ConsolidationReport,
+) {
     let by_id: HashMap<&str, &MemoryNode> =
         nodes.iter().map(|node| (node.id.as_str(), node)).collect();
     // 逐条向量检索：一次性算出每条记忆的相似候选。
-    let candidates = match build_candidates(handle, &nodes, &by_id, options, progress).await {
+    let candidates = match build_candidates(handle, nodes, &by_id, options, progress).await {
         Ok((candidates, backend)) => {
             report.retrieval_backend = backend;
             candidates
@@ -228,20 +265,22 @@ pub async fn run_consolidation(
         Err(err) => {
             report
                 .errors
-                .push(format!("相似检索失败，本次仅执行低质量遗忘：{err:#}"));
+                .push(format!("相似检索失败，本批仅执行低质量遗忘：{err:#}"));
             report.retrieval_backend = "unavailable";
             HashMap::new()
         }
     };
     let mut processed: HashSet<String> = HashSet::new();
-    for node in &nodes {
+    let mut handled = 0;
+    for node in nodes {
         if processed.contains(&node.id) {
             continue;
         }
-        if options.max_nodes > 0 && report.processed >= options.max_nodes {
+        if options.max_nodes > 0 && handled >= options.max_nodes {
             break;
         }
         processed.insert(node.id.clone());
+        handled += 1;
         report.processed += 1;
         if let Some(callback) = progress {
             callback(&format!(
@@ -258,7 +297,7 @@ pub async fn run_consolidation(
             &candidates,
             options,
             &mut processed,
-            &mut report,
+            report,
         )
         .await
         {
@@ -267,17 +306,15 @@ pub async fn run_consolidation(
                 .push(format!("整理记忆 {} 失败：{err:#}", node.id));
         }
     }
-    report.remaining = nodes
+    report.remaining += nodes
         .iter()
         .filter(|node| !processed.contains(&node.id))
         .count();
-    report
 }
-
-/// 分页拉取全部活跃记忆（按更新时间从新到旧）。
-async fn collect_active_nodes(handle: &MemoryHandle) -> Vec<MemoryNode> {
+/// 分页拉取活跃记忆（按更新时间从新到旧）；`skip` 跳过最新的若干条。
+async fn collect_active_nodes(handle: &MemoryHandle, skip: usize) -> Vec<MemoryNode> {
     let mut all = Vec::new();
-    let mut offset = 0;
+    let mut offset = skip;
     loop {
         let batch = handle
             .list_nodes(MemoryListQuery {
@@ -1402,6 +1439,7 @@ mod tests {
     fn render_reports_counts() {
         let report = ConsolidationReport {
             scanned: 10,
+            pages: 1,
             processed: 4,
             remaining: 6,
             merged_groups: 2,

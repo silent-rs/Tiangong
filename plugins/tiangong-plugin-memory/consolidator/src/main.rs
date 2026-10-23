@@ -45,9 +45,12 @@ struct Cli {
     /// 每条记忆的相似候选检索数，缺省 12
     #[arg(long, default_value_t = DEFAULT_CANDIDATE_LIMIT)]
     candidate_limit: usize,
-    /// 最多处理多少条记忆，0 表示全部
+    /// 单批最多处理多少条记忆，0 表示不限
     #[arg(long, default_value_t = 0)]
     max_nodes: usize,
+    /// 跳过最新的 N 条记忆再开始整理（断点续跑 / 跳过已整理批次）
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
     /// 试运行：只报告不落库
     #[arg(long)]
     dry_run: bool,
@@ -152,6 +155,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         dry_run: cli.dry_run,
         forget_low_quality: !cli.keep_low_quality,
         max_nodes: cli.max_nodes,
+        offset: cli.offset,
         ..Default::default()
     };
     if consolidation.llm.is_none() {

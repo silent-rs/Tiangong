@@ -193,6 +193,33 @@ async fn consolidation_merges_similar_memories_and_forgets_low_quality() {
 
 #[tokio::test]
 #[serial]
+async fn consolidation_offset_skips_newest_memories() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let (m1, _m2, _m3, unrelated, low_quality) = prepare(&handle).await;
+
+    // 跳过最新的 2 条（保存顺序即更新时间从旧到新，跳过的是最后保存的两条）。
+    let report = run_consolidation(
+        &handle,
+        &ConsolidationOptions {
+            offset: 2,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+
+    assert_eq!(report.scanned, 3, "应跳过最新的 2 条后扫描剩余 3 条");
+    let active = active_ids(&handle).await;
+    // 被跳过的两条（unrelated / low_quality 中最新的两条）不应被改动。
+    let skipped = [&unrelated, &low_quality];
+    let untouched = skipped.iter().filter(|id| active.contains(**id)).count();
+    assert_eq!(untouched, 2, "跳过的记忆不应被整理：{active:?}");
+    let _ = (m1, report);
+}
+
+#[tokio::test]
+#[serial]
 async fn consolidation_dry_run_changes_nothing() {
     let _env = EnvGuard::enter();
     let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
