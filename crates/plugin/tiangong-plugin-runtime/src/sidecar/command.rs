@@ -69,6 +69,10 @@ impl EphemeralCommandConnection {
         if self.template.plugin_id != "command" {
             bail!("一次性 command 连接的插件身份无效");
         }
+        // 提前解析并校验工作区：一是给下方 cwd 解析提供真实路径基准，
+        // 二是在启动进程前给出 command 专属错误。安全边界不依赖此处——
+        // stdio 启动层会对同一调用上下文独立校验（validate_invocation_
+        // workspace），Launcher 策略也由该层按插件身份与用户配置组装。
         let workspace = canonicalize_path(&context.authoritative_workspace).with_context(|| {
             format!(
                 "本次工具调用的工作区无效: {}",
@@ -104,14 +108,15 @@ impl EphemeralCommandConnection {
                 );
             }
         }
-        // CommandAccessContext 使用 serde(flatten)，最终只保留宿主权威工作区。
+        // 宿主权威工作区写入请求对象（CommandAccessContext 经 serde(flatten)
+        // 接收）：与 stdio 帧 context 注入同源，供按参数解析工作区的 sidecar
+        // 形态使用。安全策略不经过 payload——Launcher 策略由 stdio 启动层按
+        // 已验证的插件身份与用户配置组装（见 launch_policy），模型提供的
+        // 参数字段没有进入策略的入口，故无需在此剥离。
         request_object.insert(
             "workspace".to_string(),
             serde_json::Value::String(workspace.display().to_string()),
         );
-        request_object.remove("full_trust");
-        request_object.remove("allowed_commands");
-        request_object.remove("access");
 
         let invocation_dir = tempfile::Builder::new()
             .prefix("tiangong-command-")
