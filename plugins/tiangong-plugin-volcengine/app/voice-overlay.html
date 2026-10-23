@@ -162,10 +162,10 @@
       render();
       try {
         // 边录边识别：录音期间即上传音频，松手后只需等待最后一包的识别结果。
-        await call('plugin.record_start', { session_id: state.recordId, transcribe: true });
+        await call('sidecar.record_start', { session_id: state.recordId, transcribe: true });
         if (state.phase !== 'starting') {
           // 启动期间已松开/取消：立即丢弃这次录音。
-          await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+          await call('sidecar.record_cancel', { session_id: state.recordId }).catch(() => {});
           return;
         }
         state.phase = 'recording';
@@ -190,7 +190,7 @@
       state.phase = 'idle';
       state.liveText = '';
       render();
-      await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+      await call('sidecar.record_cancel', { session_id: state.recordId }).catch(() => {});
       if (!silent) toast('已取消');
     }
 
@@ -202,18 +202,18 @@
       if (elapsed < MIN_DURATION_MS) {
         state.phase = 'idle';
         render();
-        await call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+        await call('sidecar.record_cancel', { session_id: state.recordId }).catch(() => {});
         toast('说话时间太短');
         return;
       }
       state.phase = 'transcribing';
       render();
       try {
-        const recorded = await call('plugin.record_stop', { session_id: state.recordId });
+        const recorded = await call('sidecar.record_stop', { session_id: state.recordId });
         let text = recorded && typeof recorded.text === 'string' ? recorded.text : null;
         if (text === null) {
           // 旧版 sidecar 不返回实时识别结果：回退为整段识别。
-          const result = await call('plugin.transcribe', { file_path: recorded.file_path });
+          const result = await call('sidecar.transcribe', { file_path: recorded.file_path });
           text = (result && result.text) || '';
         }
         text = text.trim();
@@ -327,7 +327,7 @@
         window.removeEventListener('blur', onBlur);
         stopTimer();
         if (state.phase === 'recording' || state.phase === 'starting') {
-          call('plugin.record_cancel', { session_id: state.recordId }).catch(() => {});
+          call('sidecar.record_cancel', { session_id: state.recordId }).catch(() => {});
         }
       });
     }
