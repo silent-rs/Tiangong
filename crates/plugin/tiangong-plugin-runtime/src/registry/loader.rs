@@ -335,7 +335,7 @@ pub fn invoke_sidecar(
     operation: &str,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    invoke_sidecar_with_workspace(storage_root, plugin_id, operation, payload, None)
+    invoke_sidecar_op(storage_root, plugin_id, operation, payload, None, None)
 }
 
 /// 使用宿主权威会话工作区调用 sidecar。
@@ -350,6 +350,22 @@ pub fn invoke_sidecar_with_workspace(
     payload: serde_json::Value,
     workspace: Option<&Path>,
 ) -> Result<serde_json::Value> {
+    invoke_sidecar_op(storage_root, plugin_id, operation, payload, workspace, None)
+}
+
+/// 携带统一调用上下文（含 `deadline_ms` 交互预算）调用 sidecar。
+///
+/// deadline 由 stdio 往返等待消费：超时返回 Err 而不是等满清单的
+/// `request_timeout_ms`——交互路径（@提及补全）不能让挂起的 sidecar
+/// 阻塞输入框。上下文同时把会话工作区带给按需连接的沙箱启动。
+pub fn invoke_sidecar_op(
+    storage_root: &Path,
+    plugin_id: &str,
+    operation: &str,
+    payload: serde_json::Value,
+    workspace: Option<&Path>,
+    invocation_context: Option<&crate::protocol::RequestInvocationContext>,
+) -> Result<serde_json::Value> {
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     if !installed.enabled {
         bail!("插件 {plugin_id} 已停用");
@@ -361,7 +377,15 @@ pub fn invoke_sidecar_with_workspace(
     };
     let connection = sidecar_connection_with_workspace(storage_root, &installed, false, workspace)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
-    let response = connection.invoke(operation, &payload)?;
+    let response = match invocation_context {
+        Some(context) => connection.invoke_with_invocation_context_and_progress(
+            operation,
+            &payload,
+            context,
+            &mut |_| {},
+        )?,
+        None => connection.invoke(operation, &payload)?,
+    };
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
 }
 
@@ -415,9 +439,11 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
         };
         let mut candidates = Vec::new();
         // v2 提及：清单声明 mention.candidates_op 且带 sidecar 时，查询直达
-        // sidecar（载荷 MentionQuery JSON，响应 { entry?, candidates? }）——
-        // 入口候选由 entry 的 hint/mark 加宿主约定（value/label/kind）合成，
-        // 动态候选逐项完备性过滤。sidecar 不可用时返回空：无法提供即不出现。
+        // sidecar（载荷 MentionQuery JSON）。响应 `{ entry?, candidates }`：
+        // entry 可选——能力型插件用它声明"可被 @ 调用"的入口（宿主合成
+        // value/label/kind，op 提供 hint/mark）；内容提供方（如 index）只返回
+        // candidates，插件本身不作为被提及对象。动态候选逐项完备性过滤。
+        // sidecar 不可用或超预算时返回空：无法提供即不出现。
         if let Some(op) = manifest
             .mention
             .as_ref()
@@ -425,43 +451,47 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             .filter(|op| !op.trim().is_empty())
             && manifest.sidecar.is_some()
         {
+            // 交互级预算：补全是输入路径，等满清单 request_timeout_ms 会卡住
+            // 输入框。会话上下文（工作区）随统一调用元数据带给 sidecar。
+            const MENTION_QUERY_BUDGET_MS: u64 = 3000;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let invocation_context = crate::protocol::RequestInvocationContext {
+                session_id: query.context.session_id.clone().unwrap_or_default(),
+                invocation_id: scru128::new().to_string(),
+                workspace: query.context.workspace.clone().unwrap_or_default(),
+                actor_id: String::new(),
+                deadline_ms: Some(now + MENTION_QUERY_BUDGET_MS),
+            };
             let payload = serde_json::to_value(query).unwrap_or_default();
-            match crate::bridge::invoke_plugin_sidecar(&self.id, op, payload, None) {
-                Ok(value) => {
-                    if let Some(entry) = value.get("entry") {
-                        match crate::ts_plugin::mention_entry_candidate(
-                            &manifest,
-                            descriptor_name.as_deref(),
-                            entry,
-                        ) {
-                            Some(candidate) => candidates.push(candidate),
-                            None => tracing::warn!(
-                                plugin_id = %self.id,
-                                op,
-                                "mention entry 缺少 hint，入口候选已跳过"
-                            ),
-                        }
-                    }
-                    if let Some(items) = value.get("candidates").and_then(Value::as_array) {
-                        let mut skipped = 0usize;
-                        for item in items {
-                            match dynamic_mention_candidate(item) {
-                                Some(candidate) => candidates.push(candidate),
-                                None => skipped += 1,
-                            }
-                        }
-                        if skipped > 0 {
-                            tracing::warn!(
-                                plugin_id = %self.id,
-                                skipped,
-                                op,
-                                "动态提及候选缺少 value/label/hint，已跳过"
-                            );
-                        }
-                    }
+            let storage_root = crate::registry::plugin_install_directory(&self.id)
+                .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
+                .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()));
+            let result = storage_root.map(|root| {
+                crate::registry::invoke_sidecar_op(
+                    &root,
+                    &self.id,
+                    op,
+                    payload,
+                    None,
+                    Some(&invocation_context),
+                )
+            });
+            match result {
+                Some(Ok(value)) => candidates.extend(parse_mention_op_response(
+                    &value,
+                    &manifest,
+                    descriptor_name.as_deref(),
+                    &self.id,
+                    op,
+                )),
+                Some(Err(error)) => {
+                    tracing::warn!(plugin_id = %self.id, %error, op, "sidecar 动态提及查询失败或超预算")
                 }
-                Err(error) => {
-                    tracing::warn!(plugin_id = %self.id, %error, op, "sidecar 动态提及查询失败")
+                None => {
+                    tracing::warn!(plugin_id = %self.id, op, "无法定位插件存储根，跳过提及查询")
                 }
             }
         }
@@ -534,6 +564,48 @@ fn dynamic_mention_candidate(item: &serde_json::Value) -> Option<tiangong_types:
         mark: text("mark"),
     };
     mention_candidate_is_complete(&candidate).then_some(candidate)
+}
+
+/// 解析 `candidates_op` 响应 `{ entry?, candidates }`。
+///
+/// - `entry` 可选：有则合成入口候选（宿主约定 value/label/kind + op 的
+///   hint/mark，见 {@link crate::ts_plugin::mention_entry_candidate}），
+///   缺 hint 跳过并告警；内容提供方（如 index）不返回 entry，插件本身
+///   不作为被提及对象。
+/// - `candidates` 逐项完备性过滤，残缺项跳过并计数告警。
+/// - 形状不符（非对象、无 candidates）返回已解析部分，不视为错误。
+pub(crate) fn parse_mention_op_response(
+    value: &serde_json::Value,
+    manifest: &crate::manifest::PluginManifest,
+    descriptor_name: Option<&str>,
+    plugin_id: &str,
+    op: &str,
+) -> Vec<tiangong_types::MentionCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(entry) = value.get("entry") {
+        match crate::ts_plugin::mention_entry_candidate(manifest, descriptor_name, entry) {
+            Some(candidate) => candidates.push(candidate),
+            None => tracing::warn!(plugin_id, op, "mention entry 缺少 hint，入口候选已跳过"),
+        }
+    }
+    if let Some(items) = value.get("candidates").and_then(Value::as_array) {
+        let mut skipped = 0usize;
+        for item in items {
+            match dynamic_mention_candidate(item) {
+                Some(candidate) => candidates.push(candidate),
+                None => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                plugin_id,
+                op,
+                skipped,
+                "动态提及候选缺少 value/label/hint，已跳过"
+            );
+        }
+    }
+    candidates
 }
 
 /// 取已启用插件的安装目录（供桥接层访问插件私有数据）。

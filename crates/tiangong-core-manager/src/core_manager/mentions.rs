@@ -99,15 +99,10 @@ impl CoreManager {
                 {
                     continue;
                 }
-                // 状态型候选（value 为空，如「索引创建中…」占位）豁免查询词过滤：
-                // 它没有可匹配的内容，按查询词过滤会让"扫描中"提示在用户输入关键词
-                // 后恰好消失——而那正是最需要它的时刻（索引刚重建、候选还不存在）。
-                //
-                // 其余候选走兜底匹配：来源未按 query 过滤时在此收敛（匹配先于截断）。
-                // 与来源侧（含静态清单候选）共用同一判定，避免两层语义不一致。
-                if !candidate.value.is_empty()
-                    && !tiangong_types::mention::candidate_matches_query(&candidate, &query.query)
-                {
+                // 兜底匹配：来源未按 query 过滤时在此收敛（匹配先于截断）。
+                // 与来源侧共用同一判定（candidate_matches_query），避免两层
+                // 语义不一致。
+                if !tiangong_types::mention::candidate_matches_query(&candidate, &query.query) {
                     continue;
                 }
                 if !seen.insert((candidate.kind.clone(), candidate.value.clone())) {
@@ -231,45 +226,36 @@ mod tests {
         }
     }
 
-    /// 状态型候选（索引建立中占位）不被查询词过滤。
-    ///
-    /// 对应真实故障：索引被 schema 迁移删空后，首次 mention 查询返回空候选 +
-    /// scanning，index 插件用一条 value 为空的占位候选把状态透传给前端。宿主
-    /// 兜底过滤若按查询词匹配，用户在面板搜索框输入任何关键词后这条提示都会被
-    /// 滤掉，界面退化成"无匹配"——用户既看不到候选，也看不到"正在建立索引"。
     #[test]
-    fn 索引建立中占位候选不被查询词过滤() {
-        struct StatusSource;
-        impl MentionSource for StatusSource {
+    fn 无匹配查询不保留任何分组() {
+        struct NomatchSource;
+        impl MentionSource for NomatchSource {
             fn id(&self) -> &str {
-                "status"
+                "nomatch"
             }
             fn query(&self, _query: &MentionQuery) -> Result<Vec<MentionCandidate>, String> {
                 Ok(vec![MentionCandidate {
-                    value: String::new(),
-                    label: "索引创建中…".to_string(),
+                    value: "@file:lib.rs".to_string(),
+                    label: "lib.rs".to_string(),
                     kind: "file".to_string(),
-                    hint: "正在扫描工作区文件，请稍候".to_string(),
+                    hint: "src/lib.rs".to_string(),
                     ..Default::default()
                 }])
             }
         }
         let root = tempfile::tempdir().unwrap();
         let manager = manager(root.path());
-        manager.set_mention_sources(vec![Arc::new(StatusSource)]);
+        manager.set_mention_sources(vec![Arc::new(NomatchSource)]);
 
         let groups = manager
             .query_mentions(MentionRequest {
-                query: "lib".to_string(),
+                query: "zzz-no-match".to_string(),
                 ..Default::default()
             })
             .expect("查询应成功");
-        assert_eq!(groups.len(), 1, "占位提示应单独成组");
-        assert_eq!(groups[0].kind, "file");
-        assert_eq!(groups[0].candidates.len(), 1);
         assert!(
-            groups[0].candidates[0].value.is_empty(),
-            "透传的占位候选应原样保留"
+            groups.is_empty(),
+            "无匹配候选不保留分组——空 value 状态占位已随单一来源方案删除，所有候选统一走查询词匹配"
         );
     }
 }

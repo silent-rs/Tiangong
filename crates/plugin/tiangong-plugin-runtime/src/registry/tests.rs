@@ -680,3 +680,116 @@ fn sidecar_instance_role_defaults_to_auxiliary() {
         crate::sidecar::INSTANCE_ROLE_PRIMARY
     );
 }
+
+/// 解析 candidates_op 响应：index 形态（仅 candidates，无 entry）。
+#[test]
+fn 提及响应仅含candidates时不合成入口候选() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"index","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"index.mention_candidates"},"sidecar":{"binary":"index-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    let response = serde_json::json!({
+        "candidates": [
+            { "value": "@file:src/main.rs", "label": "main.rs", "kind": "file", "hint": "src/main.rs" }
+        ]
+    });
+    let candidates = super::loader::parse_mention_op_response(
+        &response,
+        &manifest,
+        None,
+        "index",
+        "index.mention_candidates",
+    );
+    assert_eq!(candidates.len(), 1, "内容提供方只有文件候选");
+    assert_eq!(candidates[0].value, "@file:src/main.rs");
+    assert!(
+        candidates.iter().all(|c| c.kind == "file"),
+        "不应出现 plugin 入口"
+    );
+}
+
+/// entry 存在且带 hint：合成入口候选（宿主约定 value/kind）+ 动态候选并存。
+#[test]
+fn 提及响应entry与candidates可并存() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"volcengine","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"volcengine.mention_candidates"},"sidecar":{"binary":"volcengine-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    let response = serde_json::json!({
+        "entry": { "hint": "生成图片、视频与语音", "mark": "火山" },
+        "candidates": [
+            { "value": "@plugin:volcengine", "label": "文生图", "kind": "tool", "hint": "按描述生成图片" }
+        ]
+    });
+    let candidates = super::loader::parse_mention_op_response(
+        &response,
+        &manifest,
+        None,
+        "volcengine",
+        "volcengine.mention_candidates",
+    );
+    assert_eq!(candidates.len(), 2, "入口候选 + 动态候选");
+    assert_eq!(candidates[0].value, "@plugin:volcengine");
+    assert_eq!(candidates[0].kind, "plugin");
+    assert_eq!(candidates[0].hint, "生成图片、视频与语音");
+    assert_eq!(candidates[0].mark, "火山");
+    assert_eq!(candidates[1].value, "@plugin:volcengine");
+    assert_eq!(candidates[1].kind, "tool");
+}
+
+/// entry 缺 hint 跳过；candidates 残缺项跳过——不把渲染不出的候选透给前端。
+#[test]
+fn 提及响应残缺项被跳过() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"bot","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"bot.mention_candidates"},"sidecar":{"binary":"bot-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    let response = serde_json::json!({
+        "entry": { "hint": "   " },
+        "candidates": [
+            { "value": "@file:a.rs", "label": "a.rs" },
+            { "value": "", "label": "b.rs", "kind": "file", "hint": "b.rs" },
+            { "value": "@file:c.rs", "label": "c.rs", "kind": "file", "hint": "c.rs" }
+        ]
+    });
+    let candidates = super::loader::parse_mention_op_response(
+        &response,
+        &manifest,
+        None,
+        "bot",
+        "bot.mention_candidates",
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "缺 hint 的 entry 与缺字段的候选全部跳过"
+    );
+    assert_eq!(candidates[0].value, "@file:c.rs");
+}
+
+/// 形状不符（空对象/数组/null）不视为错误：返回空，不 panic。
+#[test]
+fn 提及响应形状不符返回空() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"index","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"index.mention_candidates"},"sidecar":{"binary":"index-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+        serde_json::json!({ "candidates": "not-an-array" }),
+    ] {
+        assert!(
+            super::loader::parse_mention_op_response(
+                &value,
+                &manifest,
+                None,
+                "index",
+                "index.mention_candidates"
+            )
+            .is_empty(),
+            "形状 {value} 应解析为空候选"
+        );
+    }
+}
