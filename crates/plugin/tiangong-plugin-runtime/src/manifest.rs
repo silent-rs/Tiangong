@@ -87,6 +87,11 @@ pub struct PluginManifest {
 pub struct MentionManifest {
     /// 候选副标题（一句话能力描述）。
     pub hint: String,
+    /// 动态候选查询的 sidecar 操作名（如 `index.mention_candidates`）：
+    /// 声明后宿主在提及查询时调用该操作（载荷 MentionQuery JSON，返回
+    /// MentionCandidate JSON 数组），无 WASM 逻辑层的插件也能提供动态候选。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates_op: Option<String>,
     /// 候选标记（chip 角标字符，如 `T`）。缺省时前端按 kind 用默认标记。
     #[serde(default)]
     pub mark: Option<String>,

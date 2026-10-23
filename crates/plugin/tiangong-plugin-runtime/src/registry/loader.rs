@@ -412,6 +412,46 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             return Ok(Vec::new());
         };
         let mut candidates = Vec::new();
+        // v2 无 WASM 逻辑层插件的动态提及：清单声明 mention.candidates_op
+        // 且带 sidecar 时，查询直达 sidecar（载荷 MentionQuery JSON，返回
+        // 候选数组）；与 WASM 路径互斥，失败告警不中断其他来源。
+        if instance.is_none()
+            && let Some(op) = manifest
+                .mention
+                .as_ref()
+                .and_then(|mention| mention.candidates_op.as_deref())
+                .filter(|op| !op.trim().is_empty())
+            && manifest.sidecar.is_some()
+        {
+            let payload = serde_json::to_value(query).unwrap_or_default();
+            match crate::bridge::invoke_plugin_sidecar(&self.id, op, payload, None) {
+                Ok(value) => {
+                    if let Some(items) = value.as_array() {
+                        for item in items {
+                            let text = |key: &str| {
+                                item.get(key)
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string()
+                            };
+                            if item.get("value").and_then(|v| v.as_str()).is_none() {
+                                continue;
+                            }
+                            candidates.push(tiangong_types::MentionCandidate {
+                                value: text("value"),
+                                label: text("label"),
+                                kind: text("kind"),
+                                hint: text("hint"),
+                                mark: text("mark"),
+                            });
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(plugin_id = %self.id, %error, op, "sidecar 动态提及查询失败")
+                }
+            }
+        }
         if let Some(instance) = &instance {
             let result = crate::execution::run_outside_tokio(|| {
                 let Ok(mut plugin) = instance.try_lock() else {

@@ -66,8 +66,9 @@ async function callHost(method, payload = "") {
       }
     };
     window.addEventListener("message", handler);
+    // v2 无 wasm 桥接：宿主方法经宿主桥 sidecar.* 直达插件 sidecar。
     window.parent.postMessage(
-      { type: "plugin_call", channel, id, method, payload },
+      { type: "plugin_call", channel, id, method: `sidecar.${method}`, payload: payload === "" ? "{}" : payload },
       "*",
     );
   });
@@ -137,7 +138,7 @@ async function loadIndexes() {
   refreshIcon.classList.add("spinning");
   setStatus("");
   try {
-    const raw = await callHost("list", "{}");
+    const raw = await callHost("index.list_workspace_indexes", "{}");
     const items = raw ? JSON.parse(raw) : [];
     renderList(Array.isArray(items) ? items : []);
     setStatus("");
@@ -155,7 +156,7 @@ async function rebuild(item, btn) {
   btn.querySelector("svg").classList.add("spinning");
   setStatus(`重建中：${item.root || item.id} …`);
   try {
-    const raw = await callHost("rebuild", JSON.stringify({ root: item.root }));
+    const raw = await callHost("index.rebuild_workspace_index", JSON.stringify({ root: item.root }));
     await loadIndexes();
     const count = Number(raw ? JSON.parse(raw) : NaN);
     setStatus(Number.isFinite(count) ? `索引重建完成，共 ${count} 个文件` : "索引重建完成");
