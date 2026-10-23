@@ -12,7 +12,8 @@
 //!
 //! 与 `tiangong-memory-sidecar --mcp/--daemon` 一样属于 Memory 通用模式：
 //! 同一时刻只有一个写入者，天工正在运行时会以 Follower 身份经 IPC 转发，
-//! 记忆数据始终一致；本工具不修改 Memory 插件本身。
+//! 记忆数据始终一致。归一合并与低质量遗忘均为物理删除（经 Memory 的
+//! `delete_node`），整理中的记忆一旦 LLM 连续失败即中断并以非零码退出。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -196,7 +197,11 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         ..Default::default()
     };
     if consolidation.llm.is_none() {
-        println!("未配置 Memory LLM，将按规则整理（仍会合并一致记忆并重建关联链）");
+        // 深度整理的核心是「由 LLM 判断哪些需要归一」，未配置 LLM 时直接报错，
+        // 避免退化为规则整理悄悄改写记忆库。
+        bail!(
+            "未配置记忆 LLM：深度整理需要 LLM 判断归一与遗忘，请先在 Memory 设置中配置模型端点后重试"
+        );
     }
     println!("开始记忆深度整理……");
     // 句柄提供者：Leader 退出后 follower 监控会自动接替并替换内部句柄，
@@ -213,6 +218,10 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
     println!("{}", report.render());
     // managed Drop：停心跳、释放 Leader 租约；本进程是 Leader 时 actor 随之退出。
     drop(managed);
+    if let Some(fatal) = &report.fatal_error {
+        eprintln!("错误：记忆深度整理被中断：{fatal}");
+        std::process::exit(1);
+    }
     Ok(())
 }
 

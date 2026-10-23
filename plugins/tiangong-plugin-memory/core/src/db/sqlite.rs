@@ -868,6 +868,39 @@ impl MemoryDb {
         Ok(())
     }
 
+    /// 物理删除记忆节点及其全部附属数据（关联关系、卫星表、遗留向量行）。
+    ///
+    /// 与归档不同，删除后不可恢复，供深度整理等场景使用。
+    pub(crate) fn delete_memory_node(&self, node_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM memory_relations WHERE from_node_id = ?1 OR to_node_id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| format!("删除记忆 {node_id} 的关联关系失败"))?;
+        for table in ["episodes", "entities", "decisions", "evidence"] {
+            self.conn
+                .execute(
+                    &format!("DELETE FROM {table} WHERE id = ?1"),
+                    rusqlite::params![node_id],
+                )
+                .with_context(|| format!("清理记忆 {node_id} 在 {table} 中的附属数据失败"))?;
+        }
+        self.conn
+            .execute(
+                "DELETE FROM memory_vectors WHERE node_id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| format!("清理记忆 {node_id} 的遗留向量行失败"))?;
+        self.conn
+            .execute(
+                "DELETE FROM memory_nodes WHERE id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| format!("物理删除记忆 {node_id} 失败"))?;
+        Ok(())
+    }
+
     /// 读取图关系邻接节点，供 deep recall 继续展开使用。
     pub(crate) fn list_related_node_ids(&self, node_ids: &[String]) -> Result<Vec<String>> {
         let mut related = Vec::new();

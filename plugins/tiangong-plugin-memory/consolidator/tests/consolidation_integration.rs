@@ -4,6 +4,7 @@
 //! 以及试运行不落库与 `max_nodes` 批次限制两条边界路径。
 
 use serial_test::serial;
+use tiangong_llm::LlmEndpointConfig;
 use tiangong_memory::MemoryOptions;
 use tiangong_memory::{
     ManualMemoryDraft, MemoryCognitiveType, MemoryListQuery, MemoryRelationDraft,
@@ -280,4 +281,42 @@ async fn consolidation_respects_max_nodes_and_reports_remaining() {
         .count();
     assert!(survivors <= 3, "一致组至多保留三条（未处理时原样保留）");
     let _ = (unrelated, low_quality);
+}
+
+/// LLM 连续失败（无法连通）时：重试耗尽即中断、报错，且不写入任何改动。
+#[tokio::test]
+#[serial]
+async fn consolidation_aborts_when_llm_unreachable() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let (m1, m2, m3, unrelated, low_quality) = prepare(&handle).await;
+
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            // 指向必然无法连通的端点：验证重试耗尽后中断且不写库。
+            llm: Some(LlmEndpointConfig::new(
+                "test-key",
+                "http://127.0.0.1:9",
+                "test-model",
+            )),
+            llm_retry_attempts: 2,
+            llm_retry_delay: std::time::Duration::from_millis(50),
+            forget_low_quality: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+
+    assert!(
+        report.fatal_error.is_some(),
+        "LLM 连续失败应致命中断：{report:?}"
+    );
+    assert!(report.llm_calls == 0, "全部调用失败，不计成功调用");
+    let active = active_ids(&handle).await;
+    assert_eq!(active.len(), 5, "中断后不应写入任何改动：{active:?}");
+    for id in [&m1, &m2, &m3, &unrelated, &low_quality] {
+        assert!(active.contains(id), "中断时记忆 {id} 应保持原样");
+    }
 }

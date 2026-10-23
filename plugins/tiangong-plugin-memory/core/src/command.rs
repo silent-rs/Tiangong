@@ -86,6 +86,10 @@ pub enum MemoryCommand {
         status: MemoryStatus,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    DeleteNode {
+        node_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     UpsertRelation {
         draft: MemoryRelationDraft,
         reply: oneshot::Sender<Result<MemoryRelation, String>>,

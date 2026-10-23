@@ -61,6 +61,9 @@ pub enum MemoryIpcRequestPayload {
         node_id: String,
         status: MemoryStatus,
     },
+    DeleteNode {
+        node_id: String,
+    },
     UpsertRelation {
         draft: MemoryRelationDraft,
     },

@@ -1102,6 +1102,10 @@ pub async fn handle_memory_request(
             handle.set_node_status(node_id, status).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::DeleteNode { node_id } => {
+            handle.delete_node(node_id).await?;
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
         MemoryIpcRequestPayload::UpsertRelation { draft } => {
             Ok(MemoryIpcResponsePayload::Relation {
                 item: handle.upsert_relation(draft).await?,

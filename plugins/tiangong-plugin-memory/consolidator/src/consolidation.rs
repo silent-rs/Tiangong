@@ -8,11 +8,12 @@
 //!    交给 LLM 归一、合并并重新分类；
 //! 3. 每处理完一条就把整组标记为已处理，后续节点跳过已处理的记忆，
 //!    直到全部整理完成；
-//! 4. 整理过程中识别低质量记忆并遗忘（归档，不再参与召回）。
+//! 4. 整理过程中识别低质量记忆并删除（向量与索引一并移除，不再参与召回）。
 //!
-//! 本 crate 只通过 `tiangong-memory` 的公开 API（[`MemoryHandle`]）读写记忆，
-//! 不修改 Memory 插件本身；接入方式与 sidecar 通用模式一致
-//! （竞争 Leader，天工运行时以 Follower 经 IPC 转发）。
+//! 本 crate 经 `tiangong-memory` 的公开 API（[`MemoryHandle`]）读写记忆；
+//! 物理删除使用 Memory 插件提供的 [`MemoryHandle::delete_node`] 能力。
+//! 接入方式与 sidecar 通用模式一致（竞争 Leader，天工运行时以 Follower
+//! 经 IPC 转发）。
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -56,6 +57,10 @@ pub const DEFAULT_STALE_DAYS: i64 = 60;
 pub const DEFAULT_IMPORTANCE_FLOOR: f64 = 0.35;
 /// LLM 单次整理输出的 token 上限。
 const LLM_MAX_TOKENS: u32 = 1600;
+/// LLM 请求失败后的默认重试次数（含首次共尝试 N 次）。
+pub const DEFAULT_LLM_RETRY_ATTEMPTS: usize = 3;
+/// LLM 请求失败后的默认重试间隔。
+pub const DEFAULT_LLM_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 /// 报告里保留的处理明细条数上限。
 const MAX_REPORT_ACTIONS: usize = 50;
 /// 候选预过滤：至少共享的字符二元组数量。
@@ -123,6 +128,10 @@ pub struct ConsolidationOptions {
     pub max_pages: usize,
     /// 向量库里已算好的向量（读取即用，不重新向量化）。
     pub stored_vectors: Option<std::sync::Arc<StoredVectors>>,
+    /// LLM 请求失败后的重试次数（含首次共尝试 N 次）。
+    pub llm_retry_attempts: usize,
+    /// LLM 请求失败后的重试间隔。
+    pub llm_retry_delay: std::time::Duration,
 }
 
 impl Default for ConsolidationOptions {
@@ -142,6 +151,8 @@ impl Default for ConsolidationOptions {
             offset: 0,
             max_pages: 0,
             stored_vectors: None,
+            llm_retry_attempts: DEFAULT_LLM_RETRY_ATTEMPTS,
+            llm_retry_delay: DEFAULT_LLM_RETRY_DELAY,
         }
     }
 }
@@ -159,13 +170,13 @@ pub struct ConsolidationReport {
     pub remaining: usize,
     /// 发生合并的组数。
     pub merged_groups: usize,
-    /// 被合并归档的记忆条数。
+    /// 被合并删除的记忆条数。
     pub merged_away: usize,
     /// 被重写（归一/重分类）的主记忆条数。
     pub updated: usize,
     /// 其中认知分类发生变化的条数。
     pub reclassified: usize,
-    /// 被遗忘（归档）的低质量记忆条数。
+    /// 被删除的低质量记忆条数。
     pub forgotten: usize,
     /// 机械重指向重建的关联数。
     pub relations_relinked: usize,
@@ -181,6 +192,8 @@ pub struct ConsolidationReport {
     pub without_vectors: usize,
     /// 是否试运行。
     pub dry_run: bool,
+    /// 致命中断原因（LLM 连续失败等）：整理被中断，后续批次不再执行。
+    pub fatal_error: Option<String>,
     /// 人类可读的处理明细（限量）。
     pub actions: Vec<String>,
     /// 处理过程中的错误（不中断整理）。
@@ -196,10 +209,15 @@ impl ConsolidationReport {
             "记忆深度整理{}",
             if self.dry_run {
                 "（试运行，未落库）"
+            } else if self.fatal_error.is_some() {
+                "中断"
             } else {
                 "完成"
             }
         );
+        if let Some(fatal) = &self.fatal_error {
+            let _ = writeln!(out, "- 致命中断：{fatal}");
+        }
         let _ = writeln!(
             out,
             "- 检索后端：{}；扫描活跃记忆：{}（{} 批）",
@@ -219,7 +237,7 @@ impl ConsolidationReport {
         );
         let _ = writeln!(
             out,
-            "- 合并组数：{}，合并归档：{}，重写归一：{}（重分类 {}）",
+            "- 合并组数：{}，合并删除：{}，重写归一：{}（重分类 {}）",
             self.merged_groups, self.merged_away, self.updated, self.reclassified
         );
         let _ = writeln!(out, "- 遗忘低质量记忆：{}", self.forgotten);
@@ -303,6 +321,10 @@ pub async fn run_consolidation(
         )
         .await;
         skip += page;
+        if report.fatal_error.is_some() {
+            // 致命错误（LLM 连续失败等）：立即停止后续批次。
+            break;
+        }
         if page < PAGE_LIMIT {
             break;
         }
@@ -379,9 +401,13 @@ async fn consolidate_page(
         )
         .await
         {
+            // 致命中断：LLM 连续失败或写重试耗尽。中断本批及后续批次，
+            // 由调用方（CLI）以非零退出码报错；已完成的组保持一致。
+            report.fatal_error = Some(format!("{err:#}"));
             report
                 .errors
-                .push(format!("整理记忆 {} 失败：{err:#}", node.id));
+                .push(format!("整理记忆 {} 失败，已中断：{err:#}", node.id));
+            break;
         }
     }
     report.remaining += nodes
@@ -687,18 +713,14 @@ async fn consolidate_node(
         } else {
             retry_write(provider, GROUP_RETRY_ATTEMPTS, |handle| {
                 let node_id = node_id.clone();
-                async move {
-                    handle
-                        .set_node_status(node_id, MemoryStatus::Archived)
-                        .await
-                }
+                async move { handle.delete_node(node_id).await }
             })
             .await
         };
         outcome?;
         report.forgotten += 1;
         report.actions.push(format!(
-            "遗忘低质量记忆「{}」（{}）{}",
+            "删除低质量记忆「{}」（{}）{}",
             truncate(&node.title, 40),
             reason,
             dry_run_tag(options)
@@ -729,26 +751,17 @@ async fn consolidate_node(
     if group.is_empty() {
         return Ok(());
     }
-    // 3) LLM 整理：由 LLM 判断哪些需要归一、哪些保留、哪些遗忘；
-    //    仅未配置或调用失败时才退化为规则整理。
+    // 3) LLM 整理：由 LLM 判断哪些需要归一、哪些保留、哪些遗忘。
+    //    请求失败按配置重试，重试耗尽即视为致命中断（不退化为规则整理，
+    //    避免在 LLM 失联时由规则悄悄改写记忆库）。
     let mut group_ids = vec![node.id.clone()];
     group_ids.extend(group.iter().map(|member| member.node.id.clone()));
     let relations = provider().list_relations_batch(group_ids).await;
     let decision = match options.llm.as_ref() {
-        Some(model) => match request_consolidation(model, node, &group, &relations).await {
-            Ok(decision) => {
-                report.llm_calls += 1;
-                report.used_llm = true;
-                Some(decision)
-            }
-            Err(err) => {
-                report.errors.push(format!(
-                    "记忆 {} 的 LLM 整理失败，已按规则整理：{err:#}",
-                    node.id
-                ));
-                None
-            }
-        },
+        Some(model) => Some(
+            request_consolidation_with_retry(model, node, &group, &relations, options, report)
+                .await?,
+        ),
         None => None,
     };
     // 4) 应用整理（Leader 接替期间写会短暂失败，整组刷新重试避免半途落地）。
@@ -852,15 +865,13 @@ async fn apply_decision(
             let mut count = 0;
             for id in &group_ids {
                 if !options.dry_run {
-                    handle
-                        .set_node_status(id.clone(), MemoryStatus::Archived)
-                        .await?;
+                    handle.delete_node(id.clone()).await?;
                 }
                 count += 1;
             }
             report.forgotten += count;
             report.actions.push(format!(
-                "遗忘整组低质量/重复记忆 {} 条{}",
+                "删除整组低质量/重复记忆 {} 条{}",
                 count,
                 dry_run_tag(options)
             ));
@@ -968,21 +979,13 @@ async fn apply_decision(
     if memory_type != base.memory_type {
         report.reclassified += 1;
     }
-    // 其余组员归档：内容已并入主记忆；归档会把他们从 Tantivy 与向量库中
-    // 删除，不再参与召回（记忆行保留为软删除，可在记忆页恢复）。
+    // 其余组员物理删除：内容已并入主记忆；删除会移除其记忆行、关联关系、
+    // Tantivy 与向量库中的索引，后续序列处理跳过它们。
     let archived_ids: Vec<String> = group_ids
         .iter()
         .filter(|id| **id != primary_id)
         .cloned()
         .collect();
-    for id in &archived_ids {
-        if !options.dry_run {
-            handle
-                .set_node_status(id.clone(), MemoryStatus::Archived)
-                .await?;
-        }
-        report.merged_away += 1;
-    }
     let planned = decision
         .map(|decision| decision.relations.as_slice())
         .unwrap_or(&[]);
@@ -998,6 +1001,13 @@ async fn apply_decision(
     .await?;
     report.relations_relinked += relinked;
     report.relations_created += created;
+    // 关联重指向完成后再物理删除组员，避免级联删除吞掉待重建的关联信息。
+    for id in &archived_ids {
+        if !options.dry_run {
+            handle.delete_node(id.clone()).await?;
+        }
+        report.merged_away += 1;
+    }
     report.merged_groups += 1;
     let source = if decision.is_some() { "LLM" } else { "规则" };
     report.actions.push(format!(
@@ -1026,14 +1036,12 @@ async fn forget_members(
             continue;
         }
         if !options.dry_run {
-            handle
-                .set_node_status(id.clone(), MemoryStatus::Archived)
-                .await?;
+            handle.delete_node(id.clone()).await?;
         }
         report.forgotten += 1;
         report
             .actions
-            .push(format!("遗忘组内低质量记忆 {id}{}", dry_run_tag(options)));
+            .push(format!("删除组内低质量记忆 {id}{}", dry_run_tag(options)));
     }
     Ok(())
 }
@@ -1213,6 +1221,44 @@ impl ConsolidationDecision {
 }
 
 /// 调用 LLM 完成一组记忆的归一整理。
+/// 带重试的 LLM 整理请求：失败时间隔 `llm_retry_delay` 后重试，共尝试
+/// `llm_retry_attempts` 次；重试耗尽返回错误（调用方应中断整理）。
+async fn request_consolidation_with_retry(
+    model: &LlmEndpointConfig,
+    node: &MemoryNode,
+    group: &[GroupMember<'_>],
+    relations: &[MemoryRelation],
+    options: &ConsolidationOptions,
+    report: &mut ConsolidationReport,
+) -> anyhow::Result<ConsolidationDecision> {
+    let attempts = options.llm_retry_attempts.max(1);
+    let mut last_err = None;
+    for attempt in 1..=attempts {
+        match request_consolidation(model, node, group, relations).await {
+            Ok(decision) => {
+                report.llm_calls += 1;
+                report.used_llm = true;
+                return Ok(decision);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "记忆 {} 的 LLM 整理失败（第 {attempt}/{attempts} 次）：{err:#}",
+                    node.id
+                );
+                last_err = Some(err);
+                if attempt < attempts {
+                    tokio::time::sleep(options.llm_retry_delay).await;
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "记忆 {} 的 LLM 整理连续 {attempts} 次失败，中断整理（未写入任何半成品）：{:#}",
+        node.id,
+        last_err.unwrap_or_else(|| anyhow::anyhow!("未知错误"))
+    ))
+}
+
 async fn request_consolidation(
     model: &LlmEndpointConfig,
     node: &MemoryNode,
@@ -1707,6 +1753,7 @@ mod tests {
             retrieval_backend: "vector_store",
             without_vectors: 0,
             dry_run: false,
+            fatal_error: None,
             actions: vec!["合并 2 条一致记忆".to_string()],
             errors: Vec::new(),
         };
@@ -1716,6 +1763,13 @@ mod tests {
         assert!(text.contains("合并组数：2"));
         assert!(text.contains("遗忘低质量记忆：1"));
         assert!(text.contains("剩余未处理：6"));
+        let fatal = ConsolidationReport {
+            fatal_error: Some("LLM 整理连续 3 次失败".to_string()),
+            ..report
+        };
+        let text = fatal.render();
+        assert!(text.contains("记忆深度整理中断"));
+        assert!(text.contains("致命中断：LLM 整理连续 3 次失败"));
     }
 
     #[test]

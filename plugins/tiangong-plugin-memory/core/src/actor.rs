@@ -168,6 +168,15 @@ impl MemoryActor {
                 let _ = reply.send(result);
             }
 
+            MemoryCommand::DeleteNode { node_id, reply } => {
+                let result = self
+                    .store
+                    .delete_node(&node_id)
+                    .await
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+
             MemoryCommand::UpsertRelation { draft, reply } => {
                 let result = self
                     .store

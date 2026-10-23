@@ -1071,6 +1071,15 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// 物理删除记忆节点及其全部附属数据，供深度整理使用。
+    ///
+    /// 删除内容：召回索引（Tantivy 全文 + 语义向量）、关联关系、
+    /// episodes/entities/decisions/evidence 卫星表与节点行本身；不可恢复。
+    pub(crate) async fn delete_node(&mut self, node_id: &str) -> Result<()> {
+        self.delete_from_recall_indexes(node_id).await;
+        self.db.delete_memory_node(node_id)
+    }
+
     /// 全文搜索（Tantivy BM25，同步版，供兼容使用）
     #[allow(dead_code)]
     pub(crate) fn search(&self, query: &str, limit: usize) -> Vec<RecallHit> {

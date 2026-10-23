@@ -502,6 +502,39 @@ impl MemoryHandle {
         }
     }
 
+    /// 物理删除记忆节点及其全部附属数据（关联关系、召回索引、卫星表）。
+    ///
+    /// 与 [`MemoryHandle::set_node_status`] 的归档（软删除、可恢复）不同，
+    /// 删除后不可恢复，供记忆深度整理等场景使用。
+    pub async fn delete_node(&self, node_id: String) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::DeleteNode {
+                    node_id,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 删除命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 删除结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::DeleteNode { node_id })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Ack => Ok(()),
+                    other => Err(anyhow!(
+                        "Memory IPC delete_node 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
     /// 列出某个记忆节点的图关系。
     pub async fn list_relations(&self, node_id: String) -> Vec<MemoryRelation> {
         match self.inner.as_ref() {
