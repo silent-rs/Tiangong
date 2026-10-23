@@ -51,6 +51,9 @@ struct Cli {
     /// 跳过最新的 N 条记忆再开始整理（断点续跑 / 跳过已整理批次）
     #[arg(long, default_value_t = 0)]
     offset: usize,
+    /// 最多整理多少批（0 表示直到全库完成；每批最多 5000 条）
+    #[arg(long, default_value_t = 0)]
+    max_pages: usize,
     /// 试运行：只报告不落库
     #[arg(long)]
     dry_run: bool,
@@ -156,6 +159,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         forget_low_quality: !cli.keep_low_quality,
         max_nodes: cli.max_nodes,
         offset: cli.offset,
+        max_pages: cli.max_pages,
         ..Default::default()
     };
     if consolidation.llm.is_none() {
@@ -168,8 +172,12 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         );
     }
     println!("开始记忆深度整理……");
+    // 句柄提供者：Leader 退出后 follower 监控会自动接替并替换内部句柄，
+    // 每次调用都取当前可用的最新句柄（见 consolidation::HandleProvider）。
+    let managed_ref = &managed;
+    let provider = move || managed_ref.handle();
     let report = run_consolidation(
-        &managed.handle(),
+        &provider,
         &consolidation,
         Some(&|progress: &str| println!("{progress}")),
     )

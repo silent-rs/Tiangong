@@ -55,6 +55,17 @@ const MIN_SHARED_BIGRAMS: usize = 3;
 /// 整理进度回调：每处理一条记忆触发一次。
 pub type ConsolidationProgress<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
+/// 记忆句柄提供者：每次调用返回当前可用的 [`MemoryHandle`]。
+///
+/// Leader 退出时 follower 监控会自动接替并替换内部句柄；整理跨越多轮 LLM
+/// 调用，长连接可能中途失效，因此读写都经此获取最新句柄，写失败时刷新重试。
+pub type HandleProvider<'a> = &'a (dyn Fn() -> MemoryHandle + Send + Sync);
+
+/// 单组整理失败后的重试次数（Leader 接替需要时间）。
+const GROUP_RETRY_ATTEMPTS: usize = 3;
+/// 重试前的等待时间（给 follower 监控留出接替窗口）。
+const GROUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// 相似记忆候选项（含来源记忆的完整元数据）。
 #[derive(Debug, Clone)]
 pub struct SimilarHit {
@@ -92,6 +103,8 @@ pub struct ConsolidationOptions {
     pub max_nodes: usize,
     /// 跳过最新的 N 条记忆再开始扫描（配合扫描上限分批处理全库）。
     pub offset: usize,
+    /// 最多扫描多少批（0 表示直到全库整理完成）。
+    pub max_pages: usize,
 }
 
 impl Default for ConsolidationOptions {
@@ -109,6 +122,7 @@ impl Default for ConsolidationOptions {
             importance_floor: DEFAULT_IMPORTANCE_FLOOR,
             max_nodes: 0,
             offset: 0,
+            max_pages: 0,
         }
     }
 }
@@ -211,7 +225,7 @@ impl ConsolidationReport {
 
 /// 执行一次记忆深度整理。
 pub async fn run_consolidation(
-    handle: &MemoryHandle,
+    provider: HandleProvider<'_>,
     options: &ConsolidationOptions,
     progress: Option<ConsolidationProgress<'_>>,
 ) -> ConsolidationReport {
@@ -224,7 +238,7 @@ pub async fn run_consolidation(
     // 开始（断点续跑），`max_nodes` 约束单批处理条数。
     let mut skip = options.offset;
     loop {
-        let nodes = collect_active_nodes(handle, skip).await;
+        let nodes = collect_active_nodes(provider, skip).await;
         if nodes.is_empty() {
             break;
         }
@@ -237,9 +251,18 @@ pub async fn run_consolidation(
                 report.pages, page, skip
             ));
         }
-        consolidate_page(handle, &nodes, options, progress, &mut report).await;
+        consolidate_page(provider, &nodes, options, progress, &mut report).await;
         skip += page;
         if page < PAGE_LIMIT {
+            break;
+        }
+        if options.max_pages > 0 && report.pages >= options.max_pages {
+            if let Some(callback) = progress {
+                callback(&format!(
+                    "已达单次批次上限（{} 批），剩余记忆可用 --offset {} 继续",
+                    options.max_pages, skip
+                ));
+            }
             break;
         }
     }
@@ -248,7 +271,7 @@ pub async fn run_consolidation(
 
 /// 整理一批记忆：相似检索 → 逐条处理（过滤已处理）。
 async fn consolidate_page(
-    handle: &MemoryHandle,
+    provider: HandleProvider<'_>,
     nodes: &[MemoryNode],
     options: &ConsolidationOptions,
     progress: Option<ConsolidationProgress<'_>>,
@@ -257,7 +280,7 @@ async fn consolidate_page(
     let by_id: HashMap<&str, &MemoryNode> =
         nodes.iter().map(|node| (node.id.as_str(), node)).collect();
     // 逐条向量检索：一次性算出每条记忆的相似候选。
-    let candidates = match build_candidates(handle, nodes, &by_id, options, progress).await {
+    let candidates = match build_candidates(provider, nodes, &by_id, options, progress).await {
         Ok((candidates, backend)) => {
             report.retrieval_backend = backend;
             candidates
@@ -291,7 +314,7 @@ async fn consolidate_page(
             ));
         }
         if let Err(err) = consolidate_node(
-            handle,
+            provider,
             node,
             &by_id,
             &candidates,
@@ -312,7 +335,8 @@ async fn consolidate_page(
         .count();
 }
 /// 分页拉取活跃记忆（按更新时间从新到旧）；`skip` 跳过最新的若干条。
-async fn collect_active_nodes(handle: &MemoryHandle, skip: usize) -> Vec<MemoryNode> {
+async fn collect_active_nodes(provider: HandleProvider<'_>, skip: usize) -> Vec<MemoryNode> {
+    let handle = provider();
     let mut all = Vec::new();
     let mut offset = skip;
     loop {
@@ -332,7 +356,7 @@ async fn collect_active_nodes(handle: &MemoryHandle, skip: usize) -> Vec<MemoryN
         if all.len() >= MAX_SCAN_NODES {
             tracing::warn!(
                 "活跃记忆超过 {MAX_SCAN_NODES} 条，本次只整理前 {MAX_SCAN_NODES} 条；\
-                 可用 --max-nodes 分批处理"
+                 可用 --offset 分批处理"
             );
             break;
         }
@@ -346,7 +370,7 @@ async fn collect_active_nodes(handle: &MemoryHandle, skip: usize) -> Vec<MemoryN
 /// 预过滤，避免全量两两比较）；否则经 Memory 召回取候选，再用字符二元组
 /// Jaccard 判定一致性。返回 (候选表, 后端标识)。
 async fn build_candidates(
-    handle: &MemoryHandle,
+    provider: HandleProvider<'_>,
     nodes: &[MemoryNode],
     by_id: &HashMap<&str, &MemoryNode>,
     options: &ConsolidationOptions,
@@ -356,6 +380,7 @@ async fn build_candidates(
         let candidates = embed_candidates(embedding, nodes, options, progress).await?;
         return Ok((candidates, "vector"));
     }
+    let handle = provider();
     let mut candidates: HashMap<String, Vec<SimilarHit>> = HashMap::new();
     let total = nodes.len();
     for (index, node) in nodes.iter().enumerate() {
@@ -486,7 +511,7 @@ async fn embed_candidates(
 
 /// 处理单条记忆：低质量遗忘 → 相似组 → LLM/规则整理。
 async fn consolidate_node(
-    handle: &MemoryHandle,
+    provider: HandleProvider<'_>,
     node: &MemoryNode,
     by_id: &HashMap<&str, &MemoryNode>,
     candidates: &HashMap<String, Vec<SimilarHit>>,
@@ -498,11 +523,21 @@ async fn consolidate_node(
     if options.forget_low_quality
         && let Some(reason) = rule_low_quality(node, options)
     {
-        if !options.dry_run {
-            handle
-                .set_node_status(node.id.clone(), MemoryStatus::Archived)
-                .await?;
-        }
+        let node_id = node.id.clone();
+        let outcome = if options.dry_run {
+            Ok(())
+        } else {
+            retry_write(provider, GROUP_RETRY_ATTEMPTS, |handle| {
+                let node_id = node_id.clone();
+                async move {
+                    handle
+                        .set_node_status(node_id, MemoryStatus::Archived)
+                        .await
+                }
+            })
+            .await
+        };
+        outcome?;
         report.forgotten += 1;
         report.actions.push(format!(
             "遗忘低质量记忆「{}」（{}）{}",
@@ -531,7 +566,7 @@ async fn consolidate_node(
     // 3) LLM 整理；未配置或调用失败时退化为规则整理。
     let mut group_ids = vec![node.id.clone()];
     group_ids.extend(group.iter().map(|hit| hit.node.id.clone()));
-    let relations = handle.list_relations_batch(group_ids).await;
+    let relations = provider().list_relations_batch(group_ids).await;
     let decision = match options.llm.as_ref() {
         Some(model) => match request_consolidation(model, node, &group, &relations).await {
             Ok(decision) => {
@@ -549,18 +584,71 @@ async fn consolidate_node(
         },
         None => None,
     };
-    apply_decision(
-        handle,
-        node,
-        &group,
-        by_id,
-        decision.as_ref(),
-        &relations,
-        options,
-        processed,
-        report,
-    )
-    .await
+    // 4) 应用整理（Leader 接替期间写会短暂失败，整组刷新重试避免半途落地）。
+    let mut attempt = 0;
+    loop {
+        let handle = provider();
+        match apply_decision(
+            &handle,
+            node,
+            &group,
+            by_id,
+            decision.as_ref(),
+            &relations,
+            options,
+            processed,
+            report,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                attempt += 1;
+                if attempt >= GROUP_RETRY_ATTEMPTS {
+                    return Err(err);
+                }
+                tracing::warn!(
+                    "整理一组记忆失败（第 {attempt}/{} 次），刷新连接后重试：{err:#}",
+                    GROUP_RETRY_ATTEMPTS
+                );
+                tokio::time::sleep(GROUP_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
+/// 带连接刷新重试的写操作：Leader 退出后 follower 监控会自动接替并替换
+/// 内部句柄，重试时经 [`HandleProvider`] 取最新句柄；句柄未变则直接返回
+/// 原错误（说明是操作本身失败，重试无意义）。
+async fn retry_write<T, F, Fut>(
+    provider: HandleProvider<'_>,
+    attempts: usize,
+    operation: F,
+) -> anyhow::Result<T>
+where
+    F: Fn(MemoryHandle) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut last_error = None;
+    for attempt in 0..attempts.max(1) {
+        let handle = provider();
+        match operation(handle.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt + 1 >= attempts {
+                    break;
+                }
+                tokio::time::sleep(GROUP_RETRY_DELAY).await;
+                let refreshed = provider();
+                if refreshed.is_same_handle(&handle) {
+                    break;
+                }
+                tracing::info!("Memory 连接已刷新（Leader 接替），重试写操作");
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Memory 写操作失败")))
 }
 
 /// 应用整理决策：合并归一 / 保留重分类 / 整组遗忘，并重建关联链。

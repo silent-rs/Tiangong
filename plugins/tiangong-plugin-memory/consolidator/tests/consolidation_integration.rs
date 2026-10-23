@@ -139,7 +139,8 @@ async fn consolidation_merges_similar_memories_and_forgets_low_quality() {
     let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
     let (m1, m2, m3, unrelated, low_quality) = prepare(&handle).await;
 
-    let report = run_consolidation(&handle, &ConsolidationOptions::default(), None).await;
+    let report =
+        run_consolidation(&|| handle.clone(), &ConsolidationOptions::default(), None).await;
 
     assert_eq!(report.scanned, 5, "应扫描全部活跃记忆");
     // 一致组（3 条）算作一次处理，组员不再作为主记忆重复处理。
@@ -200,7 +201,7 @@ async fn consolidation_offset_skips_newest_memories() {
 
     // 跳过最新的 2 条（保存顺序即更新时间从旧到新，跳过的是最后保存的两条）。
     let report = run_consolidation(
-        &handle,
+        &|| handle.clone(),
         &ConsolidationOptions {
             offset: 2,
             ..Default::default()
@@ -226,7 +227,7 @@ async fn consolidation_dry_run_changes_nothing() {
     let (m1, m2, m3, unrelated, low_quality) = prepare(&handle).await;
 
     let report = run_consolidation(
-        &handle,
+        &|| handle.clone(),
         &ConsolidationOptions {
             dry_run: true,
             ..Default::default()
@@ -253,7 +254,7 @@ async fn consolidation_respects_max_nodes_and_reports_remaining() {
     let (m1, m2, m3, unrelated, low_quality) = prepare(&handle).await;
 
     let report = run_consolidation(
-        &handle,
+        &|| handle.clone(),
         &ConsolidationOptions {
             max_nodes: 2,
             ..Default::default()
