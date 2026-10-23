@@ -17,6 +17,7 @@ members = [
     "crates/tiangong-media-archive",
     "crates/tiangong-config",
     "crates/tiangong-relay",
+    "plugins/tiangong-plugin-memory/consolidator",
     "plugins/tiangong-plugin-coding/protocol",
     "plugins/tiangong-plugin-coding/sidecar",
     "plugins/tiangong-plugin-computer-use/protocol",
