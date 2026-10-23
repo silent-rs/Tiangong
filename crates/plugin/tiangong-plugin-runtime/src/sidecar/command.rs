@@ -1,7 +1,9 @@
 //! command 专用的一次性 sidecar 连接。
 //!
 //! 每个执行请求都使用宿主调用上下文中的工作区创建独立 Launcher、临时目录
-//! 和进程树。`command.set_workspace` 仅作为 WASM 兼容通知接收，不启动进程。
+//! 和进程树。v2 清单直连下操作名即工具名，与 sidecar dispatch 同口径；
+//! 旧的 `command.*` 协议名与 `command.set_workspace` 通知已随 WASM 桥接
+//! 淘汰删除（见 docs/plugin-harness/wasm-sunset-plan.md）。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -17,18 +19,12 @@ use super::{
     StdioSidecarConnection,
 };
 
-/// v2 清单直连的操作名即工具名；旧协议名（command.*）保留兼容旧版 sidecar。
-const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
-const RUN_COMMAND_OPERATION: &str = "command.run_command";
-const RUN_SHELL_OPERATION: &str = "command.run_shell";
+/// v2 清单直连的操作名即工具名（与 sidecar dispatch 一致）。
 const TOOL_RUN_COMMAND: &str = "run_command";
 const TOOL_RUN_SHELL: &str = "run_shell";
 
 fn is_run_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        RUN_COMMAND_OPERATION | RUN_SHELL_OPERATION | TOOL_RUN_COMMAND | TOOL_RUN_SHELL
-    )
+    matches!(operation, TOOL_RUN_COMMAND | TOOL_RUN_SHELL)
 }
 
 struct ActiveInvocation {
@@ -177,8 +173,7 @@ impl EphemeralCommandConnection {
             }
             // 工作区随宿主调用上下文（stdio 帧 context 字段）注入 sidecar，
             // 由 CommandAccessContext 接收；请求对象内的 workspace 字段
-            // 同步保留，兼容从参数解析工作区的 sidecar 形态。旧版
-            // `command.set_workspace` 初始化通知已随 sidecar v0.2 删除。
+            // 同步保留，兼容从参数解析工作区的 sidecar 形态。
             emit_sandbox_diagnostic(
                 &context.invocation_id,
                 "workspace-ready",
@@ -267,9 +262,6 @@ fn emit_sandbox_diagnostic(
 
 impl SidecarConnection for EphemeralCommandConnection {
     fn invoke(&self, operation: &str, _payload: &str) -> Result<String> {
-        if operation == SET_WORKSPACE_OPERATION {
-            return Ok("{}".to_string());
-        }
         if is_run_operation(operation) {
             return Err(SidecarInvokeError::PermissionDenied)
                 .context("command 执行缺少宿主工具调用上下文");
@@ -293,9 +285,6 @@ impl SidecarConnection for EphemeralCommandConnection {
         context: &SidecarInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
-        if operation == SET_WORKSPACE_OPERATION {
-            return Ok("{}".to_string());
-        }
         if !is_run_operation(operation) {
             bail!("不支持的 command 操作: {operation}");
         }

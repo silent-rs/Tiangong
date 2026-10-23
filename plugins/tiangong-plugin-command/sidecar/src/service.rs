@@ -18,7 +18,7 @@ use tiangong_plugin_sidecar::protocol::{
 
 /// Command sidecar 业务服务。
 pub struct CommandService {
-    /// 当前会话工作目录（由 set_workspace 注入，cwd 解析基准）。
+    /// 当前会话工作目录（由每次请求的调用上下文注入，cwd 解析基准）。
     workspace: RwLock<Option<PathBuf>>,
 }
 
@@ -93,7 +93,7 @@ impl CommandService {
             // 宿主清单直连（v2 无 wasm 桥接）：operation 为工具名，参数即调用
             // 参数对象（宽松解析与原桥接一致），返回 ToolOutcome 形状
             //（ExecResponse 字段一一对应）。工作目录由宿主注入的请求上下文
-            // 提供，取代原 set_workspace 钩子。
+            // 提供。
             TOOL_RUN_COMMAND => {
                 let req = parse_run_command_args(&payload);
                 let resp = self.handle_run_command(req).await;
