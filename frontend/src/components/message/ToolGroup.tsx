@@ -188,7 +188,7 @@ function ContinuationRow({
   expansion,
   titleOf,
 }: {
-  rounds: { tool: MessageItem; continuation: ParsedContinuation }[];
+  rounds: { tool: MessageItem; continuation: ParsedContinuation; roundMs: number | null }[];
   expansion: ExpansionState;
   titleOf?: (toolName: string, args: unknown) => string | null;
 }) {
@@ -238,7 +238,10 @@ function ContinuationRow({
         <div className="ml-5 mt-0.5 mb-1">
           <ContinuationCard
             command={title || null}
-            rounds={rounds.map((round) => round.continuation)}
+            rounds={rounds.map((round) => ({
+              continuation: round.continuation,
+              roundMs: round.roundMs,
+            }))}
           />
         </div>
       )}
@@ -274,21 +277,27 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
   // 结果合并为一个逻辑条目；其余工具保持单条。
   type GroupItem =
     | { kind: "tool"; tool: MessageItem }
-    | { kind: "continuation"; rounds: { tool: MessageItem; continuation: ParsedContinuation }[] };
+    | {
+        kind: "continuation";
+        rounds: { tool: MessageItem; continuation: ParsedContinuation; roundMs: number | null }[];
+      };
   const items: GroupItem[] = [];
   for (const tool of tools) {
     const continuation = parseContinuationMark(
       buildToolDisplayModel(tool, argsOf?.(tool), hints).outputText,
     );
     if (continuation) {
+      // 本轮调用耗时（等待用掉的时长）：与标记里的 elapsed_ms（命令累计
+      // 运行时长，含轮次间隙）是两个口径，展开时分别标注避免误读。
+      const roundMs = buildToolDisplayModel(tool, argsOf?.(tool), hints).durationMs;
       const previous = items[items.length - 1];
       if (
         previous?.kind === "continuation" &&
         previous.rounds[previous.rounds.length - 1].continuation.mark.key === continuation.mark.key
       ) {
-        previous.rounds.push({ tool, continuation });
+        previous.rounds.push({ tool, continuation, roundMs });
       } else {
-        items.push({ kind: "continuation", rounds: [{ tool, continuation }] });
+        items.push({ kind: "continuation", rounds: [{ tool, continuation, roundMs }] });
       }
       continue;
     }
