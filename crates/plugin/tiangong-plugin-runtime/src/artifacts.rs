@@ -1162,7 +1162,7 @@ mod extract_and_catalog_tests {
         std::fs::write(
             directory.join(MANIFEST_FILE),
             format!(
-                r#"{{"schema_version":2,"id":"{id}","version":"{version}","mention":{{"hint":"test"}}}}"#
+                r#"{{"schema_version":2,"id":"{id}","version":"{version}","permissions":["sidecar.invoke"],"mention":{{"candidates_op":"{id}.mention_candidates"}},"sidecar":{{"binary":"{id}-sidecar"}}}}"#
             ),
         )
         .unwrap();

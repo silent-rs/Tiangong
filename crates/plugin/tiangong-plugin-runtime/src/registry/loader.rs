@@ -1,5 +1,7 @@
 //! 查询视图（列表/状态/清单）、WASM 编译装载与 Core 适配器创建。
 
+use serde_json::Value;
+
 use super::connections::{
     loaded_plugin_matches, stop_connection_for_directory, stop_loaded_sidecar,
 };
@@ -412,21 +414,35 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             return Ok(Vec::new());
         };
         let mut candidates = Vec::new();
-        // v2 无 WASM 逻辑层插件的动态提及：清单声明 mention.candidates_op
-        // 且带 sidecar 时，查询直达 sidecar（载荷 MentionQuery JSON，返回
-        // 候选数组）；与 WASM 路径互斥，失败告警不中断其他来源。
-        if instance.is_none()
-            && let Some(op) = manifest
-                .mention
-                .as_ref()
-                .and_then(|mention| mention.candidates_op.as_deref())
-                .filter(|op| !op.trim().is_empty())
+        // v2 提及：清单声明 mention.candidates_op 且带 sidecar 时，查询直达
+        // sidecar（载荷 MentionQuery JSON，响应 { entry?, candidates? }）——
+        // 入口候选由 entry 的 hint/mark 加宿主约定（value/label/kind）合成，
+        // 动态候选逐项完备性过滤。sidecar 不可用时返回空：无法提供即不出现。
+        if let Some(op) = manifest
+            .mention
+            .as_ref()
+            .map(|mention| mention.candidates_op.as_str())
+            .filter(|op| !op.trim().is_empty())
             && manifest.sidecar.is_some()
         {
             let payload = serde_json::to_value(query).unwrap_or_default();
             match crate::bridge::invoke_plugin_sidecar(&self.id, op, payload, None) {
                 Ok(value) => {
-                    if let Some(items) = value.as_array() {
+                    if let Some(entry) = value.get("entry") {
+                        match crate::ts_plugin::mention_entry_candidate(
+                            &manifest,
+                            descriptor_name.as_deref(),
+                            entry,
+                        ) {
+                            Some(candidate) => candidates.push(candidate),
+                            None => tracing::warn!(
+                                plugin_id = %self.id,
+                                op,
+                                "mention entry 缺少 hint，入口候选已跳过"
+                            ),
+                        }
+                    }
+                    if let Some(items) = value.get("candidates").and_then(Value::as_array) {
                         let mut skipped = 0usize;
                         for item in items {
                             match dynamic_mention_candidate(item) {
@@ -472,15 +488,6 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
                 Err(error) => tracing::warn!(plugin_id = %self.id, %error, "mention 查询失败"),
             }
         }
-        // 静态清单候选也按本次查询词过滤（不过滤会列出全部声明了 mention
-        // 的插件），判定与宿主兜底同一函数。
-        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(
-            &manifest,
-            descriptor_name.as_deref(),
-            &query.query,
-        ) {
-            candidates.push(candidate);
-        }
         let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
         let current = plugins.get(&self.id).filter(|p| {
             p.enabled && p.generation == generation && p.manifest.version == manifest.version
@@ -500,9 +507,8 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
 ///
 /// 三者是前端渲染与查询匹配的必备字段——hint 是副标题且与 label / value
 /// 一同参与查询词匹配（`candidate_matches_query`），label 空会渲染出空行，
-/// value 空则候选无插入内容。静态入口候选的完备性由清单校验保证
-/// （`mention.hint` 必填、label 有多级回退）；动态候选来自插件返回值，
-/// 由本谓词在宿主侧统一把关。
+/// value 空则候选无插入内容。入口候选（op entry 合成）的完备性由
+/// `mention_entry_candidate` 保证（缺 hint 即不合成）。
 fn mention_candidate_is_complete(candidate: &tiangong_types::MentionCandidate) -> bool {
     !candidate.value.trim().is_empty()
         && !candidate.label.trim().is_empty()

@@ -365,7 +365,7 @@ fn 插件发现忽略内部事务目录并拒绝目录名与清单id不一致() 
         std::fs::write(
                 path.join(MANIFEST_FILE),
                 format!(
-                    r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"test"}}}}"#
+                    r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{{"candidates_op":"{id}.mention_candidates"}},"sidecar":{{"binary":"{id}-sidecar"}}}}"#
                 ),
             )
             .unwrap();
@@ -555,7 +555,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
 fn mention_sources_are_reachable_without_any_session_core() {
     let manifest = |id: &str| -> PluginManifest {
         serde_json::from_str(&format!(
-            r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"候选"}},"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","title":"{id}","entry":"dist/index.html"}}]}}}}"#
+            r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"candidates_op":"{id}.mention_candidates"}},"sidecar":{{"binary":"{id}-sidecar"}},"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","title":"{id}","entry":"dist/index.html"}}]}}}}"#
         ))
         .expect("解析测试清单")
     };
@@ -582,16 +582,27 @@ fn mention_sources_are_reachable_without_any_session_core() {
         plugins.insert("mention-disabled".into(), record("mention-disabled", false));
     }
     let query = tiangong_types::MentionQuery::default();
+    // #550：来源由注册表持有，没有任何 TiangongCore、也不依赖适配器弱引用
+    // 即可查询。提及内容自 v2 起由 sidecar 的 candidates_op 提供，测试装置
+    // 没有安装 sidecar，因而启用插件返回空候选而非报错——这里断言的是可达
+    // 性与停用/卸载行为，内容链路由 loader 与 ts_plugin 的单测覆盖。
+    let source_ids: Vec<String> = mention_sources()
+        .into_iter()
+        .map(|source| source.id().to_string())
+        .collect();
+    assert!(
+        source_ids.contains(&"mention-enabled".to_string()),
+        "启用插件应有候选来源：{source_ids:?}"
+    );
+    assert!(
+        !source_ids.iter().any(|id| id == "mention-disabled"),
+        "停用插件不应有来源：{source_ids:?}"
+    );
     let values: Vec<String> = mention_sources()
         .into_iter()
-        // 注册表持有的来源：没有任何 TiangongCore 存在，也不依赖适配器弱引用。
         .flat_map(|source| source.query(&query).expect("查询不应失败"))
         .map(|candidate| candidate.value)
         .collect();
-    assert!(
-        values.contains(&"@plugin:mention-enabled".to_string()),
-        "启用插件应可见：{values:?}"
-    );
     assert!(
         !values
             .iter()
