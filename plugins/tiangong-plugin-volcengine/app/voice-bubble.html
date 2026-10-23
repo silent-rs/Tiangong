@@ -101,16 +101,16 @@
       if (playingPath === path) {
         playingPath = null;
         render(current);
-        await call('plugin.stop', {}).catch(() => {});
+        await call('sidecar.stop', {}).catch(() => {});
         return;
       }
       playingPath = path;
       render(current);
       try {
-        await call('plugin.stop', {}).catch(() => {});
-        await call('plugin.play', { file_path: path });
+        await call('sidecar.stop', {}).catch(() => {});
+        await call('sidecar.play', { file_path: path });
         for (;;) {
-          const status = await call('plugin.play_status', {});
+          const status = await call('sidecar.play_status', {});
           if (!status || !status.playing || playingPath !== path) break;
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
@@ -160,7 +160,7 @@
     }
     if (typeof registerCleanup === 'function') {
       registerCleanup(() => {
-        if (playingPath) call('plugin.stop', {}).catch(() => {});
+        if (playingPath) call('sidecar.stop', {}).catch(() => {});
       });
     }
   </script>

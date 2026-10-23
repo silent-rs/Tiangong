@@ -57,7 +57,7 @@
 
     async function waitPlayback() {
       for (;;) {
-        const status = await call('plugin.play_status', {});
+        const status = await call('sidecar.play_status', {});
         if (status && status.error) throw new Error(status.error);
         if (!status || !status.playing || phase !== 'playing') return;
         await new Promise((resolve) => setTimeout(resolve, 200));
@@ -68,7 +68,7 @@
       if (phase === 'playing' || phase === 'loading') {
         phase = 'idle';
         render();
-        await call('plugin.stop', {}).catch(() => {});
+        await call('sidecar.stop', {}).catch(() => {});
         return;
       }
       if (!text.trim()) return;
@@ -76,7 +76,7 @@
       render();
       try {
         // speak：已生成过的直接播放音频文件；否则边合成边流式播放（同时缓存）。
-        await call('plugin.speak', { text });
+        await call('sidecar.speak', { text });
         if (phase !== 'loading') return;
         phase = 'playing';
         render();

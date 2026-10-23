@@ -1,10 +1,7 @@
 {
   "schema_version": 2,
   "id": "volcengine",
-  "version": "0.1.2",
-  "wasm": {
-    "binary": "tiangong_plugin_volcengine_wasm.wasm"
-  },
+  "version": "0.2.0",
   "sidecar": {
     "binary": "tiangong-volcengine-sidecar",
     "transport_protocol": "0.1.0",
@@ -13,9 +10,10 @@
     "request_timeout_ms": 600000
   },
   "permissions": [
-    "sidecar.invoke",
     "bridge.call",
-    "session.write"
+    "session.write",
+    "sidecar.invoke",
+    "tool.provide"
   ],
   "capabilities": {
     "tools": true,
@@ -23,7 +21,8 @@
     "events": [
       "session.*",
       "sidecar.*"
-    ]
+    ],
+    "lifecycle": true
   },
   "ui": {
     "sandbox": "shadow",
@@ -44,7 +43,9 @@
         "description": "切换到按住说话的语音输入模式",
         "icon": "mic",
         "entry": "app/voice-input.html",
-        "context": ["session"]
+        "context": [
+          "session"
+        ]
       },
       {
         "slot": "session.input-overlay",
@@ -53,7 +54,9 @@
         "description": "按住说话录音，识别后连同录音一起发送",
         "icon": "mic",
         "entry": "app/voice-overlay.html",
-        "context": ["session"]
+        "context": [
+          "session"
+        ]
       },
       {
         "slot": "session.message-action",
@@ -62,7 +65,10 @@
         "description": "朗读助手回复",
         "icon": "volume-2",
         "entry": "app/message-read.html",
-        "context": ["session", "message"]
+        "context": [
+          "session",
+          "message"
+        ]
       },
       {
         "slot": "session.message-item",
@@ -71,7 +77,10 @@
         "description": "语音输入消息卡片：录音播放与识别文本",
         "icon": "audio-lines",
         "entry": "app/voice-bubble.html",
-        "context": ["session", "message"],
+        "context": [
+          "session",
+          "message"
+        ],
         "render": "replace"
       },
       {
@@ -81,7 +90,9 @@
         "description": "边生成边朗读当前会话的助手回复",
         "icon": "volume-2",
         "entry": "app/auto-read.html",
-        "context": ["workspace"]
+        "context": [
+          "workspace"
+        ]
       }
     ]
   },
@@ -93,5 +104,117 @@
   "mention": {
     "hint": "火山引擎：生成图片或视频、语音合成与语音识别",
     "mark": "火山"
-  }
+  },
+  "tools": [
+    {
+      "name": "generate_image",
+      "timeout_ms": 300000,
+      "description": "使用火山方舟 Agent Plan 的 Seedream 根据文字描述生成图片；传入 images 时基于参考图生成。                每次调用等待完成后返回图片路径。                注意：同一轮次中不要重复调用相同 prompt 的 generate_image，                拿到图片结果后应直接继续后续任务（如编写 HTML、组合排版等）。\"                     .to_string(),                 input_schema: r#\"{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"description\":\"图片描述\"},\"size\":{\"type\":\"string\",\"description\":\"尺寸（可选）：1K / 2K / 4K，或 宽x高 如 2048x2048\"},\"images\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"参考图本地路径或 URL（可选），传入时为图生图\"}},\"required\":[\"prompt\"]}\"#                     .to_string(),             },             ToolSpec {                 name: TOOL_GENERATE_VIDEO.to_string(),                 description: \"使用火山方舟 Agent Plan 的 Seedance 根据文字描述生成视频；传入 image 时以该图为首帧。                提交后等待生成完成并返回视频地址，超时则返回任务 ID。\"                     .to_string(),                 input_schema: r#\"{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"description\":\"视频描述\"},\"duration\":{\"type\":\"integer\",\"description\":\"视频时长，单位秒（可选）\"},\"resolution\":{\"type\":\"string\",\"description\":\"分辨率（可选）：480p / 720p / 1080p\"},\"ratio\":{\"type\":\"string\",\"description\":\"宽高比（可选）：16:9 / 9:16 / 1:1 等\"},\"image\":{\"type\":\"string\",\"description\":\"首帧图本地路径或 URL（可选）\"}},\"required\":[\"prompt\"]}\"#                     .to_string(),             },             ToolSpec {                 name: TOOL_TEXT_TO_SPEECH.to_string(),                 description: \"使用火山方舟 Agent Plan 的豆包语音合成将文本合成为语音音频文件（mp3），返回本地文件路径。\"                     .to_string(),                 input_schema: r#\"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"待合成文本\"},\"voice\":{\"type\":\"string\",\"description\":\"音色 ID（可选，如 zh_female_vv_uranus_bigtts；留空使用设置中的默认音色）\"},\"speed\":{\"type\":\"number\",\"description\":\"语速倍率（可选，1.0 为正常，范围 0.5～2.0）\"}},\"required\":[\"text\"]}\"#                     .to_string(),             },             ToolSpec {                 name: TOOL_SPEECH_TO_TEXT.to_string(),                 description: \"使用火山方舟 Agent Plan 的豆包流式语音识别将音频文件转录为文本",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "图片描述"
+          },
+          "size": {
+            "type": "string",
+            "description": "尺寸（可选）：1K / 2K / 4K，或 宽x高 如 2048x2048"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "参考图本地路径或 URL（可选），传入时为图生图"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    },
+    {
+      "name": "generate_video",
+      "timeout_ms": 300000,
+      "description": "使用火山方舟 Agent Plan 的 Seedance 根据文字描述生成视频；传入 image 时以该图为首帧。                提交后等待生成完成并返回视频地址，超时则返回任务 ID。\"                     .to_string(),                 input_schema: r#\"{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\",\"description\":\"视频描述\"},\"duration\":{\"type\":\"integer\",\"description\":\"视频时长，单位秒（可选）\"},\"resolution\":{\"type\":\"string\",\"description\":\"分辨率（可选）：480p / 720p / 1080p\"},\"ratio\":{\"type\":\"string\",\"description\":\"宽高比（可选）：16:9 / 9:16 / 1:1 等\"},\"image\":{\"type\":\"string\",\"description\":\"首帧图本地路径或 URL（可选）\"}},\"required\":[\"prompt\"]}\"#                     .to_string(),             },             ToolSpec {                 name: TOOL_TEXT_TO_SPEECH.to_string(),                 description: \"使用火山方舟 Agent Plan 的豆包语音合成将文本合成为语音音频文件（mp3），返回本地文件路径。\"                     .to_string(),                 input_schema: r#\"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"待合成文本\"},\"voice\":{\"type\":\"string\",\"description\":\"音色 ID（可选，如 zh_female_vv_uranus_bigtts；留空使用设置中的默认音色）\"},\"speed\":{\"type\":\"number\",\"description\":\"语速倍率（可选，1.0 为正常，范围 0.5～2.0）\"}},\"required\":[\"text\"]}\"#                     .to_string(),             },             ToolSpec {                 name: TOOL_SPEECH_TO_TEXT.to_string(),                 description: \"使用火山方舟 Agent Plan 的豆包流式语音识别将音频文件转录为文本",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "视频描述"
+          },
+          "duration": {
+            "type": "integer",
+            "description": "视频时长，单位秒（可选）"
+          },
+          "resolution": {
+            "type": "string",
+            "description": "分辨率（可选）：480p / 720p / 1080p"
+          },
+          "ratio": {
+            "type": "string",
+            "description": "宽高比（可选）：16:9 / 9:16 / 1:1 等"
+          },
+          "image": {
+            "type": "string",
+            "description": "首帧图本地路径或 URL（可选）"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    },
+    {
+      "name": "text_to_speech",
+      "timeout_ms": 120000,
+      "description": "使用火山方舟 Agent Plan 的豆包语音合成将文本合成为语音音频文件（mp3），返回本地文件路径。\"                     .to_string(),                 input_schema: r#\"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"待合成文本\"},\"voice\":{\"type\":\"string\",\"description\":\"音色 ID（可选，如 zh_female_vv_uranus_bigtts；留空使用设置中的默认音色）\"},\"speed\":{\"type\":\"number\",\"description\":\"语速倍率（可选，1.0 为正常，范围 0.5～2.0）\"}},\"required\":[\"text\"]}\"#                     .to_string(),             },             ToolSpec {                 name: TOOL_SPEECH_TO_TEXT.to_string(),                 description: \"使用火山方舟 Agent Plan 的豆包流式语音识别将音频文件转录为文本",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "待合成文本"
+          },
+          "voice": {
+            "type": "string",
+            "description": "音色 ID（可选，如 zh_female_vv_uranus_bigtts；留空使用设置中的默认音色）"
+          },
+          "speed": {
+            "type": "number",
+            "description": "语速倍率（可选，1.0 为正常，范围 0.5～2.0）"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "speech_to_text",
+      "timeout_ms": 120000,
+      "description": "使用火山方舟 Agent Plan 的豆包流式语音识别将音频文件转录为文本",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "音频文件路径（仅允许 ~/.tiangong/media 目录下的 wav / mp3 / ogg 文件）"
+          },
+          "language": {
+            "type": "string",
+            "description": "语种（可选，如 zh-CN / en-US；留空自动识别）"
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    }
+  ],
+  "prompt": [
+    "音频附件处理：用户消息附带音频且需要了解其内容时，调用 speech_to_text，以该附件的 path 作为 file_path。经语音输入发送的消息正文已是识别结果，其录音附件（名称为「语音消息」）无需再次识别。"
+  ]
 }

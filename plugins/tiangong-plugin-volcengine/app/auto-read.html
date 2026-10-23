@@ -71,7 +71,7 @@
       state.sentences = [];
       state.speaking = false;
       state.playing = false;
-      call('plugin.stop', {}).catch(() => {});
+      call('sidecar.stop', {}).catch(() => {});
       render();
     }
 
@@ -125,11 +125,11 @@
         while (state.sentences.length && generation === state.generation) {
           const sentence = state.sentences.shift();
           try {
-            await call('plugin.speak', { text: sentence });
+            await call('sidecar.speak', { text: sentence });
             for (;;) {
               await new Promise((resolve) => setTimeout(resolve, 150));
               if (generation !== state.generation) return;
-              const status = await call('plugin.play_status', {});
+              const status = await call('sidecar.play_status', {});
               if (status && status.error) throw new Error(status.error);
               if (!status || !status.playing) break;
             }
@@ -196,7 +196,7 @@
     if (typeof registerCleanup === 'function') {
       registerCleanup(() => {
         unsubscribe();
-        if (state.playing) call('plugin.stop', {}).catch(() => {});
+        if (state.playing) call('sidecar.stop', {}).catch(() => {});
       });
     }
     if (state.enabled) subscribe();

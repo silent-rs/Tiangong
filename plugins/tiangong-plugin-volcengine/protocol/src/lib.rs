@@ -38,6 +38,8 @@ pub const RECORD_STOP_OPERATION: &str = "record_stop";
 pub const RECORD_CANCEL_OPERATION: &str = "record_cancel";
 /// WASM `on_turn_finished` 生命周期钩子转发：本轮最终答复（自动朗读用）。
 pub const TURN_FINISHED_OPERATION: &str = "turn_finished";
+/// 宿主生命周期钩子转发操作（payload = PluginSession 快照 JSON）。
+pub const LIFECYCLE_TURN_FINISHED_OPERATION: &str = "lifecycle.on_turn_finished";
 /// sidecar 通知通道：本轮最终答复（经宿主 `sidecar.event` 到达插件 UI）。
 pub const REPLY_FINAL_CHANNEL: &str = "volcengine.reply_final";
 /// sidecar 通知通道：边录边识别的中间文本（`{session_id, text}`，text 为累计全文）。

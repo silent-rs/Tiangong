@@ -282,7 +282,11 @@ async function callHost(method, payload = "") {
       else resolve(event.data.result ?? "");
     };
     window.addEventListener("message", handler);
-    window.parent.postMessage({ type: "plugin_call", channel, id, method, payload }, "*");
+    // v2 无 wasm 桥接：宿主方法经宿主桥 sidecar.* 直达插件 sidecar。
+    const bridgeMethod = method === "bootstrap" ? "sidecar.get_config"
+      : method === "save_config" ? "sidecar.set_config"
+      : `sidecar.${method}`;
+    window.parent.postMessage({ type: "plugin_call", channel, id, method: bridgeMethod, payload }, "*");
   });
 }
 

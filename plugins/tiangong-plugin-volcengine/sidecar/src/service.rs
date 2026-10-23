@@ -18,15 +18,18 @@ use tiangong_plugin_volcengine_protocol::{
     PLAY_STATUS_OPERATION, PLUGIN_ID, PLUGIN_VERSION, PlayRequest, PlayStatusResponse,
     RECORD_CANCEL_OPERATION, RECORD_START_OPERATION, RECORD_STOP_OPERATION, REPLY_FINAL_CHANNEL,
     RecordControlRequest, RecordStartRequest, SET_CONFIG_OPERATION, STOP_OPERATION,
-    SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse, TRANSCRIBE_OPERATION,
-    TURN_FINISHED_OPERATION, TranscribeRequest, TranscribeResponse, TurnFinishedRequest,
-    VOLCENGINE_PROTOCOL_VERSION, VideoRequest, VideoResponse, VoiceInfo, VolcengineConfig,
+    SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse, TOOL_SPEECH_TO_TEXT,
+    TOOL_TEXT_TO_SPEECH, TRANSCRIBE_OPERATION, TURN_FINISHED_OPERATION, TranscribeRequest,
+    TranscribeResponse, TurnFinishedRequest, VOLCENGINE_PROTOCOL_VERSION, VideoRequest,
+    VideoResponse, VideoStatus, VoiceInfo, VolcengineConfig,
 };
 
 use crate::ark::{self, Endpoint, VideoOptions};
 use crate::speech::{self, SpeechEndpoint, TtsOptions};
 use crate::{audio, config};
-use tiangong_plugin_volcengine_protocol::{SPEAK_OPERATION, SpeakRequest, SpeakResponse};
+use tiangong_plugin_volcengine_protocol::{
+    LIFECYCLE_TURN_FINISHED_OPERATION, SPEAK_OPERATION, SpeakRequest, SpeakResponse,
+};
 
 pub struct VolcengineService;
 
@@ -70,24 +73,86 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
                 "video_generation".to_string(),
                 "text_to_speech".to_string(),
                 "speech_to_text".to_string(),
+                format!(
+                    "tool:{}",
+                    tiangong_plugin_volcengine_protocol::TOOL_GENERATE_IMAGE
+                ),
+                format!(
+                    "tool:{}",
+                    tiangong_plugin_volcengine_protocol::TOOL_GENERATE_VIDEO
+                ),
+                format!(
+                    "tool:{}",
+                    tiangong_plugin_volcengine_protocol::TOOL_TEXT_TO_SPEECH
+                ),
+                format!(
+                    "tool:{}",
+                    tiangong_plugin_volcengine_protocol::TOOL_SPEECH_TO_TEXT
+                ),
             ],
             instance_id: format!("volcengine-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
         })
         .context("序列化握手响应失败"),
 
+        // 宿主清单直连（v2 无 wasm 桥接）：操作名与工具名相同，返回
+        // ToolOutcome 形状；结果文案沿用原 WASM 桥接。
         GENERATE_IMAGE_OPERATION => {
             let request: ImageRequest =
                 serde_json::from_value(payload).context("解析 generate_image 请求失败")?;
             let response = generate_image(request).await?;
-            serde_json::to_value(response).context("序列化 generate_image 响应失败")
+            let markdown = response
+                .images
+                .iter()
+                .enumerate()
+                .map(|(index, image)| format!("![图片 {}]({})", index + 1, image.reference))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(serde_json::json!({
+                "ok": true,
+                "summary": format!("图片生成成功（模型：{}）", response.model),
+                "stdout": markdown,
+                "stderr": "",
+                "exit_code": 0,
+            }))
         }
-
         GENERATE_VIDEO_OPERATION => {
             let request: VideoRequest =
                 serde_json::from_value(payload).context("解析 generate_video 请求失败")?;
             let response = generate_video(request).await?;
-            serde_json::to_value(response).context("序列化 generate_video 响应失败")
+            let model = &response.model;
+            let task_id = &response.task_id;
+            Ok(match response.status {
+                VideoStatus::Succeeded {
+                    video_url,
+                    duration,
+                } => {
+                    let duration_line = duration
+                        .map(|seconds| format!("\nDuration: {seconds:.1}s"))
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "ok": true,
+                        "summary": format!("视频生成成功（模型：{model}）"),
+                        "stdout": format!("Video URL: {video_url}{duration_line}"),
+                        "stderr": "",
+                        "exit_code": 0,
+                    })
+                }
+                VideoStatus::Running { status } => serde_json::json!({
+                    "ok": true,
+                    "summary": format!("视频生成任务仍在处理（模型：{model}）"),
+                    "stdout": format!("Task ID: {task_id}\nStatus: {status}"),
+                    "stderr": "",
+                    "exit_code": 0,
+                }),
+                VideoStatus::Failed { error } => serde_json::json!({
+                    "ok": false,
+                    "summary": format!("视频生成失败：{error}"),
+                    "stdout": format!("Task ID: {task_id}"),
+                    "stderr": error,
+                    "exit_code": 1,
+                }),
+            })
         }
 
         GET_CONFIG_OPERATION => {
@@ -166,6 +231,54 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             serde_json::to_value(Empty {}).context("序列化 record_cancel 响应失败")
         }
 
+        // 工具直连：text_to_speech / speech_to_text（UI 继续用 synthesize/transcribe）
+        TOOL_TEXT_TO_SPEECH => {
+            let request: SynthesizeRequest =
+                serde_json::from_value(payload).context("解析 text_to_speech 请求失败")?;
+            let response = synthesize(request).await?;
+            let duration = response
+                .duration
+                .map(|seconds| format!("，时长 {seconds:.1}s"))
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "ok": true,
+                "summary": format!("语音合成成功（{}{duration}）", response.model),
+                "stdout": format!("音频文件已保存到：{}", response.file_path),
+                "stderr": "",
+                "exit_code": 0,
+            }))
+        }
+        TOOL_SPEECH_TO_TEXT => {
+            let request: TranscribeRequest =
+                serde_json::from_value(payload).context("解析 speech_to_text 请求失败")?;
+            let response = transcribe(request).await?;
+            let language = response
+                .language
+                .as_deref()
+                .map(|language| format!("，语言：{language}"))
+                .unwrap_or_default();
+            let duration = response
+                .duration
+                .map(|seconds| format!("，音频时长：{seconds:.1}s"))
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "ok": true,
+                "summary": format!("语音识别成功（{}{language}{duration}）", response.model),
+                "stdout": response.text,
+                "stderr": "",
+                "exit_code": 0,
+            }))
+        }
+        // 宿主生命周期钩子转发（capabilities.lifecycle）：轮次结束提取
+        // 最终答复交给自动朗读（无最终答复时静默，与原 WASM 桥接一致）。
+        LIFECYCLE_TURN_FINISHED_OPERATION => {
+            let session_json = payload.to_string();
+            if let Some(reply) = tiangong_plugin_volcengine_protocol::final_reply(&session_json) {
+                let body = serde_json::to_string(&reply).context("序列化最终答复失败")?;
+                tiangong_plugin_sidecar::server::emit_notification(REPLY_FINAL_CHANNEL, body);
+            }
+            Ok(serde_json::json!({}))
+        }
         TURN_FINISHED_OPERATION => {
             let request: TurnFinishedRequest =
                 serde_json::from_value(payload).context("解析 turn_finished 请求失败")?;
