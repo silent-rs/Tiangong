@@ -1,20 +1,56 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "analyze-attachment",
-  "version": "0.1.8",
-  "wasm": {
-    "binary": "tiangong_plugin_analyze_attachment_wasm.wasm"
+  "version": "0.2.0",
+  "capabilities": {
+    "tools": true,
+    "prompt": true
   },
+  "tools": [
+    {
+      "name": "analyze_attachment",
+      "description": "调用多模态模型分析本地图片。当需要了解图片内容、而当前对话中只有图片的本地路径（看不到图片本身）时使用；images 必须是对话中明确给出的图片本地路径，不要传消息编号或自行猜测路径。文档和其他文件应使用对应文件工具。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "minLength": 1,
+            "description": "希望如何解析图片，例如提取文字、描述画面或回答与图片有关的问题"
+          },
+          "images": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "待分析图片的本地完整路径列表，原样使用用户消息中的 path；多张图片按希望分析的顺序传入"
+          }
+        },
+        "required": [
+          "instruction",
+          "images"
+        ]
+      },
+      "timeout_ms": 120000
+    }
+  ],
+  "prompt": [
+    "## 图片分析工具\n当对话中只有图片的本地路径、看不到图片本身，且回答确实需要了解图片内容时，可调用 `analyze_attachment`。\n调用时将要分析的图片本地 `path` 原样传入 `images` 数组，并用 `instruction` 说明问题；不要用消息编号代替图片路径。\n文档和其他文件应使用对应文件工具；普通文本对话、无需查看图片内容或消息未提供可分析图片时，不要调用此工具。"
+  ],
   "sidecar": {
     "binary": "tiangong-analyze-attachment-sidecar",
     "transport_protocol": "0.1.0",
     "business_protocol": 1,
+    "lifecycle": "resident",
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 120000
   },
   "permissions": [
     "model-config.read",
-    "sidecar.invoke"
+    "sidecar.invoke",
+    "tool.provide"
   ],
   "entrypoints": [
     "desktop",
