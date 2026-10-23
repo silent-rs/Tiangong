@@ -427,23 +427,20 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             match crate::bridge::invoke_plugin_sidecar(&self.id, op, payload, None) {
                 Ok(value) => {
                     if let Some(items) = value.as_array() {
+                        let mut skipped = 0usize;
                         for item in items {
-                            let text = |key: &str| {
-                                item.get(key)
-                                    .and_then(serde_json::Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_string()
-                            };
-                            if item.get("value").and_then(|v| v.as_str()).is_none() {
-                                continue;
+                            match dynamic_mention_candidate(item) {
+                                Some(candidate) => candidates.push(candidate),
+                                None => skipped += 1,
                             }
-                            candidates.push(tiangong_types::MentionCandidate {
-                                value: text("value"),
-                                label: text("label"),
-                                kind: text("kind"),
-                                hint: text("hint"),
-                                mark: text("mark"),
-                            });
+                        }
+                        if skipped > 0 {
+                            tracing::warn!(
+                                plugin_id = %self.id,
+                                skipped,
+                                op,
+                                "动态提及候选缺少 value/label/hint，已跳过"
+                            );
                         }
                     }
                 }
@@ -460,15 +457,18 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
                 plugin.query_mentions(query)
             });
             match result {
-                Ok(values) => candidates.extend(values.into_iter().map(|c| {
-                    tiangong_types::MentionCandidate {
-                        value: c.value,
-                        label: c.label,
-                        kind: c.kind,
-                        hint: c.hint,
-                        mark: c.mark,
-                    }
-                })),
+                Ok(values) => candidates.extend(
+                    values
+                        .into_iter()
+                        .map(|c| tiangong_types::MentionCandidate {
+                            value: c.value,
+                            label: c.label,
+                            kind: c.kind,
+                            hint: c.hint,
+                            mark: c.mark,
+                        })
+                        .filter(mention_candidate_is_complete),
+                ),
                 Err(error) => tracing::warn!(plugin_id = %self.id, %error, "mention 查询失败"),
             }
         }
@@ -494,6 +494,40 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
         });
         Ok(if valid { candidates } else { Vec::new() })
     }
+}
+
+/// 动态提及候选完备性：value / label / hint 均非空。
+///
+/// 三者是前端渲染与查询匹配的必备字段——hint 是副标题且与 label / value
+/// 一同参与查询词匹配（`candidate_matches_query`），label 空会渲染出空行，
+/// value 空则候选无插入内容。静态入口候选的完备性由清单校验保证
+/// （`mention.hint` 必填、label 有多级回退）；动态候选来自插件返回值，
+/// 由本谓词在宿主侧统一把关。
+fn mention_candidate_is_complete(candidate: &tiangong_types::MentionCandidate) -> bool {
+    !candidate.value.trim().is_empty()
+        && !candidate.label.trim().is_empty()
+        && !candidate.hint.trim().is_empty()
+}
+
+/// 把 `candidates_op` 返回的单个 JSON 项转为候选；字段残缺（缺
+/// value / label / hint）时返回 None，由调用方跳过并计数告警，不把
+/// 渲染不出、也搜不到的候选透给前端。
+fn dynamic_mention_candidate(item: &serde_json::Value) -> Option<tiangong_types::MentionCandidate> {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let candidate = tiangong_types::MentionCandidate {
+        value: text("value"),
+        label: text("label"),
+        kind: text("kind"),
+        hint: text("hint"),
+        mark: text("mark"),
+    };
+    mention_candidate_is_complete(&candidate).then_some(candidate)
 }
 
 /// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
@@ -823,4 +857,88 @@ pub(super) fn list_plugin_status_without_preload(
         sidecar_running,
         last_error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(value: &str, label: &str, hint: &str) -> tiangong_types::MentionCandidate {
+        tiangong_types::MentionCandidate {
+            value: value.into(),
+            label: label.into(),
+            kind: "file".into(),
+            hint: hint.into(),
+            mark: "F".into(),
+        }
+    }
+
+    #[test]
+    fn 动态候选_三项齐全才采用() {
+        let item = serde_json::json!({
+            "value": "@file:src/main.rs",
+            "label": "main.rs",
+            "kind": "file",
+            "hint": "src/main.rs",
+            "mark": "F",
+        });
+        let parsed = dynamic_mention_candidate(&item).expect("完备候选应被采用");
+        assert_eq!(parsed.value, "@file:src/main.rs");
+        assert_eq!(parsed.hint, "src/main.rs");
+        assert_eq!(parsed.mark, "F");
+    }
+
+    #[test]
+    fn 动态候选_缺hint或label或value被跳过() {
+        // 缺 hint：前端没有副标题，查询匹配也少一个字段
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "value": "@file:a.rs", "label": "a.rs",
+            }))
+            .is_none()
+        );
+        // 空串 hint 等同缺失
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "value": "@file:a.rs", "label": "a.rs", "hint": "  ",
+            }))
+            .is_none()
+        );
+        // 缺 label：渲染出空行
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "value": "@file:a.rs", "hint": "a.rs",
+            }))
+            .is_none()
+        );
+        // 缺 value：候选无插入内容
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "label": "a.rs", "hint": "a.rs",
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn 完备性谓词_空白字符串视为缺失() {
+        assert!(mention_candidate_is_complete(&candidate(
+            "@file:a.rs",
+            "a.rs",
+            "a.rs"
+        )));
+        assert!(!mention_candidate_is_complete(&candidate(
+            "@file:a.rs",
+            "a.rs",
+            ""
+        )));
+        assert!(!mention_candidate_is_complete(&candidate(
+            "", "a.rs", "a.rs"
+        )));
+        assert!(!mention_candidate_is_complete(&candidate(
+            "@file:a.rs",
+            " ",
+            "a.rs"
+        )));
+    }
 }

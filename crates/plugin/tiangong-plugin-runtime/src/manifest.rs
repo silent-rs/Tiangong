@@ -79,9 +79,14 @@ pub struct PluginManifest {
 
 /// @提及声明（`mention` 字段）。
 ///
-/// 候选 value/label 由宿主从插件 id 与 UI 贡献标题推导，插件只声明展示
+/// 候选 value/label 由宿主从插件 id 与 UI 贡献标题推导，插件声明展示
 /// 副标题（hint）与可选标记（mark）——@skill / @mcp 同款交互，用户点名后
 /// Agent 按插件说明（prompt）使用能力。
+///
+/// `hint` 必填：前端副标题渲染与查询匹配（label / value / hint 三字段
+/// 参与词匹配，见 `candidate_matches_query`）都依赖它。动态候选
+/// （`candidates_op` 返回项）同样必须自带非空 hint，由宿主查询时过滤
+/// 保证（见 `registry::loader::dynamic_mention_candidate`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MentionManifest {
@@ -1056,6 +1061,12 @@ mod tests {
         let bad = json.replace("问候能力", "  ");
         let manifest: PluginManifest = serde_json::from_str(&bad).unwrap();
         assert!(manifest.validate().is_err());
+        // 省略 hint 同样拒绝：副标题是前端渲染与查询匹配的必备字段
+        let missing = json.replace(r#""hint":"问候能力""#, "");
+        assert!(
+            serde_json::from_str::<PluginManifest>(&missing).is_err(),
+            "mention 声明必须带 hint"
+        );
         // v1 清单拒绝
         let legacy = json.replace("\"schema_version\":2", "\"schema_version\":1");
         let manifest: PluginManifest = serde_json::from_str(&legacy).unwrap();
