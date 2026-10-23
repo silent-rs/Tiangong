@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 tiangong-memory = { workspace = true }
 tiangong-llm = { workspace = true }
+lancedb = { workspace = true }
+futures-util = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 serde = { workspace = true, features = ["derive"] }

@@ -11381,6 +11381,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures-util",
+ "lancedb",
  "serde",
  "serde_json",
  "serial_test",

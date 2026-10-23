@@ -21,6 +21,8 @@ use std::time::Instant;
 
 use serde::Deserialize;
 use tiangong_llm::{EmbeddingProvider, LlmEndpointConfig, complete_text_with_usage};
+
+use crate::vector_store::StoredVectors;
 use tiangong_memory::{
     ManualMemoryDraft, MemoryCognitiveType, MemoryHandle, MemoryListQuery, MemoryNode,
     MemoryRelation, MemoryRelationDraft, MemoryRelationKind, MemoryStatus, RecallAnchors,
@@ -35,8 +37,15 @@ pub const DEFAULT_GROUP_LIMIT: usize = 6;
 pub const DEFAULT_CANDIDATE_LIMIT: usize = 12;
 /// 单次分页拉取的记忆数。
 const PAGE_LIMIT: usize = 500;
-/// 单次整理扫描的记忆上限（全量两两比较的安全阀）。
+/// 召回路径单批扫描上限（逐条召回代价高，分批 bounds 工作量）。
 const MAX_SCAN_NODES: usize = 5_000;
+/// 向量路径单次扫描上限（读向量库本地算相似度，一批覆盖全库）。
+const MAX_SCAN_NODES_VECTOR: usize = 50_000;
+/// 阻塞索引的文档频率上限：出现频率高于 `节点数 / 该除数` 的二元组不参与
+/// 阻塞（无区分度，且会造成平方级比较）。
+const BLOCKING_DF_DIVISOR: usize = 200;
+/// 阻塞索引文档频率的绝对下限。
+const BLOCKING_MIN_DF: usize = 20;
 /// 单次 embedding 请求的文本数。
 const EMBEDDING_BATCH: usize = 32;
 /// 摘要短于该字符数（且重要性也低）视为低质量。
@@ -66,14 +75,21 @@ const GROUP_RETRY_ATTEMPTS: usize = 3;
 /// 重试前的等待时间（给 follower 监控留出接替窗口）。
 const GROUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// 相似记忆候选项（含来源记忆的完整元数据）。
+/// 相似记忆候选项（只存节点 ID；完整节点从当批 `by_id` 取，避免大量克隆）。
 #[derive(Debug, Clone)]
 pub struct SimilarHit {
-    pub node: MemoryNode,
+    pub node_id: String,
     /// 相似度：向量路径为余弦相似度，词法路径为字符二元组 Jaccard。
     pub score: f64,
-    /// 检索后端标识（`vector` / `lexical`）。
+    /// 检索后端标识（`vector_store` / `vector` / `lexical`）。
     pub backend: &'static str,
+}
+
+/// 组内成员：完整节点 + 与主记忆的相似度。
+#[derive(Debug, Clone, Copy)]
+struct GroupMember<'a> {
+    node: &'a MemoryNode,
+    score: f64,
 }
 
 /// 记忆深度整理参数。
@@ -105,6 +121,8 @@ pub struct ConsolidationOptions {
     pub offset: usize,
     /// 最多扫描多少批（0 表示直到全库整理完成）。
     pub max_pages: usize,
+    /// 向量库里已算好的向量（读取即用，不重新向量化）。
+    pub stored_vectors: Option<std::sync::Arc<StoredVectors>>,
 }
 
 impl Default for ConsolidationOptions {
@@ -123,6 +141,7 @@ impl Default for ConsolidationOptions {
             max_nodes: 0,
             offset: 0,
             max_pages: 0,
+            stored_vectors: None,
         }
     }
 }
@@ -158,6 +177,8 @@ pub struct ConsolidationReport {
     pub used_llm: bool,
     /// 使用的检索后端。
     pub retrieval_backend: &'static str,
+    /// 向量库中暂无向量的记忆条数（未参与相似比较）。
+    pub without_vectors: usize,
     /// 是否试运行。
     pub dry_run: bool,
     /// 人类可读的处理明细（限量）。
@@ -184,6 +205,13 @@ impl ConsolidationReport {
             "- 检索后端：{}；扫描活跃记忆：{}（{} 批）",
             self.retrieval_backend, self.scanned, self.pages
         );
+        if self.without_vectors > 0 {
+            let _ = writeln!(
+                out,
+                "- 其中 {} 条暂无向量（未参与相似比较）",
+                self.without_vectors
+            );
+        }
         let _ = writeln!(
             out,
             "- 已处理：{}（剩余未处理：{}）",
@@ -236,9 +264,16 @@ pub async fn run_consolidation(
     // 全库分批：每批扫描上限内的活跃记忆，整理完再取下一批（跳过已整理的
     // 最新若干条），直到某批不足上限即全库整理完成。`offset` 用于从指定位置
     // 开始（断点续跑），`max_nodes` 约束单批处理条数。
+    let stored = options.stored_vectors.clone();
+    // 向量路径（读向量库 / 本地 embedding）一批覆盖全库；召回路径分批 bounds。
+    let scan_cap = if stored.is_some() || options.embedding.is_some() {
+        MAX_SCAN_NODES_VECTOR
+    } else {
+        MAX_SCAN_NODES
+    };
     let mut skip = options.offset;
     loop {
-        let nodes = collect_active_nodes(provider, skip).await;
+        let nodes = collect_active_nodes(provider, skip, scan_cap).await;
         if nodes.is_empty() {
             break;
         }
@@ -251,10 +286,17 @@ pub async fn run_consolidation(
                 report.pages, page, skip
             ));
         }
+        if let Some(stored) = stored.as_deref() {
+            report.without_vectors += nodes
+                .iter()
+                .filter(|node| stored.get(&node.id).is_none())
+                .count();
+        }
         consolidate_page(
             provider,
             report.pages,
             &nodes,
+            stored.as_deref(),
             options,
             progress,
             &mut report,
@@ -282,6 +324,7 @@ async fn consolidate_page(
     provider: HandleProvider<'_>,
     page_no: usize,
     nodes: &[MemoryNode],
+    stored: Option<&StoredVectors>,
     options: &ConsolidationOptions,
     progress: Option<ConsolidationProgress<'_>>,
     report: &mut ConsolidationReport,
@@ -289,19 +332,20 @@ async fn consolidate_page(
     let by_id: HashMap<&str, &MemoryNode> =
         nodes.iter().map(|node| (node.id.as_str(), node)).collect();
     // 逐条向量检索：一次性算出每条记忆的相似候选。
-    let candidates = match build_candidates(provider, nodes, &by_id, options, progress).await {
-        Ok((candidates, backend)) => {
-            report.retrieval_backend = backend;
-            candidates
-        }
-        Err(err) => {
-            report
-                .errors
-                .push(format!("相似检索失败，本批仅执行低质量遗忘：{err:#}"));
-            report.retrieval_backend = "unavailable";
-            HashMap::new()
-        }
-    };
+    let candidates =
+        match build_candidates(provider, nodes, &by_id, stored, options, progress).await {
+            Ok((candidates, backend)) => {
+                report.retrieval_backend = backend;
+                candidates
+            }
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("相似检索失败，本批仅执行低质量遗忘：{err:#}"));
+                report.retrieval_backend = "unavailable";
+                HashMap::new()
+            }
+        };
     let mut processed: HashSet<String> = HashSet::new();
     let mut handled = 0;
     for node in nodes {
@@ -346,7 +390,11 @@ async fn consolidate_page(
         .count();
 }
 /// 分页拉取活跃记忆（按更新时间从新到旧）；`skip` 跳过最新的若干条。
-async fn collect_active_nodes(provider: HandleProvider<'_>, skip: usize) -> Vec<MemoryNode> {
+async fn collect_active_nodes(
+    provider: HandleProvider<'_>,
+    skip: usize,
+    cap: usize,
+) -> Vec<MemoryNode> {
     let mut all = Vec::new();
     let mut offset = skip;
     loop {
@@ -364,11 +412,8 @@ async fn collect_active_nodes(provider: HandleProvider<'_>, skip: usize) -> Vec<
         }
         offset += batch.len();
         all.extend(batch);
-        if all.len() >= MAX_SCAN_NODES {
-            tracing::warn!(
-                "活跃记忆超过 {MAX_SCAN_NODES} 条，本次只整理前 {MAX_SCAN_NODES} 条；\
-                 可用 --offset 分批处理"
-            );
+        if all.len() >= cap {
+            tracing::warn!("活跃记忆超过 {cap} 条，本次只整理前 {cap} 条；可用 --offset 分批处理");
             break;
         }
     }
@@ -384,13 +429,21 @@ async fn build_candidates(
     provider: HandleProvider<'_>,
     nodes: &[MemoryNode],
     by_id: &HashMap<&str, &MemoryNode>,
+    stored: Option<&StoredVectors>,
     options: &ConsolidationOptions,
     progress: Option<ConsolidationProgress<'_>>,
 ) -> anyhow::Result<(HashMap<String, Vec<SimilarHit>>, &'static str)> {
+    // 1) 向量库里已经算好向量：直接读出来本地算相似度，不重新向量化。
+    if let Some(stored) = stored {
+        let candidates = stored_vector_candidates(nodes, stored, options);
+        return Ok((candidates, "vector_store"));
+    }
+    // 2) 配置了在线 Embedding 端点：本地批量向量化 + 余弦。
     if let Some(embedding) = options.embedding.as_ref() {
         let candidates = embed_candidates(embedding, nodes, options, progress).await?;
         return Ok((candidates, "vector"));
     }
+    // 3) 都没有：逐条经记忆召回取候选，再用字符二元组相似度判定。
     let mut candidates: HashMap<String, Vec<SimilarHit>> = HashMap::new();
     let total = nodes.len();
     for (index, node) in nodes.iter().enumerate() {
@@ -424,7 +477,7 @@ async fn build_candidates(
                 let node = by_id.get(hit.node_id.as_str())?;
                 let score = text_similarity(&source_text, &node_text(node));
                 (score >= options.similarity_threshold).then(|| SimilarHit {
-                    node: (*node).clone(),
+                    node_id: node.id.clone(),
                     score,
                     backend: "lexical",
                 })
@@ -442,6 +495,99 @@ async fn build_candidates(
         }
     }
     Ok((candidates, "lexical"))
+}
+
+/// 读向量库算相似候选：精确文本相同直接判 1.0，其余走「稀有二元组阻塞 +
+/// 余弦相似度」（按文档频率过滤，避免常见二元组造成平方级比较）。
+fn stored_vector_candidates(
+    nodes: &[MemoryNode],
+    stored: &StoredVectors,
+    options: &ConsolidationOptions,
+) -> HashMap<String, Vec<SimilarHit>> {
+    // 只有带向量的记忆参与比较。
+    let indexed: Vec<usize> = (0..nodes.len())
+        .filter(|index| stored.get(&nodes[*index].id).is_some())
+        .collect();
+    if indexed.len() < 2 {
+        return HashMap::new();
+    }
+    let normalized: Vec<Vec<f32>> = indexed
+        .iter()
+        .map(|index| normalize(stored.get(&nodes[*index].id).expect("已过滤")))
+        .collect();
+    let bigram_sets: Vec<HashSet<String>> = indexed
+        .iter()
+        .map(|index| bigrams(&node_text(&nodes[*index])))
+        .collect();
+    // 精确文本分组（完全相同 → 相似度 1.0）。
+    let mut exact: HashMap<String, Vec<usize>> = HashMap::new();
+    for (position, index) in indexed.iter().enumerate() {
+        exact
+            .entry(normalized_key(&node_text(&nodes[*index])))
+            .or_default()
+            .push(position);
+    }
+    // 二元组倒排索引（键借用 bigram_sets，生命周期覆盖本函数）。
+    let mut inverted: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (position, set) in bigram_sets.iter().enumerate() {
+        for bigram in set {
+            inverted.entry(bigram.as_str()).or_default().push(position);
+        }
+    }
+    let max_df = (indexed.len() / BLOCKING_DF_DIVISOR).max(BLOCKING_MIN_DF);
+    let mut candidates: HashMap<String, Vec<SimilarHit>> = HashMap::new();
+    for (position, index) in indexed.iter().enumerate() {
+        let mut scored: Vec<(f64, usize)> = Vec::new();
+        let mut seen: HashSet<usize> = HashSet::new();
+        // 1) 完全相同的文本。
+        if let Some(bucket) = exact.get(&normalized_key(&node_text(&nodes[*index]))) {
+            for other in bucket {
+                if *other != position && seen.insert(*other) {
+                    scored.push((1.0, *other));
+                }
+            }
+        }
+        // 2) 稀有二元组阻塞 + 余弦。
+        let mut shared: HashMap<usize, usize> = HashMap::new();
+        for bigram in &bigram_sets[position] {
+            let Some(postings) = inverted.get(bigram.as_str()) else {
+                continue;
+            };
+            if postings.len() > max_df {
+                continue;
+            }
+            for other in postings {
+                if *other != position {
+                    *shared.entry(*other).or_insert(0) += 1;
+                }
+            }
+        }
+        for (other, count) in shared {
+            if count >= MIN_SHARED_BIGRAMS && seen.insert(other) {
+                scored.push((cosine(&normalized[position], &normalized[other]), other));
+            }
+        }
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(options.candidate_limit);
+        if scored.is_empty() {
+            continue;
+        }
+        let hits = scored
+            .into_iter()
+            .map(|(score, other)| SimilarHit {
+                node_id: nodes[indexed[other]].id.clone(),
+                score,
+                backend: "vector_store",
+            })
+            .collect();
+        candidates.insert(nodes[*index].id.clone(), hits);
+    }
+    candidates
 }
 
 /// 批量embedding + 余弦相似度候选（字符二元组预过滤）。
@@ -511,7 +657,7 @@ async fn embed_candidates(
         let hits = scored
             .into_iter()
             .map(|(score, other)| SimilarHit {
-                node: nodes[other].clone(),
+                node_id: nodes[other].id.clone(),
                 score,
                 backend: "vector",
             })
@@ -559,25 +705,34 @@ async fn consolidate_node(
         ));
         return Ok(());
     }
-    // 2) 取出该记忆的相似组（过滤已处理）。
-    let group: Vec<SimilarHit> = candidates
+    // 2) 取出该记忆的相似组（过滤已处理），并解析成完整节点。
+    let selected: Vec<SimilarHit> = candidates
         .get(&node.id)
         .map(|hits| {
             hits.iter()
-                .filter(|hit| !processed.contains(&hit.node.id))
+                .filter(|hit| !processed.contains(&hit.node_id))
                 .cloned()
                 .collect()
         })
         .unwrap_or_default();
     // 组大小受 group_limit 约束（候选已按相似度降序）。
-    let mut group = group;
-    group.truncate(options.group_limit);
+    let mut selected = selected;
+    selected.truncate(options.group_limit);
+    let group: Vec<GroupMember<'_>> = selected
+        .iter()
+        .filter_map(|hit| by_id.get(hit.node_id.as_str()))
+        .map(|member| GroupMember {
+            node: member,
+            score: 0.0,
+        })
+        .collect();
     if group.is_empty() {
         return Ok(());
     }
-    // 3) LLM 整理；未配置或调用失败时退化为规则整理。
+    // 3) LLM 整理：由 LLM 判断哪些需要归一、哪些保留、哪些遗忘；
+    //    仅未配置或调用失败时才退化为规则整理。
     let mut group_ids = vec![node.id.clone()];
-    group_ids.extend(group.iter().map(|hit| hit.node.id.clone()));
+    group_ids.extend(group.iter().map(|member| member.node.id.clone()));
     let relations = provider().list_relations_batch(group_ids).await;
     let decision = match options.llm.as_ref() {
         Some(model) => match request_consolidation(model, node, &group, &relations).await {
@@ -604,7 +759,6 @@ async fn consolidate_node(
             &handle,
             node,
             &group,
-            by_id,
             decision.as_ref(),
             &relations,
             options,
@@ -668,8 +822,7 @@ where
 async fn apply_decision(
     handle: &MemoryHandle,
     node: &MemoryNode,
-    group: &[SimilarHit],
-    by_id: &HashMap<&str, &MemoryNode>,
+    group: &[GroupMember<'_>],
     decision: Option<&ConsolidationDecision>,
     relations: &[MemoryRelation],
     options: &ConsolidationOptions,
@@ -681,16 +834,16 @@ async fn apply_decision(
         .unwrap_or(ConsolidationAction::Merge);
     let primary_id = decision
         .and_then(|decision| decision.primary_id.clone())
-        .filter(|id| *id == node.id || group.iter().any(|hit| hit.node.id == *id))
+        .filter(|id| *id == node.id || group.iter().any(|member| member.node.id == *id))
         .unwrap_or_else(|| node.id.clone());
-    // 整组（含主记忆）标记为已处理，后续节点不再处理它们。
+    // 整组（含主记忆）标记为已处理，后续节点跳过它们。
     processed.insert(primary_id.clone());
-    for hit in group {
-        processed.insert(hit.node.id.clone());
+    for member in group {
+        processed.insert(member.node.id.clone());
     }
     let group_ids: HashSet<String> = group
         .iter()
-        .map(|hit| hit.node.id.clone())
+        .map(|member| member.node.id.clone())
         .chain(std::iter::once(primary_id.clone()))
         .collect();
 
@@ -757,7 +910,7 @@ async fn apply_decision(
     }
 
     // ── 合并归一 ──
-    let base = group_base(node, group, by_id, &primary_id);
+    let base = group_base(node, group, &primary_id);
     let (title, summary, keywords, memory_type, importance) = match decision {
         Some(decision) => (
             decision
@@ -815,7 +968,8 @@ async fn apply_decision(
     if memory_type != base.memory_type {
         report.reclassified += 1;
     }
-    // 其余组员归档（内容已并入主记忆）。
+    // 其余组员归档：内容已并入主记忆；归档会把他们从 Tantivy 与向量库中
+    // 删除，不再参与召回（记忆行保留为软删除，可在记忆页恢复）。
     let archived_ids: Vec<String> = group_ids
         .iter()
         .filter(|id| **id != primary_id)
@@ -1062,7 +1216,7 @@ impl ConsolidationDecision {
 async fn request_consolidation(
     model: &LlmEndpointConfig,
     node: &MemoryNode,
-    group: &[SimilarHit],
+    group: &[GroupMember<'_>],
     relations: &[MemoryRelation],
 ) -> anyhow::Result<ConsolidationDecision> {
     let prompt = build_consolidation_prompt(node, group, relations);
@@ -1096,18 +1250,15 @@ async fn request_consolidation(
 /// 组装整理用的用户提示（组内记忆 + 主记忆 + 现有关联链）。
 fn build_consolidation_prompt(
     node: &MemoryNode,
-    group: &[SimilarHit],
+    group: &[GroupMember<'_>],
     relations: &[MemoryRelation],
 ) -> String {
     let mut items = vec![memory_json(node, None)];
-    items.extend(group.iter().map(|hit| {
-        let similarity = if hit.backend == "vector" {
-            Some(hit.score)
-        } else {
-            None
-        };
-        memory_json(&hit.node, similarity)
-    }));
+    items.extend(
+        group
+            .iter()
+            .map(|member| memory_json(member.node, Some(member.score))),
+    );
     let relations: Vec<serde_json::Value> = relations
         .iter()
         .map(|relation| {
@@ -1162,20 +1313,14 @@ struct GroupBase {
 }
 
 /// 取主记忆对应的基础信息；主记忆不是当前节点时从组内命中取。
-fn group_base(
-    node: &MemoryNode,
-    group: &[SimilarHit],
-    by_id: &HashMap<&str, &MemoryNode>,
-    primary_id: &str,
-) -> GroupBase {
+fn group_base(node: &MemoryNode, group: &[GroupMember<'_>], primary_id: &str) -> GroupBase {
     let source = if primary_id == node.id {
         Some(node)
     } else {
         group
             .iter()
-            .find(|hit| hit.node.id == primary_id)
-            .map(|hit| &hit.node)
-            .or_else(|| by_id.get(primary_id).copied())
+            .find(|member| member.node.id == primary_id)
+            .map(|member| member.node)
     };
     match source {
         Some(node) => GroupBase {
@@ -1250,6 +1395,14 @@ fn days_since(timestamp: &str) -> Option<i64> {
         .ok()?;
     let now = chrono::Local::now().naive_local();
     Some((now - parsed).num_days().max(0))
+}
+
+/// 精确去重用的归一化键：去空白、转小写。
+fn normalized_key(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 /// 相似度对比 / 预过滤用的归一化文本。
@@ -1551,13 +1704,14 @@ mod tests {
             relations_created: 1,
             llm_calls: 2,
             used_llm: true,
-            retrieval_backend: "vector",
+            retrieval_backend: "vector_store",
+            without_vectors: 0,
             dry_run: false,
             actions: vec!["合并 2 条一致记忆".to_string()],
             errors: Vec::new(),
         };
         let text = report.render();
-        assert!(text.contains("检索后端：vector"));
+        assert!(text.contains("检索后端：vector_store"));
         assert!(text.contains("扫描活跃记忆：10"));
         assert!(text.contains("合并组数：2"));
         assert!(text.contains("遗忘低质量记忆：1"));
@@ -1568,18 +1722,24 @@ mod tests {
     fn group_base_falls_back_to_group_member() {
         let source = node("a", "主记忆", "摘要甲", 0.8);
         let member = node("b", "组员", "摘要乙", 0.7);
-        let group = vec![SimilarHit {
-            node: member.clone(),
+        let group = vec![GroupMember {
+            node: &member,
             score: 0.95,
-            backend: "vector",
         }];
-        let by_id: HashMap<&str, &MemoryNode> =
-            [("a", &source), ("b", &member)].into_iter().collect();
-        let base = group_base(&source, &group, &by_id, "b");
+        let base = group_base(&source, &group, "b");
         assert_eq!(base.title, "组员", "主记忆是组员时应取组员信息");
-        let base = group_base(&source, &group, &by_id, "a");
+        let base = group_base(&source, &group, "a");
         assert_eq!(base.title, "主记忆");
-        let base = group_base(&source, &group, &by_id, "missing");
+        let base = group_base(&source, &group, "missing");
         assert_eq!(base.title, "主记忆", "未知主记忆回退到当前节点");
+    }
+
+    #[test]
+    fn normalized_key_collapses_whitespace_and_case() {
+        assert_eq!(
+            normalized_key("  Redis  哨兵\n部署 "),
+            normalized_key("redis 哨兵 部署")
+        );
+        assert_ne!(normalized_key("redis 哨兵"), normalized_key("redis 主从"));
     }
 }

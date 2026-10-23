@@ -15,6 +15,7 @@
 //! 记忆数据始终一致；本工具不修改 Memory 插件本身。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -28,6 +29,7 @@ use tiangong_memory_consolidator::consolidation::{
     ConsolidationOptions, DEFAULT_CANDIDATE_LIMIT, DEFAULT_GROUP_LIMIT,
     DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
 };
+use tiangong_memory_consolidator::vector_store::{self, StoredVectors};
 
 /// 天工 Memory：记忆深度整理工具。
 #[derive(Debug, Parser)]
@@ -139,6 +141,36 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         },
         None => None,
     };
+    // 向量库里已经算好向量：直接读出来本地算相似度，不重新向量化。
+    let model_hint = options
+        .embedding
+        .as_ref()
+        .map(|embedding| embedding.model.clone())
+        .or_else(|| {
+            options
+                .local_embedding
+                .map(|tier| tiangong_memory::local_model::local_model_status(tier, true).model)
+        });
+    let stored: Option<Arc<StoredVectors>> =
+        match vector_store::load_stored_vectors(&root, model_hint.as_deref()).await {
+            Ok(Some(stored)) => {
+                println!(
+                    "已读取向量库 {} 中的 {} 条向量（{} 维），相似度本地计算",
+                    stored.table,
+                    stored.vectors.len(),
+                    stored.dimension
+                );
+                Some(Arc::new(stored))
+            }
+            Ok(None) => {
+                println!("未找到可用向量库，相似检索退化为「记忆召回 + 文本相似度」");
+                None
+            }
+            Err(err) => {
+                tracing::warn!("读取向量库失败（{err:#}），退化为「记忆召回 + 文本相似度」");
+                None
+            }
+        };
     let managed: ManagedMemory =
         start_or_connect_with_options(options.clone(), ProcessType::Sidecar)
             .await
@@ -160,16 +192,11 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         max_nodes: cli.max_nodes,
         offset: cli.offset,
         max_pages: cli.max_pages,
+        stored_vectors: stored,
         ..Default::default()
     };
     if consolidation.llm.is_none() {
         println!("未配置 Memory LLM，将按规则整理（仍会合并一致记忆并重建关联链）");
-    }
-    if consolidation.embedding.is_none() {
-        println!(
-            "未配置可用的 Embedding 端点，相似检索退化为「记忆召回 + 文本相似度」；\
-             在记忆配置页配置 Embedding 可获得更准确的向量检索"
-        );
     }
     println!("开始记忆深度整理……");
     // 句柄提供者：Leader 退出后 follower 监控会自动接替并替换内部句柄，
@@ -211,7 +238,7 @@ fn print_detected(root: &std::path::Path, config: &MemoryConfig, options: &Memor
         (Some(embedding), _) => {
             format!("在线端点 {}（{} 维）", embedding.model, embedding.dimension)
         }
-        (None, true) => "内置本地模型（本工具改用召回 + 文本相似度）".to_string(),
+        (None, true) => "内置本地模型（向量已入库，直接读取）".to_string(),
         (None, false) => "未配置".to_string(),
     };
     let rerank = match (options.rerank.as_ref(), options.local_rerank.is_some()) {
