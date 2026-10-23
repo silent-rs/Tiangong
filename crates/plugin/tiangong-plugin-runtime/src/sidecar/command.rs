@@ -19,12 +19,6 @@ use super::{
     StdioSidecarConnection,
 };
 
-/// v2 清单直连的操作名即工具名，与 sidecar dispatch 同口径（权威定义在
-/// command protocol crate；本库不依赖具体插件协议，故此处内联字面量）。
-fn is_run_operation(operation: &str) -> bool {
-    matches!(operation, "run_command" | "run_shell")
-}
-
 struct ActiveInvocation {
     session_id: String,
     connection: Arc<StdioSidecarConnection>,
@@ -259,12 +253,11 @@ fn emit_sandbox_diagnostic(
 }
 
 impl SidecarConnection for EphemeralCommandConnection {
-    fn invoke(&self, operation: &str, _payload: &str) -> Result<String> {
-        if is_run_operation(operation) {
-            return Err(SidecarInvokeError::PermissionDenied)
-                .context("command 执行缺少宿主工具调用上下文");
-        }
-        bail!("不支持的 command 操作: {operation}")
+    /// 无调用上下文即无权威工作区，命令执行无法进行（fail-closed）。
+    /// command 的全部操作都需要工作区，故无需按操作名分类；操作合法性
+    /// 由 sidecar dispatch 判定（见下）。
+    fn invoke(&self, _operation: &str, _payload: &str) -> Result<String> {
+        Err(SidecarInvokeError::PermissionDenied).context("command 执行缺少宿主工具调用上下文")
     }
 
     fn invoke_with_context(
@@ -276,6 +269,9 @@ impl SidecarConnection for EphemeralCommandConnection {
         self.invoke_with_context_and_progress(operation, payload, context, &mut |_| {})
     }
 
+    /// 操作名直接交给 sidecar：dispatch 是操作命名的权威，未知操作由
+    /// sidecar 报错并经 runtime 回给 Agent——宿主不再维护第二份命名空间
+    /// （否则 sidecar 新增工具会被宿主旧名单误拒）。
     fn invoke_with_context_and_progress(
         &self,
         operation: &str,
@@ -283,9 +279,6 @@ impl SidecarConnection for EphemeralCommandConnection {
         context: &SidecarInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
-        if !is_run_operation(operation) {
-            bail!("不支持的 command 操作: {operation}");
-        }
         self.invoke_ephemeral(operation, payload, context, on_progress)
     }
 
