@@ -26,8 +26,5 @@
   ],
   "prompt": [
     "插件能力说明（{{PLUGIN_NAME}}，id: {{PLUGIN_ID}}）：本插件随包分发一个 npx 命令行脚本，安装在 ~/.tiangong/plugins/{{PLUGIN_ID}}/tools/main.ts。需要该能力时，经命令执行通道运行：npx -y tsx@4.19.2 ~/.tiangong/plugins/{{PLUGIN_ID}}/tools/main.ts [--name 名字]。脚本向 stdout 输出 JSON 结果（{ok, message, ...}），解析后使用；非零退出码或 stderr 表示失败。首次运行需要联网下载 tsx（命令的网络审批放行一次即可，会话内不再重复询问）。修改脚本内容属于插件升级：重新经 plugin creator 构建安装。——以下是能力定制区（按用户需求改写本段与 tools/main.ts）：当前示例能力为问候（--name 指定名字）。"
-  ],
-  "mention": {
-    "hint": "{{PLUGIN_NAME}}（请改为一句话能力描述）"
-  }
+  ]
 }

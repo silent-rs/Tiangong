@@ -222,6 +222,15 @@ impl ComputerUseService {
                     .with_context(|| "序列化 restore_host_window 响应失败")
             }
 
+            // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+            "mention_candidates" => serde_json::to_value(serde_json::json!({
+                "entry": {
+                    "hint": "控制桌面应用：定位窗口、读取控件树、执行点击与输入",
+                },
+                "candidates": [],
+            }))
+            .with_context(|| "序列化 mention_candidates 响应失败"),
+
             operation => Err(anyhow::anyhow!("不支持的 Computer Use 操作: {operation}")),
         }
     }

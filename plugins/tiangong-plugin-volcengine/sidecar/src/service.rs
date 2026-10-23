@@ -288,6 +288,16 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             serde_json::to_value(Empty {}).context("序列化 turn_finished 响应失败")
         }
 
+        // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+        "mention_candidates" => serde_json::to_value(serde_json::json!({
+            "entry": {
+                "hint": "火山引擎：生成图片或视频、语音合成与语音识别",
+                "mark": "火山",
+            },
+            "candidates": [],
+        }))
+        .context("序列化 mention_candidates 响应失败"),
+
         other => bail!("未知的 Volcengine 操作: {other}"),
     }
 }

@@ -42,6 +42,6 @@
     "server"
   ],
   "mention": {
-    "hint": "控制桌面应用：定位窗口、读取控件树、执行点击与输入"
+    "candidates_op": "computer-use.mention_candidates"
   }
 }

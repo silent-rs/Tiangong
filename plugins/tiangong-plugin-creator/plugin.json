@@ -141,6 +141,6 @@
     "plugin_install 是唯一安装通道（官方 Creator 自动签名安装 + 注册表加载）；不要尝试用文件复制等方式绕过安装流程。"
   ],
   "mention": {
-    "hint": "插件创作：生成、构建与安装自建插件（devkit 工具链）"
+    "candidates_op": "plugin-creator.mention_candidates"
   }
 }

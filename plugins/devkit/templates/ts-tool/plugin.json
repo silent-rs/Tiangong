@@ -42,8 +42,5 @@
       },
       "timeout_ms": 20000
     }
-  ],
-  "mention": {
-    "hint": "{{PLUGIN_NAME}}（请改为一句话能力描述）"
-  }
+  ]
 }

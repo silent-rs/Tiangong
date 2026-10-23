@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 
 use tiangong_plugin_index_protocol::lifecycle::{
     FINALIZE_SESSION_OPERATION, FinalizeSessionRequest, INDEX_TURN_BATCH_OPERATION,
-    IndexTurnBatchRequest, SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
+    IndexTurnBatchRequest,
 };
 use tiangong_plugin_index_protocol::management::{
     DELETE_WORKSPACE_INDEX_OPERATION, DeleteWorkspaceIndexRequest,
@@ -21,15 +21,15 @@ use tiangong_plugin_index_protocol::management::{
     RebuildWorkspaceIndexResponse,
 };
 use tiangong_plugin_index_protocol::search::{
-    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, MENTION_FILES_OPERATION,
+    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, MENTION_CANDIDATES_OPERATION,
     MentionFileCandidate, MentionFilesRequest, MentionFilesResponse, SEARCH_CODE_OPERATION,
     SearchCodeRequest, SearchCodeResponse,
 };
 use tiangong_plugin_index_protocol::{
     INDEX_PROTOCOL_VERSION, IndexScope, LIFECYCLE_SESSION_ENDED_OPERATION,
     LIFECYCLE_SESSION_READY_OPERATION, LIFECYCLE_TURN_FINISHED_OPERATION,
-    LIFECYCLE_TURN_STARTED_OPERATION, MENTION_CANDIDATES_OPERATION, PLUGIN_ID, PLUGIN_VERSION,
-    TOOL_INDEX_SEARCH, TOOL_SEARCH_CODE, TurnData, WorkspaceIndexInfo,
+    LIFECYCLE_TURN_STARTED_OPERATION, PLUGIN_ID, PLUGIN_VERSION, TOOL_INDEX_SEARCH,
+    TOOL_SEARCH_CODE, TurnData, WorkspaceIndexInfo,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -284,10 +284,10 @@ impl IndexService {
                 {
                     Ok(Ok(resp)) => resp,
                     Ok(Err(error)) => {
-                        return Ok(mention_failure_candidates(&format!("{error:#}")));
+                        return Ok(mention_failure_response(&format!("{error:#}")));
                     }
                     Err(error) => {
-                        return Ok(mention_failure_candidates(&format!(
+                        return Ok(mention_failure_response(&format!(
                             "mention 后台任务失败：{error}"
                         )));
                     }
@@ -295,7 +295,7 @@ impl IndexService {
                 if let Some(root) = scan_root.as_deref() {
                     self.ensure_full_scan(std::path::Path::new(root));
                 }
-                Ok(mention_candidates_value(&resp))
+                Ok(mention_response(&resp))
             }
             INDEX_SEARCH_OPERATION => {
                 let req: IndexSearchRequest = serde_json::from_value(payload)
@@ -323,30 +323,6 @@ impl IndexService {
                         .await
                         .with_context(|| "search_code 后台任务失败")?;
                 serde_json::to_value(resp).with_context(|| "序列化 search_code 响应失败")
-            }
-            MENTION_FILES_OPERATION => {
-                let req: MentionFilesRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 mention_files 请求失败")?;
-                let manager = self.manager.clone();
-                let workspace = self.resolve_mention_workspace(req.workspace.clone());
-                let scan_root = workspace.clone();
-                let resp = tokio::task::spawn_blocking(move || {
-                    handle_mention_files_blocking(&manager, workspace.as_deref(), req)
-                })
-                .await
-                .with_context(|| "mention_files 后台任务失败")??;
-                // 查询可能刚触发索引重建：在此补一次全量扫描，否则空索引没人管。
-                if let Some(root) = scan_root.as_deref() {
-                    self.ensure_full_scan(root);
-                }
-                serde_json::to_value(resp).with_context(|| "序列化 mention_files 响应失败")
-            }
-            SET_WORKSPACE_OPERATION => {
-                let req: SetWorkspaceRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 set_workspace 请求失败")?;
-                self.handle_set_workspace(req.workspace)?;
-                serde_json::to_value(tiangong_plugin_index_protocol::Ack {})
-                    .with_context(|| "序列化 set_workspace 响应失败")
             }
             INDEX_TURN_BATCH_OPERATION => {
                 let req: IndexTurnBatchRequest = serde_json::from_value(payload)
@@ -441,20 +417,6 @@ impl IndexService {
         request_workspace
             .map(PathBuf::from)
             .or_else(|| self.workspace())
-    }
-
-    /// mention 文件候选的工作区：请求注入优先（wasm 从宿主查询上下文读出），
-    /// 其次 `set_workspace` 注入的全局工作区，最后回落宿主权威调用上下文。
-    fn resolve_mention_workspace(&self, requested: Option<String>) -> Option<PathBuf> {
-        requested
-            .map(PathBuf::from)
-            .or_else(|| self.workspace())
-            .or_else(|| {
-                tiangong_plugin_sidecar::invocation_context()
-                    .map(|ctx| ctx.workspace)
-                    .filter(|workspace| !workspace.is_empty())
-                    .map(PathBuf::from)
-            })
     }
 
     // ── 生命周期 ─────────────────────────────────────────────
@@ -953,9 +915,12 @@ fn turn_index_content(message: &tiangong_types::Message) -> String {
         .join("\n")
 }
 
-/// 动态提及候选（原 wasm index_mention_candidates 映射）。
+/// 提及入口副标题（宿主约定 value/label/kind，插件只提供 hint/mark）。
+const MENTION_ENTRY_HINT: &str = "检索工作区文件与对话历史：语义索引与精确文本搜索";
+
+/// 动态提及候选：`@file:<相对路径>` token，hint 为相对路径。
 fn mention_candidates_value(response: &MentionFilesResponse) -> serde_json::Value {
-    let mut candidates: Vec<serde_json::Value> = response
+    let candidates: Vec<serde_json::Value> = response
         .candidates
         .iter()
         .map(|candidate| {
@@ -974,26 +939,28 @@ fn mention_candidates_value(response: &MentionFilesResponse) -> serde_json::Valu
             })
         })
         .collect();
-    if response.scanning {
-        // 索引扫描中：候选必然不完整，用占位候选透传状态。
-        candidates.push(serde_json::json!({
-            "value": "",
-            "label": "索引创建中…",
-            "kind": "file",
-            "hint": "正在扫描工作区文件，请稍候",
-            "mark": "…",
-        }));
-    }
     serde_json::Value::Array(candidates)
 }
 
-/// 查询失败时的占位候选（原 wasm mention_failure_candidates）。
-fn mention_failure_candidates(reason: &str) -> serde_json::Value {
-    serde_json::json!([{
-        "value": "",
-        "label": "文件索引查询失败",
-        "hint": reason,
-        "kind": "file",
-        "mark": "!",
-    }])
+/// 提及查询响应：`{ entry, candidates }`。索引扫描中时入口副标题改为
+/// 扫描提示（候选暂不完整），不再用空 value 的占位候选——宿主的完备性
+/// 过滤会丢掉它，状态改由 entry 副标题表达。
+fn mention_response(response: &MentionFilesResponse) -> serde_json::Value {
+    let hint = if response.scanning {
+        "索引创建中…正在扫描工作区文件，候选暂不完整"
+    } else {
+        MENTION_ENTRY_HINT
+    };
+    serde_json::json!({
+        "entry": { "hint": hint },
+        "candidates": mention_candidates_value(response),
+    })
+}
+
+/// 查询失败：入口仍出现，副标题即失败原因（不提供候选）。
+fn mention_failure_response(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "entry": { "hint": format!("文件索引查询失败：{reason}") },
+        "candidates": [],
+    })
 }

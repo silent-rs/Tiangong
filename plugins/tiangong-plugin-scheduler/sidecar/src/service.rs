@@ -371,6 +371,14 @@ impl SchedulerService {
                 })
                 .with_context(|| "序列化 get_job_runs 响应失败")
             }
+            // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+            "mention_candidates" => serde_json::to_value(serde_json::json!({
+                "entry": {
+                    "hint": "创建、管理定时任务（Cron 调度）",
+                },
+                "candidates": [],
+            }))
+            .with_context(|| "序列化 mention_candidates 响应失败"),
             other => Err(anyhow::anyhow!("未知的 Scheduler 操作: {other}")),
         }
     }

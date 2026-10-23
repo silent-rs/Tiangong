@@ -286,6 +286,13 @@ impl BotService {
                 "instance_id": format!("{PLUGIN_ID}-sidecar-{}", std::process::id()),
                 "status": "ready",
             })),
+            // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+            "mention_candidates" => Ok(serde_json::json!({
+                "entry": {
+                    "hint": "经 Bot 向已授权的飞书 / QQ / 微信会话主动推送消息",
+                },
+                "candidates": [],
+            })),
             // ── 推送工具（返回 ToolOutcome 形状）──
             "list_push_targets" => {
                 let targets = self.all_targets(true)?;
