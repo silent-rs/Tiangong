@@ -19,12 +19,10 @@ use super::{
     StdioSidecarConnection,
 };
 
-/// v2 清单直连的操作名即工具名（与 sidecar dispatch 一致）。
-const TOOL_RUN_COMMAND: &str = "run_command";
-const TOOL_RUN_SHELL: &str = "run_shell";
-
+/// v2 清单直连的操作名即工具名，与 sidecar dispatch 同口径（权威定义在
+/// command protocol crate；本库不依赖具体插件协议，故此处内联字面量）。
 fn is_run_operation(operation: &str) -> bool {
-    matches!(operation, TOOL_RUN_COMMAND | TOOL_RUN_SHELL)
+    matches!(operation, "run_command" | "run_shell")
 }
 
 struct ActiveInvocation {
