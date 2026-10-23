@@ -259,7 +259,7 @@ impl IndexService {
                     .map(str::to_string);
                 let Some(workspace) = workspace else {
                     // 草稿/全局查询没有工作区，直接无候选。
-                    return Ok(serde_json::json!([]));
+                    return Ok(serde_json::json!({ "candidates": [] }));
                 };
                 let request = MentionFilesRequest {
                     query: payload
@@ -915,9 +915,6 @@ fn turn_index_content(message: &tiangong_types::Message) -> String {
         .join("\n")
 }
 
-/// 提及入口副标题（宿主约定 value/label/kind，插件只提供 hint/mark）。
-const MENTION_ENTRY_HINT: &str = "检索工作区文件与对话历史：语义索引与精确文本搜索";
-
 /// 动态提及候选：`@file:<相对路径>` token，hint 为相对路径。
 fn mention_candidates_value(response: &MentionFilesResponse) -> serde_json::Value {
     let candidates: Vec<serde_json::Value> = response
@@ -942,25 +939,17 @@ fn mention_candidates_value(response: &MentionFilesResponse) -> serde_json::Valu
     serde_json::Value::Array(candidates)
 }
 
-/// 提及查询响应：`{ entry, candidates }`。索引扫描中时入口副标题改为
-/// 扫描提示（候选暂不完整），不再用空 value 的占位候选——宿主的完备性
-/// 过滤会丢掉它，状态改由 entry 副标题表达。
+/// 提及查询响应：仅 `{ candidates }`——index 是内容提供方，不提供
+/// "被提及"入口（`@plugin:index` 不是有效对象），用户 @ 出来的是文件。
+/// 索引扫描中时候选自然不完整，不做占位表达。
 fn mention_response(response: &MentionFilesResponse) -> serde_json::Value {
-    let hint = if response.scanning {
-        "索引创建中…正在扫描工作区文件，候选暂不完整"
-    } else {
-        MENTION_ENTRY_HINT
-    };
     serde_json::json!({
-        "entry": { "hint": hint },
         "candidates": mention_candidates_value(response),
     })
 }
 
-/// 查询失败：入口仍出现，副标题即失败原因（不提供候选）。
+/// 查询失败：不出现（fail-honest），原因记入日志供诊断。
 fn mention_failure_response(reason: &str) -> serde_json::Value {
-    serde_json::json!({
-        "entry": { "hint": format!("文件索引查询失败：{reason}") },
-        "candidates": [],
-    })
+    tracing::warn!("mention 文件候选查询失败：{reason}");
+    serde_json::json!({ "candidates": [] })
 }
