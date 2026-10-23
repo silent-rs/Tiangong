@@ -1,11 +1,8 @@
 {
   "schema_version": 2,
   "id": "scheduler",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "require_server": true,
-  "wasm": {
-    "binary": "tiangong_plugin_scheduler_wasm.wasm"
-  },
   "sidecar": {
     "binary": "tiangong-scheduler-sidecar",
     "transport_protocol": "0.1.0",
@@ -15,8 +12,9 @@
   },
   "permissions": [
     "app-storage.read",
+    "bridge.call",
     "sidecar.invoke",
-    "bridge.call"
+    "tool.provide"
   ],
   "capabilities": {
     "tools": true
@@ -47,5 +45,156 @@
         "render": "replace"
       }
     ]
+  },
+  "tools": [
+    {
+      "name": "scheduler_create_job",
+      "description": "创建定时任务（Cron Job）。指定 Cron 表达式、任务内容后，调度器会按周期自动触发。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "任务名称"
+          },
+          "description": {
+            "type": "string",
+            "description": "任务描述"
+          },
+          "schedule": {
+            "type": "string",
+            "description": "Cron 表达式（6 字段：秒 分 时 日 月 周），如 '0 0 9 * * *' 表示每天 9 点"
+          },
+          "payload": {
+            "type": "string",
+            "description": "触发时发送给 LLM 的任务描述"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "关联已有会话 ID（可选，不指定则首次触发时自动创建新会话）"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "是否启用，默认 true"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "schedule",
+          "payload"
+        ]
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "scheduler_list_jobs",
+      "description": "列出所有定时任务。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "scheduler_update_job",
+      "description": "更新已有定时任务的字段（所有字段可选，仅更新传入的字段）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "任务 ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "任务名称"
+          },
+          "description": {
+            "type": "string",
+            "description": "任务描述"
+          },
+          "schedule": {
+            "type": "string",
+            "description": "Cron 表达式（6 字段：秒 分 时 日 月 周）"
+          },
+          "payload": {
+            "type": "string",
+            "description": "触发时发送给 LLM 的任务描述"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "关联会话 ID"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "是否启用"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "scheduler_delete_job",
+      "description": "按 ID 删除定时任务。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "任务 ID"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "scheduler_trigger_job",
+      "description": "按 ID 立即手动触发一次定时任务执行（会真正执行任务并把结果写入执行历史）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "任务 ID"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "scheduler_get_job_runs",
+      "description": "查询指定定时任务的最近执行历史。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "任务 ID"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "返回记录数量，默认 10"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 30000
+    }
+  ],
+  "mention": {
+    "hint": "创建、管理定时任务（Cron 调度）"
   }
 }

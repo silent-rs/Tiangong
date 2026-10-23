@@ -977,7 +977,7 @@ async function callHost(method, payload = "") {
     };
     window.addEventListener("message", handler);
     window.parent.postMessage(
-      { type: "plugin_call", channel, id, method, payload },
+      { type: "plugin_call", channel, id, method: `sidecar.${method}`, payload: payload === "" ? "{}" : payload },
       "*",
     );
   });
@@ -1203,7 +1203,7 @@ async function loadJobs(manual = false) {
   refreshIcon.classList.add("spinning");
   if (manual) setStatus("正在刷新…");
   try {
-    const raw = await callHost("list", "{}");
+    const raw = await callHost("list_jobs", "{}");
     const data = raw ? JSON.parse(raw) : { jobs: [] };
     renderList(data.jobs || []);
     if (manual) setStatus("已刷新");
@@ -1468,7 +1468,7 @@ async function submitJobForm() {
     const id = fieldId.value;
     let successMessage = "已创建";
     if (id) {
-      await callHost("update", JSON.stringify({
+      await callHost("update_job", JSON.stringify({
         id,
         name,
         description,
@@ -1478,7 +1478,7 @@ async function submitJobForm() {
       }));
       successMessage = "已更新";
     } else {
-      await callHost("create", JSON.stringify({
+      await callHost("create_job", JSON.stringify({
         name,
         description,
         schedule,
@@ -1511,7 +1511,7 @@ jobForm.addEventListener("keydown", (event) => {
 async function toggleJob(job, enabled, checkbox) {
   checkbox.disabled = true;
   try {
-    await callHost("update", JSON.stringify({ id: job.id, enabled }));
+    await callHost("update_job", JSON.stringify({ id: job.id, enabled }));
     setStatus(enabled ? "已启用" : "已停用");
     await loadJobs();
   } catch (e) {
@@ -1528,7 +1528,7 @@ async function deleteJob(job, button) {
   button.disabled = true;
   setStatus("删除中…");
   try {
-    await callHost("delete", JSON.stringify({ id: job.id }));
+    await callHost("delete_job", JSON.stringify({ id: job.id }));
     setStatus("已删除");
     await loadJobs();
   } catch (e) {
@@ -1544,7 +1544,7 @@ async function triggerJob(job, button) {
   button.disabled = true;
   setStatus(`正在触发「${job.name || job.id}」…`);
   try {
-    await callHost("trigger", JSON.stringify({ id: job.id }));
+    await callHost("trigger_job", JSON.stringify({ id: job.id }));
     setStatus(`已触发「${job.name || job.id}」，执行中`);
     setTimeout(loadJobs, 2000);
   } catch (e) {
@@ -1583,7 +1583,7 @@ async function showRuns(jobId) {
   runsEmpty.textContent = "暂无执行记录";
   runsLoading.hidden = false;
   try {
-    const raw = await callHost("runs", JSON.stringify({ id: jobId, limit: 50 }));
+    const raw = await callHost("get_job_runs", JSON.stringify({ id: jobId, limit: 50 }));
     const data = raw ? JSON.parse(raw) : { runs: [] };
     const runs = data.runs || [];
     runsLoading.hidden = true;
