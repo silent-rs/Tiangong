@@ -251,7 +251,15 @@ pub async fn run_consolidation(
                 report.pages, page, skip
             ));
         }
-        consolidate_page(provider, &nodes, options, progress, &mut report).await;
+        consolidate_page(
+            provider,
+            report.pages,
+            &nodes,
+            options,
+            progress,
+            &mut report,
+        )
+        .await;
         skip += page;
         if page < PAGE_LIMIT {
             break;
@@ -272,6 +280,7 @@ pub async fn run_consolidation(
 /// 整理一批记忆：相似检索 → 逐条处理（过滤已处理）。
 async fn consolidate_page(
     provider: HandleProvider<'_>,
+    page_no: usize,
     nodes: &[MemoryNode],
     options: &ConsolidationOptions,
     progress: Option<ConsolidationProgress<'_>>,
@@ -307,9 +316,11 @@ async fn consolidate_page(
         report.processed += 1;
         if let Some(callback) = progress {
             callback(&format!(
-                "整理中 [{}/{}] {}",
-                report.processed,
+                "第 {} 批整理中 [{}/{}]（累计已处理 {}）{}",
+                page_no,
+                handled,
                 nodes.len(),
+                report.processed,
                 truncate(&node.title, 40)
             ));
         }
@@ -336,11 +347,11 @@ async fn consolidate_page(
 }
 /// 分页拉取活跃记忆（按更新时间从新到旧）；`skip` 跳过最新的若干条。
 async fn collect_active_nodes(provider: HandleProvider<'_>, skip: usize) -> Vec<MemoryNode> {
-    let handle = provider();
     let mut all = Vec::new();
     let mut offset = skip;
     loop {
-        let batch = handle
+        // 每页都取当前句柄，Leader 接替后继续分页不丢数据。
+        let batch = provider()
             .list_nodes(MemoryListQuery {
                 status: Some(MemoryStatus::Active),
                 limit: PAGE_LIMIT,
@@ -380,7 +391,6 @@ async fn build_candidates(
         let candidates = embed_candidates(embedding, nodes, options, progress).await?;
         return Ok((candidates, "vector"));
     }
-    let handle = provider();
     let mut candidates: HashMap<String, Vec<SimilarHit>> = HashMap::new();
     let total = nodes.len();
     for (index, node) in nodes.iter().enumerate() {
@@ -392,7 +402,9 @@ async fn build_candidates(
                 truncate(&node.title, 40)
             ));
         }
-        let hits = handle
+        // 每次召回都取当前句柄：Leader 退出后 follower 监控会自动接替，
+        // 旧的远程句柄会持续写入失败并静默返回空结果。
+        let hits = provider()
             .recall(
                 RecallAnchors {
                     keywords: node.keywords.clone(),
