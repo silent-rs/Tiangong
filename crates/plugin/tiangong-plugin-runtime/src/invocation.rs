@@ -260,7 +260,6 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
-            continuation: None,
             execution: None,
         };
         let result = dispatch(invocation.clone(), async { Some(expected) }).await;

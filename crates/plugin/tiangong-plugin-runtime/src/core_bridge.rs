@@ -97,7 +97,6 @@ fn local_call_failure(message: &str, inventory: Option<serde_json::Value>) -> To
         stdout: String::new(),
         stderr,
         exit_code: 1,
-        continuation: None,
         execution: None,
     }
 }
@@ -509,7 +508,6 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                         stdout: text,
                         stderr: String::new(),
                         exit_code: 0,
-                        continuation: None,
                         execution: None,
                     })
                 })

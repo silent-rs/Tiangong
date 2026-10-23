@@ -4,6 +4,7 @@ import {
   baseToolName,
   buildRunningToolModel,
   buildToolDisplayModel,
+  parseContinuationMark,
   stripToolResultHeader,
 } from "@/components/message/toolDisplayModel";
 import type { MessageItem } from "@/components/message/types";
@@ -92,42 +93,52 @@ describe("通用工具行", () => {
   });
 });
 
-describe("延续声明展示（通用机制，issue #707）", () => {
-  const toolMsgWith = (fields: Record<string, unknown>, text: string): MessageItem =>
+describe("延续标记展示（通用约定，issue #707）", () => {
+  const toolMsg = (text: string): MessageItem =>
     ({
       id: "t-cont",
       role: "tool",
       tool_name: "terminal__terminal",
       tool_call_id: "c1",
       content: [{ type: "text", text }],
-      ...fields,
     }) as unknown as MessageItem;
-  const continuation = {
-    key: "terminal-send:tty-01",
-    title: "for i in 1 2 3; do make build && break; done",
-    status: "running",
-    status_label: "仍在执行 · 已 692 秒",
-    elapsed_ms: 692000,
-    round_label: "",
-    output: "... 编译输出 ...",
-  };
+  const marker =
+    '@continuation {"key":"terminal-send:tty-01","title":"for i in 1 2 3; do make build && break; done","status":"running","status_label":"仍在执行 · 已 692 秒","elapsed_ms":692000,"round_label":""}';
 
-  it("带延续声明的结果摘要显示逻辑标题，不退化到参数摘要", () => {
-    const msg = toolMsgWith({ continuation }, "调用工具 terminal：成功\n[仍在执行 · 已 692 秒] · make build\n...");
+  it("解析标记行：字段与去标记后的输出", () => {
+    const parsed = parseContinuationMark(marker + "\n... 编译输出 ...");
+    expect(parsed?.mark.key).toBe("terminal-send:tty-01");
+    expect(parsed?.mark.title).toContain("make build");
+    expect(parsed?.mark.elapsed_ms).toBe(692000);
+    expect(parsed?.body).toBe("... 编译输出 ...");
+  });
+
+  it("无标记或格式不合法时返回 null", () => {
+    expect(parseContinuationMark("普通输出")).toBeNull();
+    expect(parseContinuationMark("@continuation {oops}")).toBeNull();
+    expect(parseContinuationMark("@continuation {\"title\":\"无 key\"}")).toBeNull();
+    expect(parseContinuationMark(null)).toBeNull();
+  });
+
+  it("带标记的结果摘要显示逻辑标题，不退化到参数摘要", () => {
+    const msg = toolMsg("调用工具 terminal：成功\n" + marker + "\n...");
     const model = buildToolDisplayModel(msg, { action: "send", terminal_id: "tty-01", input: "" }, hints);
     expect(model.summary).toContain("make build");
     expect(model.summary).not.toContain("tty-01");
   });
 
   it("标题缺省时用本轮标签（如发送 Ctrl+C）", () => {
-    const round = { ...continuation, title: "", round_label: "发送 Ctrl+C" };
-    const msg = toolMsgWith({ continuation: round }, "调用工具 terminal：成功\n[已更新]");
+    const round = marker.replace(
+      '"title":"for i in 1 2 3; do make build && break; done"',
+      '"title":""',
+    ).replace('"round_label":""', '"round_label":"发送 Ctrl+C"');
+    const msg = toolMsg("调用工具 terminal：成功\n" + round);
     const model = buildToolDisplayModel(msg, { action: "send", terminal_id: "tty-01", input: "\\x03" }, hints);
     expect(model.summary).toBe("发送 Ctrl+C");
   });
 
-  it("无延续声明的结果保持通用展示", () => {
-    const msg = toolMsgWith({}, "调用工具 x__y：成功\nok");
+  it("无标记的结果保持通用展示", () => {
+    const msg = toolMsg("调用工具 x__y：成功\nok");
     const model = buildToolDisplayModel(msg, { q: "查询" }, hints);
     expect(model.summary).toBe("q=查询");
   });

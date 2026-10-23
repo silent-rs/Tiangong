@@ -110,33 +110,39 @@ async fn 静默长命令返回仍在执行且不接受新命令() {
     assert!(stdout(&waited).contains("sleep-done"), "{waited}");
     // issue #707：stdout 首行是状态行（运行中含原命令、完成含退出码），
     // 真实输出在其后——有新输出时模型也能看到命令仍在执行。
+    // issue #707：延续标记行（通用约定）——同 key 的连续结果由界面合并，
+    // 模型也能从 status_label 看到命令状态。
+    let out = stdout(&first);
     assert!(
-        stdout(&first).starts_with("[仍在执行 · 已 "),
-        "续等结果应以运行中状态行开头: {first}"
+        out.starts_with("@continuation {"),
+        "结果应以延续标记行开头: {first}"
     );
     assert!(
-        stdout(&first).contains("sleep 4; echo sleep-done"),
-        "运行中状态行应带原命令: {first}"
+        out.contains("\"status_label\":\"仍在执行 · 已 "),
+        "标记行应带运行中状态: {first}"
     );
-    // issue #707：延续声明（通用展示机制）——同 key 的连续结果由界面合并。
-    let cont = &first["continuation"];
-    assert_eq!(cont["key"], format!("terminal-send:{terminal}"), "{first}");
-    assert_eq!(cont["status"], "running", "{first}");
-    assert_eq!(cont["title"], "sleep 4; echo sleep-done", "{first}");
-    assert_eq!(
-        cont["round_label"], "sleep 4; echo sleep-done",
+    assert!(
+        out.contains("\"title\":\"sleep 4; echo sleep-done\""),
+        "标记行应带原命令: {first}"
+    );
+    assert!(
+        out.contains(&format!("\"key\":\"terminal-send:{terminal}\"")),
+        "标记行 key 应带终端编号: {first}"
+    );
+    assert!(
+        out.contains("\"round_label\":\"sleep 4; echo sleep-done\""),
         "带命令的首轮 round_label 为命令文本: {first}"
     );
+    let out = stdout(&waited);
     assert!(
-        stdout(&waited).starts_with("[已完成 · 退出码 0]"),
-        "完成结果应以状态行开头: {waited}"
+        out.contains("\"status_label\":\"已完成 · 退出码 0\""),
+        "完成结果标记行应为已完成: {waited}"
     );
-    let cont = &waited["continuation"];
-    assert_eq!(cont["status"], "completed", "{waited}");
     assert!(
-        cont["round_label"].as_str().is_some_and(str::is_empty),
+        out.contains("\"round_label\":\"\""),
         "空输入续等的 round_label 为空（界面按续等展示）: {waited}"
     );
+    assert!(out.contains("sleep-done"), "{waited}");
 
     // 后续命令正常执行，被拒绝的命令从未写入。
     let next = send(&service, &terminal, "echo next-$((40+2))", true, 5).await;

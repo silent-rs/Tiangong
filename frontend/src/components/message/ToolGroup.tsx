@@ -1,14 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
 import type { MessageItem } from "./types";
-import { continuationOf, toolCallIdOf, toolNameOf } from "@/api/message";
-import type { ToolContinuation } from "@/api/message";
+import { toolCallIdOf, toolNameOf } from "@/api/message";
 import { formatToolDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
   buildFinishedToolModel,
   buildRunningToolModel,
   buildToolDisplayModel,
+  parseContinuationMark,
+  type ParsedContinuation,
   type ToolDisplayModel,
 } from "./toolDisplayModel";
 import { ToolIcon } from "./ToolIcon";
@@ -187,18 +188,18 @@ function ContinuationRow({
   expansion,
   titleOf,
 }: {
-  rounds: { tool: MessageItem; continuation: ToolContinuation }[];
+  rounds: { tool: MessageItem; continuation: ParsedContinuation }[];
   expansion: ExpansionState;
   titleOf?: (toolName: string, args: unknown) => string | null;
 }) {
   const first = rounds[0];
   const last = rounds[rounds.length - 1];
-  const title = last.continuation.title?.trim() || first.continuation.title?.trim() || "";
-  const badge = last.continuation.status_label?.trim() ?? "";
-  const waitCount = rounds.slice(1).filter((round) => !round.continuation.round_label?.trim()).length;
+  const title = last.continuation.mark.title?.trim() || first.continuation.mark.title?.trim() || "";
+  const badge = last.continuation.mark.status_label?.trim() ?? "";
+  const waitCount = rounds.slice(1).filter((round) => !round.continuation.mark.round_label?.trim()).length;
   const totalMs =
-    last.continuation.elapsed_ms != null && last.continuation.elapsed_ms > 0
-      ? last.continuation.elapsed_ms
+    last.continuation.mark.elapsed_ms != null && last.continuation.mark.elapsed_ms > 0
+      ? last.continuation.mark.elapsed_ms
       : null;
   const expandKey = first.tool.id;
   const expanded = expansion.isExpanded(expandKey);
@@ -273,15 +274,17 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
   // 结果合并为一个逻辑条目；其余工具保持单条。
   type GroupItem =
     | { kind: "tool"; tool: MessageItem }
-    | { kind: "continuation"; rounds: { tool: MessageItem; continuation: ToolContinuation }[] };
+    | { kind: "continuation"; rounds: { tool: MessageItem; continuation: ParsedContinuation }[] };
   const items: GroupItem[] = [];
   for (const tool of tools) {
-    const continuation = continuationOf(tool);
-    if (continuation?.key) {
+    const continuation = parseContinuationMark(
+      buildToolDisplayModel(tool, argsOf?.(tool), hints).outputText,
+    );
+    if (continuation) {
       const previous = items[items.length - 1];
       if (
         previous?.kind === "continuation" &&
-        previous.rounds[previous.rounds.length - 1].continuation.key === continuation.key
+        previous.rounds[previous.rounds.length - 1].continuation.mark.key === continuation.mark.key
       ) {
         previous.rounds.push({ tool, continuation });
       } else {

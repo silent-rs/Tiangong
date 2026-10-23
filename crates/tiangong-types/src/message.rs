@@ -15,37 +15,6 @@ fn is_inline_data_reference(value: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
 }
 
-/// 工具结果的延续声明（通用展示机制）。
-///
-/// 工具用本结构声明「这条结果是同一逻辑执行的延续轮次」（典型如终端命令
-/// 的空输入续等）：界面把连续的同 `key` 工具结果合并为一个逻辑条目展示
-/// （原命令 + 状态 + 延续次数 + 累计耗时），而不是一串重复的独立调用。
-/// 字段全部是展示语义，由工具按需提供，宿主不按工具名解释；任何插件的
-/// 长任务轮询（构建进度、生成轮次等）都可复用该机制。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolContinuation {
-    /// 逻辑执行键：同键的连续工具结果属于同一逻辑条目（如「终端 × 命令」）。
-    pub key: String,
-    /// 逻辑条目的展示标题（如原命令）；空时界面回退参数摘要。
-    #[serde(default)]
-    pub title: String,
-    /// 本轮状态（running / completed / interactive / failed 或工具自定义）。
-    #[serde(default)]
-    pub status: String,
-    /// 状态的可读标签（如「运行中 · 已 692 秒」）。
-    #[serde(default)]
-    pub status_label: String,
-    /// 逻辑执行累计耗时（毫秒）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u64>,
-    /// 本轮的可读标签（如「发送 Ctrl+C」「输入：y」）；空表示首轮。
-    #[serde(default)]
-    pub round_label: String,
-    /// 本轮展示输出（stdout 的展示形态，可去掉面向模型的状态行）。
-    #[serde(default)]
-    pub output: String,
-}
-
 /// 消息角色标签（不带角色数据），用于比较、匹配与分派。
 ///
 /// [`Notice`](MessageRole::Notice) 是系统发给用户的通知（如轮次失败原因），
@@ -183,10 +152,6 @@ pub enum Role {
     /// 工具结果。`tool_call_id` 为空只出现在旧版本会话（曾把运行时轨迹写成
     /// Tool 消息），这类消息不进入模型请求。
     Tool {
-        /// 延续声明（通用展示机制）：本条结果是同一逻辑执行的延续轮次，
-        /// 界面据此把连续的同 key 结果合并为一个逻辑条目（如终端命令续等）。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        continuation: Option<Box<ToolContinuation>>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         tool_call_id: String,
         #[serde(default)]
@@ -217,7 +182,6 @@ impl Role {
                 tool_name: String::new(),
                 is_error: false,
                 duration_ms: None,
-                continuation: None,
             },
             MessageRole::Notice => Self::Notice { usage: None },
         }
@@ -785,8 +749,6 @@ pub struct MessageRaw {
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
     duration_ms: Option<u64>,
-    #[serde(default)]
-    continuation: Option<Box<ToolContinuation>>,
     // ── 当前格式独有 ──
     source: Option<UserSource>,
     final_reply: Option<String>,
@@ -899,7 +861,6 @@ impl MessageRaw {
                 tool_name: self.tool_name.unwrap_or_default(),
                 is_error: self.is_error || self.tool_result_is_error,
                 duration_ms: self.duration_ms,
-                continuation: self.continuation,
             },
             MessageRole::Notice => Role::Notice { usage: self.usage },
         };
@@ -1082,7 +1043,6 @@ impl Message {
                 tool_name: tool_name.into(),
                 is_error,
                 duration_ms: None,
-                continuation: None,
             },
             vec![ContentBlock::text(content.into())],
         )
@@ -1103,17 +1063,6 @@ impl Message {
         } = &mut self.role
         {
             *slot = Some(duration_ms);
-        }
-        self
-    }
-
-    /// 写入工具结果的延续声明（链式调用）；非工具消息不受影响。
-    pub fn with_continuation(mut self, continuation: ToolContinuation) -> Self {
-        if let Role::Tool {
-            continuation: slot, ..
-        } = &mut self.role
-        {
-            *slot = Some(Box::new(continuation));
         }
         self
     }
@@ -1456,7 +1405,6 @@ impl Message {
                 tool_name,
                 is_error,
                 duration_ms,
-                continuation,
             } => {
                 if !tool_call_id.is_empty() {
                     put("tool_call_id", Value::from(tool_call_id.as_str()));
@@ -1471,12 +1419,6 @@ impl Message {
                     "duration_ms",
                     serde_json::to_value(duration_ms).unwrap_or_default(),
                 );
-                if let Some(continuation) = continuation {
-                    put(
-                        "continuation",
-                        serde_json::to_value(continuation).unwrap_or_default(),
-                    );
-                }
             }
             Role::Notice { usage } => {
                 put("usage", serde_json::to_value(usage).unwrap_or_default());

@@ -1,11 +1,5 @@
 import { textContent } from "@/api/tauri";
-import {
-  continuationOf,
-  durationMsOf,
-  messageKind,
-  toolIsError,
-  toolNameOf,
-} from "@/api/message";
+import { durationMsOf, messageKind, toolIsError, toolNameOf } from "@/api/message";
 import type { MessageItem } from "./types";
 import type { ToolArgsPresentation } from "@/api/tauri";
 import { EMPTY_ARGS_PRESENTATION } from "./toolArgsPresentation";
@@ -120,6 +114,51 @@ export function argsSummary(
   return clamp(parts.join(" "), SUMMARY_MAX_CHARS);
 }
 
+// ── 工具结果延续标记（通用约定，issue #707）──
+//
+// 工具在 stdout 首行写 `@continuation ` + 单行 JSON，声明本结果是同一逻辑
+// 执行的延续轮次（如终端命令的空输入续等）。界面把连续的同 key 结果合并
+// 为一个逻辑条目（原命令 + 状态 + 延续次数 + 累计耗时）。字段全为展示
+// 语义，任何插件的长任务轮次（构建进度、生成轮次等）都可复用。
+
+/** 延续标记字段（见 sidecar 工具约定）。 */
+export interface ToolContinuationMark {
+  /** 逻辑执行键：同键的连续结果属于同一逻辑条目。 */
+  key: string;
+  /** 展示标题（如原命令）；空时界面回退参数摘要。 */
+  title?: string;
+  /** 本轮状态（running/completed/interactive/failed 或自定义）。 */
+  status?: string;
+  /** 状态的可读标签。 */
+  status_label?: string;
+  /** 逻辑执行累计耗时（毫秒）。 */
+  elapsed_ms?: number | null;
+  /** 本轮的可读标签（如「发送 Ctrl+C」）；空表示首轮。 */
+  round_label?: string;
+}
+
+/** 解析后的延续信息：标记 + 去标记行的真实输出。 */
+export interface ParsedContinuation {
+  mark: ToolContinuationMark;
+  body: string;
+}
+
+/** 解析结果首部的延续标记行；无标记或格式不合法时返回 null。 */
+export function parseContinuationMark(
+  output: string | null | undefined,
+): ParsedContinuation | null {
+  if (!output) return null;
+  const line = output.split(/\r?\n/, 1)[0] ?? "";
+  if (!line.startsWith("@continuation ")) return null;
+  try {
+    const mark = JSON.parse(line.slice("@continuation ".length)) as ToolContinuationMark;
+    if (!mark || typeof mark.key !== "string" || !mark.key) return null;
+    return { mark, body: output.slice(line.length).replace(/^\r?\n/, "") };
+  } catch {
+    return null;
+  }
+}
+
 /** 展开用的参数文本：对象 pretty JSON，数组逐项标注位置参数。 */
 function argsToText(args: unknown): string | null {
   if (args === undefined || args === null) return null;
@@ -192,9 +231,9 @@ export function buildToolDisplayModel(
   const isError = toolIsError(msg);
   const outputText = (messageKind(msg) === "tool" ? stripToolResultHeader(content) : content) || null;
   const call = callPart(args, hints);
-  // 延续声明（通用展示机制）：工具声明本结果是同一逻辑执行的延续轮次，
+  // 延续标记（通用约定）：工具声明本结果是同一逻辑执行的延续轮次，
   // 摘要优先显示逻辑条目标题（如原命令）或本轮标签，不退化到参数摘要。
-  const continuation = continuationOf(msg);
+  const continuation = parseContinuationMark(outputText)?.mark;
   return {
     toolName,
     ...call,

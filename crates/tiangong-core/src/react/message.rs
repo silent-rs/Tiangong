@@ -151,23 +151,16 @@ pub(crate) fn append_tool_result_message(
 
 /// 追加带执行耗时的工具结果消息：耗时随消息持久化，
 /// 历史 tool_calls 调用重新打开会话后仍可展示。
-/// 追加带执行耗时与延续声明的工具结果消息：延续声明随消息持久化，
-/// 界面据此把连续的同 key 结果合并为一个逻辑条目（如终端命令续等）。
-pub(crate) fn append_tool_result_message_with_continuation(
+pub(crate) fn append_tool_result_message_with_duration(
     session: &mut Session,
     tool_call_id: &str,
     tool_name: &str,
     text: String,
     is_error: bool,
     duration_ms: u64,
-    continuation: Option<Box<tiangong_types::ToolContinuation>>,
 ) {
     let message =
         Message::tool_result(tool_call_id, tool_name, text, is_error).with_duration_ms(duration_ms);
-    let message = match continuation {
-        Some(continuation) => message.with_continuation(*continuation),
-        None => message,
-    };
     session.messages.push(message);
 }
 
@@ -1289,7 +1282,6 @@ mod tests {
             stderr: "exit status 2".to_string(),
             exit_code: 2,
             execution: None,
-            continuation: None,
         };
         assert_eq!(
             classify_tool_result_failure(&command_failed),
@@ -1303,7 +1295,6 @@ mod tests {
             stderr: "command not found: rg".to_string(),
             exit_code: 127,
             execution: None,
-            continuation: None,
         };
         assert_eq!(
             classify_tool_result_failure(&missing_environment),

@@ -55,9 +55,7 @@ pub(super) fn tool_scope(
     })
 }
 
-/// 工具结果（对齐宿主 ToolOutcome 形状）。`continuation` 为通用延续声明
-/// （见 tiangong_types::ToolContinuation）：声明本结果是同一逻辑执行的
-/// 延续轮次，宿主界面按 key 合并展示。
+/// 工具结果（对齐宿主 ToolOutcome 形状）。
 #[derive(Debug, Serialize)]
 pub(super) struct ToolOutcome {
     pub(super) ok: bool,
@@ -67,9 +65,8 @@ pub(super) struct ToolOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) stderr: Option<String>,
     pub(super) exit_code: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) continuation: Option<serde_json::Value>,
 }
+
 impl ToolOutcome {
     pub(super) fn ok(summary: String) -> Self {
         Self {
@@ -78,7 +75,6 @@ impl ToolOutcome {
             stdout: None,
             stderr: None,
             exit_code: 0,
-            continuation: None,
         }
     }
 
@@ -89,7 +85,6 @@ impl ToolOutcome {
             stdout: None,
             stderr: None,
             exit_code: 1,
-            continuation: None,
         }
     }
 }
@@ -463,7 +458,6 @@ impl TerminalService {
             stdout: Some(executed.stdout),
             stderr: Some(executed.stderr),
             exit_code,
-            continuation: None,
         }
     }
 
@@ -579,17 +573,13 @@ impl TerminalService {
                         None => format!("终端 {target} 已更新，当前内容见 stdout"),
                     }
                 };
-                // stdout 首行放状态行（含原命令与已执行秒数）：续等等待轮次
-                // 有真实输出时模型仍能看到「仍在执行」，不再只能从输出猜测
-                //（issue #673/#707）；前端据此渲染状态标签并隐藏给模型的提示。
-                // stdout 首行放状态行（含原命令与已执行秒数）：续等等待轮次
-                // 有真实输出时模型仍能看到「仍在执行」，不再只能从输出猜测
-                //（issue #673/#707）。
-                // continuation 为宿主界面的通用延续声明（不进模型上下文）：
-                // 同一终端的连续 send 结果合并为一个逻辑条目展示。
+                // stdout 首行为通用延续标记行（约定：`@continuation ` + 单行 JSON）：
+                // 声明本结果是同一逻辑执行的延续轮次（如终端命令续等），宿主
+                // 界面按 key 合并展示，模型也能从 status_label 看到命令状态
+                //（issue #673/#707）。字段全为展示语义，任何插件的长任务轮次
+                //（构建进度、生成轮次等）都可复用该约定。
                 let command = sent.command.clone().unwrap_or_default();
                 let trimmed_command = command.trim().to_string();
-                let mut continuation = None;
                 let stdout = if sent.rejected {
                     sent.stdout
                 } else {
@@ -604,24 +594,19 @@ impl TerminalService {
                         ),
                         None => ("updated", "已更新".to_string()),
                     };
-                    let status_line = if trimmed_command.is_empty() {
-                        format!("[{label}]")
-                    } else {
-                        format!("[{label}] · {trimmed_command}")
-                    };
-                    continuation = Some(serde_json::json!({
+                    let marker = serde_json::json!({
                         "key": format!("terminal-send:{target}"),
                         "title": trimmed_command,
                         "status": kind,
                         "status_label": label,
                         "elapsed_ms": sent.elapsed_secs.map(|secs| secs * 1000),
                         "round_label": round_label,
-                        "output": sent.stdout,
-                    }));
+                    });
+                    let marker_line = format!("@continuation {marker}");
                     if sent.stdout.is_empty() {
-                        status_line
+                        marker_line
                     } else {
-                        format!("{status_line}\n{}", sent.stdout)
+                        format!("{marker_line}\n{}", sent.stdout)
                     }
                 };
                 ToolOutcome {
@@ -630,7 +615,6 @@ impl TerminalService {
                     stdout: Some(stdout),
                     stderr: None,
                     exit_code: sent.exit_code,
-                    continuation,
                 }
             }
             Err(error) => ToolOutcome::fail(format!("{error:#}")),
@@ -737,7 +721,6 @@ impl TerminalService {
             ),
             stderr: None,
             exit_code: 0,
-            continuation: None,
         }
     }
 
@@ -811,7 +794,6 @@ impl TerminalService {
             ),
             stderr: None,
             exit_code: 0,
-            continuation: None,
         }
     }
 }

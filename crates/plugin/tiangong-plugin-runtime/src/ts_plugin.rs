@@ -524,21 +524,6 @@ async fn invoke_sidecar_tool(
                         0
                     },
                 ) as i32,
-            // 延续声明（通用展示机制）：sidecar 可在结果中声明本调用是同一
-            // 逻辑执行的延续轮次（如终端命令续等），宿主原样透传到 Tool 消息。
-            continuation: value
-                .get("continuation")
-                .and_then(|continuation| {
-                    serde_json::from_value::<tiangong_types::ToolContinuation>(
-                        continuation.clone(),
-                    )
-                    .map_err(|error| {
-                        tracing::warn!(plugin = %plugin_id, %error, "sidecar 延续声明不合法，已忽略");
-                        error
-                    })
-                    .ok()
-                    .map(Box::new)
-                }),
             execution: None,
         },
         Err(error) => sidecar_tool_failure(plugin_id, format!("{error:#}")),
@@ -600,7 +585,6 @@ fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> Too
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 1,
-        continuation: None,
         execution: None,
     }
 }

@@ -49,30 +49,8 @@ export type Role =
       is_error?: boolean;
       /** 单次工具调用耗时（毫秒）。 */
       duration_ms?: number | null;
-      /** 延续声明（通用展示机制）：本结果是同一逻辑执行的延续轮次。 */
-      continuation?: ToolContinuation | null;
     }
   | { role: 'notice'; usage?: MessageUsage | null };
-
-/** 工具结果的延续声明（与 tiangong_types::ToolContinuation 对应）：
- * 工具声明本条结果是同一逻辑执行的延续轮次（如终端命令的空输入续等），
- * 界面把连续的同 key 结果合并为一个逻辑条目展示。字段均为展示语义。 */
-export interface ToolContinuation {
-  /** 逻辑执行键：同键的连续结果属于同一逻辑条目。 */
-  key: string;
-  /** 展示标题（如原命令）；空时界面回退参数摘要。 */
-  title?: string;
-  /** 本轮状态（running/completed/interactive/failed 或自定义）。 */
-  status?: string;
-  /** 状态的可读标签。 */
-  status_label?: string;
-  /** 逻辑执行累计耗时（毫秒）。 */
-  elapsed_ms?: number | null;
-  /** 本轮的可读标签（如「发送 Ctrl+C」）；空表示首轮。 */
-  round_label?: string;
-  /** 本轮展示输出（stdout 的展示形态）。 */
-  output?: string;
-}
 
 /** 插件渲染声明：只影响显示，插件缺失时按角色默认渲染。 */
 export interface MessageRender {
@@ -129,11 +107,6 @@ export function toolNameOf(message: Message): string | undefined {
 
 export function toolIsError(message: Message): boolean {
   return roleAs(message, 'tool')?.is_error === true;
-}
-
-/** 工具结果的延续声明（非工具消息或未声明时为 null）。 */
-export function continuationOf(message: Message): ToolContinuation | null {
-  return roleAs(message, 'tool')?.continuation ?? null;
 }
 
 export function durationMsOf(message: Message): number | null {

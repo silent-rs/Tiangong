@@ -336,7 +336,7 @@ pub(super) fn record_completed_tool_call(
         )
         .render_for_model()
     };
-    append_tool_result_message_with_continuation(
+    append_tool_result_message_with_duration(
         &mut ctx.session,
         &call.id,
         &call.name,
@@ -346,7 +346,6 @@ pub(super) fn record_completed_tool_call(
         },
         !result.ok,
         duration_ms,
-        result.continuation.clone(),
     );
     append_runtime_tool_message(
         &mut ctx.session,
