@@ -1,10 +1,7 @@
 {
   "schema_version": 2,
   "id": "screenshot-input",
-  "version": "0.3.2",
-  "wasm": {
-    "binary": "tiangong_plugin_screenshot_input_wasm.wasm"
-  },
+  "version": "0.3.3",
   "sidecar": {
     "binary": "tiangong-screenshot-input-sidecar",
     "transport_protocol": "0.1.0",

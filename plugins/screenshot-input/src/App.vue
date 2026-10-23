@@ -21,7 +21,8 @@ async function capture() {
   busy.value = true;
   try {
     const bridge = await getBridge();
-    const raw = await bridge.call('plugin.capture', '{}');
+    // v2 无 wasm 桥接：capture 操作经宿主桥 sidecar.* 直达插件 sidecar。
+    const raw = await bridge.call('sidecar.capture', '{}');
     const result = JSON.parse(raw) as CaptureResult;
     if (result.cancelled) return;
     if (!result.source?.startsWith('data:image/png;base64,')) {
