@@ -7,11 +7,10 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 
 use crate::exec;
-use tiangong_plugin_command_protocol::exec::{
-    ExecResponse, RUN_COMMAND_OPERATION, RUN_SHELL_OPERATION, RunCommandRequest, RunShellRequest,
-    SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
+use tiangong_plugin_command_protocol::exec::{ExecResponse, RunCommandRequest, RunShellRequest};
+use tiangong_plugin_command_protocol::{
+    COMMAND_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION, TOOL_RUN_COMMAND, TOOL_RUN_SHELL,
 };
-use tiangong_plugin_command_protocol::{Ack, COMMAND_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
@@ -83,28 +82,27 @@ impl CommandService {
                 sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 business_protocol: COMMAND_PROTOCOL_VERSION,
-                capabilities: vec!["command".to_string()],
+                capabilities: vec![
+                    format!("tool:{TOOL_RUN_COMMAND}"),
+                    format!("tool:{TOOL_RUN_SHELL}"),
+                ],
                 instance_id: format!("command-sidecar-{}", std::process::id()),
                 status: ServiceStatus::Ready,
             })
             .with_context(|| "序列化 Command 握手响应失败"),
-            RUN_COMMAND_OPERATION => {
-                let req: RunCommandRequest =
-                    serde_json::from_value(payload).with_context(|| "解析 run_command 请求失败")?;
+            // 宿主清单直连（v2 无 wasm 桥接）：operation 为工具名，参数即调用
+            // 参数对象（宽松解析与原桥接一致），返回 ToolOutcome 形状
+            //（ExecResponse 字段一一对应）。工作目录由宿主注入的请求上下文
+            // 提供，取代原 set_workspace 钩子。
+            TOOL_RUN_COMMAND => {
+                let req = parse_run_command_args(&payload);
                 let resp = self.handle_run_command(req).await;
                 serde_json::to_value(resp).with_context(|| "序列化 run_command 响应失败")
             }
-            RUN_SHELL_OPERATION => {
-                let req: RunShellRequest =
-                    serde_json::from_value(payload).with_context(|| "解析 run_shell 请求失败")?;
+            TOOL_RUN_SHELL => {
+                let req = parse_run_shell_args(&payload);
                 let resp = self.handle_run_shell(req).await;
                 serde_json::to_value(resp).with_context(|| "序列化 run_shell 响应失败")
-            }
-            SET_WORKSPACE_OPERATION => {
-                let req: SetWorkspaceRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 set_workspace 请求失败")?;
-                self.handle_set_workspace(req)?;
-                serde_json::to_value(Ack {}).with_context(|| "序列化 set_workspace 响应失败")
             }
             operation => Err(anyhow!("不支持的 Command 操作: {operation}")),
         }
@@ -174,12 +172,7 @@ impl CommandService {
 
     // ── 生命周期 ─────────────────────────────────────────────
 
-    fn handle_set_workspace(&self, req: SetWorkspaceRequest) -> Result<()> {
-        if let Ok(mut guard) = self.workspace.write() {
-            *guard = req.workspace.map(PathBuf::from);
-        }
-        Ok(())
-    }
+    // ── 生命周期 ─────────────────────────────────────────────
 
     // ── 辅助 ─────────────────────────────────────────────────
 
@@ -243,5 +236,98 @@ impl tiangong_plugin_sidecar::SidecarService for CommandService {
         request: tiangong_plugin_sidecar::protocol::Request,
     ) -> tiangong_plugin_sidecar::protocol::Response {
         CommandService::dispatch(self, request).await
+    }
+}
+
+/// 宿主注入的权威工作区（每次调用随请求上下文到达；缺失时由既有
+/// 「会话工作目录未注入」错误兜底）。
+fn access_from_context() -> tiangong_plugin_command_protocol::CommandAccessContext {
+    tiangong_plugin_command_protocol::CommandAccessContext {
+        workspace: tiangong_plugin_sidecar::invocation_context().map(|context| context.workspace),
+    }
+}
+
+/// 从工具调用参数宽松解析 run_command 请求（与原 WASM 桥接一致：
+/// timeout 接受数字或数字字符串，缺省 0 表示不限时）。
+fn parse_run_command_args(args: &serde_json::Value) -> RunCommandRequest {
+    RunCommandRequest {
+        cmd: args
+            .get("cmd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        args: args
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        cwd: args
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from),
+        timeout_secs: opt_u64(args, "timeout").unwrap_or(0),
+        access: access_from_context(),
+    }
+}
+
+/// 从工具调用参数宽松解析 run_shell 请求（shell 缺省 auto）。
+fn parse_run_shell_args(args: &serde_json::Value) -> RunShellRequest {
+    RunShellRequest {
+        script: args
+            .get("script")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        shell: args
+            .get("shell")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("auto")
+            .to_string(),
+        cwd: args
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from),
+        timeout_secs: opt_u64(args, "timeout").unwrap_or(0),
+        access: access_from_context(),
+    }
+}
+
+fn opt_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
+    let value = args.get(key)?;
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    #[test]
+    fn 宽松解析接受字符串超时与默认值() {
+        let req = parse_run_command_args(
+            &serde_json::json!({"cmd": "echo", "args": ["hi"], "timeout": "5"}),
+        );
+        assert_eq!(req.cmd, "echo");
+        assert_eq!(req.args, vec!["hi"]);
+        assert_eq!(req.timeout_secs, 5);
+        assert!(req.cwd.is_none());
+
+        let req = parse_run_shell_args(&serde_json::json!({"script": "ls"}));
+        assert_eq!(req.script, "ls");
+        assert_eq!(req.shell, "auto");
+        assert_eq!(req.timeout_secs, 0);
+    }
+
+    #[test]
+    fn 缺少必填参数时为空值交由执行层拒绝() {
+        let req = parse_run_command_args(&serde_json::json!({}));
+        assert!(req.cmd.is_empty());
+        let req = parse_run_shell_args(&serde_json::json!({}));
+        assert!(req.script.is_empty());
     }
 }
