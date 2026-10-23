@@ -197,10 +197,9 @@ function ContinuationRow({
   const title = last.continuation.mark.title?.trim() || first.continuation.mark.title?.trim() || "";
   const badge = last.continuation.mark.status_label?.trim() ?? "";
   const waitCount = rounds.slice(1).filter((round) => !round.continuation.mark.round_label?.trim()).length;
-  const totalMs =
-    last.continuation.mark.elapsed_ms != null && last.continuation.mark.elapsed_ms > 0
-      ? last.continuation.mark.elapsed_ms
-      : null;
+  // 行尾时间与普通工具行同口径：本次（最后一轮）调用的真实执行时长，
+  // 由宿主自测；命令累计运行时长已含在插件提供的 status_label 里。
+  const lastRoundMs = last.roundMs;
   const expandKey = first.tool.id;
   const expanded = expansion.isExpanded(expandKey);
   const args = undefined;
@@ -225,12 +224,12 @@ function ContinuationRow({
             续等 {waitCount} 次
           </span>
         )}
-        {totalMs != null && (
+        {lastRoundMs != null && lastRoundMs > 0 && (
           <span
             className={`${badge || waitCount > 0 ? "" : "ml-auto "}shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums`}
-            title="逻辑执行累计时长"
+            title="本次调用耗时"
           >
-            {formatToolDuration(totalMs)}
+            {formatToolDuration(lastRoundMs)}
           </span>
         )}
       </button>
@@ -238,10 +237,7 @@ function ContinuationRow({
         <div className="ml-5 mt-0.5 mb-1">
           <ContinuationCard
             command={title || null}
-            rounds={rounds.map((round) => ({
-              continuation: round.continuation,
-              roundMs: round.roundMs,
-            }))}
+            rounds={rounds.map((round) => round.continuation)}
           />
         </div>
       )}

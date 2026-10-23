@@ -1,5 +1,4 @@
 import { LongContent } from "./LongContent";
-import { formatToolDuration } from "../utils";
 import type { ParsedContinuation } from "../toolDisplayModel";
 
 /**
@@ -13,7 +12,7 @@ export function ContinuationCard({
 }: {
   /** 逻辑条目标题（如原命令）；空时仅展示轮次。 */
   command: string | null;
-  rounds: { continuation: ParsedContinuation; roundMs: number | null }[];
+  rounds: ParsedContinuation[];
 }) {
   if (rounds.length === 0) return null;
   return (
@@ -25,25 +24,17 @@ export function ContinuationCard({
       )}
       <div className="divide-y divide-border/40">
         {rounds.map((round, index) => {
-          const label = round.continuation.mark.round_label?.trim();
-          const status = round.continuation.mark.status_label?.trim();
+          const label = round.mark.round_label?.trim();
+          const status = round.mark.status_label?.trim();
           return (
             <div key={index} className="px-3 py-1.5" data-continuation-round>
               <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                 <span className="font-mono">{label || (index === 0 ? "（执行）" : "（续等）")}</span>
                 {status && <span className="rounded bg-muted px-1.5 py-0.5" title="命令累计运行时长（含轮次间隙）">{status}</span>}
-                {round.roundMs != null && round.roundMs > 0 && (
-                  <span
-                    className="tabular-nums"
-                    title="本轮等待/调用时长（不含轮次间隙）"
-                  >
-                    本轮 {formatToolDuration(round.roundMs)}
-                  </span>
-                )}
               </div>
-              {round.continuation.body.trim() ? (
+              {round.body.trim() ? (
                 <LongContent
-                  content={round.continuation.body}
+                  content={round.body}
                   className="mt-1 text-xs font-mono whitespace-pre-wrap break-words max-h-60 overflow-y-auto text-foreground/85"
                 />
               ) : (
