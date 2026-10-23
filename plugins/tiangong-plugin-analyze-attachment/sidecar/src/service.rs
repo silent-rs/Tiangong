@@ -10,8 +10,8 @@ use tiangong_llm::{
     RoutingSlot, SingleProviderClient,
 };
 use tiangong_plugin_analyze_attachment_protocol::{
-    ANALYZE_OPERATION, ATTACHMENT_PROTOCOL_VERSION, AnalyzeRequest, AnalyzeResponse, PLUGIN_ID,
-    PLUGIN_VERSION,
+    ATTACHMENT_PROTOCOL_VERSION, AnalyzeRequest, AnalyzeResponse, PLUGIN_ID, PLUGIN_VERSION,
+    TOOL_ANALYZE_ATTACHMENT,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -63,17 +63,29 @@ async fn dispatch_operation(
             sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: PROTOCOL_VERSION.to_string(),
             business_protocol: ATTACHMENT_PROTOCOL_VERSION,
-            capabilities: vec!["multimodal".to_string()],
+            capabilities: vec![format!("tool:{TOOL_ANALYZE_ATTACHMENT}")],
             instance_id: format!("attachment-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
         })
         .context("序列化 Attachment 握手响应失败"),
 
-        ANALYZE_OPERATION => {
-            let req: AnalyzeRequest =
-                serde_json::from_value(payload).context("解析 analyze 请求失败")?;
-            let result = analyze(req).await?;
-            serde_json::to_value(result).context("序列化 analyze 响应失败")
+        // 宿主清单直连（v2 无 wasm 桥接）：operation 为工具名，参数即调用
+        // 参数对象，返回 ToolOutcome 形状。参数校验沿用原桥接语义。
+        TOOL_ANALYZE_ATTACHMENT => {
+            let request = match parse_analyze_args(&payload) {
+                Ok(request) => request,
+                Err(message) => return Ok(tool_failure(&format!("{message:#}"))),
+            };
+            match analyze(request).await {
+                Ok(response) => Ok(serde_json::json!({
+                    "ok": true,
+                    "summary": "附件解析完成",
+                    "stdout": response.text,
+                    "stderr": "",
+                    "exit_code": 0,
+                })),
+                Err(error) => Ok(tool_failure(&format!("附件分析失败：{error:#}"))),
+            }
         }
 
         other => Err(anyhow::anyhow!("未知的 Attachment 操作: {other}")),
@@ -273,5 +285,58 @@ mod tests {
             "vision-b-model",
             "路由中的多模态模型优先"
         );
+    }
+}
+
+/// 从工具调用参数解析 `AnalyzeRequest`（沿用原 WASM 桥接的校验语义）。
+fn parse_analyze_args(args: &serde_json::Value) -> anyhow::Result<AnalyzeRequest> {
+    let request: AnalyzeRequest = serde_json::from_value(args.clone())
+        .context("附件参数无效，请提供 instruction 和 images 图片路径列表")?;
+    if request.instruction.trim().is_empty() {
+        anyhow::bail!("instruction 不能为空");
+    }
+    if request.images.is_empty() || request.images.iter().any(|path| path.trim().is_empty()) {
+        anyhow::bail!("images 必须包含非空的图片本地路径");
+    }
+    Ok(request)
+}
+
+/// 构造失败的工具结果（ToolOutcome 形状）。
+fn tool_failure(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "summary": message,
+        "stdout": "",
+        "stderr": message,
+        "exit_code": 1,
+    })
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    #[test]
+    fn 图片路径直接来自本次工具参数() {
+        let paths = vec!["/tmp/旧图.png", "/tmp/新图 \"带引号\".png"];
+        let request = parse_analyze_args(
+            &serde_json::json!({"instruction": "对比两张图片", "images": paths}),
+        )
+        .unwrap();
+        assert_eq!(request.images, paths);
+        assert_eq!(request.instruction, "对比两张图片");
+    }
+
+    #[test]
+    fn 缺少或无效路径明确失败而不回退旧消息() {
+        for args in [
+            serde_json::json!({"instruction":"看图", "message_id":"old-message", "attachment_index":0}),
+            serde_json::json!({"instruction":"看图", "images":[]}),
+            serde_json::json!({"instruction":"看图", "images":[" "]}),
+            serde_json::json!({"instruction":"看图", "images":"/tmp/image.png"}),
+            serde_json::json!({"instruction":" ", "images":["/tmp/image.png"]}),
+        ] {
+            assert!(parse_analyze_args(&args).is_err(), "{args}");
+        }
     }
 }

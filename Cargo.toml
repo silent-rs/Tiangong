@@ -58,7 +58,6 @@ members = [
     "plugins/tiangong-plugin-subagent/sidecar",
     "plugins/tiangong-plugin-analyze-attachment/protocol",
     "plugins/tiangong-plugin-analyze-attachment/sidecar",
-    "plugins/tiangong-plugin-analyze-attachment/wasm",
     "plugins/tiangong-plugin-skill/protocol",
     "plugins/tiangong-plugin-skill/sidecar",
     "plugins/tiangong-plugin-skill/wasm",
@@ -126,7 +125,6 @@ tiangong-plugin-subagent-wasm = { path = "plugins/tiangong-plugin-subagent/wasm"
 tiangong-plugin-subagent-sidecar = { path = "plugins/tiangong-plugin-subagent/sidecar" }
 tiangong-plugin-analyze-attachment-protocol = { path = "plugins/tiangong-plugin-analyze-attachment/protocol" }
 tiangong-plugin-analyze-attachment-sidecar = { path = "plugins/tiangong-plugin-analyze-attachment/sidecar" }
-tiangong-plugin-analyze-attachment-wasm = { path = "plugins/tiangong-plugin-analyze-attachment/wasm" }
 tiangong-plugin-skill-protocol = { path = "plugins/tiangong-plugin-skill/protocol" }
 tiangong-plugin-skill-sidecar = { path = "plugins/tiangong-plugin-skill/sidecar" }
 tiangong-plugin-skill-wasm = { path = "plugins/tiangong-plugin-skill/wasm" }
