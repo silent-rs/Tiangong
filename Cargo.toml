@@ -43,7 +43,6 @@ members = [
     "plugins/tiangong-plugin-memory/sidecar",
     "plugins/tiangong-plugin-scheduler/core",
     "plugins/tiangong-plugin-scheduler/protocol",
-    "plugins/tiangong-plugin-scheduler/wasm",
     "plugins/tiangong-plugin-scheduler/sidecar",
     "plugins/tiangong-plugin-terminal/sidecar",
     "plugins/tiangong-plugin-workspace-files/sidecar",
@@ -108,7 +107,6 @@ tiangong-plugin-volcengine-sidecar = { path = "plugins/tiangong-plugin-volcengin
 tiangong-plugin-screenshot-input-protocol = { path = "plugins/screenshot-input/protocol" }
 tiangong-plugin-screenshot-input-sidecar = { path = "plugins/screenshot-input/sidecar" }
 tiangong-plugin-scheduler-protocol = { path = "plugins/tiangong-plugin-scheduler/protocol" }
-tiangong-plugin-scheduler-wasm = { path = "plugins/tiangong-plugin-scheduler/wasm" }
 tiangong-plugin-scheduler-sidecar = { path = "plugins/tiangong-plugin-scheduler/sidecar" }
 tiangong-plugin-subagent-protocol = { path = "plugins/tiangong-plugin-subagent/protocol" }
 tiangong-plugin-subagent-wasm = { path = "plugins/tiangong-plugin-subagent/wasm" }

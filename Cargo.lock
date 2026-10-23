@@ -11818,7 +11818,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-protocol"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -11826,7 +11826,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-sidecar"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11844,17 +11844,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tiangong-plugin-scheduler-wasm"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-scheduler-protocol",
- "tiangong-types",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]

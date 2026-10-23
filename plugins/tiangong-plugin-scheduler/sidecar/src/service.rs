@@ -13,7 +13,8 @@ use anyhow::{Context, Result};
 use tiangong_plugin_scheduler_protocol::{
     CreateJobRequest, DeleteJobRequest, Empty, GetJobRunsRequest, Job, JobResponse, JobRun,
     JobRunStatus, ListJobsResponse, PLUGIN_ID, PLUGIN_VERSION, SCHEDULER_PROTOCOL_VERSION,
-    TriggerJobRequest, TriggerJobResponse, TriggerType, UpdateJobRequest,
+    TOOL_CREATE_JOB, TOOL_DELETE_JOB, TOOL_GET_JOB_RUNS, TOOL_LIST_JOBS, TOOL_TRIGGER_JOB,
+    TOOL_UPDATE_JOB, TriggerJobRequest, TriggerJobResponse, TriggerType, UpdateJobRequest,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -168,11 +169,123 @@ impl SchedulerService {
                 sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 business_protocol: SCHEDULER_PROTOCOL_VERSION,
-                capabilities: vec!["scheduler".to_string()],
+                capabilities: vec![
+                    "scheduler".to_string(),
+                    format!("tool:{}", TOOL_CREATE_JOB),
+                    format!("tool:{}", TOOL_LIST_JOBS),
+                    format!("tool:{}", TOOL_UPDATE_JOB),
+                    format!("tool:{}", TOOL_DELETE_JOB),
+                    format!("tool:{}", TOOL_TRIGGER_JOB),
+                    format!("tool:{}", TOOL_GET_JOB_RUNS),
+                ],
                 instance_id: format!("scheduler-sidecar-{}", std::process::id()),
                 status: ServiceStatus::Ready,
             })
             .with_context(|| "序列化 Scheduler 握手响应失败"),
+            // ── 宿主清单直连（v2 无 wasm 桥接）：operation 为工具名
+            //（scheduler_* 前缀），返回 ToolOutcome 形状；结果文案沿用原桥接。──
+            name if name == TOOL_CREATE_JOB => {
+                let request = parse_create_job_args(&payload)?;
+                if let Some(schedule) = request.schedule.as_deref() {
+                    validate_cron_schedule(schedule)?;
+                }
+                let job = self.create_job(request)?;
+                scheduler_tool_result(format!("已创建定时任务：{}", job.name), &job_summary(&job))
+            }
+            name if name == TOOL_LIST_JOBS => {
+                let jobs = self
+                    .store
+                    .list_jobs()
+                    .context("查询任务列表失败")?
+                    .into_iter()
+                    .map(job_to_protocol)
+                    .collect::<Vec<_>>();
+                let summary: Vec<serde_json::Value> = jobs
+                    .iter()
+                    .map(|job| {
+                        serde_json::json!({
+                            "id": job.id,
+                            "name": job.name,
+                            "schedule": job.schedule,
+                            "enabled": job.enabled,
+                            "session_id": job.session_id,
+                        })
+                    })
+                    .collect();
+                let count = summary.len();
+                scheduler_tool_result(format!("共 {count} 个定时任务"), &summary)
+            }
+            name if name == TOOL_UPDATE_JOB => {
+                let request = parse_update_job_args(&payload)?;
+                if let Some(schedule) = request.schedule.as_deref().filter(|s| !s.is_empty()) {
+                    validate_cron_schedule(schedule)?;
+                }
+                let job = self.update_job(request)?;
+                scheduler_tool_result(format!("已更新定时任务：{}", job.name), &job_summary(&job))
+            }
+            name if name == TOOL_DELETE_JOB => {
+                let id = required_str(&payload, "id")?;
+                let deleted = self.delete_job(&id)?;
+                Ok(serde_json::json!({
+                    "ok": deleted,
+                    "summary": if deleted {
+                        format!("已删除定时任务：{id}")
+                    } else {
+                        format!("定时任务 '{id}' 不存在")
+                    },
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": if deleted { 0 } else { 1 },
+                }))
+            }
+            name if name == TOOL_TRIGGER_JOB => {
+                let id = required_str(&payload, "id")?;
+                let job = self
+                    .store
+                    .get_job(&id)
+                    .context("查询任务失败")?
+                    .ok_or_else(|| anyhow::anyhow!("定时任务 '{}' 不存在", id))?;
+                let name = job.name.clone();
+                let job_id = job.id.clone();
+                self.spawn_execute(job);
+                scheduler_tool_result(
+                    format!("定时任务 '{name}' 已触发并开始执行（异步，结果见执行历史）"),
+                    &serde_json::json!({ "id": job_id, "name": name, "status": "triggered" }),
+                )
+            }
+            name if name == TOOL_GET_JOB_RUNS => {
+                let id = required_str(&payload, "id")?;
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(10) as usize;
+                let exists = self.store.get_job(&id).context("查询任务失败")?.is_some();
+                if !exists {
+                    anyhow::bail!("定时任务 '{}' 不存在", id);
+                }
+                let limit = if limit == 0 { 10 } else { limit };
+                let runs = self
+                    .store
+                    .list_job_runs(&id, limit)
+                    .context("查询执行历史失败")?
+                    .into_iter()
+                    .map(job_run_to_protocol)
+                    .collect::<Vec<_>>();
+                let summary: Vec<serde_json::Value> = runs
+                    .iter()
+                    .map(|run| {
+                        serde_json::json!({
+                            "id": run.id,
+                            "status": run_status_str(run),
+                            "started_at": run.started_at,
+                            "finished_at": run.finished_at,
+                            "result_summary": run.result_summary,
+                        })
+                    })
+                    .collect();
+                let count = summary.len();
+                scheduler_tool_result(format!("共 {count} 条执行记录"), &summary)
+            }
             "create_job" => {
                 let req: CreateJobRequest =
                     serde_json::from_value(payload).with_context(|| "解析 create_job 请求失败")?;
@@ -689,6 +802,92 @@ fn job_run_to_protocol(model: tiangong_scheduler::model::JobRun) -> JobRun {
         started_at: model.started_at,
         finished_at: model.finished_at,
         result_summary: model.result_summary,
+    }
+}
+
+// ── 工具直连辅助（参数解析与结果文案沿用原 WASM 桥接）──
+
+fn scheduler_tool_result(
+    summary: String,
+    value: &impl serde::Serialize,
+) -> anyhow::Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "ok": true,
+        "summary": summary,
+        "stdout": serde_json::to_string_pretty(value).unwrap_or_default(),
+        "stderr": "",
+        "exit_code": 0,
+    }))
+}
+
+fn required_str(payload: &serde_json::Value, key: &str) -> anyhow::Result<String> {
+    let value = payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("缺少必填参数 {key}"))?;
+    Ok(value.to_string())
+}
+
+fn optional_str(payload: &serde_json::Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn nullable_str(payload: &serde_json::Value, key: &str) -> Option<Option<String>> {
+    match payload.get(key) {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(value) => value.as_str().map(|text| Some(text.to_string())),
+    }
+}
+
+fn parse_create_job_args(payload: &serde_json::Value) -> anyhow::Result<CreateJobRequest> {
+    Ok(CreateJobRequest {
+        name: required_str(payload, "name")?,
+        description: required_str(payload, "description")?,
+        schedule: Some(required_str(payload, "schedule")?),
+        session_id: optional_str(payload, "session_id"),
+        payload: required_str(payload, "payload")?,
+        enabled: payload
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+    })
+}
+
+fn parse_update_job_args(payload: &serde_json::Value) -> anyhow::Result<UpdateJobRequest> {
+    Ok(UpdateJobRequest {
+        id: required_str(payload, "id")?,
+        name: optional_str(payload, "name"),
+        description: optional_str(payload, "description"),
+        schedule: nullable_str(payload, "schedule").map(|opt| opt.unwrap_or_default()),
+        session_id: nullable_str(payload, "session_id").map(|opt| opt.unwrap_or_default()),
+        payload: optional_str(payload, "payload"),
+        enabled: payload.get("enabled").and_then(serde_json::Value::as_bool),
+    })
+}
+
+fn job_summary(job: &tiangong_plugin_scheduler_protocol::Job) -> serde_json::Value {
+    serde_json::json!({
+        "id": job.id,
+        "name": job.name,
+        "schedule": job.schedule,
+        "session_id": job.session_id,
+        "enabled": job.enabled,
+    })
+}
+
+fn run_status_str(run: &tiangong_plugin_scheduler_protocol::JobRun) -> &'static str {
+    use tiangong_plugin_scheduler_protocol::JobRunStatus;
+    match run.status {
+        JobRunStatus::Running => "running",
+        JobRunStatus::Succeeded => "succeeded",
+        JobRunStatus::Failed => "failed",
     }
 }
 
