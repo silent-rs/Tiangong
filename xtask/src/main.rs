@@ -1284,22 +1284,11 @@ fn generate_oss_distribution(
     plugin: &Path,
     config: &PluginConfig,
 ) -> io::Result<()> {
-    // 只有带 sidecar 的插件才生成签名发布清单：签名用于建立 sidecar 信任边界，
-    // 纯 WASM 插件（如 prompt）不需要 sidecar，运行时不强制要求签名。
-    // 签名触发：native sidecar 插件与解释器插件（官方信任根，解释器签名
-    // 锚定内容清单）。纯 WASM/UI 插件不携带签名。
-    let manifest_value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(plugin.join("plugin.json"))?)
-            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
-    let interpreter_release = manifest_value
-        .get("sidecar")
-        .and_then(|sidecar| sidecar.get("runtime"))
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|runtime| runtime != "native");
-    let has_sidecar = config.sidecar_artifact.is_some() || interpreter_release;
-    if has_sidecar {
-        write_signed_release(plugin, config)?;
-    }
+    // 官方构建的全部插件一律生成签名发布清单：不按形态（sidecar/UI/wasm）
+    // 设置免签通道——任何免签形态都会成为风险插件的藏身处。签名覆盖
+    // plugin.json 与全部携带制品（sidecar 二进制 / UI 制品 / wasm）的
+    // sha256；运行时发现路径对已签名插件强制校验，签名无效即拒绝加载。
+    write_signed_release(plugin, config)?;
 
     let manifest_path = plugin.join("plugin.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
@@ -1357,17 +1346,15 @@ fn generate_oss_distribution(
             }),
         );
     }
-    // 签名清单与签名文件复制到分平台目录，供运行时验签（仅 sidecar 插件）。
-    if has_sidecar {
-        std::fs::copy(
-            plugin.join("release.json"),
-            platform_root.join("release.json"),
-        )?;
-        std::fs::copy(
-            plugin.join("release.json.sig"),
-            platform_root.join("release.json.sig"),
-        )?;
-    }
+    // 签名清单与签名文件复制到分平台目录，供运行时验签（全部插件一律加签）。
+    std::fs::copy(
+        plugin.join("release.json"),
+        platform_root.join("release.json"),
+    )?;
+    std::fs::copy(
+        plugin.join("release.json.sig"),
+        platform_root.join("release.json.sig"),
+    )?;
 
     // sidecar 分发（无 sidecar 的插件跳过）。
     let sidecar_entry = if let Some(sidecar_artifact) = config.sidecar_artifact {
@@ -1424,15 +1411,13 @@ fn generate_oss_distribution(
             "checksum": format!("sha256:{}", sha256(&dist_wasm)?),
         });
     }
-    // 签名清单仅对 sidecar 插件生成，纯 WASM 插件不携带签名。
-    if has_sidecar {
-        release["signed_releases"] = serde_json::json!({
-            platform.clone(): {
-                "url": format!("{release_url}/{platform}/release.json"),
-                "signature_url": format!("{release_url}/{platform}/release.json.sig"),
-            }
-        });
-    }
+    // 全部插件一律携带签名发布清单（无免签通道，防风险插件）。
+    release["signed_releases"] = serde_json::json!({
+        platform.clone(): {
+            "url": format!("{release_url}/{platform}/release.json"),
+            "signature_url": format!("{release_url}/{platform}/release.json.sig"),
+        }
+    });
     write_json(
         &index_root.join("catalog.json"),
         &serde_json::json!({"version": 1, "plugins": [release.clone()]}),
