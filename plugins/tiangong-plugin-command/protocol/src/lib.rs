@@ -1,7 +1,7 @@
 //! Command 插件私有业务协议。
 //!
-//! 本 crate 只定义 WASM 与 sidecar 共同使用的操作、请求和响应，不包含 IPC、
-//! 进程、子进程、文件系统或 Wasmtime 依赖。可同时编译为本机与 `wasm32-wasip2`。
+//! 本 crate 只定义宿主封套与 sidecar 共同使用的操作、请求和响应，不包含 IPC、
+//! 进程、子进程或文件系统依赖。
 //!
 //! `CommandAccessContext` 只携带当前会话的权威工作区。目录、环境和系统能力
 //! 边界由 Runtime 与 Launcher 统一实施，业务协议不再复制命令白名单策略。
@@ -22,16 +22,12 @@ pub const TOOL_RUN_SHELL: &str = "run_shell";
 /// 一个类型化 Command 业务操作。
 ///
 /// 每个操作由零字段 marker struct 实现，提供操作名常量与关联的请求/响应类型。
-/// WASM 端通过 `sidecar_client::invoke::<O>()` 泛型调用，以 `NAME` 作为 operation、
-/// 序列化 `Request`、反序列化 `Response`。
+/// v2 清单直连下 `NAME` 即工具名（sidecar dispatch 同口径）。
 pub trait CommandOperation {
     const NAME: &'static str;
     type Request: Serialize;
     type Response: DeserializeOwned;
 }
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Ack {}
 
 /// 当前会话的命令执行上下文。
 ///

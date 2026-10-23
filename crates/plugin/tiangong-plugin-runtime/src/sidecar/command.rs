@@ -1,7 +1,9 @@
 //! command 专用的一次性 sidecar 连接。
 //!
 //! 每个执行请求都使用宿主调用上下文中的工作区创建独立 Launcher、临时目录
-//! 和进程树。`command.set_workspace` 仅作为 WASM 兼容通知接收，不启动进程。
+//! 和进程树。v2 清单直连下操作名即工具名，与 sidecar dispatch 同口径；
+//! 旧的 `command.*` 协议名与 `command.set_workspace` 通知已随 WASM 桥接
+//! 淘汰删除（见 docs/plugin-harness/wasm-sunset-plan.md）。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -16,10 +18,6 @@ use super::{
     SidecarConfig, SidecarConnection, SidecarInvocationContext, SidecarInvokeError,
     StdioSidecarConnection,
 };
-
-const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
-const RUN_COMMAND_OPERATION: &str = "command.run_command";
-const RUN_SHELL_OPERATION: &str = "command.run_shell";
 
 struct ActiveInvocation {
     session_id: String,
@@ -59,6 +57,10 @@ impl EphemeralCommandConnection {
         if self.template.plugin_id != "command" {
             bail!("一次性 command 连接的插件身份无效");
         }
+        // 提前解析并校验工作区：一是给下方 cwd 解析提供真实路径基准，
+        // 二是在启动进程前给出 command 专属错误。安全边界不依赖此处——
+        // stdio 启动层会对同一调用上下文独立校验（validate_invocation_
+        // workspace），Launcher 策略也由该层按插件身份与用户配置组装。
         let workspace = canonicalize_path(&context.authoritative_workspace).with_context(|| {
             format!(
                 "本次工具调用的工作区无效: {}",
@@ -94,14 +96,15 @@ impl EphemeralCommandConnection {
                 );
             }
         }
-        // CommandAccessContext 使用 serde(flatten)，最终只保留宿主权威工作区。
+        // 宿主权威工作区写入请求对象（CommandAccessContext 经 serde(flatten)
+        // 接收）：与 stdio 帧 context 注入同源，供按参数解析工作区的 sidecar
+        // 形态使用。安全策略不经过 payload——Launcher 策略由 stdio 启动层按
+        // 已验证的插件身份与用户配置组装（见 launch_policy），模型提供的
+        // 参数字段没有进入策略的入口，故无需在此剥离。
         request_object.insert(
             "workspace".to_string(),
             serde_json::Value::String(workspace.display().to_string()),
         );
-        request_object.remove("full_trust");
-        request_object.remove("allowed_commands");
-        request_object.remove("access");
 
         let invocation_dir = tempfile::Builder::new()
             .prefix("tiangong-command-")
@@ -160,22 +163,24 @@ impl EphemeralCommandConnection {
             if cancelled.load(Ordering::Acquire) {
                 bail!("command 调用已取消");
             }
-            let init = serde_json::json!({
-                "workspace": workspace.display().to_string(),
-            });
-            let init_result = connection.invoke(SET_WORKSPACE_OPERATION, &init.to_string());
+            // 工作区随宿主调用上下文（stdio 帧 context 字段）注入 sidecar，
+            // 由 CommandAccessContext 接收；请求对象内的 workspace 字段
+            // 同步保留，兼容从参数解析工作区的 sidecar 形态。
             emit_sandbox_diagnostic(
                 &context.invocation_id,
                 "workspace-ready",
                 started,
                 &sidecar_log,
             );
-            init_result?;
             if cancelled.load(Ordering::Acquire) {
                 bail!("command 调用已取消");
             }
-            let invoke_result =
-                connection.invoke_with_progress(operation, &request.to_string(), on_progress);
+            let invoke_result = connection.invoke_with_context_and_progress(
+                operation,
+                &request.to_string(),
+                context,
+                on_progress,
+            );
             emit_sandbox_diagnostic(
                 &context.invocation_id,
                 "command-finished",
@@ -248,15 +253,11 @@ fn emit_sandbox_diagnostic(
 }
 
 impl SidecarConnection for EphemeralCommandConnection {
-    fn invoke(&self, operation: &str, _payload: &str) -> Result<String> {
-        if operation == SET_WORKSPACE_OPERATION {
-            return Ok("{}".to_string());
-        }
-        if matches!(operation, RUN_COMMAND_OPERATION | RUN_SHELL_OPERATION) {
-            return Err(SidecarInvokeError::PermissionDenied)
-                .context("command 执行缺少宿主工具调用上下文");
-        }
-        bail!("不支持的 command 操作: {operation}")
+    /// 无调用上下文即无权威工作区，命令执行无法进行（fail-closed）。
+    /// command 的全部操作都需要工作区，故无需按操作名分类；操作合法性
+    /// 由 sidecar dispatch 判定（见下）。
+    fn invoke(&self, _operation: &str, _payload: &str) -> Result<String> {
+        Err(SidecarInvokeError::PermissionDenied).context("command 执行缺少宿主工具调用上下文")
     }
 
     fn invoke_with_context(
@@ -268,6 +269,9 @@ impl SidecarConnection for EphemeralCommandConnection {
         self.invoke_with_context_and_progress(operation, payload, context, &mut |_| {})
     }
 
+    /// 操作名直接交给 sidecar：dispatch 是操作命名的权威，未知操作由
+    /// sidecar 报错并经 runtime 回给 Agent——宿主不再维护第二份命名空间
+    /// （否则 sidecar 新增工具会被宿主旧名单误拒）。
     fn invoke_with_context_and_progress(
         &self,
         operation: &str,
@@ -275,12 +279,6 @@ impl SidecarConnection for EphemeralCommandConnection {
         context: &SidecarInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
-        if operation == SET_WORKSPACE_OPERATION {
-            return Ok("{}".to_string());
-        }
-        if !matches!(operation, RUN_COMMAND_OPERATION | RUN_SHELL_OPERATION) {
-            bail!("不支持的 command 操作: {operation}");
-        }
         self.invoke_ephemeral(operation, payload, context, on_progress)
     }
 

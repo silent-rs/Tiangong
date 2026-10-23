@@ -1,12 +1,8 @@
-//! 命令执行链路操作（run_command / run_shell + set_workspace）。
+//! 命令执行链路操作（run_command / run_shell）。
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Ack, CommandAccessContext, CommandOperation};
-
-pub const RUN_COMMAND_OPERATION: &str = "command.run_command";
-pub const RUN_SHELL_OPERATION: &str = "command.run_shell";
-pub const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
+use crate::{CommandAccessContext, CommandOperation, TOOL_RUN_COMMAND, TOOL_RUN_SHELL};
 
 /// 命令执行响应：保留与 core `ToolResult` 同构字段，便于 sidecar 直接构造。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,7 +33,7 @@ pub struct RunCommandRequest {
 }
 pub struct RunCommand;
 impl CommandOperation for RunCommand {
-    const NAME: &'static str = RUN_COMMAND_OPERATION;
+    const NAME: &'static str = TOOL_RUN_COMMAND;
     type Request = RunCommandRequest;
     type Response = ExecResponse;
 }
@@ -61,21 +57,7 @@ pub struct RunShellRequest {
 }
 pub struct RunShell;
 impl CommandOperation for RunShell {
-    const NAME: &'static str = RUN_SHELL_OPERATION;
+    const NAME: &'static str = TOOL_RUN_SHELL;
     type Request = RunShellRequest;
     type Response = ExecResponse;
-}
-
-/// `set_workspace` 钩子请求：通知 sidecar 工作区与信任模式变更。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetWorkspaceRequest {
-    /// 新工作目录；None 表示清除。
-    #[serde(default)]
-    pub workspace: Option<String>,
-}
-pub struct SetWorkspace;
-impl CommandOperation for SetWorkspace {
-    const NAME: &'static str = SET_WORKSPACE_OPERATION;
-    type Request = SetWorkspaceRequest;
-    type Response = Ack;
 }
