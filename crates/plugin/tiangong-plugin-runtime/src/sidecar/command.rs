@@ -17,9 +17,19 @@ use super::{
     StdioSidecarConnection,
 };
 
+/// v2 清单直连的操作名即工具名；旧协议名（command.*）保留兼容旧版 sidecar。
 const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
 const RUN_COMMAND_OPERATION: &str = "command.run_command";
 const RUN_SHELL_OPERATION: &str = "command.run_shell";
+const TOOL_RUN_COMMAND: &str = "run_command";
+const TOOL_RUN_SHELL: &str = "run_shell";
+
+fn is_run_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        RUN_COMMAND_OPERATION | RUN_SHELL_OPERATION | TOOL_RUN_COMMAND | TOOL_RUN_SHELL
+    )
+}
 
 struct ActiveInvocation {
     session_id: String,
@@ -160,22 +170,25 @@ impl EphemeralCommandConnection {
             if cancelled.load(Ordering::Acquire) {
                 bail!("command 调用已取消");
             }
-            let init = serde_json::json!({
-                "workspace": workspace.display().to_string(),
-            });
-            let init_result = connection.invoke(SET_WORKSPACE_OPERATION, &init.to_string());
+            // 工作区随宿主调用上下文（stdio 帧 context 字段）注入 sidecar，
+            // 由 CommandAccessContext 接收；请求对象内的 workspace 字段
+            // 同步保留，兼容从参数解析工作区的 sidecar 形态。旧版
+            // `command.set_workspace` 初始化通知已随 sidecar v0.2 删除。
             emit_sandbox_diagnostic(
                 &context.invocation_id,
                 "workspace-ready",
                 started,
                 &sidecar_log,
             );
-            init_result?;
             if cancelled.load(Ordering::Acquire) {
                 bail!("command 调用已取消");
             }
-            let invoke_result =
-                connection.invoke_with_progress(operation, &request.to_string(), on_progress);
+            let invoke_result = connection.invoke_with_context_and_progress(
+                operation,
+                &request.to_string(),
+                context,
+                on_progress,
+            );
             emit_sandbox_diagnostic(
                 &context.invocation_id,
                 "command-finished",
@@ -252,7 +265,7 @@ impl SidecarConnection for EphemeralCommandConnection {
         if operation == SET_WORKSPACE_OPERATION {
             return Ok("{}".to_string());
         }
-        if matches!(operation, RUN_COMMAND_OPERATION | RUN_SHELL_OPERATION) {
+        if is_run_operation(operation) {
             return Err(SidecarInvokeError::PermissionDenied)
                 .context("command 执行缺少宿主工具调用上下文");
         }
@@ -278,7 +291,7 @@ impl SidecarConnection for EphemeralCommandConnection {
         if operation == SET_WORKSPACE_OPERATION {
             return Ok("{}".to_string());
         }
-        if !matches!(operation, RUN_COMMAND_OPERATION | RUN_SHELL_OPERATION) {
+        if !is_run_operation(operation) {
             bail!("不支持的 command 操作: {operation}");
         }
         self.invoke_ephemeral(operation, payload, context, on_progress)

@@ -20,10 +20,9 @@ use tiangong_plugin_runtime::sidecar::{
     EphemeralCommandConnection, SidecarConfig, SidecarConnection, StdioSidecarConnection,
 };
 
-const RUN_SHELL_OPERATION: &str = "command.run_shell";
+const RUN_SHELL_OPERATION: &str = "run_shell";
 #[cfg(windows)]
-const RUN_COMMAND_OPERATION: &str = "command.run_command";
-const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
+const RUN_COMMAND_OPERATION: &str = "run_command";
 #[cfg(windows)]
 const WINDOWS_PROCESS_TREE_MARKER: &str = ".tiangong-process-tree-helper";
 #[cfg(windows)]
@@ -304,7 +303,7 @@ fn windows_command_request(
         "cmd": format!("\"{executable}\""),
         "args": [test_name, "--exact", "--nocapture"],
         "cwd": workspace.display().to_string(),
-        "timeout_secs": timeout_secs,
+        "timeout": timeout_secs,
         "workspace": workspace.display().to_string(),
     })
     .to_string()
@@ -349,7 +348,7 @@ fn shell_request_with_timeout(
     serde_json::json!({
         "script": script,
         "shell": "sh",
-        "timeout_secs": timeout_secs,
+        "timeout": timeout_secs,
         "workspace": claimed_workspace.display().to_string(),
     })
     .to_string()
@@ -710,15 +709,7 @@ fn stdio_stop_kills_background_process_tree() {
         .with_timeouts(Duration::from_secs(15), Duration::from_secs(30))
         .with_lifecycle(SidecarLifecycle::Resident),
     ));
-    connection
-        .invoke(
-            SET_WORKSPACE_OPERATION,
-            &serde_json::json!({
-                "workspace": workspace.display().to_string(),
-            })
-            .to_string(),
-        )
-        .unwrap();
+    connection.invoke("runtime.handshake", "{}").unwrap();
 
     let pid_file = workspace.join("background.pid");
     #[cfg(unix)]
@@ -739,9 +730,10 @@ fn stdio_stop_kills_background_process_tree() {
     #[cfg(windows)]
     let operation = RUN_COMMAND_OPERATION;
     let worker_connection = Arc::clone(&connection);
+    let context = invocation_context(&workspace, "stop-tree");
     let (finished_tx, finished_rx) = sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let result = worker_connection.invoke(operation, &request);
+        let result = worker_connection.invoke_with_context(operation, &request, &context);
         let _ = finished_tx.send(result);
     });
 
@@ -803,15 +795,7 @@ fn repeated_stdio_start_stop_does_not_leak_host_resources() {
             .with_timeouts(Duration::from_secs(15), Duration::from_secs(15))
             .with_lifecycle(SidecarLifecycle::Resident),
         );
-        connection
-            .invoke(
-                SET_WORKSPACE_OPERATION,
-                &serde_json::json!({
-                    "workspace": workspace.display().to_string(),
-                })
-                .to_string(),
-            )
-            .unwrap();
+        connection.invoke("runtime.handshake", "{}").unwrap();
         connection.stop().unwrap();
     };
 
