@@ -19,7 +19,6 @@ members = [
     "crates/tiangong-relay",
     "plugins/tiangong-plugin-coding/protocol",
     "plugins/tiangong-plugin-coding/sidecar",
-    "plugins/tiangong-plugin-coding/wasm",
     "plugins/tiangong-plugin-computer-use/protocol",
     "plugins/tiangong-plugin-computer-use/sidecar",
     "plugins/tiangong-plugin-computer-use/wasm",
@@ -90,7 +89,6 @@ tiangong-plugin-memory-sidecar = { path = "plugins/tiangong-plugin-memory/sideca
 tiangong-plugin-memory-protocol = { path = "plugins/tiangong-plugin-memory/protocol" }
 tiangong-plugin-coding-protocol = { path = "plugins/tiangong-plugin-coding/protocol" }
 tiangong-plugin-coding-sidecar = { path = "plugins/tiangong-plugin-coding/sidecar" }
-tiangong-plugin-coding-wasm = { path = "plugins/tiangong-plugin-coding/wasm" }
 tiangong-plugin-computer-use-protocol = { path = "plugins/tiangong-plugin-computer-use/protocol" }
 tiangong-plugin-computer-use-sidecar = { path = "plugins/tiangong-plugin-computer-use/sidecar" }
 tiangong-plugin-computer-use-wasm = { path = "plugins/tiangong-plugin-computer-use/wasm" }

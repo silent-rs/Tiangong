@@ -113,7 +113,7 @@
   <!--
     Coding 插件 · 分支切换器（session.input-status 挂载点）
     宿主只提供通用插槽；本文件是插件自带的自包含 UI：
-    - 数据/切换经 bridge.call('plugin.branches' / 'plugin.switchBranch') 走
+    - 数据/切换经 bridge.call('plugin.branches' / 'sidecar.switch') 走
       WASM handle-view-message → sidecar（on_demand，沙箱可写域随会话工作区）。
     - 工作区路径取自宿主会话上下文（hostContext().session.workspace），
       会话切换时经 onHostContextChange 重新加载。
@@ -224,7 +224,7 @@
       state.error = null;
       render();
       try {
-        const data = await callPlugin('plugin.branches', { workspace: state.workspace });
+        const data = await callPlugin('sidecar.branches', { workspace: state.workspace });
         if (data && data.is_repo) {
           state.data = data;
           state.checkError = null;
@@ -269,7 +269,7 @@
       state.error = null;
       render();
       try {
-        await callPlugin('plugin.switchBranch', {
+        await callPlugin('sidecar.switch', {
           workspace: state.workspace,
           branch,
         });
