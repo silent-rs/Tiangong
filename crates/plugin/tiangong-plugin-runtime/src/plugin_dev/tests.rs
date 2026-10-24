@@ -126,7 +126,7 @@ fn install_完整链_暂存确认导入与注册表() {
     .unwrap();
     std::fs::write(
             project.join("release/plugin.json"),
-            r#"{"schema_version":2,"id":"inst-demo","version":"9.9.9","permissions":[],"entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"hint":"安装链验证能力"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","title":"安装链验证","entry":"dist/index.html"}]}}"#,
+            r#"{"schema_version":2,"id":"inst-demo","version":"9.9.9","permissions":[],"entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"ui":{"contributions":[{"slot":"extension.tab","id":"app","title":"安装链验证","entry":"dist/index.html"}]}}"#,
         )
         .unwrap();
     std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
@@ -156,7 +156,10 @@ fn install_完整链_暂存确认导入与注册表() {
         crate::registry::plugin_manifest("inst-demo").is_some(),
         "注册表应可见已装插件"
     );
-    // @提及候选实时聚合：安装后立即可见（不依赖会话 Core 快照）。
+    // @提及来源实时聚合：安装后立即可查（不依赖会话 Core 快照）。提及
+    // 内容自 v2 起由 sidecar 的 candidates_op 提供，本装置是无 sidecar 的
+    // UI 模板，故返回空候选而非报错——内容链路由 registry::loader 与
+    // ts_plugin 的单测覆盖。
     let mentions = crate::registry::mention_sources()
         .into_iter()
         .flat_map(|source| {
@@ -166,10 +169,8 @@ fn install_完整链_暂存确认导入与注册表() {
         })
         .collect::<Vec<_>>();
     assert!(
-        mentions
-            .iter()
-            .any(|candidate| candidate.value == "@plugin:inst-demo"),
-        "安装后 mention 候选应立即可见：{mentions:?}"
+        mentions.is_empty(),
+        "无 sidecar 插件不产生提及候选（内容只能来自 candidates_op）：{mentions:?}"
     );
 }
 
@@ -1085,7 +1086,7 @@ fn integration_无界面纯工具插件_安装与工具契约() {
     std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
     std::fs::write(
             release.join("plugin.json"),
-            r#"{"schema_version":2,"id":"pure-tool-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"text_analyze","description":"文本分析","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"},"mention":{"hint":"纯工具"}}"#,
+            r#"{"schema_version":2,"id":"pure-tool-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"text_analyze","description":"文本分析","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"},"mention":{"candidates_op":"pure-tool-demo.mention_candidates"}}"#,
         )
         .unwrap();
     let sdk = crate::test_support::node_sidecar_sdk();

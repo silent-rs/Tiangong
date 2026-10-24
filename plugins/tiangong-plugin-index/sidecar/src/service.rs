@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 
 use tiangong_plugin_index_protocol::lifecycle::{
     FINALIZE_SESSION_OPERATION, FinalizeSessionRequest, INDEX_TURN_BATCH_OPERATION,
-    IndexTurnBatchRequest, SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
+    IndexTurnBatchRequest,
 };
 use tiangong_plugin_index_protocol::management::{
     DELETE_WORKSPACE_INDEX_OPERATION, DeleteWorkspaceIndexRequest,
@@ -21,12 +21,15 @@ use tiangong_plugin_index_protocol::management::{
     RebuildWorkspaceIndexResponse,
 };
 use tiangong_plugin_index_protocol::search::{
-    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, MENTION_FILES_OPERATION,
+    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, MENTION_CANDIDATES_OPERATION,
     MentionFileCandidate, MentionFilesRequest, MentionFilesResponse, SEARCH_CODE_OPERATION,
     SearchCodeRequest, SearchCodeResponse,
 };
 use tiangong_plugin_index_protocol::{
-    INDEX_PROTOCOL_VERSION, IndexScope, PLUGIN_ID, PLUGIN_VERSION, WorkspaceIndexInfo,
+    INDEX_PROTOCOL_VERSION, IndexScope, LIFECYCLE_SESSION_ENDED_OPERATION,
+    LIFECYCLE_SESSION_READY_OPERATION, LIFECYCLE_TURN_FINISHED_OPERATION,
+    LIFECYCLE_TURN_STARTED_OPERATION, PLUGIN_ID, PLUGIN_VERSION, TOOL_INDEX_SEARCH,
+    TOOL_SEARCH_CODE, TurnData, WorkspaceIndexInfo,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -39,8 +42,10 @@ use crate::index::{IndexManager, IndexQuery};
 /// Index sidecar 业务服务。
 pub struct IndexService {
     manager: Arc<IndexManager>,
-    /// 当前会话工作目录（由 set_workspace 注入）。
+    /// 当前会话工作目录（由 set_workspace / 生命周期身份注入）。
     workspace: RwLock<Option<PathBuf>>,
+    /// 当前会话 ID（index_search 的 session 范围使用；生命周期注入）。
+    session_id: RwLock<Option<String>>,
 }
 
 impl IndexService {
@@ -50,6 +55,7 @@ impl IndexService {
         Ok(Self {
             manager,
             workspace: RwLock::new(None),
+            session_id: RwLock::new(None),
         })
     }
 
@@ -100,11 +106,198 @@ impl IndexService {
                 sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 business_protocol: INDEX_PROTOCOL_VERSION,
-                capabilities: vec!["index".to_string()],
+                capabilities: vec![
+                    "index".to_string(),
+                    format!("tool:{TOOL_INDEX_SEARCH}"),
+                    format!("tool:{TOOL_SEARCH_CODE}"),
+                ],
                 instance_id: format!("index-sidecar-{}", std::process::id()),
                 status: ServiceStatus::Ready,
             })
             .with_context(|| "序列化 Index 握手响应失败"),
+            // ── 宿主清单直连（v2 无 wasm 桥接）：operation 为工具名，返回
+            // ToolOutcome 形状；文案沿用原桥接。工作区与会话 ID 由生命周期
+            // 身份注入缓存，取代原 wasm set_workspace/session 缓存。──
+            name if name == TOOL_INDEX_SEARCH => {
+                let query = payload
+                    .get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                if query.is_empty() {
+                    return Ok(index_tool_failure(
+                        false,
+                        "查询为空",
+                        "query parameter is required",
+                    ));
+                }
+                let request = IndexSearchRequest {
+                    query,
+                    scope: match payload.get("scope").and_then(serde_json::Value::as_str) {
+                        Some("workspace") => IndexScope::Workspace,
+                        Some("session") => IndexScope::Session,
+                        _ => IndexScope::All,
+                    },
+                    limit: payload
+                        .get("limit")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(10)
+                        .clamp(1, 20) as usize,
+                    workspace: self.workspace().map(|path| path.display().to_string()),
+                    session_id: self.cached_session_id(),
+                };
+                let manager = self.manager.clone();
+                let cwd = self.resolve_workspace(request.workspace.clone());
+                let scan_root = cwd.clone();
+                let query = request.query.clone();
+                let resp = tokio::task::spawn_blocking(move || {
+                    handle_index_search_blocking(&manager, &cwd, request)
+                })
+                .await
+                .with_context(|| "index_search 后台任务失败")??;
+                if let Some(root) = scan_root.as_deref() {
+                    self.ensure_full_scan(root);
+                }
+                Ok(index_search_outcome(&resp, &query))
+            }
+            name if name == TOOL_SEARCH_CODE => {
+                let pattern = payload
+                    .get("pattern")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                if pattern.is_empty() {
+                    return Ok(index_tool_failure(
+                        false,
+                        "search_code 缺少 pattern 参数",
+                        "empty pattern",
+                    ));
+                }
+                let req = SearchCodeRequest {
+                    pattern,
+                    path: payload
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from),
+                    workspace: self.workspace().map(|path| path.display().to_string()),
+                    // 直连通道暂不携带信任模式，按受限默认（工作区外路径将被拒绝）。
+                    full_trust: false,
+                };
+                let base = self.resolve_workspace(req.workspace.clone());
+                let resp =
+                    tokio::task::spawn_blocking(move || handle_search_code_blocking(&base, req))
+                        .await
+                        .with_context(|| "search_code 后台任务失败")?;
+                Ok(serde_json::json!({
+                    "ok": resp.ok,
+                    "summary": resp.summary,
+                    "stdout": resp.stdout,
+                    "stderr": resp.stderr,
+                    "exit_code": resp.exit_code as i32,
+                }))
+            }
+            // ── 宿主生命周期转发（capabilities.lifecycle）──
+            name if name == LIFECYCLE_SESSION_READY_OPERATION
+                || name == LIFECYCLE_TURN_STARTED_OPERATION =>
+            {
+                // 身份快照：缓存会话 ID；工作区变化时触发后台重扫（取代原
+                // wasm set_workspace 转发）。
+                let session: tiangong_types::PluginSession =
+                    serde_json::from_value(payload).context("解析会话身份失败")?;
+                if let Ok(mut guard) = self.session_id.write() {
+                    *guard = (!session.id.is_empty()).then(|| session.id.clone());
+                }
+                let new_workspace = (!session.cwd.trim().is_empty()).then(|| session.cwd.clone());
+                let changed = self.workspace() != new_workspace.as_ref().map(PathBuf::from);
+                if changed {
+                    self.handle_set_workspace(new_workspace)?;
+                }
+                Ok(serde_json::json!({"ok": true}))
+            }
+            LIFECYCLE_TURN_FINISHED_OPERATION => {
+                // 全量快照：提取本轮消息批量写入会话索引（原 wasm
+                // collect_turn_data/turn_index_content 逻辑内聚于此）。
+                let session: tiangong_types::PluginSession =
+                    serde_json::from_value(payload).context("解析轮次快照失败")?;
+                let turns = collect_turn_data(&session);
+                if turns.is_empty() {
+                    return Ok(serde_json::json!({"ok": true}));
+                }
+                let request = IndexTurnBatchRequest {
+                    session_id: session.id,
+                    turns,
+                };
+                let manager = self.manager.clone();
+                tokio::task::spawn_blocking(move || {
+                    manager.index_turn_batch(&request.session_id, &request.turns)
+                })
+                .await
+                .with_context(|| "index_turn_batch 后台任务失败")??;
+                Ok(serde_json::json!({"ok": true}))
+            }
+            LIFECYCLE_SESSION_ENDED_OPERATION => {
+                let session: tiangong_types::PluginSession =
+                    serde_json::from_value(payload).context("解析会话结束快照失败")?;
+                let request = FinalizeSessionRequest {
+                    session_id: session.id,
+                };
+                let manager = self.manager.clone();
+                tokio::task::spawn_blocking(move || {
+                    manager.finalize_session_index(&request.session_id)
+                })
+                .await
+                .with_context(|| "finalize_session 后台任务失败")??;
+                Ok(serde_json::json!({"ok": true}))
+            }
+            // ── 动态提及候选（mention.candidates_op）──
+            MENTION_CANDIDATES_OPERATION => {
+                let workspace = payload
+                    .pointer("/context/workspace")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let Some(workspace) = workspace else {
+                    // 草稿/全局查询没有工作区，直接无候选。
+                    return Ok(serde_json::json!({ "candidates": [] }));
+                };
+                let request = MentionFilesRequest {
+                    query: payload
+                        .get("query")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    limit: payload
+                        .get("max_per_group")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize,
+                    workspace: Some(workspace),
+                };
+                let manager = self.manager.clone();
+                let scan_root = request.workspace.clone();
+                let resp = match tokio::task::spawn_blocking(move || {
+                    let workspace = request.workspace.clone();
+                    let workspace = workspace.as_deref().map(std::path::Path::new);
+                    handle_mention_files_blocking(&manager, workspace, request)
+                })
+                .await
+                {
+                    Ok(Ok(resp)) => resp,
+                    Ok(Err(error)) => {
+                        return Ok(mention_failure_response(&format!("{error:#}")));
+                    }
+                    Err(error) => {
+                        return Ok(mention_failure_response(&format!(
+                            "mention 后台任务失败：{error}"
+                        )));
+                    }
+                };
+                if let Some(root) = scan_root.as_deref() {
+                    self.ensure_full_scan(std::path::Path::new(root));
+                }
+                Ok(mention_response(&resp))
+            }
             INDEX_SEARCH_OPERATION => {
                 let req: IndexSearchRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 index_search 请求失败")?;
@@ -131,30 +324,6 @@ impl IndexService {
                         .await
                         .with_context(|| "search_code 后台任务失败")?;
                 serde_json::to_value(resp).with_context(|| "序列化 search_code 响应失败")
-            }
-            MENTION_FILES_OPERATION => {
-                let req: MentionFilesRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 mention_files 请求失败")?;
-                let manager = self.manager.clone();
-                let workspace = self.resolve_mention_workspace(req.workspace.clone());
-                let scan_root = workspace.clone();
-                let resp = tokio::task::spawn_blocking(move || {
-                    handle_mention_files_blocking(&manager, workspace.as_deref(), req)
-                })
-                .await
-                .with_context(|| "mention_files 后台任务失败")??;
-                // 查询可能刚触发索引重建：在此补一次全量扫描，否则空索引没人管。
-                if let Some(root) = scan_root.as_deref() {
-                    self.ensure_full_scan(root);
-                }
-                serde_json::to_value(resp).with_context(|| "序列化 mention_files 响应失败")
-            }
-            SET_WORKSPACE_OPERATION => {
-                let req: SetWorkspaceRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 set_workspace 请求失败")?;
-                self.handle_set_workspace(req.workspace)?;
-                serde_json::to_value(tiangong_plugin_index_protocol::Ack {})
-                    .with_context(|| "序列化 set_workspace 响应失败")
             }
             INDEX_TURN_BATCH_OPERATION => {
                 let req: IndexTurnBatchRequest = serde_json::from_value(payload)
@@ -251,20 +420,6 @@ impl IndexService {
             .or_else(|| self.workspace())
     }
 
-    /// mention 文件候选的工作区：请求注入优先（wasm 从宿主查询上下文读出），
-    /// 其次 `set_workspace` 注入的全局工作区，最后回落宿主权威调用上下文。
-    fn resolve_mention_workspace(&self, requested: Option<String>) -> Option<PathBuf> {
-        requested
-            .map(PathBuf::from)
-            .or_else(|| self.workspace())
-            .or_else(|| {
-                tiangong_plugin_sidecar::invocation_context()
-                    .map(|ctx| ctx.workspace)
-                    .filter(|workspace| !workspace.is_empty())
-                    .map(PathBuf::from)
-            })
-    }
-
     // ── 生命周期 ─────────────────────────────────────────────
 
     fn handle_set_workspace(&self, workspace: Option<String>) -> Result<()> {
@@ -352,6 +507,11 @@ impl IndexService {
 
     fn workspace(&self) -> Option<PathBuf> {
         self.workspace.read().ok()?.clone()
+    }
+
+    /// 生命周期注入的会话 ID 缓存。
+    fn cached_session_id(&self) -> Option<String> {
+        self.session_id.read().ok().and_then(|guard| guard.clone())
     }
 }
 
@@ -651,5 +811,259 @@ impl tiangong_plugin_sidecar::SidecarService for IndexService {
         request: tiangong_plugin_sidecar::protocol::Request,
     ) -> tiangong_plugin_sidecar::protocol::Response {
         IndexService::dispatch(self, request).await
+    }
+}
+
+// ── 工具直连与生命周期辅助（原 WASM 桥接逻辑内聚）──
+
+fn index_tool_failure(ok: bool, summary: &str, stderr: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": ok,
+        "summary": summary,
+        "stdout": "",
+        "stderr": stderr,
+        "exit_code": if ok { 0 } else { 1 },
+    })
+}
+
+/// index_search 结果组装（文案沿用原 WASM 桥接）。
+fn index_search_outcome(response: &IndexSearchResponse, query: &str) -> serde_json::Value {
+    let mut parts: Vec<String> = Vec::new();
+    if response.scanning {
+        parts.push("【工作区索引正在构建中，请稍候】".to_string());
+    } else if !response.workspace_hits.is_empty() {
+        parts.push("【工作区文件】".to_string());
+        for hit in &response.workspace_hits {
+            parts.push(format!("- {} ({})", hit.path, hit.language));
+        }
+    }
+    if !response.session_hits.is_empty() {
+        parts.push("【对话历史】".to_string());
+        for hit in &response.session_hits {
+            let preview: String = hit.content.chars().take(200).collect();
+            parts.push(format!("- [{}] {}", hit.role, preview));
+        }
+    }
+    if parts.is_empty() {
+        return index_tool_failure(true, &format!("未找到与 \"{query}\" 相关的索引结果"), "");
+    }
+    let stdout = parts.join("\n");
+    let count = parts.iter().filter(|line| line.starts_with('-')).count();
+    serde_json::json!({
+        "ok": true,
+        "summary": format!("找到 {count} 条索引结果"),
+        "stdout": stdout,
+        "stderr": "",
+        "exit_code": 0,
+    })
+}
+
+/// 收集本轮需要写入会话索引的消息（原 wasm collect_turn_data）。
+fn collect_turn_data(session: &tiangong_types::PluginSession) -> Vec<TurnData> {
+    use tiangong_types::MessageRole;
+    session
+        .messages
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg.kind() {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+                MessageRole::System | MessageRole::Notice => return None,
+            };
+            if msg.kind() == MessageRole::User && !msg.is_user_input() {
+                return None;
+            }
+            let content = turn_index_content(msg);
+            if content.trim().is_empty() {
+                return None;
+            }
+            Some(TurnData {
+                turn_id: msg.id.clone(),
+                workspace_id: session.cwd.clone(),
+                role: role.to_string(),
+                content,
+                topics: Vec::new(),
+                entity_names: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// 按内容块原始顺序生成索引正文（原 wasm turn_index_content）。
+fn turn_index_content(message: &tiangong_types::Message) -> String {
+    use tiangong_types::ContentBlock;
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } | ContentBlock::ModelInstruction { text } => {
+                let text = text.trim();
+                (!text.is_empty()).then(|| text.to_string())
+            }
+            ContentBlock::Image { asset, .. } | ContentBlock::AssetReference { asset } => {
+                Some(format!(
+                    "[附件] {} ({}) path={}",
+                    asset.original_name, asset.mime_type, asset.local_path
+                ))
+            }
+            ContentBlock::Media { url, title, .. } => Some(format!(
+                "[附件] {} path={url}",
+                title.as_deref().unwrap_or("media")
+            )),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 动态提及候选：`@file:<相对路径>` token，hint 为相对路径。
+fn mention_candidates_value(response: &MentionFilesResponse) -> serde_json::Value {
+    let candidates: Vec<serde_json::Value> = response
+        .candidates
+        .iter()
+        .map(|candidate| {
+            // 路径含空白时用反引号包裹：前端 token 扫描到空白即止。
+            let token = if candidate.relative_path.chars().any(|c| c.is_whitespace()) {
+                format!("@file:`{}`", candidate.relative_path)
+            } else {
+                format!("@file:{}", candidate.relative_path)
+            };
+            serde_json::json!({
+                "value": token,
+                "label": candidate.file_name,
+                "kind": "file",
+                "hint": candidate.relative_path,
+                "mark": "F",
+            })
+        })
+        .collect();
+    serde_json::Value::Array(candidates)
+}
+
+/// 提及查询响应：仅 `{ candidates }`——index 是内容提供方，不提供
+/// "被提及"入口（`@plugin:index` 不是有效对象），用户 @ 出来的是文件。
+/// 索引扫描中时候选自然不完整，不做占位表达。
+fn mention_response(response: &MentionFilesResponse) -> serde_json::Value {
+    serde_json::json!({
+        "candidates": mention_candidates_value(response),
+    })
+}
+
+/// 查询失败：不出现（fail-honest），原因记入日志供诊断。
+fn mention_failure_response(reason: &str) -> serde_json::Value {
+    tracing::warn!("mention 文件候选查询失败：{reason}");
+    serde_json::json!({ "candidates": [] })
+}
+
+/// 会话消息收集（原 wasm 的 collect_turn_data 单测，随逻辑一并迁移）。
+#[cfg(test)]
+mod collect_turn_data_tests {
+    use super::*;
+    use tiangong_types::{ContentBlock, Message, MessageRole, UserSource};
+
+    fn test_session(messages: Vec<Message>) -> tiangong_types::PluginSession {
+        tiangong_types::PluginSession {
+            id: "s-1".to_string(),
+            title: String::new(),
+            cwd: "/tmp/ws".to_string(),
+            workspace_id: "ws".to_string(),
+            reasoning_effort: None,
+            messages,
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 构造 RFC 0017 的插件反馈图片注入消息（role=User、phase=HostInjected，
+    /// ModelInstruction + Image 块，text_content 为空）。
+    fn host_injected_image_message() -> Message {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::model_instruction("[injected-images provenance]"),
+            ContentBlock::image(
+                tiangong_types::StoredAsset {
+                    asset_id: "a-1".to_string(),
+                    local_path: "/media/shot.png".to_string(),
+                    original_name: "shot.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 1024,
+                    kind: tiangong_types::MediaKind::Image,
+                },
+                None,
+            ),
+        ];
+        message.with_source(UserSource::HostInjected)
+    }
+
+    #[test]
+    fn skips_host_injected_and_empty_messages() {
+        let session = test_session(vec![
+            Message::new(MessageRole::User, "帮我看下这张截图"),
+            host_injected_image_message(),
+            Message::new(MessageRole::Assistant, "已查看截图内容"),
+            // 宿主注入的纯媒体消息：不是用户意图，不应进入索引。
+            host_injected_image_message(),
+        ]);
+        let turns = collect_turn_data(&session);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].content, "帮我看下这张截图");
+        assert_eq!(turns[1].role, "assistant");
+        assert!(turns.iter().all(|turn| !turn.content.trim().is_empty()));
+    }
+
+    #[test]
+    fn skips_compressed_resume_message() {
+        let resume = Message::new(MessageRole::User, "压缩恢复锚点")
+            .with_source(UserSource::CompressedResume);
+        let session = test_session(vec![resume, Message::new(MessageRole::User, "真实输入")]);
+        let turns = collect_turn_data(&session);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].content, "真实输入");
+    }
+
+    fn image_asset() -> tiangong_types::StoredAsset {
+        tiangong_types::StoredAsset {
+            asset_id: "a-2".to_string(),
+            local_path: "/media/images/photo.png".to_string(),
+            original_name: "photo.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 2048,
+            kind: tiangong_types::MediaKind::Image,
+        }
+    }
+
+    #[test]
+    fn indexes_attachment_only_user_message() {
+        // 用户只发附件、未附文字：仍要写入索引，并能检索到附件路径。
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::asset_reference(image_asset()),
+            ContentBlock::model_instruction("本条用户消息只包含上述附件"),
+        ];
+        let turns = collect_turn_data(&test_session(vec![message]));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "user");
+        assert!(
+            turns[0]
+                .content
+                .contains("[附件] photo.png (image/png) path=/media/images/photo.png")
+        );
+        assert!(turns[0].content.contains("本条用户消息只包含上述附件"));
+    }
+
+    #[test]
+    fn keeps_text_and_attachment_in_block_order() {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::text("把这张图调亮"),
+            ContentBlock::asset_reference(image_asset()),
+        ];
+        let turns = collect_turn_data(&test_session(vec![message]));
+        assert_eq!(
+            turns[0].content,
+            "把这张图调亮\n[附件] photo.png (image/png) path=/media/images/photo.png"
+        );
     }
 }

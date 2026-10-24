@@ -148,7 +148,7 @@
     ]
   },
   "mention": {
-    "hint": "经 Bot 向已授权的飞书 / QQ / 微信会话主动推送消息"
+    "candidates_op": "bot.mention_candidates"
   },
   "sidecar": {
     "binary": "tiangong-bot-sidecar",

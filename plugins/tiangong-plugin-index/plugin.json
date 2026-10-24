@@ -1,10 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "index",
-  "version": "0.2.9",
-  "wasm": {
-    "binary": "tiangong_plugin_index_wasm.wasm"
-  },
+  "version": "0.3.0",
   "sidecar": {
     "binary": "tiangong-index-sidecar",
     "transport_protocol": "0.1.0",
@@ -14,11 +11,92 @@
   },
   "permissions": [
     "app-storage.read",
-    "sidecar.invoke"
+    "bridge.call",
+    "sidecar.invoke",
+    "tool.provide"
   ],
   "entrypoints": [
     "desktop",
     "cli",
     "server"
-  ]
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "lifecycle": true
+  },
+  "tools": [
+    {
+      "name": "index_search",
+      "description": "搜索当前工作区的文件内容和对话历史索引。查找代码文件、符号定义或之前的对话内容时优先使用此工具，需要精确定位代码行时配合 search_code 使用。仅在索引结果不足时再使用 recall_memory。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "搜索关键词，支持文件路径、代码片段、符号名、对话内容"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "workspace",
+              "session",
+              "all"
+            ],
+            "description": "搜索范围：workspace=仅文件索引，session=仅对话索引，all=全部（默认 all）"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "最多返回多少条结果，默认 10，最大 20",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "search_code",
+      "description": "在目录中精确检索文本（优先使用 ripgrep/rg，rg 缺失时回退到 grep 较慢；需精确定位代码行时与 index_search 配合）",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "检索文本或正则模式"
+          },
+          "path": {
+            "type": "string",
+            "description": "目标目录或文件路径，默认当前目录。非完全信任模式下限制在工作区内；完全信任模式下可读取工作区外路径"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      },
+      "timeout_ms": 60000
+    }
+  ],
+  "prompt": [
+    "## 检索工具使用指引\n- search_code 用于精确文本/正则检索，优先使用 rg；若环境缺失 rg，工具会自动回退到 grep，可能较慢。调用 search_code 时应尽量指定更小的 path 和更精确的 pattern，避免全仓搜索导致超时。\n- index_search 用于基于索引的语义检索（工作区文件 + 对话历史），速度更快但受索引覆盖范围限制；需要精确定位某行代码时优先用 index_search 缩小范围，再用 search_code 取精确行号。"
+  ],
+  "mention": {
+    "candidates_op": "index.mention_candidates"
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "index-settings",
+        "title": "索引管理",
+        "description": "工作区索引列表与重建/删除",
+        "entry": "app/index.html",
+        "context": []
+      }
+    ]
+  }
 }

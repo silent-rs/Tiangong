@@ -11638,7 +11638,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-protocol"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11646,7 +11646,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-sidecar"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11661,20 +11661,10 @@ dependencies = [
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-sidecar",
  "tiangong-toolkit",
+ "tiangong-types",
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tiangong-plugin-index-wasm"
-version = "0.2.1"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-index-protocol",
- "tiangong-types",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]

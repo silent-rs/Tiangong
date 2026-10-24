@@ -40,6 +40,6 @@
     "request_timeout_ms": 30000
   },
   "mention": {
-    "hint": "{{PLUGIN_NAME}}（无界面纯工具插件）"
+    "candidates_op": "{{PLUGIN_ID}}.mention_candidates"
   }
 }

@@ -12,9 +12,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tiangong_plugin_scheduler_protocol::{
     CreateJobRequest, DeleteJobRequest, Empty, GetJobRunsRequest, Job, JobResponse, JobRun,
-    JobRunStatus, ListJobsResponse, PLUGIN_ID, PLUGIN_VERSION, SCHEDULER_PROTOCOL_VERSION,
-    TOOL_CREATE_JOB, TOOL_DELETE_JOB, TOOL_GET_JOB_RUNS, TOOL_LIST_JOBS, TOOL_TRIGGER_JOB,
-    TOOL_UPDATE_JOB, TriggerJobRequest, TriggerJobResponse, TriggerType, UpdateJobRequest,
+    JobRunStatus, ListJobsResponse, MENTION_CANDIDATES_OPERATION, PLUGIN_ID, PLUGIN_VERSION,
+    SCHEDULER_PROTOCOL_VERSION, TOOL_CREATE_JOB, TOOL_DELETE_JOB, TOOL_GET_JOB_RUNS,
+    TOOL_LIST_JOBS, TOOL_TRIGGER_JOB, TOOL_UPDATE_JOB, TriggerJobRequest, TriggerJobResponse,
+    TriggerType, UpdateJobRequest,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -371,6 +372,15 @@ impl SchedulerService {
                 })
                 .with_context(|| "序列化 get_job_runs 响应失败")
             }
+            // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+            // 操作名与清单 mention.candidates_op 一致（含插件前缀）。
+            MENTION_CANDIDATES_OPERATION => serde_json::to_value(serde_json::json!({
+                "entry": {
+                    "hint": "创建、管理定时任务（Cron 调度）",
+                },
+                "candidates": [],
+            }))
+            .with_context(|| "序列化 mention_candidates 响应失败"),
             other => Err(anyhow::anyhow!("未知的 Scheduler 操作: {other}")),
         }
     }
@@ -917,5 +927,29 @@ mod tests {
         assert_eq!(render["data"]["schedule"], "0 0 9 * * *");
         // 执行内容只在正文里，渲染声明保持小体积。
         assert!(serde_json::to_vec(&render).unwrap().len() < 1024);
+    }
+
+    /// 清单声明的是含插件前缀的完整名（scheduler.mention_candidates），分发臂
+    /// 必须匹配同一常量——曾因缺前缀被 sidecar 拒绝。
+    #[tokio::test]
+    async fn mention_op_matches_manifest_operation_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = SchedulerService {
+            store: JobStore::open_at(dir.path().to_path_buf()).unwrap(),
+            deliver: Arc::new(MessageDeliver::new(tokio::runtime::Handle::current())),
+        };
+        let response = service
+            .dispatch(Request::new(
+                MENTION_CANDIDATES_OPERATION,
+                serde_json::json!({}),
+            ))
+            .await;
+        assert!(
+            response.success,
+            "完整操作名必须被分发: {:?}",
+            response.error_message
+        );
+        let entry = response.payload.unwrap()["entry"].clone();
+        assert!(!entry["hint"].as_str().unwrap_or("").trim().is_empty());
     }
 }

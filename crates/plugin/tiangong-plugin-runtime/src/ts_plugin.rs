@@ -602,42 +602,56 @@ impl PromptSectionProvider for TsPluginAdapter {
     }
 }
 
-/// 按清单静态生成 @提及候选（未声明 mention 返回 None，查询词不命中返回 None）。
+/// 由 sidecar op 响应的 `entry` 合成 @提及入口候选。
 ///
-/// 供注册表实时聚合使用——TS 插件的候选是纯清单数据，不依赖适配器实例
-///（适配器弱引用由会话 Core 构建时填充，安装后不存在）。
+/// value / label / kind 是宿主约定：`@plugin:<id>` / 插件名回退链 /
+/// `plugin`；hint 与 mark 由 sidecar 经 entry 提供。entry 缺 hint 时返回
+/// None——hint 是前端副标题与查询匹配（label / value / hint 参与词匹配）
+/// 的必备字段，插件没提供就不出现，不用静态桩兜底。mark 非 1-4 字符按
+/// 缺省处理（前端不显示标记）。
 ///
-/// 静态候选同样必须按 query 过滤：不过滤会让输入任何字符都列出全部声明了
-/// mention 的插件。判定与宿主兜底共用
-/// {@link tiangong_types::mention::candidate_matches_query}，两层语义一致。
-pub(crate) fn mention_candidate_from_manifest(
+/// 查询词过滤不在此处：op 已收到完整 MentionQuery（含查询词），且
+/// CoreManager 聚合层对全部来源统一过滤
+/// （{@link tiangong_types::mention::candidate_matches_query}）。
+pub(crate) fn mention_entry_candidate(
     manifest: &PluginManifest,
     descriptor_name: Option<&str>,
-    query: &str,
+    entry: &serde_json::Value,
 ) -> Option<tiangong_core::MentionCandidate> {
-    let (label, hint, mark) = mention_candidate_parts(manifest, descriptor_name)?;
-    let candidate = tiangong_core::MentionCandidate {
-        value: format!("@plugin:{}", manifest.id),
-        label,
-        kind: "plugin".to_string(),
-        hint,
-        mark,
+    let hint = entry
+        .get("hint")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if hint.is_empty() {
+        return None;
+    }
+    let mark = entry
+        .get("mark")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let mark = if (1..=4).contains(&mark.chars().count()) {
+        mark.to_string()
+    } else {
+        String::new()
     };
-    tiangong_types::mention::candidate_matches_query(&candidate, query).then_some(candidate)
+    Some(tiangong_core::MentionCandidate {
+        value: format!("@plugin:{}", manifest.id),
+        label: mention_label(manifest, descriptor_name),
+        kind: "plugin".to_string(),
+        hint: hint.to_string(),
+        mark,
+    })
 }
 
-/// 从清单推导 @提及候选的展示字段：hint 取 mention.hint（未声明 mention 则无
-/// 候选），mark 取 mention.mark（可选，缺省空串由前端不显示标记）。
+/// 入口候选的 label：插件名回退链。
 ///
-/// label 是插件名称，优先级：清单 `name` → 页面类贡献（`extension.tab` /
+/// 优先级：清单 `name` → 页面类贡献（`extension.tab` /
 /// `settings.plugin-page`）标题 → WASM descriptor 名称 → 插件 id。
 /// 不取任意首个贡献的标题：输入区按钮、消息操作等贡献的标题是动作名
 ///（如 computer-use 的「恢复窗口」），不是插件名。
-fn mention_candidate_parts(
-    manifest: &PluginManifest,
-    descriptor_name: Option<&str>,
-) -> Option<(String, String, String)> {
-    let mention = manifest.mention.as_ref()?;
+fn mention_label(manifest: &PluginManifest, descriptor_name: Option<&str>) -> String {
     let non_empty = |value: &str| {
         let value = value.trim();
         (!value.is_empty()).then(|| value.to_string())
@@ -650,15 +664,13 @@ fn mention_candidate_parts(
                 .find_map(|c| non_empty(&c.title))
         })
     };
-    let label = manifest
+    manifest
         .name
         .as_deref()
         .and_then(non_empty)
         .or_else(page_title)
         .or_else(|| descriptor_name.and_then(non_empty))
-        .unwrap_or_else(|| manifest.id.clone());
-    let mark = mention.mark.clone().unwrap_or_default();
-    Some((label, mention.hint.clone(), mark))
+        .unwrap_or_else(|| manifest.id.clone())
 }
 
 #[cfg(test)]
@@ -666,10 +678,11 @@ mod tests {
     use super::*;
     use crate::manifest::MentionManifest;
 
-    fn manifest_with_mention(hint: Option<&str>) -> PluginManifest {
-        let mention = hint.map(|hint| {
-            serde_json::from_str::<MentionManifest>(&format!(r#"{{"hint":"{hint}"}}"#)).unwrap()
-        });
+    fn manifest_with_mention() -> PluginManifest {
+        let mention = serde_json::from_str::<MentionManifest>(
+            r#"{"candidates_op":"demo.mention_candidates"}"#,
+        )
+        .unwrap();
         PluginManifest {
             schema_version: 2,
             name: None,
@@ -690,36 +703,78 @@ mod tests {
             tools: None,
             prompt: None,
             resources: None,
-            mention,
+            mention: Some(mention),
             tool_icons: None,
         }
     }
 
+    fn manifest_without_mention() -> PluginManifest {
+        let mut manifest = manifest_with_mention();
+        manifest.mention = None;
+        manifest
+    }
+
+    fn entry(hint: &str, mark: Option<&str>) -> serde_json::Value {
+        serde_json::json!({ "hint": hint, "mark": mark })
+    }
+
     #[test]
-    fn mention候选_声明时生成_未声明为空() {
-        // 静态候选只看清单：启停过滤由注册表查询句柄（MentionSource）负责。
-        let manifest = manifest_with_mention(Some("问候能力"));
-        // 空查询不过滤：刚唤出面板时枚举型候选照常返回。
-        let candidate =
-            mention_candidate_from_manifest(&manifest, None, "").expect("声明 mention 应有候选");
+    fn mention入口候选_由op_entry合成() {
+        let manifest = manifest_with_mention();
+        let candidate = mention_entry_candidate(&manifest, None, &entry("问候能力", Some("T")))
+            .expect("entry 带 hint 应合成入口候选");
+        // value / label / kind 是宿主约定
         assert_eq!(candidate.value, "@plugin:demo");
         assert_eq!(candidate.label, "演示插件");
         assert_eq!(candidate.kind, "plugin");
+        // hint / mark 来自 sidecar entry
         assert_eq!(candidate.hint, "问候能力");
-        // 未声明 mention：无候选
-        assert!(mention_candidate_from_manifest(&manifest_with_mention(None), None, "").is_none());
+        assert_eq!(candidate.mark, "T");
     }
+
     #[test]
-    fn mention候选_无ui标题时用插件id() {
-        let mut manifest = manifest_with_mention(Some("能力"));
+    fn mention入口候选_缺hint不出现() {
+        let manifest = manifest_with_mention();
+        // 无 hint 字段
+        assert!(mention_entry_candidate(&manifest, None, &serde_json::json!({})).is_none());
+        // 空白 hint 等同缺失：不用静态桩兜底
+        assert!(mention_entry_candidate(&manifest, None, &entry("  ", None)).is_none());
+    }
+
+    #[test]
+    fn mention入口候选_mark非法按缺省() {
+        let manifest = manifest_with_mention();
+        // 1-4 字符合法
+        assert_eq!(
+            mention_entry_candidate(&manifest, None, &entry("能力", Some("TTS")))
+                .unwrap()
+                .mark,
+            "TTS"
+        );
+        // 超长 / 空白按缺省（前端不显示标记），不丢入口候选
+        for bad in ["SPEECH", "  ", ""] {
+            assert_eq!(
+                mention_entry_candidate(&manifest, None, &entry("能力", Some(bad)))
+                    .unwrap()
+                    .mark,
+                "",
+                "mark {bad:?} 应按缺省处理"
+            );
+        }
+    }
+
+    #[test]
+    fn mention入口候选_无ui标题时用插件id() {
+        let mut manifest = manifest_with_mention();
         manifest.ui = None;
         let candidate =
-            mention_candidate_from_manifest(&manifest, None, "").expect("声明 mention 应有候选");
+            mention_entry_candidate(&manifest, None, &entry("能力", None)).expect("应有入口候选");
         assert_eq!(candidate.label, "demo");
     }
+
     #[test]
-    fn mention候选_label取插件名而非动作贡献标题() {
-        let mut manifest = manifest_with_mention(Some("能力"));
+    fn mention入口候选_label取插件名而非动作贡献标题() {
+        let mut manifest = manifest_with_mention();
         // 只有动作类贡献（如 computer-use 的「恢复窗口」）：不当插件名
         manifest.ui = Some(
             serde_json::from_str(
@@ -728,7 +783,9 @@ mod tests {
             .unwrap(),
         );
         let label = |m: &PluginManifest, d: Option<&str>| {
-            mention_candidate_from_manifest(m, d, "").unwrap().label
+            mention_entry_candidate(m, d, &entry("能力", None))
+                .unwrap()
+                .label
         };
         assert_eq!(label(&manifest, Some("Computer Use")), "Computer Use");
         assert_eq!(label(&manifest, None), "demo");
@@ -745,25 +802,9 @@ mod tests {
         assert_eq!(label(&manifest, Some("Volcengine")), "显式名称");
     }
     #[test]
-    fn mention候选_按查询词过滤() {
-        let manifest = manifest_with_mention(Some("问候能力"));
-        // 命中 label（UI 标题）
-        assert!(mention_candidate_from_manifest(&manifest, None, "演示").is_some());
-        // 命中 hint
-        assert!(mention_candidate_from_manifest(&manifest, None, "问候").is_some());
-        // 命中 value 剥离 kind 前缀后的插件 id
-        assert!(mention_candidate_from_manifest(&manifest, None, "demo").is_some());
-        // kind 前缀本身不参与匹配：输入 plugin 不应命中 @plugin:demo
-        assert!(mention_candidate_from_manifest(&manifest, None, "plugin").is_none());
-        // 词间 AND：两个词分属 label 与 hint 时仍应命中
-        assert!(mention_candidate_from_manifest(&manifest, None, "演示 问候").is_some());
-        // 缺一个词即不命中
-        assert!(mention_candidate_from_manifest(&manifest, None, "演示 不存在").is_none());
-    }
-    #[test]
     fn 无界面sidecar插件_工具走直连_有界面走页面() {
         // 无 UI + sidecar：直连
-        let mut manifest = manifest_with_mention(None);
+        let mut manifest = manifest_without_mention();
         manifest.ui = None;
         manifest.sidecar =
             Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
@@ -775,7 +816,7 @@ mod tests {
             "无界面 sidecar 插件应直连"
         );
         // 有 UI：照旧页面路径
-        let mut manifest = manifest_with_mention(None);
+        let mut manifest = manifest_without_mention();
         manifest.sidecar =
             Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
         let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
@@ -786,7 +827,7 @@ mod tests {
             "有界面插件应保持页面接应路径"
         );
         // 无 UI 无 sidecar：也不直连（无接应由 ts_tools 明确报错）
-        let mut manifest = manifest_with_mention(None);
+        let mut manifest = manifest_without_mention();
         manifest.ui = None;
         let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
         assert!(
@@ -802,7 +843,7 @@ mod tests {
             serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap();
         // 无 UI + sidecar + 无记录：仍走 sidecar 真实调用——运行异常以
         // 真实错误返回（安装后运行检查语义，不再以记录缺失拒绝执行）。
-        let mut manifest = manifest_with_mention(None);
+        let mut manifest = manifest_without_mention();
         manifest.ui = None;
         manifest.sidecar = Some(serde_json::from_value(sidecar_manifest.clone()).unwrap());
         let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
@@ -817,7 +858,7 @@ mod tests {
             crate::invocation::HandlerKind::Sidecar
         );
         // 有 UI + sidecar：已验证声明接管才走 sidecar。
-        let mut manifest = manifest_with_mention(None);
+        let mut manifest = manifest_without_mention();
         manifest.sidecar = Some(serde_json::from_value(sidecar_manifest).unwrap());
         let adapter =
             TsPluginAdapter::from_manifest(&manifest, true, Some(vec!["tool:demo".to_string()]));

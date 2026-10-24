@@ -25,6 +25,9 @@ mod weixin;
 /// 插件 ID（与 plugin.json 一致），渲染声明与宿主事件使用。
 pub(crate) const PLUGIN_ID: &str = "bot";
 
+/// @提及候选查询操作：与清单 `mention.candidates_op` 一致（含插件前缀）。
+pub(crate) const MENTION_CANDIDATES_OPERATION: &str = "bot.mention_candidates";
+
 /// 插件支持的全部平台（设置页与工具按此顺序展示）。
 pub(crate) fn all_platforms() -> Vec<Arc<dyn platform::BotPlatform>> {
     vec![
