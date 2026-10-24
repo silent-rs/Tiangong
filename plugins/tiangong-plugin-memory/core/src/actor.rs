@@ -176,6 +176,19 @@ impl MemoryActor {
                     .map_err(|err| err.to_string());
                 let _ = reply.send(result);
             }
+            MemoryCommand::UpsertNodeVectors {
+                model,
+                dimension,
+                items,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .upsert_node_vectors(&model, dimension, items)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
+                let _ = reply.send(result);
+            }
 
             MemoryCommand::UpsertRelation { draft, reply } => {
                 let result = self

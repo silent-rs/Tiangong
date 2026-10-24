@@ -246,10 +246,11 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// 补写缺失向量：确定当前 embedding 模型与向量表，工具侧计算并写入。
+/// 补写缺失向量：确定当前 embedding 模型与向量表，工具侧计算向量后交给
+/// Memory Leader 写入。
 ///
-/// 写入直接落 LanceDB，必须独占：仅当本进程是 Leader（天工未运行）时写入；
-/// 天工运行中只统计缺失数并提示退出天工后重跑，避免与天工的 Memory 并发写表。
+/// 天工运行时本进程为 Follower，向量经 IPC 由天工的 Memory 写入并立即对召回
+/// 生效；天工未运行时本进程即 Leader。两种情况都只有 Leader 写 LanceDB。
 async fn repair_vectors(
     root: &std::path::Path,
     options: &MemoryOptions,
@@ -272,14 +273,17 @@ async fn repair_vectors(
     }
     let table = tiangong_memory::vector_table_name(&model, dimension);
     let lancedb_dir = root.join("data").join("memory").join("lancedb");
-    let exclusive = managed.is_leader();
-    let write = !dry_run && exclusive;
-    let embedding = if write {
+    let embedding = if dry_run {
+        None
+    } else {
         println!("加载 embedding 模型 {model}（{dimension} 维）用于补写向量……");
         Some(load_embedding(options).await?)
-    } else {
-        None
     };
+    if !dry_run && managed.is_leader() {
+        // 本进程刚成为 Leader 时，内置本地模型在后台加载，向量层就绪前
+        // Leader 会拒绝写入；工具侧已加载完同一模型，再等 Leader 就绪。
+        wait_vector_layer_ready(managed).await;
+    }
     let managed_ref = managed;
     let provider = move || managed_ref.handle();
     let report = repair_missing_vectors(
@@ -291,14 +295,24 @@ async fn repair_vectors(
     )
     .await?;
     println!("{}", report.summary());
-    if !dry_run && !exclusive && report.missing > 0 {
-        bail!(
-            "天工正在运行（Memory Leader 为其他进程），为避免并发写向量表未补写 {} 条缺失向量；\
-             请退出天工后重试，或加 --skip-vector-repair 跳过",
-            report.missing
-        );
-    }
     Ok(())
+}
+
+/// 等待本进程 Leader 的向量层就绪（以空批写入探测），最多约 2 分钟。
+async fn wait_vector_layer_ready(managed: &ManagedMemory) {
+    for _ in 0..120 {
+        // 空批写入不改动数据：向量层未就绪或模型不一致时返回错误。
+        match managed
+            .handle()
+            .upsert_node_vectors(String::new(), 0, Vec::new())
+            .await
+        {
+            Err(err) if err.to_string().contains("未启用或尚未就绪") => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            _ => return,
+        }
+    }
 }
 
 /// 加载与 Memory 相同的 embedding：在线端点优先，否则内置本地模型。

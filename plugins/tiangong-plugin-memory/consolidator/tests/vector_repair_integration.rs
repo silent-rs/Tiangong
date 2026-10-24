@@ -1,9 +1,10 @@
 //! 补写缺失向量集成测试（整理工具侧实现）。
 //!
 //! 场景：Memory 用确定性 embedding 写入记忆并建好向量表 → 关闭 Memory、
-//! 从表中删掉部分向量模拟「写入时漏写」→ 工具经 Memory 公开 API 列出活跃
-//! 记忆、比对向量表并补写；覆盖试运行只统计、补写后覆盖完整、重复运行幂等、
-//! 维度不一致拒绝写入。
+//! 从表中删掉部分向量模拟「写入时漏写」→ 重新启动 Memory 作为 Leader 并经
+//! IPC bridge 暴露（模拟天工运行中）→ 工具以 Follower 身份列出活跃记忆、
+//! 比对向量表、工具侧计算向量并交给 Leader 写入；覆盖试运行只统计、补写后
+//! 覆盖完整、重复运行幂等、维度/模型不一致拒绝、已删除记忆跳过。
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,9 +15,10 @@ use lancedb::connect;
 use lancedb::query::ExecutableQuery;
 use serial_test::serial;
 use tiangong_llm::EmbeddingProvider;
+use tiangong_memory::ipc::spawn_memory_bridge;
 use tiangong_memory::{
     ManualMemoryDraft, MemoryCognitiveType, MemoryHandle, MemoryOptions, MemoryVectorMode,
-    node_embedding_text, start_with_options, vector_table_name,
+    NodeVector, node_embedding_text, start_with_options, vector_table_name,
 };
 use tiangong_memory_consolidator::vector_repair::repair_missing_vectors;
 
@@ -322,10 +324,20 @@ async fn repairs_only_missing_vectors_with_memory_text_and_is_idempotent() {
     let dropped = vec![ids[1].clone(), ids[3].clone()];
     delete_vectors(&dir, &table, &dropped).await;
 
-    // 3) 工具侧：经 Memory 公开 API 列活跃记忆（不启用向量层，只读元数据）。
-    let reader = start_with_options(MemoryOptions::new()).expect("启动 Memory 失败");
-    let provider = || reader.clone();
-
+    // 3) 再次启动 Memory（Leader，启用向量层），并经 IPC bridge 暴露给工具，
+    //    模拟「天工正在运行、工具为 Follower」：工具只算向量，写入交给 Leader。
+    let leader = start_with_options(
+        MemoryOptions::new()
+            .with_embedding(server.config())
+            .with_vector_mode(MemoryVectorMode::EmbeddedLanceDb),
+    )
+    .expect("启动 Memory 失败");
+    let _bridge = spawn_memory_bridge("memory-vector-repair-test", leader.clone())
+        .expect("启动 Memory IPC bridge 失败");
+    let follower = MemoryHandle::connect_tcp("memory-vector-repair-test")
+        .await
+        .expect("连接 Memory IPC 失败");
+    let provider = || follower.clone();
     let dry = repair_missing_vectors(&provider, &dir, &table, None, None)
         .await
         .expect("试运行统计失败");
@@ -349,7 +361,7 @@ async fn repairs_only_missing_vectors_with_memory_text_and_is_idempotent() {
             "记忆 {id} 的补写向量应与 Memory 写入一致"
         );
     }
-    let nodes = reader
+    let nodes = follower
         .list_nodes(tiangong_memory::MemoryListQuery {
             limit: 10,
             ..Default::default()
@@ -372,5 +384,61 @@ async fn repairs_only_missing_vectors_with_memory_text_and_is_idempotent() {
         .expect_err("维度不一致应拒绝");
     assert!(err.to_string().contains("维度"), "{err}");
 
-    reader.shutdown().await;
+    // Leader 侧校验：模型与当前向量层不一致时拒绝，错误原因经 IPC 原样送达。
+    let err = follower
+        .upsert_node_vectors(
+            "other-model".to_string(),
+            DIM,
+            vec![NodeVector {
+                node_id: ids[0].clone(),
+                vector: vec![9.0; DIM],
+            }],
+        )
+        .await
+        .expect_err("模型不一致应拒绝");
+    assert!(format!("{err:#}").contains("不一致"), "{err:#}");
+    // 拒绝后同一连接仍可继续使用。
+    assert_eq!(
+        follower
+            .count_nodes(tiangong_memory::MemoryListQuery::default())
+            .await,
+        4
+    );
+
+    // 已删除的记忆不会被写回向量（跳过），维度错误的向量计为失败。
+    follower
+        .delete_node(ids[2].clone())
+        .await
+        .expect("删除记忆失败");
+    let written = follower
+        .upsert_node_vectors(
+            MODEL.to_string(),
+            DIM,
+            vec![
+                NodeVector {
+                    node_id: ids[2].clone(),
+                    vector: vec![1.0; DIM],
+                },
+                NodeVector {
+                    node_id: ids[0].clone(),
+                    vector: vec![1.0; DIM + 1],
+                },
+            ],
+        )
+        .await
+        .expect("写入请求失败");
+    assert_eq!(
+        (written.written, written.skipped, written.failed),
+        (0, 1, 1)
+    );
+    let final_rows = table_vectors(&dir, &table).await;
+    assert!(!final_rows.contains_key(&ids[2]), "已删除记忆不应写回向量");
+    assert_eq!(
+        final_rows[&ids[0]], before[&ids[0]],
+        "失败的写入不改动已有向量"
+    );
+
+    drop(follower);
+    drop(_bridge);
+    leader.shutdown().await;
 }

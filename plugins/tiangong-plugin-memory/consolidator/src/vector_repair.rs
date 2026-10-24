@@ -1,4 +1,4 @@
-//! 补写缺失向量（整理工具侧实现，不依赖 Memory 插件新增能力）。
+//! 补写缺失向量：工具侧计算，交由 Memory Leader 写入。
 //!
 //! Memory 写入记忆时 embedding 未就绪或失败只告警，而向量回填只在新建向量表
 //! 时运行一次，漏写的记忆会永久缺语义索引，也就无法参与整理的相似比较。
@@ -7,11 +7,12 @@
 //! 1. 经 Memory 公开 API 列出全部活跃记忆；
 //! 2. 只读当前模型向量表的 `node_id` 列，求出缺向量的记忆；
 //! 3. 用与 Memory 相同的 embedding 模型、相同的节点文本
-//!    （[`tiangong_memory::node_embedding_text`]）计算向量，按 `node_id`
-//!    merge 写入同一张表（幂等，可重复运行）。
+//!    （[`tiangong_memory::node_embedding_text`]）在工具侧计算向量；
+//! 4. 经 [`tiangong_memory::MemoryHandle::upsert_node_vectors`] 交给 Leader
+//!    写入（按 `node_id` merge，幂等，可重复运行）。
 //!
-//! 写入直接落 LanceDB，因此调用方必须保证没有其他 Memory 进程同时写该表
-//! （整理工具在补写阶段要求自身为 Leader，见 `main.rs`）。
+//! 写入始终由 Leader 串行完成：天工运行时经 IPC 转发，补写的向量立即对
+//! 召回生效，且不会与 Memory 并发写 LanceDB；天工未运行时本进程即 Leader。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -20,23 +21,22 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use futures_util::TryStreamExt;
 use lancedb::Table;
-use lancedb::arrow::arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
-    StringArray,
-};
-use lancedb::arrow::arrow_schema::{DataType, Field};
+use lancedb::arrow::arrow_array::{Array, StringArray};
+use lancedb::arrow::arrow_schema::DataType;
 use lancedb::connect;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use tiangong_llm::EmbeddingProvider;
-use tiangong_memory::{MemoryListQuery, MemoryNode, MemoryStatus, node_embedding_text};
+use tiangong_memory::{MemoryListQuery, MemoryNode, MemoryStatus, NodeVector, node_embedding_text};
 
 use crate::consolidation::HandleProvider;
 use crate::vector_store::connection_uri;
 
 /// 单次 embedding 请求的文本数。
 const EMBED_BATCH: usize = 32;
-/// 单次写入（一个 LanceDB 表版本）的向量数。
-const WRITE_BATCH: usize = 256;
+/// 单次提交给 Leader 写入的向量数（一个 IPC 请求、一个 LanceDB 表版本）。
+///
+/// 1024 维向量 JSON 编码约 10 KB/条，64 条约 0.7 MB，避免单帧过大。
+const WRITE_BATCH: usize = 64;
 /// 分页拉取活跃记忆的页大小（Memory 列表接口上限）。
 const LIST_PAGE: usize = 500;
 
@@ -51,6 +51,8 @@ pub struct VectorRepairReport {
     pub missing: usize,
     /// 成功补写的条数。
     pub repaired: usize,
+    /// 补写期间记忆已被删除或归档、无需补写的条数。
+    pub skipped: usize,
     /// 补写失败的条数（embedding 或写入失败）。
     pub failed: usize,
     /// 向量表中不属于任何活跃记忆的残留向量数（已归档/删除，仅统计不处理）。
@@ -62,7 +64,7 @@ pub struct VectorRepairReport {
 impl VectorRepairReport {
     /// 补写后仍缺向量的条数。
     pub fn remaining(&self) -> usize {
-        self.missing.saturating_sub(self.repaired)
+        self.missing.saturating_sub(self.repaired + self.skipped)
     }
 
     /// 面向用户的单行摘要。
@@ -87,8 +89,13 @@ impl VectorRepairReport {
                 self.active, self.missing, self.table
             );
         }
+        let skipped = if self.skipped > 0 {
+            format!("，跳过 {}（记忆已删除或归档）", self.skipped)
+        } else {
+            String::new()
+        };
         format!(
-            "向量补写完成：缺失 {}，补写 {}，失败 {}，剩余 {}（{}）{orphan}",
+            "向量补写完成：缺失 {}，补写 {}{skipped}，失败 {}，剩余 {}（{}）{orphan}",
             self.missing,
             self.repaired,
             self.failed,
@@ -100,9 +107,12 @@ impl VectorRepairReport {
 
 /// 补写缺失向量。
 ///
-/// - `lancedb_dir`：`<天工根目录>/data/memory/lancedb`；
+/// - `lancedb_dir`：`<天工根目录>/data/memory/lancedb`（只读，用于求缺失差集）；
 /// - `table`：当前模型的向量表名（[`tiangong_memory::vector_table_name`]）；
 /// - `embedding`：与 Memory 相同的 embedding 模型；`None` 表示试运行只统计。
+///
+/// 写入经 `provider()` 返回的句柄交给 Memory Leader；Leader 不支持该能力
+/// （版本过旧）或拒绝写入（模型不一致、向量层未就绪）时立即返回错误。
 pub async fn repair_missing_vectors(
     provider: HandleProvider<'_>,
     lancedb_dir: &Path,
@@ -122,6 +132,7 @@ pub async fn repair_missing_vectors(
         );
     }
     let indexed = indexed_node_ids(&table_handle).await?;
+    drop(table_handle);
     let active = list_active_nodes(provider).await;
     let mut report = VectorRepairReport {
         table: table.to_string(),
@@ -143,17 +154,19 @@ pub async fn repair_missing_vectors(
     let Some(embedding) = embedding else {
         return Ok(report);
     };
+    let model = embedding.model().to_string();
     for chunk in missing.chunks(WRITE_BATCH) {
-        let mut nodes = Vec::with_capacity(chunk.len());
-        let mut vectors = Vec::with_capacity(chunk.len());
+        let mut items = Vec::with_capacity(chunk.len());
         for sub in chunk.chunks(EMBED_BATCH) {
             let texts = sub.iter().map(|node| node_embedding_text(node)).collect();
             match embedding.embed(texts).await {
                 Ok(embedded) if embedded.len() == sub.len() => {
                     for (node, vector) in sub.iter().zip(embedded) {
                         if vector.len() == dimension {
-                            nodes.push(*node);
-                            vectors.push(vector);
+                            items.push(NodeVector {
+                                node_id: node.id.clone(),
+                                vector,
+                            });
                         } else {
                             report.failed += 1;
                         }
@@ -173,19 +186,26 @@ pub async fn repair_missing_vectors(
                 }
             }
         }
-        if !nodes.is_empty() {
-            match write_vectors(&table_handle, &nodes, vectors, dimension).await {
-                Ok(()) => report.repaired += nodes.len(),
-                Err(err) => {
-                    report.failed += nodes.len();
-                    tracing::warn!(batch = nodes.len(), "写入向量失败: {err:#}");
-                }
-            }
+        if !items.is_empty() {
+            // 写入失败（Leader 不支持、模型不一致、向量层未就绪）属于整体性
+            // 问题，继续后续批次也只会同样失败，直接中断并带上已完成进度。
+            let written = provider()
+                .upsert_node_vectors(model.clone(), dimension, items)
+                .await
+                .with_context(|| {
+                    format!(
+                        "提交向量给 Memory Leader 写入失败（已补写 {}）",
+                        report.repaired
+                    )
+                })?;
+            report.repaired += written.written;
+            report.skipped += written.skipped;
+            report.failed += written.failed;
         }
         if let Some(callback) = progress {
             callback(&format!(
-                "补写向量 [{}/{}]（失败 {}）",
-                report.repaired, report.missing, report.failed
+                "补写向量 [{}/{}]（跳过 {}，失败 {}）",
+                report.repaired, report.missing, report.skipped, report.failed
             ));
         }
     }
@@ -280,71 +300,6 @@ async fn list_active_nodes(provider: HandleProvider<'_>) -> HashMap<String, Memo
     nodes
 }
 
-/// 按表结构构造批次并 merge 写入（`node_id` 已存在则覆盖，否则插入）。
-async fn write_vectors(
-    table: &Table,
-    nodes: &[&MemoryNode],
-    vectors: Vec<Vec<f32>>,
-    dimension: usize,
-) -> Result<()> {
-    let schema = table.schema().await.context("读取向量表结构失败")?;
-    let item_field = match schema.field_with_name("vector")?.data_type() {
-        DataType::FixedSizeList(item, _) => item.clone(),
-        other => bail!("向量表 vector 列类型异常：{other:?}"),
-    };
-    let values: Vec<f32> = vectors.into_iter().flatten().collect();
-    let vector = FixedSizeListArray::try_new(
-        item_field,
-        dimension as i32,
-        Arc::new(Float32Array::from(values)),
-        None,
-    )
-    .context("构造向量列失败")?;
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
-    for field in schema.fields() {
-        columns.push(build_column(field, nodes, &vector)?);
-    }
-    let batch = RecordBatch::try_new(schema.clone(), columns).context("构造写入批次失败")?;
-    let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut merge = table.merge_insert(&["node_id"]);
-    merge
-        .when_matched_update_all(None)
-        .when_not_matched_insert_all();
-    merge
-        .execute(Box::new(reader))
-        .await
-        .with_context(|| format!("LanceDB 写入 {} 条向量失败", nodes.len()))?;
-    Ok(())
-}
-
-/// 按列名构造与 Memory 写入一致的列（`kind` 与 Memory 一样取 Debug 形式）。
-fn build_column(
-    field: &Field,
-    nodes: &[&MemoryNode],
-    vector: &FixedSizeListArray,
-) -> Result<ArrayRef> {
-    let column: ArrayRef = match field.name().as_str() {
-        "node_id" => Arc::new(StringArray::from_iter_values(
-            nodes.iter().map(|node| node.id.as_str()),
-        )),
-        "title" => Arc::new(StringArray::from_iter_values(
-            nodes.iter().map(|node| node.title.as_str()),
-        )),
-        "summary" => Arc::new(StringArray::from_iter_values(
-            nodes.iter().map(|node| node.summary.as_str()),
-        )),
-        "kind" => Arc::new(StringArray::from_iter_values(
-            nodes.iter().map(|node| format!("{:?}", node.kind)),
-        )),
-        "importance" => Arc::new(Float32Array::from_iter_values(
-            nodes.iter().map(|node| node.importance),
-        )),
-        "vector" => Arc::new(vector.clone()),
-        other => bail!("向量表包含未知列 {other}，拒绝写入（表结构与当前版本不兼容）"),
-    };
-    Ok(column)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +310,7 @@ mod tests {
             active: 10,
             missing,
             repaired,
+            skipped: 0,
             failed: missing - repaired,
             orphaned: 0,
             dry_run,

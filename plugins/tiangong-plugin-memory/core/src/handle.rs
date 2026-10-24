@@ -16,8 +16,8 @@ use crate::options::MemoryOptions;
 use crate::types::{
     EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
     MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
-    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
-    RuntimeRecallContext, TurnResult,
+    MemoryRelationDraft, MemoryStatus, NodeVector, NodeVectorUpsertReport, RecallAnchors,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 
 /// Memory 系统的客户端句柄，可任意 Clone 跨线程使用
@@ -529,6 +529,52 @@ impl MemoryHandle {
                     MemoryIpcResponsePayload::Ack => Ok(()),
                     other => Err(anyhow!(
                         "Memory IPC delete_node 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 写入外部预先算好的节点向量（如整理工具补写缺失向量）。
+    ///
+    /// 写入由 Leader 串行完成，天工运行时外部工具经 IPC 转发即可安全写入，
+    /// 且立即对召回生效。`model` / `dimension` 必须与 Memory 当前向量层一致，
+    /// 否则拒绝；节点不存在或已非活跃时计入 `skipped`。
+    pub async fn upsert_node_vectors(
+        &self,
+        model: String,
+        dimension: usize,
+        items: Vec<NodeVector>,
+    ) -> Result<NodeVectorUpsertReport> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::UpsertNodeVectors {
+                    model,
+                    dimension,
+                    items,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 向量写入命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 向量写入结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::UpsertNodeVectors {
+                        model,
+                        dimension,
+                        items,
+                    })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::NodeVectors { report } => Ok(report),
+                    other => Err(anyhow!(
+                        "Memory IPC upsert_node_vectors 返回了非预期响应（Leader 侧 Memory \
+                         版本可能过旧，不支持写入外部向量）: {other:?}"
                     )),
                 }
             }

@@ -6,8 +6,8 @@ use crate::command::InjectionLevel;
 use crate::types::{
     EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
     MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
-    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
-    RuntimeRecallContext, TurnResult,
+    MemoryRelationDraft, MemoryStatus, NodeVector, NodeVectorUpsertReport, RecallAnchors,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 pub use tiangong_plugin_sidecar::protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse,
@@ -64,6 +64,12 @@ pub enum MemoryIpcRequestPayload {
     DeleteNode {
         node_id: String,
     },
+    /// 写入外部预先算好的节点向量（由 Leader 串行写入向量表）。
+    UpsertNodeVectors {
+        model: String,
+        dimension: usize,
+        items: Vec<NodeVector>,
+    },
     UpsertRelation {
         draft: MemoryRelationDraft,
     },
@@ -110,4 +116,5 @@ pub enum MemoryIpcResponsePayload {
     Node { item: MemoryNode },
     Relations { items: Vec<MemoryRelation> },
     Relation { item: MemoryRelation },
+    NodeVectors { report: NodeVectorUpsertReport },
 }

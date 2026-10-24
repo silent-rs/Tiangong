@@ -3,8 +3,8 @@
 记忆深度整理**独立工具**。对天工 Memory 的长期记忆库做一次全量「深刻整理」：
 合并高度一致的记忆、重新归纳分类、重建关联链，并遗忘低质量记忆。
 
-本工具是独立制品：只通过 `tiangong-memory` 的公开 API 读写记忆，**不修改
-Memory 插件本身的任何代码**；接入方式与 `tiangong-memory-sidecar` 的通用模式
+本工具是独立制品：只通过 `tiangong-memory` 的公开 API 读写记忆（Memory 侧仅为
+本工具提供 `delete_node` 与 `upsert_node_vectors` 两个通用能力）；接入方式与 `tiangong-memory-sidecar` 的通用模式
 一致（竞争 Leader，天工运行时以 Follower 经 IPC 转发），因此天工正在使用时
 也可以安全运行，记忆数据始终只有一份。
 
@@ -29,8 +29,19 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 | `--offset <n>` | 跳过最新的 N 条再开始（断点续跑） | `0` |
 | `--dry-run` | 试运行：只报告不落库（仍会调用 LLM 生成预览决策） | 关 |
 | `--keep-low-quality` | 保留低质量记忆，不执行遗忘 | 关 |
+| `--repair-vectors-only` | 只补写缺失向量后退出，不执行整理 | 关 |
+| `--skip-vector-repair` | 整理前跳过缺失向量补写 | 关 |
 
 建议第一次先用 `--dry-run` 预览将要发生的合并与遗忘，确认后再正式执行。
+
+## 补写缺失向量
+
+整理前默认先补齐缺向量的活跃记忆（也可用 `--repair-vectors-only` 单独执行）：
+工具只读向量表求出缺失差集，用与 Memory 相同的 embedding 模型和节点文本在
+**工具侧**计算向量，再经 `upsert_node_vectors` 交给 Memory Leader 写入。
+天工运行时无需退出：向量经 IPC 由天工的 Memory 串行写入并立即对召回生效，
+不会与 Memory 并发写 LanceDB。Leader 会校验模型与维度、跳过已删除或归档的
+记忆；Leader 侧 Memory 版本过旧（不支持该接口）时补写报错退出。
 
 ## 整理逻辑
 
@@ -86,4 +97,4 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 - LLM 的合并结果会做结构校验（`primary_id`、`forget_ids`、关联目标必须在
   给定范围内）；LLM 请求连续失败时中断整理并以非零码退出，不写半成品。
 - 与天工同时运行时本进程为 Follower，所有读写经 IPC 转发给 Leader（要求
-  Leader 侧 Memory 同样包含 `delete_node` 能力）。
+  Leader 侧 Memory 同样包含 `delete_node` 与 `upsert_node_vectors` 能力）。
