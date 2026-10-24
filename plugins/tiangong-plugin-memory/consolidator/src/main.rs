@@ -46,7 +46,10 @@ struct Cli {
     /// 单次 LLM 判定最多包含的记忆数（含种子），缺省 20；种子的相似记忆超出时分多批判定
     #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
     batch_size: usize,
-    /// 最多以多少条记忆为种子处理，0 表示不限
+    /// 最多调用多少次 LLM，0 表示不限（试运行时用于控制耗时与成本）
+    #[arg(long, default_value_t = 0)]
+    max_llm_calls: usize,
+    /// 最多以多少条记忆为种子处理（相似记忆多的优先），0 表示不限
     #[arg(long, default_value_t = 0)]
     max_nodes: usize,
     /// 跳过最新的 N 条记忆再开始整理（断点续跑 / 跳过已整理批次）
@@ -207,6 +210,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         dry_run: cli.dry_run,
         forget_low_quality: !cli.keep_low_quality,
         max_nodes: cli.max_nodes,
+        max_llm_calls: cli.max_llm_calls,
         offset: cli.offset,
         max_pages: cli.max_pages,
         stored_vectors: stored,

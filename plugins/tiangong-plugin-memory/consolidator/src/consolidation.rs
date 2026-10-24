@@ -103,8 +103,11 @@ pub struct ConsolidationOptions {
     pub stale_days: i64,
     /// 低质量判定：重要性下限。
     pub importance_floor: f64,
-    /// 最多以多少条记忆为种子处理（0 表示全部）。
+    /// 最多以多少条记忆为种子处理（0 表示全部）。种子按相似记忆数从多到少
+    /// 排列，没有相似记忆的排在最后。
     pub max_nodes: usize,
+    /// 最多调用多少次 LLM（0 表示不限），用于试运行控制成本。
+    pub max_llm_calls: usize,
     /// 跳过最新的 N 条记忆再开始扫描（配合扫描上限分批处理全库）。
     pub offset: usize,
     /// 最多扫描多少批（0 表示直到全库整理完成）。
@@ -130,6 +133,7 @@ impl Default for ConsolidationOptions {
             stale_days: DEFAULT_STALE_DAYS,
             importance_floor: DEFAULT_IMPORTANCE_FLOOR,
             max_nodes: 0,
+            max_llm_calls: 0,
             offset: 0,
             max_pages: 0,
             stored_vectors: None,
@@ -156,6 +160,8 @@ pub struct ConsolidationReport {
     pub nodes_with_candidates: usize,
     /// 单条记忆的最大相似记忆数。
     pub max_candidates: usize,
+    /// 相似聚类统计（相似关系连通的记忆簇）。
+    pub clusters: ClusterStats,
     /// 送 LLM 判定的记忆条次（同一记忆可出现在多批中）。
     pub reviewed: usize,
     /// 发生合并的组数。
@@ -182,6 +188,8 @@ pub struct ConsolidationReport {
     pub without_vectors: usize,
     /// 是否试运行。
     pub dry_run: bool,
+    /// 是否因达到 LLM 调用上限而提前停止。
+    pub llm_budget_exhausted: bool,
     /// 致命中断原因（LLM 连续失败等）：整理被中断，后续批次不再执行。
     pub fatal_error: Option<String>,
     /// 人类可读的处理明细（限量；单条可含多行组员明细）。
@@ -225,10 +233,38 @@ impl ConsolidationReport {
             "- 相似候选：{} 对，涉及 {} 条记忆（单条最多 {} 条相似）",
             self.candidate_pairs, self.nodes_with_candidates, self.max_candidates
         );
+        if self.clusters.count > 0 {
+            let _ = writeln!(
+                out,
+                "- 相似簇：{} 个，最大簇 {} 条；相似记忆数分布：{}",
+                self.clusters.count,
+                self.clusters.largest,
+                self.clusters.degree_histogram()
+            );
+            let _ = writeln!(
+                out,
+                "- LLM 判定次数估算：簇内全部合并时至少约 {} 次；全部保留时最多约 {} 次（每批 {} 条）",
+                self.clusters.min_calls, self.clusters.max_calls, self.clusters.batch_size
+            );
+            if !self.clusters.densest.is_empty() {
+                let _ = writeln!(out, "- 相似记忆最多的记忆：");
+                for (title, degree, id) in &self.clusters.densest {
+                    let _ = writeln!(out, "    {degree:>5} 条相似  {id}「{title}」");
+                }
+            }
+        }
         let _ = writeln!(
             out,
-            "- 已处理种子：{}（剩余未处理：{}）；LLM 判定 {} 次，送审 {} 条次",
-            self.processed, self.remaining, self.llm_calls, self.reviewed
+            "- 已处理种子：{}（剩余未处理：{}）；LLM 判定 {} 次，送审 {} 条次{}",
+            self.processed,
+            self.remaining,
+            self.llm_calls,
+            self.reviewed,
+            if self.llm_budget_exhausted {
+                "（已达 LLM 调用上限，提前停止）"
+            } else {
+                ""
+            }
         );
         let _ = writeln!(
             out,
@@ -316,8 +352,8 @@ pub async fn run_consolidation(
         )
         .await;
         skip += page;
-        if report.fatal_error.is_some() {
-            // 致命错误（LLM 连续失败等）：立即停止后续批次。
+        if report.fatal_error.is_some() || report.llm_budget_exhausted {
+            // 致命错误（LLM 连续失败等）或达到 LLM 调用上限：停止后续批次。
             break;
         }
         if page < PAGE_LIMIT {
@@ -334,6 +370,104 @@ pub async fn run_consolidation(
         }
     }
     report
+}
+
+/// 相似聚类统计：帮助判断阈值是否合适、预估 LLM 判定次数。
+#[derive(Debug, Clone, Default)]
+pub struct ClusterStats {
+    /// 相似簇数（至少两条记忆、经相似关系连通）。
+    pub count: usize,
+    /// 最大簇的记忆数。
+    pub largest: usize,
+    /// 相似记忆数分布：1、2~5、6~20、21~100、101~500、>500 条。
+    pub degree_buckets: [usize; 6],
+    /// 簇内全部合并时的最少 LLM 判定次数（每批合并 batch_size-1 条）。
+    pub min_calls: usize,
+    /// 全部保留时的最多 LLM 判定次数（每个种子的相似记忆分批送审）。
+    pub max_calls: usize,
+    /// 估算所用的单批上限。
+    pub batch_size: usize,
+    /// 相似记忆最多的若干条记忆：(标题, 相似数, ID)。
+    pub densest: Vec<(String, usize, String)>,
+}
+
+impl ClusterStats {
+    fn compute(nodes: &[MemoryNode], neighbors: &[Vec<(u32, f32)>], batch_size: usize) -> Self {
+        let len = neighbors.len();
+        let mut parent: Vec<usize> = (0..len).collect();
+        fn find(parent: &mut [usize], mut node: usize) -> usize {
+            while parent[node] != node {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
+        }
+        for (left, list) in neighbors.iter().enumerate() {
+            for (right, _) in list {
+                let a = find(&mut parent, left);
+                let b = find(&mut parent, *right as usize);
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut sizes: HashMap<usize, usize> = HashMap::new();
+        for (position, list) in neighbors.iter().enumerate() {
+            if !list.is_empty() {
+                *sizes.entry(find(&mut parent, position)).or_default() += 1;
+            }
+        }
+        let per_batch = batch_size.saturating_sub(1).max(1);
+        let mut stats = Self {
+            count: sizes.len(),
+            largest: sizes.values().copied().max().unwrap_or_default(),
+            min_calls: sizes
+                .values()
+                .map(|size| (size - 1).div_ceil(per_batch))
+                .sum(),
+            batch_size,
+            ..Default::default()
+        };
+        // 全部保留时：每对记忆至少出现在一批中；以种子为中心的批每批覆盖
+        // per_batch 对种子相关的记忆对，按「每个种子尚未覆盖的度」上界估算。
+        let pairs: usize = neighbors.iter().map(Vec::len).sum::<usize>() / 2;
+        stats.max_calls = pairs.div_ceil(per_batch);
+        for list in neighbors.iter().filter(|list| !list.is_empty()) {
+            let bucket = match list.len() {
+                1 => 0,
+                2..=5 => 1,
+                6..=20 => 2,
+                21..=100 => 3,
+                101..=500 => 4,
+                _ => 5,
+            };
+            stats.degree_buckets[bucket] += 1;
+        }
+        let mut dense: Vec<usize> = (0..len).filter(|p| !neighbors[*p].is_empty()).collect();
+        dense.sort_by_key(|position| std::cmp::Reverse(neighbors[*position].len()));
+        stats.densest = dense
+            .into_iter()
+            .take(10)
+            .map(|position| {
+                (
+                    truncate(&nodes[position].title, 40),
+                    neighbors[position].len(),
+                    nodes[position].id.clone(),
+                )
+            })
+            .collect();
+        stats
+    }
+
+    fn degree_histogram(&self) -> String {
+        const LABELS: [&str; 6] = ["1", "2~5", "6~20", "21~100", "101~500", ">500"];
+        LABELS
+            .iter()
+            .zip(self.degree_buckets)
+            .map(|(label, count)| format!("{label} 条:{count}"))
+            .collect::<Vec<_>>()
+            .join("，")
+    }
 }
 
 /// 一批记忆的整理状态：节点快照（合并后就地更新）、相似图与处理进度。
@@ -459,9 +593,15 @@ async fn consolidate_page(
             options.similarity_threshold
         ));
     }
+    report.clusters = ClusterStats::compute(&nodes, &neighbors, options.batch_size.max(2));
     let total = nodes.len();
+    // 种子顺序：相似记忆多的优先（同数时保持原顺序，即更新时间从新到旧），
+    // 没有相似记忆的排在最后（只做低质量检查）。`--max-nodes` 因此优先覆盖
+    // 真正需要 LLM 判定的记忆。
+    let mut order: Vec<usize> = (0..total).collect();
+    order.sort_by_key(|position| std::cmp::Reverse(neighbors[*position].len()));
     let mut state = PageState::new(nodes, neighbors);
-    let mut queue: VecDeque<usize> = (0..total).collect();
+    let mut queue: VecDeque<usize> = order.into_iter().collect();
     let mut handled = 0;
     let batch_size = options.batch_size.max(2);
     while let Some(seed) = queue.pop_front() {
@@ -519,6 +659,10 @@ async fn consolidate_page(
             if pending.is_empty() {
                 break;
             }
+            if options.max_llm_calls > 0 && report.llm_calls >= options.max_llm_calls {
+                report.llm_budget_exhausted = true;
+                break;
+            }
             let left = pending.len();
             let mut batch = vec![seed];
             batch.extend(pending.iter().take(batch_size - 1).map(|(other, _)| *other));
@@ -550,7 +694,7 @@ async fn consolidate_page(
                 break;
             }
         }
-        if fatal {
+        if fatal || report.llm_budget_exhausted {
             break;
         }
     }
@@ -2060,6 +2204,32 @@ mod tests {
     }
 
     #[test]
+    fn cluster_stats_summarize_similarity_graph() {
+        let nodes: Vec<MemoryNode> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|id| node(id, id, "摘要", 0.5))
+            .collect();
+        // 簇 {a,b,c}（b 为中心）与簇 {d,e}；f 无相似。
+        let neighbors = vec![
+            vec![(1, 0.95)],
+            vec![(0, 0.95), (2, 0.92)],
+            vec![(1, 0.92)],
+            vec![(4, 0.93)],
+            vec![(3, 0.93)],
+            vec![],
+        ];
+        let stats = ClusterStats::compute(&nodes, &neighbors, 20);
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.largest, 3);
+        assert_eq!(stats.degree_buckets[0], 4, "a、c、d、e 各 1 条相似");
+        assert_eq!(stats.degree_buckets[1], 1, "b 有 2 条相似");
+        assert_eq!(stats.min_calls, 2, "每簇至少一次判定");
+        assert_eq!(stats.max_calls, 1, "3 对相似、每批 19 对");
+        assert_eq!(stats.densest[0].2, "b", "相似最多的排第一");
+        assert!(stats.degree_histogram().contains("1 条:4"));
+    }
+
+    #[test]
     fn exact_neighbors_keeps_all_pairs_above_threshold() {
         let a = [1.0f32, 0.0, 0.0];
         let b = [0.99f32, 0.1, 0.0];
@@ -2090,6 +2260,7 @@ mod tests {
             candidate_pairs: 5,
             nodes_with_candidates: 4,
             max_candidates: 3,
+            clusters: ClusterStats::default(),
             reviewed: 7,
             merged_groups: 2,
             merged_away: 3,
@@ -2103,6 +2274,7 @@ mod tests {
             retrieval_backend: "vector_store",
             without_vectors: 0,
             dry_run: false,
+            llm_budget_exhausted: false,
             fatal_error: None,
             actions: vec!["合并 2 条".to_string()],
             errors: Vec::new(),

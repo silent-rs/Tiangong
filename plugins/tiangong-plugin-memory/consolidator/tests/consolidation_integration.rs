@@ -622,3 +622,72 @@ async fn candidates_beyond_batch_size_are_judged_in_multiple_batches() {
     assert_eq!(report.merged_groups, 0, "LLM 未要求合并时不应合并");
     assert_eq!(active_ids(&handle).await.len(), 7);
 }
+
+/// `max_llm_calls` 限制 LLM 调用次数；种子按相似记忆数从多到少处理，
+/// 没有相似记忆的记忆不会占用 `max_nodes` 名额。
+#[tokio::test]
+#[serial]
+async fn llm_budget_and_dense_first_seed_order() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "Redis Sentinel 配置在 infra/redis/sentinel.conf，负责主从切换";
+    // 最新写入的若干条互不相似（按更新时间从新到旧会被先扫描到）。
+    for index in 0..4 {
+        handle
+            .upsert_manual_memory(ManualMemoryDraft {
+                title: format!("相似组 {index}"),
+                summary: summary.to_string(),
+                keywords: vec!["redis".to_string()],
+                importance: 0.6,
+                memory_type: MemoryCognitiveType::DomainKnowledge,
+                ..Default::default()
+            })
+            .await
+            .expect("写入记忆失败");
+    }
+    for (index, text) in [
+        "PostgreSQL 主从复制配置要点",
+        "前端 Vue 组件拆分约定",
+        "Kubernetes 节点亲和性调度策略",
+    ]
+    .iter()
+    .enumerate()
+    {
+        handle
+            .upsert_manual_memory(ManualMemoryDraft {
+                title: format!("孤立 {index}"),
+                summary: text.to_string(),
+                keywords: vec![format!("k{index}")],
+                importance: 0.6,
+                memory_type: MemoryCognitiveType::DomainKnowledge,
+                ..Default::default()
+            })
+            .await
+            .expect("写入记忆失败");
+    }
+    let llm = MockLlm::start(|_| "{}".to_string());
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            similarity_threshold: 0.6,
+            batch_size: 2,
+            max_nodes: 1,
+            max_llm_calls: 2,
+            llm: Some(llm.config()),
+            llm_retry_attempts: 1,
+            forget_low_quality: false,
+            dry_run: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 2, "应在 2 次 LLM 调用后停止：{requests:?}");
+    assert!(report.llm_budget_exhausted);
+    assert!(report.render().contains("已达 LLM 调用上限"));
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.clusters.count, 1, "{}", report.render());
+    assert_eq!(report.clusters.largest, 4);
+}
