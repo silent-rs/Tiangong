@@ -150,12 +150,12 @@ fn slug(model: &str) -> String {
 
 /// LanceDB 连接 URI：非 Windows 直接用路径，Windows 用 file:// URL。
 #[cfg(not(windows))]
-fn connection_uri(path: &Path) -> String {
+pub(crate) fn connection_uri(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
 #[cfg(windows)]
-fn connection_uri(path: &Path) -> String {
+pub(crate) fn connection_uri(path: &Path) -> String {
     format!("file:///{}", path.to_string_lossy().replace('\\', "/"))
 }
 

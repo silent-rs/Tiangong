@@ -31,6 +31,7 @@ use tiangong_memory_consolidator::consolidation::{
     ConsolidationOptions, DEFAULT_CANDIDATE_LIMIT, DEFAULT_GROUP_LIMIT,
     DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
 };
+use tiangong_memory_consolidator::vector_repair::repair_missing_vectors;
 use tiangong_memory_consolidator::vector_store::{self, StoredVectors};
 
 /// 天工 Memory：记忆深度整理工具。
@@ -58,12 +59,18 @@ struct Cli {
     /// 最多整理多少批（0 表示直到全库完成；每批最多 5000 条）
     #[arg(long, default_value_t = 0)]
     max_pages: usize,
-    /// 试运行：只报告不落库
+    /// 试运行：只报告不落库（向量补写也只统计缺失数，不写入）
     #[arg(long)]
     dry_run: bool,
     /// 保留低质量记忆，不执行遗忘
     #[arg(long)]
     keep_low_quality: bool,
+    /// 只补写缺失向量后退出，不执行整理（只新增向量，不改动记忆内容）
+    #[arg(long, conflicts_with = "skip_vector_repair")]
+    repair_vectors_only: bool,
+    /// 整理前跳过缺失向量补写
+    #[arg(long)]
+    skip_vector_repair: bool,
 }
 
 fn main() -> Result<()> {
@@ -153,6 +160,29 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
                 .local_embedding
                 .map(|tier| tiangong_memory::local_model::local_model_status(tier, true).model)
         });
+    let managed: ManagedMemory =
+        start_or_connect_with_options(options.clone(), ProcessType::Sidecar)
+            .await
+            .context("接入 Memory Leader 失败")?;
+    match managed.state() {
+        LeaderState::Leader => println!("本进程已竞争为 Memory Leader"),
+        LeaderState::Follower { pid } => {
+            println!("已有 Memory Leader 运行中（pid={pid}），本进程经 IPC 转发执行")
+        }
+    }
+    // 先补齐缺失向量（工具侧计算并写入向量表），再读取向量库，保证所有
+    // 活跃记忆都参与相似比较。
+    if cli.repair_vectors_only || !cli.skip_vector_repair {
+        let outcome = repair_vectors(&root, &options, &managed, cli.dry_run).await;
+        if cli.repair_vectors_only {
+            drop(managed);
+            return outcome;
+        }
+        if let Err(err) = outcome {
+            drop(managed);
+            return Err(err.context("补写缺失向量失败；可加 --skip-vector-repair 跳过后整理"));
+        }
+    }
     let stored: Option<Arc<StoredVectors>> =
         match vector_store::load_stored_vectors(&root, model_hint.as_deref()).await {
             Ok(Some(stored)) => {
@@ -173,16 +203,6 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
                 None
             }
         };
-    let managed: ManagedMemory =
-        start_or_connect_with_options(options.clone(), ProcessType::Sidecar)
-            .await
-            .context("接入 Memory Leader 失败")?;
-    match managed.state() {
-        LeaderState::Leader => println!("本进程已竞争为 Memory Leader，开始整理"),
-        LeaderState::Follower { pid } => {
-            println!("已有 Memory Leader 运行中（pid={pid}），本进程经 IPC 转发执行整理")
-        }
-    }
     let consolidation = ConsolidationOptions {
         similarity_threshold: cli.threshold,
         group_limit: cli.group_limit.clamp(1, 20),
@@ -224,6 +244,75 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// 补写缺失向量：确定当前 embedding 模型与向量表，工具侧计算并写入。
+///
+/// 写入直接落 LanceDB，必须独占：仅当本进程是 Leader（天工未运行）时写入；
+/// 天工运行中只统计缺失数并提示退出天工后重跑，避免与天工的 Memory 并发写表。
+async fn repair_vectors(
+    root: &std::path::Path,
+    options: &MemoryOptions,
+    managed: &ManagedMemory,
+    dry_run: bool,
+) -> Result<()> {
+    let (model, dimension) = match (options.embedding.as_ref(), options.local_embedding) {
+        (Some(endpoint), _) => (endpoint.model.clone(), endpoint.dimension),
+        (None, Some(tier)) => {
+            let status = tiangong_memory::local_model::local_model_status(tier, true);
+            (status.model, status.dimension.unwrap_or_default())
+        }
+        (None, None) => {
+            println!("未配置 Embedding，跳过缺失向量补写");
+            return Ok(());
+        }
+    };
+    if dimension == 0 {
+        bail!("无法确定 embedding 模型 {model} 的向量维度");
+    }
+    let table = tiangong_memory::vector_table_name(&model, dimension);
+    let lancedb_dir = root.join("data").join("memory").join("lancedb");
+    let exclusive = managed.is_leader();
+    let write = !dry_run && exclusive;
+    let embedding = if write {
+        println!("加载 embedding 模型 {model}（{dimension} 维）用于补写向量……");
+        Some(load_embedding(options).await?)
+    } else {
+        None
+    };
+    let managed_ref = managed;
+    let provider = move || managed_ref.handle();
+    let report = repair_missing_vectors(
+        &provider,
+        &lancedb_dir,
+        &table,
+        embedding,
+        Some(&|progress: &str| println!("{progress}")),
+    )
+    .await?;
+    println!("{}", report.summary());
+    if !dry_run && !exclusive && report.missing > 0 {
+        bail!(
+            "天工正在运行（Memory Leader 为其他进程），为避免并发写向量表未补写 {} 条缺失向量；\
+             请退出天工后重试，或加 --skip-vector-repair 跳过",
+            report.missing
+        );
+    }
+    Ok(())
+}
+
+/// 加载与 Memory 相同的 embedding：在线端点优先，否则内置本地模型。
+async fn load_embedding(
+    options: &MemoryOptions,
+) -> Result<Arc<dyn tiangong_llm::EmbeddingProvider>> {
+    if let Some(endpoint) = options.embedding.as_ref() {
+        return embedding_provider_from_config(endpoint)
+            .map_err(|err| anyhow::anyhow!("创建 Embedding 端点失败：{err:#}"));
+    }
+    let tier = options.local_embedding.context("未配置 Embedding 模型")?;
+    tiangong_memory::local_model::load_embedding_provider(tier)
+        .await
+        .context("加载内置 Embedding 模型失败")
 }
 
 /// 火山方舟（Ark）端点改走 Chat Completions 并关闭思考。

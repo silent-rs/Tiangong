@@ -11379,6 +11379,7 @@ name = "tiangong-memory-consolidator"
 version = "0.17.6"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "futures-util",

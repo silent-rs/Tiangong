@@ -87,6 +87,12 @@ pub async fn load_embedding_for_test(tier: MemoryLocalTier) -> Result<Arc<dyn Em
     load_embedding(tier, &download::CancelToken::default()).await
 }
 
+/// 下载（如需）并加载内置 Embedding 模型，供外部工具（如记忆整理工具补写
+/// 缺失向量）复用，保证与 Memory 写入使用同一模型。
+pub async fn load_embedding_provider(tier: MemoryLocalTier) -> Result<Arc<dyn EmbeddingProvider>> {
+    load_embedding(tier, &download::CancelToken::default()).await
+}
+
 /// 集成测试入口：下载并加载内置 Rerank。
 #[doc(hidden)]
 pub async fn load_rerank_for_test(tier: MemoryLocalTier) -> Result<Arc<dyn RerankProvider>> {
