@@ -58,12 +58,18 @@ struct Cli {
     /// 最多整理多少批（0 表示直到全库完成；每批最多 5000 条）
     #[arg(long, default_value_t = 0)]
     max_pages: usize,
-    /// 试运行：只报告不落库
+    /// 试运行：只报告不落库（向量补写也只统计缺失数，不写入）
     #[arg(long)]
     dry_run: bool,
     /// 保留低质量记忆，不执行遗忘
     #[arg(long)]
     keep_low_quality: bool,
+    /// 只补写缺失向量后退出，不执行整理（只新增向量索引，不改动记忆内容）
+    #[arg(long, conflicts_with = "skip_vector_repair")]
+    repair_vectors_only: bool,
+    /// 整理前跳过缺失向量补写
+    #[arg(long)]
+    skip_vector_repair: bool,
 }
 
 fn main() -> Result<()> {
@@ -153,6 +159,30 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
                 .local_embedding
                 .map(|tier| tiangong_memory::local_model::local_model_status(tier, true).model)
         });
+    let managed: ManagedMemory =
+        start_or_connect_with_options(options.clone(), ProcessType::Sidecar)
+            .await
+            .context("接入 Memory Leader 失败")?;
+    let is_leader = matches!(managed.state(), LeaderState::Leader);
+    match managed.state() {
+        LeaderState::Leader => println!("本进程已竞争为 Memory Leader"),
+        LeaderState::Follower { pid } => {
+            println!("已有 Memory Leader 运行中（pid={pid}），本进程经 IPC 转发执行")
+        }
+    }
+    // 先补齐缺失向量（由 Leader 用已加载的 embedding 模型计算），再读取向量库，
+    // 保证所有活跃记忆都参与相似比较。
+    if cli.repair_vectors_only || !cli.skip_vector_repair {
+        let outcome = repair_missing_vectors(&managed, cli.dry_run, is_leader).await;
+        if cli.repair_vectors_only {
+            drop(managed);
+            return outcome;
+        }
+        if let Err(err) = outcome {
+            drop(managed);
+            return Err(err.context("补写缺失向量失败；可加 --skip-vector-repair 跳过后整理"));
+        }
+    }
     let stored: Option<Arc<StoredVectors>> =
         match vector_store::load_stored_vectors(&root, model_hint.as_deref()).await {
             Ok(Some(stored)) => {
@@ -173,16 +203,6 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
                 None
             }
         };
-    let managed: ManagedMemory =
-        start_or_connect_with_options(options.clone(), ProcessType::Sidecar)
-            .await
-            .context("接入 Memory Leader 失败")?;
-    match managed.state() {
-        LeaderState::Leader => println!("本进程已竞争为 Memory Leader，开始整理"),
-        LeaderState::Follower { pid } => {
-            println!("已有 Memory Leader 运行中（pid={pid}），本进程经 IPC 转发执行整理")
-        }
-    }
     let consolidation = ConsolidationOptions {
         similarity_threshold: cli.threshold,
         group_limit: cli.group_limit.clamp(1, 20),
@@ -224,6 +244,100 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// 单次补写批量：约 8 次 embedding 请求，单次 IPC 往返控制在数十秒内，
+/// 不长时间占用 Memory Actor（期间天工的召回与写入照常排队处理）。
+const VECTOR_REPAIR_BATCH: usize = 256;
+/// embedding 模型尚未就绪（内置模型下载/加载中）时的等待间隔与上限。
+const VECTOR_READY_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+const VECTOR_READY_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// 循环补写缺失向量直至补齐；试运行只统计缺失数。
+///
+/// 本进程是 Leader 时内置 embedding 模型在后台加载，就绪前返回「尚未就绪」，
+/// 此时按间隔等待；连续一批全部失败则停止并报错，避免空转。
+async fn repair_missing_vectors(
+    managed: &ManagedMemory,
+    dry_run: bool,
+    is_leader: bool,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let mut waited = std::time::Duration::ZERO;
+    let mut total_repaired = 0usize;
+    let mut total_failed = 0usize;
+    let limit = if dry_run { 0 } else { VECTOR_REPAIR_BATCH };
+    loop {
+        let report = match managed.handle().repair_vectors(limit).await {
+            Ok(report) => report,
+            Err(err) => {
+                let message = format!("{err:#}");
+                if is_leader && message.contains("尚未就绪") && waited < VECTOR_READY_MAX_WAIT {
+                    if waited.is_zero() {
+                        println!("等待 Memory embedding 模型加载就绪……");
+                    }
+                    tokio::time::sleep(VECTOR_READY_POLL).await;
+                    waited += VECTOR_READY_POLL;
+                    continue;
+                }
+                if !is_leader {
+                    bail!(
+                        "运行中的天工 Memory 不支持或无法补写向量：{message}。\
+                         请升级到包含本功能的天工版本，或退出天工后重试（本工具将自行成为 Leader）"
+                    );
+                }
+                bail!("补写缺失向量失败：{message}");
+            }
+        };
+        if report.missing_before == 0 {
+            println!(
+                "向量覆盖完整：{} 条活跃记忆均已有向量{}",
+                report.active,
+                orphan_note(report.orphaned)
+            );
+            break;
+        }
+        if dry_run {
+            println!(
+                "试运行：{} 条活跃记忆中有 {} 条缺向量（正式运行或 --repair-vectors-only 时补写）{}",
+                report.active,
+                report.missing_before,
+                orphan_note(report.orphaned)
+            );
+            break;
+        }
+        total_repaired += report.repaired;
+        total_failed += report.failed;
+        println!(
+            "补写向量：本批 +{}（失败 {}），剩余 {} / 活跃 {}",
+            report.repaired, report.failed, report.remaining, report.active
+        );
+        if report.remaining == 0 {
+            println!(
+                "向量补写完成：共补写 {total_repaired} 条，用时 {:.0}s{}",
+                started.elapsed().as_secs_f64(),
+                orphan_note(report.orphaned)
+            );
+            break;
+        }
+        if report.repaired == 0 {
+            bail!(
+                "补写向量连续失败（本批 {} 条全部失败，累计失败 {total_failed}），剩余 {} 条未补；\
+                 请检查 embedding 模型状态后重试",
+                report.failed,
+                report.remaining
+            );
+        }
+    }
+    Ok(())
+}
+
+fn orphan_note(orphaned: usize) -> String {
+    if orphaned == 0 {
+        String::new()
+    } else {
+        format!("；向量表另有 {orphaned} 条不属于活跃记忆的残留向量（未处理）")
+    }
 }
 
 /// 火山方舟（Ark）端点改走 Chat Completions 并关闭思考。

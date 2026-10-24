@@ -64,6 +64,9 @@ pub enum MemoryIpcRequestPayload {
     DeleteNode {
         node_id: String,
     },
+    RepairVectors {
+        limit: usize,
+    },
     UpsertRelation {
         draft: MemoryRelationDraft,
     },
@@ -100,14 +103,37 @@ pub enum MemoryIpcRequestPayload {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryIpcResponsePayload {
     Ack,
-    Injection { items: Vec<String> },
-    Recall { hits: Vec<RecallHit> },
-    RecallContext { response: MemoryRecallResponse },
-    RecallSufficiency { result: RecallSufficiency },
-    Depth2 { items: Vec<ExpandedMemory> },
-    Nodes { items: Vec<MemoryNode> },
-    NodeCount { count: usize },
-    Node { item: MemoryNode },
-    Relations { items: Vec<MemoryRelation> },
-    Relation { item: MemoryRelation },
+    Injection {
+        items: Vec<String>,
+    },
+    Recall {
+        hits: Vec<RecallHit>,
+    },
+    RecallContext {
+        response: MemoryRecallResponse,
+    },
+    RecallSufficiency {
+        result: RecallSufficiency,
+    },
+    Depth2 {
+        items: Vec<ExpandedMemory>,
+    },
+    Nodes {
+        items: Vec<MemoryNode>,
+    },
+    NodeCount {
+        count: usize,
+    },
+    Node {
+        item: MemoryNode,
+    },
+    Relations {
+        items: Vec<MemoryRelation>,
+    },
+    Relation {
+        item: MemoryRelation,
+    },
+    VectorRepair {
+        report: crate::types::VectorRepairReport,
+    },
 }

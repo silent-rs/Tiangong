@@ -177,6 +177,15 @@ impl MemoryActor {
                 let _ = reply.send(result);
             }
 
+            MemoryCommand::RepairVectors { limit, reply } => {
+                let result = self
+                    .store
+                    .repair_missing_vectors(limit)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
+                let _ = reply.send(result);
+            }
+
             MemoryCommand::UpsertRelation { draft, reply } => {
                 let result = self
                     .store

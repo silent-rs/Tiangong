@@ -556,6 +556,26 @@ pub struct VectorPoint {
     pub vector: Vec<f32>,
 }
 
+/// 一次「补写缺失向量」的结果。
+///
+/// 统计口径：活跃记忆与当前向量表按 `node_id` 比对。`remaining` 为本批之后
+/// 仍缺向量的活跃记忆数（含本批失败的），为 0 表示已全部补齐。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VectorRepairReport {
+    /// 活跃记忆总数。
+    pub active: usize,
+    /// 本批开始前缺向量的活跃记忆数。
+    pub missing_before: usize,
+    /// 本批成功补写的条数。
+    pub repaired: usize,
+    /// 本批补写失败的条数（embedding 或写入失败）。
+    pub failed: usize,
+    /// 本批之后仍缺向量的活跃记忆数。
+    pub remaining: usize,
+    /// 向量表中不属于任何活跃记忆的向量数（已归档/删除的残留，仅统计）。
+    pub orphaned: usize,
+}
+
 /// 展开的记忆节点（Phase C 实现）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpandedMemory {

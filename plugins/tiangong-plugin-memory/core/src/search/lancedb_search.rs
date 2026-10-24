@@ -14,7 +14,7 @@ use lancedb::arrow::arrow_array::{
 };
 use lancedb::arrow::arrow_schema::{DataType, Field, Schema, SchemaRef};
 use lancedb::database::CreateTableMode;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{Connection, DistanceType, Table, connect};
 
 use crate::search::vector::VectorIndex;
@@ -427,6 +427,34 @@ impl VectorIndex for LanceDbIndex {
             .with_context(|| format!("LanceDB 删除节点失败: {node_id}"))?;
         Ok(())
     }
+
+    async fn list_node_ids(&self) -> Result<Vec<String>> {
+        let batches = self
+            .table
+            .query()
+            .select(Select::Columns(vec!["node_id".to_string()]))
+            .execute()
+            .await
+            .with_context(|| "LanceDB 读取节点 ID 失败")?
+            .try_collect::<Vec<_>>()
+            .await
+            .with_context(|| "LanceDB 节点 ID 收集失败")?;
+        let mut ids = Vec::new();
+        for batch in batches {
+            let Some(column) = batch
+                .column_by_name("node_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            else {
+                continue;
+            };
+            ids.extend(
+                (0..column.len())
+                    .filter(|row| !column.is_null(*row))
+                    .map(|row| column.value(row).to_string()),
+            );
+        }
+        Ok(ids)
+    }
 }
 
 fn build_schema(dimension: usize) -> SchemaRef {
@@ -764,6 +792,28 @@ mod tests {
 
         let hits = index.search(vec![0.4, 1.0, 0.0, 0.0], 1).await.unwrap();
         assert_eq!(hits[0].node_id, "b", "更新后的向量参与检索");
+    }
+
+    /// `list_node_ids` 只读 node_id 列，覆盖写与删除后结果与表内实际一致。
+    #[tokio::test]
+    async fn list_node_ids_reflects_upserts_and_deletes() {
+        let tmp = TempDir::new().unwrap();
+        let index = open_index(tmp.path(), "test-model").await;
+        assert!(index.list_node_ids().await.unwrap().is_empty());
+
+        index
+            .upsert_batch(vec![point("a", "甲", 0.1), point("b", "乙", 0.2)])
+            .await
+            .unwrap();
+        index
+            .upsert_batch(vec![point("b", "乙-更新", 0.3), point("c", "丙", 0.4)])
+            .await
+            .unwrap();
+        index.delete("a").await.unwrap();
+
+        let mut ids = index.list_node_ids().await.unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
     }
 
     #[tokio::test]

@@ -1106,6 +1106,11 @@ pub async fn handle_memory_request(
             handle.delete_node(node_id).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::RepairVectors { limit } => {
+            Ok(MemoryIpcResponsePayload::VectorRepair {
+                report: handle.repair_vectors(limit).await?,
+            })
+        }
         MemoryIpcRequestPayload::UpsertRelation { draft } => {
             Ok(MemoryIpcResponsePayload::Relation {
                 item: handle.upsert_relation(draft).await?,

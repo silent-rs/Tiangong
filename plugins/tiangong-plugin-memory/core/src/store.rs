@@ -1080,6 +1080,85 @@ impl MemoryStore {
         self.db.delete_memory_node(node_id)
     }
 
+    /// 补写缺失向量：比对活跃记忆与当前向量表，为缺向量的记忆（按 ID 升序
+    /// 取前 `limit` 条，0 表示只统计不补写）计算 embedding 并写入。
+    ///
+    /// 写入时 embedding 未就绪或失败只告警（见 [`Self::write_episode`] 等），
+    /// 而回填任务只在新建向量表时运行一次，漏写的记忆会永久缺语义索引；
+    /// 本方法按真实差集补齐，不依赖回填游标，可重复调用（幂等）。
+    /// 调用方按 `remaining` 循环分批，每批耗时受 `limit` 约束，不长时间占用 Actor。
+    pub(crate) async fn repair_missing_vectors(
+        &mut self,
+        limit: usize,
+    ) -> Result<crate::types::VectorRepairReport> {
+        if !self.recall_engine.vector_ready() {
+            anyhow::bail!("Memory 向量层未启用或 embedding 模型尚未就绪，暂无法补写向量");
+        }
+        let Some(indexed) = self.recall_engine.indexed_node_ids().await? else {
+            anyhow::bail!("Memory 向量层未启用，暂无法补写向量");
+        };
+        let indexed: std::collections::HashSet<String> = indexed.into_iter().collect();
+        let active = self.db.list_active_node_ids()?;
+        let active_set: std::collections::HashSet<&str> =
+            active.iter().map(String::as_str).collect();
+        let missing: Vec<&String> = active
+            .iter()
+            .filter(|id| !indexed.contains(id.as_str()))
+            .collect();
+        let mut report = crate::types::VectorRepairReport {
+            active: active.len(),
+            missing_before: missing.len(),
+            orphaned: indexed
+                .iter()
+                .filter(|id| !active_set.contains(id.as_str()))
+                .count(),
+            ..Default::default()
+        };
+        let mut nodes = Vec::new();
+        for id in missing.iter().take(limit) {
+            match self.db.get_memory_node(id) {
+                Ok(Some(node)) => nodes.push(node),
+                Ok(None) => {}
+                Err(err) => {
+                    report.failed += 1;
+                    tracing::warn!(node_id = %id, "补写向量读取节点失败: {err}");
+                }
+            }
+        }
+        let embedding = self
+            .recall_engine
+            .embedding_provider()
+            .ok_or_else(|| anyhow::anyhow!("Memory embedding 模型尚未就绪"))?;
+        for chunk in nodes.chunks(VECTOR_BACKFILL_BATCH) {
+            let texts = RecallEngine::backfill_texts(chunk);
+            let outcome = match embedding.embed(texts).await {
+                Ok(vectors) => self.recall_engine.upsert_nodes_batch(chunk, vectors).await,
+                Err(err) => Err(err),
+            };
+            match outcome {
+                Ok((written, failed)) => {
+                    report.repaired += written;
+                    report.failed += failed;
+                }
+                Err(err) => {
+                    report.failed += chunk.len();
+                    tracing::warn!(batch = chunk.len(), "Memory 补写向量批次失败: {err:#}");
+                }
+            }
+        }
+        report.remaining = report.missing_before.saturating_sub(report.repaired);
+        tracing::info!(
+            active = report.active,
+            missing_before = report.missing_before,
+            repaired = report.repaired,
+            failed = report.failed,
+            remaining = report.remaining,
+            orphaned = report.orphaned,
+            "Memory 补写缺失向量"
+        );
+        Ok(report)
+    }
+
     /// 全文搜索（Tantivy BM25，同步版，供兼容使用）
     #[allow(dead_code)]
     pub(crate) fn search(&self, query: &str, limit: usize) -> Vec<RecallHit> {
@@ -1446,5 +1525,163 @@ mod tests {
         assert!(store.take_backfill_batch().is_none());
         assert!(store.vector_backfill.is_none());
         assert_eq!(store.backfill_due_in(), None);
+    }
+
+    /// 测试用 embedding：维度固定，可按文本注入失败。
+    struct RepairEmbedding {
+        dimension: usize,
+        fail_marker: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for RepairEmbedding {
+        async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+            if let Some(marker) = self.fail_marker
+                && texts.iter().any(|text| text.contains(marker))
+            {
+                anyhow::bail!("embedding 端点故障");
+            }
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let mut vector = vec![0.0; self.dimension];
+                    vector[0] = text.chars().count() as f32;
+                    vector[1] = 1.0;
+                    vector
+                })
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
+
+        fn model(&self) -> &str {
+            "repair-test"
+        }
+    }
+
+    fn insert_active(db: &MemoryDb, title: &str) -> String {
+        let episode = Episode::new(
+            "repair-session".to_string(),
+            title.to_string(),
+            format!("{title} 的摘要内容"),
+            EpisodeOutcome::Success,
+            vec![title.to_string()],
+            Vec::new(),
+            0.6,
+        );
+        let id = episode.id.clone();
+        db.insert_episode(&episode, None).unwrap();
+        id
+    }
+
+    /// 构造带真实 LanceDB 向量表（临时目录）与测试 embedding 的 store。
+    async fn store_with_vectors(
+        dir: &std::path::Path,
+        fail_marker: Option<&'static str>,
+    ) -> MemoryStore {
+        const DIM: usize = 4;
+        let (index, _) = LanceDbIndex::open(dir, &VectorIdentity::new("repair-test", DIM))
+            .await
+            .unwrap();
+        MemoryStore {
+            db: open_in_memory().unwrap(),
+            tantivy: None,
+            recall_engine: RecallEngine::dual(
+                Box::new(index),
+                Arc::new(RepairEmbedding {
+                    dimension: DIM,
+                    fail_marker,
+                }),
+                None,
+                true,
+            ),
+            vector_backfill: None,
+            resync_vector_pending: Vec::new(),
+        }
+    }
+
+    async fn indexed_ids(store: &MemoryStore) -> std::collections::BTreeSet<String> {
+        store
+            .recall_engine
+            .indexed_node_ids()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    /// 只补缺失的活跃记忆：已有向量不重算，归档记忆不补，分批直到 remaining=0，
+    /// 再次调用幂等；向量表里的残留向量只统计不删除。
+    #[tokio::test]
+    async fn repair_missing_vectors_fills_only_missing_active_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_vectors(dir.path(), None).await;
+        let indexed = insert_active(&store.db, "已有向量的记忆");
+        let node = store.db.get_memory_node(&indexed).unwrap().unwrap();
+        store.recall_engine.upsert_node(&node).await.unwrap();
+        let missing: Vec<String> = (0..3)
+            .map(|i| insert_active(&store.db, &format!("缺向量记忆{i}")))
+            .collect();
+        let archived = insert_active(&store.db, "已归档记忆");
+        store
+            .db
+            .update_node_status(&archived, &MemoryStatus::Archived)
+            .unwrap();
+        // 已删除记忆在向量表中的残留（孤儿向量）。
+        let ghost = backfill_test_node("ghost-node");
+        store.recall_engine.upsert_node(&ghost).await.unwrap();
+
+        let stats = store.repair_missing_vectors(0).await.unwrap();
+        assert_eq!(stats.active, 4);
+        assert_eq!(stats.missing_before, 3);
+        assert_eq!(stats.repaired, 0, "limit=0 只统计");
+        assert_eq!(stats.remaining, 3);
+        assert_eq!(stats.orphaned, 1);
+
+        let first = store.repair_missing_vectors(2).await.unwrap();
+        assert_eq!((first.repaired, first.failed, first.remaining), (2, 0, 1));
+        let second = store.repair_missing_vectors(2).await.unwrap();
+        assert_eq!(
+            (second.missing_before, second.repaired, second.remaining),
+            (1, 1, 0)
+        );
+
+        let ids = indexed_ids(&store).await;
+        for id in missing.iter().chain(std::iter::once(&indexed)) {
+            assert!(ids.contains(id), "活跃记忆 {id} 应已有向量");
+        }
+        assert!(!ids.contains(&archived), "归档记忆不补向量");
+
+        let again = store.repair_missing_vectors(10).await.unwrap();
+        assert_eq!(
+            (again.missing_before, again.repaired, again.remaining),
+            (0, 0, 0)
+        );
+        assert_eq!(again.orphaned, 1, "残留向量只统计不删除");
+    }
+
+    /// embedding 失败的批次计入 failed 并保留在 remaining 中，不影响其他批次。
+    #[tokio::test]
+    async fn repair_missing_vectors_reports_failed_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_vectors(dir.path(), Some("坏记忆")).await;
+        insert_active(&store.db, "坏记忆");
+        let report = store.repair_missing_vectors(10).await.unwrap();
+        assert_eq!(report.missing_before, 1);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.remaining, 1, "失败的记忆仍待补写");
+    }
+
+    /// 向量层未启用（BM25-only）时明确报错，而不是静默返回成功。
+    #[tokio::test]
+    async fn repair_missing_vectors_requires_vector_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_backfill(dir.path());
+        let err = store.repair_missing_vectors(10).await.unwrap_err();
+        assert!(err.to_string().contains("向量层"), "{err}");
     }
 }

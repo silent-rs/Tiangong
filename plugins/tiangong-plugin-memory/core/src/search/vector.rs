@@ -16,4 +16,6 @@ pub(crate) trait VectorIndex: Send {
     async fn search(&self, query_vector: Vec<f32>, limit: usize) -> Result<Vec<RecallHit>>;
     #[allow(dead_code)]
     async fn delete(&self, node_id: &str) -> Result<()>;
+    /// 列出已写入向量的全部节点 ID（只读 `node_id` 列，用于覆盖率统计与缺失补写）。
+    async fn list_node_ids(&self) -> Result<Vec<String>>;
 }

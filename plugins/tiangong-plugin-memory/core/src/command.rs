@@ -90,6 +90,11 @@ pub enum MemoryCommand {
         node_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// 补写缺失向量（单批 `limit` 条，0 只统计）。
+    RepairVectors {
+        limit: usize,
+        reply: oneshot::Sender<Result<crate::types::VectorRepairReport, String>>,
+    },
     UpsertRelation {
         draft: MemoryRelationDraft,
         reply: oneshot::Sender<Result<MemoryRelation, String>>,
