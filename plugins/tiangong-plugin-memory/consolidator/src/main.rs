@@ -279,10 +279,9 @@ async fn repair_vectors(
         println!("加载 embedding 模型 {model}（{dimension} 维）用于补写向量……");
         Some(load_embedding(options).await?)
     };
-    if !dry_run && managed.is_leader() {
-        // 本进程刚成为 Leader 时，内置本地模型在后台加载，向量层就绪前
-        // Leader 会拒绝写入；工具侧已加载完同一模型，再等 Leader 就绪。
-        wait_vector_layer_ready(managed).await;
+    if !dry_run {
+        // 先确认 Leader 能接收向量，再花时间计算 embedding。
+        ensure_leader_accepts_vectors(managed, &model, dimension).await?;
     }
     let managed_ref = managed;
     let provider = move || managed_ref.handle();
@@ -298,21 +297,54 @@ async fn repair_vectors(
     Ok(())
 }
 
-/// 等待本进程 Leader 的向量层就绪（以空批写入探测），最多约 2 分钟。
-async fn wait_vector_layer_ready(managed: &ManagedMemory) {
+/// 以空批写入探测 Leader 能否接收外部向量（空批不改动数据）。
+///
+/// - 向量层未就绪（内置模型仍在加载，常见于天工或本进程刚启动）：每秒重试，
+///   最多约 2 分钟；
+/// - Leader 是不支持该接口的旧版 Memory：旧版收到未知请求会直接断开连接，
+///   给出「重启天工」的明确提示；
+/// - 模型/维度不一致等其他拒绝：原样报错。
+async fn ensure_leader_accepts_vectors(
+    managed: &ManagedMemory,
+    model: &str,
+    dimension: usize,
+) -> Result<()> {
+    let mut last_err = None;
     for _ in 0..120 {
-        // 空批写入不改动数据：向量层未就绪或模型不一致时返回错误。
         match managed
             .handle()
-            .upsert_node_vectors(String::new(), 0, Vec::new())
+            .upsert_node_vectors(model.to_string(), dimension, Vec::new())
             .await
         {
+            Ok(_) => return Ok(()),
             Err(err) if err.to_string().contains("未启用或尚未就绪") => {
+                last_err = Some(err);
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            _ => return,
+            Err(err) if !managed.is_leader() && is_connection_closed(&err) => {
+                let pid = match managed.state() {
+                    LeaderState::Follower { pid } => pid.to_string(),
+                    LeaderState::Leader => "?".to_string(),
+                };
+                bail!(
+                    "当前 Memory Leader（pid={pid}）不支持写入外部向量，连接被断开。\
+                     通常是天工仍在运行升级前启动的 Memory 进程：请完全退出并重启天工\
+                     （或退出天工后由本工具自身作为 Leader 补写），再重试"
+                );
+            }
+            Err(err) => return Err(err.context("Memory Leader 拒绝写入向量")),
         }
     }
+    Err(last_err
+        .map(|err| err.context("等待 Memory 向量层就绪超时"))
+        .unwrap_or_else(|| anyhow::anyhow!("等待 Memory 向量层就绪超时")))
+}
+
+fn is_connection_closed(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let text = cause.to_string();
+        text.contains("IPC 连接已关闭") || text.contains("读取 IPC 帧失败")
+    })
 }
 
 /// 加载与 Memory 相同的 embedding：在线端点优先，否则内置本地模型。
