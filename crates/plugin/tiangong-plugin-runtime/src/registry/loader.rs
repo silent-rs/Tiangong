@@ -438,17 +438,25 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             return Ok(Vec::new());
         };
         let mut candidates = Vec::new();
-        // v2 提及：清单声明 mention.candidates_op 且带 sidecar 时，查询直达
-        // sidecar（载荷 MentionQuery JSON）。响应 `{ entry?, candidates }`：
-        // entry 可选——能力型插件用它声明"可被 @ 调用"的入口（宿主合成
-        // value/label/kind，op 提供 hint/mark）；内容提供方（如 index）只返回
-        // candidates，插件本身不作为被提及对象。动态候选逐项完备性过滤。
-        // sidecar 不可用或超预算时返回空：无法提供即不出现。
-        if let Some(op) = manifest
+        // 提及来源按清单写法分流（两者并存时以 candidates_op 为准，静态字段
+        // 被忽略——不作为 sidecar 不可用时的回退，见 MentionManifest 文档）：
+        //
+        // 1. v2 写法（candidates_op 且带 sidecar）：查询直达 sidecar（载荷
+        //    MentionQuery JSON）。响应 `{ entry?, candidates }`：entry 可选——
+        //    能力型插件用它声明"可被 @ 调用"的入口（宿主合成 value/label/kind，
+        //    op 提供 hint/mark）；内容提供方（如 index）只返回 candidates，
+        //    插件本身不作为被提及对象。动态候选逐项完备性过滤。sidecar 不可用
+        //    或超预算时返回空：无法提供即不出现。
+        // 2. v0.17.6 静态写法（只有 hint）：复用入口合成，把静态 hint/mark
+        //    当作 entry 传入——兼容存量插件（不经升级无法改清单），不要求
+        //    sidecar。查询词过滤由 CoreManager 聚合层统一处理。
+        let mention_op = manifest
             .mention
             .as_ref()
-            .map(|mention| mention.candidates_op.as_str())
-            .filter(|op| !op.trim().is_empty())
+            .and_then(|mention| mention.candidates_op.as_deref())
+            .map(str::trim)
+            .filter(|op| !op.is_empty());
+        if let Some(op) = mention_op
             && manifest.sidecar.is_some()
         {
             // 交互级预算：补全是输入路径，等满清单 request_timeout_ms 会卡住
@@ -493,6 +501,16 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
                 None => {
                     tracing::warn!(plugin_id = %self.id, op, "无法定位插件存储根，跳过提及查询")
                 }
+            }
+        } else if let Some(mention) = manifest.mention.as_ref() {
+            // v0.17.6 静态入口（仅存量插件兼容）：静态 hint/mark 走同一条入口
+            // 合成路径，完备性（hint 非空）由 mention_entry_candidate 兜底。
+            if let Some(candidate) = crate::ts_plugin::mention_entry_candidate(
+                &manifest,
+                descriptor_name.as_deref(),
+                &static_mention_entry(mention),
+            ) {
+                candidates.push(candidate);
             }
         }
         if let Some(instance) = &instance {
@@ -566,8 +584,19 @@ fn dynamic_mention_candidate(item: &serde_json::Value) -> Option<tiangong_types:
     mention_candidate_is_complete(&candidate).then_some(candidate)
 }
 
-/// 解析 `candidates_op` 响应 `{ entry?, candidates }`。
-///
+/// v0.17.6 静态 mention 声明转入口 entry：hint/mark 透传，完备性（hint
+/// 非空、mark 1-4 字符）由 {@link crate::ts_plugin::mention_entry_candidate}
+/// 兜底——与 op 响应的 entry 走同一条合成路径，行为一致。
+pub(crate) fn static_mention_entry(
+    mention: &crate::manifest::MentionManifest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hint": mention.hint.clone().unwrap_or_default(),
+        "mark": mention.mark.clone().unwrap_or_default(),
+    })
+}
+
+/// 解析 `candidates_op` 响应 `{ entry?, candidates }`。///
 /// - `entry` 可选：有则合成入口候选（宿主约定 value/label/kind + op 的
 ///   hint/mark，见 {@link crate::ts_plugin::mention_entry_candidate}），
 ///   缺 hint 跳过并告警；内容提供方（如 index）不返回 entry，插件本身

@@ -966,7 +966,33 @@ fn installed_plugin_states(storage_root: &Path) -> HashMap<String, InstalledPlug
     entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
-            let manifest = PluginManifest::load(&entry.path().join(MANIFEST_FILE)).ok()?;
+            let manifest_path = entry.path().join(MANIFEST_FILE);
+            let manifest = match PluginManifest::load(&manifest_path) {
+                Ok(manifest) => Some(manifest),
+                Err(error) => {
+                    // 完整解析失败（如清单格式随版本演进，老安装读不进新
+                    // 校验）不能把插件当成"未安装"——否则自动升级会跳过
+                    // 它，坏安装永远修不好。回落只读 id/version 做升级判断：
+                    // 新版本仍能替换掉坏掉的安装。
+                    match read_manifest_identity(&manifest_path) {
+                        Ok((id, version)) => {
+                            // 同样只认目录名与 ID 一致的正式目录（防 staging 残留）。
+                            if *entry.file_name() != *id {
+                                return None;
+                            }
+                            tracing::warn!(
+                                path = %entry.path().display(),
+                                %error,
+                                "插件清单完整解析失败，仅按 id/version 参与升级判断"
+                            );
+                            let enabled = !entry.path().join(DISABLED_MARKER_FILE).is_file();
+                            return Some((id, InstalledPluginState { version, enabled }));
+                        }
+                        Err(_) => return None,
+                    }
+                }
+            };
+            let manifest = manifest?;
             // 只认目录名与清单 ID 一致的正式目录：本地部署中断残留的
             // `.{id}-staging-{pid}` 同样带清单，混入会以同 ID 覆盖正式目录
             // 的版本，让升级判定与安装校验读到的"当前版本"不一致。
@@ -983,6 +1009,27 @@ fn installed_plugin_states(storage_root: &Path) -> HashMap<String, InstalledPlug
             ))
         })
         .collect()
+}
+
+/// 清单完整解析失败时的身份回落：只提取 `id` 与 `version`。
+///
+/// 与完整 `PluginManifest::load` 不同，这里不跑任何校验、不拒绝未知结构
+/// 变化——目的只是让升级判断能识别"哪个插件装了什么版本"。两字段缺失
+/// 或非法 JSON 时返回 Err（无法参与任何判断）。
+fn read_manifest_identity(path: &Path) -> Result<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct ManifestIdentity {
+        id: String,
+        version: String,
+    }
+    let identity: ManifestIdentity = serde_json::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("读取插件身份失败: {}", path.display()))?;
+    let id = identity.id.trim().to_string();
+    let version = identity.version.trim().to_string();
+    if id.is_empty() || version.is_empty() {
+        bail!("插件清单缺少 id 或 version");
+    }
+    Ok((id, version))
 }
 
 fn version_is_newer(installed: &str, available: &str) -> bool {

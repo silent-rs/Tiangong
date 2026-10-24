@@ -793,3 +793,31 @@ fn 提及响应形状不符返回空() {
         );
     }
 }
+
+/// v0.17.6 静态 mention（hint/mark）能合成入口候选：与 op entry 同一条
+/// 路径，value/kind 是宿主约定，hint/mark 来自静态声明。
+#[test]
+fn 静态mention声明生成入口候选() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"legacy-demo","version":"0.9.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["说明"],"mention":{"hint":"老插件的能力说明","mark":"老"}}"#,
+    )
+    .expect("静态清单应合法");
+    manifest.validate().unwrap();
+    let mention = manifest.mention.as_ref().unwrap();
+    let candidate = crate::ts_plugin::mention_entry_candidate(
+        &manifest,
+        None,
+        &super::loader::static_mention_entry(mention),
+    )
+    .expect("静态 hint 应合成入口候选");
+    assert_eq!(candidate.value, "@plugin:legacy-demo");
+    assert_eq!(candidate.kind, "plugin");
+    assert_eq!(candidate.hint, "老插件的能力说明");
+    assert_eq!(candidate.mark, "老");
+    // 缺 hint（空值视为没写）：不合成——与 op entry 缺 hint 同语义。
+    let broken = serde_json::json!({ "hint": "   ", "mark": "老" });
+    assert!(
+        crate::ts_plugin::mention_entry_candidate(&manifest, None, &broken).is_none(),
+        "空 hint 不合成入口"
+    );
+}

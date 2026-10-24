@@ -1,0 +1,161 @@
+{
+  "schema_version": 2,
+  "id": "bot",
+  "name": "Bot",
+  "description": "飞书 / QQ / 微信机器人：接收 IM 消息转发到天工，并提供主动推送工具\n需要天工 Server 运行（桌面开启 Server 或 tiangong server）；在插件设置中扫码或填写凭据即可启用对应平台。",
+  "version": "0.1.3",
+  "entrypoints": [
+    "desktop",
+    "server"
+  ],
+  "permissions": [
+    "tool.provide",
+    "sidecar.invoke",
+    "bridge.call"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true
+  },
+  "prompt": [
+    "## Bot 消息回复规则\n来自飞书 / QQ / 微信的消息附带来源标签 `[来源：…，经 Bot 推送工具回复 target_id=…]`。带 target_id 时，IM 用户只能收到你经 Bot 推送工具发送的内容，直接输出的文本不会送达：\n- 最终答复用 `bot__send_text_message`（target_id 取自来源标签）；图片、文件用 `bot__send_image_message` / `bot__send_file_message`。\n- 标签含“回复次数有限”（QQ / 微信）时：最终答复设 `is_final=true`；耗时任务可先发一两条 `is_final=false` 的简短进展，不要频繁发送。\n- 每次发送使用不同的 `idempotency_key`。\n- 移动端阅读：回复简洁直接，先给结论；少用表格与多级标题，避免整段代码，本地路径或长内容改为发送文件。\n- 来源标签不带 target_id 时，直接正常回复即可。"
+  ],
+  "tools": [
+    {
+      "name": "list_push_targets",
+      "description": "列出用户已授权接收主动推送的飞书 / QQ / 微信目标（含平台与可用性说明）",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "send_text_message",
+      "description": "向一个已授权的推送目标发送文本消息。QQ / 微信只能使用最近一条入站消息的回复窗口，次数有限，进展消息设 is_final=false",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "description": "list_push_targets 返回的目标编号。"
+          },
+          "text": {
+            "type": "string",
+            "description": "要发送的文本内容。"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "本次任务稳定编号；同一目标下重复使用不会再次发送。"
+          },
+          "is_final": {
+            "type": "boolean",
+            "description": "是否为本轮最终答复（缺省 true）。QQ / 微信每条入站消息的回复次数有限：进展消息填 false，会限流合并并为最终答复保留额度；最终答复填 true，超长自动拆分。飞书忽略此参数。"
+          }
+        },
+        "required": [
+          "target_id",
+          "text",
+          "idempotency_key"
+        ]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "send_image_message",
+      "description": "向一个已授权的推送目标发送本地图片；文件必须位于当前会话工作目录或 ~/.tiangong/media，支持 PNG/JPEG/GIF/WebP，最大 10 MiB。QQ / 微信每张图片占用 1 次回复额度",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "description": "list_push_targets 返回的目标编号。"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "当前会话工作目录或 ~/.tiangong/media 内的本地文件路径。"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "本次任务稳定编号；同一目标下重复使用不会再次发送。"
+          },
+          "is_final": {
+            "type": "boolean",
+            "description": "是否为本轮最终答复（缺省 true）。QQ / 微信每条入站消息的回复次数有限：进展消息填 false，会限流合并并为最终答复保留额度；最终答复填 true，超长自动拆分。飞书忽略此参数。"
+          }
+        },
+        "required": [
+          "target_id",
+          "file_path",
+          "idempotency_key"
+        ]
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "send_file_message",
+      "description": "向一个已授权的推送目标发送本地文件；文件必须位于当前会话工作目录或 ~/.tiangong/media，最大 30 MiB。QQ / 微信每个文件占用 1 次回复额度",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "description": "list_push_targets 返回的目标编号。"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "当前会话工作目录或 ~/.tiangong/media 内的本地文件路径。"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "本次任务稳定编号；同一目标下重复使用不会再次发送。"
+          },
+          "is_final": {
+            "type": "boolean",
+            "description": "是否为本轮最终答复（缺省 true）。QQ / 微信每条入站消息的回复次数有限：进展消息填 false，会限流合并并为最终答复保留额度；最终答复填 true，超长自动拆分。飞书忽略此参数。"
+          }
+        },
+        "required": [
+          "target_id",
+          "file_path",
+          "idempotency_key"
+        ]
+      },
+      "timeout_ms": 120000
+    }
+  ],
+  "ui": {
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "bot-settings",
+        "title": "Bot",
+        "description": "扫码或填写凭据绑定飞书 / QQ / 微信机器人，查看连接状态与推送目标",
+        "icon": "bot",
+        "entry": "app/settings.html",
+        "sandbox": "iframe"
+      },
+      {
+        "slot": "session.message-item",
+        "id": "im-message",
+        "title": "IM 消息",
+        "description": "飞书 / QQ / 微信入站消息的渠道卡片",
+        "entry": "app/im-message.html",
+        "sandbox": "shadow",
+        "context": ["session", "message"],
+        "render": "replace"
+      }
+    ]
+  },
+  "mention": {
+    "hint": "经 Bot 向已授权的飞书 / QQ / 微信会话主动推送消息"
+  },
+  "sidecar": {
+    "binary": "tiangong-bot-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 180000,
+    "lifecycle": "resident"
+  }
+}
