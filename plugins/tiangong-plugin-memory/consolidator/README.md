@@ -1,10 +1,11 @@
 # tiangong-memory-consolidator
 
 记忆深度整理**独立工具**。对天工 Memory 的长期记忆库做一次全量「深刻整理」：
-合并高度一致的记忆、重新归纳分类、重建关联链，并遗忘低质量记忆。
+归一重复记忆、把零散的工具日志提炼为经历、合并高度一致的记忆、重新归纳分类、
+重建关联链，并遗忘低质量记忆。
 
 本工具是独立制品：只通过 `tiangong-memory` 的公开 API 读写记忆（Memory 侧仅为
-本工具提供 `delete_node` 与 `upsert_node_vectors` 两个通用能力）；接入方式与 `tiangong-memory-sidecar` 的通用模式
+本工具提供 `delete_node`、`upsert_node_vectors` 与只读的 `evidence_paths` 三个通用能力）；接入方式与 `tiangong-memory-sidecar` 的通用模式
 一致（竞争 Leader，天工运行时以 Follower 经 IPC 转发），因此天工正在使用时
 也可以安全运行，记忆数据始终只有一份。
 
@@ -30,6 +31,10 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 | `--keep-low-quality` | 保留低质量记忆，不执行遗忘 | 关 |
 | `--repair-vectors-only` | 只补写缺失向量后退出，不执行整理 | 关 |
 | `--skip-vector-repair` | 整理前跳过缺失向量补写 | 关 |
+| `--stage <阶段>` | 只执行指定阶段：`dedup` / `distill` / `similar`，可重复或逗号分隔 | 全部 |
+| `--max-llm-calls <n>` | 每个阶段最多调用多少次 LLM，`0` 表示不限 | `0` |
+| `--distill-batch-size <n>` | distill：每次 LLM 调用最多包含的工具日志数 | `40` |
+| `--distill-window-minutes <n>` | distill：相邻工具日志间隔超过该分钟数即切分时间段 | `30` |
 
 建议第一次先用 `--dry-run` 预览将要发生的合并与遗忘，确认后再正式执行。
 
@@ -42,7 +47,40 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 不会与 Memory 并发写 LanceDB。Leader 会校验模型与维度、跳过已删除或归档的
 记忆；Leader 侧 Memory 版本过旧（不支持该接口）时补写报错退出。
 
-## 整理逻辑
+## 三个阶段
+
+整理分三个阶段，缺省按 dedup → distill → similar 顺序全部执行；可用
+`--stage`（可重复或逗号分隔）只执行部分阶段。试运行时后面的阶段会跳过前面
+阶段「模拟删除」的记忆，统计与真实执行一致。建议分阶段执行：
+
+```bash
+# 1. 摘要完全一致的归一（不调用 LLM）
+tiangong-memory-consolidator --stage dedup --dry-run
+# 2. 工具日志提炼（先小批试跑）
+tiangong-memory-consolidator --stage distill --dry-run --max-llm-calls 5
+# 3. 相似召回 + LLM 判定
+tiangong-memory-consolidator --stage similar --dry-run --max-llm-calls 5
+```
+
+- **dedup**：同一范围（工作区）内摘要完全一致（去空白、忽略大小写）的记忆
+  直接归一，不调用 LLM。主记忆优先取「决策」类，其次重要性、使用次数、更新
+  时间；标题取组内出现次数最多的；重要性取组内最高；组员的关联全部改挂到主
+  记忆（重复关联取较大权重）后物理删除组员。摘要短于 20 字的不处理；证据类
+  记忆还要求证据路径一致；工具日志留给 distill。
+- **distill**：工具日志（标题形如 `fs__file_write 产物`、即 `^[A-Za-z0-9_]+ 产物$`
+  的证据类记忆）单条信息量很低。按工作区、按时间段（相邻日志间隔超过
+  `--distill-window-minutes`，默认 30 分钟即切段）分批（每批最多
+  `--distill-batch-size`，默认 40 条），连同证据文件路径和同时段的经历/决策
+  记忆交给 LLM：提炼出新经历（`learned_from` 关联到保留的依据日志，`related_to`
+  关联到相关上下文），并判定哪些日志可以删除。**先写新经历再删日志**，被删
+  日志的关联改挂到新经历；LLM 没有点名删除的日志一律保留。证据路径经 Memory
+  的只读接口 `evidence_paths` 读取，不计入使用次数。
+- **similar**：相似召回 + LLM 统一判定（见下节），排除工具日志。
+
+`--max-llm-calls` 对 distill 与 similar 分别计算。只执行 dedup 时不要求配置
+LLM，也不读取/补写向量。
+
+## 整理逻辑（similar 阶段）
 
 1. **获取所有记忆**：全库分批拉取活跃记忆——每批最多 5000 条（按更新时间
    从新到旧），整理完自动取下一批，直到某批不足 5000 条即全库整理完成；
