@@ -1016,3 +1016,82 @@ async fn distill_aborts_without_deleting_when_llm_fails() {
     assert_eq!(report.pages, 0, "distill 中断后不应继续 similar");
     assert_eq!(all_active(&handle).await.len(), before);
 }
+
+/// 执行记录：每条被删除的记忆在删除前写入完整快照（含关联），试运行同样
+/// 记录并标注 dry_run；记录可据此追溯。
+#[tokio::test]
+#[serial]
+async fn journal_keeps_full_snapshot_of_every_deletion() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "调用插件 fs 的 file_write：成功 replacements=1,replace_all=false";
+    let keep = save_in(&handle, "写入文件", summary, 0.9, Some("ws")).await;
+    let gone = save_in(&handle, "写入文件", summary, 0.4, Some("ws")).await;
+    let outside = save_in(
+        &handle,
+        "无关",
+        "完全不同的一条记忆，用于验证关联快照",
+        0.5,
+        Some("ws"),
+    )
+    .await;
+    handle
+        .upsert_relation(MemoryRelationDraft {
+            from_node_id: gone.clone(),
+            to_node_id: outside.clone(),
+            relation_kind: MemoryRelationKind::RelatedTo,
+            weight: 0.7,
+            ..Default::default()
+        })
+        .await
+        .expect("关系应写入成功");
+    let dir = tempfile::tempdir().unwrap();
+    for dry_run in [true, false] {
+        let path = dir.path().join(format!("journal-{dry_run}.jsonl"));
+        let journal = std::sync::Arc::new(
+            tiangong_memory_consolidator::journal::Journal::create(&path).unwrap(),
+        );
+        let report = run_consolidation(
+            &|| handle.clone(),
+            &ConsolidationOptions {
+                stages: vec![ConsolidationStage::Dedup],
+                dry_run,
+                journal: Some(journal),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        assert!(report.fatal_error.is_none(), "{report:?}");
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let deletes: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|line| line["event"] == "delete_node")
+            .collect();
+        assert_eq!(deletes.len(), 1, "{lines:?}");
+        let deleted = deletes[0];
+        assert_eq!(deleted["dry_run"], dry_run);
+        assert_eq!(deleted["stage"], "dedup");
+        assert_eq!(deleted["merged_into"], keep.as_str());
+        assert_eq!(deleted["node"]["id"], gone.as_str());
+        assert_eq!(deleted["node"]["summary"], summary, "应保存完整内容");
+        assert!(
+            deleted["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|relation| relation["to_node_id"] == outside.as_str()),
+            "应保存删除前的关联：{deleted}"
+        );
+        assert!(
+            lines.iter().any(|line| line["event"] == "upsert_relation"),
+            "关联改挂也应记录"
+        );
+    }
+    let active = all_active(&handle).await;
+    assert!(!active.iter().any(|node| node.id == gone));
+}

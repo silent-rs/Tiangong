@@ -35,6 +35,7 @@ use std::time::Instant;
 use serde::Deserialize;
 use tiangong_llm::{EmbeddingProvider, LlmEndpointConfig, complete_text_with_usage};
 
+use crate::journal::Journal;
 pub use crate::stages::{
     ConsolidationStage, DEFAULT_DEDUP_MIN_SUMMARY_CHARS, DEFAULT_DISTILL_BATCH_SIZE,
     DEFAULT_DISTILL_WINDOW_MINUTES,
@@ -139,6 +140,8 @@ pub struct ConsolidationOptions {
     pub distill_window_minutes: i64,
     /// distill：单次 LLM 调用最多包含的工具日志数。
     pub distill_batch_size: usize,
+    /// 执行记录（审计日志）：删除/改写/关联变更/LLM 判定逐条落盘。
+    pub journal: Option<Arc<Journal>>,
 }
 
 impl Default for ConsolidationOptions {
@@ -164,8 +167,123 @@ impl Default for ConsolidationOptions {
             dedup_min_summary_chars: DEFAULT_DEDUP_MIN_SUMMARY_CHARS,
             distill_window_minutes: DEFAULT_DISTILL_WINDOW_MINUTES,
             distill_batch_size: DEFAULT_DISTILL_BATCH_SIZE,
+            journal: None,
         }
     }
+}
+
+impl ConsolidationOptions {
+    /// 追加一条执行记录（未配置记录时忽略）；写入失败返回错误，调用方应中断。
+    pub(crate) fn record(&self, event: &str, fields: serde_json::Value) -> anyhow::Result<()> {
+        match self.journal.as_deref() {
+            Some(journal) => {
+                let mut fields = fields;
+                if let serde_json::Value::Object(map) = &mut fields {
+                    map.insert("dry_run".to_string(), self.dry_run.into());
+                }
+                journal.record(event, fields)
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// 记录完整快照后物理删除一条记忆（试运行只记录）。
+///
+/// 快照含节点全部字段、当前全部关联与证据路径，可据此追溯或人工恢复；
+/// 记录写入失败时不删除。
+pub(crate) async fn delete_with_journal(
+    provider: HandleProvider<'_>,
+    options: &ConsolidationOptions,
+    node: &MemoryNode,
+    stage: &str,
+    reason: &str,
+    merged_into: Option<&str>,
+    known_relations: Option<&[MemoryRelation]>,
+) -> anyhow::Result<()> {
+    if options.journal.is_some() {
+        // 合并时关联会先改挂到主记忆再删除组员：调用方传入改挂前读取的关联，
+        // 快照才是删除前的原貌。
+        let relations: Vec<MemoryRelation> = match known_relations {
+            Some(known) => known
+                .iter()
+                .filter(|relation| {
+                    relation.from_node_id == node.id || relation.to_node_id == node.id
+                })
+                .cloned()
+                .collect(),
+            None => provider().list_relations(node.id.clone()).await,
+        };
+        let evidence_path = if node.kind == tiangong_memory::MemoryKind::Evidence {
+            provider()
+                .evidence_paths(vec![node.id.clone()])
+                .await
+                .ok()
+                .and_then(|items| items.into_iter().next())
+                .map(|item| item.path)
+        } else {
+            None
+        };
+        options.record(
+            "delete_node",
+            serde_json::json!({
+                "stage": stage,
+                "reason": reason,
+                "merged_into": merged_into,
+                "node": node,
+                "evidence_path": evidence_path,
+                "relations": relations,
+            }),
+        )?;
+    }
+    if !options.dry_run {
+        retry_write(provider, |handle| {
+            let node_id = node.id.clone();
+            async move { handle.delete_node(node_id).await }
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// 记录并写入一条记忆的改写或新建（试运行只记录）。`before` 为 `None` 表示新建。
+pub(crate) async fn upsert_with_journal(
+    provider: HandleProvider<'_>,
+    options: &ConsolidationOptions,
+    stage: &str,
+    before: Option<&MemoryNode>,
+    draft: ManualMemoryDraft,
+    reason: &str,
+) -> anyhow::Result<Option<MemoryNode>> {
+    let event = if before.is_some() {
+        "update_node"
+    } else {
+        "create_node"
+    };
+    let written = if options.dry_run {
+        None
+    } else {
+        Some(
+            retry_write(provider, |handle| {
+                let draft = draft.clone();
+                async move { handle.upsert_manual_memory(draft).await }
+            })
+            .await?,
+        )
+    };
+    // 新建记忆的 ID 只有写入后才知道，因此在写入后记录（改写不涉及删除，
+    // 失败时内容仍在库中）。
+    options.record(
+        event,
+        serde_json::json!({
+            "stage": stage,
+            "reason": reason,
+            "before": before,
+            "after": draft,
+            "id": written.as_ref().map(|node| node.id.clone()),
+        }),
+    )?;
+    Ok(written)
 }
 
 impl ConsolidationOptions {
@@ -805,15 +923,12 @@ async fn consolidate_page(
             if options.forget_low_quality
                 && let Some(reason) = rule_low_quality(&state.nodes[seed], options)
             {
-                let node_id = state.nodes[seed].id.clone();
-                if !options.dry_run
-                    && let Err(err) = retry_write(provider, |handle| {
-                        let node_id = node_id.clone();
-                        async move { handle.delete_node(node_id).await }
-                    })
-                    .await
+                let node = state.nodes[seed].clone();
+                if let Err(err) =
+                    delete_with_journal(provider, options, &node, "similar", &reason, None, None)
+                        .await
                 {
-                    fail(report, &node_id, err);
+                    fail(report, &node.id, err);
                     break;
                 }
                 state.alive[seed] = false;
@@ -1383,22 +1498,25 @@ async fn apply_plan(
         // 主记忆已参与本次判定：不再单独作为种子计数；获得新候选时会重新排队。
         state.visited[group.primary] = true;
         let old_type = state.nodes[group.primary].memory_type.clone();
-        if !dry_run {
-            let draft = ManualMemoryDraft {
-                id: Some(primary_id.clone()),
-                memory_type: group.memory_type.clone(),
-                title: group.title.clone(),
-                summary: group.summary.clone(),
-                keywords: group.keywords.clone(),
-                importance: group.importance,
-                ..Default::default()
-            };
-            retry_write(provider, |handle| {
-                let draft = draft.clone();
-                async move { handle.upsert_manual_memory(draft).await }
-            })
-            .await?;
-        }
+        let before = state.nodes[group.primary].clone();
+        let draft = ManualMemoryDraft {
+            id: Some(primary_id.clone()),
+            memory_type: group.memory_type.clone(),
+            title: group.title.clone(),
+            summary: group.summary.clone(),
+            keywords: group.keywords.clone(),
+            importance: group.importance,
+            ..Default::default()
+        };
+        upsert_with_journal(
+            provider,
+            options,
+            "similar",
+            Some(&before),
+            draft,
+            &format!("LLM 合并主记忆：{}", group.reason),
+        )
+        .await?;
         {
             let node = &mut state.nodes[group.primary];
             node.title = group.title.clone();
@@ -1436,19 +1554,22 @@ async fn apply_plan(
             &group_ids,
             &relations,
             &mut weights,
-            dry_run,
+            options,
         )
         .await?;
         // 关联重指向完成后再物理删除组员，避免级联删除吞掉待重建的关联信息。
         for position in &merged {
             let node_id = state.nodes[*position].id.clone();
-            if !dry_run {
-                retry_write(provider, |handle| {
-                    let node_id = node_id.clone();
-                    async move { handle.delete_node(node_id).await }
-                })
-                .await?;
-            }
+            delete_with_journal(
+                provider,
+                options,
+                &state.nodes[*position],
+                "similar",
+                &format!("LLM 合并：{}", group.reason),
+                Some(&primary_id),
+                Some(&relations),
+            )
+            .await?;
             state.alive[*position] = false;
             merged_into.insert(node_id.clone(), primary_id.clone());
             removed.insert(node_id);
@@ -1487,13 +1608,16 @@ async fn apply_plan(
 
     for (position, reason) in &plan.forget {
         let node_id = state.nodes[*position].id.clone();
-        if !dry_run {
-            retry_write(provider, |handle| {
-                let node_id = node_id.clone();
-                async move { handle.delete_node(node_id).await }
-            })
-            .await?;
-        }
+        delete_with_journal(
+            provider,
+            options,
+            &state.nodes[*position],
+            "similar",
+            &format!("LLM 删除：{reason}"),
+            None,
+            None,
+        )
+        .await?;
         state.alive[*position] = false;
         removed.insert(node_id.clone());
         report.forgotten += 1;
@@ -1509,18 +1633,20 @@ async fn apply_plan(
 
     for (position, memory_type, reason) in &plan.reclassify {
         let node = state.nodes[*position].clone();
-        if !dry_run {
-            let draft = ManualMemoryDraft {
-                id: Some(node.id.clone()),
-                memory_type: memory_type.clone(),
-                ..base_draft(&node)
-            };
-            retry_write(provider, |handle| {
-                let draft = draft.clone();
-                async move { handle.upsert_manual_memory(draft).await }
-            })
-            .await?;
-        }
+        let draft = ManualMemoryDraft {
+            id: Some(node.id.clone()),
+            memory_type: memory_type.clone(),
+            ..base_draft(&node)
+        };
+        upsert_with_journal(
+            provider,
+            options,
+            "similar",
+            Some(&node),
+            draft,
+            &format!("LLM 重分类：{reason}"),
+        )
+        .await?;
         state.nodes[*position].memory_type = memory_type.clone();
         report.updated += 1;
         report.reclassified += 1;
@@ -1578,7 +1704,7 @@ async fn apply_plan(
             ),
             ..Default::default()
         };
-        upsert_relation_max(provider, draft, &mut weights, dry_run).await?;
+        upsert_relation_max(provider, draft, &mut weights, options).await?;
         report.relations_created += 1;
     }
     Ok(requeue)
@@ -1612,8 +1738,9 @@ pub(crate) async fn relink_relations(
     group_ids: &HashSet<String>,
     relations: &[MemoryRelation],
     weights: &mut RelationWeights,
-    dry_run: bool,
+    options: &ConsolidationOptions,
 ) -> anyhow::Result<usize> {
+    let dry_run = options.dry_run;
     let mut relinked = 0;
     for relation in relations {
         let from_merged =
@@ -1647,7 +1774,11 @@ pub(crate) async fn relink_relations(
                 .or_else(|| Some("记忆深度整理重建关联".to_string())),
             ..Default::default()
         };
-        upsert_relation_max(provider, draft, weights, dry_run).await?;
+        upsert_relation_max(provider, draft, weights, options).await?;
+        options.record(
+            "delete_relation",
+            serde_json::json!({"relation": relation, "relinked_to": primary_id}),
+        )?;
         if !dry_run {
             let relation_id = relation.id.clone();
             retry_write(provider, |handle| {
@@ -1667,8 +1798,9 @@ pub(crate) async fn upsert_relation_max(
     provider: HandleProvider<'_>,
     mut draft: MemoryRelationDraft,
     weights: &mut RelationWeights,
-    dry_run: bool,
+    options: &ConsolidationOptions,
 ) -> anyhow::Result<()> {
+    let dry_run = options.dry_run;
     let key = (
         draft.from_node_id.clone(),
         draft.to_node_id.clone(),
@@ -1678,6 +1810,7 @@ pub(crate) async fn upsert_relation_max(
         draft.weight = draft.weight.max(*existing);
     }
     weights.insert(key, draft.weight);
+    options.record("upsert_relation", serde_json::json!({"relation": draft}))?;
     if !dry_run {
         retry_write(provider, |handle| {
             let draft = draft.clone();
@@ -1834,10 +1967,22 @@ pub(crate) async fn request_json_with_retry<T: serde::de::DeserializeOwned>(
     let attempts = options.llm_retry_attempts.max(1);
     let mut last_err = None;
     for attempt in 1..=attempts {
-        match request_json(model, system, prompt, items).await {
-            Ok(decision) => {
+        match request_json::<T>(model, system, prompt, items).await {
+            Ok((decision, raw)) => {
                 report.llm_calls += 1;
                 report.used_llm = true;
+                // 完整保留送审内容与 LLM 原始判定，便于追溯每次删除的依据。
+                options.record(
+                    "llm_decision",
+                    serde_json::json!({
+                        "label": label,
+                        "call": report.llm_calls,
+                        "prompt": serde_json::from_str::<serde_json::Value>(prompt)
+                            .unwrap_or_else(|_| prompt.into()),
+                        "response": serde_json::from_str::<serde_json::Value>(&raw)
+                            .unwrap_or_else(|_| raw.clone().into()),
+                    }),
+                )?;
                 return Ok(decision);
             }
             Err(err) => {
@@ -1860,7 +2005,7 @@ async fn request_json<T: serde::de::DeserializeOwned>(
     system: &str,
     prompt: &str,
     items: usize,
-) -> anyhow::Result<T> {
+) -> anyhow::Result<(T, String)> {
     let started = Instant::now();
     let (response, usage) = complete_text_with_usage(model, system, prompt, LLM_MAX_TOKENS).await?;
     let completion_tokens = usage
@@ -1888,7 +2033,7 @@ async fn request_json<T: serde::de::DeserializeOwned>(
             response_preview(&response)
         );
     };
-    serde_json::from_str(json).map_err(|err| {
+    let parsed = serde_json::from_str(json).map_err(|err| {
         let hint = if truncated {
             format!("，输出达到 token 上限 {LLM_MAX_TOKENS} 可能被截断（可调小批大小）")
         } else {
@@ -1898,7 +2043,8 @@ async fn request_json<T: serde::de::DeserializeOwned>(
             "解析整理结果失败：{err}{hint}（响应开头：{}）",
             response_preview(&response)
         )
-    })
+    })?;
+    Ok((parsed, json.to_string()))
 }
 
 /// 组装单批判定的用户提示（本批记忆 + 现有关联链）。

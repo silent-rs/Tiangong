@@ -35,6 +35,7 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 | `--max-llm-calls <n>` | 每个阶段最多调用多少次 LLM，`0` 表示不限 | `0` |
 | `--distill-batch-size <n>` | distill：每次 LLM 调用最多包含的工具日志数 | `40` |
 | `--distill-window-minutes <n>` | distill：相邻工具日志间隔超过该分钟数即切分时间段 | `30` |
+| `--journal <文件>` | 执行记录（JSON Lines）路径 | `<根目录>/data/memory-consolidation/<时间>-<阶段>[-dry-run]-<pid>.jsonl` |
 
 建议第一次先用 `--dry-run` 预览将要发生的合并与遗忘，确认后再正式执行。
 
@@ -46,6 +47,24 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 天工运行时无需退出：向量经 IPC 由天工的 Memory 串行写入并立即对召回生效，
 不会与 Memory 并发写 LanceDB。Leader 会校验模型与维度、跳过已删除或归档的
 记忆；Leader 侧 Memory 版本过旧（不支持该接口）时补写报错退出。
+
+## 执行记录
+
+每次运行（含试运行）都会写一个 JSON Lines 执行记录，启动和结束时打印路径。
+每条删除、改写、新建记忆、关联变更以及每次 LLM 判定（完整送审内容与原始输出）
+都在**执行前**追加一行并立即落盘（`sync_data`）；被删除的记忆保存完整快照
+（全部字段、删除前的关联、证据路径），可据此追溯或人工恢复。记录写入失败即
+中断整理——没有记录就不删除。结束行 `run_end` 含完整报告（终端只显示前 200 条
+明细）。记录放在 `data/memory` 之外，不受 Memory 迁移/恢复影响。
+
+| event | 内容 |
+|---|---|
+| `run_start` | 命令行参数、阶段、阈值、模型 |
+| `llm_decision` | 送审内容 `prompt` 与 LLM 原始判定 `response` |
+| `delete_node` | 被删记忆完整快照 `node`、`relations`、`evidence_path`、`reason`、`merged_into` |
+| `update_node` / `create_node` | 改写前 `before`、写入内容 `after`、新建记忆 `id` |
+| `upsert_relation` / `delete_relation` | 关联内容 |
+| `run_end` | 致命错误、LLM 调用数、完整报告 |
 
 ## 三个阶段
 

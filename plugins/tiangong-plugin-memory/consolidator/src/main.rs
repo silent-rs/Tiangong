@@ -31,6 +31,7 @@ use tiangong_memory_consolidator::consolidation::{
     ConsolidationOptions, ConsolidationStage, DEFAULT_BATCH_SIZE, DEFAULT_DISTILL_BATCH_SIZE,
     DEFAULT_DISTILL_WINDOW_MINUTES, DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
 };
+use tiangong_memory_consolidator::journal::Journal;
 use tiangong_memory_consolidator::vector_repair::repair_missing_vectors;
 use tiangong_memory_consolidator::vector_store::{self, StoredVectors};
 
@@ -82,6 +83,10 @@ struct Cli {
     /// distill：相邻工具日志间隔超过该分钟数即切分时间段
     #[arg(long, default_value_t = DEFAULT_DISTILL_WINDOW_MINUTES)]
     distill_window_minutes: i64,
+    /// 执行记录文件（JSON Lines）；缺省写到
+    /// <根目录>/data/memory-consolidation/<时间>-<阶段>[-dry-run]-<pid>.jsonl
+    #[arg(long)]
+    journal: Option<PathBuf>,
 }
 
 fn parse_stage(raw: &str) -> std::result::Result<ConsolidationStage, String> {
@@ -227,6 +232,12 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
             }
         }
     };
+    let journal_path = cli
+        .journal
+        .clone()
+        .unwrap_or_else(|| default_journal_path(&root, &cli.stage, cli.dry_run));
+    let journal = Arc::new(Journal::create(&journal_path)?);
+    println!("执行记录：{}", journal.path().display());
     let consolidation = ConsolidationOptions {
         similarity_threshold: cli.threshold,
         batch_size: cli.batch_size.clamp(2, 50),
@@ -242,6 +253,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         stages: cli.stage.clone(),
         distill_batch_size: cli.distill_batch_size.clamp(1, 100),
         distill_window_minutes: cli.distill_window_minutes.max(1),
+        journal: Some(journal.clone()),
         ..Default::default()
     };
     let needs_llm = consolidation.runs(ConsolidationStage::Distill)
@@ -253,6 +265,16 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
             "未配置记忆 LLM：深度整理需要 LLM 判断归一与遗忘，请先在 Memory 设置中配置模型端点后重试"
         );
     }
+    journal.record(
+        "run_start",
+        serde_json::json!({
+            "args": std::env::args().collect::<Vec<_>>(),
+            "dry_run": cli.dry_run,
+            "stages": cli.stage.iter().map(|stage| stage.key()).collect::<Vec<_>>(),
+            "threshold": cli.threshold,
+            "llm": consolidation.llm.as_ref().map(|model| model.model.clone()),
+        }),
+    )?;
     println!("开始记忆深度整理……");
     // 句柄提供者：Leader 退出后 follower 监控会自动接替并替换内部句柄，
     // 每次调用都取当前可用的最新句柄（见 consolidation::HandleProvider）。
@@ -265,7 +287,30 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
     )
     .await;
     println!();
-    println!("{}", report.render());
+    let rendered = report.render();
+    println!("{rendered}");
+    // 结束记录写入完整报告（终端只显示前若干条明细）。
+    let mut full = rendered.clone();
+    if report.actions.len() > 200 {
+        full.push_str("\n完整处理明细：\n");
+        for action in &report.actions {
+            full.push_str("  - ");
+            full.push_str(action);
+            full.push('\n');
+        }
+    }
+    if let Err(err) = journal.record(
+        "run_end",
+        serde_json::json!({
+            "fatal_error": report.fatal_error,
+            "llm_calls": report.llm_calls,
+            "errors": report.errors,
+            "report": full,
+        }),
+    ) {
+        eprintln!("警告：写入执行记录结尾失败：{err:#}");
+    }
+    println!("执行记录已保存：{}", journal.path().display());
     // managed Drop：停心跳、释放 Leader 租约；本进程是 Leader 时 actor 随之退出。
     drop(managed);
     if let Some(fatal) = &report.fatal_error {
@@ -273,6 +318,32 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// 缺省执行记录路径：<根目录>/data/memory-consolidation/<时间>-<阶段>[-dry-run]-<pid>.jsonl。
+///
+/// 放在 Memory 插件数据目录（data/memory）之外：Memory 的迁移/恢复会整体替换
+/// 该目录，记录不能随之丢失。
+fn default_journal_path(
+    root: &std::path::Path,
+    stages: &[ConsolidationStage],
+    dry_run: bool,
+) -> PathBuf {
+    let stages = if stages.is_empty() {
+        "all".to_string()
+    } else {
+        stages
+            .iter()
+            .map(|stage| stage.key())
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    root.join("data").join("memory-consolidation").join(format!(
+        "{stamp}-{stages}{}-{}.jsonl",
+        if dry_run { "-dry-run" } else { "" },
+        std::process::id()
+    ))
 }
 
 /// 补写缺失向量：确定当前 embedding 模型与向量表，工具侧计算向量后交给

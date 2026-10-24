@@ -21,10 +21,10 @@ use tiangong_memory::{
 };
 
 use crate::consolidation::{
-    ConsolidationOptions, ConsolidationProgress, ConsolidationReport, HandleProvider, dry_run_tag,
-    memory_type_key, normalize_keywords, normalized_key, one_line, parse_memory_type,
-    parse_timestamp, relation_weights, relink_relations, request_json_with_retry, retry_write,
-    truncate, upsert_relation_max,
+    ConsolidationOptions, ConsolidationProgress, ConsolidationReport, HandleProvider,
+    delete_with_journal, dry_run_tag, memory_type_key, normalize_keywords, normalized_key,
+    one_line, parse_memory_type, parse_timestamp, relation_weights, relink_relations,
+    request_json_with_retry, truncate, upsert_relation_max, upsert_with_journal,
 };
 
 /// dedup：摘要短于该字符数的记忆不参与归一（短摘要撞车概率高，信息不足以判断）。
@@ -183,7 +183,6 @@ pub(crate) async fn run_dedup(
     progress: Option<ConsolidationProgress<'_>>,
     report: &mut ConsolidationReport,
 ) -> anyhow::Result<()> {
-    let dry_run = options.dry_run;
     // 1) 按（范围，归一化摘要）分桶。
     let mut buckets: HashMap<(String, String), Vec<usize>> = HashMap::new();
     let mut order: Vec<(String, String)> = Vec::new();
@@ -252,7 +251,7 @@ pub(crate) async fn run_dedup(
             .map(|position| nodes[*position].importance)
             .fold(base.importance, f32::max);
         let changed = title != base.title.trim() || importance > base.importance;
-        if changed && !dry_run {
+        if changed {
             let draft = ManualMemoryDraft {
                 id: Some(base.id.clone()),
                 memory_type: base.memory_type.clone(),
@@ -262,10 +261,14 @@ pub(crate) async fn run_dedup(
                 importance,
                 ..Default::default()
             };
-            retry_write(provider, |handle| {
-                let draft = draft.clone();
-                async move { handle.upsert_manual_memory(draft).await }
-            })
+            upsert_with_journal(
+                provider,
+                options,
+                "dedup",
+                Some(base),
+                draft,
+                "摘要完全一致归一：标题取多数、重要性取最高",
+            )
             .await?;
         }
         if changed {
@@ -286,18 +289,21 @@ pub(crate) async fn run_dedup(
             &group_ids,
             &relations,
             &mut weights,
-            dry_run,
+            options,
         )
         .await?;
         for position in members.iter().filter(|position| **position != primary) {
             let node_id = nodes[*position].id.clone();
-            if !dry_run {
-                retry_write(provider, |handle| {
-                    let node_id = node_id.clone();
-                    async move { handle.delete_node(node_id).await }
-                })
-                .await?;
-            }
+            delete_with_journal(
+                provider,
+                options,
+                &nodes[*position],
+                "dedup",
+                "摘要完全一致",
+                Some(&base.id),
+                Some(&relations),
+            )
+            .await?;
             removed.insert(node_id);
             report.dedup_removed += 1;
         }
@@ -693,24 +699,27 @@ async fn apply_distill(
             .filter(|value| value.is_finite())
             .map(|value| value.clamp(0.05, 1.0) as f32)
             .unwrap_or(0.6);
-        let new_id = if dry_run {
-            format!("dry-run-distill-{}-{index}", report.distill_batches)
-        } else {
-            let draft = ManualMemoryDraft {
-                memory_type: memory_type.clone(),
-                title: title.clone(),
-                summary: summary.clone(),
-                keywords: normalize_keywords(&experience.keywords),
-                importance,
-                workspace_id: workspace_id.clone(),
-                ..Default::default()
-            };
-            retry_write(provider, |handle| {
-                let draft = draft.clone();
-                async move { handle.upsert_manual_memory(draft).await }
-            })
-            .await?
-            .id
+        let draft = ManualMemoryDraft {
+            memory_type: memory_type.clone(),
+            title: title.clone(),
+            summary: summary.clone(),
+            keywords: normalize_keywords(&experience.keywords),
+            importance,
+            workspace_id: workspace_id.clone(),
+            ..Default::default()
+        };
+        let written = upsert_with_journal(
+            provider,
+            options,
+            "distill",
+            None,
+            draft,
+            &format!("提炼自工具日志：{}", sources.join(",")),
+        )
+        .await?;
+        let new_id = match written {
+            Some(node) => node.id,
+            None => format!("dry-run-distill-{}-{index}", report.distill_batches),
         };
         report.distill_created += 1;
         // 关联：新经历 → 保留下来的依据日志（learned_from）、→ 相关上下文（related_to）。
@@ -747,7 +756,7 @@ async fn apply_distill(
                 note: Some(note.to_string()),
                 ..Default::default()
             };
-            upsert_relation_max(provider, draft, &mut weights, dry_run).await?;
+            upsert_relation_max(provider, draft, &mut weights, options).await?;
             report.distill_relations += 1;
         }
         lines.push(format!(
@@ -759,23 +768,33 @@ async fn apply_distill(
         ));
     }
     // 删除日志：被提炼的日志先把已有关联改挂到新经历。
-    for (id, _) in &delete {
+    let by_id: HashMap<&str, &MemoryNode> = batch
+        .logs
+        .iter()
+        .map(|position| (nodes[*position].id.as_str(), &nodes[*position]))
+        .collect();
+    for (id, reason) in &delete {
+        // 先读出删除前的关联（快照与改挂都用这一份；只读，试运行也读取）。
+        let relations = provider().list_relations(id.clone()).await;
         if let Some(new_id) = distilled_into.get(id)
             && !dry_run
+            && !relations.is_empty()
         {
-            let relations = provider().list_relations(id.clone()).await;
-            if !relations.is_empty() {
-                let group: HashSet<String> = [new_id.clone(), id.clone()].into_iter().collect();
-                report.distill_relations +=
-                    relink_relations(provider, new_id, &group, &relations, &mut weights, dry_run)
-                        .await?;
-            }
+            let group: HashSet<String> = [new_id.clone(), id.clone()].into_iter().collect();
+            report.distill_relations +=
+                relink_relations(provider, new_id, &group, &relations, &mut weights, options)
+                    .await?;
         }
-        if !dry_run {
-            retry_write(provider, |handle| {
-                let id = id.clone();
-                async move { handle.delete_node(id).await }
-            })
+        if let Some(node) = by_id.get(id.as_str()) {
+            delete_with_journal(
+                provider,
+                options,
+                node,
+                "distill",
+                &format!("LLM 判定删除工具日志：{reason}"),
+                distilled_into.get(id).map(String::as_str),
+                Some(&relations),
+            )
             .await?;
         }
         removed.insert(id.clone());
