@@ -577,6 +577,13 @@ pub struct NodeVectorUpsertReport {
     pub failed: usize,
 }
 
+/// 证据记忆的出处（文件路径或 URL）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidencePath {
+    pub node_id: String,
+    pub path: String,
+}
+
 /// 展开的记忆节点（Phase C 实现）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpandedMemory {

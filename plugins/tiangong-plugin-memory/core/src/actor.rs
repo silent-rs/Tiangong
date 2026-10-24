@@ -176,6 +176,9 @@ impl MemoryActor {
                     .map_err(|err| err.to_string());
                 let _ = reply.send(result);
             }
+            MemoryCommand::EvidencePaths { node_ids, reply } => {
+                let _ = reply.send(self.store.evidence_paths(&node_ids));
+            }
             MemoryCommand::UpsertNodeVectors {
                 model,
                 dimension,

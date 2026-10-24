@@ -835,6 +835,14 @@ impl MemoryStore {
         self.db.delete_memory_relation(relation_id)
     }
 
+    /// 批量读取证据记忆的出处路径（只读）。
+    pub(crate) fn evidence_paths(&self, node_ids: &[String]) -> Vec<crate::types::EvidencePath> {
+        self.db.load_evidence_paths(node_ids).unwrap_or_else(|err| {
+            tracing::warn!("读取证据路径失败: {err:#}");
+            Vec::new()
+        })
+    }
+
     /// 读取图邻接节点，供 deep recall 关系追溯使用。
     pub(crate) fn related_node_ids(&self, node_ids: &[String]) -> Vec<String> {
         self.db.list_related_node_ids(node_ids).unwrap_or_default()

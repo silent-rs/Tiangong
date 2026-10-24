@@ -10,7 +10,17 @@ use tiangong_memory::{
     ManualMemoryDraft, MemoryCognitiveType, MemoryListQuery, MemoryRelationDraft,
     MemoryRelationKind, MemoryStatus, start_with_options,
 };
-use tiangong_memory_consolidator::consolidation::{ConsolidationOptions, run_consolidation};
+use tiangong_memory_consolidator::consolidation::{
+    ConsolidationOptions, ConsolidationStage, run_consolidation,
+};
+
+/// 只执行 similar 阶段的默认参数（以下多数用例针对相似判定）。
+fn similar_only() -> ConsolidationOptions {
+    ConsolidationOptions {
+        stages: vec![ConsolidationStage::Similar],
+        ..Default::default()
+    }
+}
 
 struct EnvGuard {
     prev_home: Option<std::ffi::OsString>,
@@ -140,8 +150,7 @@ async fn consolidation_merges_similar_memories_and_forgets_low_quality() {
     let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
     let (m1, m2, m3, unrelated, low_quality) = prepare(&handle).await;
 
-    let report =
-        run_consolidation(&|| handle.clone(), &ConsolidationOptions::default(), None).await;
+    let report = run_consolidation(&|| handle.clone(), &similar_only(), None).await;
 
     assert_eq!(report.scanned, 5, "应扫描全部活跃记忆");
     // 一致组（3 条）算作一次处理，组员不再作为主记忆重复处理。
@@ -204,6 +213,7 @@ async fn consolidation_offset_skips_newest_memories() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             offset: 2,
             ..Default::default()
         },
@@ -230,6 +240,7 @@ async fn consolidation_dry_run_changes_nothing() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             dry_run: true,
             ..Default::default()
         },
@@ -257,6 +268,7 @@ async fn consolidation_respects_max_nodes_and_reports_remaining() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             max_nodes: 2,
             ..Default::default()
         },
@@ -294,6 +306,7 @@ async fn consolidation_aborts_when_llm_unreachable() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             // 指向必然无法连通的端点：验证重试耗尽后中断且不写库。
             llm: Some(LlmEndpointConfig::new(
                 "test-key",
@@ -393,13 +406,23 @@ impl MockLlm {
                         let content = messages.last()?.get("content")?.as_str()?.to_string();
                         serde_json::from_str::<serde_json::Value>(&content).ok()
                     })
-                    .and_then(|prompt| prompt.get("memories")?.as_array().cloned())
+                    .and_then(|prompt| {
+                        prompt
+                            .get("memories")
+                            .or_else(|| prompt.get("logs"))?
+                            .as_array()
+                            .cloned()
+                    })
                     .unwrap_or_default()
                     .iter()
                     .map(|item| {
                         (
                             item["id"].as_str().unwrap_or_default().to_string(),
-                            item["title"].as_str().unwrap_or_default().to_string(),
+                            item["title"]
+                                .as_str()
+                                .or_else(|| item["tool"].as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                         )
                     })
                     .collect();
@@ -521,6 +544,7 @@ async fn llm_decides_merges_among_all_similar_candidates() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             similarity_threshold: 0.6,
             llm: Some(llm.config()),
             llm_retry_attempts: 1,
@@ -592,6 +616,7 @@ async fn candidates_beyond_batch_size_are_judged_in_multiple_batches() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             similarity_threshold: 0.6,
             batch_size: 3,
             llm: Some(llm.config()),
@@ -669,6 +694,7 @@ async fn llm_budget_and_dense_first_seed_order() {
     let report = run_consolidation(
         &|| handle.clone(),
         &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
             similarity_threshold: 0.6,
             batch_size: 2,
             max_nodes: 1,
@@ -690,4 +716,303 @@ async fn llm_budget_and_dense_first_seed_order() {
     assert_eq!(report.processed, 1);
     assert_eq!(report.clusters.count, 1, "{}", report.render());
     assert_eq!(report.clusters.largest, 4);
+}
+
+// ---------------------------------------------------------------------------
+// dedup / distill 阶段
+// ---------------------------------------------------------------------------
+
+async fn save_in(
+    handle: &tiangong_memory::MemoryHandle,
+    title: &str,
+    summary: &str,
+    importance: f32,
+    workspace: Option<&str>,
+) -> String {
+    handle
+        .upsert_manual_memory(ManualMemoryDraft {
+            title: title.to_string(),
+            summary: summary.to_string(),
+            keywords: vec!["dedup".to_string()],
+            importance,
+            memory_type: MemoryCognitiveType::Factual,
+            workspace_id: workspace.map(str::to_string),
+            ..Default::default()
+        })
+        .await
+        .expect("写入记忆失败")
+        .id
+}
+
+async fn all_active(handle: &tiangong_memory::MemoryHandle) -> Vec<tiangong_memory::MemoryNode> {
+    handle
+        .list_nodes(MemoryListQuery {
+            status: Some(MemoryStatus::Active),
+            limit: 500,
+            ..Default::default()
+        })
+        .await
+}
+
+/// 摘要完全一致的记忆在同一范围内归一：标题取多数、重要性取最高、关联改挂；
+/// 不同范围与过短摘要不处理；不调用 LLM。
+#[tokio::test]
+#[serial]
+async fn dedup_merges_identical_summaries_within_scope() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "调用插件 fs 的 file_write：成功 replacements=1,replace_all=false";
+    let a1 = save_in(&handle, "写入文件", summary, 0.5, Some("ws-a")).await;
+    let a2 = save_in(&handle, "写入文件", summary, 0.4, Some("ws-a")).await;
+    let a3 = save_in(&handle, "另一个标题", summary, 0.9, Some("ws-a")).await;
+    let other_scope = save_in(&handle, "写入文件", summary, 0.5, Some("ws-b")).await;
+    let short1 = save_in(&handle, "短", "成功", 0.5, Some("ws-a")).await;
+    let short2 = save_in(&handle, "短", "成功", 0.5, Some("ws-a")).await;
+    let outside = save_in(
+        &handle,
+        "无关",
+        "完全不同的一条记忆，用于验证关联改挂",
+        0.5,
+        Some("ws-a"),
+    )
+    .await;
+    handle
+        .upsert_relation(MemoryRelationDraft {
+            from_node_id: a2.clone(),
+            to_node_id: outside.clone(),
+            relation_kind: MemoryRelationKind::RelatedTo,
+            weight: 0.8,
+            ..Default::default()
+        })
+        .await
+        .expect("关系应写入成功");
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Dedup],
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    assert!(!report.used_llm, "dedup 不应调用 LLM");
+    assert_eq!(report.dedup_groups, 1, "{}", report.render());
+    assert_eq!(report.dedup_removed, 2);
+    assert_eq!(report.dedup_relinked, 1);
+    let active = all_active(&handle).await;
+    let ids: Vec<&str> = active.iter().map(|node| node.id.as_str()).collect();
+    // 同类记忆按重要性选主：a3（0.9）保留，标题改为多数的「写入文件」。
+    assert!(ids.contains(&a3.as_str()));
+    assert!(!ids.contains(&a1.as_str()) && !ids.contains(&a2.as_str()));
+    for id in [&other_scope, &short1, &short2, &outside] {
+        assert!(ids.contains(&id.as_str()), "{id} 不应被归一");
+    }
+    let primary = active.iter().find(|node| node.id == a3).unwrap();
+    assert_eq!(primary.title, "写入文件");
+    assert!((primary.importance - 0.9).abs() < 1e-6);
+    let relations = handle.list_relations(a3.clone()).await;
+    assert!(
+        relations
+            .iter()
+            .any(|relation| relation.to_node_id == outside && (relation.weight - 0.8).abs() < 1e-6),
+        "组员的关联应改挂到主记忆：{relations:?}"
+    );
+}
+
+/// 试运行时，后面的阶段跳过前面阶段模拟删除的记忆：dedup 已归一的记忆不会
+/// 在 similar 阶段再被合并一次，且数据库保持不变。
+#[tokio::test]
+#[serial]
+async fn dry_run_later_stages_skip_simulated_removals() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "使用 Redis Sentinel 管理主从切换，配置在 infra/redis/sentinel.conf";
+    for importance in [0.8, 0.7, 0.6] {
+        save_in(&handle, "Redis 哨兵部署", summary, importance, None).await;
+    }
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Dedup, ConsolidationStage::Similar],
+            dry_run: true,
+            forget_low_quality: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    assert_eq!(report.dedup_removed, 2);
+    assert_eq!(report.scanned, 1, "similar 只应看到 dedup 后剩下的主记忆");
+    assert_eq!(report.merged_groups, 0, "{}", report.render());
+    assert_eq!(all_active(&handle).await.len(), 3, "试运行不应改动数据库");
+}
+
+/// 经反刍规则兜底生成工具日志（无 LLM：每个带文件路径的工具调用写一条
+/// 「<工具> 产物」证据），等待异步反刍落库。
+async fn seed_tool_logs(handle: &tiangong_memory::MemoryHandle, workspace: &str, count: usize) {
+    let candidates = (0..count)
+        .map(|index| tiangong_memory::MemoryCandidate {
+            tool_name: "fs__file_write".to_string(),
+            step_index: index,
+            hint: "写入文件".to_string(),
+            suggested_kinds: Vec::new(),
+            file_path: Some(format!("/repo/src/module_{index}.rs")),
+            url: None,
+            result_summary: Some(format!("调用插件 fs 的 file_write：成功 #{index}")),
+            success: true,
+            tool_source: Some("file_operation".to_string()),
+            is_recalled_context: false,
+        })
+        .collect();
+    handle
+        .run_enhanced_micro_rumination(tiangong_memory::EnhancedTurnResult {
+            session_id: "distill-session".to_string(),
+            turn_id: "distill-turn".to_string(),
+            had_tool_calls: true,
+            user_input: "重构模块".to_string(),
+            summary: "重构了若干模块".to_string(),
+            workspace_id: Some(workspace.to_string()),
+            memory_candidates: candidates,
+            ..Default::default()
+        })
+        .await
+        .expect("反刍应入队");
+    for _ in 0..100 {
+        let logs = all_active(handle)
+            .await
+            .into_iter()
+            .filter(|node| node.title == "fs__file_write 产物")
+            .count();
+        if logs >= count {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("工具日志未在预期时间内落库");
+}
+
+/// 提炼除最后一条外的全部日志为一条新经历并删除它们，最后一条点名保留。
+fn distill_all_but_last(logs: &[(String, String)]) -> String {
+    let ids: Vec<&String> = logs.iter().map(|(id, _)| id).collect();
+    let Some((last, rest)) = ids.split_last() else {
+        return "{}".to_string();
+    };
+    serde_json::json!({
+        "experiences": [{
+            "title": "重构 module 系列文件",
+            "summary": "批量改写 /repo/src/module_*.rs",
+            "keywords": ["refactor", "module"],
+            "memory_type": "project_structure",
+            "importance": 0.7,
+            "source_ids": ids,
+        }],
+        "delete": rest.iter().map(|id| serde_json::json!({"id": id, "reason": "已提炼"})).collect::<Vec<_>>(),
+        "keep": [{"id": last, "reason": "保留最终产物"}],
+    })
+    .to_string()
+}
+
+/// distill：工具日志连同证据路径交给 LLM，先写新经历再删日志；保留的日志
+/// 与新经历建立 learned_from 关联；similar 阶段不再看到工具日志。
+#[tokio::test]
+#[serial]
+async fn distill_turns_tool_logs_into_experience() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    seed_tool_logs(&handle, "ws-distill", 4).await;
+    let logs: Vec<String> = all_active(&handle)
+        .await
+        .into_iter()
+        .filter(|node| node.title == "fs__file_write 产物")
+        .map(|node| node.id)
+        .collect();
+    assert_eq!(logs.len(), 4);
+    let llm = MockLlm::start(distill_all_but_last);
+    let options = ConsolidationOptions {
+        stages: vec![ConsolidationStage::Distill],
+        llm: Some(llm.config()),
+        llm_retry_attempts: 1,
+        ..Default::default()
+    };
+    // 先试运行：只报告不落库。
+    let dry = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            dry_run: true,
+            ..options.clone()
+        },
+        None,
+    )
+    .await;
+    assert!(dry.fatal_error.is_none(), "{dry:?}");
+    assert_eq!((dry.distill_created, dry.distill_deleted), (1, 3));
+    assert_eq!(
+        all_active(&handle).await.len(),
+        logs.len() + 1,
+        "试运行不落库（含反刍 Episode）"
+    );
+
+    let report = run_consolidation(&|| handle.clone(), &options, None).await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    assert_eq!(report.distill_logs, 4);
+    assert_eq!(report.distill_batches, 1);
+    assert_eq!(report.distill_created, 1);
+    assert_eq!(report.distill_deleted, 3);
+    assert_eq!(report.distill_kept, 1);
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 2, "试运行与正式执行各一次：{requests:?}");
+    let active = all_active(&handle).await;
+    let remaining: Vec<&String> = logs
+        .iter()
+        .filter(|id| active.iter().any(|node| node.id == **id))
+        .collect();
+    assert_eq!(remaining.len(), 1, "只保留被点名保留的日志");
+    let experience = active
+        .iter()
+        .find(|node| node.title == "重构 module 系列文件")
+        .expect("应写入提炼出的经历");
+    assert_eq!(
+        experience.scope_id.as_deref(),
+        Some("ws-distill"),
+        "新经历应留在原工作区"
+    );
+    assert_eq!(
+        experience.memory_type,
+        MemoryCognitiveType::ProjectStructure
+    );
+    let relations = handle.list_relations(experience.id.clone()).await;
+    assert!(
+        relations
+            .iter()
+            .any(|relation| relation.to_node_id == *remaining[0]
+                && relation.relation_kind == MemoryRelationKind::LearnedFrom),
+        "新经历应关联到保留的依据日志：{relations:?}"
+    );
+}
+
+/// distill 的 LLM 连续失败时中断整理，不删除任何日志。
+#[tokio::test]
+#[serial]
+async fn distill_aborts_without_deleting_when_llm_fails() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    seed_tool_logs(&handle, "ws-distill", 2).await;
+    let before = all_active(&handle).await.len();
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Distill, ConsolidationStage::Similar],
+            llm: Some(LlmEndpointConfig::new("k", "http://127.0.0.1:9", "m")),
+            llm_retry_attempts: 1,
+            llm_retry_delay: std::time::Duration::from_millis(10),
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_some(), "{report:?}");
+    assert_eq!(report.pages, 0, "distill 中断后不应继续 similar");
+    assert_eq!(all_active(&handle).await.len(), before);
 }

@@ -28,7 +28,8 @@ use tiangong_memory::election::{
 use tiangong_memory::{MemoryConfig, MemoryLlmSource, MemoryOptions};
 
 use tiangong_memory_consolidator::consolidation::{
-    ConsolidationOptions, DEFAULT_BATCH_SIZE, DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
+    ConsolidationOptions, ConsolidationStage, DEFAULT_BATCH_SIZE, DEFAULT_DISTILL_BATCH_SIZE,
+    DEFAULT_DISTILL_WINDOW_MINUTES, DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
 };
 use tiangong_memory_consolidator::vector_repair::repair_missing_vectors;
 use tiangong_memory_consolidator::vector_store::{self, StoredVectors};
@@ -70,6 +71,24 @@ struct Cli {
     /// 整理前跳过缺失向量补写
     #[arg(long)]
     skip_vector_repair: bool,
+    /// 只执行指定阶段（可重复或逗号分隔）：dedup=摘要完全一致归一（不调用
+    /// LLM）；distill=工具日志由 LLM 按上下文提炼；similar=相似召回 + LLM 判定。
+    /// 缺省按 dedup → distill → similar 全部执行
+    #[arg(long, value_delimiter = ',', value_parser = parse_stage)]
+    stage: Vec<ConsolidationStage>,
+    /// distill：每次 LLM 调用最多包含的工具日志数
+    #[arg(long, default_value_t = DEFAULT_DISTILL_BATCH_SIZE)]
+    distill_batch_size: usize,
+    /// distill：相邻工具日志间隔超过该分钟数即切分时间段
+    #[arg(long, default_value_t = DEFAULT_DISTILL_WINDOW_MINUTES)]
+    distill_window_minutes: i64,
+}
+
+fn parse_stage(raw: &str) -> std::result::Result<ConsolidationStage, String> {
+    ConsolidationStage::ALL
+        .into_iter()
+        .find(|stage| stage.key() == raw.trim().to_ascii_lowercase())
+        .ok_or_else(|| format!("未知阶段 {raw}，可选：dedup、distill、similar"))
 }
 
 fn main() -> Result<()> {
@@ -171,7 +190,9 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
     }
     // 先补齐缺失向量（工具侧计算并写入向量表），再读取向量库，保证所有
     // 活跃记忆都参与相似比较。
-    if cli.repair_vectors_only || !cli.skip_vector_repair {
+    // 向量只用于 similar 阶段的相似召回。
+    let needs_vectors = cli.stage.is_empty() || cli.stage.contains(&ConsolidationStage::Similar);
+    if cli.repair_vectors_only || (needs_vectors && !cli.skip_vector_repair) {
         let outcome = repair_vectors(&root, &options, &managed, cli.dry_run).await;
         if cli.repair_vectors_only {
             drop(managed);
@@ -182,7 +203,9 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
             return Err(err.context("补写缺失向量失败；可加 --skip-vector-repair 跳过后整理"));
         }
     }
-    let stored: Option<Arc<StoredVectors>> =
+    let stored: Option<Arc<StoredVectors>> = if !needs_vectors {
+        None
+    } else {
         match vector_store::load_stored_vectors(&root, model_hint.as_deref()).await {
             Ok(Some(stored)) => {
                 println!(
@@ -201,7 +224,8 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
                 tracing::warn!("读取向量库失败（{err:#}），退化为「记忆召回 + 文本相似度」");
                 None
             }
-        };
+        }
+    };
     let consolidation = ConsolidationOptions {
         similarity_threshold: cli.threshold,
         batch_size: cli.batch_size.clamp(2, 50),
@@ -214,11 +238,16 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         offset: cli.offset,
         max_pages: cli.max_pages,
         stored_vectors: stored,
+        stages: cli.stage.clone(),
+        distill_batch_size: cli.distill_batch_size.clamp(1, 100),
+        distill_window_minutes: cli.distill_window_minutes.max(1),
         ..Default::default()
     };
-    if consolidation.llm.is_none() {
+    let needs_llm = consolidation.runs(ConsolidationStage::Distill)
+        || consolidation.runs(ConsolidationStage::Similar);
+    if needs_llm && consolidation.llm.is_none() {
         // 深度整理的核心是「由 LLM 判断哪些需要归一」，未配置 LLM 时直接报错，
-        // 避免退化为规则整理悄悄改写记忆库。
+        // 避免退化为规则整理悄悄改写记忆库（dedup 阶段不需要 LLM）。
         bail!(
             "未配置记忆 LLM：深度整理需要 LLM 判断归一与遗忘，请先在 Memory 设置中配置模型端点后重试"
         );
@@ -464,5 +493,21 @@ mod tests {
             ProviderProtocol::Anthropic,
         ));
         assert_eq!(anthropic.protocol, ProviderProtocol::Anthropic);
+    }
+
+    #[test]
+    fn stage_flag_accepts_repeated_and_comma_separated_values() {
+        let cli = Cli::try_parse_from(["x", "--stage", "dedup,distill", "--stage", "SIMILAR"])
+            .expect("应解析阶段参数");
+        assert_eq!(
+            cli.stage,
+            vec![
+                ConsolidationStage::Dedup,
+                ConsolidationStage::Distill,
+                ConsolidationStage::Similar
+            ]
+        );
+        assert!(Cli::try_parse_from(["x", "--stage", "bogus"]).is_err());
+        assert!(Cli::try_parse_from(["x"]).unwrap().stage.is_empty());
     }
 }

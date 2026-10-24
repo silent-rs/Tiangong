@@ -1,6 +1,14 @@
 //! 记忆深度整理引擎。
 //!
-//! 对长期积累的记忆库做一次全量「深刻整理」：
+//! 整理分三个阶段（`--stage` 可单独执行，缺省按顺序全部执行）：
+//!
+//! - **dedup**：同一范围内摘要完全一致的记忆直接归一（不调用 LLM），见 [`crate::stages`]；
+//! - **distill**：工具日志由 LLM 结合证据路径与同时间段上下文提炼为经历，见 [`crate::stages`]；
+//! - **similar**：本模块的相似召回 + LLM 统一判定（排除工具日志），流程如下。
+//!
+//! 试运行时后面的阶段会跳过前面阶段模拟删除的记忆。
+//!
+//! similar 阶段：
 //!
 //! 1. 获取全部活跃记忆；
 //! 2. **相似召回**：按阈值找出每条记忆的全部相似记忆（读向量库时精确计算
@@ -27,6 +35,11 @@ use std::time::Instant;
 use serde::Deserialize;
 use tiangong_llm::{EmbeddingProvider, LlmEndpointConfig, complete_text_with_usage};
 
+pub use crate::stages::{
+    ConsolidationStage, DEFAULT_DEDUP_MIN_SUMMARY_CHARS, DEFAULT_DISTILL_BATCH_SIZE,
+    DEFAULT_DISTILL_WINDOW_MINUTES,
+};
+use crate::stages::{is_tool_log, run_dedup, run_distill};
 use crate::vector_store::StoredVectors;
 use tiangong_memory::{
     ManualMemoryDraft, MemoryCognitiveType, MemoryHandle, MemoryListQuery, MemoryNode,
@@ -118,6 +131,14 @@ pub struct ConsolidationOptions {
     pub llm_retry_attempts: usize,
     /// LLM 请求失败后的重试间隔。
     pub llm_retry_delay: std::time::Duration,
+    /// 要执行的阶段（按 dedup → distill → similar 顺序执行；空表示全部）。
+    pub stages: Vec<ConsolidationStage>,
+    /// dedup：摘要短于该字符数的记忆不参与归一。
+    pub dedup_min_summary_chars: usize,
+    /// distill：相邻工具日志超过该间隔（分钟）即切分时间段。
+    pub distill_window_minutes: i64,
+    /// distill：单次 LLM 调用最多包含的工具日志数。
+    pub distill_batch_size: usize,
 }
 
 impl Default for ConsolidationOptions {
@@ -139,7 +160,18 @@ impl Default for ConsolidationOptions {
             stored_vectors: None,
             llm_retry_attempts: DEFAULT_LLM_RETRY_ATTEMPTS,
             llm_retry_delay: DEFAULT_LLM_RETRY_DELAY,
+            stages: Vec::new(),
+            dedup_min_summary_chars: DEFAULT_DEDUP_MIN_SUMMARY_CHARS,
+            distill_window_minutes: DEFAULT_DISTILL_WINDOW_MINUTES,
+            distill_batch_size: DEFAULT_DISTILL_BATCH_SIZE,
         }
+    }
+}
+
+impl ConsolidationOptions {
+    /// 是否执行某个阶段（未指定阶段时执行全部）。
+    pub fn runs(&self, stage: ConsolidationStage) -> bool {
+        self.stages.is_empty() || self.stages.contains(&stage)
     }
 }
 
@@ -196,6 +228,36 @@ pub struct ConsolidationReport {
     pub actions: Vec<String>,
     /// 处理过程中的错误（不中断整理）。
     pub errors: Vec<String>,
+    /// 实际执行的阶段。
+    pub stages: Vec<ConsolidationStage>,
+    /// dedup：归一的组数。
+    pub dedup_groups: usize,
+    /// dedup：删除的重复记忆数。
+    pub dedup_removed: usize,
+    /// dedup：标题/重要性被改写的主记忆数。
+    pub dedup_updated: usize,
+    /// dedup：改挂到主记忆的关联数。
+    pub dedup_relinked: usize,
+    /// distill：工具日志条数。
+    pub distill_logs: usize,
+    /// distill：计划批数。
+    pub distill_batches_total: usize,
+    /// distill：已完成批数。
+    pub distill_batches: usize,
+    /// distill：提炼出的新经历数。
+    pub distill_created: usize,
+    /// distill：删除的日志数。
+    pub distill_deleted: usize,
+    /// distill：已判定后保留的日志数。
+    pub distill_kept: usize,
+    /// distill：新建或改挂的关联数。
+    pub distill_relations: usize,
+    /// distill：是否因达到 LLM 调用上限提前停止。
+    pub distill_budget_exhausted: bool,
+    /// similar 阶段开始前已发生的 LLM 调用数（各阶段分别计算调用上限）。
+    pub similar_llm_base: usize,
+    /// similar：排除的工具日志条数。
+    pub similar_excluded_logs: usize,
 }
 
 impl ConsolidationReport {
@@ -215,6 +277,45 @@ impl ConsolidationReport {
         );
         if let Some(fatal) = &self.fatal_error {
             let _ = writeln!(out, "- 致命中断：{fatal}");
+        }
+        let stages: Vec<&str> = self.stages.iter().map(|stage| stage.key()).collect();
+        let _ = writeln!(out, "- 执行阶段：{}", stages.join(" → "));
+        if self.stages.contains(&ConsolidationStage::Dedup) {
+            let _ = writeln!(
+                out,
+                "- [dedup] 摘要完全一致：归一 {} 组，删除重复 {} 条，改写主记忆 {} 条，改挂关联 {} 条",
+                self.dedup_groups, self.dedup_removed, self.dedup_updated, self.dedup_relinked
+            );
+        }
+        if self.stages.contains(&ConsolidationStage::Distill) {
+            let _ = writeln!(
+                out,
+                "- [distill] 工具日志 {} 条，完成 {}/{} 批：提炼新经历 {} 条，删除日志 {} 条，保留 {} 条，关联 {} 条{}",
+                self.distill_logs,
+                self.distill_batches,
+                self.distill_batches_total,
+                self.distill_created,
+                self.distill_deleted,
+                self.distill_kept,
+                self.distill_relations,
+                if self.distill_budget_exhausted {
+                    "（已达 LLM 调用上限，提前停止）"
+                } else {
+                    ""
+                }
+            );
+        }
+        if !self.stages.contains(&ConsolidationStage::Similar) {
+            let _ = writeln!(out, "- LLM 调用合计：{} 次", self.llm_calls);
+            self.render_details(&mut out);
+            return out;
+        }
+        if self.similar_excluded_logs > 0 {
+            let _ = writeln!(
+                out,
+                "- [similar] 已排除工具日志 {} 条（由 distill 阶段处理）",
+                self.similar_excluded_logs
+            );
         }
         let _ = writeln!(
             out,
@@ -277,6 +378,11 @@ impl ConsolidationReport {
             "- 关联链：重指向重建 {}，LLM 新建 {}",
             self.relations_relinked, self.relations_created
         );
+        self.render_details(&mut out);
+        out
+    }
+
+    fn render_details(&self, out: &mut String) {
         if !self.actions.is_empty() {
             let _ = writeln!(out, "处理明细：");
             for action in self.actions.iter().take(MAX_REPORT_ACTIONS) {
@@ -296,11 +402,12 @@ impl ConsolidationReport {
                 let _ = writeln!(out, "  - {error}");
             }
         }
-        out
     }
 }
 
-/// 执行一次记忆深度整理。
+/// 执行一次记忆深度整理：按 dedup → distill → similar 顺序执行所选阶段。
+///
+/// 试运行时后面的阶段会跳过前面阶段「模拟删除」的记忆，统计与真实执行一致。
 pub async fn run_consolidation(
     provider: HandleProvider<'_>,
     options: &ConsolidationOptions,
@@ -308,8 +415,63 @@ pub async fn run_consolidation(
 ) -> ConsolidationReport {
     let mut report = ConsolidationReport {
         dry_run: options.dry_run,
+        stages: ConsolidationStage::ALL
+            .into_iter()
+            .filter(|stage| options.runs(*stage))
+            .collect(),
         ..Default::default()
     };
+    let mut removed: HashSet<String> = HashSet::new();
+    if options.runs(ConsolidationStage::Dedup) || options.runs(ConsolidationStage::Distill) {
+        // 前置阶段面向全库（不分批、不受 offset 影响）。
+        let nodes = collect_active_nodes(provider, 0, usize::MAX).await;
+        if let Some(callback) = progress {
+            callback(&format!("前置阶段：读取到 {} 条活跃记忆", nodes.len()));
+        }
+        if options.runs(ConsolidationStage::Dedup)
+            && let Err(err) = run_dedup(
+                provider,
+                &nodes,
+                options,
+                &mut removed,
+                progress,
+                &mut report,
+            )
+            .await
+        {
+            fail(&mut report, "dedup", err);
+            return report;
+        }
+        if options.runs(ConsolidationStage::Distill)
+            && let Err(err) = run_distill(
+                provider,
+                &nodes,
+                options,
+                &mut removed,
+                progress,
+                &mut report,
+            )
+            .await
+        {
+            fail(&mut report, "distill", err);
+            return report;
+        }
+    }
+    if options.runs(ConsolidationStage::Similar) {
+        report.similar_llm_base = report.llm_calls;
+        run_similar(provider, options, &removed, progress, &mut report).await;
+    }
+    report
+}
+
+/// similar 阶段：相似召回 + LLM 判定（排除工具日志与前置阶段已删除的记忆）。
+async fn run_similar(
+    provider: HandleProvider<'_>,
+    options: &ConsolidationOptions,
+    removed: &HashSet<String>,
+    progress: Option<ConsolidationProgress<'_>>,
+    report: &mut ConsolidationReport,
+) {
     // 全库分批：每批扫描上限内的活跃记忆，整理完再取下一批（跳过已整理的
     // 最新若干条），直到某批不足上限即全库整理完成。`offset` 用于从指定位置
     // 开始（断点续跑），`max_nodes` 约束单批种子条数。
@@ -322,13 +484,24 @@ pub async fn run_consolidation(
     };
     let mut skip = options.offset;
     loop {
-        let nodes = collect_active_nodes(provider, skip, scan_cap).await;
-        if nodes.is_empty() {
+        let fetched = collect_active_nodes(provider, skip, scan_cap).await;
+        if fetched.is_empty() {
             break;
         }
-        let page = nodes.len();
+        let page = fetched.len();
+        // 工具日志交给 distill 阶段；前置阶段已删除（或试运行中模拟删除）的记忆跳过。
+        let nodes: Vec<MemoryNode> = fetched
+            .into_iter()
+            .filter(|node| !removed.contains(&node.id))
+            .collect();
+        let without_removed = nodes.len();
+        let nodes: Vec<MemoryNode> = nodes
+            .into_iter()
+            .filter(|node| !is_tool_log(node))
+            .collect();
+        report.similar_excluded_logs += without_removed - nodes.len();
         report.pages += 1;
-        report.scanned += page;
+        report.scanned += nodes.len();
         if let Some(callback) = progress {
             callback(&format!(
                 "第 {} 批：扫描到 {} 条活跃记忆（累计跳过最新 {} 条）",
@@ -348,7 +521,7 @@ pub async fn run_consolidation(
             stored.as_deref(),
             options,
             progress,
-            &mut report,
+            report,
         )
         .await;
         skip += page;
@@ -369,7 +542,6 @@ pub async fn run_consolidation(
             break;
         }
     }
-    report
 }
 
 /// 相似聚类统计：帮助判断阈值是否合适、预估 LLM 判定次数。
@@ -659,7 +831,9 @@ async fn consolidate_page(
             if pending.is_empty() {
                 break;
             }
-            if options.max_llm_calls > 0 && report.llm_calls >= options.max_llm_calls {
+            if options.max_llm_calls > 0
+                && report.llm_calls - report.similar_llm_base >= options.max_llm_calls
+            {
                 report.llm_budget_exhausted = true;
                 break;
             }
@@ -705,7 +879,7 @@ async fn consolidate_page(
 
 /// 致命中断：LLM 连续失败或写重试耗尽。中断本批及后续批次，由调用方
 /// （CLI）以非零退出码报错；已完成的批保持一致。
-fn fail(report: &mut ConsolidationReport, node_id: &str, err: anyhow::Error) {
+pub(crate) fn fail(report: &mut ConsolidationReport, node_id: &str, err: anyhow::Error) {
     report.fatal_error = Some(format!("{err:#}"));
     report
         .errors
@@ -713,7 +887,7 @@ fn fail(report: &mut ConsolidationReport, node_id: &str, err: anyhow::Error) {
 }
 
 /// 分页拉取活跃记忆（按更新时间从新到旧）；`skip` 跳过最新的若干条。
-async fn collect_active_nodes(
+pub(crate) async fn collect_active_nodes(
     provider: HandleProvider<'_>,
     skip: usize,
     cap: usize,
@@ -939,7 +1113,10 @@ async fn embed_nodes(
 /// 带连接刷新重试的写操作：Leader 退出后 follower 监控会自动接替并替换
 /// 内部句柄，重试时经 [`HandleProvider`] 取最新句柄；句柄未变则直接返回
 /// 原错误（说明是操作本身失败，重试无意义）。
-async fn retry_write<T, F, Fut>(provider: HandleProvider<'_>, operation: F) -> anyhow::Result<T>
+pub(crate) async fn retry_write<T, F, Fut>(
+    provider: HandleProvider<'_>,
+    operation: F,
+) -> anyhow::Result<T>
 where
     F: Fn(MemoryHandle) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
@@ -1193,19 +1370,7 @@ async fn apply_plan(
     let dry_run = options.dry_run;
     let mut requeue = Vec::new();
     // 本批内已知的关联权重（from, to, kind）→ weight：写入时取较大值。
-    let mut weights: HashMap<(String, String, &'static str), f32> = batch_relations
-        .iter()
-        .map(|relation| {
-            (
-                (
-                    relation.from_node_id.clone(),
-                    relation.to_node_id.clone(),
-                    relation_kind_key(&relation.relation_kind),
-                ),
-                relation.weight,
-            )
-        })
-        .collect();
+    let mut weights = relation_weights(batch_relations);
     // 合并删除的记忆 → 主记忆 ID（用于重映射 LLM 关联的端点）。
     let mut merged_into: HashMap<String, String> = HashMap::new();
     let mut removed: HashSet<String> = HashSet::new();
@@ -1262,49 +1427,15 @@ async fn apply_plan(
                 .list_relations_batch(group_ids.iter().cloned().collect())
                 .await
         };
-        for relation in &relations {
-            let from_merged =
-                group_ids.contains(&relation.from_node_id) && relation.from_node_id != primary_id;
-            let to_merged =
-                group_ids.contains(&relation.to_node_id) && relation.to_node_id != primary_id;
-            if !from_merged && !to_merged {
-                continue;
-            }
-            let other = if from_merged {
-                &relation.to_node_id
-            } else {
-                &relation.from_node_id
-            };
-            if group_ids.contains(other) {
-                continue;
-            }
-            let (from, to) = if from_merged {
-                (primary_id.clone(), other.clone())
-            } else {
-                (other.clone(), primary_id.clone())
-            };
-            let draft = MemoryRelationDraft {
-                from_node_id: from,
-                to_node_id: to,
-                relation_kind: relation.relation_kind.clone(),
-                weight: relation.weight,
-                note: relation
-                    .note
-                    .clone()
-                    .or_else(|| Some("记忆深度整理重建关联".to_string())),
-                ..Default::default()
-            };
-            upsert_relation_max(provider, draft, &mut weights, dry_run).await?;
-            if !dry_run {
-                let relation_id = relation.id.clone();
-                retry_write(provider, |handle| {
-                    let relation_id = relation_id.clone();
-                    async move { handle.delete_relation(relation_id).await }
-                })
-                .await?;
-            }
-            report.relations_relinked += 1;
-        }
+        report.relations_relinked += relink_relations(
+            provider,
+            &primary_id,
+            &group_ids,
+            &relations,
+            &mut weights,
+            dry_run,
+        )
+        .await?;
         // 关联重指向完成后再物理删除组员，避免级联删除吞掉待重建的关联信息。
         for position in &merged {
             let node_id = state.nodes[*position].id.clone();
@@ -1450,12 +1581,89 @@ async fn apply_plan(
     Ok(requeue)
 }
 
+/// 关联权重表：(from, to, kind) → weight，写入关联时取较大值。
+pub(crate) type RelationWeights = HashMap<(String, String, &'static str), f32>;
+
+/// 由已有关联构建权重表。
+pub(crate) fn relation_weights(relations: &[MemoryRelation]) -> RelationWeights {
+    relations
+        .iter()
+        .map(|relation| {
+            (
+                (
+                    relation.from_node_id.clone(),
+                    relation.to_node_id.clone(),
+                    relation_kind_key(&relation.relation_kind),
+                ),
+                relation.weight,
+            )
+        })
+        .collect()
+}
+
+/// 合并组的关联改挂：组员（非主记忆）与组外记忆之间的关联改挂到主记忆，
+/// 组内互连随合并消失；重复关联取较大权重。返回改挂的关联数。
+pub(crate) async fn relink_relations(
+    provider: HandleProvider<'_>,
+    primary_id: &str,
+    group_ids: &HashSet<String>,
+    relations: &[MemoryRelation],
+    weights: &mut RelationWeights,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    let mut relinked = 0;
+    for relation in relations {
+        let from_merged =
+            group_ids.contains(&relation.from_node_id) && relation.from_node_id != primary_id;
+        let to_merged =
+            group_ids.contains(&relation.to_node_id) && relation.to_node_id != primary_id;
+        if !from_merged && !to_merged {
+            continue;
+        }
+        let other = if from_merged {
+            &relation.to_node_id
+        } else {
+            &relation.from_node_id
+        };
+        if group_ids.contains(other) {
+            continue;
+        }
+        let (from, to) = if from_merged {
+            (primary_id.to_string(), other.clone())
+        } else {
+            (other.clone(), primary_id.to_string())
+        };
+        let draft = MemoryRelationDraft {
+            from_node_id: from,
+            to_node_id: to,
+            relation_kind: relation.relation_kind.clone(),
+            weight: relation.weight,
+            note: relation
+                .note
+                .clone()
+                .or_else(|| Some("记忆深度整理重建关联".to_string())),
+            ..Default::default()
+        };
+        upsert_relation_max(provider, draft, weights, dry_run).await?;
+        if !dry_run {
+            let relation_id = relation.id.clone();
+            retry_write(provider, |handle| {
+                let relation_id = relation_id.clone();
+                async move { handle.delete_relation(relation_id).await }
+            })
+            .await?;
+        }
+        relinked += 1;
+    }
+    Ok(relinked)
+}
+
 /// 写入关联：同一 (from, to, kind) 已有关联时取较大权重，避免整理把强关联
 /// 覆盖成弱关联。
-async fn upsert_relation_max(
+pub(crate) async fn upsert_relation_max(
     provider: HandleProvider<'_>,
     mut draft: MemoryRelationDraft,
-    weights: &mut HashMap<(String, String, &'static str), f32>,
+    weights: &mut RelationWeights,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let key = (
@@ -1595,20 +1803,42 @@ async fn request_decision_with_retry(
     options: &ConsolidationOptions,
     report: &mut ConsolidationReport,
 ) -> anyhow::Result<BatchDecision> {
-    let attempts = options.llm_retry_attempts.max(1);
     let seed = members.first().map(|node| node.id.as_str()).unwrap_or("?");
+    let prompt = build_batch_prompt(members, similarity, relations);
+    request_json_with_retry(
+        model,
+        CONSOLIDATION_SYSTEM,
+        &prompt,
+        &format!("记忆 {seed} 所在批次"),
+        members.len(),
+        options,
+        report,
+    )
+    .await
+}
+
+/// 通用 LLM JSON 请求（带重试）：成功计入 `llm_calls`；重试耗尽返回错误，
+/// 调用方应中断整理（本批未写入任何改动）。
+pub(crate) async fn request_json_with_retry<T: serde::de::DeserializeOwned>(
+    model: &LlmEndpointConfig,
+    system: &str,
+    prompt: &str,
+    label: &str,
+    items: usize,
+    options: &ConsolidationOptions,
+    report: &mut ConsolidationReport,
+) -> anyhow::Result<T> {
+    let attempts = options.llm_retry_attempts.max(1);
     let mut last_err = None;
     for attempt in 1..=attempts {
-        match request_decision(model, members, similarity, relations).await {
+        match request_json(model, system, prompt, items).await {
             Ok(decision) => {
                 report.llm_calls += 1;
                 report.used_llm = true;
                 return Ok(decision);
             }
             Err(err) => {
-                tracing::warn!(
-                    "记忆 {seed} 所在批次的 LLM 判定失败（第 {attempt}/{attempts} 次）：{err:#}"
-                );
+                tracing::warn!("{label}的 LLM 判定失败（第 {attempt}/{attempts} 次）：{err:#}");
                 last_err = Some(err);
                 if attempt < attempts {
                     tokio::time::sleep(options.llm_retry_delay).await;
@@ -1617,28 +1847,26 @@ async fn request_decision_with_retry(
         }
     }
     Err(anyhow::anyhow!(
-        "记忆 {seed} 所在批次的 LLM 判定连续 {attempts} 次失败，中断整理（本批未写入任何改动）：{:#}",
+        "{label}的 LLM 判定连续 {attempts} 次失败，中断整理（本批未写入任何改动）：{:#}",
         last_err.unwrap_or_else(|| anyhow::anyhow!("未知错误"))
     ))
 }
 
-async fn request_decision(
+async fn request_json<T: serde::de::DeserializeOwned>(
     model: &LlmEndpointConfig,
-    members: &[&MemoryNode],
-    similarity: &[Option<f32>],
-    relations: &[MemoryRelation],
-) -> anyhow::Result<BatchDecision> {
-    let prompt = build_batch_prompt(members, similarity, relations);
+    system: &str,
+    prompt: &str,
+    items: usize,
+) -> anyhow::Result<T> {
     let started = Instant::now();
-    let (response, usage) =
-        complete_text_with_usage(model, CONSOLIDATION_SYSTEM, &prompt, LLM_MAX_TOKENS).await?;
+    let (response, usage) = complete_text_with_usage(model, system, prompt, LLM_MAX_TOKENS).await?;
     let completion_tokens = usage
         .as_ref()
         .map(|usage| usage.completion_tokens)
         .unwrap_or_default();
     tracing::info!(
         model = %model.model,
-        memories = members.len(),
+        memories = items,
         elapsed_ms = started.elapsed().as_millis(),
         prompt_tokens = usage.as_ref().map(|usage| usage.prompt_tokens).unwrap_or_default(),
         completion_tokens,
@@ -1659,7 +1887,7 @@ async fn request_decision(
     };
     serde_json::from_str(json).map_err(|err| {
         let hint = if truncated {
-            format!("，输出达到 token 上限 {LLM_MAX_TOKENS} 可能被截断（可调小 --batch-size）")
+            format!("，输出达到 token 上限 {LLM_MAX_TOKENS} 可能被截断（可调小批大小）")
         } else {
             String::new()
         };
@@ -1787,21 +2015,26 @@ fn rule_low_quality(node: &MemoryNode, options: &ConsolidationOptions) -> Option
     None
 }
 
-/// 距今天数（解析失败返回 `None`）。
-fn days_since(timestamp: &str) -> Option<i64> {
-    let parsed = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S")
+/// 解析记忆时间戳（`%Y-%m-%d %H:%M:%S[.f]` 或日期）。
+pub(crate) fn parse_timestamp(timestamp: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S%.f"))
         .or_else(|_| {
             chrono::NaiveDate::parse_from_str(timestamp, "%Y-%m-%d")
                 .map(|date| date.and_hms_opt(0, 0, 0).unwrap_or_default())
         })
-        .ok()?;
+        .ok()
+}
+
+/// 距今天数（解析失败返回 `None`）。
+fn days_since(timestamp: &str) -> Option<i64> {
+    let parsed = parse_timestamp(timestamp)?;
     let now = chrono::Local::now().naive_local();
     Some((now - parsed).num_days().max(0))
 }
 
 /// 精确去重用的归一化键：去空白、转小写。
-fn normalized_key(text: &str) -> String {
+pub(crate) fn normalized_key(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -1883,7 +2116,7 @@ fn normalize(vector: &[f32]) -> Vec<f32> {
 }
 
 /// 解析认知分类（与记忆提取保持同一套别名）。
-fn parse_memory_type(raw: &str) -> Option<MemoryCognitiveType> {
+pub(crate) fn parse_memory_type(raw: &str) -> Option<MemoryCognitiveType> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "factual" | "fact" => Some(MemoryCognitiveType::Factual),
         "user_preference" | "preference" => Some(MemoryCognitiveType::UserPreference),
@@ -1904,7 +2137,7 @@ fn parse_memory_type(raw: &str) -> Option<MemoryCognitiveType> {
 }
 
 /// 认知分类的稳定键名（供 LLM 提示使用）。
-fn memory_type_key(memory_type: &MemoryCognitiveType) -> &'static str {
+pub(crate) fn memory_type_key(memory_type: &MemoryCognitiveType) -> &'static str {
     match memory_type {
         MemoryCognitiveType::Factual => "factual",
         MemoryCognitiveType::UserPreference => "user_preference",
@@ -1949,7 +2182,7 @@ fn parse_relation_kind(raw: &str) -> Option<MemoryRelationKind> {
 }
 
 /// 关键词归一：去空白、去重、限量。
-fn normalize_keywords(keywords: &[String]) -> Vec<String> {
+pub(crate) fn normalize_keywords(keywords: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
     for keyword in keywords {
         let keyword = keyword.trim();
@@ -1965,7 +2198,7 @@ fn normalize_keywords(keywords: &[String]) -> Vec<String> {
 }
 
 /// 试运行标记。
-fn dry_run_tag(options: &ConsolidationOptions) -> &'static str {
+pub(crate) fn dry_run_tag(options: &ConsolidationOptions) -> &'static str {
     if options.dry_run {
         "（试运行）"
     } else {
@@ -1974,7 +2207,7 @@ fn dry_run_tag(options: &ConsolidationOptions) -> &'static str {
 }
 
 /// 截断文本用于报告展示。
-fn truncate(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
@@ -2278,8 +2511,19 @@ mod tests {
             fatal_error: None,
             actions: vec!["合并 2 条".to_string()],
             errors: Vec::new(),
+            stages: ConsolidationStage::ALL.to_vec(),
+            dedup_groups: 3,
+            dedup_removed: 4,
+            distill_logs: 9,
+            distill_batches_total: 2,
+            distill_batches: 1,
+            distill_deleted: 5,
+            ..Default::default()
         };
         let text = report.render();
+        assert!(text.contains("执行阶段：dedup → distill → similar"));
+        assert!(text.contains("归一 3 组，删除重复 4 条"));
+        assert!(text.contains("工具日志 9 条，完成 1/2 批"));
         assert!(text.contains("检索后端：vector_store"));
         assert!(text.contains("扫描活跃记忆：10"));
         assert!(text.contains("相似候选：5 对"));

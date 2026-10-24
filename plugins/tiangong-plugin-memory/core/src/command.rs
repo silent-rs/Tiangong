@@ -90,6 +90,11 @@ pub enum MemoryCommand {
         node_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// 批量读取证据记忆的出处路径（只读，不更新使用统计）。
+    EvidencePaths {
+        node_ids: Vec<String>,
+        reply: oneshot::Sender<Vec<crate::types::EvidencePath>>,
+    },
     /// 写入外部预先算好的节点向量（整理工具补写缺失向量）。
     UpsertNodeVectors {
         model: String,

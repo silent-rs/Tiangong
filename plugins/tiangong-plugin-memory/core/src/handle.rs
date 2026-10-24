@@ -14,7 +14,7 @@ use crate::ipc::IpcClient;
 use crate::ipc::protocol::{IpcRequest, MemoryIpcRequestPayload, MemoryIpcResponsePayload};
 use crate::options::MemoryOptions;
 use crate::types::{
-    EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
+    EnhancedTurnResult, Episode, EvidencePath, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
     MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
     MemoryRelationDraft, MemoryStatus, NodeVector, NodeVectorUpsertReport, RecallAnchors,
     RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
@@ -529,6 +529,39 @@ impl MemoryHandle {
                     MemoryIpcResponsePayload::Ack => Ok(()),
                     other => Err(anyhow!(
                         "Memory IPC delete_node 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 批量读取证据记忆的出处路径（文件路径或 URL）。
+    ///
+    /// 只读，不更新使用统计（区别于 [`MemoryHandle::load_depth2`]），供记忆
+    /// 整理等批处理场景使用；不存在、非证据或路径为空的节点不返回。
+    pub async fn evidence_paths(&self, node_ids: Vec<String>) -> Result<Vec<EvidencePath>> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::EvidencePaths {
+                    node_ids,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 证据路径查询失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 证据路径结果失败")
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::EvidencePaths { node_ids })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::EvidencePaths { items } => Ok(items),
+                    other => Err(anyhow!(
+                        "Memory IPC evidence_paths 返回了非预期响应（Leader 侧 Memory \
+                         版本可能过旧）: {other:?}"
                     )),
                 }
             }

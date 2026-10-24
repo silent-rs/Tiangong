@@ -1120,6 +1120,11 @@ pub async fn handle_memory_request(
             handle.delete_node(node_id).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::EvidencePaths { node_ids } => {
+            Ok(MemoryIpcResponsePayload::EvidencePaths {
+                items: handle.evidence_paths(node_ids).await?,
+            })
+        }
         MemoryIpcRequestPayload::UpsertNodeVectors {
             model,
             dimension,
