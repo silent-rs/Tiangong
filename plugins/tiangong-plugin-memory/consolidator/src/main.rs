@@ -21,6 +21,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tiangong_llm::embedding_provider_from_config;
+use tiangong_llm::{LlmEndpointConfig, ProviderProtocol};
 use tiangong_memory::election::{
     LeaderState, ManagedMemory, ProcessType, start_or_connect_with_options,
 };
@@ -186,7 +187,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         similarity_threshold: cli.threshold,
         group_limit: cli.group_limit.clamp(1, 20),
         candidate_limit: cli.candidate_limit.clamp(1, 50),
-        llm: options.model.clone(),
+        llm: options.model.clone().map(prefer_non_reasoning_protocol),
         embedding,
         dry_run: cli.dry_run,
         forget_low_quality: !cli.keep_low_quality,
@@ -225,6 +226,34 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// 火山方舟（Ark）端点改走 Chat Completions 并关闭思考。
+///
+/// Ark 的 Responses API 没有关闭思考的语义：推理型模型（如 Agent Plan 的
+/// `ark-code-latest`）会持续推理直到吃满输出上限、正文为空，整理永远拿不到
+/// JSON。Chat Completions 在不需要推理时会携带 `thinking: {type: disabled}`，
+/// Ark 据此直接输出正文（实测推理 token 为 0）。其他厂商保持原协议不变。
+fn prefer_non_reasoning_protocol(mut model: LlmEndpointConfig) -> LlmEndpointConfig {
+    if model.protocol == ProviderProtocol::OpenAi && is_volcengine_ark(&model.base_url) {
+        println!(
+            "记忆 LLM：火山方舟端点改用 Chat Completions 并关闭思考（Responses API 无法关闭推理）"
+        );
+        model.protocol = ProviderProtocol::OpenAiChatCompletions;
+    }
+    model
+}
+
+fn is_volcengine_ark(base_url: &str) -> bool {
+    let host = base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "volces.com" || host.ends_with(".volces.com")
+}
+
 /// 打印自动识别到的模型配置（不回显密钥）。
 fn print_detected(root: &std::path::Path, config: &MemoryConfig, options: &MemoryOptions) {
     println!("天工根目录：{}", root.display());
@@ -257,4 +286,49 @@ fn print_detected(root: &std::path::Path, config: &MemoryConfig, options: &Memor
     };
     println!("记忆 Embedding：{embedding}");
     println!("记忆 Rerank：{rerank}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn endpoint(base_url: &str, protocol: ProviderProtocol) -> LlmEndpointConfig {
+        let mut model = LlmEndpointConfig::new("k", base_url, "ark-code-latest");
+        model.protocol = protocol;
+        model
+    }
+
+    #[test]
+    fn detects_volcengine_ark_host() {
+        assert!(is_volcengine_ark(
+            "https://ark.cn-beijing.volces.com/api/plan/v3"
+        ));
+        assert!(is_volcengine_ark("http://ark.volces.com:443/api/v3"));
+        assert!(!is_volcengine_ark("https://api.openai.com/v1"));
+        assert!(!is_volcengine_ark("https://evil.com/ark.volces.com"));
+        assert!(!is_volcengine_ark("https://notvolces.com/v1"));
+    }
+
+    #[test]
+    fn ark_responses_switches_to_chat_completions() {
+        let switched = prefer_non_reasoning_protocol(endpoint(
+            "https://ark.cn-beijing.volces.com/api/plan/v3",
+            ProviderProtocol::OpenAi,
+        ));
+        assert_eq!(switched.protocol, ProviderProtocol::OpenAiChatCompletions);
+        let openai = prefer_non_reasoning_protocol(endpoint(
+            "https://api.openai.com/v1",
+            ProviderProtocol::OpenAi,
+        ));
+        assert_eq!(
+            openai.protocol,
+            ProviderProtocol::OpenAi,
+            "其他厂商不改协议"
+        );
+        let anthropic = prefer_non_reasoning_protocol(endpoint(
+            "https://ark.cn-beijing.volces.com/api/v3",
+            ProviderProtocol::Anthropic,
+        ));
+        assert_eq!(anthropic.protocol, ProviderProtocol::Anthropic);
+    }
 }

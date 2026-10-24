@@ -56,7 +56,10 @@ pub const DEFAULT_STALE_DAYS: i64 = 60;
 /// 低质量判定的重要性下限。
 pub const DEFAULT_IMPORTANCE_FLOOR: f64 = 0.35;
 /// LLM 单次整理输出的 token 上限。
-const LLM_MAX_TOKENS: u32 = 1600;
+///
+/// 正常 JSON 输出约 300~800 token；留余量应对关联较多的组。推理型模型须
+/// 关闭思考（见 CLI 对火山方舟的协议切换），否则推理会吃满额度、JSON 被截断。
+const LLM_MAX_TOKENS: u32 = 4096;
 /// LLM 请求失败后的默认重试次数（含首次共尝试 N 次）。
 pub const DEFAULT_LLM_RETRY_ATTEMPTS: usize = 3;
 /// LLM 请求失败后的默认重试间隔。
@@ -1269,17 +1272,41 @@ async fn request_consolidation(
     let started = Instant::now();
     let (response, usage) =
         complete_text_with_usage(model, CONSOLIDATION_SYSTEM, &prompt, LLM_MAX_TOKENS).await?;
+    let completion_tokens = usage
+        .as_ref()
+        .map(|usage| usage.completion_tokens)
+        .unwrap_or_default();
     tracing::info!(
         model = %model.model,
         elapsed_ms = started.elapsed().as_millis(),
         prompt_tokens = usage.as_ref().map(|usage| usage.prompt_tokens).unwrap_or_default(),
-        completion_tokens = usage.as_ref().map(|usage| usage.completion_tokens).unwrap_or_default(),
+        completion_tokens,
         "记忆整理 LLM 调用完成"
     );
-    let json =
-        extract_json_object(&response).ok_or_else(|| anyhow::anyhow!("LLM 未返回 JSON 对象"))?;
-    let decision: ConsolidationDecision =
-        serde_json::from_str(json).map_err(|err| anyhow::anyhow!("解析整理结果失败：{err}"))?;
+    let truncated = completion_tokens >= LLM_MAX_TOKENS as usize;
+    let Some(json) = extract_json_object(&response) else {
+        if truncated {
+            anyhow::bail!(
+                "LLM 输出达到 token 上限 {LLM_MAX_TOKENS} 被截断，未返回 JSON 对象（响应开头：{}）",
+                response_preview(&response)
+            );
+        }
+        anyhow::bail!(
+            "LLM 未返回 JSON 对象（响应开头：{}）",
+            response_preview(&response)
+        );
+    };
+    let decision: ConsolidationDecision = serde_json::from_str(json).map_err(|err| {
+        let hint = if truncated {
+            format!("，输出达到 token 上限 {LLM_MAX_TOKENS} 可能被截断")
+        } else {
+            String::new()
+        };
+        anyhow::anyhow!(
+            "解析整理结果失败：{err}{hint}（响应开头：{}）",
+            response_preview(&response)
+        )
+    })?;
     if decision.action() == ConsolidationAction::Merge
         && decision
             .summary
@@ -1343,6 +1370,15 @@ fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     (end > start).then(|| &text[start..=end])
+}
+
+/// LLM 响应开头（单行、限长），用于错误诊断。
+fn response_preview(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return "<空>".to_string();
+    }
+    truncate(&flat, 200)
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,6 +1755,14 @@ mod tests {
             parse_relation_kind(&decision.relations[0].kind),
             Some(MemoryRelationKind::Supersedes)
         );
+    }
+
+    #[test]
+    fn response_preview_flattens_and_truncates() {
+        assert_eq!(response_preview("  \n "), "<空>");
+        assert_eq!(response_preview("思考\n  中\t…"), "思考 中 …");
+        let long = "字".repeat(500);
+        assert!(response_preview(&long).chars().count() <= 201);
     }
 
     #[test]
