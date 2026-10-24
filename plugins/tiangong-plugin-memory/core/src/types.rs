@@ -556,6 +556,27 @@ pub struct VectorPoint {
     pub vector: Vec<f32>,
 }
 
+/// 外部预先算好的节点向量（如整理工具补写缺失向量），交由 Leader 写入。
+///
+/// 只携带 `node_id` 与向量；标题、摘要等列由 Leader 按库中最新节点填充，
+/// 避免外部快照过期导致索引元数据与记忆不一致。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeVector {
+    pub node_id: String,
+    pub vector: Vec<f32>,
+}
+
+/// 外部向量写入结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeVectorUpsertReport {
+    /// 成功写入的条数。
+    pub written: usize,
+    /// 跳过的条数（节点不存在或已非活跃）。
+    pub skipped: usize,
+    /// 写入失败的条数。
+    pub failed: usize,
+}
+
 /// 展开的记忆节点（Phase C 实现）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpandedMemory {

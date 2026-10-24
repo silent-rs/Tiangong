@@ -11375,6 +11375,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-memory-consolidator"
+version = "0.17.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "futures-util",
+ "lancedb",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tiangong-llm",
+ "tiangong-memory",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tiangong-plugin-analyze-attachment-protocol"
 version = "0.2.0"
 dependencies = [

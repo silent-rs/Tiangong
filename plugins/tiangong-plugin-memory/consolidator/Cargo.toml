@@ -1,0 +1,34 @@
+[package]
+name = "tiangong-memory-consolidator"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "天工记忆深度整理独立工具：向量检索找出高度一致记忆，LLM 归一合并、重新分类并重建关联链"
+publish = false
+
+[lib]
+name = "tiangong_memory_consolidator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tiangong-memory-consolidator"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-memory = { workspace = true }
+tiangong-llm = { workspace = true }
+lancedb = { workspace = true }
+futures-util = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+chrono = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }

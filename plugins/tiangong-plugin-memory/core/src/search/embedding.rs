@@ -104,8 +104,7 @@ impl MemoryEmbeddingClient {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn node_embedding_text(node: &MemoryNode) -> String {
+pub fn node_embedding_text(node: &MemoryNode) -> String {
     normalize_text(&format!(
         "kind: {:?}\ntitle: {}\nsummary: {}\nkeywords: {}",
         node.kind,

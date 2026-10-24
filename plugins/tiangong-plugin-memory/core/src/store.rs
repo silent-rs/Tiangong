@@ -1071,6 +1071,67 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// 物理删除记忆节点及其全部附属数据，供深度整理使用。
+    ///
+    /// 删除内容：召回索引（Tantivy 全文 + 语义向量）、关联关系、
+    /// episodes/entities/decisions/evidence 卫星表与节点行本身；不可恢复。
+    pub(crate) async fn delete_node(&mut self, node_id: &str) -> Result<()> {
+        self.delete_from_recall_indexes(node_id).await;
+        self.db.delete_memory_node(node_id)
+    }
+
+    /// 写入外部预先算好的节点向量（如整理工具补写缺失向量）。
+    ///
+    /// 由 Leader 串行写入，避免外部进程与 Memory 并发写 LanceDB。`model` 与
+    /// `dimension` 必须与当前向量层一致（按向量表名比较），否则拒绝，防止
+    /// 不同语义空间的向量混入；节点不存在或已非活跃时跳过；元数据列取库中
+    /// 最新节点。
+    pub(crate) async fn upsert_node_vectors(
+        &mut self,
+        model: &str,
+        dimension: usize,
+        items: Vec<crate::types::NodeVector>,
+    ) -> Result<crate::types::NodeVectorUpsertReport> {
+        let Some((current_model, current_dimension)) = self.recall_engine.vector_identity() else {
+            anyhow::bail!("Memory 向量层未启用或尚未就绪（本地模型可能仍在加载），请稍后重试");
+        };
+        let expected = VectorIdentity::new(&current_model, current_dimension).table_name();
+        let actual = VectorIdentity::new(model, dimension).table_name();
+        if expected != actual {
+            anyhow::bail!(
+                "向量模型不一致：Memory 当前为 {current_model}（{current_dimension} 维），\
+                 请求为 {model}（{dimension} 维），拒绝写入"
+            );
+        }
+        let mut report = crate::types::NodeVectorUpsertReport::default();
+        let mut nodes = Vec::with_capacity(items.len());
+        let mut vectors = Vec::with_capacity(items.len());
+        for item in items {
+            if item.vector.len() != current_dimension {
+                report.failed += 1;
+                continue;
+            }
+            match self.db.get_memory_node(&item.node_id) {
+                Ok(Some(node)) if node.status == MemoryStatus::Active => {
+                    nodes.push(node);
+                    vectors.push(item.vector);
+                }
+                Ok(_) => report.skipped += 1,
+                Err(err) => {
+                    report.failed += 1;
+                    tracing::warn!(node_id = %item.node_id, "读取待写向量的节点失败: {err:#}");
+                }
+            }
+        }
+        let (written, failed) = self
+            .recall_engine
+            .upsert_nodes_batch(&nodes, vectors)
+            .await?;
+        report.written = written;
+        report.failed += failed;
+        Ok(report)
+    }
+
     /// 全文搜索（Tantivy BM25，同步版，供兼容使用）
     #[allow(dead_code)]
     pub(crate) fn search(&self, query: &str, limit: usize) -> Vec<RecallHit> {

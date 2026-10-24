@@ -86,6 +86,17 @@ pub enum MemoryCommand {
         status: MemoryStatus,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    DeleteNode {
+        node_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 写入外部预先算好的节点向量（整理工具补写缺失向量）。
+    UpsertNodeVectors {
+        model: String,
+        dimension: usize,
+        items: Vec<crate::types::NodeVector>,
+        reply: oneshot::Sender<Result<crate::types::NodeVectorUpsertReport, String>>,
+    },
     UpsertRelation {
         draft: MemoryRelationDraft,
         reply: oneshot::Sender<Result<MemoryRelation, String>>,

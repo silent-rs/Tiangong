@@ -284,10 +284,24 @@ async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -
             };
             serde_json::to_value(plugin_response).with_context(|| "序列化插件 sidecar 响应失败")?
         } else {
-            let payload: MemoryIpcRequestPayload = serde_json::from_value(request.payload)
-                .with_context(|| "解析 Memory IPC 请求载荷失败")?;
-            serde_json::to_value(handle_memory_request(handle.clone(), payload).await?)
-                .with_context(|| "序列化 Memory IPC 响应载荷失败")?
+            // 请求失败（含不认识的方法）回 Error 帧而不断开连接：客户端能拿到
+            // 真实原因，且同一连接后续请求不受影响。
+            let result = match serde_json::from_value::<MemoryIpcRequestPayload>(request.payload) {
+                Ok(payload) => handle_memory_request(handle.clone(), payload)
+                    .await
+                    .and_then(|response| {
+                        serde_json::to_value(response)
+                            .with_context(|| "序列化 Memory IPC 响应载荷失败")
+                    }),
+                Err(error) => Err(anyhow!("解析 Memory IPC 请求载荷失败: {error}")),
+            };
+            match result {
+                Ok(payload) => payload,
+                Err(error) => {
+                    connection.write_error_frame(format!("{error:#}")).await?;
+                    continue;
+                }
+            }
         };
         connection
             .write_response(IpcResponse {
@@ -1102,6 +1116,17 @@ pub async fn handle_memory_request(
             handle.set_node_status(node_id, status).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::DeleteNode { node_id } => {
+            handle.delete_node(node_id).await?;
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
+        MemoryIpcRequestPayload::UpsertNodeVectors {
+            model,
+            dimension,
+            items,
+        } => Ok(MemoryIpcResponsePayload::NodeVectors {
+            report: handle.upsert_node_vectors(model, dimension, items).await?,
+        }),
         MemoryIpcRequestPayload::UpsertRelation { draft } => {
             Ok(MemoryIpcResponsePayload::Relation {
                 item: handle.upsert_relation(draft).await?,
@@ -1176,6 +1201,11 @@ impl IpcConnection {
 
     pub async fn write_response(&mut self, response: IpcResponse) -> Result<()> {
         self.write_frame(&IpcFrame::Response(response)).await
+    }
+
+    /// 回写错误帧（客户端 `read_response` 将其转为带原因的错误）。
+    pub async fn write_error_frame(&mut self, message: String) -> Result<()> {
+        self.write_frame(&IpcFrame::Error { message }).await
     }
 
     pub async fn write_progress(&mut self, request_id: &str, message: String) -> Result<()> {

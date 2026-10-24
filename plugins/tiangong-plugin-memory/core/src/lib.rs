@@ -54,7 +54,15 @@ pub use handle::MemoryHandle;
 pub use migration::{migrate_legacy_storage, resync_legacy_storage};
 pub use options::{MemoryOptions, MemoryVectorMode};
 pub use recovery::recover_plugin_data_dir;
+/// Memory 写入向量时使用的节点文本（外部工具补写向量须与此一致，向量才可比）。
+pub use search::embedding::node_embedding_text;
 pub use types::*;
+
+/// 指定 embedding 模型与维度对应的 LanceDB 向量表名（与 Memory 写入规则一致：
+/// 规范化模型名 + 维度），供外部工具定位当前模型的向量表。
+pub fn vector_table_name(model: &str, dimension: usize) -> String {
+    search::vector_meta::VectorIdentity::new(model, dimension).table_name()
+}
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）
 ///
