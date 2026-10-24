@@ -320,3 +320,305 @@ async fn consolidation_aborts_when_llm_unreachable() {
         assert!(active.contains(id), "中断时记忆 {id} 应保持原样");
     }
 }
+
+/// 模拟 OpenAI 兼容 Chat Completions 的 LLM：记录每次请求送审的记忆 ID，
+/// 按给定规则返回判定 JSON。
+struct MockLlm {
+    base_url: String,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MockLlm {
+    /// `decide`：输入本批记忆 (id, title) 列表，返回判定 JSON 字符串。
+    fn start(decide: fn(&[(String, String)]) -> String) -> Self {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定 LLM 服务失败");
+        let addr = listener.local_addr().expect("读取地址失败");
+        listener.set_nonblocking(true).expect("设置非阻塞失败");
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let join = std::thread::spawn(move || {
+            loop {
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                stream.set_nonblocking(false).ok();
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 16384];
+                let body = loop {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        break None;
+                    };
+                    if read == 0 {
+                        break None;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&buffer[..end]).to_string();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    while buffer.len() < end + 4 + length {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    break String::from_utf8(buffer[end + 4..].to_vec()).ok();
+                };
+                // 取最后一条用户消息里的 memories。
+                let members: Vec<(String, String)> = body
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .and_then(|value| {
+                        let messages = value.get("messages")?.as_array()?.clone();
+                        let content = messages.last()?.get("content")?.as_str()?.to_string();
+                        serde_json::from_str::<serde_json::Value>(&content).ok()
+                    })
+                    .and_then(|prompt| prompt.get("memories")?.as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|item| {
+                        (
+                            item["id"].as_str().unwrap_or_default().to_string(),
+                            item["title"].as_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect();
+                seen.lock()
+                    .unwrap()
+                    .push(members.iter().map(|(id, _)| id.clone()).collect());
+                let content = decide(&members);
+                let payload = serde_json::json!({
+                    "id": "mock",
+                    "object": "chat.completion",
+                    "model": "mock",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self {
+            base_url: format!("http://{addr}"),
+            requests,
+            shutdown: Some(tx),
+            join: Some(join),
+        }
+    }
+
+    fn config(&self) -> LlmEndpointConfig {
+        let mut config = LlmEndpointConfig::new("test-key", self.base_url.clone(), "mock");
+        config.protocol = tiangong_llm::ProviderProtocol::OpenAiChatCompletions;
+        config.max_retries = 0;
+        config
+    }
+
+    fn requests(&self) -> Vec<Vec<String>> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for MockLlm {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// 仅把标题以「同一事实」开头的记忆归为一组，其余保持原样。
+fn merge_same_fact(members: &[(String, String)]) -> String {
+    let same: Vec<&String> = members
+        .iter()
+        .filter(|(_, title)| title.starts_with("同一事实"))
+        .map(|(id, _)| id)
+        .collect();
+    if same.len() < 2 {
+        return "{}".to_string();
+    }
+    serde_json::json!({
+        "groups": [{
+            "member_ids": same,
+            "title": "同一事实（已归一）",
+            "summary": "Redis Sentinel 配置在 infra/redis/sentinel.conf，负责主从切换",
+            "keywords": ["redis", "sentinel"],
+            "memory_type": "domain_knowledge",
+            "reason": "描述同一配置"
+        }]
+    })
+    .to_string()
+}
+
+/// 相似只决定送审范围，是否合并由 LLM 决定；种子的全部相似记忆（超过旧版
+/// 的 6 条上限）都会送审，未被 LLM 点名的记忆保持原样。
+#[tokio::test]
+#[serial]
+async fn llm_decides_merges_among_all_similar_candidates() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "Redis Sentinel 配置在 infra/redis/sentinel.conf，负责主从切换";
+    // 10 条文本完全相同的记忆（词法相似度 1.0，全部互为候选）：
+    // 3 条「同一事实」应被合并，7 条「独立事件」由 LLM 判定保留。
+    let mut same = Vec::new();
+    let mut separate = Vec::new();
+    for index in 0..10 {
+        let title = if index < 3 {
+            format!("同一事实 {index}")
+        } else {
+            format!("独立事件 {index}")
+        };
+        // 标题不同但正文相同，确保词法相似度达到阈值。
+        let id = handle
+            .upsert_manual_memory(ManualMemoryDraft {
+                title: title.clone(),
+                summary: summary.to_string(),
+                keywords: vec!["redis".to_string(), "sentinel".to_string()],
+                importance: 0.6,
+                memory_type: MemoryCognitiveType::DomainKnowledge,
+                ..Default::default()
+            })
+            .await
+            .expect("写入记忆失败")
+            .id;
+        if index < 3 {
+            same.push(id);
+        } else {
+            separate.push(id);
+        }
+    }
+    let llm = MockLlm::start(merge_same_fact);
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            similarity_threshold: 0.6,
+            llm: Some(llm.config()),
+            llm_retry_attempts: 1,
+            forget_low_quality: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    let requests = llm.requests();
+    assert!(!requests.is_empty(), "应调用 LLM");
+    assert_eq!(
+        requests[0].len(),
+        10,
+        "首批应包含种子与全部 9 条相似记忆（不再截断前 6 条）：{requests:?}"
+    );
+    assert_eq!(report.merged_groups, 1, "{}", report.render());
+    assert_eq!(report.merged_away, 2);
+    let active = active_ids(&handle).await;
+    assert_eq!(
+        active.len(),
+        8,
+        "3 条合并为 1 条，其余 7 条保持原样：{active:?}"
+    );
+    for id in &separate {
+        assert!(active.contains(id), "LLM 未点名的记忆 {id} 应保留");
+    }
+    let survivors: Vec<&String> = same.iter().filter(|id| active.contains(*id)).collect();
+    assert_eq!(survivors.len(), 1);
+    let merged = handle
+        .list_nodes(MemoryListQuery {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .into_iter()
+        .find(|node| node.id == *survivors[0])
+        .expect("主记忆应存在");
+    assert_eq!(merged.title, "同一事实（已归一）");
+    // 同一对记忆只送审一次：总送审条次远小于两两组合。
+    let total: usize = requests.iter().map(Vec::len).sum();
+    assert!(total <= 20, "同一对记忆不应重复送审：{requests:?}");
+    let rendered = report.render();
+    assert!(rendered.contains("★"), "明细应列出主记忆与组员：{rendered}");
+}
+
+/// 种子的相似记忆超过单批上限时分多批判定，且每批都包含种子。
+#[tokio::test]
+#[serial]
+async fn candidates_beyond_batch_size_are_judged_in_multiple_batches() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "Redis Sentinel 配置在 infra/redis/sentinel.conf，负责主从切换";
+    for index in 0..7 {
+        handle
+            .upsert_manual_memory(ManualMemoryDraft {
+                title: format!("独立事件 {index}"),
+                summary: summary.to_string(),
+                keywords: vec!["redis".to_string()],
+                importance: 0.6,
+                memory_type: MemoryCognitiveType::DomainKnowledge,
+                ..Default::default()
+            })
+            .await
+            .expect("写入记忆失败");
+    }
+    let llm = MockLlm::start(|_| "{}".to_string());
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            similarity_threshold: 0.6,
+            batch_size: 3,
+            llm: Some(llm.config()),
+            llm_retry_attempts: 1,
+            forget_low_quality: false,
+            dry_run: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    let requests = llm.requests();
+    // 首个种子有 6 条相似记忆，每批 1 种子 + 2 候选 → 3 批。
+    let seed = requests[0][0].clone();
+    let seeded: Vec<&Vec<String>> = requests
+        .iter()
+        .filter(|batch| batch.first() == Some(&seed))
+        .collect();
+    assert_eq!(seeded.len(), 3, "应分 3 批判定：{requests:?}");
+    assert!(seeded.iter().all(|batch| batch.len() <= 3));
+    // 7 条记忆两两共 21 对，每批覆盖 3 对：全部判定完且不重复。
+    let pairs: usize = requests
+        .iter()
+        .map(|batch| batch.len() * (batch.len() - 1) / 2)
+        .sum();
+    assert!(pairs >= 21, "全部记忆对都应被判定过：{requests:?}");
+    assert_eq!(report.merged_groups, 0, "LLM 未要求合并时不应合并");
+    assert_eq!(active_ids(&handle).await.len(), 7);
+}

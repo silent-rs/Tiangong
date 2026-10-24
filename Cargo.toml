@@ -260,3 +260,8 @@ opt-level = 3
 
 [profile.dev.package.cpufeatures]
 opt-level = 3
+
+# 记忆整理工具在本地对全库向量做两两余弦（2 万条 × 1024 维约 3 亿对），
+# 未优化构建慢两个数量级；该 crate 只做批处理，开优化不影响调试。
+[profile.dev.package.tiangong-memory-consolidator]
+opt-level = 3

@@ -28,8 +28,7 @@ use tiangong_memory::election::{
 use tiangong_memory::{MemoryConfig, MemoryLlmSource, MemoryOptions};
 
 use tiangong_memory_consolidator::consolidation::{
-    ConsolidationOptions, DEFAULT_CANDIDATE_LIMIT, DEFAULT_GROUP_LIMIT,
-    DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
+    ConsolidationOptions, DEFAULT_BATCH_SIZE, DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
 };
 use tiangong_memory_consolidator::vector_repair::repair_missing_vectors;
 use tiangong_memory_consolidator::vector_store::{self, StoredVectors};
@@ -41,16 +40,13 @@ struct Cli {
     /// 天工根目录（存储根）；缺省 ~/.tiangong，也可用环境变量 TIANGONG_STORAGE_ROOT
     #[arg(long)]
     root: Option<String>,
-    /// 相似度阈值（0~1），缺省 0.90，越高越保守
+    /// 相似召回阈值（0~1），缺省 0.90：达到即送 LLM 判定（是否合并由 LLM 决定）
     #[arg(long, default_value_t = DEFAULT_SIMILARITY_THRESHOLD)]
     threshold: f64,
-    /// 每组最多参与的相似记忆数，缺省 6
-    #[arg(long, default_value_t = DEFAULT_GROUP_LIMIT)]
-    group_limit: usize,
-    /// 每条记忆的相似候选检索数，缺省 12
-    #[arg(long, default_value_t = DEFAULT_CANDIDATE_LIMIT)]
-    candidate_limit: usize,
-    /// 单批最多处理多少条记忆，0 表示不限
+    /// 单次 LLM 判定最多包含的记忆数（含种子），缺省 20；种子的相似记忆超出时分多批判定
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    batch_size: usize,
+    /// 最多以多少条记忆为种子处理，0 表示不限
     #[arg(long, default_value_t = 0)]
     max_nodes: usize,
     /// 跳过最新的 N 条记忆再开始整理（断点续跑 / 跳过已整理批次）
@@ -205,8 +201,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         };
     let consolidation = ConsolidationOptions {
         similarity_threshold: cli.threshold,
-        group_limit: cli.group_limit.clamp(1, 20),
-        candidate_limit: cli.candidate_limit.clamp(1, 50),
+        batch_size: cli.batch_size.clamp(2, 50),
         llm: options.model.clone().map(prefer_non_reasoning_protocol),
         embedding,
         dry_run: cli.dry_run,
