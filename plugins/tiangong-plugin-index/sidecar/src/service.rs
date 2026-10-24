@@ -150,6 +150,7 @@ impl IndexService {
                 let manager = self.manager.clone();
                 let cwd = self.resolve_workspace(request.workspace.clone());
                 let scan_root = cwd.clone();
+                let query = request.query.clone();
                 let resp = tokio::task::spawn_blocking(move || {
                     handle_index_search_blocking(&manager, &cwd, request)
                 })
@@ -158,7 +159,7 @@ impl IndexService {
                 if let Some(root) = scan_root.as_deref() {
                     self.ensure_full_scan(root);
                 }
-                Ok(index_search_outcome(&resp))
+                Ok(index_search_outcome(&resp, &query))
             }
             name if name == TOOL_SEARCH_CODE => {
                 let pattern = payload
@@ -826,7 +827,7 @@ fn index_tool_failure(ok: bool, summary: &str, stderr: &str) -> serde_json::Valu
 }
 
 /// index_search 结果组装（文案沿用原 WASM 桥接）。
-fn index_search_outcome(response: &IndexSearchResponse) -> serde_json::Value {
+fn index_search_outcome(response: &IndexSearchResponse, query: &str) -> serde_json::Value {
     let mut parts: Vec<String> = Vec::new();
     if response.scanning {
         parts.push("【工作区索引正在构建中，请稍候】".to_string());
@@ -844,7 +845,7 @@ fn index_search_outcome(response: &IndexSearchResponse) -> serde_json::Value {
         }
     }
     if parts.is_empty() {
-        return index_tool_failure(true, &format!("未找到与 \"{}\" 相关的索引结果", ""), "");
+        return index_tool_failure(true, &format!("未找到与 \"{query}\" 相关的索引结果"), "");
     }
     let stdout = parts.join("\n");
     let count = parts.iter().filter(|line| line.starts_with('-')).count();
@@ -952,4 +953,117 @@ fn mention_response(response: &MentionFilesResponse) -> serde_json::Value {
 fn mention_failure_response(reason: &str) -> serde_json::Value {
     tracing::warn!("mention 文件候选查询失败：{reason}");
     serde_json::json!({ "candidates": [] })
+}
+
+/// 会话消息收集（原 wasm 的 collect_turn_data 单测，随逻辑一并迁移）。
+#[cfg(test)]
+mod collect_turn_data_tests {
+    use super::*;
+    use tiangong_types::{ContentBlock, Message, MessageRole, UserSource};
+
+    fn test_session(messages: Vec<Message>) -> tiangong_types::PluginSession {
+        tiangong_types::PluginSession {
+            id: "s-1".to_string(),
+            title: String::new(),
+            cwd: "/tmp/ws".to_string(),
+            workspace_id: "ws".to_string(),
+            reasoning_effort: None,
+            messages,
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 构造 RFC 0017 的插件反馈图片注入消息（role=User、phase=HostInjected，
+    /// ModelInstruction + Image 块，text_content 为空）。
+    fn host_injected_image_message() -> Message {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::model_instruction("[injected-images provenance]"),
+            ContentBlock::image(
+                tiangong_types::StoredAsset {
+                    asset_id: "a-1".to_string(),
+                    local_path: "/media/shot.png".to_string(),
+                    original_name: "shot.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 1024,
+                    kind: tiangong_types::MediaKind::Image,
+                },
+                None,
+            ),
+        ];
+        message.with_source(UserSource::HostInjected)
+    }
+
+    #[test]
+    fn skips_host_injected_and_empty_messages() {
+        let session = test_session(vec![
+            Message::new(MessageRole::User, "帮我看下这张截图"),
+            host_injected_image_message(),
+            Message::new(MessageRole::Assistant, "已查看截图内容"),
+            // 宿主注入的纯媒体消息：不是用户意图，不应进入索引。
+            host_injected_image_message(),
+        ]);
+        let turns = collect_turn_data(&session);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].content, "帮我看下这张截图");
+        assert_eq!(turns[1].role, "assistant");
+        assert!(turns.iter().all(|turn| !turn.content.trim().is_empty()));
+    }
+
+    #[test]
+    fn skips_compressed_resume_message() {
+        let resume = Message::new(MessageRole::User, "压缩恢复锚点")
+            .with_source(UserSource::CompressedResume);
+        let session = test_session(vec![resume, Message::new(MessageRole::User, "真实输入")]);
+        let turns = collect_turn_data(&session);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].content, "真实输入");
+    }
+
+    fn image_asset() -> tiangong_types::StoredAsset {
+        tiangong_types::StoredAsset {
+            asset_id: "a-2".to_string(),
+            local_path: "/media/images/photo.png".to_string(),
+            original_name: "photo.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size: 2048,
+            kind: tiangong_types::MediaKind::Image,
+        }
+    }
+
+    #[test]
+    fn indexes_attachment_only_user_message() {
+        // 用户只发附件、未附文字：仍要写入索引，并能检索到附件路径。
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::asset_reference(image_asset()),
+            ContentBlock::model_instruction("本条用户消息只包含上述附件"),
+        ];
+        let turns = collect_turn_data(&test_session(vec![message]));
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "user");
+        assert!(
+            turns[0]
+                .content
+                .contains("[附件] photo.png (image/png) path=/media/images/photo.png")
+        );
+        assert!(turns[0].content.contains("本条用户消息只包含上述附件"));
+    }
+
+    #[test]
+    fn keeps_text_and_attachment_in_block_order() {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::text("把这张图调亮"),
+            ContentBlock::asset_reference(image_asset()),
+        ];
+        let turns = collect_turn_data(&test_session(vec![message]));
+        assert_eq!(
+            turns[0].content,
+            "把这张图调亮\n[附件] photo.png (image/png) path=/media/images/photo.png"
+        );
+    }
 }

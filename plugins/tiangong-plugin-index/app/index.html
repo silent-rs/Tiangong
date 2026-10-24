@@ -581,7 +581,7 @@ async function remove(item, btn) {
   setStatus(`删除中：${item.root || item.id} …`);
   try {
     await callHost(
-      "delete",
+      "index.delete_workspace_index",
       JSON.stringify({ root: item.root, workspace_id: item.id }),
     );
     await loadIndexes();

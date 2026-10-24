@@ -21,6 +21,8 @@ pub use ops::{
 pub const PLUGIN_ID: &str = "computer-use";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMPUTER_USE_PROTOCOL_VERSION: u32 = 1;
+/// @提及候选查询操作：与清单 `mention.candidates_op` 一致（含插件前缀）。
+pub const MENTION_CANDIDATES_OPERATION: &str = "computer-use.mention_candidates";
 
 /// 对 Agent 暴露的工具名（5 个，按职责合并；与 handle_tool 路由对齐）。
 ///

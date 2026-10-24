@@ -26,7 +26,7 @@ use crate::delivery::{self, DeliveryResult};
 use crate::platform::{BotPlatform, ServerEndpoint, TargetView};
 use crate::tools::{SendLocalMediaInput, SendTextInput};
 
-use crate::PLUGIN_ID;
+use crate::{MENTION_CANDIDATES_OPERATION, PLUGIN_ID};
 const CONNECTION_LOCK_FILE: &str = "connection.lock";
 /// 平台停用标记：存在时不建立接收连接、不对外推送（设置页“停止”）。
 const DISABLED_MARKER: &str = "disabled";
@@ -287,7 +287,8 @@ impl BotService {
                 "status": "ready",
             })),
             // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
-            "mention_candidates" => Ok(serde_json::json!({
+            // 操作名与清单 mention.candidates_op 一致（含插件前缀）。
+            MENTION_CANDIDATES_OPERATION => Ok(serde_json::json!({
                 "entry": {
                     "hint": "经 Bot 向已授权的飞书 / QQ / 微信会话主动推送消息",
                 },
@@ -706,6 +707,26 @@ mod tests {
                     .contains(&serde_json::json!(format!("tool:{tool}")))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn mention_op_matches_manifest_operation_name() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // 清单声明的是含插件前缀的完整名（bot.mention_candidates），
+        // 分发臂必须匹配同一常量——曾因缺前缀被 sidecar 拒绝。
+        let response = call(
+            &service(data_dir.path()),
+            MENTION_CANDIDATES_OPERATION,
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            response.success,
+            "完整操作名必须被分发: {:?}",
+            response.error_message
+        );
+        let entry = response.payload.unwrap()["entry"].clone();
+        assert!(!entry["hint"].as_str().unwrap_or("").trim().is_empty());
     }
 
     #[tokio::test]
