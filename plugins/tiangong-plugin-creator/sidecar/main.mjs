@@ -18,6 +18,13 @@ await runSidecar({
   // pluginVersion 由宿主环境变量注入（协议库缺省读 TIANGONG_PLUGIN_VERSION）。
   businessProtocol: 0,
   dispatch(operation, payload) {
+    // @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）。
+    if (operation === 'plugin-creator.mention_candidates') {
+      return {
+        entry: { hint: '插件创作：生成、构建与安装自建插件（devkit 工具链）' },
+        candidates: [],
+      };
+    }
     const command = operation.startsWith('devkit.')
       ? operation.slice('devkit.'.length)
       : null;

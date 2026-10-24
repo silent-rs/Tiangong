@@ -77,18 +77,36 @@ pub struct PluginManifest {
     pub tool_icons: Option<std::collections::BTreeMap<String, String>>,
 }
 
-/// @提及声明（`mention` 字段）。
+/// @提及声明（`mention` 字段）：`candidates_op`（新）与 `hint`/`mark`
+/// （v0.17.6 兼容）。
 ///
-/// 候选 value/label 由宿主从插件 id 与 UI 贡献标题推导，插件只声明展示
-/// 副标题（hint）与可选标记（mark）——@skill / @mcp 同款交互，用户点名后
-/// Agent 按插件说明（prompt）使用能力。
+/// - `candidates_op`：提及内容全部由 sidecar 的该操作提供（载荷
+///   MentionQuery JSON），响应为
+///   `{ "entry": { "hint", "mark"? }, "candidates": [ MentionCandidate ] }`。
+///   入口候选的 value / label / kind 是宿主约定（`@plugin:<id>`、插件名回退
+///   链、`plugin`），由宿主合成；插件只经 entry 提供 hint / mark。sidecar
+///   不可用、或 entry 缺 hint 时，入口候选不出现——无法提供即不出现，不用
+///   静态桩假装可用（选了再失败比不出现更糟）。因此声明 `candidates_op`
+///   必须同时声明 `sidecar`（`validate` 强制）；动态候选项的完备性
+///   （value / label / hint 非空）由宿主查询时过滤保证
+///   （见 `registry::loader::dynamic_mention_candidate`）。
+/// - `hint` / `mark`：v0.17.6 的静态入口写法，**仅用于存量插件兼容**——
+///   老安装不经升级无法改清单，宿主按旧语义合成 `@plugin:<id>` 入口候选，
+///   不要求 sidecar。新插件一律使用 `candidates_op`（node 系模板）。
+///
+/// 两者同时出现时以 `candidates_op` 为准（静态字段被忽略，不作为 sidecar
+/// 不可用时的回退——回退会掩盖 sidecar 故障并制造双来源）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MentionManifest {
-    /// 候选副标题（一句话能力描述）。
-    pub hint: String,
-    /// 候选标记（chip 角标字符，如 `T`）。缺省时前端按 kind 用默认标记。
-    #[serde(default)]
+    /// 提及查询的 sidecar 操作名（如 `index.mention_candidates`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates_op: Option<String>,
+    /// 静态入口副标题（v0.17.6 兼容，仅存量插件）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// 静态入口短标记，1-4 字符（v0.17.6 兼容，仅存量插件）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark: Option<String>,
 }
 
@@ -457,20 +475,47 @@ impl PluginManifest {
         if self.permissions.iter().any(|item| item.trim().is_empty()) {
             bail!("插件 {} permissions 不能包含空值", self.id);
         }
-        if let Some(mention) = &self.mention
-            && mention.hint.trim().is_empty()
-        {
-            bail!("插件 {} mention.hint 不能为空", self.id);
-        }
-        if let Some(mention) = &self.mention
-            && let Some(mark) = &mention.mark
-        {
-            let char_count = mark.trim().chars().count();
-            if char_count == 0 || char_count > 4 {
+        if let Some(mention) = &self.mention {
+            let candidates_op = mention
+                .candidates_op
+                .as_deref()
+                .map(str::trim)
+                .filter(|op| !op.is_empty());
+            let static_hint = mention
+                .hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|hint| !hint.is_empty());
+            // 两种写法至少其一，否则声明本身没有意义。
+            if candidates_op.is_none() && static_hint.is_none() {
                 bail!(
-                    "插件 {} mention.mark 必须是 1-4 个字符（当前：{mark:?}）",
+                    "插件 {} mention 需要 candidates_op 或 hint 至少其一（v0.17.6 静态写法仅为兼容保留）",
                     self.id
                 );
+            }
+            if candidates_op.is_some() {
+                // 提及内容只能来自 sidecar 的 candidates_op：无 sidecar 的插件
+                // （纯 prompt / 纯 UI）声明 op 永远解析不到候选，安装期拒收。
+                // 静态 hint 与 op 并存时以 op 为准（见 MentionManifest 文档）。
+                if self.sidecar.is_none() {
+                    bail!(
+                        "插件 {} 声明 mention.candidates_op 必须同时声明 sidecar（内容由 candidates_op 提供）",
+                        self.id
+                    );
+                }
+            } else {
+                // 纯静态写法（v0.17.6 兼容）：hint 非空、mark 1-4 字符，
+                // 不要求 sidecar（纯 prompt / 纯 UI 插件也可有静态入口）。
+                if let Some(mark) = mention.mark.as_deref() {
+                    let trimmed = mark.trim();
+                    if !(1..=4).contains(&trimmed.chars().count()) {
+                        bail!(
+                            "插件 {} mention.mark 必须为 1-4 个字符（当前 {} 个）",
+                            self.id,
+                            trimmed.chars().count()
+                        );
+                    }
+                }
             }
         }
         if let Some(resources) = &self.resources {
@@ -1044,32 +1089,94 @@ mod tests {
 
     #[test]
     fn mention声明_校验() {
-        let json = r#"{"schema_version":2,"id":"m-demo","version":"0.1.0","permissions":[],"mention":{"hint":"问候能力"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#;
+        // 合法形态 1：candidates_op（内容由 sidecar 提供）
+        let json = r#"{"schema_version":2,"id":"m-demo","version":"0.1.0","permissions":["sidecar.invoke"],"sidecar":{"binary":"demo-sidecar"},"mention":{"candidates_op":"demo.mention_candidates"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         manifest.validate().unwrap();
-        // 空 hint 拒绝
-        let bad = json.replace("问候能力", "  ");
+        // 空 op 视同未写：只剩空值时拒绝
+        let bad = json.replace("demo.mention_candidates", "  ");
         let manifest: PluginManifest = serde_json::from_str(&bad).unwrap();
         assert!(manifest.validate().is_err());
+        // 合法形态 2：v0.17.6 静态 hint（兼容，不要求 sidecar）
+        let static_only = json.replace(
+            r#""candidates_op":"demo.mention_candidates""#,
+            r#""hint":"生成图片与语音""#,
+        );
+        let static_only = static_only.replace(r#""sidecar":{"binary":"demo-sidecar"},"#, "");
+        let static_only = static_only.replace(r#""permissions":["sidecar.invoke"],"#, "");
+        let manifest: PluginManifest = serde_json::from_str(&static_only).unwrap();
+        manifest.validate().unwrap();
+        // 合法形态 3：两写法并存——解析成功（运行时以 candidates_op 为准）
+        let both = json.replace(
+            r#""candidates_op":"demo.mention_candidates""#,
+            r#""candidates_op":"demo.mention_candidates","hint":"旧文案""#,
+        );
+        let manifest: PluginManifest = serde_json::from_str(&both).unwrap();
+        manifest.validate().unwrap();
+        // 拒绝：两者都没写（含空值视为没写）
+        let neither = json.replace(
+            r#""candidates_op":"demo.mention_candidates""#,
+            r#""mark":"T""#,
+        );
+        let manifest: PluginManifest = serde_json::from_str(&neither).unwrap();
+        assert!(
+            manifest.validate().is_err(),
+            "只有 mark 没有 hint/op 应拒绝"
+        );
+        // 拒绝：静态写法 hint 为空白
+        let empty_hint = json.replace(
+            r#""candidates_op":"demo.mention_candidates""#,
+            r#""hint":"   ""#,
+        );
+        let manifest: PluginManifest = serde_json::from_str(&empty_hint).unwrap();
+        assert!(manifest.validate().is_err());
+        // 拒绝：静态写法 mark 超长（>4 字符）
+        let long_mark = json.replace(
+            r#""candidates_op":"demo.mention_candidates""#,
+            r#""hint":"能力","mark":"五个字标记""#,
+        );
+        let manifest: PluginManifest = serde_json::from_str(&long_mark).unwrap();
+        assert!(manifest.validate().is_err());
+        // 拒绝：op 无 sidecar（op 声明"内容由 sidecar 提供"，物理上不可能）
+        let no_sidecar = json.replace(r#""sidecar":{"binary":"demo-sidecar"},"#, "");
+        let manifest: PluginManifest = serde_json::from_str(&no_sidecar).unwrap();
+        assert!(manifest.validate().is_err());
+        // 静态 hint 无 sidecar：通过（上面形态 2 已覆盖，这里显式命名语义）
+        let manifest: PluginManifest = serde_json::from_str(&static_only).unwrap();
+        assert!(
+            manifest.validate().is_ok() && manifest.sidecar.is_none(),
+            "静态 hint 不要求 sidecar"
+        );
+        // 拼错字段仍然拒绝（deny_unknown_fields 不因兼容放松）
+        let typo = json.replace(
+            r#""candidates_op":"demo.mention_candidates""#,
+            r#""candidates":"demo.mention_candidates""#,
+        );
+        assert!(
+            serde_json::from_str::<PluginManifest>(&typo).is_err(),
+            "拼错字段应报错"
+        );
         // v1 清单拒绝
         let legacy = json.replace("\"schema_version\":2", "\"schema_version\":1");
         let manifest: PluginManifest = serde_json::from_str(&legacy).unwrap();
         assert!(manifest.validate().is_err());
     }
 
+    /// 测试辅助：静态 hint 形态应通过完整校验（含无 sidecar 场景）。
     #[test]
-    fn mention_mark_校验() {
-        let json = r#"{"schema_version":2,"id":"m-demo","version":"0.1.0","permissions":[],"mention":{"hint":"问候能力","mark":"TTS"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#;
-        // 1-4 字符的 mark 合法
-        parse(json).expect("短 mark 应通过校验");
-        // 超过 4 字符拒绝
-        let bad = json.replace("\"mark\":\"TTS\"", "\"mark\":\"SPEECH\"");
-        let manifest: PluginManifest = serde_json::from_str(&bad).unwrap();
-        assert!(manifest.validate().is_err());
-        // 空白 mark 拒绝
-        let blank = json.replace("\"mark\":\"TTS\"", "\"mark\":\"  \"");
-        let manifest: PluginManifest = serde_json::from_str(&blank).unwrap();
-        assert!(manifest.validate().is_err());
+    fn 静态hint清单_无sidecar通过校验() {
+        let json = r#"{"schema_version":2,"id":"m-static","version":"0.1.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["静态入口插件"],"mention":{"hint":"老插件的能力说明","mark":"老"}}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        manifest.validate().unwrap();
+        assert!(manifest.sidecar.is_none());
+        assert_eq!(
+            manifest.mention.as_ref().unwrap().hint.as_deref(),
+            Some("老插件的能力说明")
+        );
+        assert_eq!(
+            manifest.mention.as_ref().unwrap().mark.as_deref(),
+            Some("老")
+        );
     }
 
     #[test]
@@ -1405,12 +1512,14 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("只能声明 desktop 入口"));
 
-        // v2 + 无 UI 纯 prompt + mention：同样合法
+        // v2 + 无 UI 纯 prompt + mention：mention 内容只能来自 sidecar 的
+        // candidates_op，无 sidecar 的 prompt 插件声明即拒收
         let prompt_only: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"com.example.hint","version":"1.0.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"hint":"提示插件"}}"#,
+            r#"{"schema_version":2,"id":"com.example.hint","version":"1.0.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"candidates_op":"hint.mention_candidates"}}"#,
         )
         .unwrap();
-        prompt_only.validate().expect("无 UI prompt 插件应通过校验");
+        let error = prompt_only.validate().unwrap_err();
+        assert!(error.to_string().contains("必须同时声明 sidecar"));
 
         // v2 + 无 wasm + 无任何贡献：空壳拒绝
         let bare: PluginManifest = serde_json::from_str(

@@ -1,5 +1,7 @@
 //! 查询视图（列表/状态/清单）、WASM 编译装载与 Core 适配器创建。
 
+use serde_json::Value;
+
 use super::connections::{
     loaded_plugin_matches, stop_connection_for_directory, stop_loaded_sidecar,
 };
@@ -333,7 +335,7 @@ pub fn invoke_sidecar(
     operation: &str,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    invoke_sidecar_with_workspace(storage_root, plugin_id, operation, payload, None)
+    invoke_sidecar_op(storage_root, plugin_id, operation, payload, None, None)
 }
 
 /// 使用宿主权威会话工作区调用 sidecar。
@@ -348,6 +350,22 @@ pub fn invoke_sidecar_with_workspace(
     payload: serde_json::Value,
     workspace: Option<&Path>,
 ) -> Result<serde_json::Value> {
+    invoke_sidecar_op(storage_root, plugin_id, operation, payload, workspace, None)
+}
+
+/// 携带统一调用上下文（含 `deadline_ms` 交互预算）调用 sidecar。
+///
+/// deadline 由 stdio 往返等待消费：超时返回 Err 而不是等满清单的
+/// `request_timeout_ms`——交互路径（@提及补全）不能让挂起的 sidecar
+/// 阻塞输入框。上下文同时把会话工作区带给按需连接的沙箱启动。
+pub fn invoke_sidecar_op(
+    storage_root: &Path,
+    plugin_id: &str,
+    operation: &str,
+    payload: serde_json::Value,
+    workspace: Option<&Path>,
+    invocation_context: Option<&crate::protocol::RequestInvocationContext>,
+) -> Result<serde_json::Value> {
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     if !installed.enabled {
         bail!("插件 {plugin_id} 已停用");
@@ -359,7 +377,15 @@ pub fn invoke_sidecar_with_workspace(
     };
     let connection = sidecar_connection_with_workspace(storage_root, &installed, false, workspace)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
-    let response = connection.invoke(operation, &payload)?;
+    let response = match invocation_context {
+        Some(context) => connection.invoke_with_invocation_context_and_progress(
+            operation,
+            &payload,
+            context,
+            &mut |_| {},
+        )?,
+        None => connection.invoke(operation, &payload)?,
+    };
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
 }
 
@@ -412,6 +438,81 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             return Ok(Vec::new());
         };
         let mut candidates = Vec::new();
+        // 提及来源按清单写法分流（两者并存时以 candidates_op 为准，静态字段
+        // 被忽略——不作为 sidecar 不可用时的回退，见 MentionManifest 文档）：
+        //
+        // 1. v2 写法（candidates_op 且带 sidecar）：查询直达 sidecar（载荷
+        //    MentionQuery JSON）。响应 `{ entry?, candidates }`：entry 可选——
+        //    能力型插件用它声明"可被 @ 调用"的入口（宿主合成 value/label/kind，
+        //    op 提供 hint/mark）；内容提供方（如 index）只返回 candidates，
+        //    插件本身不作为被提及对象。动态候选逐项完备性过滤。sidecar 不可用
+        //    或超预算时返回空：无法提供即不出现。
+        // 2. v0.17.6 静态写法（只有 hint）：复用入口合成，把静态 hint/mark
+        //    当作 entry 传入——兼容存量插件（不经升级无法改清单），不要求
+        //    sidecar。查询词过滤由 CoreManager 聚合层统一处理。
+        let mention_op = manifest
+            .mention
+            .as_ref()
+            .and_then(|mention| mention.candidates_op.as_deref())
+            .map(str::trim)
+            .filter(|op| !op.is_empty());
+        if let Some(op) = mention_op
+            && manifest.sidecar.is_some()
+        {
+            // 交互级预算：补全是输入路径，等满清单 request_timeout_ms 会卡住
+            // 输入框。会话上下文（工作区）随统一调用元数据带给 sidecar。
+            const MENTION_QUERY_BUDGET_MS: u64 = 3000;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let invocation_context = crate::protocol::RequestInvocationContext {
+                session_id: query.context.session_id.clone().unwrap_or_default(),
+                invocation_id: scru128::new().to_string(),
+                workspace: query.context.workspace.clone().unwrap_or_default(),
+                actor_id: String::new(),
+                deadline_ms: Some(now + MENTION_QUERY_BUDGET_MS),
+            };
+            let payload = serde_json::to_value(query).unwrap_or_default();
+            let storage_root = crate::registry::plugin_install_directory(&self.id)
+                .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
+                .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()));
+            let result = storage_root.map(|root| {
+                crate::registry::invoke_sidecar_op(
+                    &root,
+                    &self.id,
+                    op,
+                    payload,
+                    None,
+                    Some(&invocation_context),
+                )
+            });
+            match result {
+                Some(Ok(value)) => candidates.extend(parse_mention_op_response(
+                    &value,
+                    &manifest,
+                    descriptor_name.as_deref(),
+                    &self.id,
+                    op,
+                )),
+                Some(Err(error)) => {
+                    tracing::warn!(plugin_id = %self.id, %error, op, "sidecar 动态提及查询失败或超预算")
+                }
+                None => {
+                    tracing::warn!(plugin_id = %self.id, op, "无法定位插件存储根，跳过提及查询")
+                }
+            }
+        } else if let Some(mention) = manifest.mention.as_ref() {
+            // v0.17.6 静态入口（仅存量插件兼容）：静态 hint/mark 走同一条入口
+            // 合成路径，完备性（hint 非空）由 mention_entry_candidate 兜底。
+            if let Some(candidate) = crate::ts_plugin::mention_entry_candidate(
+                &manifest,
+                descriptor_name.as_deref(),
+                &static_mention_entry(mention),
+            ) {
+                candidates.push(candidate);
+            }
+        }
         if let Some(instance) = &instance {
             let result = crate::execution::run_outside_tokio(|| {
                 let Ok(mut plugin) = instance.try_lock() else {
@@ -420,26 +521,20 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
                 plugin.query_mentions(query)
             });
             match result {
-                Ok(values) => candidates.extend(values.into_iter().map(|c| {
-                    tiangong_types::MentionCandidate {
-                        value: c.value,
-                        label: c.label,
-                        kind: c.kind,
-                        hint: c.hint,
-                        mark: c.mark,
-                    }
-                })),
+                Ok(values) => candidates.extend(
+                    values
+                        .into_iter()
+                        .map(|c| tiangong_types::MentionCandidate {
+                            value: c.value,
+                            label: c.label,
+                            kind: c.kind,
+                            hint: c.hint,
+                            mark: c.mark,
+                        })
+                        .filter(mention_candidate_is_complete),
+                ),
                 Err(error) => tracing::warn!(plugin_id = %self.id, %error, "mention 查询失败"),
             }
-        }
-        // 静态清单候选也按本次查询词过滤（不过滤会列出全部声明了 mention
-        // 的插件），判定与宿主兜底同一函数。
-        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(
-            &manifest,
-            descriptor_name.as_deref(),
-            &query.query,
-        ) {
-            candidates.push(candidate);
         }
         let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
         let current = plugins.get(&self.id).filter(|p| {
@@ -454,6 +549,92 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
         });
         Ok(if valid { candidates } else { Vec::new() })
     }
+}
+
+/// 动态提及候选完备性：value / label / hint 均非空。
+///
+/// 三者是前端渲染与查询匹配的必备字段——hint 是副标题且与 label / value
+/// 一同参与查询词匹配（`candidate_matches_query`），label 空会渲染出空行，
+/// value 空则候选无插入内容。入口候选（op entry 合成）的完备性由
+/// `mention_entry_candidate` 保证（缺 hint 即不合成）。
+fn mention_candidate_is_complete(candidate: &tiangong_types::MentionCandidate) -> bool {
+    !candidate.value.trim().is_empty()
+        && !candidate.label.trim().is_empty()
+        && !candidate.hint.trim().is_empty()
+}
+
+/// 把 `candidates_op` 返回的单个 JSON 项转为候选；字段残缺（缺
+/// value / label / hint）时返回 None，由调用方跳过并计数告警，不把
+/// 渲染不出、也搜不到的候选透给前端。
+fn dynamic_mention_candidate(item: &serde_json::Value) -> Option<tiangong_types::MentionCandidate> {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let candidate = tiangong_types::MentionCandidate {
+        value: text("value"),
+        label: text("label"),
+        kind: text("kind"),
+        hint: text("hint"),
+        mark: text("mark"),
+    };
+    mention_candidate_is_complete(&candidate).then_some(candidate)
+}
+
+/// v0.17.6 静态 mention 声明转入口 entry：hint/mark 透传，完备性（hint
+/// 非空、mark 1-4 字符）由 {@link crate::ts_plugin::mention_entry_candidate}
+/// 兜底——与 op 响应的 entry 走同一条合成路径，行为一致。
+pub(crate) fn static_mention_entry(
+    mention: &crate::manifest::MentionManifest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hint": mention.hint.clone().unwrap_or_default(),
+        "mark": mention.mark.clone().unwrap_or_default(),
+    })
+}
+
+/// 解析 `candidates_op` 响应 `{ entry?, candidates }`。///
+/// - `entry` 可选：有则合成入口候选（宿主约定 value/label/kind + op 的
+///   hint/mark，见 {@link crate::ts_plugin::mention_entry_candidate}），
+///   缺 hint 跳过并告警；内容提供方（如 index）不返回 entry，插件本身
+///   不作为被提及对象。
+/// - `candidates` 逐项完备性过滤，残缺项跳过并计数告警。
+/// - 形状不符（非对象、无 candidates）返回已解析部分，不视为错误。
+pub(crate) fn parse_mention_op_response(
+    value: &serde_json::Value,
+    manifest: &crate::manifest::PluginManifest,
+    descriptor_name: Option<&str>,
+    plugin_id: &str,
+    op: &str,
+) -> Vec<tiangong_types::MentionCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(entry) = value.get("entry") {
+        match crate::ts_plugin::mention_entry_candidate(manifest, descriptor_name, entry) {
+            Some(candidate) => candidates.push(candidate),
+            None => tracing::warn!(plugin_id, op, "mention entry 缺少 hint，入口候选已跳过"),
+        }
+    }
+    if let Some(items) = value.get("candidates").and_then(Value::as_array) {
+        let mut skipped = 0usize;
+        for item in items {
+            match dynamic_mention_candidate(item) {
+                Some(candidate) => candidates.push(candidate),
+                None => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                plugin_id,
+                op,
+                skipped,
+                "动态提及候选缺少 value/label/hint，已跳过"
+            );
+        }
+    }
+    candidates
 }
 
 /// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
@@ -783,4 +964,88 @@ pub(super) fn list_plugin_status_without_preload(
         sidecar_running,
         last_error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(value: &str, label: &str, hint: &str) -> tiangong_types::MentionCandidate {
+        tiangong_types::MentionCandidate {
+            value: value.into(),
+            label: label.into(),
+            kind: "file".into(),
+            hint: hint.into(),
+            mark: "F".into(),
+        }
+    }
+
+    #[test]
+    fn 动态候选_三项齐全才采用() {
+        let item = serde_json::json!({
+            "value": "@file:src/main.rs",
+            "label": "main.rs",
+            "kind": "file",
+            "hint": "src/main.rs",
+            "mark": "F",
+        });
+        let parsed = dynamic_mention_candidate(&item).expect("完备候选应被采用");
+        assert_eq!(parsed.value, "@file:src/main.rs");
+        assert_eq!(parsed.hint, "src/main.rs");
+        assert_eq!(parsed.mark, "F");
+    }
+
+    #[test]
+    fn 动态候选_缺hint或label或value被跳过() {
+        // 缺 hint：前端没有副标题，查询匹配也少一个字段
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "value": "@file:a.rs", "label": "a.rs",
+            }))
+            .is_none()
+        );
+        // 空串 hint 等同缺失
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "value": "@file:a.rs", "label": "a.rs", "hint": "  ",
+            }))
+            .is_none()
+        );
+        // 缺 label：渲染出空行
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "value": "@file:a.rs", "hint": "a.rs",
+            }))
+            .is_none()
+        );
+        // 缺 value：候选无插入内容
+        assert!(
+            dynamic_mention_candidate(&serde_json::json!({
+                "label": "a.rs", "hint": "a.rs",
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn 完备性谓词_空白字符串视为缺失() {
+        assert!(mention_candidate_is_complete(&candidate(
+            "@file:a.rs",
+            "a.rs",
+            "a.rs"
+        )));
+        assert!(!mention_candidate_is_complete(&candidate(
+            "@file:a.rs",
+            "a.rs",
+            ""
+        )));
+        assert!(!mention_candidate_is_complete(&candidate(
+            "", "a.rs", "a.rs"
+        )));
+        assert!(!mention_candidate_is_complete(&candidate(
+            "@file:a.rs",
+            " ",
+            "a.rs"
+        )));
+    }
 }

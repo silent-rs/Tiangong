@@ -31,7 +31,6 @@ members = [
     "plugins/tiangong-plugin-fs/sidecar",
     "plugins/tiangong-plugin-index/protocol",
     "plugins/tiangong-plugin-index/sidecar",
-    "plugins/tiangong-plugin-index/wasm",
     "plugins/tiangong-plugin-generate-image-openai/protocol",
     "plugins/tiangong-plugin-generate-image-openai/sidecar",
     "plugins/tiangong-plugin-generate-image-openai/wasm",
@@ -70,7 +69,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.17.6"
+version = "0.17.7"
 
 [workspace.dependencies]
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
@@ -98,7 +97,6 @@ tiangong-plugin-fetch-sidecar = { path = "plugins/tiangong-plugin-fetch/sidecar"
 tiangong-plugin-fs-protocol = { path = "plugins/tiangong-plugin-fs/protocol" }
 tiangong-plugin-fs-sidecar = { path = "plugins/tiangong-plugin-fs/sidecar" }
 tiangong-plugin-index-protocol = { path = "plugins/tiangong-plugin-index/protocol" }
-tiangong-plugin-index-wasm = { path = "plugins/tiangong-plugin-index/wasm" }
 tiangong-plugin-index-sidecar = { path = "plugins/tiangong-plugin-index/sidecar" }
 tiangong-plugin-generate-image-openai-protocol = { path = "plugins/tiangong-plugin-generate-image-openai/protocol" }
 tiangong-plugin-generate-image-openai-sidecar = { path = "plugins/tiangong-plugin-generate-image-openai/sidecar" }

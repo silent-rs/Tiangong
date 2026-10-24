@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 pub const PLUGIN_ID: &str = "volcengine";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const VOLCENGINE_PROTOCOL_VERSION: u32 = 1;
+/// @提及候选查询操作：与清单 `mention.candidates_op` 一致（含插件前缀）。
+pub const MENTION_CANDIDATES_OPERATION: &str = "volcengine.mention_candidates";
 
 pub const TOOL_GENERATE_IMAGE: &str = "generate_image";
 pub const TOOL_GENERATE_VIDEO: &str = "generate_video";

@@ -115,8 +115,8 @@ const INDEX: PluginConfig = PluginConfig {
     name: "Index",
     description: "工作区文件索引、对话历史索引与代码检索",
     protocol_crate: Some("tiangong-plugin-index-protocol"),
-    wasm_crate: Some("tiangong-plugin-index-wasm"),
-    wasm_artifact: Some("tiangong_plugin_index_wasm.wasm"),
+    wasm_crate: None,
+    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-index-sidecar"),
     sidecar_artifact: Some("tiangong-index-sidecar"),
     plugin_root: "plugins/tiangong-plugin-index",
@@ -389,6 +389,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "fs" => &["app/tool-view.html"],
         // 记忆设置页（settings.plugin-page，自包含单文件）。
         "memory" => &["app/memory.html"],
+        // 索引管理设置页（settings.plugin-page，自包含单文件）。
+        "index" => &["app/index.html"],
         "bot" => &["app/im-message.html", "app/settings.html"],
         "volcengine" => &[
             "app/settings.html",

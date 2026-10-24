@@ -13,7 +13,8 @@ use tiangong_plugin_computer_use_protocol::ops::{
     VIRTUAL_CURSOR_OPERATION, VirtualCursorRequest, VirtualCursorResponse, WaitResponse,
 };
 use tiangong_plugin_computer_use_protocol::{
-    Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, PLUGIN_ID, PLUGIN_VERSION,
+    Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, MENTION_CANDIDATES_OPERATION, PLUGIN_ID,
+    PLUGIN_VERSION,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -222,6 +223,16 @@ impl ComputerUseService {
                     .with_context(|| "序列化 restore_host_window 响应失败")
             }
 
+            // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+            // 操作名与清单 mention.candidates_op 一致（含插件前缀）。
+            MENTION_CANDIDATES_OPERATION => serde_json::to_value(serde_json::json!({
+                "entry": {
+                    "hint": "控制桌面应用：定位窗口、读取控件树、执行点击与输入",
+                },
+                "candidates": [],
+            }))
+            .with_context(|| "序列化 mention_candidates 响应失败"),
+
             operation => Err(anyhow::anyhow!("不支持的 Computer Use 操作: {operation}")),
         }
     }
@@ -358,5 +369,30 @@ fn map_wait(result: DesktopResult<crate::backend::WaitResult>) -> DesktopResult<
 impl tiangong_plugin_sidecar::SidecarService for ComputerUseService {
     async fn dispatch(&self, request: Request) -> Response {
         ComputerUseService::dispatch(self, request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 清单声明的是含插件前缀的完整名（computer-use.mention_candidates），
+    /// 分发臂必须匹配同一常量——曾因缺前缀被 sidecar 拒绝。
+    #[tokio::test]
+    async fn mention_op_matches_manifest_operation_name() {
+        let service = ComputerUseService::new().unwrap();
+        let response = service
+            .dispatch(Request::new(
+                MENTION_CANDIDATES_OPERATION,
+                serde_json::json!({}),
+            ))
+            .await;
+        assert!(
+            response.success,
+            "完整操作名必须被分发: {:?}",
+            response.error_message
+        );
+        let entry = response.payload.unwrap()["entry"].clone();
+        assert!(!entry["hint"].as_str().unwrap_or("").trim().is_empty());
     }
 }

@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub const PLUGIN_ID: &str = "scheduler";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SCHEDULER_PROTOCOL_VERSION: u32 = 1;
+/// @提及候选查询操作：与清单 `mention.candidates_op` 一致（含插件前缀）。
+pub const MENTION_CANDIDATES_OPERATION: &str = "scheduler.mention_candidates";
 
 /// 工具名常量（与工具规格、handle_tool 路由对齐）。
 pub const TOOL_CREATE_JOB: &str = "scheduler_create_job";

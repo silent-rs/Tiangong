@@ -12,6 +12,16 @@ await runSidecar({
   // pluginVersion 由宿主环境变量注入（协议库缺省读 TIANGONG_PLUGIN_VERSION）。
   businessProtocol: 0,
   dispatch(operation, payload, ctx) {
+    // @提及：宿主查询时返回入口候选的展示字段（hint/mark）与动态候选数组；
+    // 操作名与 plugin.json 的 mention.candidates_op 一致。
+    if (operation === '{{PLUGIN_ID}}.mention_candidates') {
+      return {
+        payload: {
+          entry: { hint: '{{PLUGIN_NAME}}（请改为一句话能力描述）' },
+          candidates: [],
+        },
+      };
+    }
     if (operation === 'demo.echo') {
       ctx.progress('echo 处理中');
       return {

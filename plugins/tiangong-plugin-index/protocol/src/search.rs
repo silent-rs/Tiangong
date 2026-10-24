@@ -7,7 +7,8 @@ use crate::{IndexHit, IndexOperation, IndexScope, SessionIndexHit};
 pub const INDEX_SEARCH_OPERATION: &str = "index.search";
 pub const SEARCH_CODE_OPERATION: &str = "index.search_code";
 /// `@` 提及文件候选：输入框补全用，只查 path 字段（不查内容）。
-pub const MENTION_FILES_OPERATION: &str = "index.mention_files";
+/// 操作名与清单 `mention.candidates_op` 一致（`index.mention_candidates`）。
+pub const MENTION_CANDIDATES_OPERATION: &str = "index.mention_candidates";
 
 /// `index_search` 工具请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -116,7 +117,7 @@ pub struct MentionFilesResponse {
 
 pub struct MentionFiles;
 impl IndexOperation for MentionFiles {
-    const NAME: &'static str = MENTION_FILES_OPERATION;
+    const NAME: &'static str = MENTION_CANDIDATES_OPERATION;
     type Request = MentionFilesRequest;
     type Response = MentionFilesResponse;
 }

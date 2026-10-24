@@ -11,6 +11,15 @@ pub mod management;
 pub mod search;
 
 pub const PLUGIN_ID: &str = "index";
+
+/// 宿主清单直连工具名（operation = 工具名，返回 ToolOutcome 形状）。
+/// 宿主生命周期钩子转发操作（payload = PluginSession 快照 JSON）。
+pub const LIFECYCLE_SESSION_READY_OPERATION: &str = "lifecycle.on_session_ready";
+pub const LIFECYCLE_TURN_STARTED_OPERATION: &str = "lifecycle.on_turn_started";
+pub const LIFECYCLE_TURN_FINISHED_OPERATION: &str = "lifecycle.on_turn_finished";
+pub const LIFECYCLE_SESSION_ENDED_OPERATION: &str = "lifecycle.on_session_ended";
+/// 动态提及候选查询（mention.candidates_op；载荷 MentionQuery JSON）。
+pub const MENTION_CANDIDATES_OPERATION: &str = "index.mention_candidates";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const INDEX_PROTOCOL_VERSION: u32 = 1;
 

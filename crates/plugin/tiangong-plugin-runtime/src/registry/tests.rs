@@ -365,7 +365,7 @@ fn 插件发现忽略内部事务目录并拒绝目录名与清单id不一致() 
         std::fs::write(
                 path.join(MANIFEST_FILE),
                 format!(
-                    r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"test"}}}}"#
+                    r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{{"candidates_op":"{id}.mention_candidates"}},"sidecar":{{"binary":"{id}-sidecar"}}}}"#
                 ),
             )
             .unwrap();
@@ -555,7 +555,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
 fn mention_sources_are_reachable_without_any_session_core() {
     let manifest = |id: &str| -> PluginManifest {
         serde_json::from_str(&format!(
-            r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"候选"}},"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","title":"{id}","entry":"dist/index.html"}}]}}}}"#
+            r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"candidates_op":"{id}.mention_candidates"}},"sidecar":{{"binary":"{id}-sidecar"}},"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","title":"{id}","entry":"dist/index.html"}}]}}}}"#
         ))
         .expect("解析测试清单")
     };
@@ -582,16 +582,27 @@ fn mention_sources_are_reachable_without_any_session_core() {
         plugins.insert("mention-disabled".into(), record("mention-disabled", false));
     }
     let query = tiangong_types::MentionQuery::default();
+    // #550：来源由注册表持有，没有任何 TiangongCore、也不依赖适配器弱引用
+    // 即可查询。提及内容自 v2 起由 sidecar 的 candidates_op 提供，测试装置
+    // 没有安装 sidecar，因而启用插件返回空候选而非报错——这里断言的是可达
+    // 性与停用/卸载行为，内容链路由 loader 与 ts_plugin 的单测覆盖。
+    let source_ids: Vec<String> = mention_sources()
+        .into_iter()
+        .map(|source| source.id().to_string())
+        .collect();
+    assert!(
+        source_ids.contains(&"mention-enabled".to_string()),
+        "启用插件应有候选来源：{source_ids:?}"
+    );
+    assert!(
+        !source_ids.iter().any(|id| id == "mention-disabled"),
+        "停用插件不应有来源：{source_ids:?}"
+    );
     let values: Vec<String> = mention_sources()
         .into_iter()
-        // 注册表持有的来源：没有任何 TiangongCore 存在，也不依赖适配器弱引用。
         .flat_map(|source| source.query(&query).expect("查询不应失败"))
         .map(|candidate| candidate.value)
         .collect();
-    assert!(
-        values.contains(&"@plugin:mention-enabled".to_string()),
-        "启用插件应可见：{values:?}"
-    );
     assert!(
         !values
             .iter()
@@ -667,5 +678,146 @@ fn sidecar_instance_role_defaults_to_auxiliary() {
     assert_eq!(
         config.instance_role(),
         crate::sidecar::INSTANCE_ROLE_PRIMARY
+    );
+}
+
+/// 解析 candidates_op 响应：index 形态（仅 candidates，无 entry）。
+#[test]
+fn 提及响应仅含candidates时不合成入口候选() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"index","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"index.mention_candidates"},"sidecar":{"binary":"index-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    let response = serde_json::json!({
+        "candidates": [
+            { "value": "@file:src/main.rs", "label": "main.rs", "kind": "file", "hint": "src/main.rs" }
+        ]
+    });
+    let candidates = super::loader::parse_mention_op_response(
+        &response,
+        &manifest,
+        None,
+        "index",
+        "index.mention_candidates",
+    );
+    assert_eq!(candidates.len(), 1, "内容提供方只有文件候选");
+    assert_eq!(candidates[0].value, "@file:src/main.rs");
+    assert!(
+        candidates.iter().all(|c| c.kind == "file"),
+        "不应出现 plugin 入口"
+    );
+}
+
+/// entry 存在且带 hint：合成入口候选（宿主约定 value/kind）+ 动态候选并存。
+#[test]
+fn 提及响应entry与candidates可并存() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"volcengine","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"volcengine.mention_candidates"},"sidecar":{"binary":"volcengine-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    let response = serde_json::json!({
+        "entry": { "hint": "生成图片、视频与语音", "mark": "火山" },
+        "candidates": [
+            { "value": "@plugin:volcengine", "label": "文生图", "kind": "tool", "hint": "按描述生成图片" }
+        ]
+    });
+    let candidates = super::loader::parse_mention_op_response(
+        &response,
+        &manifest,
+        None,
+        "volcengine",
+        "volcengine.mention_candidates",
+    );
+    assert_eq!(candidates.len(), 2, "入口候选 + 动态候选");
+    assert_eq!(candidates[0].value, "@plugin:volcengine");
+    assert_eq!(candidates[0].kind, "plugin");
+    assert_eq!(candidates[0].hint, "生成图片、视频与语音");
+    assert_eq!(candidates[0].mark, "火山");
+    assert_eq!(candidates[1].value, "@plugin:volcengine");
+    assert_eq!(candidates[1].kind, "tool");
+}
+
+/// entry 缺 hint 跳过；candidates 残缺项跳过——不把渲染不出的候选透给前端。
+#[test]
+fn 提及响应残缺项被跳过() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"bot","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"bot.mention_candidates"},"sidecar":{"binary":"bot-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    let response = serde_json::json!({
+        "entry": { "hint": "   " },
+        "candidates": [
+            { "value": "@file:a.rs", "label": "a.rs" },
+            { "value": "", "label": "b.rs", "kind": "file", "hint": "b.rs" },
+            { "value": "@file:c.rs", "label": "c.rs", "kind": "file", "hint": "c.rs" }
+        ]
+    });
+    let candidates = super::loader::parse_mention_op_response(
+        &response,
+        &manifest,
+        None,
+        "bot",
+        "bot.mention_candidates",
+    );
+    assert_eq!(
+        candidates.len(),
+        1,
+        "缺 hint 的 entry 与缺字段的候选全部跳过"
+    );
+    assert_eq!(candidates[0].value, "@file:c.rs");
+}
+
+/// 形状不符（空对象/数组/null）不视为错误：返回空，不 panic。
+#[test]
+fn 提及响应形状不符返回空() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"index","version":"1.0.0","permissions":["sidecar.invoke"],"mention":{"candidates_op":"index.mention_candidates"},"sidecar":{"binary":"index-sidecar"}}"#,
+    )
+    .expect("清单应合法");
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+        serde_json::json!({ "candidates": "not-an-array" }),
+    ] {
+        assert!(
+            super::loader::parse_mention_op_response(
+                &value,
+                &manifest,
+                None,
+                "index",
+                "index.mention_candidates"
+            )
+            .is_empty(),
+            "形状 {value} 应解析为空候选"
+        );
+    }
+}
+
+/// v0.17.6 静态 mention（hint/mark）能合成入口候选：与 op entry 同一条
+/// 路径，value/kind 是宿主约定，hint/mark 来自静态声明。
+#[test]
+fn 静态mention声明生成入口候选() {
+    let manifest: crate::manifest::PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"legacy-demo","version":"0.9.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["说明"],"mention":{"hint":"老插件的能力说明","mark":"老"}}"#,
+    )
+    .expect("静态清单应合法");
+    manifest.validate().unwrap();
+    let mention = manifest.mention.as_ref().unwrap();
+    let candidate = crate::ts_plugin::mention_entry_candidate(
+        &manifest,
+        None,
+        &super::loader::static_mention_entry(mention),
+    )
+    .expect("静态 hint 应合成入口候选");
+    assert_eq!(candidate.value, "@plugin:legacy-demo");
+    assert_eq!(candidate.kind, "plugin");
+    assert_eq!(candidate.hint, "老插件的能力说明");
+    assert_eq!(candidate.mark, "老");
+    // 缺 hint（空值视为没写）：不合成——与 op entry 缺 hint 同语义。
+    let broken = serde_json::json!({ "hint": "   ", "mark": "老" });
+    assert!(
+        crate::ts_plugin::mention_entry_candidate(&manifest, None, &broken).is_none(),
+        "空 hint 不合成入口"
     );
 }

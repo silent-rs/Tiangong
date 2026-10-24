@@ -57,6 +57,6 @@
     "request_timeout_ms": 30000
   },
   "mention": {
-    "hint": "{{PLUGIN_NAME}}（常驻 sidecar 插件，提供 query 工具）"
+    "candidates_op": "{{PLUGIN_ID}}.mention_candidates"
   }
 }

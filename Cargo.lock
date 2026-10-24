@@ -11091,7 +11091,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "tiangong-config",
@@ -11100,7 +11100,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-anthropic"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "bytes",
  "eventsource-stream",
@@ -11115,7 +11115,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -11177,7 +11177,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app-state"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "serde",
  "tiangong-config",
@@ -11188,7 +11188,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-cli"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -11208,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-config"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "scru128",
@@ -11225,7 +11225,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11246,7 +11246,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core-manager"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -11278,7 +11278,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-entry"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -11299,7 +11299,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-llm"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -11329,7 +11329,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-media-archive"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "base64 0.23.1",
  "reqwest 0.13.4",
@@ -11342,7 +11342,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-memory"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11659,7 +11659,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-protocol"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11667,7 +11667,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-sidecar"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11682,20 +11682,10 @@ dependencies = [
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-sidecar",
  "tiangong-toolkit",
+ "tiangong-types",
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tiangong-plugin-index-wasm"
-version = "0.2.1"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-index-protocol",
- "tiangong-types",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]
@@ -11799,7 +11789,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-runtime"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -11892,7 +11882,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-sidecar"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11911,7 +11901,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-sidecar-e2e"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12027,7 +12017,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-update"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "serde",
 ]
@@ -12134,7 +12124,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-sandbox-update"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -12156,7 +12146,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-scheduler"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -12170,7 +12160,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-server"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -12203,7 +12193,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-toolkit"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "dunce",
@@ -12213,7 +12203,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-types"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "chrono",
  "scru128",

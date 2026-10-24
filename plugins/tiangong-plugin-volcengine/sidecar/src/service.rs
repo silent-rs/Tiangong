@@ -14,14 +14,14 @@ use tiangong_plugin_sidecar::protocol::{
 use tiangong_plugin_volcengine_protocol::{
     ASR_PARTIAL_CHANNEL, Ack, Empty, GENERATE_IMAGE_OPERATION, GENERATE_VIDEO_OPERATION,
     GET_CONFIG_OPERATION, GeneratedImage, ImageRequest, ImageResponse, LIST_VOICES_OPERATION,
-    ListVoicesResponse, PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL, PLAY_OPERATION,
-    PLAY_STATUS_OPERATION, PLUGIN_ID, PLUGIN_VERSION, PlayRequest, PlayStatusResponse,
-    RECORD_CANCEL_OPERATION, RECORD_START_OPERATION, RECORD_STOP_OPERATION, REPLY_FINAL_CHANNEL,
-    RecordControlRequest, RecordStartRequest, SET_CONFIG_OPERATION, STOP_OPERATION,
-    SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse, TOOL_SPEECH_TO_TEXT,
-    TOOL_TEXT_TO_SPEECH, TRANSCRIBE_OPERATION, TURN_FINISHED_OPERATION, TranscribeRequest,
-    TranscribeResponse, TurnFinishedRequest, VOLCENGINE_PROTOCOL_VERSION, VideoRequest,
-    VideoResponse, VideoStatus, VoiceInfo, VolcengineConfig,
+    ListVoicesResponse, MENTION_CANDIDATES_OPERATION, PLAN_ARK_BASE_URL, PLAN_SPEECH_BASE_URL,
+    PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID, PLUGIN_VERSION, PlayRequest,
+    PlayStatusResponse, RECORD_CANCEL_OPERATION, RECORD_START_OPERATION, RECORD_STOP_OPERATION,
+    REPLY_FINAL_CHANNEL, RecordControlRequest, RecordStartRequest, SET_CONFIG_OPERATION,
+    STOP_OPERATION, SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse,
+    TOOL_SPEECH_TO_TEXT, TOOL_TEXT_TO_SPEECH, TRANSCRIBE_OPERATION, TURN_FINISHED_OPERATION,
+    TranscribeRequest, TranscribeResponse, TurnFinishedRequest, VOLCENGINE_PROTOCOL_VERSION,
+    VideoRequest, VideoResponse, VideoStatus, VoiceInfo, VolcengineConfig,
 };
 
 use crate::ark::{self, Endpoint, VideoOptions};
@@ -287,6 +287,18 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             tiangong_plugin_sidecar::server::emit_notification(REPLY_FINAL_CHANNEL, body);
             serde_json::to_value(Empty {}).context("序列化 turn_finished 响应失败")
         }
+
+        // ── @提及（内容由 sidecar 提供：entry 的 hint/mark + 候选数组）──
+        // 操作名与清单 mention.candidates_op 一致（含插件前缀），缺前缀会被
+        // 宿主原样发送、sidecar 拒绝。
+        MENTION_CANDIDATES_OPERATION => serde_json::to_value(serde_json::json!({
+            "entry": {
+                "hint": "火山引擎：生成图片或视频、语音合成与语音识别",
+                "mark": "火山",
+            },
+            "candidates": [],
+        }))
+        .context("序列化 mention_candidates 响应失败"),
 
         other => bail!("未知的 Volcengine 操作: {other}"),
     }
@@ -705,6 +717,22 @@ fn image_input(reference: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mention_op_matches_manifest_operation_name() {
+        // 清单声明的是含插件前缀的完整名（volcengine.mention_candidates），
+        // 分发臂必须匹配同一常量——曾因缺前缀被 sidecar 拒绝。
+        let value = dispatch_operation(MENTION_CANDIDATES_OPERATION, serde_json::json!({}))
+            .await
+            .expect("完整操作名必须被分发");
+        assert!(
+            !value["entry"]["hint"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn normalize_config_trims_and_defaults() {

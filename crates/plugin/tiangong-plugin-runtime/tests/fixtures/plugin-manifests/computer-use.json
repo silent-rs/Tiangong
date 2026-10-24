@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "id": "computer-use",
+  "version": "0.4.2",
+  "wasm": {
+    "binary": "tiangong_plugin_computer_use_wasm.wasm"
+  },
+  "sidecar": {
+    "binary": "tiangong-computer-use-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 60000
+  },
+  "permissions": [
+    "sidecar.invoke",
+    "bridge.call"
+  ],
+  "capabilities": {
+    "events": [
+      "sidecar.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "session.input-action",
+        "id": "restore-window",
+        "title": "恢复窗口",
+        "description": "Computer Use 自动分屏后，把天工窗口恢复到原来的位置和大小",
+        "entry": "app/restore-window.html",
+        "context": [
+          "session"
+        ]
+      }
+    ]
+  },
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ],
+  "mention": {
+    "hint": "控制桌面应用：定位窗口、读取控件树、执行点击与输入"
+  }
+}
