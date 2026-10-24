@@ -344,7 +344,7 @@ impl ConsolidationReport {
             );
             let _ = writeln!(
                 out,
-                "- LLM 判定次数估算：簇内全部合并时至少约 {} 次；全部保留时最多约 {} 次（每批 {} 条）",
+                "- LLM 判定次数估算：约 {} ~ {} 次（下限按簇内全部合并、上限按全部保留估算，每批 {} 条）",
                 self.clusters.min_calls, self.clusters.max_calls, self.clusters.batch_size
             );
             if !self.clusters.densest.is_empty() {
@@ -600,10 +600,13 @@ impl ClusterStats {
             batch_size,
             ..Default::default()
         };
-        // 全部保留时：每对记忆至少出现在一批中；以种子为中心的批每批覆盖
-        // per_batch 对种子相关的记忆对，按「每个种子尚未覆盖的度」上界估算。
-        let pairs: usize = neighbors.iter().map(Vec::len).sum::<usize>() / 2;
-        stats.max_calls = pairs.div_ceil(per_batch);
+        // 全部保留时：每个种子最多把自己的全部相似记忆分批送审一次（已与其他
+        // 种子一起判定过的会被跳过，实际更少），故上界为各记忆 ⌈相似数/每批⌉ 之和。
+        // 该上界不小于簇数，与「全部合并」的下界保持有序。
+        stats.max_calls = neighbors
+            .iter()
+            .map(|list| list.len().div_ceil(per_batch))
+            .sum();
         for list in neighbors.iter().filter(|list| !list.is_empty()) {
             let bucket = match list.len() {
                 1 => 0,
@@ -622,7 +625,7 @@ impl ClusterStats {
             .take(10)
             .map(|position| {
                 (
-                    truncate(&nodes[position].title, 40),
+                    one_line(&nodes[position].title, 40),
                     neighbors[position].len(),
                     nodes[position].id.clone(),
                 )
@@ -795,7 +798,7 @@ async fn consolidate_page(
                     handled,
                     total,
                     report.processed,
-                    truncate(&state.nodes[seed].title, 40)
+                    one_line(&state.nodes[seed].title, 40)
                 ));
             }
             // 1) 规则低质量遗忘。
@@ -817,7 +820,7 @@ async fn consolidate_page(
                 report.forgotten += 1;
                 report.actions.push(format!(
                     "删除低质量记忆「{}」（{}）{}",
-                    truncate(&state.nodes[seed].title, 40),
+                    one_line(&state.nodes[seed].title, 40),
                     reason,
                     dry_run_tag(options)
                 ));
@@ -967,7 +970,7 @@ async fn build_neighbors(
                 "检索中 [{}/{}] {}",
                 position + 1,
                 total,
-                truncate(&node.title, 40)
+                one_line(&node.title, 40)
             ));
         }
         // 每次召回都取当前句柄：Leader 退出后 follower 监控会自动接替。
@@ -1458,7 +1461,7 @@ async fn apply_plan(
         let mut detail = format!(
             "合并 {} 条为「{}」（分类 {:?}）{}",
             group.members.len(),
-            truncate(&group.title, 40),
+            one_line(&group.title, 40),
             group.memory_type,
             dry_run_tag(options)
         );
@@ -1476,7 +1479,7 @@ async fn apply_plan(
                 },
                 state.nodes[*position].id,
                 similarity_label(batch, *position, scores),
-                truncate(&state.nodes[*position].title, 50)
+                one_line(&state.nodes[*position].title, 50)
             );
         }
         report.actions.push(detail);
@@ -1498,7 +1501,7 @@ async fn apply_plan(
             "LLM 删除记忆 {} {}「{}」；理由：{}{}",
             node_id,
             similarity_label(batch, *position, scores),
-            truncate(&state.nodes[*position].title, 50),
+            one_line(&state.nodes[*position].title, 50),
             truncate(reason, 120),
             dry_run_tag(options)
         ));
@@ -1523,7 +1526,7 @@ async fn apply_plan(
         report.reclassified += 1;
         report.actions.push(format!(
             "重分类「{}」{:?} → {:?}；理由：{}{}",
-            truncate(&node.title, 40),
+            one_line(&node.title, 40),
             node.memory_type,
             memory_type,
             truncate(reason, 120),
@@ -2206,6 +2209,14 @@ pub(crate) fn dry_run_tag(options: &ConsolidationOptions) -> &'static str {
     }
 }
 
+/// 报告展示用：折叠换行与连续空白为单个空格后截断。
+pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
+    truncate(
+        &text.split_whitespace().collect::<Vec<_>>().join(" "),
+        max_chars,
+    )
+}
+
 /// 截断文本用于报告展示。
 pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
@@ -2457,7 +2468,8 @@ mod tests {
         assert_eq!(stats.degree_buckets[0], 4, "a、c、d、e 各 1 条相似");
         assert_eq!(stats.degree_buckets[1], 1, "b 有 2 条相似");
         assert_eq!(stats.min_calls, 2, "每簇至少一次判定");
-        assert_eq!(stats.max_calls, 1, "3 对相似、每批 19 对");
+        assert_eq!(stats.max_calls, 5, "5 条有相似的记忆各至多一批");
+        assert!(stats.min_calls <= stats.max_calls);
         assert_eq!(stats.densest[0].2, "b", "相似最多的排第一");
         assert!(stats.degree_histogram().contains("1 条:4"));
     }

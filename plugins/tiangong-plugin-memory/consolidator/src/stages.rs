@@ -22,9 +22,9 @@ use tiangong_memory::{
 
 use crate::consolidation::{
     ConsolidationOptions, ConsolidationProgress, ConsolidationReport, HandleProvider, dry_run_tag,
-    memory_type_key, normalize_keywords, normalized_key, parse_memory_type, parse_timestamp,
-    relation_weights, relink_relations, request_json_with_retry, retry_write, truncate,
-    upsert_relation_max,
+    memory_type_key, normalize_keywords, normalized_key, one_line, parse_memory_type,
+    parse_timestamp, relation_weights, relink_relations, request_json_with_retry, retry_write,
+    truncate, upsert_relation_max,
 };
 
 /// dedup：摘要短于该字符数的记忆不参与归一（短摘要撞车概率高，信息不足以判断）。
@@ -158,6 +158,22 @@ fn most_common_title(nodes: &[MemoryNode], members: &[usize], primary: usize) ->
         .to_string()
 }
 
+/// dedup 分桶键：（范围，归一化摘要）。
+///
+/// 实体的摘要常是通用描述（如「开源社区」「推理框架」），不同实体可能摘要
+/// 相同：实体还要求标题一致（忽略大小写与空白）。
+fn dedup_key(node: &MemoryNode) -> (String, String) {
+    let entity_title = if node.kind == MemoryKind::Entity {
+        normalized_key(&node.title)
+    } else {
+        String::new()
+    };
+    (
+        format!("{}\u{1f}{entity_title}", scope_key(node)),
+        normalized_key(&node.summary),
+    )
+}
+
 /// dedup 阶段：摘要完全一致的记忆归一。返回 `Err` 表示写入失败，应中断整理。
 pub(crate) async fn run_dedup(
     provider: HandleProvider<'_>,
@@ -178,7 +194,7 @@ pub(crate) async fn run_dedup(
         if node.summary.trim().chars().count() < options.dedup_min_summary_chars {
             continue;
         }
-        let key = (scope_key(node), normalized_key(&node.summary));
+        let key = dedup_key(node);
         let entry = buckets.entry(key.clone()).or_default();
         if entry.is_empty() {
             order.push(key);
@@ -289,7 +305,7 @@ pub(crate) async fn run_dedup(
         let mut detail = format!(
             "dedup 归一 {} 条为「{}」（重要性 {:.2}）{}",
             members.len(),
-            truncate(&title, 40),
+            one_line(&title, 40),
             importance,
             dry_run_tag(options)
         );
@@ -301,7 +317,7 @@ pub(crate) async fn run_dedup(
                 if *position == primary { "★" } else { "·" },
                 node.id,
                 node.kind,
-                truncate(&node.title, 50)
+                one_line(&node.title, 50)
             );
         }
         report.actions.push(detail);
@@ -737,9 +753,9 @@ async fn apply_distill(
         lines.push(format!(
             "\n      + {}「{}」← {} 条日志：{}",
             new_id,
-            truncate(&title, 40),
+            one_line(&title, 40),
             sources.len(),
-            truncate(&summary, 80)
+            one_line(&summary, 80)
         ));
     }
     // 删除日志：被提炼的日志先把已有关联改挂到新经历。
@@ -785,7 +801,7 @@ async fn apply_distill(
         detail.push_str(&line);
     }
     if let Some((_, reason)) = delete.iter().find(|(_, reason)| !reason.trim().is_empty()) {
-        let _ = write!(detail, "\n      删除理由示例：{}", truncate(reason, 100));
+        let _ = write!(detail, "\n      删除理由示例：{}", one_line(reason, 100));
     }
     report.actions.push(detail);
     Ok(())
@@ -884,6 +900,27 @@ mod tests {
         let primary = pick_primary(&nodes, &members);
         assert_eq!(nodes[primary].id, "b", "kind 冲突时优先决策");
         assert_eq!(most_common_title(&nodes, &members, primary), "标题甲");
+    }
+
+    #[test]
+    fn dedup_key_requires_same_title_for_entities() {
+        let at = "2025-01-01 10:00:00";
+        let vllm = node("a", MemoryKind::Entity, "vLLM", at);
+        let sglang = node("b", MemoryKind::Entity, "SGLang", at);
+        let upper = node("c", MemoryKind::Entity, "Tiangong ", at);
+        let lower = node("d", MemoryKind::Entity, "tiangong", at);
+        assert_ne!(dedup_key(&vllm), dedup_key(&sglang), "不同实体不应归一");
+        assert_eq!(dedup_key(&upper), dedup_key(&lower), "同名实体忽略大小写");
+        let episode = node("e", MemoryKind::Episode, "修复问题", at);
+        let decision = node("f", MemoryKind::Decision, "决策：修复问题", at);
+        assert_eq!(
+            dedup_key(&episode),
+            dedup_key(&decision),
+            "经历与决策只看摘要"
+        );
+        let mut other_scope = episode.clone();
+        other_scope.scope_id = Some("ws-2".to_string());
+        assert_ne!(dedup_key(&episode), dedup_key(&other_scope));
     }
 
     #[test]
