@@ -1,0 +1,146 @@
+{
+  "schema_version": 2,
+  "id": "plugin-creator",
+  "version": "0.2.3",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide",
+    "bridge.call",
+    "plugin-dev.use",
+    "sidecar.invoke",
+    "storage.private",
+    "session.write"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "events": [
+      "tool.*",
+      "plugins.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "plugin-creator",
+        "title": "插件创作",
+        "description": "创建、构建与安装自建插件",
+        "icon": "assets/icon.svg",
+        "entry": "dist/index.html",
+        "open_mode": "singleton"
+      }
+    ]
+  },
+  "sidecar": {
+    "runtime": "node",
+    "entry": "sidecar/main.mjs",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 0,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 300000
+  },
+  "resources": [
+    "templates",
+    "assets"
+  ],
+  "tools": [
+    {
+      "name": "plugin_init",
+      "description": "按模板生成插件项目骨架（写入 ~/.tiangong/plugins-dev/<id>/）。模板：ui-app（纯 UI）、ts-tool（TS 工具插件）、ts-npx（npx 脚本插件）、node-sidecar（常驻 node sidecar 插件）、node-tool（无界面纯工具，Agent 直调工具、无拓展区页面）。生成后浏览项目结构并向用户确认需求要点。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "enum": [
+              "ui-app",
+              "ts-tool",
+              "ts-npx",
+              "node-sidecar",
+              "node-tool"
+            ],
+            "description": "模板名"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "插件 ID（小写字母数字与 - _ .，不得与已安装插件同名）"
+          },
+          "name": {
+            "type": "string",
+            "description": "显示名（缺省用 ID）"
+          }
+        },
+        "required": [
+          "template",
+          "id"
+        ]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "plugin_devkit",
+      "non_idempotent": true,
+      "description": "对插件项目执行开发操作：validate（清单与结构校验）｜build（构建，工程模板需本机 yarn + Node ≥ 20）｜add（添加 npm 依赖，锁定精确版本，如 args [\"<id>\", \"yaml\"]）｜run（按 run.json 试运行）｜logs（读日志尾部，args 如 [\"dev:<id>\"] 或 [\"plugin:<id>\"]）。args 为 devkit 命令行参数数组（不含命令名）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "build",
+              "add",
+              "run",
+              "logs"
+            ],
+            "description": "devkit 命令"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "命令行参数（不含命令名），如 [\"my-plugin\"] 或 [\"my-plugin\", \"yaml\"]"
+          }
+        },
+        "required": [
+          "command",
+          "args"
+        ]
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "name": "plugin_install",
+      "non_idempotent": true,
+      "description": "把开发目录中已构建的插件项目安装为天工可用插件（读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物，须先经 plugin_devkit build 构建成功）。安装由宿主以本机用户密钥自动签名并验证，免确认（仅官方 Plugin Creator 可触发；构建后修改产物会被指纹核验拒绝）。迭代修改代码后需重新 build 再 install（每次构建只授予一次安装）。安装后当前会话即可使用：本机自制插件经固定工具 call_local_plugin 动态调用（清单由系统注入对话），已开启的会话在下一轮生效，无需新开会话。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "项目 ID（plugin.json 中的插件 ID）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 300000
+    }
+  ],
+  "prompt": [
+    "自建插件创作流程（plugin creator）：全部操作经本插件工具完成——plugin_init 生成骨架（模板 ui-app/ts-tool/ts-npx/node-sidecar/node-tool；纯能力无界面用 node-tool，需要面板或交互用 node-sidecar/ts-tool）→ 浏览并按需求实现 → plugin_devkit validate/build（工程模板构建需本机 Node ≥ 20 与 yarn，添加依赖用 plugin_devkit add，锁定精确版本）→ plugin_install 安装（官方 Creator 专属：宿主自动签名，免确认）→ 迭代时改码后重新 build/install。构建失败用 plugin_devkit logs 读日志定位。无需 npx 或命令通道。",
+    "生成规范：1) 能力最小化，只申请必需权限，纯 UI/TS 工具插件绝不声明 sidecar.invoke；2) 交互类 UI 贡献 slot 为官方专属，自建插件只用 extension.tab 与 settings.plugin-page；3) 每引入外部 npm 依赖必须注明用途；4) node-sidecar 模板的常驻服务写业务逻辑在 sidecar/main.mjs 的 dispatch，依赖经 plugin_devkit add 添加（构建时打进单文件）；5) 能力型插件在 plugin.json 声明 mention（hint 一句话描述），供用户 @plugin:<id> 点名调用；6) 插件页面禁止使用 File System Access API（showSaveFilePicker/showOpenFilePicker 等，宿主 webview 是 WebKit 不支持）——导出文件用 SDK 的 saveFileDialog（plugin.json 声明 dialog.use 权限），经宿主原生保存对话框由用户选择位置；7) extension.tab 实例若持有后端资源（子进程、PTY、远程连接等），贡献声明 \"instance_resources\": true 并由 sidecar 按 instance_id（runtime.context.app.instance_id）归属资源、实现 instanceClosed{session_id,instance_id} 与 listInstances{session_id}→{instances:[{instance_id}]}（均幂等）；beforeClose 只做状态保存，释放以宿主发出的 instanceClosed 为准；无后端资源的 App 不声明该字段，仅用 registerCleanup。",
+    "plugin_install 是唯一安装通道（官方 Creator 自动签名安装 + 注册表加载）；不要尝试用文件复制等方式绕过安装流程。"
+  ],
+  "mention": {
+    "hint": "插件创作：生成、构建与安装自建插件（devkit 工具链）"
+  }
+}

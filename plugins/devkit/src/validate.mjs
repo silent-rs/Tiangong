@@ -60,6 +60,15 @@ export async function validate(argv, ctx) {
   if (contributions.length === 0 && !manifest.tools?.length && !manifest.wasm) {
     warnings.push('清单未声明任何 UI 贡献、工具或逻辑层，安装后不会有可见效果');
   }
+  const mention = manifest.mention;
+  if (mention && !mention.candidates_op && mention.hint) {
+    warnings.push(
+      'mention.hint 为 v0.17.6 兼容写法，仅限存量插件；新插件请使用 candidates_op（node 系模板，需 sidecar）'
+    );
+  }
+  if (mention && !mention.candidates_op && !mention.hint) {
+    errors.push('mention 需要 candidates_op 或 hint 至少其一');
+  }
   const sidecar = manifest.sidecar;
   if (sidecar && !(manifest.permissions ?? []).includes('sidecar.invoke')) {
     errors.push('声明 sidecar 时必须声明 sidecar.invoke 权限');
