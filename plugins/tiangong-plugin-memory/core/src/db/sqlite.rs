@@ -742,19 +742,6 @@ impl MemoryDb {
             .with_context(|| format!("记忆节点不存在: {node_id}"))
     }
 
-    /// 列出全部活跃节点 ID（按 ID 升序），供向量覆盖率比对使用。
-    pub(crate) fn list_active_node_ids(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM memory_nodes WHERE status = 'active' ORDER BY id ASC")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut ids = Vec::new();
-        for row in rows {
-            ids.push(row.with_context(|| "读取活跃节点 ID 失败")?);
-        }
-        Ok(ids)
-    }
-
     /// 按 ID 获取记忆节点。
     pub(crate) fn get_memory_node(&self, node_id: &str) -> Result<Option<MemoryNode>> {
         self.conn

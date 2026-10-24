@@ -218,16 +218,3 @@ async fn manual_memory_can_be_physically_deleted() {
     assert!(nodes.iter().any(|node| node.id == other.id));
     handle.shutdown().await;
 }
-
-/// 未配置向量层时，补写向量经 Actor 明确报错（不静默成功），命令链路可达。
-#[tokio::test]
-#[serial]
-async fn repair_vectors_reports_unavailable_vector_layer() {
-    let _env = EnvGuard::enter();
-    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
-    let err = handle
-        .repair_vectors(10)
-        .await
-        .expect_err("无向量层时应返回错误");
-    assert!(err.to_string().contains("向量层"), "{err}");
-}

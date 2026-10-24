@@ -535,40 +535,6 @@ impl MemoryHandle {
         }
     }
 
-    /// 补写缺失向量：为活跃记忆中缺少语义向量的节点计算 embedding 并写入
-    /// 当前向量表（单批最多 `limit` 条，0 只统计不补写）。
-    ///
-    /// 调用方按返回的 [`crate::VectorRepairReport::remaining`] 循环调用直至为 0。
-    /// 向量层未启用或 embedding 模型尚未就绪时返回错误。
-    pub async fn repair_vectors(&self, limit: usize) -> Result<crate::types::VectorRepairReport> {
-        match self.inner.as_ref() {
-            HandleInner::Local { tx } => {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                tx.send(MemoryCommand::RepairVectors {
-                    limit,
-                    reply: reply_tx,
-                })
-                .await
-                .with_context(|| "发送 Memory 补写向量命令失败")?;
-                reply_rx
-                    .await
-                    .with_context(|| "等待 Memory 补写向量结果失败")?
-                    .map_err(|err| anyhow!(err))
-            }
-            HandleInner::Remote { .. } => {
-                match self
-                    .send_remote_request(MemoryIpcRequestPayload::RepairVectors { limit })
-                    .await?
-                {
-                    MemoryIpcResponsePayload::VectorRepair { report } => Ok(report),
-                    other => Err(anyhow!(
-                        "Memory IPC repair_vectors 返回了非预期响应: {other:?}"
-                    )),
-                }
-            }
-        }
-    }
-
     /// 列出某个记忆节点的图关系。
     pub async fn list_relations(&self, node_id: String) -> Vec<MemoryRelation> {
         match self.inner.as_ref() {

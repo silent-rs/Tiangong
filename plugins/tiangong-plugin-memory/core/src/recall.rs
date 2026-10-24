@@ -176,19 +176,6 @@ impl RecallEngine {
         Ok(())
     }
 
-    /// 向量层是否可写（向量索引与 embedding 均已就绪）。
-    pub(crate) fn vector_ready(&self) -> bool {
-        self.vector_index.is_some() && self.embedding.is_some()
-    }
-
-    /// 当前向量表中已有向量的节点 ID；向量层未启用时返回 `None`。
-    pub(crate) async fn indexed_node_ids(&self) -> anyhow::Result<Option<Vec<String>>> {
-        match self.vector_index.as_ref() {
-            Some(vector_index) => vector_index.list_node_ids().await.map(Some),
-            None => Ok(None),
-        }
-    }
-
     /// 执行召回：接受已完成的 BM25 结果，可选地用向量检索增强后融合重排
     ///
     /// `strategy` 为外部（Core/LLM）传入的检索策略，为 None 时内部自动判断。
