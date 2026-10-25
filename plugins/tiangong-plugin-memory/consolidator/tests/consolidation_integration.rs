@@ -1095,3 +1095,28 @@ async fn journal_keeps_full_snapshot_of_every_deletion() {
     let active = all_active(&handle).await;
     assert!(!active.iter().any(|node| node.id == gone));
 }
+
+/// 手动停止：已请求停止时不再处理任何记忆，报告标注已停止，数据不变。
+#[tokio::test]
+#[serial]
+async fn stop_request_halts_before_next_batch() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let summary = "调用插件 fs 的 file_write：成功 replacements=1,replace_all=false";
+    for importance in [0.9, 0.5, 0.4] {
+        save_in(&handle, "写入文件", summary, importance, Some("ws")).await;
+    }
+    let options = ConsolidationOptions {
+        stages: vec![ConsolidationStage::Dedup, ConsolidationStage::Similar],
+        ..Default::default()
+    };
+    options
+        .stop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = run_consolidation(&|| handle.clone(), &options, None).await;
+    assert!(report.stopped, "{report:?}");
+    assert_eq!(report.dedup_groups, 0);
+    assert_eq!(report.pages, 0, "停止后不应进入 similar");
+    assert!(report.render().contains("已手动停止"));
+    assert_eq!(all_active(&handle).await.len(), 3, "停止后数据不变");
+}

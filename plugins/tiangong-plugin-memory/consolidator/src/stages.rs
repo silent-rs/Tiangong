@@ -243,6 +243,10 @@ pub(crate) async fn run_dedup(
     }
     // 3) 逐组归一。
     for (index, members) in groups.iter().enumerate() {
+        if options.stop_requested() {
+            report.stopped = true;
+            break;
+        }
         let primary = pick_primary(nodes, members);
         let base = &nodes[primary];
         let title = most_common_title(nodes, members, primary);
@@ -587,17 +591,23 @@ pub(crate) async fn run_distill(
     }
     let base_calls = report.llm_calls;
     for (index, batch) in batches.iter().enumerate() {
+        if options.stop_requested() {
+            report.stopped = true;
+            break;
+        }
         if options.max_llm_calls > 0 && report.llm_calls - base_calls >= options.max_llm_calls {
             report.distill_budget_exhausted = true;
             break;
         }
         if let Some(callback) = progress {
             callback(&format!(
-                "distill [{}/{}] {}：{} 条日志",
+                "distill [{}/{}] {}：{} 条日志（已删除日志 {} 条，新经历 {} 条）",
                 index + 1,
                 batches.len(),
                 batch.scope,
-                batch.logs.len()
+                batch.logs.len(),
+                report.distill_deleted,
+                report.distill_created
             ));
         }
         let ids: Vec<String> = batch

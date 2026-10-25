@@ -275,6 +275,20 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
             "llm": consolidation.llm.as_ref().map(|model| model.model.clone()),
         }),
     )?;
+    // Ctrl+C：第一次请求在当前批次落库后停止；第二次立即退出。
+    let stop = consolidation.stop.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!(
+                "\n收到停止请求：当前批次落库完成后停止（LLM 判定中最多需等待一次调用）。再按一次 Ctrl+C 立即退出。"
+            );
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("立即退出：当前批次可能未完成，下次运行会重新判定。");
+                std::process::exit(130);
+            }
+        }
+    });
     println!("开始记忆深度整理……");
     // 句柄提供者：Leader 退出后 follower 监控会自动接替并替换内部句柄，
     // 每次调用都取当前可用的最新句柄（见 consolidation::HandleProvider）。
@@ -303,6 +317,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         "run_end",
         serde_json::json!({
             "fatal_error": report.fatal_error,
+            "stopped": report.stopped,
             "llm_calls": report.llm_calls,
             "errors": report.errors,
             "report": full,

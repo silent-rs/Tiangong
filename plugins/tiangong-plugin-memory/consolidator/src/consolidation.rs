@@ -142,6 +142,8 @@ pub struct ConsolidationOptions {
     pub distill_batch_size: usize,
     /// 执行记录（审计日志）：删除/改写/关联变更/LLM 判定逐条落盘。
     pub journal: Option<Arc<Journal>>,
+    /// 停止请求（Ctrl+C）：在当前批次落库完成后停止，不留下半完成的合并。
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for ConsolidationOptions {
@@ -168,11 +170,17 @@ impl Default for ConsolidationOptions {
             distill_window_minutes: DEFAULT_DISTILL_WINDOW_MINUTES,
             distill_batch_size: DEFAULT_DISTILL_BATCH_SIZE,
             journal: None,
+            stop: Arc::default(),
         }
     }
 }
 
 impl ConsolidationOptions {
+    /// 是否已请求停止。
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// 追加一条执行记录（未配置记录时忽略）；写入失败返回错误，调用方应中断。
     pub(crate) fn record(&self, event: &str, fields: serde_json::Value) -> anyhow::Result<()> {
         match self.journal.as_deref() {
@@ -376,6 +384,8 @@ pub struct ConsolidationReport {
     pub similar_llm_base: usize,
     /// similar：排除的工具日志条数。
     pub similar_excluded_logs: usize,
+    /// 是否因手动停止（Ctrl+C）而提前结束。
+    pub stopped: bool,
 }
 
 impl ConsolidationReport {
@@ -389,6 +399,8 @@ impl ConsolidationReport {
                 "（试运行，未落库）"
             } else if self.fatal_error.is_some() {
                 "中断"
+            } else if self.stopped {
+                "已手动停止（已完成的批次均已落库，可直接重新运行继续）"
             } else {
                 "完成"
             }
@@ -560,6 +572,9 @@ pub async fn run_consolidation(
             fail(&mut report, "dedup", err);
             return report;
         }
+        if report.stopped {
+            return report;
+        }
         if options.runs(ConsolidationStage::Distill)
             && let Err(err) = run_distill(
                 provider,
@@ -574,6 +589,9 @@ pub async fn run_consolidation(
             fail(&mut report, "distill", err);
             return report;
         }
+    }
+    if report.stopped {
+        return report;
     }
     if options.runs(ConsolidationStage::Similar) {
         report.similar_llm_base = report.llm_calls;
@@ -643,7 +661,7 @@ async fn run_similar(
         )
         .await;
         skip += page;
-        if report.fatal_error.is_some() || report.llm_budget_exhausted {
+        if report.fatal_error.is_some() || report.llm_budget_exhausted || report.stopped {
             // 致命错误（LLM 连续失败等）或达到 LLM 调用上限：停止后续批次。
             break;
         }
@@ -774,6 +792,8 @@ struct PageState {
     visited: Vec<bool>,
     /// 已在同一批中交给 LLM 判定过的记忆对（小位置在前）。
     judged: HashSet<(u32, u32)>,
+    /// 本批已删除（合并/遗忘）的记忆数。
+    removed: usize,
 }
 
 impl PageState {
@@ -785,7 +805,20 @@ impl PageState {
             alive: vec![true; len],
             visited: vec![false; len],
             judged: HashSet::new(),
+            removed: 0,
         }
+    }
+
+    /// 标记一条记忆已删除（合并或遗忘）。
+    fn remove(&mut self, position: usize) {
+        if std::mem::replace(&mut self.alive[position], false) {
+            self.removed += 1;
+        }
+    }
+
+    /// 当前仍存活的记忆数。
+    fn alive_count(&self) -> usize {
+        self.nodes.len() - self.removed
     }
 
     fn pair(left: usize, right: usize) -> (u32, u32) {
@@ -898,6 +931,10 @@ async fn consolidate_page(
     let mut handled = 0;
     let batch_size = options.batch_size.max(2);
     while let Some(seed) = queue.pop_front() {
+        if options.stop_requested() {
+            report.stopped = true;
+            break;
+        }
         if !state.alive[seed] {
             continue;
         }
@@ -910,12 +947,13 @@ async fn consolidate_page(
             handled += 1;
             report.processed += 1;
             if let Some(callback) = progress {
+                // 分母为当前存活数：被合并/删除的记忆不再处理，分母随之减少。
                 callback(&format!(
-                    "第 {} 批整理中 [{}/{}]（累计已处理 {}）{}",
+                    "第 {} 批整理中 [{}/{}]（已删除 {} 条）{}",
                     page_no,
                     handled,
-                    total,
-                    report.processed,
+                    state.alive_count(),
+                    state.removed,
                     one_line(&state.nodes[seed].title, 40)
                 ));
             }
@@ -931,7 +969,7 @@ async fn consolidate_page(
                     fail(report, &node.id, err);
                     break;
                 }
-                state.alive[seed] = false;
+                state.remove(seed);
                 report.forgotten += 1;
                 report.actions.push(format!(
                     "删除低质量记忆「{}」（{}）{}",
@@ -947,6 +985,10 @@ async fn consolidate_page(
         loop {
             let pending = state.pending(seed);
             if pending.is_empty() {
+                break;
+            }
+            if options.stop_requested() {
+                report.stopped = true;
                 break;
             }
             if options.max_llm_calls > 0
@@ -986,7 +1028,7 @@ async fn consolidate_page(
                 break;
             }
         }
-        if fatal || report.llm_budget_exhausted {
+        if fatal || report.llm_budget_exhausted || report.stopped {
             break;
         }
     }
@@ -1570,7 +1612,7 @@ async fn apply_plan(
                 Some(&relations),
             )
             .await?;
-            state.alive[*position] = false;
+            state.remove(*position);
             merged_into.insert(node_id.clone(), primary_id.clone());
             removed.insert(node_id);
             if state.inherit(*position, group.primary) {
@@ -1618,7 +1660,7 @@ async fn apply_plan(
             None,
         )
         .await?;
-        state.alive[*position] = false;
+        state.remove(*position);
         removed.insert(node_id.clone());
         report.forgotten += 1;
         report.actions.push(format!(
@@ -2586,7 +2628,11 @@ mod tests {
             "按相似度降序"
         );
         // b 合并进 a：a 继承 c、d 两个未判定的候选。
-        state.alive[1] = false;
+        assert_eq!(state.alive_count(), 4);
+        state.remove(1);
+        state.remove(1);
+        assert_eq!(state.alive_count(), 3, "重复删除只计一次");
+        assert_eq!(state.removed, 1);
         assert!(state.inherit(1, 0));
         let pending: Vec<usize> = state.pending(0).iter().map(|(p, _)| *p).collect();
         assert_eq!(pending, vec![2, 3]);
