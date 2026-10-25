@@ -28,6 +28,8 @@
 //! 经 IPC 转发）。
 
 use std::collections::{HashMap, HashSet, VecDeque};
+
+use futures_util::StreamExt as _;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
@@ -75,6 +77,8 @@ pub const DEFAULT_IMPORTANCE_FLOOR: f64 = 0.35;
 const LLM_MAX_TOKENS: u32 = 8192;
 /// 送给 LLM 的单条摘要最大字符数（控制单批提示长度）。
 const PROMPT_SUMMARY_CHARS: usize = 800;
+/// 默认 LLM 并发请求数。
+pub const DEFAULT_CONCURRENCY: usize = 4;
 /// LLM 请求失败后的默认重试次数（含首次共尝试 N 次）。
 pub const DEFAULT_LLM_RETRY_ATTEMPTS: usize = 3;
 /// LLM 请求失败后的默认重试间隔。
@@ -144,6 +148,8 @@ pub struct ConsolidationOptions {
     pub journal: Option<Arc<Journal>>,
     /// 停止请求（Ctrl+C）：在当前批次落库完成后停止，不留下半完成的合并。
     pub stop: Arc<std::sync::atomic::AtomicBool>,
+    /// LLM 并发请求数（至少 1）。判定并发进行，落库仍按顺序串行。
+    pub concurrency: usize,
 }
 
 impl Default for ConsolidationOptions {
@@ -171,6 +177,7 @@ impl Default for ConsolidationOptions {
             distill_batch_size: DEFAULT_DISTILL_BATCH_SIZE,
             journal: None,
             stop: Arc::default(),
+            concurrency: DEFAULT_CONCURRENCY,
         }
     }
 }
@@ -400,6 +407,8 @@ pub struct ConsolidationReport {
     pub entity_relinked: usize,
     /// entity：是否因达到 LLM 调用上限提前停止。
     pub entity_budget_exhausted: bool,
+    /// entity：进行中的 LLM 请求数（并发时控制调用上限，内部使用）。
+    pub entity_inflight: usize,
 }
 
 impl ConsolidationReport {
@@ -981,71 +990,98 @@ async fn consolidate_page(
     let mut queue: VecDeque<usize> = order.into_iter().collect();
     let mut handled = 0;
     let batch_size = options.batch_size.max(2);
-    while let Some(seed) = queue.pop_front() {
-        if options.stop_requested() {
-            report.stopped = true;
-            break;
-        }
-        if !state.alive[seed] {
-            continue;
-        }
-        // 达到种子上限后整体停止（含排队等待继续判定的主记忆）。
-        if options.max_nodes > 0 && handled >= options.max_nodes {
-            break;
-        }
-        if !state.visited[seed] {
-            state.visited[seed] = true;
-            handled += 1;
-            report.processed += 1;
-            if let Some(callback) = progress {
-                // 分母为当前存活数：被合并/删除的记忆不再处理，分母随之减少。
-                callback(&format!(
-                    "第 {} 批整理中 [{}/{}]（已删除 {} 条）{}",
-                    page_no,
-                    handled,
-                    state.alive_count(),
-                    state.removed,
-                    one_line(&state.nodes[seed].title, 40)
-                ));
-            }
-            // 1) 规则低质量遗忘。
-            if options.forget_low_quality
-                && let Some(reason) = rule_low_quality(&state.nodes[seed], options)
-            {
-                let node = state.nodes[seed].clone();
-                if let Err(err) =
-                    delete_with_journal(provider, options, &node, "similar", &reason, None, None)
-                        .await
-                {
-                    fail(report, &node.id, err);
-                    break;
-                }
-                state.remove(seed);
-                report.forgotten += 1;
-                report.actions.push(format!(
-                    "删除低质量记忆「{}」（{}）{}",
-                    one_line(&state.nodes[seed].title, 40),
-                    reason,
-                    dry_run_tag(options)
-                ));
-                continue;
-            }
-        }
-        // 2) 种子与全部尚未一起判定过的相似记忆，分批交 LLM 统一判定。
-        let mut fatal = false;
-        loop {
-            let pending = state.pending(seed);
-            if pending.is_empty() {
+    let concurrency = options.concurrency.max(1);
+    // 并发调度：同时在途的批次两两不共享记忆（busy），LLM 判定并发进行；
+    // 结果按返回顺序逐批落库（只有一个写入者，落库期间状态不被其他批次修改）。
+    // 在途批次的记忆不会被其他批次合并或删除，送审时的快照即落库时的状态。
+    let mut busy: HashSet<usize> = HashSet::new();
+    // 相似候选全部在途、暂时无法组批的种子：有批次落库后重新排队。
+    let mut deferred: Vec<usize> = Vec::new();
+    let mut inflight = futures_util::stream::FuturesUnordered::new();
+    let mut launched = 0usize;
+    let mut aborted = false;
+    loop {
+        // 1) 补满并发窗口。
+        while !aborted
+            && !report.stopped
+            && !report.llm_budget_exhausted
+            && inflight.len() < concurrency
+        {
+            let Some(seed) = queue.pop_front() else {
                 break;
-            }
+            };
             if options.stop_requested() {
                 report.stopped = true;
                 break;
             }
-            if options.max_llm_calls > 0
-                && report.llm_calls - report.similar_llm_base >= options.max_llm_calls
-            {
+            if !state.alive[seed] {
+                continue;
+            }
+            if busy.contains(&seed) {
+                deferred.push(seed);
+                continue;
+            }
+            // 达到种子上限后整体停止（含排队等待继续判定的主记忆）。
+            if options.max_nodes > 0 && handled >= options.max_nodes && !state.visited[seed] {
+                queue.clear();
+                break;
+            }
+            if !state.visited[seed] {
+                state.visited[seed] = true;
+                handled += 1;
+                report.processed += 1;
+                if let Some(callback) = progress {
+                    // 分母为当前存活数：被合并/删除的记忆不再处理，分母随之减少。
+                    callback(&format!(
+                        "第 {} 批整理中 [{}/{}]（已删除 {} 条）{}",
+                        page_no,
+                        handled,
+                        state.alive_count(),
+                        state.removed,
+                        one_line(&state.nodes[seed].title, 40)
+                    ));
+                }
+                // 规则低质量遗忘（不调用 LLM，直接落库）。
+                if options.forget_low_quality
+                    && let Some(reason) = rule_low_quality(&state.nodes[seed], options)
+                {
+                    let node = state.nodes[seed].clone();
+                    if let Err(err) = delete_with_journal(
+                        provider, options, &node, "similar", &reason, None, None,
+                    )
+                    .await
+                    {
+                        fail(report, &node.id, err);
+                        aborted = true;
+                        break;
+                    }
+                    state.remove(seed);
+                    report.forgotten += 1;
+                    report.actions.push(format!(
+                        "删除低质量记忆「{}」（{}）{}",
+                        one_line(&state.nodes[seed].title, 40),
+                        reason,
+                        dry_run_tag(options)
+                    ));
+                    continue;
+                }
+            }
+            // 种子与尚未一起判定过、且不在途的相似记忆组批。
+            let all_pending = state.pending(seed);
+            if all_pending.is_empty() {
+                continue;
+            }
+            let pending: Vec<(usize, f32)> = all_pending
+                .into_iter()
+                .filter(|(other, _)| !busy.contains(other))
+                .collect();
+            if pending.is_empty() {
+                deferred.push(seed);
+                continue;
+            }
+            if options.max_llm_calls > 0 && launched >= options.max_llm_calls {
                 report.llm_budget_exhausted = true;
+                queue.push_front(seed);
                 break;
             }
             let left = pending.len();
@@ -1054,33 +1090,101 @@ async fn consolidate_page(
             let scores: HashMap<usize, f32> = pending.into_iter().collect();
             if let Some(callback) = progress {
                 callback(&format!(
-                    "  LLM 判定：种子 + {} 条相似记忆（该种子剩余候选 {}）",
+                    "  LLM 判定：种子 + {} 条相似记忆（该种子剩余候选 {}，并发 {}）",
                     batch.len() - 1,
-                    left
+                    left,
+                    inflight.len() + 1
                 ));
             }
-            let requeue =
-                match judge_batch(provider, &mut state, &batch, &scores, options, report).await {
-                    Ok(requeue) => requeue,
-                    Err(err) => {
-                        let node_id = state.nodes[seed].id.clone();
-                        fail(report, &node_id, err);
-                        fatal = true;
-                        break;
+            state.mark_judged(&batch);
+            busy.extend(batch.iter().copied());
+            launched += 1;
+            let members: Vec<MemoryNode> = batch
+                .iter()
+                .map(|position| state.nodes[*position].clone())
+                .collect();
+            let rule = options.llm.is_none().then(|| rule_decision(&state, &batch));
+            inflight.push(async move {
+                let ids: Vec<String> = members.iter().map(|node| node.id.clone()).collect();
+                let relations = provider().list_relations_batch(ids).await;
+                let result = match (options.llm.as_ref(), rule) {
+                    (Some(model), _) => {
+                        let refs: Vec<&MemoryNode> = members.iter().collect();
+                        let similarity: Vec<Option<f32>> = batch
+                            .iter()
+                            .map(|position| scores.get(position).copied())
+                            .collect();
+                        let prompt = build_batch_prompt(&refs, &similarity, &relations);
+                        let label = format!("记忆 {} 所在批次", members[0].id);
+                        call_llm_json::<BatchDecision>(
+                            model,
+                            CONSOLIDATION_SYSTEM,
+                            &prompt,
+                            &label,
+                            members.len(),
+                            options,
+                        )
+                        .await
+                        .map(|(decision, raw)| (decision, Some((label, prompt, raw))))
                     }
+                    (None, rule) => Ok((rule.unwrap_or_default(), None)),
                 };
-            // 合并后的主记忆获得新候选：排到队尾继续判定。
-            for position in requeue {
-                if position != seed {
-                    queue.push_back(position);
-                }
-            }
-            if !state.alive[seed] {
+                (seed, batch, scores, relations, result)
+            });
+        }
+        // 2) 等待一个在途批次并落库。
+        let Some((seed, batch, scores, relations, result)) = inflight.next().await else {
+            if deferred.is_empty() || aborted || report.stopped || report.llm_budget_exhausted {
                 break;
             }
+            // 没有在途批次：被推迟的种子此时一定能组批。
+            queue.extend(deferred.drain(..));
+            continue;
+        };
+        for position in &batch {
+            busy.remove(position);
         }
-        if fatal || report.llm_budget_exhausted || report.stopped {
-            break;
+        // 有记忆释放：被推迟的种子重新排到队首。
+        for position in deferred.drain(..).rev() {
+            queue.push_front(position);
+        }
+        if aborted {
+            // 已中断：已发出的请求结果丢弃（未落库，下次重新判定）。
+            continue;
+        }
+        let applied = async {
+            let (decision, record) = result?;
+            if let Some((label, prompt, raw)) = record {
+                record_llm_decision(options, report, &label, &prompt, &raw)?;
+            }
+            report.reviewed += batch.len();
+            let plan = validate_plan(&state, &batch, decision);
+            apply_plan(
+                provider, &mut state, &batch, &scores, plan, &relations, options, report,
+            )
+            .await
+        }
+        .await;
+        match applied {
+            Ok(requeue) => {
+                // 种子还有未判定的候选：排到队首继续；合并后获得新候选的主记忆排到队尾。
+                if state.alive[seed] && !state.pending(seed).is_empty() {
+                    queue.push_front(seed);
+                }
+                for position in requeue {
+                    if position != seed {
+                        queue.push_back(position);
+                    }
+                }
+            }
+            Err(err) => {
+                let node_id = state.nodes[seed].id.clone();
+                fail(report, &node_id, err);
+                aborted = true;
+            }
+        }
+        if options.stop_requested() {
+            report.stopped = true;
         }
     }
     report.remaining += (0..total)
@@ -1377,44 +1481,6 @@ struct ValidPlan {
     forget: Vec<(usize, String)>,
     reclassify: Vec<(usize, MemoryCognitiveType, String)>,
     relations: Vec<RelationPlan>,
-}
-
-/// 判定一批记忆并落库，返回获得新候选、需要重新排队的主记忆位置。
-async fn judge_batch(
-    provider: HandleProvider<'_>,
-    state: &mut PageState,
-    batch: &[usize],
-    scores: &HashMap<usize, f32>,
-    options: &ConsolidationOptions,
-    report: &mut ConsolidationReport,
-) -> anyhow::Result<Vec<usize>> {
-    state.mark_judged(batch);
-    report.reviewed += batch.len();
-    let ids: Vec<String> = batch
-        .iter()
-        .map(|position| state.nodes[*position].id.clone())
-        .collect();
-    let relations = provider().list_relations_batch(ids).await;
-    let decision = match options.llm.as_ref() {
-        Some(model) => {
-            let members: Vec<&MemoryNode> = batch
-                .iter()
-                .map(|position| &state.nodes[*position])
-                .collect();
-            let similarity: Vec<Option<f32>> = batch
-                .iter()
-                .map(|position| scores.get(position).copied())
-                .collect();
-            request_decision_with_retry(model, &members, &similarity, &relations, options, report)
-                .await?
-        }
-        None => rule_decision(state, batch),
-    };
-    let plan = validate_plan(state, batch, decision);
-    apply_plan(
-        provider, state, batch, scores, plan, &relations, options, report,
-    )
-    .await
 }
 
 /// 未配置 LLM 时的保守规则：只合并文本完全相同的记忆（主记忆取重要性最高者）。
@@ -2023,62 +2089,21 @@ struct RelationPlan {
     note: Option<String>,
 }
 
-/// 带重试的 LLM 判定请求：失败时间隔 `llm_retry_delay` 后重试，共尝试
-/// `llm_retry_attempts` 次；重试耗尽返回错误（调用方应中断整理）。
-async fn request_decision_with_retry(
-    model: &LlmEndpointConfig,
-    members: &[&MemoryNode],
-    similarity: &[Option<f32>],
-    relations: &[MemoryRelation],
-    options: &ConsolidationOptions,
-    report: &mut ConsolidationReport,
-) -> anyhow::Result<BatchDecision> {
-    let seed = members.first().map(|node| node.id.as_str()).unwrap_or("?");
-    let prompt = build_batch_prompt(members, similarity, relations);
-    request_json_with_retry(
-        model,
-        CONSOLIDATION_SYSTEM,
-        &prompt,
-        &format!("记忆 {seed} 所在批次"),
-        members.len(),
-        options,
-        report,
-    )
-    .await
-}
-
-/// 通用 LLM JSON 请求（带重试）：成功计入 `llm_calls`；重试耗尽返回错误，
-/// 调用方应中断整理（本批未写入任何改动）。
-pub(crate) async fn request_json_with_retry<T: serde::de::DeserializeOwned>(
+/// 只发请求（带重试），不触碰报告：可并发执行。结果须由调用方在落库前经
+/// [`record_llm_decision`] 记录。
+pub(crate) async fn call_llm_json<T: serde::de::DeserializeOwned>(
     model: &LlmEndpointConfig,
     system: &str,
     prompt: &str,
     label: &str,
     items: usize,
     options: &ConsolidationOptions,
-    report: &mut ConsolidationReport,
-) -> anyhow::Result<T> {
+) -> anyhow::Result<(T, String)> {
     let attempts = options.llm_retry_attempts.max(1);
     let mut last_err = None;
     for attempt in 1..=attempts {
         match request_json::<T>(model, system, prompt, items).await {
-            Ok((decision, raw)) => {
-                report.llm_calls += 1;
-                report.used_llm = true;
-                // 完整保留送审内容与 LLM 原始判定，便于追溯每次删除的依据。
-                options.record(
-                    "llm_decision",
-                    serde_json::json!({
-                        "label": label,
-                        "call": report.llm_calls,
-                        "prompt": serde_json::from_str::<serde_json::Value>(prompt)
-                            .unwrap_or_else(|_| prompt.into()),
-                        "response": serde_json::from_str::<serde_json::Value>(&raw)
-                            .unwrap_or_else(|_| raw.clone().into()),
-                    }),
-                )?;
-                return Ok(decision);
-            }
+            Ok(result) => return Ok(result),
             Err(err) => {
                 tracing::warn!("{label}的 LLM 判定失败（第 {attempt}/{attempts} 次）：{err:#}");
                 last_err = Some(err);
@@ -2092,6 +2117,30 @@ pub(crate) async fn request_json_with_retry<T: serde::de::DeserializeOwned>(
         "{label}的 LLM 判定连续 {attempts} 次失败，中断整理（本批未写入任何改动）：{:#}",
         last_err.unwrap_or_else(|| anyhow::anyhow!("未知错误"))
     ))
+}
+
+/// 记录一次成功的 LLM 判定（计数 + 执行记录），在落库前调用。
+pub(crate) fn record_llm_decision(
+    options: &ConsolidationOptions,
+    report: &mut ConsolidationReport,
+    label: &str,
+    prompt: &str,
+    raw: &str,
+) -> anyhow::Result<()> {
+    report.llm_calls += 1;
+    report.used_llm = true;
+    // 完整保留送审内容与 LLM 原始判定，便于追溯每次删除的依据。
+    options.record(
+        "llm_decision",
+        serde_json::json!({
+            "label": label,
+            "call": report.llm_calls,
+            "prompt": serde_json::from_str::<serde_json::Value>(prompt)
+                .unwrap_or_else(|_| prompt.into()),
+            "response": serde_json::from_str::<serde_json::Value>(raw)
+                .unwrap_or_else(|_| raw.to_string().into()),
+        }),
+    )
 }
 
 async fn request_json<T: serde::de::DeserializeOwned>(

@@ -345,6 +345,8 @@ enum Decider {
 struct MockLlm {
     base_url: String,
     requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    /// 同时在处理的请求数峰值（验证并发）。
+    peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     shutdown: Option<std::sync::mpsc::Sender<()>>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -361,7 +363,16 @@ impl MockLlm {
     }
 
     fn start_with(decider: Decider) -> Self {
+        Self::start_with_delay(decider, std::time::Duration::ZERO)
+    }
+
+    /// 每个请求在独立线程处理，应答前等待 `delay`（模拟 LLM 延迟、验证并发）。
+    fn start_with_delay(decider: Decider, delay: std::time::Duration) -> Self {
         use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let active = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak_out = peak.clone();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定 LLM 服务失败");
         let addr = listener.local_addr().expect("读取地址失败");
         listener.set_nonblocking(true).expect("设置非阻塞失败");
@@ -382,95 +393,109 @@ impl MockLlm {
                     Err(_) => break,
                 };
                 stream.set_nonblocking(false).ok();
-                let mut buffer = Vec::new();
-                let mut chunk = [0u8; 16384];
-                let body = loop {
-                    let Ok(read) = stream.read(&mut chunk) else {
-                        break None;
-                    };
-                    if read == 0 {
-                        break None;
-                    }
-                    buffer.extend_from_slice(&chunk[..read]);
-                    let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
-                        continue;
-                    };
-                    let headers = String::from_utf8_lossy(&buffer[..end]).to_string();
-                    let length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .unwrap_or(0);
-                    while buffer.len() < end + 4 + length {
-                        match stream.read(&mut chunk) {
-                            Ok(0) | Err(_) => break,
-                            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                let seen = seen.clone();
+                let active = active.clone();
+                let peak = peak.clone();
+                std::thread::spawn(move || {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    let mut buffer = Vec::new();
+                    let mut chunk = [0u8; 16384];
+                    let body = loop {
+                        let Ok(read) = stream.read(&mut chunk) else {
+                            break None;
+                        };
+                        if read == 0 {
+                            break None;
                         }
-                    }
-                    break String::from_utf8(buffer[end + 4..].to_vec()).ok();
-                };
-                // 取最后一条用户消息（JSON 提示）。
-                let prompt: serde_json::Value = body
-                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-                    .and_then(|value| {
-                        let messages = value.get("messages")?.as_array()?.clone();
-                        let content = messages.last()?.get("content")?.as_str()?.to_string();
-                        serde_json::from_str::<serde_json::Value>(&content).ok()
+                        buffer.extend_from_slice(&chunk[..read]);
+                        let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&buffer[..end]).to_string();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        while buffer.len() < end + 4 + length {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                            }
+                        }
+                        break String::from_utf8(buffer[end + 4..].to_vec()).ok();
+                    };
+                    // 取最后一条用户消息（JSON 提示）。
+                    let prompt: serde_json::Value = body
+                        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                        .and_then(|value| {
+                            let messages = value.get("messages")?.as_array()?.clone();
+                            let content = messages.last()?.get("content")?.as_str()?.to_string();
+                            serde_json::from_str::<serde_json::Value>(&content).ok()
+                        })
+                        .unwrap_or(serde_json::Value::Null);
+                    let members: Vec<(String, String)> = prompt
+                        .get("memories")
+                        .or_else(|| prompt.get("logs"))
+                        .and_then(|value| value.as_array().cloned())
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|item| {
+                            (
+                                item["id"].as_str().unwrap_or_default().to_string(),
+                                item["title"]
+                                    .as_str()
+                                    .or_else(|| item["tool"].as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            )
+                        })
+                        .collect();
+                    seen.lock()
+                        .unwrap()
+                        .push(members.iter().map(|(id, _)| id.clone()).collect());
+                    let content = match decider {
+                        Decider::Members(decide) => decide(&members),
+                        Decider::Raw(decide) => decide(&prompt),
+                    };
+                    std::thread::sleep(delay);
+                    let payload = serde_json::json!({
+                        "id": "mock",
+                        "object": "chat.completion",
+                        "model": "mock",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}
                     })
-                    .unwrap_or(serde_json::Value::Null);
-                let members: Vec<(String, String)> = prompt
-                    .get("memories")
-                    .or_else(|| prompt.get("logs"))
-                    .and_then(|value| value.as_array().cloned())
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|item| {
-                        (
-                            item["id"].as_str().unwrap_or_default().to_string(),
-                            item["title"]
-                                .as_str()
-                                .or_else(|| item["tool"].as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                        )
-                    })
-                    .collect();
-                seen.lock()
-                    .unwrap()
-                    .push(members.iter().map(|(id, _)| id.clone()).collect());
-                let content = match decider {
-                    Decider::Members(decide) => decide(&members),
-                    Decider::Raw(decide) => decide(&prompt),
-                };
-                let payload = serde_json::json!({
-                    "id": "mock",
-                    "object": "chat.completion",
-                    "model": "mock",
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}
-                })
-                .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-                    payload.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
             }
         });
         Self {
             base_url: format!("http://{addr}"),
             requests,
+            peak: peak_out,
             shutdown: Some(tx),
             join: Some(join),
         }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn config(&self) -> LlmEndpointConfig {
@@ -1260,4 +1285,63 @@ fn entity_mock(prompt: &serde_json::Value) -> String {
         "evidences": []
     })
     .to_string()
+}
+
+/// 并发判定：互不相干的相似组同时送审（峰值并发 > 1），落库结果与串行一致；
+/// 在途批次之间不共享记忆。
+#[tokio::test]
+#[serial]
+async fn similar_judges_independent_groups_concurrently() {
+    let _env = EnvGuard::enter();
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    // 4 组互不相似的记忆，每组 3 条近似重复（标题以「同一事实」开头的会被合并）。
+    let topics = [
+        "Redis Sentinel 配置在 infra/redis/sentinel.conf 负责主从切换",
+        "Kubernetes HPA 根据 CPU 利用率自动扩缩容 deployment 副本数",
+        "PostgreSQL 流复制搭建只读副本并在故障时切换到 standby 节点",
+        "Nginx 反向代理开启 gzip 压缩并配置 upstream 健康检查与超时",
+    ];
+    for topic in topics {
+        for index in 0..3 {
+            save_in(&handle, &format!("同一事实 {index}"), topic, 0.6, None).await;
+        }
+    }
+    let llm = MockLlm::start_with_delay(
+        Decider::Members(merge_same_fact),
+        std::time::Duration::from_millis(300),
+    );
+    let started = std::time::Instant::now();
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Similar],
+            similarity_threshold: 0.6,
+            llm: Some(llm.config()),
+            llm_retry_attempts: 1,
+            forget_low_quality: false,
+            concurrency: 4,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    assert!(
+        llm.peak() > 1,
+        "互不相干的组应并发送审：peak={}",
+        llm.peak()
+    );
+    // 每组 3 条合并为 1 条。
+    assert_eq!(report.merged_away, 8, "{}", report.render());
+    assert_eq!(all_active(&handle).await.len(), 4);
+    // 在途批次不共享记忆：同一条记忆不会同时出现在两个请求里被合并两次。
+    let requests = llm.requests();
+    let total: usize = requests.iter().map(Vec::len).sum();
+    assert!(total <= 12 + 4, "不应重复送审：{requests:?}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(300 * requests.len() as u64),
+        "并发应快于串行：{elapsed:?}，请求 {}",
+        requests.len()
+    );
 }

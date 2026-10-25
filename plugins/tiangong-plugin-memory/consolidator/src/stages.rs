@@ -22,10 +22,11 @@ use tiangong_memory::{
 
 use crate::consolidation::{
     ConsolidationOptions, ConsolidationProgress, ConsolidationReport, HandleProvider,
-    delete_with_journal, dry_run_tag, memory_type_key, normalize_keywords, normalized_key,
-    one_line, parse_memory_type, parse_timestamp, relation_weights, relink_relations,
-    request_json_with_retry, truncate, upsert_relation_max, upsert_with_journal,
+    call_llm_json, delete_with_journal, dry_run_tag, memory_type_key, normalize_keywords,
+    normalized_key, one_line, parse_memory_type, parse_timestamp, record_llm_decision,
+    relation_weights, relink_relations, truncate, upsert_relation_max, upsert_with_journal,
 };
+use futures_util::StreamExt as _;
 
 /// dedup：摘要短于该字符数的记忆不参与归一（短摘要撞车概率高，信息不足以判断）。
 pub const DEFAULT_DEDUP_MIN_SUMMARY_CHARS: usize = 20;
@@ -464,59 +465,118 @@ pub(crate) async fn run_entity(
             report.entity_names, report.entity_members
         ));
     }
+    // 不同名称的组互不相干，组之间并发；同一组内的多批依赖上一批的合并结果，
+    // 在组内顺序执行。落库经共享状态串行（Mutex 只在落库时持有，LLM 请求期间
+    // 不持锁），执行记录与报告保持一致。
     let base_calls = report.llm_calls;
+    let concurrency = options.concurrency.max(1);
+    let shared = tokio::sync::Mutex::new((std::mem::take(removed), std::mem::take(report)));
+    let budget_hit = std::sync::atomic::AtomicBool::new(false);
+    let total = groups.len();
+    let results: Vec<anyhow::Result<()>> = futures_util::stream::iter(groups.iter().enumerate())
+        .map(|(index, members)| {
+            let shared = &shared;
+            let budget_hit = &budget_hit;
+            async move {
+                run_entity_group(
+                    provider, nodes, model, options, members, index, total, base_calls, shared,
+                    budget_hit, progress,
+                )
+                .await
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+    let (shared_removed, shared_report) = shared.into_inner();
+    *removed = shared_removed;
+    *report = shared_report;
+    if budget_hit.load(std::sync::atomic::Ordering::SeqCst) {
+        report.entity_budget_exhausted = true;
+    }
+    if options.stop_requested() {
+        report.stopped = true;
+    }
+    results.into_iter().collect::<anyhow::Result<Vec<()>>>()?;
+    Ok(())
+}
+
+/// 处理一个同名组：大组分批，每批以当前主记忆（上一批合并结果）打头。
+#[allow(clippy::too_many_arguments)]
+async fn run_entity_group(
+    provider: HandleProvider<'_>,
+    nodes: &[MemoryNode],
+    model: &tiangong_llm::LlmEndpointConfig,
+    options: &ConsolidationOptions,
+    members: &[usize],
+    index: usize,
+    total: usize,
+    base_calls: usize,
+    shared: &tokio::sync::Mutex<(HashSet<String>, ConsolidationReport)>,
+    budget_hit: &std::sync::atomic::AtomicBool,
+    progress: Option<ConsolidationProgress<'_>>,
+) -> anyhow::Result<()> {
     let batch_size = ENTITY_BATCH_SIZE.max(2);
-    for (index, members) in groups.iter().enumerate() {
-        // 大组分批：每批以当前主记忆（上一批合并结果）打头，再接 batch_size-1 条新成员。
-        let mut carry: Option<usize> = None;
-        let mut rest: &[usize] = members;
-        while !rest.is_empty() {
-            if options.stop_requested() {
-                report.stopped = true;
+    let mut carry: Option<usize> = None;
+    let mut rest: &[usize] = members;
+    while !rest.is_empty() {
+        if options.stop_requested() || budget_hit.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let take = batch_size - usize::from(carry.is_some());
+        let (head, tail) = rest.split_at(take.min(rest.len()));
+        rest = tail;
+        let batch: Vec<usize> = {
+            let guard = shared.lock().await;
+            // 调用上限：已完成 + 进行中的估算由锁内计数保证不超发。
+            if options.max_llm_calls > 0
+                && guard.1.llm_calls + guard.1.entity_inflight - base_calls >= options.max_llm_calls
+            {
+                budget_hit.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Ok(());
             }
-            if options.max_llm_calls > 0 && report.llm_calls - base_calls >= options.max_llm_calls {
-                report.entity_budget_exhausted = true;
-                return Ok(());
-            }
-            let take = batch_size - usize::from(carry.is_some());
-            let (head, tail) = rest.split_at(take.min(rest.len()));
-            rest = tail;
             let mut batch: Vec<usize> = carry.into_iter().collect();
             batch.extend(
                 head.iter()
                     .copied()
-                    .filter(|position| !removed.contains(&nodes[*position].id)),
+                    .filter(|position| !guard.0.contains(&nodes[*position].id)),
             );
-            if batch.len() < 2 {
-                continue;
-            }
-            if let Some(callback) = progress {
-                callback(&format!(
-                    "entity [{}/{}]「{}」：{} 条（已删除实体 {} 条）",
-                    index + 1,
-                    groups.len(),
-                    one_line(&nodes[batch[0]].title, 30),
-                    batch.len(),
-                    report.entity_removed
-                ));
-            }
-            let prompt = build_entity_prompt(nodes, &batch);
-            let decision: EntityDecision = request_json_with_retry(
-                model,
-                ENTITY_SYSTEM,
-                &prompt,
-                &format!("entity「{}」", one_line(&nodes[batch[0]].title, 30)),
-                batch.len(),
-                options,
-                report,
-            )
-            .await?;
-            report.entity_batches += 1;
-            carry = apply_entity(provider, nodes, &batch, decision, options, removed, report)
-                .await?
-                .or(carry.filter(|position| !removed.contains(&nodes[*position].id)));
+            batch
+        };
+        if batch.len() < 2 {
+            continue;
         }
+        shared.lock().await.1.entity_inflight += 1;
+        let label = format!("entity「{}」", one_line(&nodes[batch[0]].title, 30));
+        let prompt = build_entity_prompt(nodes, &batch);
+        let result = call_llm_json::<EntityDecision>(
+            model,
+            ENTITY_SYSTEM,
+            &prompt,
+            &label,
+            batch.len(),
+            options,
+        )
+        .await;
+        let mut guard = shared.lock().await;
+        guard.1.entity_inflight -= 1;
+        let (decision, raw) = result?;
+        let (removed, report) = &mut *guard;
+        if let Some(callback) = progress {
+            callback(&format!(
+                "entity [{}/{}]「{}」：{} 条（已删除实体 {} 条）",
+                index + 1,
+                total,
+                one_line(&nodes[batch[0]].title, 30),
+                batch.len(),
+                report.entity_removed
+            ));
+        }
+        record_llm_decision(options, report, &label, &prompt, &raw)?;
+        report.entity_batches += 1;
+        carry = apply_entity(provider, nodes, &batch, decision, options, removed, report)
+            .await?
+            .or(carry.filter(|position| !removed.contains(&nodes[*position].id)));
     }
     Ok(())
 }
@@ -930,16 +990,64 @@ pub(crate) async fn run_distill(
             options.distill_batch_size
         ));
     }
-    let base_calls = report.llm_calls;
-    for (index, batch) in batches.iter().enumerate() {
-        if options.stop_requested() {
-            report.stopped = true;
-            break;
+    // 各批之间没有共享日志，LLM 判定可以并发；落库按批次顺序串行进行（写入
+    // 只有一个 Leader，且保证执行记录顺序与落库一致）。
+    let mut limit = batches.len();
+    if options.max_llm_calls > 0 {
+        limit = limit.min(options.max_llm_calls);
+    }
+    let concurrency = options.concurrency.max(1);
+    let mut next = 0usize;
+    let mut pending: futures_util::stream::FuturesOrdered<_> = Default::default();
+    let mut aborted: Option<anyhow::Error> = None;
+    loop {
+        // 补满并发窗口（停止请求后不再发起新请求，已发出的继续落库）。
+        while pending.len() < concurrency && next < limit && !options.stop_requested() {
+            let index = next;
+            next += 1;
+            let batch = &batches[index];
+            let ids: Vec<String> = batch
+                .logs
+                .iter()
+                .map(|position| nodes[*position].id.clone())
+                .collect();
+            let pool = pools.get(&batch.scope).map(Vec::as_slice).unwrap_or(&[]);
+            let context = pick_context(nodes, pool, &batch.logs, options.distill_window_minutes);
+            let label = format!("distill 第 {} 批（{}）", index + 1, batch.scope);
+            pending.push_back(async move {
+                let result = async {
+                    let paths = load_evidence_paths(provider, ids).await?;
+                    let prompt = build_distill_prompt(nodes, batch, &context, &paths);
+                    let (decision, raw) = call_llm_json::<DistillDecision>(
+                        model,
+                        DISTILL_SYSTEM,
+                        &prompt,
+                        &label,
+                        batch.logs.len() + context.len(),
+                        options,
+                    )
+                    .await?;
+                    Ok::<_, anyhow::Error>((decision, raw, prompt))
+                }
+                .await;
+                (index, context, label, result)
+            });
         }
-        if options.max_llm_calls > 0 && report.llm_calls - base_calls >= options.max_llm_calls {
-            report.distill_budget_exhausted = true;
+        let Some((index, context, label, result)) = pending.next().await else {
             break;
+        };
+        if aborted.is_some() {
+            // 已中断：等待已发出的请求结束，结果丢弃（未落库，下次重新判定）。
+            continue;
         }
+        let (decision, raw, prompt) = match result {
+            Ok(value) => value,
+            Err(err) => {
+                aborted = Some(err);
+                continue;
+            }
+        };
+        let batch = &batches[index];
         if let Some(callback) = progress {
             callback(&format!(
                 "distill [{}/{}] {}：{} 条日志（已删除日志 {} 条，新经历 {} 条）",
@@ -951,30 +1059,26 @@ pub(crate) async fn run_distill(
                 report.distill_created
             ));
         }
-        let ids: Vec<String> = batch
-            .logs
-            .iter()
-            .map(|position| nodes[*position].id.clone())
-            .collect();
-        let paths = load_evidence_paths(provider, ids.clone()).await?;
-        let pool = pools.get(&batch.scope).map(Vec::as_slice).unwrap_or(&[]);
-        let context = pick_context(nodes, pool, &batch.logs, options.distill_window_minutes);
-        let prompt = build_distill_prompt(nodes, batch, &context, &paths);
-        let decision: DistillDecision = request_json_with_retry(
-            model,
-            DISTILL_SYSTEM,
-            &prompt,
-            &format!("distill 第 {} 批（{}）", index + 1, batch.scope),
-            batch.logs.len() + context.len(),
-            options,
-            report,
-        )
-        .await?;
-        report.distill_batches += 1;
-        apply_distill(
-            provider, nodes, batch, &context, decision, options, removed, report,
-        )
-        .await?;
+        let applied = async {
+            record_llm_decision(options, report, &label, &prompt, &raw)?;
+            report.distill_batches += 1;
+            apply_distill(
+                provider, nodes, batch, &context, decision, options, removed, report,
+            )
+            .await
+        }
+        .await;
+        if let Err(err) = applied {
+            aborted = Some(err);
+        }
+    }
+    if let Some(err) = aborted {
+        return Err(err);
+    }
+    if options.stop_requested() && next < batches.len() {
+        report.stopped = true;
+    } else if next < batches.len() {
+        report.distill_budget_exhausted = true;
     }
     Ok(())
 }

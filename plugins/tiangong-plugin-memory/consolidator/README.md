@@ -35,6 +35,7 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 | `--max-llm-calls <n>` | 每个阶段最多调用多少次 LLM，`0` 表示不限 | `0` |
 | `--distill-batch-size <n>` | distill：每次 LLM 调用最多包含的工具日志数 | `40` |
 | `--distill-window-minutes <n>` | distill：相邻工具日志间隔超过该分钟数即切分时间段 | `30` |
+| `--concurrency <n>` | LLM 并发请求数：判定并发进行，落库仍按顺序串行（受模型服务限流约束） | `4` |
 | `--journal <文件>` | 执行记录（JSON Lines）路径 | `<根目录>/data/memory-consolidation/<时间>-<阶段>[-dry-run]-<pid>.jsonl` |
 
 建议第一次先用 `--dry-run` 预览将要发生的合并与遗忘，确认后再正式执行。
@@ -102,6 +103,11 @@ tiangong-memory-consolidator --stage similar --dry-run --max-llm-calls 5
 整理一律跨工作区：召回不按工作区过滤，同一内容在多个工作区各存一份只是重复。
 similar 的 LLM 提示也允许跨工作区合并，只有记忆描述的是不同项目各自特有的事实时
 才保留。
+
+**并发**：entity 不同名称的组之间并发（组内多批顺序执行）；distill 各时间段批次
+并发、按批次顺序落库；similar 同时在途的批次两两不共享记忆，结果返回后逐批落库，
+被在途批次占用的种子推迟到释放后再组批。写入始终只有一个 Leader、按顺序执行，
+执行记录与落库顺序一致。遇到限流（429）时调低 `--concurrency`。
 
 `--max-llm-calls` 对 entity、distill 与 similar 分别计算。只执行 dedup 时不要求配置
 LLM，也不读取/补写向量。

@@ -28,8 +28,9 @@ use tiangong_memory::election::{
 use tiangong_memory::{MemoryConfig, MemoryLlmSource, MemoryOptions};
 
 use tiangong_memory_consolidator::consolidation::{
-    ConsolidationOptions, ConsolidationStage, DEFAULT_BATCH_SIZE, DEFAULT_DISTILL_BATCH_SIZE,
-    DEFAULT_DISTILL_WINDOW_MINUTES, DEFAULT_SIMILARITY_THRESHOLD, run_consolidation,
+    ConsolidationOptions, ConsolidationStage, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY,
+    DEFAULT_DISTILL_BATCH_SIZE, DEFAULT_DISTILL_WINDOW_MINUTES, DEFAULT_SIMILARITY_THRESHOLD,
+    run_consolidation,
 };
 use tiangong_memory_consolidator::journal::Journal;
 use tiangong_memory_consolidator::vector_repair::repair_missing_vectors;
@@ -84,6 +85,9 @@ struct Cli {
     /// distill：相邻工具日志间隔超过该分钟数即切分时间段
     #[arg(long, default_value_t = DEFAULT_DISTILL_WINDOW_MINUTES)]
     distill_window_minutes: i64,
+    /// LLM 并发请求数：判定并发进行、落库仍串行（缺省 4；受模型服务限流约束）
+    #[arg(long, default_value_t = DEFAULT_CONCURRENCY)]
+    concurrency: usize,
     /// 执行记录文件（JSON Lines）；缺省写到
     /// <根目录>/data/memory-consolidation/<时间>-<阶段>[-dry-run]-<pid>.jsonl
     #[arg(long)]
@@ -255,6 +259,7 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         distill_batch_size: cli.distill_batch_size.clamp(1, 100),
         distill_window_minutes: cli.distill_window_minutes.max(1),
         journal: Some(journal.clone()),
+        concurrency: cli.concurrency.clamp(1, 32),
         ..Default::default()
     };
     let needs_llm = consolidation.runs(ConsolidationStage::Entity)
