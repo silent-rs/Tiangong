@@ -168,6 +168,31 @@ impl MemoryActor {
                 let _ = reply.send(result);
             }
 
+            MemoryCommand::DeleteNode { node_id, reply } => {
+                let result = self
+                    .store
+                    .delete_node(&node_id)
+                    .await
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
+            }
+            MemoryCommand::EvidencePaths { node_ids, reply } => {
+                let _ = reply.send(self.store.evidence_paths(&node_ids));
+            }
+            MemoryCommand::UpsertNodeVectors {
+                model,
+                dimension,
+                items,
+                reply,
+            } => {
+                let result = self
+                    .store
+                    .upsert_node_vectors(&model, dimension, items)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
+                let _ = reply.send(result);
+            }
+
             MemoryCommand::UpsertRelation { draft, reply } => {
                 let result = self
                     .store
@@ -291,6 +316,9 @@ impl MemoryActor {
                 let _ = reply.send(count);
             }
 
+            MemoryCommand::CountRelations { reply } => {
+                let _ = reply.send(self.store.count_relations());
+            }
             MemoryCommand::ListRelations { node_id, reply } => {
                 let items = self.store.list_relations(&node_id);
                 let _ = reply.send(items);

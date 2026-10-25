@@ -379,21 +379,23 @@ fn spawn_follower_watcher(
                     Err(std_mpsc::RecvTimeoutError::Timeout) => {}
                 }
 
-                if matches!(
-                    inner
-                        .lock()
-                        .expect("ManagedMemory inner lock poisoned")
-                        .state,
-                    LeaderState::Leader
-                ) {
-                    break;
-                }
+                let following = match inner
+                    .lock()
+                    .expect("ManagedMemory inner lock poisoned")
+                    .state
+                {
+                    LeaderState::Leader => break,
+                    LeaderState::Follower { pid } => pid,
+                };
 
-                if !should_attempt_failover() {
+                if !should_attempt_failover(following) {
                     continue;
                 }
 
-                tracing::info!("Memory follower 检测到 leader 不可用，尝试自动接替");
+                tracing::info!(
+                    following,
+                    "Memory follower 检测到所跟随的 leader 不可用或已更换，重新选举/连接"
+                );
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -433,11 +435,17 @@ fn spawn_follower_watcher(
     Ok((tx, join_handle))
 }
 
-fn should_attempt_failover() -> bool {
+/// follower 是否需要重新选举/连接。
+///
+/// 除了「当前没有存活 leader」，还要处理「leader 已更换」：原 leader 退出后
+/// 若另一个进程在两次检查之间抢先成为新 leader（如整理工具连续运行时，上一个
+/// 进程退出、下一个进程立即接任），注册信息里的 leader 仍然存活，但本进程持有
+/// 的仍是到旧 leader 的已断开连接——必须重连，否则后续读写全部失败。
+fn should_attempt_failover(following: u32) -> bool {
     match read_leader_info() {
         Ok(Some(leader)) => {
             if is_leader_alive(&leader) {
-                return false;
+                return leader.pid != following;
             }
             let _ = clear_stale_registration(&leader);
             true
@@ -648,6 +656,30 @@ mod tests {
             .expect("leader 信息不存在");
         assert_eq!(loaded.service, "memory-ws-test");
         assert!(!is_leader_alive(&loaded), "过期心跳应判定为不存活");
+    }
+
+    #[test]
+    #[serial]
+    fn follower_reconnects_when_leader_is_replaced() {
+        let home = TempDir::new().expect("创建 fake home 失败");
+        let _env = EnvGuard::enter(home.path());
+        ensure_memory_base_dir().expect("创建 memory 目录失败");
+        // 存活的 leader（本进程 pid、新鲜心跳）。
+        let info = LeaderInfo::new(ProcessType::Sidecar, "memory".to_string());
+        write_leader_info(&info, &leader_info_path()).expect("写入 leader 信息失败");
+        assert!(
+            !should_attempt_failover(info.pid),
+            "仍跟随存活的同一 leader 时不应重连"
+        );
+        assert!(
+            should_attempt_failover(info.pid.wrapping_add(1)),
+            "leader 已更换为其他进程时必须重连"
+        );
+        std::fs::remove_file(leader_info_path()).expect("删除 leader 信息失败");
+        assert!(
+            should_attempt_failover(info.pid),
+            "没有 leader 时应重新选举"
+        );
     }
 
     #[test]

@@ -278,6 +278,21 @@ jobs:
             if [[ "$has_core" == "true" ]]; then
               core="$(package_name "$core_manifest")"
             fi
+            # 插件根下的附加独立 crate（如 memory 的整理工具 consolidator/）：
+            # 不属于 protocol/wasm/sidecar/core，也不在 App CI 的包矩阵里，
+            # 由这里统一做格式化、检查、Lint 与测试。
+            extra=""
+            for extra_manifest in "$root"/*/Cargo.toml; do
+              [[ -f "$extra_manifest" ]] || continue
+              case "$extra_manifest" in
+                "$protocol_manifest" | "$wasm_manifest" | "$sidecar_manifest" | "$core_manifest")
+                  continue
+                  ;;
+              esac
+              extra+=" $(package_name "$extra_manifest")"
+            done
+            extra="${extra# }"
+
             if [[ "$has_ui" == "true" ]]; then
               if jq -e '.scripts.test // empty' "$package_json" >/dev/null; then
                 ui_test=true
@@ -292,11 +307,12 @@ jobs:
               --arg wasm "$wasm" \
               --arg sidecar "$sidecar" \
               --arg core "$core" \
+              --arg extra "$extra" \
               --argjson rust "$has_protocol" \
               --argjson ui "$has_ui" \
               --argjson ui_test "$ui_test" \
               --argjson sidecar_only "$sidecar_only" \
-              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,core:$core,rust:$rust,sidecar_only:$sidecar_only,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
+              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,core:$core,extra:$extra,rust:$rust,sidecar_only:$sidecar_only,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
             if [[ "$plugin_selected" == "true" ]]; then
               append_plugin "$item"
             fi
@@ -320,7 +336,7 @@ jobs:
               --arg id "$id" \
               --arg root "$root" \
               --arg package "$package" \
-              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",core:"",rust:false,sidecar_only:false,ui:false,ui_test:false,native:true,native_package:$package}')"
+              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",core:"",extra:"",rust:false,sidecar_only:false,ui:false,ui_test:false,native:true,native_package:$package}')"
             append_plugin "$item"
           done
 
@@ -456,6 +472,38 @@ jobs:
         # 环境变量与全局状态，同进程多线程运行会互相干扰。
         run: cargo nextest run --locked -p "$CORE" --no-tests pass
 
+      - name: Check plugin extra crates formatting
+        if: matrix.plugin.extra != ''
+        run: |
+          packages=()
+          for package in ${{ matrix.plugin.extra }}; do
+            packages+=(-p "$package")
+          done
+          cargo fmt "${packages[@]}" -- --check
+      - name: Check plugin extra crates
+        if: matrix.plugin.extra != ''
+        run: |
+          packages=()
+          for package in ${{ matrix.plugin.extra }}; do
+            packages+=(-p "$package")
+          done
+          cargo check --locked "${packages[@]}" --all-targets
+      - name: Lint plugin extra crates
+        if: matrix.plugin.extra != ''
+        run: |
+          packages=()
+          for package in ${{ matrix.plugin.extra }}; do
+            packages+=(-p "$package")
+          done
+          cargo clippy --locked "${packages[@]}" --all-targets --tests --benches -- -D warnings
+      - name: Test plugin extra crates
+        if: matrix.plugin.extra != ''
+        run: |
+          packages=()
+          for package in ${{ matrix.plugin.extra }}; do
+            packages+=(-p "$package")
+          done
+          cargo test --locked "${packages[@]}"
       - name: Check native plugin formatting
         if: matrix.plugin.native
         env:

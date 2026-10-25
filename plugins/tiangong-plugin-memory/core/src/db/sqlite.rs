@@ -858,6 +858,17 @@ impl MemoryDb {
     }
 
     /// 删除指定记忆关系。
+    /// 统计全部关联关系数量。
+    pub(crate) fn count_memory_relations(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_relations", [], |row| {
+                row.get(0)
+            })
+            .with_context(|| "统计 memory_relations 数量失败")?;
+        Ok(count.max(0) as usize)
+    }
+
     pub(crate) fn delete_memory_relation(&self, relation_id: &str) -> Result<()> {
         self.conn
             .execute(
@@ -866,6 +877,65 @@ impl MemoryDb {
             )
             .with_context(|| format!("删除记忆关系失败: {relation_id}"))?;
         Ok(())
+    }
+
+    /// 物理删除记忆节点及其全部附属数据（关联关系、卫星表、遗留向量行）。
+    ///
+    /// 与归档不同，删除后不可恢复，供深度整理等场景使用。
+    pub(crate) fn delete_memory_node(&self, node_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM memory_relations WHERE from_node_id = ?1 OR to_node_id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| format!("删除记忆 {node_id} 的关联关系失败"))?;
+        for table in ["episodes", "entities", "decisions", "evidence"] {
+            self.conn
+                .execute(
+                    &format!("DELETE FROM {table} WHERE id = ?1"),
+                    rusqlite::params![node_id],
+                )
+                .with_context(|| format!("清理记忆 {node_id} 在 {table} 中的附属数据失败"))?;
+        }
+        self.conn
+            .execute(
+                "DELETE FROM memory_vectors WHERE node_id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| format!("清理记忆 {node_id} 的遗留向量行失败"))?;
+        self.conn
+            .execute(
+                "DELETE FROM memory_nodes WHERE id = ?1",
+                rusqlite::params![node_id],
+            )
+            .with_context(|| format!("物理删除记忆 {node_id} 失败"))?;
+        Ok(())
+    }
+
+    /// 批量读取证据记忆的出处路径（只读，不更新使用统计）。
+    ///
+    /// 不存在、非证据或路径为空的节点不返回。
+    pub(crate) fn load_evidence_paths(
+        &self,
+        node_ids: &[String],
+    ) -> Result<Vec<crate::types::EvidencePath>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT evidence_path FROM evidence WHERE id = ?1 AND evidence_path <> ''")?;
+        let mut paths = Vec::new();
+        for node_id in node_ids {
+            let path: Option<String> = stmt
+                .query_row(rusqlite::params![node_id], |row| row.get(0))
+                .optional()
+                .with_context(|| format!("读取证据路径失败: {node_id}"))?;
+            if let Some(path) = path {
+                paths.push(crate::types::EvidencePath {
+                    node_id: node_id.clone(),
+                    path,
+                });
+            }
+        }
+        Ok(paths)
     }
 
     /// 读取图关系邻接节点，供 deep recall 继续展开使用。
@@ -2205,5 +2275,61 @@ mod tests {
         assert_eq!(hits[0].title, title);
         assert_eq!(hits[0].kind, crate::types::MemoryKind::Episode);
         assert!(hits[0].depth1_loaded);
+    }
+
+    #[test]
+    fn load_evidence_paths_is_read_only() {
+        let db = open_in_memory().unwrap();
+        let evidence = crate::types::Evidence {
+            title: "fs__file_write 产物".to_string(),
+            summary: "写入成功".to_string(),
+            file_path: Some("/tmp/a.rs".to_string()),
+            url: None,
+            source_tool: Some("fs__file_write".to_string()),
+        };
+        db.insert_evidence("ev-1", &evidence, Some("ws")).unwrap();
+        let empty = crate::types::Evidence {
+            file_path: None,
+            ..evidence
+        };
+        db.insert_evidence("ev-2", &empty, Some("ws")).unwrap();
+        let paths = db
+            .load_evidence_paths(&[
+                "ev-1".to_string(),
+                "ev-2".to_string(),
+                "missing".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(paths.len(), 1, "空路径与不存在的节点不返回：{paths:?}");
+        assert_eq!(paths[0].node_id, "ev-1");
+        assert_eq!(paths[0].path, "/tmp/a.rs");
+        let node = db.get_memory_node("ev-1").unwrap().unwrap();
+        assert_eq!(node.usage_count, 0, "读取路径不应计入使用次数");
+    }
+
+    #[test]
+    fn count_memory_relations_counts_all_relations() {
+        let db = open_in_memory().unwrap();
+        assert_eq!(db.count_memory_relations().unwrap(), 0);
+        let evidence = crate::types::Evidence {
+            title: "e".to_string(),
+            summary: "s".to_string(),
+            file_path: None,
+            url: None,
+            source_tool: None,
+        };
+        for id in ["n-1", "n-2", "n-3"] {
+            db.insert_evidence(id, &evidence, Some("ws")).unwrap();
+        }
+        for (from, to) in [("n-1", "n-2"), ("n-2", "n-3")] {
+            db.upsert_memory_relation(crate::types::MemoryRelationDraft {
+                from_node_id: from.to_string(),
+                to_node_id: to.to_string(),
+                relation_kind: crate::types::MemoryRelationKind::RelatedTo,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        assert_eq!(db.count_memory_relations().unwrap(), 2);
     }
 }

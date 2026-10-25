@@ -70,6 +70,13 @@ impl RecallEngine {
         self.embedding.clone()
     }
 
+    /// 向量层已启用时返回当前 embedding 的（模型名, 维度），供校验外部向量。
+    pub(crate) fn vector_identity(&self) -> Option<(String, usize)> {
+        self.vector_index.as_ref()?;
+        let embedding = self.embedding.as_ref()?;
+        Some((embedding.model().to_string(), embedding.dimension()))
+    }
+
     /// 把节点的回填文本取出来，交给后台计算 embedding。
     pub(crate) fn backfill_texts(nodes: &[MemoryNode]) -> Vec<String> {
         nodes.iter().map(node_embedding_text).collect()

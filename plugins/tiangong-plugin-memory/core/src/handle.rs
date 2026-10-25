@@ -14,10 +14,10 @@ use crate::ipc::IpcClient;
 use crate::ipc::protocol::{IpcRequest, MemoryIpcRequestPayload, MemoryIpcResponsePayload};
 use crate::options::MemoryOptions;
 use crate::types::{
-    EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
+    EnhancedTurnResult, Episode, EvidencePath, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
     MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
-    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
-    RuntimeRecallContext, TurnResult,
+    MemoryRelationDraft, MemoryStatus, NodeVector, NodeVectorUpsertReport, RecallAnchors,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 
 /// Memory 系统的客户端句柄，可任意 Clone 跨线程使用
@@ -443,6 +443,40 @@ impl MemoryHandle {
         }
     }
 
+    /// 统计全部关联关系数量。
+    pub async fn count_relations(&self) -> usize {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::CountRelations { reply: reply_tx })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory count_relations 发送失败");
+                    return 0;
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::CountRelations)
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::RelationCount { count }) => count,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC count_relations 返回了非预期响应: {:?}", other);
+                        0
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC count_relations 失败: {}", e);
+                        0
+                    }
+                }
+            }
+        }
+    }
+
     /// 手动新增或调整记忆。
     pub async fn upsert_manual_memory(&self, draft: ManualMemoryDraft) -> Result<MemoryNode> {
         match self.inner.as_ref() {
@@ -496,6 +530,118 @@ impl MemoryHandle {
                     MemoryIpcResponsePayload::Ack => Ok(()),
                     other => Err(anyhow!(
                         "Memory IPC set_node_status 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 物理删除记忆节点及其全部附属数据（关联关系、召回索引、卫星表）。
+    ///
+    /// 与 [`MemoryHandle::set_node_status`] 的归档（软删除、可恢复）不同，
+    /// 删除后不可恢复，供记忆深度整理等场景使用。
+    pub async fn delete_node(&self, node_id: String) -> Result<()> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::DeleteNode {
+                    node_id,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 删除命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 删除结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::DeleteNode { node_id })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Ack => Ok(()),
+                    other => Err(anyhow!(
+                        "Memory IPC delete_node 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 批量读取证据记忆的出处路径（文件路径或 URL）。
+    ///
+    /// 只读，不更新使用统计（区别于 [`MemoryHandle::load_depth2`]），供记忆
+    /// 整理等批处理场景使用；不存在、非证据或路径为空的节点不返回。
+    pub async fn evidence_paths(&self, node_ids: Vec<String>) -> Result<Vec<EvidencePath>> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::EvidencePaths {
+                    node_ids,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 证据路径查询失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 证据路径结果失败")
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::EvidencePaths { node_ids })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::EvidencePaths { items } => Ok(items),
+                    other => Err(anyhow!(
+                        "Memory IPC evidence_paths 返回了非预期响应（Leader 侧 Memory \
+                         版本可能过旧）: {other:?}"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 写入外部预先算好的节点向量（如整理工具补写缺失向量）。
+    ///
+    /// 写入由 Leader 串行完成，天工运行时外部工具经 IPC 转发即可安全写入，
+    /// 且立即对召回生效。`model` / `dimension` 必须与 Memory 当前向量层一致，
+    /// 否则拒绝；节点不存在或已非活跃时计入 `skipped`。
+    pub async fn upsert_node_vectors(
+        &self,
+        model: String,
+        dimension: usize,
+        items: Vec<NodeVector>,
+    ) -> Result<NodeVectorUpsertReport> {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                tx.send(MemoryCommand::UpsertNodeVectors {
+                    model,
+                    dimension,
+                    items,
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 向量写入命令失败")?;
+                reply_rx
+                    .await
+                    .with_context(|| "等待 Memory 向量写入结果失败")?
+                    .map_err(|err| anyhow!(err))
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::UpsertNodeVectors {
+                        model,
+                        dimension,
+                        items,
+                    })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::NodeVectors { report } => Ok(report),
+                    other => Err(anyhow!(
+                        "Memory IPC upsert_node_vectors 返回了非预期响应（Leader 侧 Memory \
+                         版本可能过旧，不支持写入外部向量）: {other:?}"
                     )),
                 }
             }

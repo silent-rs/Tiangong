@@ -138,3 +138,83 @@ async fn manual_memory_can_be_recalled_and_archived() {
 
     handle.shutdown().await;
 }
+
+/// 物理删除：记忆行、关联关系一并移除，任何状态下列表都不再出现。
+#[tokio::test]
+#[serial]
+async fn manual_memory_can_be_physically_deleted() {
+    let _env = EnvGuard::enter();
+    let workspace_id = format!("memory-delete-{}", scru128::new());
+    let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
+    let saved = handle
+        .upsert_manual_memory(ManualMemoryDraft {
+            title: "Kafka 集群扩容".to_string(),
+            summary: "按 broker.id 递增顺序扩容 Kafka 集群，注意 __consumer_offsets 副本数。"
+                .to_string(),
+            keywords: vec!["kafka".to_string()],
+            importance: 0.7,
+            memory_type: MemoryCognitiveType::DomainKnowledge,
+            workspace_id: Some(workspace_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("手动记忆应写入成功");
+    let other = handle
+        .upsert_manual_memory(ManualMemoryDraft {
+            title: "ZooKeeper 选主".to_string(),
+            summary: "ZooKeeper 通过 ZAB 协议选主，Kafka 依赖其完成控制器选举。".to_string(),
+            keywords: vec!["zookeeper".to_string()],
+            importance: 0.6,
+            memory_type: MemoryCognitiveType::DomainKnowledge,
+            workspace_id: Some(workspace_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("手动记忆应写入成功");
+    handle
+        .upsert_relation(MemoryRelationDraft {
+            from_node_id: saved.id.clone(),
+            to_node_id: other.id.clone(),
+            relation_kind: MemoryRelationKind::DependsOn,
+            ..Default::default()
+        })
+        .await
+        .expect("记忆关系应写入成功");
+
+    handle
+        .delete_node(saved.id.clone())
+        .await
+        .expect("手动记忆应可物理删除");
+
+    for status in [MemoryStatus::Active, MemoryStatus::Archived] {
+        let nodes = handle
+            .list_nodes(MemoryListQuery {
+                workspace_id: Some(workspace_id.clone()),
+                status: Some(status.clone()),
+                limit: 10,
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            !nodes.iter().any(|node| node.id == saved.id),
+            "物理删除后 {status:?} 列表不应再出现该记忆"
+        );
+    }
+    // 未删除一侧的关联也随节点删除而消失。
+    let relations = handle.list_relations(other.id.clone()).await;
+    assert!(
+        relations.is_empty(),
+        "指向被删记忆的关联应一并删除：{relations:?}"
+    );
+    // 其余记忆不受影响。
+    let nodes = handle
+        .list_nodes(MemoryListQuery {
+            workspace_id: Some(workspace_id.clone()),
+            status: Some(MemoryStatus::Active),
+            limit: 10,
+            ..Default::default()
+        })
+        .await;
+    assert!(nodes.iter().any(|node| node.id == other.id));
+    handle.shutdown().await;
+}

@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::InjectionLevel;
 use crate::types::{
-    EnhancedTurnResult, Episode, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
+    EnhancedTurnResult, Episode, EvidencePath, ExpandedMemory, ManualMemoryDraft, MemoryCandidate,
     MemoryListQuery, MemoryNode, MemoryRecallRequest, MemoryRecallResponse, MemoryRelation,
-    MemoryRelationDraft, MemoryStatus, RecallAnchors, RecallHit, RecallSufficiency,
-    RuntimeRecallContext, TurnResult,
+    MemoryRelationDraft, MemoryStatus, NodeVector, NodeVectorUpsertReport, RecallAnchors,
+    RecallHit, RecallSufficiency, RuntimeRecallContext, TurnResult,
 };
 pub use tiangong_plugin_sidecar::protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse,
@@ -44,6 +44,7 @@ pub enum MemoryIpcRequestPayload {
     CountNodes {
         query: MemoryListQuery,
     },
+    CountRelations,
     ListRelations {
         node_id: String,
     },
@@ -60,6 +61,19 @@ pub enum MemoryIpcRequestPayload {
     SetNodeStatus {
         node_id: String,
         status: MemoryStatus,
+    },
+    DeleteNode {
+        node_id: String,
+    },
+    /// 批量读取证据记忆的出处路径（只读，不更新使用统计）。
+    EvidencePaths {
+        node_ids: Vec<String>,
+    },
+    /// 写入外部预先算好的节点向量（由 Leader 串行写入向量表）。
+    UpsertNodeVectors {
+        model: String,
+        dimension: usize,
+        items: Vec<NodeVector>,
     },
     UpsertRelation {
         draft: MemoryRelationDraft,
@@ -104,7 +118,10 @@ pub enum MemoryIpcResponsePayload {
     Depth2 { items: Vec<ExpandedMemory> },
     Nodes { items: Vec<MemoryNode> },
     NodeCount { count: usize },
+    RelationCount { count: usize },
     Node { item: MemoryNode },
     Relations { items: Vec<MemoryRelation> },
     Relation { item: MemoryRelation },
+    NodeVectors { report: NodeVectorUpsertReport },
+    EvidencePaths { items: Vec<EvidencePath> },
 }

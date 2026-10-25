@@ -258,6 +258,10 @@ fn ui_request_operation(
             plugin_ui::COUNT_NODES_OPERATION,
             to_json(plugin_ui::CountNodesRequest { query })?,
         ),
+        UiRequest::CountRelations => (
+            plugin_ui::COUNT_RELATIONS_OPERATION,
+            to_json(plugin_ui::CountRelationsRequest {})?,
+        ),
         UiRequest::ListRelations { node_id } => (
             plugin_ui::LIST_RELATIONS_OPERATION,
             to_json(plugin_ui::ListRelationsRequest { node_id })?,
@@ -305,6 +309,18 @@ fn view_operation(
             (plugin_ui::CONFIG_PROBE_OPERATION, to_json(probe)?)
         }
         "memory_request" => ui_request_operation(parse_view_payload(payload)?)?,
+        "consolidation_start" => (
+            plugin_ui::CONSOLIDATION_START_OPERATION,
+            parse_view_payload::<serde_json::Value>(payload)?,
+        ),
+        "consolidation_status" => (
+            plugin_ui::CONSOLIDATION_STATUS_OPERATION,
+            serde_json::json!({}),
+        ),
+        "consolidation_stop" => (
+            plugin_ui::CONSOLIDATION_STOP_OPERATION,
+            serde_json::json!({}),
+        ),
         other => return Err(ServiceError::Invalid(format!("未知页面消息：{other}"))),
     })
 }
@@ -615,6 +631,12 @@ mod tests {
         .expect("memory_request");
         assert_eq!(operation, plugin_ui::LIST_RELATIONS_OPERATION);
         assert_eq!(payload["node_id"], "n1");
+        let (operation, payload) =
+            view_operation("consolidation_start", r#"{"stages":["dedup"]}"#).expect("start");
+        assert_eq!(operation, plugin_ui::CONSOLIDATION_START_OPERATION);
+        assert_eq!(payload["stages"][0], "dedup");
+        let (operation, _) = view_operation("consolidation_status", "").expect("status");
+        assert_eq!(operation, plugin_ui::CONSOLIDATION_STATUS_OPERATION);
         assert!(view_operation("unknown", "").is_err());
         assert!(view_operation("save_config", "not json").is_err());
     }

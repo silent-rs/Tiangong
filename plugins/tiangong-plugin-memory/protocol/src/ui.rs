@@ -9,12 +9,18 @@ pub const CONFIG_SET_OPERATION: &str = "ui.memory.config.set";
 pub const CONFIG_PROBE_OPERATION: &str = "ui.memory.config.probe";
 pub const LIST_NODES_OPERATION: &str = "list_nodes";
 pub const COUNT_NODES_OPERATION: &str = "count_nodes";
+/// 统计全部记忆关联（不随当前页或筛选变化）。
+pub const COUNT_RELATIONS_OPERATION: &str = "count_relations";
 pub const LIST_RELATIONS_OPERATION: &str = "list_relations";
 pub const LIST_RELATIONS_BATCH_OPERATION: &str = "list_relations_batch";
 pub const UPSERT_MANUAL_MEMORY_OPERATION: &str = "upsert_manual_memory";
 pub const SET_NODE_STATUS_OPERATION: &str = "set_node_status";
 pub const UPSERT_RELATION_OPERATION: &str = "upsert_relation";
 pub const DELETE_RELATION_OPERATION: &str = "delete_relation";
+/// 深度整理（由 sidecar 进程执行，不经 Memory actor）：启动 / 查询进度 / 停止。
+pub const CONSOLIDATION_START_OPERATION: &str = "ui.memory.consolidation.start";
+pub const CONSOLIDATION_STATUS_OPERATION: &str = "ui.memory.consolidation.status";
+pub const CONSOLIDATION_STOP_OPERATION: &str = "ui.memory.consolidation.stop";
 
 /// 页面 / CLI 配置视图（与 sidecar 侧 `MemoryConfigSelection` 结构一致）。
 ///
@@ -329,6 +335,12 @@ pub struct NodeCountResponse {
     pub count: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CountRelationsRequest {}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelationCountResponse {
+    pub count: usize,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListRelationsRequest {
     pub node_id: String,
@@ -389,6 +401,12 @@ operation!(
     NodeCountResponse
 );
 operation!(
+    CountRelations,
+    COUNT_RELATIONS_OPERATION,
+    CountRelationsRequest,
+    RelationCountResponse
+);
+operation!(
     ListRelations,
     LIST_RELATIONS_OPERATION,
     ListRelationsRequest,
@@ -434,6 +452,7 @@ pub enum UiRequest {
     CountNodes {
         query: MemoryListQuery,
     },
+    CountRelations,
     ListRelations {
         node_id: String,
     },

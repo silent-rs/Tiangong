@@ -76,6 +76,7 @@
         "description": "记忆系统配置（模型端点、向量检索等）",
         "icon": "brain",
         "entry": "app/memory.html",
+        "sandbox": "iframe",
         "context": []
       }
     ]

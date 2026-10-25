@@ -12,6 +12,7 @@
 //! 见 RFC docs/memory-system/11-memory-sidecar-wasm-bridge.md 与
 //! docs/memory-system/14-通用运行模式.md。
 
+mod consolidation;
 mod daemon;
 mod http;
 mod mcp;
@@ -295,6 +296,21 @@ impl tiangong_plugin_sidecar::SidecarService for MemoryStdioService {
         &self,
         request: tiangong_plugin_sidecar::protocol::Request,
     ) -> tiangong_plugin_sidecar::protocol::Response {
+        use tiangong_plugin_sidecar::protocol::{ErrorCode, Response};
+        let request_id = request.request_id.clone();
+        if let Some(result) =
+            consolidation::dispatch(&self.managed, &request.operation, request.payload.clone())
+        {
+            return match result {
+                Ok(payload) => Response::success(request_id, payload),
+                Err(error) => Response::error(
+                    request_id,
+                    ErrorCode::ServiceError,
+                    format!("{error:#}"),
+                    false,
+                ),
+            };
+        }
         tiangong_memory::ipc::dispatch_checked_plugin_request(self.managed.handle(), request).await
     }
 }
