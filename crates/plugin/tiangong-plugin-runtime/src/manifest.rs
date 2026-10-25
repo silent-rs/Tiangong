@@ -75,6 +75,12 @@ pub struct PluginManifest {
     /// 的条目被忽略，不影响插件装载。见 [`crate::tool_icons`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_icons: Option<std::collections::BTreeMap<String, String>>,
+    /// 工具行标题：工具原名 → 折叠行标题（1-32 字）；特指键
+    /// `工具名:参数=取值` 按调用参数取值选用。与 `session.message-item`
+    /// 视图贡献的 `titles` 同键语义，供无视图插件声明；前端先查视图声明
+    /// 再查本表。见 [`crate::tool_titles`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_titles: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// @提及声明（`mention` 字段）：`candidates_op`（新）与 `hint`/`mark`

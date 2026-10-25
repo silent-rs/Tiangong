@@ -3947,6 +3947,18 @@ pub async fn list_tool_icons(
         .map_err(|error| error.to_string())
 }
 
+/// 工具行标题查询表（插件在 `tool_titles` 中声明；查不到的工具不在表中，
+/// 前端显示通用标题）。
+#[tauri::command]
+pub async fn list_tool_titles() -> Result<
+    std::collections::BTreeMap<String, tiangong_plugin_runtime::tool_titles::ToolTitle>,
+    String,
+> {
+    tauri::async_runtime::spawn_blocking(tiangong_plugin_runtime::registry::list_tool_titles)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// 工具参数摘要的展示提示（过渡期由运行时内置表提供，见
 /// `tiangong_plugin_runtime::builtin_tables`）。
 #[tauri::command]

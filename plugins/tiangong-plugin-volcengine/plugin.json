@@ -221,5 +221,11 @@
     "generate_video": "video",
     "text_to_speech": "volume-2",
     "speech_to_text": "mic"
+  },
+  "tool_titles": {
+    "generate_image": "生成图片",
+    "generate_video": "生成视频",
+    "text_to_speech": "语音合成",
+    "speech_to_text": "语音转文字"
   }
 }

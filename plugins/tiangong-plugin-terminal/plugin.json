@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terminal",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "entrypoints": [
     "desktop"
   ],
@@ -165,5 +165,14 @@
     "terminal:action=close": "assets/tool-terminal-close.svg",
     "terminal:action=status": "assets/tool-terminal-status.svg",
     "run_command": "assets/tool-run-command.svg"
+  },
+  "tool_titles": {
+    "run_command": "执行命令",
+    "run_shell": "执行 Shell",
+    "terminal": "终端操作",
+    "terminal:action=open": "打开终端",
+    "terminal:action=send": "发送终端输入",
+    "terminal:action=close": "关闭终端",
+    "terminal:action=status": "查询终端状态"
   }
 }
