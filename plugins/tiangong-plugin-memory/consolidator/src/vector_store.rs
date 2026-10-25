@@ -35,19 +35,20 @@ impl StoredVectors {
     }
 }
 
-/// 从指定天工根目录的向量库读取全部向量；没有向量库时返回 `None`。
+/// 从 Memory 向量库目录（`<数据目录>/lancedb`）读取全部向量；没有向量库时
+/// 返回 `None`。
 ///
 /// `model_hint` 为当前配置的 Embedding 模型名（用于在多张向量表中
 /// 选择与当前配置一致的那张）。
 pub async fn load_stored_vectors(
-    root: &Path,
+    lancedb_dir: &Path,
     model_hint: Option<&str>,
 ) -> Result<Option<StoredVectors>> {
-    let dir = root.join("data").join("memory").join("lancedb");
+    let dir = lancedb_dir;
     if !dir.is_dir() {
         return Ok(None);
     }
-    let db = connect(&connection_uri(&dir))
+    let db = connect(&connection_uri(dir))
         .execute()
         .await
         .with_context(|| format!("打开向量库失败：{}", dir.display()))?;

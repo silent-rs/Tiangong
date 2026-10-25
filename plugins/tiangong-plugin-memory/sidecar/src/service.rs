@@ -318,6 +318,11 @@ impl MemoryService {
         operation: &str,
         payload: serde_json::Value,
     ) -> ServiceResult<serde_json::Value> {
+        if let Some(result) =
+            crate::consolidation::dispatch(&self.managed, operation, payload.clone())
+        {
+            return result.map_err(ServiceError::Internal);
+        }
         let request = tiangong_plugin_sidecar::protocol::Request::new(operation, payload);
         let response =
             tiangong_memory::ipc::dispatch_checked_plugin_request(self.handle(), request).await;

@@ -443,6 +443,40 @@ impl MemoryHandle {
         }
     }
 
+    /// 统计全部关联关系数量。
+    pub async fn count_relations(&self) -> usize {
+        match self.inner.as_ref() {
+            HandleInner::Local { tx } => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::CountRelations { reply: reply_tx })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Memory count_relations 发送失败");
+                    return 0;
+                }
+                reply_rx.await.unwrap_or_default()
+            }
+            HandleInner::Remote { .. } => {
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::CountRelations)
+                    .await
+                {
+                    Ok(MemoryIpcResponsePayload::RelationCount { count }) => count,
+                    Ok(other) => {
+                        tracing::warn!("Memory IPC count_relations 返回了非预期响应: {:?}", other);
+                        0
+                    }
+                    Err(e) => {
+                        tracing::warn!("Memory IPC count_relations 失败: {}", e);
+                        0
+                    }
+                }
+            }
+        }
+    }
+
     /// 手动新增或调整记忆。
     pub async fn upsert_manual_memory(&self, draft: ManualMemoryDraft) -> Result<MemoryNode> {
         match self.inner.as_ref() {

@@ -4,6 +4,7 @@
 //! 缺失向量补写见 [`vector_repair`]。
 pub mod consolidation;
 pub mod journal;
+pub mod runner;
 pub mod stages;
 pub mod vector_repair;
 pub mod vector_store;

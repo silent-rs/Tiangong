@@ -858,6 +858,17 @@ impl MemoryDb {
     }
 
     /// 删除指定记忆关系。
+    /// 统计全部关联关系数量。
+    pub(crate) fn count_memory_relations(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_relations", [], |row| {
+                row.get(0)
+            })
+            .with_context(|| "统计 memory_relations 数量失败")?;
+        Ok(count.max(0) as usize)
+    }
+
     pub(crate) fn delete_memory_relation(&self, relation_id: &str) -> Result<()> {
         self.conn
             .execute(
@@ -2294,5 +2305,31 @@ mod tests {
         assert_eq!(paths[0].path, "/tmp/a.rs");
         let node = db.get_memory_node("ev-1").unwrap().unwrap();
         assert_eq!(node.usage_count, 0, "读取路径不应计入使用次数");
+    }
+
+    #[test]
+    fn count_memory_relations_counts_all_relations() {
+        let db = open_in_memory().unwrap();
+        assert_eq!(db.count_memory_relations().unwrap(), 0);
+        let evidence = crate::types::Evidence {
+            title: "e".to_string(),
+            summary: "s".to_string(),
+            file_path: None,
+            url: None,
+            source_tool: None,
+        };
+        for id in ["n-1", "n-2", "n-3"] {
+            db.insert_evidence(id, &evidence, Some("ws")).unwrap();
+        }
+        for (from, to) in [("n-1", "n-2"), ("n-2", "n-3")] {
+            db.upsert_memory_relation(crate::types::MemoryRelationDraft {
+                from_node_id: from.to_string(),
+                to_node_id: to.to_string(),
+                relation_kind: crate::types::MemoryRelationKind::RelatedTo,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        assert_eq!(db.count_memory_relations().unwrap(), 2);
     }
 }

@@ -139,6 +139,7 @@ fn has_meaningful_data(path: &Path) -> Result<bool> {
                 | "metadata.db-shm"
                 | "leader.json"
                 | "leader.lock"
+                | "consolidation.lock"
                 | "tantivy_index"
         ) || name.starts_with(".leader.json.")
         {
@@ -165,7 +166,7 @@ fn copy_data_directory(source: &Path, destination: &Path) -> Result<()> {
         let name_text = name.to_string_lossy();
         if matches!(
             name_text.as_ref(),
-            "leader.json" | "leader.lock" | "runtime" | RECOVERY_MARKER
+            "leader.json" | "leader.lock" | "consolidation.lock" | "runtime" | RECOVERY_MARKER
         ) || name_text.starts_with(".leader.json.")
         {
             continue;

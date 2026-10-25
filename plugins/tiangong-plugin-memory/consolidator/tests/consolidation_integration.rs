@@ -664,6 +664,9 @@ async fn candidates_beyond_batch_size_are_judged_in_multiple_batches() {
             llm_retry_attempts: 1,
             forget_low_quality: false,
             dry_run: true,
+            // 断言的是单种子分批方式：并发时候选可能被其他在途批次占用而
+            // 拆成更多批，并发调度另有专门测试。
+            concurrency: 1,
             ..Default::default()
         },
         None,

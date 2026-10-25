@@ -21,8 +21,8 @@ use tiangong_memory::{
 };
 
 use crate::consolidation::{
-    ConsolidationOptions, ConsolidationProgress, ConsolidationReport, HandleProvider,
-    call_llm_json, delete_with_journal, dry_run_tag, memory_type_key, normalize_keywords,
+    ConsolidationOptions, ConsolidationProgress, ConsolidationReport, HandleProvider, Progress,
+    call_llm_json, delete_with_journal, dry_run_tag, emit, memory_type_key, normalize_keywords,
     normalized_key, one_line, parse_memory_type, parse_timestamp, record_llm_decision,
     relation_weights, relink_relations, truncate, upsert_relation_max, upsert_with_journal,
 };
@@ -70,6 +70,12 @@ impl ConsolidationStage {
             ConsolidationStage::Distill => "distill",
             ConsolidationStage::Similar => "similar",
         }
+    }
+
+    /// 按名称解析阶段（忽略大小写与首尾空白）。
+    pub fn from_key(raw: &str) -> Option<Self> {
+        let key = raw.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|stage| stage.key() == key)
     }
 }
 
@@ -237,13 +243,17 @@ pub(crate) async fn run_dedup(
                 .filter(|list| list.len() >= 2),
         );
     }
-    if let Some(callback) = progress {
-        callback(&format!(
-            "dedup：{} 组摘要完全一致的记忆，涉及 {} 条",
-            groups.len(),
-            groups.iter().map(Vec::len).sum::<usize>()
-        ));
-    }
+    emit(progress, || {
+        Progress::new(
+            "dedup",
+            format!(
+                "dedup：{} 组摘要完全一致的记忆，涉及 {} 条",
+                groups.len(),
+                groups.iter().map(Vec::len).sum::<usize>()
+            ),
+        )
+        .count(0, groups.len())
+    });
     // 3) 逐组归一。
     for (index, members) in groups.iter().enumerate() {
         if options.stop_requested() {
@@ -334,10 +344,15 @@ pub(crate) async fn run_dedup(
             );
         }
         report.actions.push(detail);
-        if let Some(callback) = progress
-            && (index + 1) % 50 == 0
-        {
-            callback(&format!("dedup 进度 [{}/{}]", index + 1, groups.len()));
+        if (index + 1) % 50 == 0 || index + 1 == groups.len() {
+            emit(progress, || {
+                Progress::new(
+                    "dedup",
+                    format!("dedup 进度 [{}/{}]", index + 1, groups.len()),
+                )
+                .count(index + 1, groups.len())
+                .removed(report.dedup_removed)
+            });
         }
     }
     Ok(())
@@ -453,18 +468,35 @@ pub(crate) async fn run_entity(
     let groups = plan_entity_groups(nodes, removed);
     report.entity_names = groups.len();
     report.entity_members = groups.iter().map(Vec::len).sum();
+    // 预计批数：每批 ENTITY_BATCH_SIZE 条，后续批次以上一批的主记忆打头。
+    let per_batch = ENTITY_BATCH_SIZE.max(2);
+    report.entity_batches_total = groups
+        .iter()
+        .map(|group| {
+            if group.len() <= per_batch {
+                1
+            } else {
+                1 + (group.len() - per_batch).div_ceil(per_batch - 1)
+            }
+        })
+        .sum();
     let Some(model) = options.llm.as_ref() else {
         report
             .actions
             .push("entity：未配置 LLM，跳过同名实体合并".to_string());
         return Ok(());
     };
-    if let Some(callback) = progress {
-        callback(&format!(
-            "entity：{} 个名称重复，涉及 {} 条实体",
-            report.entity_names, report.entity_members
-        ));
-    }
+    emit(progress, || {
+        Progress::new(
+            "entity",
+            format!(
+                "entity：{} 个名称重复，涉及 {} 条实体",
+                report.entity_names, report.entity_members
+            ),
+        )
+        .count(0, report.entity_batches_total)
+        .llm_calls(report.llm_calls)
+    });
     // 不同名称的组互不相干，组之间并发；同一组内的多批依赖上一批的合并结果，
     // 在组内顺序执行。落库经共享状态串行（Mutex 只在落库时持有，LLM 请求期间
     // 不持锁），执行记录与报告保持一致。
@@ -473,14 +505,26 @@ pub(crate) async fn run_entity(
     let shared = tokio::sync::Mutex::new((std::mem::take(removed), std::mem::take(report)));
     let budget_hit = std::sync::atomic::AtomicBool::new(false);
     let total = groups.len();
-    let results: Vec<anyhow::Result<()>> = futures_util::stream::iter(groups.iter().enumerate())
-        .map(|(index, members)| {
+    // 按下标迭代：闭包参数不带引用，future 才能在 tokio::spawn 中满足 Send
+    // （借用迭代器的闭包会触发高阶生命周期推断失败）。
+    let groups = &groups;
+    let results: Vec<anyhow::Result<()>> = futures_util::stream::iter(0..total)
+        .map(|index| {
             let shared = &shared;
             let budget_hit = &budget_hit;
             async move {
                 run_entity_group(
-                    provider, nodes, model, options, members, index, total, base_calls, shared,
-                    budget_hit, progress,
+                    provider,
+                    nodes,
+                    model,
+                    options,
+                    &groups[index],
+                    index,
+                    total,
+                    base_calls,
+                    shared,
+                    budget_hit,
+                    progress,
                 )
                 .await
             }
@@ -562,16 +606,25 @@ async fn run_entity_group(
         guard.1.entity_inflight -= 1;
         let (decision, raw) = result?;
         let (removed, report) = &mut *guard;
-        if let Some(callback) = progress {
-            callback(&format!(
-                "entity [{}/{}]「{}」：{} 条（已删除实体 {} 条）",
-                index + 1,
-                total,
-                one_line(&nodes[batch[0]].title, 30),
-                batch.len(),
-                report.entity_removed
-            ));
-        }
+        emit(progress, || {
+            Progress::new(
+                "entity",
+                format!(
+                    "entity [{}/{}]「{}」：{} 条（已删除实体 {} 条）",
+                    index + 1,
+                    total,
+                    one_line(&nodes[batch[0]].title, 30),
+                    batch.len(),
+                    report.entity_removed
+                ),
+            )
+            .count(
+                report.entity_batches + 1,
+                report.entity_batches_total.max(report.entity_batches + 1),
+            )
+            .removed(report.entity_removed)
+            .llm_calls(report.llm_calls + 1)
+        });
         record_llm_decision(options, report, &label, &prompt, &raw)?;
         report.entity_batches += 1;
         carry = apply_entity(provider, nodes, &batch, decision, options, removed, report)
@@ -981,15 +1034,20 @@ pub(crate) async fn run_distill(
             pools.entry(scope_key(node)).or_default().push(position);
         }
     }
-    if let Some(callback) = progress {
-        callback(&format!(
-            "distill：{} 条工具日志，按 {} 分钟时间段分为 {} 批（每批最多 {} 条）",
-            logs.len(),
-            options.distill_window_minutes,
-            batches.len(),
-            options.distill_batch_size
-        ));
-    }
+    emit(progress, || {
+        Progress::new(
+            "distill",
+            format!(
+                "distill：{} 条工具日志，按 {} 分钟时间段分为 {} 批（每批最多 {} 条）",
+                logs.len(),
+                options.distill_window_minutes,
+                batches.len(),
+                options.distill_batch_size
+            ),
+        )
+        .count(0, batches.len())
+        .llm_calls(report.llm_calls)
+    });
     // 各批之间没有共享日志，LLM 判定可以并发；落库按批次顺序串行进行（写入
     // 只有一个 Leader，且保证执行记录顺序与落库一致）。
     let mut limit = batches.len();
@@ -1048,17 +1106,24 @@ pub(crate) async fn run_distill(
             }
         };
         let batch = &batches[index];
-        if let Some(callback) = progress {
-            callback(&format!(
-                "distill [{}/{}] {}：{} 条日志（已删除日志 {} 条，新经历 {} 条）",
-                index + 1,
-                batches.len(),
-                batch.scope,
-                batch.logs.len(),
-                report.distill_deleted,
-                report.distill_created
-            ));
-        }
+        emit(progress, || {
+            Progress::new(
+                "distill",
+                format!(
+                    "distill [{}/{}] {}：{} 条日志（已删除日志 {} 条，新经历 {} 条）",
+                    index + 1,
+                    batches.len(),
+                    batch.scope,
+                    batch.logs.len(),
+                    report.distill_deleted,
+                    report.distill_created
+                ),
+            )
+            .count(report.distill_batches + 1, batches.len())
+            .removed(report.distill_deleted)
+            .created(report.distill_created)
+            .llm_calls(report.llm_calls + 1)
+        });
         let applied = async {
             record_llm_decision(options, report, &label, &prompt, &raw)?;
             report.distill_batches += 1;

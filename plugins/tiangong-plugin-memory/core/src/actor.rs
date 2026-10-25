@@ -316,6 +316,9 @@ impl MemoryActor {
                 let _ = reply.send(count);
             }
 
+            MemoryCommand::CountRelations { reply } => {
+                let _ = reply.send(self.store.count_relations());
+            }
             MemoryCommand::ListRelations { node_id, reply } => {
                 let items = self.store.list_relations(&node_id);
                 let _ = reply.send(items);

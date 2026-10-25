@@ -662,6 +662,10 @@ fn decode_plugin_memory_request(
                 query: transcode(request.query)?,
             }
         }
+        plugin_ui::COUNT_RELATIONS_OPERATION => {
+            let _: plugin_ui::CountRelationsRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::CountRelations
+        }
         plugin_ui::LIST_RELATIONS_OPERATION => {
             let request: plugin_ui::ListRelationsRequest = decode(payload, operation)?;
             MemoryIpcRequestPayload::ListRelations {
@@ -736,6 +740,10 @@ fn encode_plugin_memory_response(
         (plugin_ui::COUNT_NODES_OPERATION, MemoryIpcResponsePayload::NodeCount { count }) => {
             serde_json::to_value(plugin_ui::NodeCountResponse { count })?
         }
+        (
+            plugin_ui::COUNT_RELATIONS_OPERATION,
+            MemoryIpcResponsePayload::RelationCount { count },
+        ) => serde_json::to_value(plugin_ui::RelationCountResponse { count })?,
         (
             plugin_ui::LIST_RELATIONS_OPERATION | plugin_ui::LIST_RELATIONS_BATCH_OPERATION,
             MemoryIpcResponsePayload::Relations { items },
@@ -1089,6 +1097,9 @@ pub async fn handle_memory_request(
         }),
         MemoryIpcRequestPayload::CountNodes { query } => Ok(MemoryIpcResponsePayload::NodeCount {
             count: handle.count_nodes(query).await,
+        }),
+        MemoryIpcRequestPayload::CountRelations => Ok(MemoryIpcResponsePayload::RelationCount {
+            count: handle.count_relations().await,
         }),
         MemoryIpcRequestPayload::ListRelations { node_id } => {
             Ok(MemoryIpcResponsePayload::Relations {

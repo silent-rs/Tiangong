@@ -28,6 +28,8 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use tiangong_llm::EmbeddingProvider;
 use tiangong_memory::{MemoryListQuery, MemoryNode, MemoryStatus, NodeVector, node_embedding_text};
 
+use crate::consolidation::{ConsolidationProgress, Progress, emit};
+
 use crate::consolidation::HandleProvider;
 use crate::vector_store::connection_uri;
 
@@ -118,7 +120,7 @@ pub async fn repair_missing_vectors(
     lancedb_dir: &Path,
     table: &str,
     embedding: Option<Arc<dyn EmbeddingProvider>>,
-    progress: Option<&(dyn Fn(&str) + Send + Sync)>,
+    progress: Option<ConsolidationProgress<'_>>,
 ) -> Result<VectorRepairReport> {
     let table_handle = open_table(lancedb_dir, table).await?;
     let dimension = table_dimension(&table_handle).await?;
@@ -202,12 +204,20 @@ pub async fn repair_missing_vectors(
             report.skipped += written.skipped;
             report.failed += written.failed;
         }
-        if let Some(callback) = progress {
-            callback(&format!(
-                "补写向量 [{}/{}]（跳过 {}，失败 {}）",
-                report.repaired, report.missing, report.skipped, report.failed
-            ));
-        }
+        emit(progress, || {
+            Progress::new(
+                "vectors",
+                format!(
+                    "补写向量 [{}/{}]（跳过 {}，失败 {}）",
+                    report.repaired, report.missing, report.skipped, report.failed
+                ),
+            )
+            .count(
+                report.repaired + report.skipped + report.failed,
+                report.missing,
+            )
+            .created(report.repaired)
+        });
     }
     if report.repaired == 0 && report.failed > 0 {
         bail!(

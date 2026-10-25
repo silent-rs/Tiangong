@@ -823,6 +823,13 @@ impl MemoryStore {
         self.db.list_memory_relations(node_id).unwrap_or_default()
     }
 
+    /// 统计全部关联关系数量。
+    pub(crate) fn count_relations(&self) -> usize {
+        self.db.count_memory_relations().unwrap_or_else(|error| {
+            tracing::warn!("统计 memory_relations 失败: {error:#}");
+            0
+        })
+    }
     /// 批量列出多个节点的关联关系（去重）。
     pub(crate) fn list_relations_batch(&self, node_ids: &[String]) -> Vec<MemoryRelation> {
         self.db

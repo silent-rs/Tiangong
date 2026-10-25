@@ -86,8 +86,57 @@ pub const DEFAULT_LLM_RETRY_DELAY: std::time::Duration = std::time::Duration::fr
 /// 报告里保留的处理明细条数上限。
 const MAX_REPORT_ACTIONS: usize = 200;
 
-/// 整理进度回调：每处理一条记忆触发一次。
-pub type ConsolidationProgress<'a> = &'a (dyn Fn(&str) + Send + Sync);
+/// 整理进度（结构化，供 CLI 打印与设置页展示）。
+///
+/// `done/total` 为当前阶段的进度（`total` 为 0 表示总量未知）；`removed` /
+/// `created` 为当前阶段累计删除 / 新建的记忆数；`llm_calls` 为本次整理累计的
+/// LLM 调用次数（部分事件无法取得时为 0，展示方应取最大值）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Progress {
+    /// 阶段：prepare | vectors | dedup | entity | distill | similar。
+    pub stage: &'static str,
+    /// 面向用户的说明（CLI 原样打印）。
+    pub message: String,
+    pub done: usize,
+    pub total: usize,
+    pub removed: usize,
+    pub created: usize,
+    pub llm_calls: usize,
+}
+impl Progress {
+    pub fn new(stage: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            stage,
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+    pub fn count(mut self, done: usize, total: usize) -> Self {
+        self.done = done;
+        self.total = total;
+        self
+    }
+    pub fn removed(mut self, removed: usize) -> Self {
+        self.removed = removed;
+        self
+    }
+    pub fn created(mut self, created: usize) -> Self {
+        self.created = created;
+        self
+    }
+    pub fn llm_calls(mut self, llm_calls: usize) -> Self {
+        self.llm_calls = llm_calls;
+        self
+    }
+}
+/// 整理进度回调。
+pub type ConsolidationProgress<'a> = &'a (dyn Fn(&Progress) + Send + Sync);
+/// 发送一条进度（未设置回调时忽略）。
+pub(crate) fn emit(progress: Option<ConsolidationProgress<'_>>, event: impl FnOnce() -> Progress) {
+    if let Some(callback) = progress {
+        callback(&event());
+    }
+}
 
 /// 记忆句柄提供者：每次调用返回当前可用的 [`MemoryHandle`]。
 ///
@@ -399,6 +448,8 @@ pub struct ConsolidationReport {
     pub entity_members: usize,
     /// entity：完成的 LLM 判定批数。
     pub entity_batches: usize,
+    /// entity：预计 LLM 判定批数（进度分母）。
+    pub entity_batches_total: usize,
     /// entity：合并组数。
     pub entity_groups: usize,
     /// entity：删除的实体数（合并 + 无信息量）。
@@ -598,9 +649,12 @@ pub async fn run_consolidation(
     {
         // 前置阶段面向全库（不分批、不受 offset 影响）。
         let nodes = collect_active_nodes(provider, 0, usize::MAX).await;
-        if let Some(callback) = progress {
-            callback(&format!("前置阶段：读取到 {} 条活跃记忆", nodes.len()));
-        }
+        emit(progress, || {
+            Progress::new(
+                "prepare",
+                format!("前置阶段：读取到 {} 条活跃记忆", nodes.len()),
+            )
+        });
         if options.runs(ConsolidationStage::Dedup)
             && let Err(err) = run_dedup(
                 provider,
@@ -698,12 +752,16 @@ async fn run_similar(
         report.similar_excluded_logs += without_removed - nodes.len();
         report.pages += 1;
         report.scanned += nodes.len();
-        if let Some(callback) = progress {
-            callback(&format!(
-                "第 {} 批：扫描到 {} 条活跃记忆（累计跳过最新 {} 条）",
-                report.pages, page, skip
-            ));
-        }
+        emit(progress, || {
+            Progress::new(
+                "similar",
+                format!(
+                    "第 {} 批：扫描到 {} 条活跃记忆（累计跳过最新 {} 条）",
+                    report.pages, page, skip
+                ),
+            )
+            .llm_calls(report.llm_calls)
+        });
         if let Some(stored) = stored.as_deref() {
             report.without_vectors += nodes
                 .iter()
@@ -729,12 +787,16 @@ async fn run_similar(
             break;
         }
         if options.max_pages > 0 && report.pages >= options.max_pages {
-            if let Some(callback) = progress {
-                callback(&format!(
-                    "已达单次批次上限（{} 批），剩余记忆可用 --offset {} 继续",
-                    options.max_pages, skip
-                ));
-            }
+            emit(progress, || {
+                Progress::new(
+                    "similar",
+                    format!(
+                        "已达单次批次上限（{} 批），剩余记忆可用 --offset {} 继续",
+                        options.max_pages, skip
+                    ),
+                )
+                .llm_calls(report.llm_calls)
+            });
             break;
         }
     }
@@ -973,12 +1035,17 @@ async fn consolidate_page(
     report.max_candidates = report
         .max_candidates
         .max(neighbors.iter().map(Vec::len).max().unwrap_or_default());
-    if let Some(callback) = progress {
-        callback(&format!(
-            "第 {page_no} 批：相似候选 {pairs} 对（阈值 {:.2}），开始逐条判定",
-            options.similarity_threshold
-        ));
-    }
+    emit(progress, || {
+        Progress::new(
+            "similar",
+            format!(
+                "第 {page_no} 批：相似候选 {pairs} 对（阈值 {:.2}），开始逐条判定",
+                options.similarity_threshold
+            ),
+        )
+        .count(0, nodes.len())
+        .llm_calls(report.llm_calls)
+    });
     report.clusters = ClusterStats::compute(&nodes, &neighbors, options.batch_size.max(2));
     let total = nodes.len();
     // 种子顺序：相似记忆多的优先（同数时保持原顺序，即更新时间从新到旧），
@@ -1030,17 +1097,23 @@ async fn consolidate_page(
                 state.visited[seed] = true;
                 handled += 1;
                 report.processed += 1;
-                if let Some(callback) = progress {
-                    // 分母为当前存活数：被合并/删除的记忆不再处理，分母随之减少。
-                    callback(&format!(
-                        "第 {} 批整理中 [{}/{}]（已删除 {} 条）{}",
-                        page_no,
-                        handled,
-                        state.alive_count(),
-                        state.removed,
-                        one_line(&state.nodes[seed].title, 40)
-                    ));
-                }
+                // 分母为当前存活数：被合并/删除的记忆不再处理，分母随之减少。
+                emit(progress, || {
+                    Progress::new(
+                        "similar",
+                        format!(
+                            "第 {} 批整理中 [{}/{}]（已删除 {} 条）{}",
+                            page_no,
+                            handled,
+                            state.alive_count(),
+                            state.removed,
+                            one_line(&state.nodes[seed].title, 40)
+                        ),
+                    )
+                    .count(handled, state.alive_count())
+                    .removed(state.removed)
+                    .llm_calls(report.llm_calls)
+                });
                 // 规则低质量遗忘（不调用 LLM，直接落库）。
                 if options.forget_low_quality
                     && let Some(reason) = rule_low_quality(&state.nodes[seed], options)
@@ -1088,14 +1161,20 @@ async fn consolidate_page(
             let mut batch = vec![seed];
             batch.extend(pending.iter().take(batch_size - 1).map(|(other, _)| *other));
             let scores: HashMap<usize, f32> = pending.into_iter().collect();
-            if let Some(callback) = progress {
-                callback(&format!(
-                    "  LLM 判定：种子 + {} 条相似记忆（该种子剩余候选 {}，并发 {}）",
-                    batch.len() - 1,
-                    left,
-                    inflight.len() + 1
-                ));
-            }
+            emit(progress, || {
+                Progress::new(
+                    "similar",
+                    format!(
+                        "  LLM 判定：种子 + {} 条相似记忆（该种子剩余候选 {}，并发 {}）",
+                        batch.len() - 1,
+                        left,
+                        inflight.len() + 1
+                    ),
+                )
+                .count(handled, state.alive_count())
+                .removed(state.removed)
+                .llm_calls(report.llm_calls)
+            });
             state.mark_judged(&batch);
             busy.extend(batch.iter().copied());
             launched += 1;
@@ -1249,9 +1328,9 @@ async fn build_neighbors(
             .iter()
             .map(|node| stored.get(&node.id).map(Vec::as_slice))
             .collect();
-        if let Some(callback) = progress {
-            callback("计算全量余弦相似度……");
-        }
+        emit(progress, || {
+            Progress::new("similar", "计算全量余弦相似度……")
+        });
         let started = Instant::now();
         let neighbors = exact_neighbors(&vectors, options.similarity_threshold);
         tracing::info!(
@@ -1277,14 +1356,18 @@ async fn build_neighbors(
     let mut neighbors: Vec<Vec<(u32, f32)>> = vec![Vec::new(); nodes.len()];
     let total = nodes.len();
     for (position, node) in nodes.iter().enumerate() {
-        if let Some(callback) = progress {
-            callback(&format!(
-                "检索中 [{}/{}] {}",
-                position + 1,
-                total,
-                one_line(&node.title, 40)
-            ));
-        }
+        emit(progress, || {
+            Progress::new(
+                "similar",
+                format!(
+                    "检索中 [{}/{}] {}",
+                    position + 1,
+                    total,
+                    one_line(&node.title, 40)
+                ),
+            )
+            .count(position + 1, total)
+        });
         // 每次召回都取当前句柄：Leader 退出后 follower 监控会自动接替。
         let hits = provider()
             .recall(
@@ -1405,13 +1488,11 @@ async fn embed_nodes(
     let texts: Vec<String> = nodes.iter().map(node_text).collect();
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     for (index, batch) in texts.chunks(EMBEDDING_BATCH).enumerate() {
-        if let Some(callback) = progress {
-            callback(&format!(
-                "向量化 [{}/{}]",
-                (index * EMBEDDING_BATCH).min(texts.len()),
-                texts.len()
-            ));
-        }
+        emit(progress, || {
+            let done = (index * EMBEDDING_BATCH).min(texts.len());
+            Progress::new("similar", format!("向量化 [{}/{}]", done, texts.len()))
+                .count(done, texts.len())
+        });
         let mut embedded = embedding.embed(batch.to_vec()).await?;
         if embedded.len() != batch.len() {
             anyhow::bail!(

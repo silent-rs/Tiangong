@@ -56,6 +56,10 @@ pub enum MemoryCommand {
         query: MemoryListQuery,
         reply: oneshot::Sender<usize>,
     },
+    /// 统计全部关联关系数量。
+    CountRelations {
+        reply: oneshot::Sender<usize>,
+    },
     ListRelations {
         node_id: String,
         reply: oneshot::Sender<Vec<MemoryRelation>>,

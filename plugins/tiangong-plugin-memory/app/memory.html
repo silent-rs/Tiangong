@@ -932,6 +932,171 @@ input[type="range"] {
   gap: 8px;
 }
 
+.consolidate-view.active {
+  display: flex;
+  justify-content: center;
+  padding-top: 8px;
+}
+.consolidate-panel {
+  display: grid;
+  width: min(760px, 100%);
+  gap: 12px;
+}
+.consolidate-view input[type="checkbox"] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  min-height: 14px;
+  margin: 1px 0 0;
+  padding: 0;
+}
+.consolidate-stages {
+  display: grid;
+  gap: 6px;
+}
+.consolidate-stages label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+.consolidate-stages label span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.consolidate-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  font-size: 12px;
+}
+.consolidate-inline label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.consolidate-inline input[type="number"] {
+  width: 84px;
+}
+.consolidate-progress {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.consolidate-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.consolidate-state {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+}
+.consolidate-state.running,
+.consolidate-state.stopping {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.consolidate-state.completed {
+  background: var(--primary-soft);
+  color: var(--status-success-color);
+}
+.consolidate-state.failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.consolidate-state.stopped {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.consolidate-stage-list {
+  display: grid;
+  gap: 8px;
+}
+.consolidate-stage {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.consolidate-stage.pending {
+  color: var(--muted);
+}
+.consolidate-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+}
+.consolidate-bar > div {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 0.3s ease;
+}
+.consolidate-stage.done .consolidate-bar > div {
+  background: var(--status-success-color);
+}
+.consolidate-bar.indeterminate > div {
+  width: 30% !important;
+  animation: consolidate-slide 1.2s ease-in-out infinite;
+}
+@keyframes consolidate-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+.consolidate-stage small {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.consolidate-message {
+  min-height: 16px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.consolidate-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.consolidate-metrics strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.consolidate-log {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: var(--surface-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.consolidate-error {
+  color: var(--danger);
+  font-size: 12px;
+}
 .config-footer {
   display: flex;
   min-height: 64px;
@@ -946,6 +1111,14 @@ input[type="range"] {
   font-size: 12px;
 }
 
+#consolidate-hint {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+#consolidate-hint.error {
+  color: var(--danger);
+}
 #config-status.error {
   color: var(--danger);
 }
@@ -1189,6 +1362,7 @@ input[type="range"] {
       <nav class="tabs" aria-label="记忆设置视图">
         <button class="tab active" type="button" data-tab="data">数据预览</button>
         <button class="tab" type="button" data-tab="config">模型配置</button>
+        <button class="tab" type="button" data-tab="consolidate">深度整理</button>
       </nav>
     </header>
 
@@ -1213,7 +1387,7 @@ input[type="range"] {
           <div class="stat-card stat-relations">
             <span>关联数</span>
             <strong id="stat-relations">0</strong>
-            <small>当前已加载</small>
+            <small id="stat-relations-note">全部关联</small>
           </div>
         </div>
 
@@ -1456,6 +1630,62 @@ input[type="range"] {
           </div>
         </form>
       </section>
+      <section id="view-consolidate" class="page-view consolidate-view">
+        <div class="consolidate-panel">
+          <form id="consolidate-form" class="config-form">
+            <div class="config-row">
+              <div>
+                <label>整理阶段</label>
+                <span>按 dedup → entity → distill → similar 顺序执行，均跨工作区整理</span>
+              </div>
+              <div class="consolidate-stages">
+                <label><input type="checkbox" name="stage" value="dedup" checked><div>去重 dedup<br><span>摘要完全一致的记忆直接归一，不调用 LLM</span></div></label>
+                <label><input type="checkbox" name="stage" value="entity" checked><div>实体 entity<br><span>同名实体由 LLM 合并描述</span></div></label>
+                <label><input type="checkbox" name="stage" value="distill" checked><div>提炼 distill<br><span>工具日志按时间段提炼为经历</span></div></label>
+                <label><input type="checkbox" name="stage" value="similar" checked><div>相似 similar<br><span>向量相似召回，由 LLM 判定合并与遗忘</span></div></label>
+              </div>
+            </div>
+            <div class="config-row">
+              <div>
+                <label for="consolidate-threshold">相似阈值 / 并发</label>
+                <span>阈值只决定哪些记忆交给 LLM 看；并发受模型服务限流约束</span>
+              </div>
+              <div class="consolidate-inline">
+                <label>阈值 <input id="consolidate-threshold" type="number" min="0.5" max="0.999" step="0.01" value="0.90"></label>
+                <label>并发 <input id="consolidate-concurrency" type="number" min="1" max="32" step="1" value="4"></label>
+                <label>LLM 上限 <input id="consolidate-max-calls" type="number" min="0" step="1" value="0" title="0 表示不限"></label>
+              </div>
+            </div>
+            <div class="config-row">
+              <div>
+                <label>运行选项</label>
+                <span>试运行只生成整理计划和执行记录，不改动记忆</span>
+              </div>
+              <div class="consolidate-inline">
+                <label><input id="consolidate-dry-run" type="checkbox" checked> 试运行</label>
+                <label><input id="consolidate-keep-low" type="checkbox"> 保留低质量记忆</label>
+                <label><input id="consolidate-skip-vectors" type="checkbox"> 跳过向量补写</label>
+              </div>
+            </div>
+            <div class="config-footer">
+              <span id="consolidate-hint" role="status">合并与遗忘为物理删除，删除前的完整快照写入执行记录</span>
+              <button id="consolidate-stop" class="secondary-button hidden" type="button">停止</button>
+              <button id="consolidate-start" class="primary-button" type="submit">开始整理</button>
+            </div>
+          </form>
+          <div id="consolidate-progress" class="consolidate-progress hidden" aria-live="polite">
+            <div class="consolidate-progress-head">
+              <strong id="consolidate-title">深度整理</strong>
+              <span id="consolidate-state" class="consolidate-state">空闲</span>
+            </div>
+            <div id="consolidate-stage-list" class="consolidate-stage-list"></div>
+            <div id="consolidate-message" class="consolidate-message"></div>
+            <div id="consolidate-metrics" class="consolidate-metrics"></div>
+            <div id="consolidate-error" class="consolidate-error hidden"></div>
+            <pre id="consolidate-log" class="consolidate-log"></pre>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -1671,6 +1901,9 @@ input[type="range"] {
     bootstrap: 'sidecar.ui.memory.config.get',
     save_config: 'sidecar.ui.memory.config.set',
     probe_config: 'sidecar.ui.memory.config.probe',
+    consolidation_start: 'sidecar.ui.memory.consolidation.start',
+    consolidation_status: 'sidecar.ui.memory.consolidation.status',
+    consolidation_stop: 'sidecar.ui.memory.consolidation.stop',
   };
   async function callHostBridge(bridgeMethod, payload = '{}') {
     if (!hostChannel) await hostReady;
@@ -1810,7 +2043,7 @@ input[type="range"] {
     weekAgo.setDate(weekAgo.getDate() - 7);
 
     try {
-      const [nodesResponse, totalResponse, activeResponse, weekResponse] = await Promise.all([
+      const [nodesResponse, totalResponse, activeResponse, weekResponse, relationResponse] = await Promise.all([
         memoryRequest({ method: 'list_nodes', query: listQuery({ limit, offset }) }),
         memoryRequest({ method: 'count_nodes', query: listQuery() }),
         memoryRequest({ method: 'count_nodes', query: listQuery({ status: 'active' }) }),
@@ -1818,6 +2051,8 @@ input[type="range"] {
           method: 'count_nodes',
           query: listQuery({ created_after: localDateTime(weekAgo) }),
         }),
+        // 旧版 sidecar 没有 count_relations，失败时回退到当前页关联数。
+        memoryRequest({ method: 'count_relations' }).catch(() => null),
       ]);
       if (loadVersion !== state.loadVersion) {
         return null;
@@ -1827,6 +2062,9 @@ input[type="range"] {
       state.totalCount = Number(totalResponse.count || 0);
       state.activeCount = Number(activeResponse.count || 0);
       state.weekCount = Number(weekResponse.count || 0);
+      state.relationCount = relationResponse && Number.isFinite(Number(relationResponse.count))
+        ? Number(relationResponse.count)
+        : null;
       state.selectedIds = new Set(
         [...state.selectedIds].filter((id) => state.nodes.some((node) => node.id === id)),
       );
@@ -1867,7 +2105,14 @@ input[type="range"] {
     byId('stat-total').textContent = String(state.totalCount);
     byId('stat-active').textContent = String(state.activeCount);
     byId('stat-week').textContent = String(state.weekCount);
-    byId('stat-relations').textContent = String(visibleRelations().length);
+    const loadedRelations = visibleRelations().length;
+    if (state.relationCount === null || state.relationCount === undefined) {
+      byId('stat-relations').textContent = String(loadedRelations);
+      byId('stat-relations-note').textContent = '当前已加载';
+    } else {
+      byId('stat-relations').textContent = String(state.relationCount);
+      byId('stat-relations-note').textContent = `全部关联 · 当前页 ${loadedRelations}`;
+    }
     byId('stat-loaded').textContent = state.totalCount > state.nodes.length
       ? `已加载 ${state.nodes.length}`
       : `已加载全部 ${state.nodes.length}`;
@@ -2875,6 +3120,194 @@ input[type="range"] {
       </article>`).join('');
   }
 
+  // ── 深度整理 ──
+  const CONSOLIDATION_STAGES = [
+    ['vectors', '补写向量'],
+    ['prepare', '读取记忆'],
+    ['dedup', '去重'],
+    ['entity', '实体'],
+    ['distill', '提炼'],
+    ['similar', '相似'],
+  ];
+  const CONSOLIDATION_STATES = {
+    idle: '空闲',
+    running: '运行中',
+    stopping: '正在停止',
+    completed: '已完成',
+    stopped: '已停止',
+    failed: '失败',
+  };
+  let consolidationTimer = null;
+  let consolidationWasRunning = false;
+
+  function consolidationActive(status) {
+    return status && (status.state === 'running' || status.state === 'stopping');
+  }
+
+  async function consolidationCall(method, payload = {}) {
+    const raw = await callHost(method, JSON.stringify(payload));
+    return raw ? JSON.parse(raw) : {};
+  }
+
+  function scheduleConsolidationPoll(status) {
+    window.clearTimeout(consolidationTimer);
+    consolidationTimer = null;
+    if (consolidationActive(status)) {
+      consolidationTimer = window.setTimeout(refreshConsolidation, 1000);
+    }
+  }
+
+  async function refreshConsolidation() {
+    try {
+      const status = await consolidationCall('consolidation_status');
+      renderConsolidation(status);
+      scheduleConsolidationPoll(status);
+    } catch (error) {
+      window.clearTimeout(consolidationTimer);
+      consolidationTimer = null;
+      byId('consolidate-hint').textContent = `无法获取整理状态：${errorText(error)}（插件可能需要更新）`;
+      byId('consolidate-hint').classList.add('error');
+    }
+  }
+
+  function stageProgressText(stage, item) {
+    if (!item) return '';
+    const parts = [];
+    if (item.total > 0) {
+      parts.push(stage === 'similar' ? `${item.done} / ${item.total} 存活` : `${item.done} / ${item.total}`);
+    } else if (item.done > 0) {
+      parts.push(String(item.done));
+    }
+    if (item.removed > 0) parts.push(`已删除 ${item.removed}`);
+    if (item.created > 0) parts.push(stage === 'vectors' ? `已补写 ${item.created}` : `新建 ${item.created}`);
+    return parts.join(' · ');
+  }
+
+  function renderConsolidation(status) {
+    const active = consolidationActive(status);
+    const state = status.state || 'idle';
+    const hasRun = state !== 'idle';
+    byId('consolidate-progress').classList.toggle('hidden', !hasRun);
+    byId('consolidate-start').disabled = active;
+    byId('consolidate-start').textContent = active ? '整理中…' : '开始整理';
+    byId('consolidate-stop').classList.toggle('hidden', !active);
+    byId('consolidate-stop').disabled = state === 'stopping';
+    byId('consolidate-form').querySelectorAll('input').forEach((input) => {
+      input.disabled = active;
+    });
+    const hint = byId('consolidate-hint');
+    hint.classList.remove('error');
+    if (!hasRun) return;
+
+    const stateLabel = byId('consolidate-state');
+    stateLabel.className = `consolidate-state ${state}`;
+    stateLabel.textContent = CONSOLIDATION_STATES[state] || state;
+    byId('consolidate-title').textContent = status.dry_run ? '深度整理（试运行，不落库）' : '深度整理';
+
+    const byStage = new Map((status.stage_progress || []).map((item) => [item.stage, item]));
+    const current = status.progress ? status.progress.stage : null;
+    const planned = new Set(status.stages || []);
+    const rows = CONSOLIDATION_STAGES.filter(([key]) => {
+      if (byStage.has(key)) return true;
+      if (key === 'vectors' || key === 'prepare') return false;
+      return planned.has(key);
+    });
+    const order = rows.map(([key]) => key);
+    const currentIndex = current ? order.indexOf(current) : -1;
+    byId('consolidate-stage-list').innerHTML = rows.map(([key, label], index) => {
+      const item = byStage.get(key);
+      const running = active && key === current;
+      const done = item && (!active || index < currentIndex || (item.total > 0 && item.done >= item.total && !running));
+      const pending = !item;
+      let percent = 0;
+      if (item && item.total > 0) percent = Math.min(100, Math.round((item.done / item.total) * 100));
+      if (done) percent = 100;
+      const indeterminate = running && (!item || item.total === 0);
+      const cls = pending ? 'pending' : done ? 'done' : running ? 'running' : '';
+      const detail = pending ? (active ? '等待中' : '未执行') : stageProgressText(key, item) || (done ? '完成' : '');
+      return `<div class="consolidate-stage ${cls}">
+        <span>${escapeHtml(label)}</span>
+        <div class="consolidate-bar${indeterminate ? ' indeterminate' : ''}"><div style="width:${percent}%"></div></div>
+        <small>${escapeHtml(detail)}</small>
+      </div>`;
+    }).join('');
+
+    byId('consolidate-message').textContent = active && status.progress ? status.progress.message.trim() : '';
+    const removed = (status.stage_progress || [])
+      .filter((item) => item.stage !== 'vectors')
+      .reduce((sum, item) => sum + (item.removed || 0), 0);
+    const metrics = [
+      ['LLM 调用', status.llm_calls || 0],
+      [status.dry_run ? '计划删除' : '已删除', removed],
+    ];
+    if (status.started_at) metrics.push(['开始', status.started_at]);
+    if (status.finished_at) metrics.push(['结束', status.finished_at]);
+    byId('consolidate-metrics').innerHTML = metrics
+      .map(([label, value]) => `<span>${escapeHtml(label)} <strong>${escapeHtml(String(value))}</strong></span>`)
+      .join('') + (status.journal ? `<span title="${escapeHtml(status.journal)}">执行记录 <strong>${escapeHtml(status.journal.split('/').pop())}</strong></span>` : '');
+
+    const errorBox = byId('consolidate-error');
+    errorBox.classList.toggle('hidden', !status.error);
+    errorBox.textContent = status.error ? `错误：${status.error}` : '';
+
+    const log = byId('consolidate-log');
+    const lines = (status.logs || []).slice();
+    if (status.report) lines.push('', status.report.trimEnd());
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    log.textContent = lines.join('\n');
+    if (stick) log.scrollTop = log.scrollHeight;
+
+    // 运行结束：刷新统计与列表（记忆数、关联数会变化）。
+    if (consolidationWasRunning && !active && !status.dry_run) loadData();
+    consolidationWasRunning = active;
+  }
+
+  async function startConsolidation(event) {
+    event.preventDefault();
+    const stages = [...byId('consolidate-form').querySelectorAll('input[name="stage"]:checked')]
+      .map((input) => input.value);
+    if (stages.length === 0) {
+      showToast('请至少选择一个整理阶段', 'error');
+      return;
+    }
+    const dryRun = byId('consolidate-dry-run').checked;
+    if (!dryRun && !window.confirm('正式整理会物理删除被合并或判定为低质量的记忆（快照保存在执行记录中）。确定开始？')) {
+      return;
+    }
+    const threshold = Number(byId('consolidate-threshold').value);
+    const concurrency = Number(byId('consolidate-concurrency').value);
+    const payload = {
+      stages,
+      dry_run: dryRun,
+      threshold: Number.isFinite(threshold) ? threshold : null,
+      concurrency: Number.isFinite(concurrency) ? Math.round(concurrency) : null,
+      max_llm_calls: Math.max(0, Math.round(Number(byId('consolidate-max-calls').value) || 0)),
+      keep_low_quality: byId('consolidate-keep-low').checked,
+      skip_vector_repair: byId('consolidate-skip-vectors').checked,
+    };
+    byId('consolidate-start').disabled = true;
+    try {
+      const status = await consolidationCall('consolidation_start', payload);
+      renderConsolidation(status);
+      scheduleConsolidationPoll(status);
+    } catch (error) {
+      showToast(`无法开始整理：${errorText(error)}`, 'error');
+      await refreshConsolidation();
+    }
+  }
+
+  async function stopConsolidation() {
+    byId('consolidate-stop').disabled = true;
+    try {
+      const status = await consolidationCall('consolidation_stop');
+      renderConsolidation(status);
+      scheduleConsolidationPoll(status);
+    } catch (error) {
+      showToast(`停止失败：${errorText(error)}`, 'error');
+      byId('consolidate-stop').disabled = false;
+    }
+  }
+
   function switchTab(tab) {
     if (state.activeTab === 'config' && tab !== 'config') flushConfigSave();
     state.activeTab = tab;
@@ -2883,6 +3316,8 @@ input[type="range"] {
     });
     byId('view-data').classList.toggle('active', tab === 'data');
     byId('view-config').classList.toggle('active', tab === 'config');
+    byId('view-consolidate').classList.toggle('active', tab === 'consolidate');
+    if (tab === 'consolidate') refreshConsolidation();
   }
 
   async function switchMode(mode) {
@@ -2904,6 +3339,8 @@ input[type="range"] {
     document.querySelectorAll('.tab').forEach((button) => {
       button.addEventListener('click', () => switchTab(button.dataset.tab));
     });
+    byId('consolidate-form').addEventListener('submit', startConsolidation);
+    byId('consolidate-stop').addEventListener('click', stopConsolidation);
     document.querySelectorAll('.segment').forEach((button) => {
       button.addEventListener('click', () => switchMode(button.dataset.mode));
     });

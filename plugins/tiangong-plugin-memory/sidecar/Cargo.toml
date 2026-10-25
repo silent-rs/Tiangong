@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 tiangong-memory = { workspace = true }
 tiangong-plugin-memory-protocol = { workspace = true }
+# 设置页触发的记忆深度整理（与独立整理工具共用执行流程）
+tiangong-memory-consolidator = { path = "../consolidator" }
 tiangong-plugin-sidecar = { workspace = true }
 # --update：官方目录与签名清单约定
 tiangong-plugin-update = { workspace = true }
@@ -44,6 +46,8 @@ libc = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 scru128 = { workspace = true }
+# 整理状态时间戳
+chrono = { workspace = true, features = ["clock"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "net", "sync"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
