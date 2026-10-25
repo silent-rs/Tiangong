@@ -44,6 +44,7 @@ pub mod host_policy;
 pub mod signature;
 pub mod slots;
 pub mod tool_icons;
+pub mod tool_titles;
 pub mod trust;
 mod ts_plugin;
 mod ts_tools;

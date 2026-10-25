@@ -705,6 +705,7 @@ mod tests {
             resources: None,
             mention: Some(mention),
             tool_icons: None,
+            tool_titles: None,
         }
     }
 

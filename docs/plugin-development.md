@@ -238,9 +238,9 @@ example-plugin/
 
 不需要 sidecar 的插件应删除整个 `sidecar` 字段，并可将 `permissions` 留空。
 
-### 工具展示信息（`tool_icons`）
+### 工具展示信息（`tool_icons` / `tool_titles`）
 
-工具图标的界面展示由插件在清单中自行声明，宿主各端（桌面前端、CLI）经运行时查询使用：
+工具插件的界面展示信息由插件在清单中自行声明，宿主各端（桌面前端、CLI）经运行时查询使用：
 
 ```json
 {
@@ -248,14 +248,18 @@ example-plugin/
     "generate_image": "image",
     "file_read:action=list": "assets/folder.svg",
     "*": "flame"
+  },
+  "tool_titles": {
+    "generate_image": "生成图片",
+    "file_read:action=list": "列出目录"
   }
 }
 ```
 
 - 键为工具原名，或特指键 `工具名:参数=取值`（按调用参数取值选用，特指优先于通用）。
-- 值为宿主内置图标名（小写字母、数字、`-`，对应 lucide 图标），或插件目录内 png/svg/jpg 资源相对路径（须位于 `resources` 声明目录内随包分发）；键 `*` 为本插件其余工具的默认图标。
+- `tool_icons` 的值为宿主内置图标名（小写字母、数字、`-`，对应 lucide 图标），或插件目录内 png/svg/jpg 资源相对路径（须位于 `resources` 声明目录内随包分发）；键 `*` 为本插件其余工具的默认图标。
+- `tool_titles` 的值为 1-32 字的折叠行标题；不支持 `*` 默认键。与 `session.message-item` 视图贡献的 `titles` 同键语义，前端先查视图声明再查本表，均未声明时显示通用标题「工具调用」。
 - 声明不合法的条目只跳过并告警，不影响插件装载。
-- 工具行标题由 `session.message-item` 视图贡献的 `titles` 声明（见 harness 设计 6.5.2），与图标通道相互独立。
 
 
 ## 实现 WASM Component

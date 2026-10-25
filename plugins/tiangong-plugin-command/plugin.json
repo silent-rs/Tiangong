@@ -92,5 +92,9 @@
   ],
   "tool_icons": {
     "*": "square-terminal"
+  },
+  "tool_titles": {
+    "run_command": "执行命令",
+    "run_shell": "执行 Shell"
   }
 }

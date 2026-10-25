@@ -528,6 +528,14 @@ export interface ToolIconEntry {
   variants?: Record<string, Record<string, string>> | null;
 }
 
+/** 工具行标题查询表条目（plugin.json 顶层 `tool_titles` 声明）。 */
+export interface ToolTitleEntry {
+  /** 通用标题；只声明了特指标题且无通用标题时为空串（用通用标题回落）。 */
+  title: string;
+  /** 特指标题：参数名 → 参数取值 → 标题（键 `工具名:参数=取值`）。 */
+  variants?: Record<string, Record<string, string>> | null;
+}
+
 /** 工具参数摘要的展示提示（运行时提供）。 */
 export interface ToolArgsPresentation {
   /** 摘要中排在最前、只显示取值的参数。 */
@@ -1071,6 +1079,10 @@ export const api = {
   /// 工具图标查询表（键为工具名与 `{插件id}__{工具名}`；查不到的工具用默认图标）。
   listToolIcons: (): Promise<Record<string, ToolIconEntry>> =>
     invoke('list_tool_icons'),
+
+  /// 工具行标题查询表（键为工具名与 `{插件id}__{工具名}`；查不到用通用标题）。
+  listToolTitles: (): Promise<Record<string, ToolTitleEntry>> =>
+    invoke('list_tool_titles'),
 
   /// 工具参数摘要的展示提示（运行时提供，前端不写死参数名）。
   toolArgsPresentation: (): Promise<ToolArgsPresentation> =>

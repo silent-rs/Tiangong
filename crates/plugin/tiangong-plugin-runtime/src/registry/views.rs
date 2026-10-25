@@ -367,6 +367,35 @@ pub struct ExtensionApp {
 /// 工具名取自已启用插件的 TS 工具声明与已交付适配器的工具规格；插件
 /// 声明优先，其次 runtime 内置表，查不到的工具不在表中（前端用默认图标）。
 pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons::ToolIcon> {
+    let entries = tool_declaring_plugins();
+    crate::tool_icons::build_tool_icon_table(entries.iter().map(|(id, manifest, tools)| {
+        crate::tool_icons::PluginToolIcons {
+            plugin_id: id,
+            declared: manifest.tool_icons.as_ref(),
+            tools: tools.clone(),
+        }
+    }))
+}
+
+/// 工具行标题查询表（见 [`crate::tool_titles`]）：已启用插件在 `tool_titles`
+/// 中声明的标题，键为工具对外名与原名；查不到的工具不在表中（前端显示
+/// 通用标题「工具调用」）。
+pub fn list_tool_titles() -> std::collections::BTreeMap<String, crate::tool_titles::ToolTitle> {
+    let entries = tool_declaring_plugins();
+    crate::tool_titles::build_tool_title_table(entries.iter().map(|(id, manifest, tools)| {
+        crate::tool_titles::PluginToolTitles {
+            plugin_id: id,
+            declared: manifest.tool_titles.as_ref(),
+            tools: tools.clone(),
+        }
+    }))
+}
+
+/// 收集已启用插件与各自声明的工具原名（清单 `tools`、TS/WASM 适配器规格，
+/// 以及 `tool_icons` / `tool_titles` 特指键归并出的工具名），供展示表建表。
+///
+/// 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
+fn tool_declaring_plugins() -> Vec<(String, PluginManifest, Vec<String>)> {
     /// 注册表快照：插件 id、清单与仍存活的 WASM / TS 适配器。
     type PluginSnapshot = (
         String,
@@ -376,7 +405,7 @@ pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons
     );
     let snapshot: Vec<PluginSnapshot> = {
         let Ok(plugins) = loaded_plugins().lock() else {
-            return crate::tool_icons::build_tool_icon_table(Vec::new());
+            return Vec::new();
         };
         plugins
             .iter()
@@ -396,7 +425,7 @@ pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons
             .collect()
     };
     // 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
-    let entries: Vec<(String, PluginManifest, Vec<String>)> = snapshot
+    snapshot
         .into_iter()
         .map(|(id, manifest, wasm, ts)| {
             let mut tools: Vec<String> = manifest
@@ -414,7 +443,8 @@ pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons
                     tools.push(spec.name);
                 }
             }
-            if let Some(declared) = &manifest.tool_icons {
+            for declared in [&manifest.tool_icons, &manifest.tool_titles] {
+                let Some(declared) = declared else { continue };
                 // 特指键 `工具名:参数=取值` 归到工具名，不单独成为工具。
                 for key in declared.keys() {
                     let Some((tool, _)) = crate::tool_icons::parse_tool_key(key) else {
@@ -429,14 +459,7 @@ pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons
             }
             (id, manifest, tools)
         })
-        .collect();
-    crate::tool_icons::build_tool_icon_table(entries.iter().map(|(id, manifest, tools)| {
-        crate::tool_icons::PluginToolIcons {
-            plugin_id: id,
-            declared: manifest.tool_icons.as_ref(),
-            tools: tools.clone(),
-        }
-    }))
+        .collect()
 }
 
 /// 读取插件声明的工具图标资源（只允许读取 `tool_icons` 中声明过的路径；

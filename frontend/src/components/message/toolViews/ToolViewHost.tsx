@@ -4,6 +4,7 @@ import { useSlotContributions } from "@/hooks/useSlotContributions";
 import { useStore } from "@/store/useStore";
 import { PluginSandbox } from "@/components/PluginSandbox";
 import type { HostMessageContext } from "@/components/pluginHostContext";
+import { manifestToolTitle, useToolTitleTable } from "../toolTitles";
 
 const MESSAGE_ITEM_SLOT = "session.message-item" as const;
 
@@ -73,10 +74,18 @@ export function findToolTitle(
   return best === null ? null : (best as { title: string }).title;
 }
 
-/** 当前已加载工具视图声明的工具行标题查询函数。 */
+/**
+ * 当前工具行标题查询函数：先查工具视图声明的 `titles`（随视图演进的插件），
+ * 再查清单 `tool_titles` 查询表（无视图插件），均未声明返回 null（通用标题）。
+ */
 export function useToolTitle(): (toolName: string, args: unknown) => string | null {
   const items = useSlotContributions(MESSAGE_ITEM_SLOT);
-  return useMemo(() => (toolName: string, args: unknown) => findToolTitle(items, toolName, args), [items]);
+  const manifestTable = useToolTitleTable();
+  return useMemo(
+    () => (toolName: string, args: unknown) =>
+      findToolTitle(items, toolName, args) ?? manifestToolTitle(manifestTable, toolName, args),
+    [items, manifestTable],
+  );
 }
 
 interface ToolViewHostProps {
