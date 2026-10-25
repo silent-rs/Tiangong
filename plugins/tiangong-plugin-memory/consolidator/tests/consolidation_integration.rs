@@ -336,6 +336,12 @@ async fn consolidation_aborts_when_llm_unreachable() {
 
 /// 模拟 OpenAI 兼容 Chat Completions 的 LLM：记录每次请求送审的记忆 ID，
 /// 按给定规则返回判定 JSON。
+#[derive(Clone, Copy)]
+enum Decider {
+    Members(fn(&[(String, String)]) -> String),
+    Raw(fn(&serde_json::Value) -> String),
+}
+
 struct MockLlm {
     base_url: String,
     requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
@@ -346,6 +352,15 @@ struct MockLlm {
 impl MockLlm {
     /// `decide`：输入本批记忆 (id, title) 列表，返回判定 JSON 字符串。
     fn start(decide: fn(&[(String, String)]) -> String) -> Self {
+        Self::start_with(Decider::Members(decide))
+    }
+
+    /// 原始模式：`decide` 收到解析后的用户提示 JSON（无法解析时为 Null）。
+    fn start_raw(decide: fn(&serde_json::Value) -> String) -> Self {
+        Self::start_with(Decider::Raw(decide))
+    }
+
+    fn start_with(decider: Decider) -> Self {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定 LLM 服务失败");
         let addr = listener.local_addr().expect("读取地址失败");
@@ -398,21 +413,19 @@ impl MockLlm {
                     }
                     break String::from_utf8(buffer[end + 4..].to_vec()).ok();
                 };
-                // 取最后一条用户消息里的 memories。
-                let members: Vec<(String, String)> = body
+                // 取最后一条用户消息（JSON 提示）。
+                let prompt: serde_json::Value = body
                     .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
                     .and_then(|value| {
                         let messages = value.get("messages")?.as_array()?.clone();
                         let content = messages.last()?.get("content")?.as_str()?.to_string();
                         serde_json::from_str::<serde_json::Value>(&content).ok()
                     })
-                    .and_then(|prompt| {
-                        prompt
-                            .get("memories")
-                            .or_else(|| prompt.get("logs"))?
-                            .as_array()
-                            .cloned()
-                    })
+                    .unwrap_or(serde_json::Value::Null);
+                let members: Vec<(String, String)> = prompt
+                    .get("memories")
+                    .or_else(|| prompt.get("logs"))
+                    .and_then(|value| value.as_array().cloned())
                     .unwrap_or_default()
                     .iter()
                     .map(|item| {
@@ -429,7 +442,10 @@ impl MockLlm {
                 seen.lock()
                     .unwrap()
                     .push(members.iter().map(|(id, _)| id.clone()).collect());
-                let content = decide(&members);
+                let content = match decider {
+                    Decider::Members(decide) => decide(&members),
+                    Decider::Raw(decide) => decide(&prompt),
+                };
                 let payload = serde_json::json!({
                     "id": "mock",
                     "object": "chat.completion",
@@ -754,11 +770,11 @@ async fn all_active(handle: &tiangong_memory::MemoryHandle) -> Vec<tiangong_memo
         .await
 }
 
-/// 摘要完全一致的记忆在同一范围内归一：标题取多数、重要性取最高、关联改挂；
-/// 不同范围与过短摘要不处理；不调用 LLM。
+/// 摘要完全一致的记忆归一（跨工作区）：标题取多数、重要性取最高、关联改挂；
+/// 过短摘要不处理；不调用 LLM。
 #[tokio::test]
 #[serial]
-async fn dedup_merges_identical_summaries_within_scope() {
+async fn dedup_merges_identical_summaries_across_scopes() {
     let _env = EnvGuard::enter();
     let handle = start_with_options(MemoryOptions::new()).expect("Memory 应可启动");
     let summary = "调用插件 fs 的 file_write：成功 replacements=1,replace_all=false";
@@ -798,14 +814,18 @@ async fn dedup_merges_identical_summaries_within_scope() {
     assert!(report.fatal_error.is_none(), "{report:?}");
     assert!(!report.used_llm, "dedup 不应调用 LLM");
     assert_eq!(report.dedup_groups, 1, "{}", report.render());
-    assert_eq!(report.dedup_removed, 2);
+    assert_eq!(report.dedup_removed, 3, "含另一个工作区的同摘要记忆");
     assert_eq!(report.dedup_relinked, 1);
     let active = all_active(&handle).await;
     let ids: Vec<&str> = active.iter().map(|node| node.id.as_str()).collect();
     // 同类记忆按重要性选主：a3（0.9）保留，标题改为多数的「写入文件」。
     assert!(ids.contains(&a3.as_str()));
     assert!(!ids.contains(&a1.as_str()) && !ids.contains(&a2.as_str()));
-    for id in [&other_scope, &short1, &short2, &outside] {
+    assert!(
+        !ids.contains(&other_scope.as_str()),
+        "跨工作区的重复也应归一"
+    );
+    for id in [&short1, &short2, &outside] {
         assert!(ids.contains(&id.as_str()), "{id} 不应被归一");
     }
     let primary = active.iter().find(|node| node.id == a3).unwrap();
@@ -1119,4 +1139,125 @@ async fn stop_request_halts_before_next_batch() {
     assert_eq!(report.pages, 0, "停止后不应进入 similar");
     assert!(report.render().contains("已手动停止"));
     assert_eq!(all_active(&handle).await.len(), 3, "停止后数据不变");
+}
+
+/// 同名实体（跨工作区）交给 LLM 合并：主记忆改写为合并描述，其余删除并改挂关联。
+///
+/// 实体只能经反刍写入：用 MockLlm 作为 Memory 的模型，抽取请求返回一个实体；
+/// 整理工具的 entity 请求（memories 字段为空、entities 字段非空）返回合并组。
+#[tokio::test]
+#[serial]
+async fn entity_stage_merges_same_name_entities_across_workspaces() {
+    let _env = EnvGuard::enter();
+    let llm = MockLlm::start_raw(entity_mock);
+    let handle =
+        start_with_options(MemoryOptions::new().with_model(llm.config())).expect("Memory 应可启动");
+    for workspace in ["ws-a", "ws-b", "ws-c"] {
+        handle
+            .run_enhanced_micro_rumination(tiangong_memory::EnhancedTurnResult {
+                session_id: format!("s-{workspace}"),
+                turn_id: format!("t-{workspace}"),
+                had_tool_calls: true,
+                user_input: format!("在 {workspace} 继续开发天工"),
+                summary: "继续开发".to_string(),
+                workspace_id: Some(workspace.to_string()),
+                memory_candidates: vec![tiangong_memory::MemoryCandidate {
+                    tool_name: "coding".to_string(),
+                    step_index: 0,
+                    hint: "开发".to_string(),
+                    suggested_kinds: Vec::new(),
+                    file_path: None,
+                    url: None,
+                    result_summary: Some("完成".to_string()),
+                    success: true,
+                    tool_source: None,
+                    is_recalled_context: false,
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("反刍应入队");
+    }
+    let entities = wait_for(|| async {
+        let found: Vec<tiangong_memory::MemoryNode> = all_active(&handle)
+            .await
+            .into_iter()
+            .filter(|node| node.kind == tiangong_memory::MemoryKind::Entity)
+            .collect();
+        (found.len() >= 3).then_some(found)
+    })
+    .await
+    .expect("反刍应写入 3 条同名实体");
+    let scopes: std::collections::HashSet<_> =
+        entities.iter().map(|node| node.scope_id.clone()).collect();
+    assert_eq!(scopes.len(), 3, "实体分布在 3 个工作区");
+    let report = run_consolidation(
+        &|| handle.clone(),
+        &ConsolidationOptions {
+            stages: vec![ConsolidationStage::Entity],
+            llm: Some(llm.config()),
+            llm_retry_attempts: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(report.fatal_error.is_none(), "{report:?}");
+    assert_eq!(report.entity_names, 1, "{}", report.render());
+    assert_eq!(report.entity_groups, 1);
+    assert_eq!(report.entity_removed, 2);
+    let remaining: Vec<tiangong_memory::MemoryNode> = all_active(&handle)
+        .await
+        .into_iter()
+        .filter(|node| node.kind == tiangong_memory::MemoryKind::Entity)
+        .collect();
+    assert_eq!(remaining.len(), 1, "跨工作区的同名实体应合并为一条");
+    assert_eq!(
+        remaining[0].summary,
+        "天工：Rust 工作区，含插件与运行时，桌面端为 Tauri"
+    );
+}
+
+/// 反复轮询直到返回 Some（最多约 5 秒）。
+async fn wait_for<T, F, Fut>(mut probe: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    for _ in 0..100 {
+        if let Some(value) = probe().await {
+            return Some(value);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+/// entity 测试用的 LLM：整理工具的 entity 请求返回合并组，其余（反刍抽取）
+/// 返回一个同名实体。
+fn entity_mock(prompt: &serde_json::Value) -> String {
+    if let Some(entities) = prompt.get("entities").and_then(|value| value.as_array()) {
+        let ids: Vec<&str> = entities
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+        return serde_json::json!({
+            "groups": [{
+                "member_ids": ids,
+                "primary_id": ids.first(),
+                "title": "tiangong",
+                "summary": "天工：Rust 工作区，含插件与运行时，桌面端为 Tauri",
+                "keywords": ["tiangong"],
+                "reason": "同一项目"
+            }]
+        })
+        .to_string();
+    }
+    serde_json::json!({
+        "episodes": [],
+        "entities": [{"name": "tiangong", "entity_type": "repository", "description": "天工项目"}],
+        "decisions": [],
+        "evidences": []
+    })
+    .to_string()
 }

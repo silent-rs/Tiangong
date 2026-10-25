@@ -73,8 +73,9 @@ struct Cli {
     #[arg(long)]
     skip_vector_repair: bool,
     /// 只执行指定阶段（可重复或逗号分隔）：dedup=摘要完全一致归一（不调用
-    /// LLM）；distill=工具日志由 LLM 按上下文提炼；similar=相似召回 + LLM 判定。
-    /// 缺省按 dedup → distill → similar 全部执行
+    /// LLM）；entity=同名实体由 LLM 合并；distill=工具日志由 LLM 按上下文提炼；
+    /// similar=相似召回 + LLM 判定。均跨工作区整理。
+    /// 缺省按 dedup → entity → distill → similar 全部执行
     #[arg(long, value_delimiter = ',', value_parser = parse_stage)]
     stage: Vec<ConsolidationStage>,
     /// distill：每次 LLM 调用最多包含的工具日志数
@@ -93,7 +94,7 @@ fn parse_stage(raw: &str) -> std::result::Result<ConsolidationStage, String> {
     ConsolidationStage::ALL
         .into_iter()
         .find(|stage| stage.key() == raw.trim().to_ascii_lowercase())
-        .ok_or_else(|| format!("未知阶段 {raw}，可选：dedup、distill、similar"))
+        .ok_or_else(|| format!("未知阶段 {raw}，可选：dedup、entity、distill、similar"))
 }
 
 fn main() -> Result<()> {
@@ -256,7 +257,8 @@ async fn run(cli: Cli, root: PathBuf) -> Result<()> {
         journal: Some(journal.clone()),
         ..Default::default()
     };
-    let needs_llm = consolidation.runs(ConsolidationStage::Distill)
+    let needs_llm = consolidation.runs(ConsolidationStage::Entity)
+        || consolidation.runs(ConsolidationStage::Distill)
         || consolidation.runs(ConsolidationStage::Similar);
     if needs_llm && consolidation.llm.is_none() {
         // 深度整理的核心是「由 LLM 判断哪些需要归一」，未配置 LLM 时直接报错，
@@ -584,16 +586,17 @@ mod tests {
 
     #[test]
     fn stage_flag_accepts_repeated_and_comma_separated_values() {
-        let cli = Cli::try_parse_from(["x", "--stage", "dedup,distill", "--stage", "SIMILAR"])
-            .expect("应解析阶段参数");
-        assert_eq!(
-            cli.stage,
-            vec![
-                ConsolidationStage::Dedup,
-                ConsolidationStage::Distill,
-                ConsolidationStage::Similar
-            ]
-        );
+        let cli = Cli::try_parse_from([
+            "x",
+            "--stage",
+            "dedup,entity",
+            "--stage",
+            "distill",
+            "--stage",
+            "SIMILAR",
+        ])
+        .expect("应解析阶段参数");
+        assert_eq!(cli.stage, ConsolidationStage::ALL.to_vec());
         assert!(Cli::try_parse_from(["x", "--stage", "bogus"]).is_err());
         assert!(Cli::try_parse_from(["x"]).unwrap().stage.is_empty());
     }

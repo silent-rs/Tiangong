@@ -31,7 +31,7 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 | `--keep-low-quality` | 保留低质量记忆，不执行遗忘 | 关 |
 | `--repair-vectors-only` | 只补写缺失向量后退出，不执行整理 | 关 |
 | `--skip-vector-repair` | 整理前跳过缺失向量补写 | 关 |
-| `--stage <阶段>` | 只执行指定阶段：`dedup` / `distill` / `similar`，可重复或逗号分隔 | 全部 |
+| `--stage <阶段>` | 只执行指定阶段：`dedup` / `entity` / `distill` / `similar`，可重复或逗号分隔 | 全部 |
 | `--max-llm-calls <n>` | 每个阶段最多调用多少次 LLM，`0` 表示不限 | `0` |
 | `--distill-batch-size <n>` | distill：每次 LLM 调用最多包含的工具日志数 | `40` |
 | `--distill-window-minutes <n>` | distill：相邻工具日志间隔超过该分钟数即切分时间段 | `30` |
@@ -66,9 +66,9 @@ cargo run -p tiangong-memory-consolidator -- --root ~/.tiangong
 | `upsert_relation` / `delete_relation` | 关联内容 |
 | `run_end` | 致命错误、LLM 调用数、完整报告 |
 
-## 三个阶段
+## 整理阶段
 
-整理分三个阶段，缺省按 dedup → distill → similar 顺序全部执行；可用
+整理分四个阶段，缺省按 dedup → entity → distill → similar 顺序全部执行；可用
 `--stage`（可重复或逗号分隔）只执行部分阶段。试运行时后面的阶段会跳过前面
 阶段「模拟删除」的记忆，统计与真实执行一致。建议分阶段执行：
 
@@ -81,11 +81,14 @@ tiangong-memory-consolidator --stage distill --dry-run --max-llm-calls 5
 tiangong-memory-consolidator --stage similar --dry-run --max-llm-calls 5
 ```
 
-- **dedup**：同一范围（工作区）内摘要完全一致（去空白、忽略大小写）的记忆
-  直接归一，不调用 LLM。主记忆优先取「决策」类，其次重要性、使用次数、更新
+- **dedup**：摘要完全一致（去空白、忽略大小写）的记忆直接归一（跨工作区），
+  不调用 LLM。主记忆优先取「决策」类，其次重要性、使用次数、更新
   时间；标题取组内出现次数最多的；重要性取组内最高；组员的关联全部改挂到主
   记忆（重复关联取较大权重）后物理删除组员。摘要短于 20 字的不处理；证据类
   记忆还要求证据路径一致；工具日志留给 distill。
+- **entity**：名称相同（忽略大小写与空白）的实体跨工作区分组，交给 LLM 合并
+  描述（大组按 30 条分批，后一批以上一批的合并结果打头），组员关联改挂到主
+  记忆后删除；同名但确属不同事物时由 LLM 拆分或保留。
 - **distill**：工具日志（标题形如 `fs__file_write 产物`、即 `^[A-Za-z0-9_]+ 产物$`
   的证据类记忆）单条信息量很低。按工作区、按时间段（相邻日志间隔超过
   `--distill-window-minutes`，默认 30 分钟即切段）分批（每批最多
@@ -96,7 +99,11 @@ tiangong-memory-consolidator --stage similar --dry-run --max-llm-calls 5
   的只读接口 `evidence_paths` 读取，不计入使用次数。
 - **similar**：相似召回 + LLM 统一判定（见下节），排除工具日志。
 
-`--max-llm-calls` 对 distill 与 similar 分别计算。只执行 dedup 时不要求配置
+整理一律跨工作区：召回不按工作区过滤，同一内容在多个工作区各存一份只是重复。
+similar 的 LLM 提示也允许跨工作区合并，只有记忆描述的是不同项目各自特有的事实时
+才保留。
+
+`--max-llm-calls` 对 entity、distill 与 similar 分别计算。只执行 dedup 时不要求配置
 LLM，也不读取/补写向量。
 
 ## 整理逻辑（similar 阶段）

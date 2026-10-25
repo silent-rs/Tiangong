@@ -40,7 +40,7 @@ pub use crate::stages::{
     ConsolidationStage, DEFAULT_DEDUP_MIN_SUMMARY_CHARS, DEFAULT_DISTILL_BATCH_SIZE,
     DEFAULT_DISTILL_WINDOW_MINUTES,
 };
-use crate::stages::{is_tool_log, run_dedup, run_distill};
+use crate::stages::{is_tool_log, run_dedup, run_distill, run_entity};
 use crate::vector_store::StoredVectors;
 use tiangong_memory::{
     ManualMemoryDraft, MemoryCognitiveType, MemoryHandle, MemoryListQuery, MemoryNode,
@@ -386,6 +386,20 @@ pub struct ConsolidationReport {
     pub similar_excluded_logs: usize,
     /// 是否因手动停止（Ctrl+C）而提前结束。
     pub stopped: bool,
+    /// entity：名称重复的实体名数。
+    pub entity_names: usize,
+    /// entity：涉及的实体条数。
+    pub entity_members: usize,
+    /// entity：完成的 LLM 判定批数。
+    pub entity_batches: usize,
+    /// entity：合并组数。
+    pub entity_groups: usize,
+    /// entity：删除的实体数（合并 + 无信息量）。
+    pub entity_removed: usize,
+    /// entity：改挂的关联数。
+    pub entity_relinked: usize,
+    /// entity：是否因达到 LLM 调用上限提前停止。
+    pub entity_budget_exhausted: bool,
 }
 
 impl ConsolidationReport {
@@ -415,6 +429,23 @@ impl ConsolidationReport {
                 out,
                 "- [dedup] 摘要完全一致：归一 {} 组，删除重复 {} 条，改写主记忆 {} 条，改挂关联 {} 条",
                 self.dedup_groups, self.dedup_removed, self.dedup_updated, self.dedup_relinked
+            );
+        }
+        if self.stages.contains(&ConsolidationStage::Entity) {
+            let _ = writeln!(
+                out,
+                "- [entity] 同名实体（跨工作区）：{} 个名称涉及 {} 条，LLM 判定 {} 批：合并 {} 组，删除 {} 条，改挂关联 {} 条{}",
+                self.entity_names,
+                self.entity_members,
+                self.entity_batches,
+                self.entity_groups,
+                self.entity_removed,
+                self.entity_relinked,
+                if self.entity_budget_exhausted {
+                    "（已达 LLM 调用上限，提前停止）"
+                } else {
+                    ""
+                }
             );
         }
         if self.stages.contains(&ConsolidationStage::Distill) {
@@ -552,7 +583,10 @@ pub async fn run_consolidation(
         ..Default::default()
     };
     let mut removed: HashSet<String> = HashSet::new();
-    if options.runs(ConsolidationStage::Dedup) || options.runs(ConsolidationStage::Distill) {
+    if options.runs(ConsolidationStage::Dedup)
+        || options.runs(ConsolidationStage::Entity)
+        || options.runs(ConsolidationStage::Distill)
+    {
         // 前置阶段面向全库（不分批、不受 offset 影响）。
         let nodes = collect_active_nodes(provider, 0, usize::MAX).await;
         if let Some(callback) = progress {
@@ -570,6 +604,23 @@ pub async fn run_consolidation(
             .await
         {
             fail(&mut report, "dedup", err);
+            return report;
+        }
+        if report.stopped {
+            return report;
+        }
+        if options.runs(ConsolidationStage::Entity)
+            && let Err(err) = run_entity(
+                provider,
+                &nodes,
+                options,
+                &mut removed,
+                progress,
+                &mut report,
+            )
+            .await
+        {
+            fail(&mut report, "entity", err);
             return report;
         }
         if report.stopped {
@@ -1885,7 +1936,8 @@ const CONSOLIDATION_SYSTEM: &str = r#"你是长期记忆整理专家。用户给
 - groups: 合并组数组。每组是「描述同一事实/同一事件/同一知识点、可以无损合并为一条」的记忆：
   {"member_ids":["至少 2 个 ID"],"primary_id":"组内信息最完整的 ID","title":"合并后标题，<=40 字","summary":"合并后摘要，<=300 字，保留全部关键事实、路径、版本号、配置项与结论，去除重复表述，不要编造","keywords":["3~8 个"],"memory_type":"见下方取值","importance":0~1,"reason":"为什么它们是同一件事"}
   一条记忆最多属于一个组；一批中可以有多个组，也可以一个都没有。
-  不要合并：只是话题相近但时间/对象不同的独立事件、结论不同或相互矛盾的记忆、互为补充但各自有独立价值的记忆、scope 不同（不同工作区/会话）的记忆。
+  不要合并：只是话题相近但时间/对象不同的独立事件、结论不同或相互矛盾的记忆、互为补充但各自有独立价值的记忆。
+  scope（工作区）不同不是拒绝合并的理由：召回不按工作区过滤，同一知识、同一实体、同一条通用经验在多个工作区各存一份只是重复。但若记忆描述的是某个工作区特有的事实（如该项目的目录结构、配置、决策），而另一条描述的是别的项目，则它们是不同的事实，不要合并。合并后主记忆保留 primary_id 所在的工作区。
 - forget: 需要删除的低质量记忆 [{"id":"...","reason":"..."}]：内容空泛无信息量，或已被本批其他记忆完全覆盖。不确定时不要删除；已放入 groups 的记忆不要再放这里。
 - reclassify: 分类明显错误需要修正的记忆 [{"id":"...","memory_type":"...","reason":"..."}]（合并组的分类在组内给出，不用重复）。
 - relations: 需要新建的关联 [{"from_id":"...","to_id":"...","kind":"related_to|depends_on|supports|contradicts|supersedes|caused_by|belongs_to|learned_from|validated_by","weight":0~1,"note":"可选"}]，端点只能是本批记忆或 existing_relations 中出现过的记忆；结论相反用 contradicts，新结论取代旧结论用 supersedes。
@@ -2725,7 +2777,7 @@ mod tests {
             ..Default::default()
         };
         let text = report.render();
-        assert!(text.contains("执行阶段：dedup → distill → similar"));
+        assert!(text.contains("执行阶段：dedup → entity → distill → similar"));
         assert!(text.contains("归一 3 组，删除重复 4 条"));
         assert!(text.contains("工具日志 9 条，完成 1/2 批"));
         assert!(text.contains("检索后端：vector_store"));

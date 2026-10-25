@@ -1,6 +1,6 @@
 //! 相似整理之前的两个前置阶段。
 //!
-//! - **dedup**：同一范围（工作区）内摘要完全一致的记忆直接归一，不调用 LLM。
+//! - **dedup**：摘要完全一致的记忆直接归一（跨工作区），不调用 LLM。
 //!   主记忆优先取「决策」类，其次重要性、使用次数、更新时间；标题取组内出现
 //!   次数最多的，重要性取组内最高；组员的关联全部改挂到主记忆（重复关联取较大
 //!   权重）后物理删除组员。摘要过短的不处理；证据类记忆还要求证据路径一致；
@@ -45,6 +45,8 @@ const EVIDENCE_PATH_CHUNK: usize = 200;
 pub enum ConsolidationStage {
     /// 摘要完全一致的归一（不调用 LLM）。
     Dedup,
+    /// 同名实体由 LLM 合并描述（跨工作区）。
+    Entity,
     /// 工具日志由 LLM 按上下文提炼。
     Distill,
     /// 相似召回 + LLM 判定（排除工具日志）。
@@ -53,8 +55,9 @@ pub enum ConsolidationStage {
 
 impl ConsolidationStage {
     /// 全部阶段（按执行顺序）。
-    pub const ALL: [ConsolidationStage; 3] = [
+    pub const ALL: [ConsolidationStage; 4] = [
         ConsolidationStage::Dedup,
+        ConsolidationStage::Entity,
         ConsolidationStage::Distill,
         ConsolidationStage::Similar,
     ];
@@ -62,6 +65,7 @@ impl ConsolidationStage {
     pub fn key(self) -> &'static str {
         match self {
             ConsolidationStage::Dedup => "dedup",
+            ConsolidationStage::Entity => "entity",
             ConsolidationStage::Distill => "distill",
             ConsolidationStage::Similar => "similar",
         }
@@ -158,8 +162,9 @@ fn most_common_title(nodes: &[MemoryNode], members: &[usize], primary: usize) ->
         .to_string()
 }
 
-/// dedup 分桶键：（范围，归一化摘要）。
+/// dedup 分桶键：（实体名，归一化摘要）。
 ///
+/// 跨工作区归一：召回不按工作区过滤，同一内容在多个工作区各存一份只是重复。
 /// 实体的摘要常是通用描述（如「开源社区」「推理框架」），不同实体可能摘要
 /// 相同：实体还要求标题一致（忽略大小写与空白）。
 fn dedup_key(node: &MemoryNode) -> (String, String) {
@@ -168,10 +173,7 @@ fn dedup_key(node: &MemoryNode) -> (String, String) {
     } else {
         String::new()
     };
-    (
-        format!("{}\u{1f}{entity_title}", scope_key(node)),
-        normalized_key(&node.summary),
-    )
+    (entity_title, normalized_key(&node.summary))
 }
 
 /// dedup 阶段：摘要完全一致的记忆归一。返回 `Err` 表示写入失败，应中断整理。
@@ -338,6 +340,345 @@ pub(crate) async fn run_dedup(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// entity
+// ---------------------------------------------------------------------------
+
+/// entity：单次 LLM 调用最多包含的同名实体数。
+const ENTITY_BATCH_SIZE: usize = 30;
+/// entity：送给 LLM 的单条实体描述最大字符数。
+const ENTITY_SUMMARY_CHARS: usize = 400;
+
+const ENTITY_SYSTEM: &str = r#"你是长期记忆整理专家。用户给出一批**名称相同**（忽略大小写）的实体记忆，它们来自不同工作区、不同对话，各自记录了对该实体的描述。同一个实体被重复记录了多次，请把它们归一。
+
+只输出一个 JSON 对象，不要输出解释、不要使用 Markdown 代码块。字段：
+- groups: 合并组数组。每组是「指同一个东西」的实体：
+  {"member_ids":["至少 2 个 ID"],"primary_id":"组内信息最完整的 ID","title":"规范名称","summary":"合并后的描述，<=400 字：这是什么、在哪些项目/工作区出现、关键路径/职责/版本等事实，去除重复表述，不要编造","keywords":["3~8 个"],"importance":0~1,"reason":"为什么是同一个东西"}
+  同名通常就是同一个东西，应当合并；工作区不同不是拒绝合并的理由。只有名称相同但确实指不同事物时（如两个项目各自有一个叫 config 的模块），才分成不同的组或不合并。
+- forget: 没有任何信息量的实体 [{"id":"...","reason":"..."}]（描述为空或只是重复名称），且没有放入任何组。
+
+未出现在以上字段中的实体保持原样。"#;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EntityDecision {
+    #[serde(default)]
+    groups: Vec<EntityGroup>,
+    #[serde(default)]
+    forget: Vec<IdReason>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EntityGroup {
+    #[serde(default)]
+    member_ids: Vec<String>,
+    #[serde(default)]
+    primary_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    importance: Option<f64>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// 按名称（忽略大小写与空白）分组同名实体，只保留至少两条的组；大组按批大小
+/// 切分，每批之后的批次以上一批的主记忆为首（让多批结果逐步归并到同一条）。
+fn plan_entity_groups(nodes: &[MemoryNode], removed: &HashSet<String>) -> Vec<Vec<usize>> {
+    let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (position, node) in nodes.iter().enumerate() {
+        if node.kind != MemoryKind::Entity || removed.contains(&node.id) {
+            continue;
+        }
+        let name = normalized_key(&node.title);
+        if name.is_empty() {
+            continue;
+        }
+        let entry = by_name.entry(name.clone()).or_default();
+        if entry.is_empty() {
+            order.push(name);
+        }
+        entry.push(position);
+    }
+    let mut groups: Vec<Vec<usize>> = order
+        .into_iter()
+        .filter_map(|name| by_name.remove(&name))
+        .filter(|members| members.len() >= 2)
+        .collect();
+    // 大组优先（收益最大）。
+    groups.sort_by_key(|members| std::cmp::Reverse(members.len()));
+    groups
+}
+
+fn build_entity_prompt(nodes: &[MemoryNode], batch: &[usize]) -> String {
+    let items: Vec<serde_json::Value> = batch
+        .iter()
+        .map(|position| {
+            let node = &nodes[*position];
+            serde_json::json!({
+                "id": node.id,
+                "name": node.title,
+                "description": truncate(&node.summary, ENTITY_SUMMARY_CHARS),
+                "workspace": node.scope_id,
+                "importance": node.importance,
+                "usage_count": node.usage_count,
+                "updated_at": node.updated_at,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "entities": items,
+        "instruction": "把指同一个东西的同名实体合并为一条；工作区不同不是拒绝合并的理由。",
+    })
+    .to_string()
+}
+
+/// entity 阶段：同名实体（跨工作区）由 LLM 合并描述。返回 `Err` 表示 LLM 连续
+/// 失败或写入失败，应中断整理。
+pub(crate) async fn run_entity(
+    provider: HandleProvider<'_>,
+    nodes: &[MemoryNode],
+    options: &ConsolidationOptions,
+    removed: &mut HashSet<String>,
+    progress: Option<ConsolidationProgress<'_>>,
+    report: &mut ConsolidationReport,
+) -> anyhow::Result<()> {
+    let groups = plan_entity_groups(nodes, removed);
+    report.entity_names = groups.len();
+    report.entity_members = groups.iter().map(Vec::len).sum();
+    let Some(model) = options.llm.as_ref() else {
+        report
+            .actions
+            .push("entity：未配置 LLM，跳过同名实体合并".to_string());
+        return Ok(());
+    };
+    if let Some(callback) = progress {
+        callback(&format!(
+            "entity：{} 个名称重复，涉及 {} 条实体",
+            report.entity_names, report.entity_members
+        ));
+    }
+    let base_calls = report.llm_calls;
+    let batch_size = ENTITY_BATCH_SIZE.max(2);
+    for (index, members) in groups.iter().enumerate() {
+        // 大组分批：每批以当前主记忆（上一批合并结果）打头，再接 batch_size-1 条新成员。
+        let mut carry: Option<usize> = None;
+        let mut rest: &[usize] = members;
+        while !rest.is_empty() {
+            if options.stop_requested() {
+                report.stopped = true;
+                return Ok(());
+            }
+            if options.max_llm_calls > 0 && report.llm_calls - base_calls >= options.max_llm_calls {
+                report.entity_budget_exhausted = true;
+                return Ok(());
+            }
+            let take = batch_size - usize::from(carry.is_some());
+            let (head, tail) = rest.split_at(take.min(rest.len()));
+            rest = tail;
+            let mut batch: Vec<usize> = carry.into_iter().collect();
+            batch.extend(
+                head.iter()
+                    .copied()
+                    .filter(|position| !removed.contains(&nodes[*position].id)),
+            );
+            if batch.len() < 2 {
+                continue;
+            }
+            if let Some(callback) = progress {
+                callback(&format!(
+                    "entity [{}/{}]「{}」：{} 条（已删除实体 {} 条）",
+                    index + 1,
+                    groups.len(),
+                    one_line(&nodes[batch[0]].title, 30),
+                    batch.len(),
+                    report.entity_removed
+                ));
+            }
+            let prompt = build_entity_prompt(nodes, &batch);
+            let decision: EntityDecision = request_json_with_retry(
+                model,
+                ENTITY_SYSTEM,
+                &prompt,
+                &format!("entity「{}」", one_line(&nodes[batch[0]].title, 30)),
+                batch.len(),
+                options,
+                report,
+            )
+            .await?;
+            report.entity_batches += 1;
+            carry = apply_entity(provider, nodes, &batch, decision, options, removed, report)
+                .await?
+                .or(carry.filter(|position| !removed.contains(&nodes[*position].id)));
+        }
+    }
+    Ok(())
+}
+
+/// 落库一批同名实体的判定：合并组改写主记忆、改挂关联后删除组员；返回本批
+/// 最大合并组的主记忆位置（作为下一批的开头）。
+async fn apply_entity(
+    provider: HandleProvider<'_>,
+    nodes: &[MemoryNode],
+    batch: &[usize],
+    decision: EntityDecision,
+    options: &ConsolidationOptions,
+    removed: &mut HashSet<String>,
+    report: &mut ConsolidationReport,
+) -> anyhow::Result<Option<usize>> {
+    let in_batch: HashMap<&str, usize> = batch
+        .iter()
+        .map(|position| (nodes[*position].id.as_str(), *position))
+        .collect();
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut carry: Option<(usize, usize)> = None;
+    for group in decision.groups {
+        let mut members: Vec<usize> = Vec::new();
+        for id in &group.member_ids {
+            if let Some(&position) = in_batch.get(id.trim())
+                && !used.contains(&position)
+                && !members.contains(&position)
+            {
+                members.push(position);
+            }
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        let primary = group
+            .primary_id
+            .as_deref()
+            .and_then(|id| in_batch.get(id.trim()).copied())
+            .filter(|position| members.contains(position))
+            .unwrap_or_else(|| {
+                members
+                    .iter()
+                    .copied()
+                    .max_by_key(|position| nodes[*position].summary.chars().count())
+                    .unwrap_or(members[0])
+            });
+        used.extend(members.iter().copied());
+        let base = &nodes[primary];
+        let title = group
+            .title
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| base.title.clone());
+        let summary = group
+            .summary
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| base.summary.clone());
+        let keywords = if group.keywords.is_empty() {
+            base.keywords.clone()
+        } else {
+            normalize_keywords(&group.keywords)
+        };
+        let max_importance = members
+            .iter()
+            .map(|position| nodes[*position].importance)
+            .fold(0.0f32, f32::max);
+        let importance = group
+            .importance
+            .filter(|value| value.is_finite())
+            .map(|value| (value as f32).clamp(0.05, 1.0).max(max_importance))
+            .unwrap_or(max_importance);
+        let reason = group.reason.unwrap_or_default();
+        let draft = ManualMemoryDraft {
+            id: Some(base.id.clone()),
+            memory_type: base.memory_type.clone(),
+            title: title.clone(),
+            summary,
+            keywords,
+            importance,
+            ..Default::default()
+        };
+        upsert_with_journal(
+            provider,
+            options,
+            "entity",
+            Some(base),
+            draft,
+            &format!("同名实体合并：{reason}"),
+        )
+        .await?;
+        let group_ids: HashSet<String> = members
+            .iter()
+            .map(|position| nodes[*position].id.clone())
+            .collect();
+        let relations = provider()
+            .list_relations_batch(group_ids.iter().cloned().collect())
+            .await;
+        let mut weights = relation_weights(&relations);
+        report.entity_relinked += relink_relations(
+            provider,
+            &base.id,
+            &group_ids,
+            &relations,
+            &mut weights,
+            options,
+        )
+        .await?;
+        for position in members.iter().filter(|position| **position != primary) {
+            delete_with_journal(
+                provider,
+                options,
+                &nodes[*position],
+                "entity",
+                &format!("同名实体合并：{reason}"),
+                Some(&base.id),
+                Some(&relations),
+            )
+            .await?;
+            removed.insert(nodes[*position].id.clone());
+            report.entity_removed += 1;
+        }
+        report.entity_groups += 1;
+        let scopes: HashSet<&str> = members
+            .iter()
+            .map(|position| nodes[*position].scope_id.as_deref().unwrap_or("-"))
+            .collect();
+        report.actions.push(format!(
+            "entity 合并 {} 条「{}」（跨 {} 个工作区）为 {}{}；理由：{}",
+            members.len(),
+            one_line(&title, 40),
+            scopes.len(),
+            base.id,
+            dry_run_tag(options),
+            one_line(&reason, 100)
+        ));
+        if carry.is_none_or(|(_, size)| members.len() > size) {
+            carry = Some((primary, members.len()));
+        }
+    }
+    for item in decision.forget {
+        let (id, reason) = item.into_parts();
+        let Some(&position) = in_batch.get(id.as_str()) else {
+            continue;
+        };
+        if used.contains(&position) || removed.contains(&id) {
+            continue;
+        }
+        delete_with_journal(
+            provider,
+            options,
+            &nodes[position],
+            "entity",
+            &format!("LLM 判定无信息量：{reason}"),
+            None,
+            None,
+        )
+        .await?;
+        removed.insert(id);
+        report.entity_removed += 1;
+    }
+    Ok(carry.map(|(position, _)| position))
 }
 
 // ---------------------------------------------------------------------------
@@ -949,7 +1290,44 @@ mod tests {
         );
         let mut other_scope = episode.clone();
         other_scope.scope_id = Some("ws-2".to_string());
-        assert_ne!(dedup_key(&episode), dedup_key(&other_scope));
+        assert_eq!(
+            dedup_key(&episode),
+            dedup_key(&other_scope),
+            "跨工作区也归一"
+        );
+    }
+
+    #[test]
+    fn entity_groups_merge_names_across_workspaces() {
+        let at = "2025-01-01 10:00:00";
+        let mut nodes = vec![
+            node("a", MemoryKind::Entity, "tiangong", at),
+            node("b", MemoryKind::Entity, "Tiangong ", at),
+            node("c", MemoryKind::Entity, "tiangong", at),
+            node("d", MemoryKind::Entity, "MyMac", at),
+            node("e", MemoryKind::Episode, "tiangong", at),
+            node("f", MemoryKind::Entity, "mymac", at),
+            node("g", MemoryKind::Entity, "solo", at),
+        ];
+        nodes[1].scope_id = Some("ws-2".to_string());
+        nodes[5].scope_id = Some("ws-3".to_string());
+        let mut removed = HashSet::new();
+        let groups = plan_entity_groups(&nodes, &removed);
+        let ids: Vec<Vec<&str>> = groups
+            .iter()
+            .map(|group| group.iter().map(|p| nodes[*p].id.as_str()).collect())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![vec!["a", "b", "c"], vec!["d", "f"]],
+            "大组在前、跨工作区、只含实体"
+        );
+        removed.insert("f".to_string());
+        assert_eq!(
+            plan_entity_groups(&nodes, &removed).len(),
+            1,
+            "已删除的不再参与"
+        );
     }
 
     #[test]
