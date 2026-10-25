@@ -33,7 +33,6 @@ members = [
     "plugins/tiangong-plugin-index/sidecar",
     "plugins/tiangong-plugin-generate-image-openai/protocol",
     "plugins/tiangong-plugin-generate-image-openai/sidecar",
-    "plugins/tiangong-plugin-generate-image-openai/wasm",
     "plugins/tiangong-plugin-volcengine/protocol",
     "plugins/tiangong-plugin-volcengine/sidecar",
     "plugins/screenshot-input/protocol",
@@ -100,7 +99,6 @@ tiangong-plugin-index-protocol = { path = "plugins/tiangong-plugin-index/protoco
 tiangong-plugin-index-sidecar = { path = "plugins/tiangong-plugin-index/sidecar" }
 tiangong-plugin-generate-image-openai-protocol = { path = "plugins/tiangong-plugin-generate-image-openai/protocol" }
 tiangong-plugin-generate-image-openai-sidecar = { path = "plugins/tiangong-plugin-generate-image-openai/sidecar" }
-tiangong-plugin-generate-image-openai-wasm = { path = "plugins/tiangong-plugin-generate-image-openai/wasm" }
 tiangong-plugin-volcengine-protocol = { path = "plugins/tiangong-plugin-volcengine/protocol" }
 tiangong-plugin-volcengine-sidecar = { path = "plugins/tiangong-plugin-volcengine/sidecar" }
 tiangong-plugin-screenshot-input-protocol = { path = "plugins/screenshot-input/protocol" }

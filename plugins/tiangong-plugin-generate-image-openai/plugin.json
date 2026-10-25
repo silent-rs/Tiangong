@@ -1,10 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "generate-image-openai",
-  "version": "0.2.11",
-  "wasm": {
-    "binary": "tiangong_plugin_generate_image_openai_wasm.wasm"
-  },
+  "version": "0.2.12",
   "sidecar": {
     "binary": "tiangong-generate-image-openai-sidecar",
     "transport_protocol": "0.1.0",
@@ -14,13 +11,61 @@
   },
   "permissions": [
     "model-config.read",
-    "sidecar.invoke"
+    "sidecar.invoke",
+    "tool.provide",
+    "bridge.call"
   ],
   "entrypoints": [
     "desktop",
     "cli",
     "server"
   ],
+  "capabilities": {
+    "tools": true
+  },
+  "tools": [
+    {
+      "name": "generate_image",
+      "description": "根据文字描述生成图片，或基于已有图片进行编辑（通过 OpenAI Responses API 的 image_generation 工具）。传入 images 参数时为编辑模式（修改/合成原图），不传时为生成模式。每次调用等待完成后返回图片路径。注意：同一轮次中不要重复调用相同参数的 generate_image，拿到图片结果后应直接继续后续任务（如编写 HTML、组合排版等）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "图片描述或编辑指令，建议使用英文以获得更好效果。编辑时用 edit/draw 等动词描述要做的修改"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "要编辑的原图本地路径列表（可选）。传入时进入编辑模式，不传为生成模式"
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      },
+      "timeout_ms": 120000
+    }
+  ],
+  "tool_icons": {
+    "generate_image": "image"
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "generate-image-openai-settings",
+        "title": "OpenAI 生图",
+        "description": "通过 Responses API 生成图片的配置",
+        "icon": "image",
+        "entry": "app/settings.html",
+        "context": []
+      }
+    ]
+  },
   "model_requirements": [
     {
       "kind": "chat",

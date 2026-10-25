@@ -13,6 +13,7 @@ use tiangong_plugin_generate_image_openai_protocol::{
     GET_CONFIG_OPERATION, GenerateRequest, GenerateResponse, GeneratedImage,
     IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, ModelInfo, ModelSource, PLUGIN_ID,
     PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint, SET_CONFIG_OPERATION,
+    TOOL_GENERATE_IMAGE,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -67,11 +68,17 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: PROTOCOL_VERSION.to_string(),
             business_protocol: IMAGE_PROTOCOL_VERSION,
-            capabilities: vec!["image_generation".to_string()],
+            capabilities: vec![
+                "image_generation".to_string(),
+                format!("tool:{TOOL_GENERATE_IMAGE}"),
+            ],
             instance_id: format!("image-openai-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
         })
         .context("序列化握手响应失败"),
+
+        // 工具直连：operation = 工具名，payload = 调用参数对象。
+        TOOL_GENERATE_IMAGE => generate_image_tool(payload).await,
 
         GENERATE_OPERATION => {
             let req: GenerateRequest =
@@ -106,6 +113,53 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
 
         other => Err(anyhow!("未知的操作: {other}")),
     }
+}
+
+/// generate_image 工具直连入口（原 WASM 桥接的参数解析与结果组装迁入）。
+///
+/// 返回 ToolOutcome 形状 `{ok, summary, stdout, stderr, exit_code}`；缺参等
+/// 用户错误经 anyhow 返回，由运行时转成工具失败结果。
+async fn generate_image_tool(payload: Value) -> Result<Value> {
+    let prompt = payload
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        anyhow::bail!("缺少必填参数 prompt");
+    }
+    let images: Vec<String> = payload
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_edit = !images.is_empty();
+
+    let response = generate(GenerateRequest { prompt, images }).await?;
+    let markdown = response
+        .images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| format!("![图片 {}]({})", i + 1, img.reference))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let summary = format!(
+        "图片{}成功（模型：{}）",
+        if is_edit { "编辑" } else { "生成" },
+        response.model
+    );
+    Ok(serde_json::json!({
+        "ok": true,
+        "summary": summary,
+        "stdout": markdown,
+        "stderr": "",
+        "exit_code": 0,
+    }))
 }
 
 /// 生成/编辑图片：读配置 → 解析端点 → 调 Responses API → 提取图片 → 归档落盘。
@@ -502,6 +556,38 @@ fn chatgpt_account_info() -> ChatgptAccountInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn 工具直连分发_缺参错误与未知操作可区分() {
+        let error = dispatch_operation(TOOL_GENERATE_IMAGE, serde_json::json!({ "images": [] }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "缺少必填参数 prompt");
+
+        let unknown = dispatch_operation("generate_image_typo", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("未知的操作"), "{unknown}");
+    }
+
+    #[tokio::test]
+    async fn 握手声明工具能力() {
+        let handshake = dispatch_operation(
+            tiangong_plugin_sidecar::protocol::HANDSHAKE_OPERATION,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("tool:generate_image")),
+            "握手须声明 tool:generate_image：{capabilities:?}"
+        );
+    }
 
     #[test]
     fn global_protocol_mapping() {
