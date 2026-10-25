@@ -11397,7 +11397,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11405,7 +11405,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11426,7 +11426,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-bot-sidecar"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -11462,7 +11462,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-protocol"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -11470,7 +11470,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-sidecar"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11489,7 +11489,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-command-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11497,7 +11497,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-command-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11559,7 +11559,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11567,7 +11567,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11659,7 +11659,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11667,7 +11667,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-sidecar"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11831,7 +11831,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-protocol"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -11839,7 +11839,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-sidecar"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12026,7 +12026,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -12034,7 +12034,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-volcengine-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -238,6 +238,26 @@ example-plugin/
 
 不需要 sidecar 的插件应删除整个 `sidecar` 字段，并可将 `permissions` 留空。
 
+### 工具展示信息（`tool_icons`）
+
+工具图标的界面展示由插件在清单中自行声明，宿主各端（桌面前端、CLI）经运行时查询使用：
+
+```json
+{
+  "tool_icons": {
+    "generate_image": "image",
+    "file_read:action=list": "assets/folder.svg",
+    "*": "flame"
+  }
+}
+```
+
+- 键为工具原名，或特指键 `工具名:参数=取值`（按调用参数取值选用，特指优先于通用）。
+- 值为宿主内置图标名（小写字母、数字、`-`，对应 lucide 图标），或插件目录内 png/svg/jpg 资源相对路径（须位于 `resources` 声明目录内随包分发）；键 `*` 为本插件其余工具的默认图标。
+- 声明不合法的条目只跳过并告警，不影响插件装载。
+- 工具行标题由 `session.message-item` 视图贡献的 `titles` 声明（见 harness 设计 6.5.2），与图标通道相互独立。
+
+
 ## 实现 WASM Component
 
 插件必须实现 [`tiangong-plugin` world](../crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，包括 `plugin` 与 `plugin-ui` 两组导出。即使插件没有页面，也需要实现 `plugin-ui` 并返回空贡献列表。

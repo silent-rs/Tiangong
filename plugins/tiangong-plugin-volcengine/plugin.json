@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "volcengine",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "sidecar": {
     "binary": "tiangong-volcengine-sidecar",
     "transport_protocol": "0.1.0",
@@ -215,5 +215,11 @@
   ],
   "prompt": [
     "音频附件处理：用户消息附带音频且需要了解其内容时，调用 speech_to_text，以该附件的 path 作为 file_path。经语音输入发送的消息正文已是识别结果，其录音附件（名称为「语音消息」）无需再次识别。"
-  ]
+  ],
+  "tool_icons": {
+    "generate_image": "image",
+    "generate_video": "video",
+    "text_to_speech": "volume-2",
+    "speech_to_text": "mic"
+  }
 }

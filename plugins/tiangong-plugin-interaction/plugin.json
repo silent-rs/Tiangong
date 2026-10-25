@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "interaction",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "entrypoints": [
     "desktop"
   ],
@@ -123,5 +123,8 @@
   ],
   "prompt": [
     "交互工具使用规范：审批与普通征询统一调用 request_user；审批时将 kind 设为 approval，需要确认、选择或补充信息时使用对应 kind。choice/multi_choice 必须提供非空 options；form 必须提供 fields。request_user 必须独占一个工具调用批次，不要与其他工具同时调用。插件会在 2 分钟内返回用户响应、取消或超时结果；approval 返回的是用户意见，由你结合任务自行决定后续步骤。"
-  ]
+  ],
+  "tool_icons": {
+    "request_user": "message-circle-question"
+  }
 }

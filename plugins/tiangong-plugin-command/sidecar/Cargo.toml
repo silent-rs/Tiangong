@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-command-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Command 独立 sidecar 进程（承载 tokio 子进程 spawn、命令校验策略、env 注入）"

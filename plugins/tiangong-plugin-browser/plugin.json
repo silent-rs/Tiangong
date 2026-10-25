@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "browser",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "entrypoints": [
     "desktop"
   ],
@@ -256,5 +256,8 @@
         ]
       }
     ]
+  },
+  "tool_icons": {
+    "*": "globe"
   }
 }

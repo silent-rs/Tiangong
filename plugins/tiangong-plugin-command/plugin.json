@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "command",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "capabilities": {
     "tools": true,
     "prompt": true
@@ -89,5 +89,8 @@
   "entrypoints": [
     "cli",
     "server"
-  ]
+  ],
+  "tool_icons": {
+    "*": "square-terminal"
+  }
 }
