@@ -241,8 +241,8 @@ const GENERATE_IMAGE_OPENAI: PluginConfig = PluginConfig {
     name: "Generate Image OpenAI",
     description: "Generate Image OpenAI",
     protocol_crate: Some("tiangong-plugin-generate-image-openai-protocol"),
-    wasm_crate: Some("tiangong-plugin-generate-image-openai-wasm"),
-    wasm_artifact: Some("tiangong_plugin_generate_image_openai_wasm.wasm"),
+    wasm_crate: None,
+    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-generate-image-openai-sidecar"),
     sidecar_artifact: Some("tiangong-generate-image-openai-sidecar"),
     plugin_root: "plugins/tiangong-plugin-generate-image-openai",
@@ -391,6 +391,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "memory" => &["app/memory.html"],
         // 索引管理设置页（settings.plugin-page，自包含单文件）。
         "index" => &["app/index.html"],
+        // OpenAI 生图设置页（settings.plugin-page，自包含单文件）。
+        "generate-image-openai" => &["app/settings.html"],
         "bot" => &["app/im-message.html", "app/settings.html"],
         "volcengine" => &[
             "app/settings.html",

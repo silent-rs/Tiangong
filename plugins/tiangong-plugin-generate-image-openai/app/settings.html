@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenAI 生图</title>
+  <style>
+    /* OpenAI 生图设置页（原 WASM 设置页迁静态贡献，样式沿用 host token 体系）。 */
+    :root {
+      color-scheme: light;
+      --bg: hsl(var(--host-background, 210 20% 98%));
+      --surface: hsl(var(--host-card, 0 0% 100%));
+      --text: hsl(var(--host-foreground, 222 47% 11%));
+      --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
+      --border: hsl(var(--host-border, 214 18% 88%));
+      --primary: hsl(var(--host-primary, 222 47% 11%));
+      --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+      --accent: hsl(var(--host-accent, 210 40% 96%));
+    }
+
+    :root[data-theme="dark"] { color-scheme: dark; }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, sans-serif);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .page { padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+
+    .header h2 { margin: 0 0 4px; font-size: 18px; }
+    .header .desc { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .card {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card-title { margin: 0; font-size: 14px; font-weight: 600; }
+
+    .radio-group { display: flex; gap: 20px; }
+    .radio { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .radio input { margin: 0; }
+
+    .sub-section { display: flex; flex-direction: column; gap: 12px; }
+
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field .label { font-size: 13px; font-weight: 500; }
+
+    .input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+    }
+    .input:focus { outline: none; border-color: var(--primary); }
+    .textarea { resize: vertical; min-height: 60px; }
+
+    .hint { color: var(--muted); font-size: 12px; }
+    .hint.error { color: hsl(0 84% 60%); }
+
+    .actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+
+    .status { color: var(--muted); font-size: 13px; flex: 1; }
+    .status.error { color: hsl(0 84% 60%); }
+    .status.success { color: hsl(142 71% 35%); }
+
+    .btn {
+      padding: 8px 20px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="header">
+      <h2>OpenAI 生图</h2>
+      <p class="desc">通过 OpenAI Responses API 的 image_generation 工具生成图片。可以选择模型配置中的模型、使用已登录的 ChatGPT 账号，或手动输入端点。</p>
+    </div>
+
+    <section class="card">
+      <h3 class="card-title">模型来源</h3>
+      <div class="radio-group">
+        <label class="radio">
+          <input type="radio" name="source" value="global" id="source-global" checked />
+          <span>选择模型配置</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="source" value="chatgpt" id="source-chatgpt" />
+          <span>ChatGPT 账号</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="source" value="manual" id="source-manual" />
+          <span>手动输入</span>
+        </label>
+      </div>
+
+      <!-- 选择模型配置 -->
+      <div id="global-section" class="sub-section">
+        <label class="field">
+          <span class="label">模型</span>
+          <select id="global-model" class="input">
+            <option value="">加载中...</option>
+          </select>
+          <span class="hint" id="global-hint"></span>
+        </label>
+      </div>
+
+      <!-- ChatGPT 账号 -->
+      <div id="chatgpt-section" class="sub-section" hidden>
+        <p class="hint" id="chatgpt-status"></p>
+        <label class="field">
+          <span class="label">模型</span>
+          <input id="chatgpt-model" class="input" type="text" list="chatgpt-model-list" placeholder="gpt-5.5" autocomplete="off" />
+          <datalist id="chatgpt-model-list"></datalist>
+          <span class="hint">使用天工中登录的 ChatGPT 账号额度生图，无需 API Key。令牌过期时需在「设置 → 模型配置 → ChatGPT」手动刷新。</span>
+        </label>
+      </div>
+
+      <!-- 手动输入 -->
+      <div id="manual-section" class="sub-section" hidden>
+        <label class="field">
+          <span class="label">请求协议</span>
+          <select id="manual-protocol" class="input">
+            <option value="responses">OpenAI Responses（image_generation 工具）</option>
+            <option value="chat_completions">Chat Completions（兼容生图接口）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="label">Base URL</span>
+          <input id="manual-base-url" class="input" type="text" placeholder="https://api.openai.com/v1" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="label">API Key</span>
+          <input id="manual-api-key" class="input" type="password" placeholder="sk-...（支持 ${ENV_VAR}）" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span class="label">Model ID</span>
+          <input id="manual-model" class="input" type="text" placeholder="gpt-5.4（支持 image_generation 工具的主模型）" autocomplete="off" />
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 class="card-title">生成选项</h3>
+      <label class="field">
+        <span class="label">附加指令（可选）</span>
+        <textarea id="extra-prompt" class="input textarea" rows="3" placeholder="作为 Responses API 的 instructions 注入，留空则不附加"></textarea>
+      </label>
+    </section>
+
+    <div class="actions">
+      <span id="status" class="status"></span>
+      <button id="save-btn" class="btn btn-primary" type="button">保存</button>
+    </div>
+  </main>
+  <script>
+    // OpenAI 生图设置页脚本：host context + callHost 桥接（sidecar.get_config /
+    // sidecar.set_config，原 WASM 设置页的 bootstrap/save_config 消息迁直连）。
+
+    const HOST_TIMEOUT_MS = 60000;
+    let hostChannel = null;
+    let hostReadyResolve = null;
+    const hostReady = new Promise((resolve) => { hostReadyResolve = resolve; });
+    let requestSequence = 0;
+
+    function applyHostContext(context) {
+      if (hostChannel && context.channel !== hostChannel) return;
+      hostChannel = context.channel;
+      const root = document.documentElement;
+      root.dataset.theme = context.theme === "dark" ? "dark" : "light";
+      Object.entries(context.tokens || {}).forEach(([name, value]) => {
+        if (typeof value === "string" && value) root.style.setProperty(`--host-${name}`, value);
+      });
+      if (typeof context.fontFamily === "string" && context.fontFamily) {
+        root.style.setProperty("--host-font-family", context.fontFamily);
+      }
+      hostReadyResolve?.();
+      hostReadyResolve = null;
+    }
+
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.parent || !event.data) return;
+      if (event.data.type === "tiangong_host_context" && typeof event.data.channel === "string") {
+        applyHostContext(event.data);
+      }
+    });
+    window.parent.postMessage({ type: "plugin_host_ready" }, "*");
+
+    async function callHost(method, payload = "") {
+      if (!hostChannel) await hostReady;
+      return new Promise((resolve, reject) => {
+        const id = `img-${Date.now()}-${++requestSequence}`;
+        const channel = hostChannel;
+        const timeout = window.setTimeout(() => {
+          window.removeEventListener("message", handler);
+          reject(new Error("插件请求超时"));
+        }, HOST_TIMEOUT_MS);
+        const handler = (event) => {
+          if (event.source !== window.parent || !event.data || event.data.id !== id || event.data.channel !== channel) return;
+          window.clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          if (event.data.error) reject(new Error(String(event.data.error)));
+          else resolve(event.data.result ?? "");
+        };
+        window.addEventListener("message", handler);
+        window.parent.postMessage(
+          { type: "plugin_call", channel, id, method: `sidecar.${method}`, payload: payload === "" ? "{}" : payload },
+          "*",
+        );
+      });
+    }
+
+    // ── DOM ──
+
+    const sourceGlobal = document.getElementById("source-global");
+    const sourceChatgpt = document.getElementById("source-chatgpt");
+    const sourceManual = document.getElementById("source-manual");
+    const globalSection = document.getElementById("global-section");
+    const chatgptSection = document.getElementById("chatgpt-section");
+    const manualSection = document.getElementById("manual-section");
+    const globalModel = document.getElementById("global-model");
+    const globalHint = document.getElementById("global-hint");
+    const chatgptStatus = document.getElementById("chatgpt-status");
+    const chatgptModel = document.getElementById("chatgpt-model");
+    const chatgptModelList = document.getElementById("chatgpt-model-list");
+    const manualProtocol = document.getElementById("manual-protocol");
+    const manualBaseUrl = document.getElementById("manual-base-url");
+    const manualApiKey = document.getElementById("manual-api-key");
+    const manualModel = document.getElementById("manual-model");
+    const extraPrompt = document.getElementById("extra-prompt");
+    const saveBtn = document.getElementById("save-btn");
+    const statusEl = document.getElementById("status");
+
+    function currentSource() {
+      if (sourceManual.checked) return "manual";
+      if (sourceChatgpt.checked) return "chatgpt";
+      return "global";
+    }
+
+    function toggleSource() {
+      const source = currentSource();
+      globalSection.hidden = source !== "global";
+      chatgptSection.hidden = source !== "chatgpt";
+      manualSection.hidden = source !== "manual";
+    }
+
+    sourceGlobal.addEventListener("change", toggleSource);
+    sourceChatgpt.addEventListener("change", toggleSource);
+    sourceManual.addEventListener("change", toggleSource);
+
+    function setStatus(message, type) {
+      statusEl.textContent = message;
+      statusEl.className = `status${type ? ` ${type}` : ""}`;
+    }
+
+    // ── 加载（sidecar.get_config 返回 {config, models, chatgpt}）──
+
+    async function loadConfig() {
+      try {
+        const raw = await callHost("get_config", "{}");
+        const data = raw ? JSON.parse(raw) : {};
+        const config = data.config || {};
+        const models = data.models || [];
+
+        // 填充模型下拉
+        globalModel.innerHTML = "";
+        if (models.length === 0) {
+          globalModel.innerHTML = '<option value="">（暂无已配置的 chat 模型）</option>';
+        } else {
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "请选择模型";
+          globalModel.appendChild(placeholder);
+          models.forEach((m) => {
+            const opt = document.createElement("option");
+            opt.value = m.key;
+            const status = m.configured ? "✓" : "未配置";
+            opt.textContent = `${m.key} — ${m.model} (${status})`;
+            globalModel.appendChild(opt);
+          });
+        }
+
+        // ChatGPT 账号状态与可选模型
+        const chatgpt = data.chatgpt || {};
+        chatgptStatus.textContent = chatgpt.logged_in
+          ? `已登录 ChatGPT 账号${chatgpt.email ? `：${chatgpt.email}` : ""}`
+          : "尚未登录 ChatGPT 账号，请先在「设置 → 模型配置 → ChatGPT」中登录";
+        chatgptStatus.className = chatgpt.logged_in ? "hint" : "hint error";
+        chatgptModelList.innerHTML = "";
+        (chatgpt.models || []).forEach((model) => {
+          const opt = document.createElement("option");
+          opt.value = model;
+          chatgptModelList.appendChild(opt);
+        });
+
+        // 回显配置
+        sourceManual.checked = config.source === "manual";
+        sourceChatgpt.checked = config.source === "chatgpt";
+        sourceGlobal.checked = !sourceManual.checked && !sourceChatgpt.checked;
+        toggleSource();
+
+        if (config.global_model_key) globalModel.value = config.global_model_key;
+        chatgptModel.value = config.chatgpt_model || "";
+        if (config.manual_endpoint) {
+          manualProtocol.value = config.manual_endpoint.protocol === "chat_completions" ? "chat_completions" : "responses";
+          manualBaseUrl.value = config.manual_endpoint.base_url || "";
+          manualApiKey.value = config.manual_endpoint.api_key || "";
+          manualModel.value = config.manual_endpoint.model || "";
+        }
+        extraPrompt.value = config.extra_prompt || "";
+
+        globalHint.textContent = models.length > 0
+          ? `共 ${models.length} 个 chat 模型可选`
+          : "请先在设置中配置 chat 模型，或改用手动输入";
+      } catch (error) {
+        setStatus(`加载失败：${error.message || error}`, "error");
+      }
+    }
+
+    // ── 保存（sidecar.set_config，sidecar 保存时解析并缓存端点）──
+
+    async function saveConfig() {
+      saveBtn.disabled = true;
+      setStatus("保存中...", "");
+      try {
+        const source = currentSource();
+        const payload = {
+          source,
+          global_model_key: source === "global" ? (globalModel.value || null) : null,
+          chatgpt_model: chatgptModel.value.trim() || null,
+          manual_endpoint: {
+            protocol: manualProtocol.value,
+            base_url: manualBaseUrl.value.trim(),
+            api_key: manualApiKey.value,
+            model: manualModel.value.trim(),
+          },
+          extra_prompt: extraPrompt.value.trim() || null,
+        };
+        await callHost("set_config", JSON.stringify(payload));
+        setStatus("已保存", "success");
+        setTimeout(() => setStatus("", ""), 3000);
+      } catch (error) {
+        setStatus(`保存失败：${error.message || error}`, "error");
+      } finally {
+        saveBtn.disabled = false;
+      }
+    }
+
+    saveBtn.addEventListener("click", saveConfig);
+    loadConfig();
+  </script>
+</body>
+</html>

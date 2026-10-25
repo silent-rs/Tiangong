@@ -46,13 +46,13 @@
 | fetch | 312 | ✅ 已迁移（v0.2.0，独立分支 `feature/fetch-wasm-sunset`） |
 
 ### 阶段二：简单纯桥接（schema v1，单工具或双工具）
-| 插件 | wasm 行数 | 说明 |
+| 插件 | wasm 行数 | 状态 |
 | --- | --- | --- |
-| generate-image-openai | 271 | 单工具 generate_image，转发 sidecar |
-| analyze-attachment | 246 | 单工具 analyze_attachment，转发 sidecar |
-| command | 345 | run_command/run_shell 双工具 |
-| skill | 425 | 工具 + skill 详情查询 |
-| volcengine | 425 | v2 但仍带 wasm 桥接 |
+| generate-image-openai | 271 | ✅ 已迁移（v0.2.12，设置页迁 `ui.contributions` 静态贡献） |
+| analyze-attachment | 246 | ✅ 已迁移 |
+| command | 345 | ✅ 已迁移（146877cf） |
+| skill | 425 | 待迁移（工具 + skill 详情查询） |
+| volcengine | 425 | ✅ 已迁移（f5901bc2） |
 
 ### 阶段三：中等复杂度（v1，多工具/带状态）
 | 插件 | wasm 行数 | 状态 |

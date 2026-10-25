@@ -11619,7 +11619,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-openai-protocol"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -11627,7 +11627,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-openai-sidecar"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11645,16 +11645,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-root-certs",
-]
-
-[[package]]
-name = "tiangong-plugin-generate-image-openai-wasm"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-generate-image-openai-protocol",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]
