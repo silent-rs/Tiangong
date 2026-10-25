@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-fetch-sidecar"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Fetch 独立 sidecar 进程（承载 reqwest 阻塞抓取、SSRF 防护、落盘）"

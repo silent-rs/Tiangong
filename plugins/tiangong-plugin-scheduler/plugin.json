@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "scheduler",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "require_server": true,
   "sidecar": {
     "binary": "tiangong-scheduler-sidecar",
@@ -196,5 +196,8 @@
   ],
   "mention": {
     "candidates_op": "scheduler.mention_candidates"
+  },
+  "tool_icons": {
+    "*": "calendar-clock"
   }
 }

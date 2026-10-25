@@ -55,13 +55,13 @@
 | volcengine | 425 | v2 但仍带 wasm 桥接 |
 
 ### 阶段三：中等复杂度（v1，多工具/带状态）
-| 插件 | wasm 行数 | 说明 |
+| 插件 | wasm 行数 | 状态 |
 | --- | --- | --- |
-| index | 782 | index_search/search_code 双工具 |
-| mcp | 448 | MCP 转发，工具名动态 |
-| scheduler | 511 | v2，5 个工具 + 定时任务管理 |
-| coding | 484 | v2，4 个生命周期工具 |
-| screenshot-input | 151 | v2，UI slot（session.input-action）需保留 |
+| index | 782 | ✅ 已迁移（#724，v0.3.x） |
+| mcp | 448 | 待迁移（工具名动态，见风险） |
+| scheduler | 511 | ✅ 已迁移（9c7c31d2） |
+| coding | 484 | ✅ 已迁移（f15886fe） |
+| screenshot-input | 151 | ✅ 已迁移（00468cc5，UI slot 保留） |
 
 ### 阶段四：大体积/多工具（v1 → v2 一起做）
 | 插件 | wasm 行数 | 状态 |
