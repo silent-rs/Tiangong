@@ -1024,6 +1024,10 @@ fn start_tray_status_refresh(app: tauri::AppHandle, tray: tauri::tray::TrayIcon,
     // 周期刷新只在状态变化时更新托盘，并投递到主线程执行、不等待结果：
     // 菜单项 setter 在非主线程调用会同步等待主线程，主线程繁忙时本线程
     // 会被一并挂住。主线程内调用 setter 走同线程分支，不跨线程等待。
+    //
+    // 巡检代价分级：Server 禁用时 tray_server_status 只读内存配置直接短路，
+    // 不发起任何网络探测；启用时每 3 秒一次 /api/v1/health 探测，用于感知
+    // 进程异常退出等非托管状态变化（托盘菜单启停本身已有事件式即时刷新）。
     std::thread::spawn(move || {
         let mut last_status: Option<ServerTrayStatus> = None;
         loop {
@@ -1164,6 +1168,13 @@ fn tray_server_status(app: &tauri::AppHandle) -> (String, ServerTrayStatus) {
         .try_lock()
         .map(|state| state.config.server.clone())
         .unwrap_or_else(|_| tiangong_server::config::load_server_config());
+    // Server 禁用时状态恒为「未运行」（见 server_status_name），无需发起
+    // TCP 健康探测。托盘巡检线程每 3 秒调用本函数，禁用态直接短路即可
+    // 消除常态化的无效连接（net_server 日志里每 3 秒一条 accept 即源于此），
+    // 仅保留内存配置读取，用户在设置页打开开关后 3 秒内即可恢复探测。
+    if !config.enabled {
+        return ("Server 状态：未运行".to_string(), ServerTrayStatus::Stopped);
+    }
     let running = tiangong_app::commands::server_health_check(&config);
     match tiangong_app::commands::server_status_name(config.enabled, running) {
         "running" => ("Server 状态：运行中".to_string(), ServerTrayStatus::Running),
