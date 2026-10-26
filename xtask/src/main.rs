@@ -430,6 +430,16 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
             "assets/tool-clock.svg",
         ],
         "memory" => &["assets/tool-recall-memory.svg"],
+        "computer-use" => &[
+            "assets/tool-desktop-app.svg",
+            "assets/tool-desktop-open.svg",
+            "assets/tool-desktop-list.svg",
+            "assets/tool-desktop-status.svg",
+            "assets/tool-desktop-screenshot.svg",
+            "assets/tool-desktop-input.svg",
+            "assets/tool-desktop-ui.svg",
+            "assets/tool-desktop-wait.svg",
+        ],
         _ => &[],
     }
 }

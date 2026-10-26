@@ -306,12 +306,18 @@
     "桌面应用的交互一律使用 computer-use 插件（5 个工具）：唤起窗口、看界面、点击输入都属本插件职责。终端沙箱无法与图形界面交互（osascript、open -a、screencapture 均不可行），不要在终端里尝试。典型流程：desktop_app(action=open) 把目标应用唤起到前台（未运行会自动启动，返回窗口坐标）→ desktop_screenshot 截取窗口看界面 → desktop_input 点击/输入（可带 screenshot_after 直接看到结果）。原生控件可用 desktop_ui 读取控件树并执行语义动作；需要等界面变化时用 desktop_wait。权限问题会在工具失败时直接报告，无需预先查询状态。网页内容继续优先交给浏览器插件。",
     "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域；macOS 为 points，Windows 为物理像素，均与鼠标坐标同系）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。"
   ],
+  "resources": [
+    "assets"
+  ],
   "tool_icons": {
-    "desktop_app": "monitor",
-    "desktop_screenshot": "camera",
-    "desktop_input": "monitor",
-    "desktop_ui": "monitor",
-    "desktop_wait": "monitor"
+    "desktop_app": "assets/tool-desktop-app.svg",
+    "desktop_app:action=open": "assets/tool-desktop-open.svg",
+    "desktop_app:action=list": "assets/tool-desktop-list.svg",
+    "desktop_app:action=status": "assets/tool-desktop-status.svg",
+    "desktop_screenshot": "assets/tool-desktop-screenshot.svg",
+    "desktop_input": "assets/tool-desktop-input.svg",
+    "desktop_ui": "assets/tool-desktop-ui.svg",
+    "desktop_wait": "assets/tool-desktop-wait.svg"
   },
   "tool_titles": {
     "desktop_app": "应用窗口管理",
