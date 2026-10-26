@@ -22,7 +22,6 @@ members = [
     "plugins/tiangong-plugin-coding/sidecar",
     "plugins/tiangong-plugin-computer-use/protocol",
     "plugins/tiangong-plugin-computer-use/sidecar",
-    "plugins/tiangong-plugin-computer-use/wasm",
     "plugins/tiangong-plugin-command/protocol",
     "plugins/tiangong-plugin-command/sidecar",
     "plugins/tiangong-plugin-fetch/protocol",
@@ -88,7 +87,6 @@ tiangong-plugin-coding-protocol = { path = "plugins/tiangong-plugin-coding/proto
 tiangong-plugin-coding-sidecar = { path = "plugins/tiangong-plugin-coding/sidecar" }
 tiangong-plugin-computer-use-protocol = { path = "plugins/tiangong-plugin-computer-use/protocol" }
 tiangong-plugin-computer-use-sidecar = { path = "plugins/tiangong-plugin-computer-use/sidecar" }
-tiangong-plugin-computer-use-wasm = { path = "plugins/tiangong-plugin-computer-use/wasm" }
 tiangong-plugin-command-protocol = { path = "plugins/tiangong-plugin-command/protocol" }
 tiangong-plugin-command-sidecar = { path = "plugins/tiangong-plugin-command/sidecar" }
 tiangong-plugin-fetch-protocol = { path = "plugins/tiangong-plugin-fetch/protocol" }

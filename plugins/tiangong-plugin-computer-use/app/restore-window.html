@@ -37,7 +37,7 @@
     打开应用时 sidecar 自动把天工窗口放到屏幕右侧、目标应用放左侧；天工窗口
     一进入分屏布局本按钮就始终显示（不区分会话、不等对话结束），点击后天工
     窗口与被分屏的全部应用窗口回到各自原位置；恢复后隐藏。
-    状态来源：bridge.call('plugin.splitState') 拉取 + sidecar.event
+    状态来源：bridge.call('sidecar.computer_use.split_state') 拉取 + sidecar.event
     （channel=computer_use.split）推送。
   -->
   <button class="rw-button" id="rw-button" type="button" title="恢复天工窗口" aria-label="恢复天工窗口" hidden>
@@ -70,7 +70,7 @@
 
     async function refresh() {
       try {
-        state.split = await call('plugin.splitState');
+        state.split = await call('sidecar.computer_use.split_state');
       } catch (error) {
         state.split = null;
         console.warn('[computer-use] 读取分屏状态失败', error);
@@ -83,7 +83,7 @@
       state.busy = true;
       render();
       try {
-        const result = await call('plugin.restoreHostWindow');
+        const result = await call('sidecar.computer_use.restore_host_window');
         state.split = result.state;
         // 天工窗口恢复失败，或部分应用窗口未能恢复时提示原因。
         if (!result.restored || result.detail.includes('未恢复')) window.alert(result.detail);

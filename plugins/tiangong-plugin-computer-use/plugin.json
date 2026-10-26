@@ -1,10 +1,7 @@
 {
   "schema_version": 2,
   "id": "computer-use",
-  "version": "0.4.2",
-  "wasm": {
-    "binary": "tiangong_plugin_computer_use_wasm.wasm"
-  },
+  "version": "0.4.3",
   "sidecar": {
     "binary": "tiangong-computer-use-sidecar",
     "transport_protocol": "0.1.0",
@@ -14,12 +11,307 @@
   },
   "permissions": [
     "sidecar.invoke",
-    "bridge.call"
+    "bridge.call",
+    "tool.provide"
   ],
   "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "lifecycle": true,
     "events": [
       "sidecar.*"
     ]
+  },
+  "tools": [
+    {
+      "name": "desktop_app",
+      "description": "应用与窗口管理。action=open：唤起或启动应用（首选；已运行则取消隐藏/激活/恢复最小化并置前，未运行经系统搜索定位后启动，支持中文本地化名如「微信」），返回前台窗口屏幕坐标 window，可直接作为 desktop_screenshot 的 region；action=list：列出运行中的应用（可按 app_name/pid/foreground_only 筛选）；action=status：查询平台、图形会话与辅助功能授权（仅在其他工具报权限错误时需要）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["open", "list", "status"],
+            "description": "open 唤起/启动；list 列举应用；status 能力探测"
+          },
+          "app_name": {
+            "type": "string",
+            "description": "open：应用名（显示名/本地化名/文件名）；list：按名称筛选"
+          },
+          "bundle_id": {
+            "type": "string",
+            "description": "open：macOS Bundle ID（如 com.tencent.xinWeChat），优先于 app_name；Windows 上视作可执行文件名"
+          },
+          "pid": {
+            "type": "integer",
+            "description": "list：按进程号筛选",
+            "minimum": 0
+          },
+          "foreground_only": {
+            "type": "boolean",
+            "description": "list：仅前台应用"
+          }
+        },
+        "required": ["action"]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "desktop_screenshot",
+      "description": "截屏并自动注入对话供你直接阅读（无需 OCR）。范围优先级：region 显式区域 > app_name/pid/foreground_only 应用窗口 > 主显示器全屏。产物为 JPEG，按屏幕逻辑尺寸输出（1 图片像素 = 1 point）；逻辑长边超过 max_dimension（默认 1568）时不裁剪，按 1/2、1/4… 整数倍缩小。结果给出 logical_bounds（原图屏幕区域）与 scale：屏幕坐标 = logical_bounds.x/y + 图片坐标 × scale。需要精确点击时对目标区域截小图（scale=1）。macOS 需要屏幕录制授权。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "app_name": {
+            "type": "string",
+            "description": "截取该应用最前窗口（包含匹配）"
+          },
+          "pid": {
+            "type": "integer",
+            "description": "截取该进程最前窗口",
+            "minimum": 0
+          },
+          "foreground_only": {
+            "type": "boolean",
+            "description": "截取前台应用窗口"
+          },
+          "region": {
+            "type": "object",
+            "description": "显式区域（屏幕逻辑坐标 points，优先于 app 定位）",
+            "properties": {
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "width": { "type": "number", "minimum": 0 },
+              "height": { "type": "number", "minimum": 0 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "max_dimension": {
+            "type": "integer",
+            "description": "产物长边上限（像素，默认 1568）；超过时按 1/2 整数倍缩小，不裁剪",
+            "minimum": 1
+          }
+        },
+        "required": []
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "desktop_input",
+      "description": "真实输入（系统级键鼠合成：macOS CGEvent / Windows SendInput，行为与用户手动操作一致），点击、输入等交互的首选路径，适用于 Canvas/Qt 自绘等无障碍树外的界面。鼠标：click/double_click/right_click/move/drag/scroll，坐标为屏幕逻辑坐标（由截图 logical_bounds 与 scale 换算）；点击自带平滑移动与到位停顿，无需先 move。首次鼠标操作时天工指针从系统鼠标位置分身出现并演示操作，本轮结束自动收起。键盘：type 输入任意文本（中文不经输入法）、key 按单键、combo 组合键（修饰键在前），先点击建立焦点。screenshot_after=true 时操作完成后自动截图，省去一次单独截图。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["click", "double_click", "right_click", "move", "drag", "scroll", "type", "key", "combo"],
+            "description": "鼠标手势或键盘动作"
+          },
+          "x": {
+            "type": "number",
+            "description": "鼠标动作必填：目标点 X（屏幕逻辑坐标）"
+          },
+          "y": {
+            "type": "number",
+            "description": "鼠标动作必填：目标点 Y"
+          },
+          "to_x": {
+            "type": "number",
+            "description": "drag 必填：终点 X"
+          },
+          "to_y": {
+            "type": "number",
+            "description": "drag 必填：终点 Y"
+          },
+          "delta_y": {
+            "type": "number",
+            "description": "scroll：垂直滚动像素，正=向下（与 delta_x 至少一个）"
+          },
+          "delta_x": {
+            "type": "number",
+            "description": "scroll：水平滚动像素，正=向右"
+          },
+          "text": {
+            "type": "string",
+            "description": "type 必填：要输入的文本"
+          },
+          "key": {
+            "type": "string",
+            "description": "key 必填：键名（enter/esc/tab/pageup/方向键/字母数字等，别名不敏感）"
+          },
+          "keys": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "combo 必填：键名数组，修饰键在前，如 [\"cmd\",\"c\"]（Windows 上 cmd 等同 ctrl，徽标键用 win）"
+          },
+          "screenshot_after": {
+            "type": "boolean",
+            "description": "操作后自动截图（默认 false）"
+          },
+          "screenshot_region": {
+            "type": "object",
+            "description": "screenshot_after 的截图区域（缺省按 screenshot_app_name 或全屏）",
+            "properties": {
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "width": { "type": "number", "minimum": 0 },
+              "height": { "type": "number", "minimum": 0 }
+            },
+            "required": ["x", "y", "width", "height"]
+          },
+          "screenshot_app_name": {
+            "type": "string",
+            "description": "screenshot_after 时截取该应用窗口"
+          }
+        },
+        "required": ["action"]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "desktop_ui",
+      "description": "无障碍控件树（适合原生控件；微信等自绘界面通常只暴露菜单栏，此时改用截图 + desktop_input）。action=snapshot：读取应用控件树，可带 conditions 只返回匹配控件（传 snapshot 则在已有快照内查找）；action=perform：对快照内控件引用执行语义动作（press/focus/set_value/toggle/select），引用只在所属快照内有效。同名控件多个候选时不得默认操作第一个。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["snapshot", "perform"]
+          },
+          "app_name": {
+            "type": "string",
+            "description": "snapshot：按应用名定位（多进程重名时报歧义并列出 pid）"
+          },
+          "pid": {
+            "type": "integer",
+            "description": "snapshot：按进程号定位",
+            "minimum": 0
+          },
+          "window": {
+            "type": "object",
+            "description": "snapshot：窗口引用",
+            "properties": {
+              "id": { "type": "string" },
+              "snapshot": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["id", "snapshot"]
+          },
+          "snapshot": {
+            "type": "integer",
+            "description": "snapshot + conditions：在已有快照版本内查找，不重新读取",
+            "minimum": 0
+          },
+          "conditions": {
+            "type": "object",
+            "description": "snapshot：查找条件（提供时只返回匹配控件）",
+            "properties": {
+              "automation_id": { "type": "string" },
+              "role": { "type": "string" },
+              "name": { "type": "string" },
+              "value": { "type": "string" },
+              "visible": { "type": "boolean" },
+              "enabled": { "type": "boolean" },
+              "focused": { "type": "boolean" },
+              "mode": { "type": "string", "enum": ["exact", "contains"], "default": "exact" }
+            }
+          },
+          "max_depth": {
+            "type": "integer",
+            "description": "snapshot：最大遍历深度，0 使用默认",
+            "minimum": 0
+          },
+          "max_nodes": {
+            "type": "integer",
+            "description": "snapshot：最大节点数，0 使用默认",
+            "minimum": 0
+          },
+          "include_invisible": {
+            "type": "boolean",
+            "description": "snapshot：包含不可见控件"
+          },
+          "max_candidates": {
+            "type": "integer",
+            "description": "snapshot + conditions：最大候选数",
+            "minimum": 0
+          },
+          "element": {
+            "type": "object",
+            "description": "perform：控件引用",
+            "properties": {
+              "id": { "type": "string" },
+              "snapshot": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["id", "snapshot"]
+          },
+          "operation": {
+            "type": "string",
+            "enum": ["press", "focus", "set_value", "toggle", "select", "expand", "collapse", "scroll_into_view"],
+            "description": "perform 必填：语义动作"
+          },
+          "value": {
+            "type": "string",
+            "description": "perform set_value 的值"
+          },
+          "selection": {
+            "type": "string",
+            "description": "perform select 的选项标识"
+          }
+        },
+        "required": ["action"]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "desktop_wait",
+      "description": "等待状态变化（有明确超时）：appear/disappear 按 target 应用名判定屏幕上是否有其可见窗口；focus/available/value 按控件引用判定。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "condition": {
+            "type": "object",
+            "description": "等待条件。appear/disappear 使用 target；focus/available/value 使用 element；value 可带 expected",
+            "properties": {
+              "kind": { "type": "string", "enum": ["appear", "disappear", "focus", "available", "value"] },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "app_name": { "type": "string" },
+                  "title": { "type": "string" }
+                }
+              },
+              "element": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "snapshot": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["id", "snapshot"]
+              },
+              "expected": { "type": "string" }
+            },
+            "required": ["kind"]
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "超时毫秒数，必须大于 0",
+            "minimum": 1
+          }
+        },
+        "required": ["condition", "timeout_ms"]
+      },
+      "timeout_ms": 60000
+    }
+  ],
+  "prompt": [
+    "桌面应用的交互一律使用 computer-use 插件（5 个工具）：唤起窗口、看界面、点击输入都属本插件职责。终端沙箱无法与图形界面交互（osascript、open -a、screencapture 均不可行），不要在终端里尝试。典型流程：desktop_app(action=open) 把目标应用唤起到前台（未运行会自动启动，返回窗口坐标）→ desktop_screenshot 截取窗口看界面 → desktop_input 点击/输入（可带 screenshot_after 直接看到结果）。原生控件可用 desktop_ui 读取控件树并执行语义动作；需要等界面变化时用 desktop_wait。权限问题会在工具失败时直接报告，无需预先查询状态。网页内容继续优先交给浏览器插件。",
+    "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域；macOS 为 points，Windows 为物理像素，均与鼠标坐标同系）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。"
+  ],
+  "tool_icons": {
+    "desktop_app": "monitor",
+    "desktop_screenshot": "camera",
+    "desktop_input": "monitor",
+    "desktop_ui": "monitor",
+    "desktop_wait": "monitor"
   },
   "ui": {
     "sandbox": "shadow",
