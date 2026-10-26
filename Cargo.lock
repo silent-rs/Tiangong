@@ -11940,7 +11940,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-protocol"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "serde",
  "serde_json",
@@ -11948,7 +11948,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-subagent-sidecar"
-version = "0.2.44"
+version = "0.2.45"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11967,16 +11967,6 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tiangong-plugin-subagent-wasm"
-version = "0.2.44"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-subagent-protocol",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]

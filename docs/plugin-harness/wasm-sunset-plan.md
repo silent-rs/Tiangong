@@ -67,7 +67,7 @@
 | 插件 | wasm 行数 | 状态 |
 | --- | --- | --- |
 | memory | 1270 | ✅ 已迁移（v0.2.0，分支 `feature/issue-709-wasm-sunset`；含运行时 lifecycle→sidecar 转发、recall_memory 直连、设置页迁 `ui.contributions`） |
-| subagent | 611 | 待迁移（附件注入依赖会话快照，需先扩 turn_started 快照转发） |
+| subagent | 611 | ✅ 已迁移（v0.2.45；sidecar 本就按工具名分发，工具/mention/prompt 声明迁清单，turn_finished 提取迁 sidecar；附件注入经核在 core 收紧钩子后已失效，未重建） |
 | computer-use | 1216 | ✅ 已迁移（v0.4.3，工具编排迁 sidecar、prompt 静态化、lifecycle 收指针、恢复窗口按钮迁 sidecar.* 桥接） |
 
 ### 阶段五：特殊形态
