@@ -410,7 +410,34 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
 /// 暂存、签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
 fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "workspace-files" | "browser" | "plugin-creator" | "subagent" => &["assets/icon.svg"],
+        "workspace-files" | "browser" | "plugin-creator" => &["assets/icon.svg"],
+        // App 图标与 plugin.json tool_icons 引用的工具图标（通用 + action 特指）。
+        "subagent" => &[
+            "assets/icon.svg",
+            "assets/tool-subagent.svg",
+            "assets/tool-create-agent.svg",
+            "assets/tool-list-agents.svg",
+            "assets/tool-get-agent.svg",
+            "assets/tool-activate-agent.svg",
+            "assets/tool-deactivate-agent.svg",
+            "assets/tool-list-active-agents.svg",
+            "assets/tool-send-agent-message.svg",
+            "assets/tool-submit-agent-task.svg",
+            "assets/tool-get-agent-task.svg",
+            "assets/tool-list-agent-tasks.svg",
+            "assets/tool-get-agent-run.svg",
+            "assets/tool-interrupt-agent-run.svg",
+            "assets/tool-cancel-agent-run.svg",
+            "assets/tool-list-agent-events.svg",
+            "assets/tool-get-agent-artifacts.svg",
+            "assets/tool-get-agent-memory.svg",
+            "assets/tool-append-agent-memory.svg",
+            "assets/tool-append-agent-instructions.svg",
+            "assets/tool-load-workspace-state.svg",
+            "assets/tool-update-workspace-state.svg",
+            "assets/tool-list-pending-work.svg",
+            "assets/tool-report-agent-result.svg",
+        ],
         // App 图标与 plugin.json tool_icons 引用的工具图标。
         "terminal" => &[
             "assets/icon.svg",

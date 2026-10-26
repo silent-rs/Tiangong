@@ -221,7 +221,29 @@
     "candidates_op": "subagent.mention_candidates"
   },
   "tool_icons": {
-    "subagent": "bot"
+    "subagent": "assets/tool-subagent.svg",
+    "subagent:action=create_agent": "assets/tool-create-agent.svg",
+    "subagent:action=list_agents": "assets/tool-list-agents.svg",
+    "subagent:action=get_agent": "assets/tool-get-agent.svg",
+    "subagent:action=activate_agent": "assets/tool-activate-agent.svg",
+    "subagent:action=deactivate_agent": "assets/tool-deactivate-agent.svg",
+    "subagent:action=list_active_agents": "assets/tool-list-active-agents.svg",
+    "subagent:action=send_agent_message": "assets/tool-send-agent-message.svg",
+    "subagent:action=submit_agent_task": "assets/tool-submit-agent-task.svg",
+    "subagent:action=get_agent_task": "assets/tool-get-agent-task.svg",
+    "subagent:action=list_agent_tasks": "assets/tool-list-agent-tasks.svg",
+    "subagent:action=get_agent_run": "assets/tool-get-agent-run.svg",
+    "subagent:action=interrupt_agent_run": "assets/tool-interrupt-agent-run.svg",
+    "subagent:action=cancel_agent_run": "assets/tool-cancel-agent-run.svg",
+    "subagent:action=list_agent_events": "assets/tool-list-agent-events.svg",
+    "subagent:action=get_agent_artifacts": "assets/tool-get-agent-artifacts.svg",
+    "subagent:action=get_agent_memory": "assets/tool-get-agent-memory.svg",
+    "subagent:action=append_agent_memory": "assets/tool-append-agent-memory.svg",
+    "subagent:action=append_agent_instructions": "assets/tool-append-agent-instructions.svg",
+    "subagent:action=load_workspace_state": "assets/tool-load-workspace-state.svg",
+    "subagent:action=update_workspace_state": "assets/tool-update-workspace-state.svg",
+    "subagent:action=list_pending_work": "assets/tool-list-pending-work.svg",
+    "subagent:action=report_agent_result": "assets/tool-report-agent-result.svg"
   },
   "tool_titles": {
     "subagent": "Subagent 操作",
