@@ -909,6 +909,8 @@ fn run_gui() {
             tiangong_app::commands::set_default_trust_mode,
             tiangong_app::commands::get_sandbox_disabled,
             tiangong_app::commands::set_sandbox_disabled,
+            tiangong_app::commands::get_auto_update,
+            tiangong_app::commands::set_auto_update,
             tiangong_app::commands::get_sandbox_policy,
             tiangong_app::commands::set_sandbox_policy,
             tiangong_app::commands::get_command_env_blocklist,

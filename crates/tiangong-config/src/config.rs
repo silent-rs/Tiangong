@@ -146,6 +146,8 @@ pub struct TiangongConfig {
     /// 用户沙箱路径与环境授权。用户规则可开放任意数据路径；宿主管理面
     /// 保护由运行时强制叠加，不能通过本配置覆盖。
     pub sandbox_policy: SandboxUserPolicy,
+    /// 打开应用时自动检查并安装更新（设置页「关于与更新」开关，默认开启）
+    pub auto_update: bool,
     /// 旧版命令环境变量黑名单兼容字段；加载后合并进 sandbox_policy.environment_blocklist。
     pub command_env_blocklist: Vec<String>,
     /// Server 配置
@@ -161,6 +163,7 @@ impl Default for TiangongConfig {
             workspace_dir: crate::loader::default_workspace_dir(),
             sandbox_disabled: false,
             sandbox_policy: SandboxUserPolicy::default(),
+            auto_update: true,
             command_env_blocklist: Vec::new(),
             server: ServerConfig::default(),
         }

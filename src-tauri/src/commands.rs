@@ -1753,6 +1753,30 @@ pub async fn get_sandbox_disabled(state: State<'_, TiangongApp>) -> Result<bool,
         .with_state_read(|core_state| Ok(core_state.config.sandbox_disabled))
         .await
 }
+/// 打开应用时自动检查并安装更新（「关于与更新」开关，默认开启）。
+#[tauri::command]
+pub async fn get_auto_update(state: State<'_, TiangongApp>) -> Result<bool, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.config.auto_update))
+        .await
+}
+#[tauri::command]
+pub async fn set_auto_update(enabled: bool, state: State<'_, TiangongApp>) -> Result<(), String> {
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    if config.auto_update == enabled {
+        return Ok(());
+    }
+    config.auto_update = enabled;
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config = config;
+            Ok(())
+        })
+        .await
+}
 
 #[tauri::command]
 pub async fn get_command_env_blocklist(

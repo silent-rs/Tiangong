@@ -142,6 +142,7 @@ impl TiangongConfig {
             self.default_trust_mode,
             &self.workspace_dir,
             self.sandbox_disabled,
+            self.auto_update,
             &self.sandbox_policy,
             &self.command_env_blocklist,
         )?;

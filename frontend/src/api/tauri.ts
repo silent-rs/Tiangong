@@ -771,6 +771,10 @@ export const api = {
 
   setSandboxDisabled: (disabled: boolean): Promise<void> =>
     invoke('set_sandbox_disabled', { disabled }),
+  getAutoUpdate: (): Promise<boolean> =>
+    invoke('get_auto_update'),
+  setAutoUpdate: (enabled: boolean): Promise<void> =>
+    invoke('set_auto_update', { enabled }),
 
   getSandboxPolicy: (): Promise<SandboxPolicyView> =>
     invoke('get_sandbox_policy'),

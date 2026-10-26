@@ -1794,6 +1794,9 @@ async function checkGithubFallback(): Promise<Update | null> {
 
 function AppUpdateSettings() {
   const storeUpdate = useStore((s) => s.updateAvailable);
+  const autoUpdate = useStore((s) => s.autoUpdate);
+  const loadAutoUpdate = useStore((s) => s.loadAutoUpdate);
+  const setAutoUpdateAction = useStore((s) => s.setAutoUpdate);
   const [currentVersion, setCurrentVersion] = useState('');
   const [availableUpdate, setAvailableUpdate] = useState<{
     version: string;
@@ -1812,6 +1815,11 @@ function AppUpdateSettings() {
   // 安装失败且与网络无关（如更新源缺包）时，提供手动下载入口
   const [showReleaseLink, setShowReleaseLink] = useState(false);
   const { showSuccess, showError, showInfo } = useToast();
+
+  // 自动更新开关：null 表示尚未加载，按默认开启展示
+  useEffect(() => {
+    if (autoUpdate === null) void loadAutoUpdate();
+  }, [autoUpdate, loadAutoUpdate]);
 
   useEffect(() => {
     let mounted = true;
@@ -2024,6 +2032,17 @@ function AppUpdateSettings() {
               <div className="mt-1 text-2xl font-semibold">{currentVersion || '读取中...'}</div>
             </div>
             <Badge variant="outline">OSS / GitHub</Badge>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <Label>自动更新</Label>
+              <p className="text-xs text-muted-foreground">打开天工时自动检查并安装新版本，安装完成后自动重启</p>
+            </div>
+            <Switch
+              checked={autoUpdate !== false}
+              disabled={autoUpdate === null}
+              onCheckedChange={(checked) => void setAutoUpdateAction(checked)}
+            />
           </div>
 
           {availableUpdate ? (
