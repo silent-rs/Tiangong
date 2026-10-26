@@ -1234,25 +1234,35 @@ fn load_icon_rgba(data: &'static [u8]) -> Option<tauri::image::Image<'static>> {
 mod tests {
     use super::*;
 
-    /// 验证 raise_nofile_limit 确实抬高了本进程的软上限：测试进程同样以
-    /// 默认 256 软上限启动，调用后软上限应达到 min(硬上限, 10240)。
+    /// 验证 raise_nofile_limit 的效果，兼容不同环境初始上限：
+    /// 低配环境（macOS 默认 256）调用后软上限应精确抬到 min(硬上限, 10240)；
+    /// 高配环境（CI runner 常见 1048576）已不低于目标则保持不变。
+    /// 两种环境下软上限都不允许降低。
     #[cfg(unix)]
     #[test]
     fn raise_nofile_limit_lifts_soft_limit() {
         unsafe {
             let mut before: libc::rlimit = std::mem::zeroed();
             assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut before), 0);
-            assert!(
-                before.rlim_cur < 10240,
-                "测试前提不成立：软上限已高于 10240"
-            );
-        }
-        raise_nofile_limit();
-        unsafe {
+            raise_nofile_limit();
             let mut after: libc::rlimit = std::mem::zeroed();
             assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut after), 0);
-            let target = after.rlim_max.min(10240);
-            assert!(after.rlim_cur >= target, "软上限未抬高: {}", after.rlim_cur);
+
+            let target = before.rlim_max.min(10240);
+            assert!(
+                after.rlim_cur >= target,
+                "软上限未达到目标 {target}: {}",
+                after.rlim_cur
+            );
+            assert!(
+                after.rlim_cur >= before.rlim_cur,
+                "软上限不允许降低: {} -> {}",
+                before.rlim_cur,
+                after.rlim_cur
+            );
+            if before.rlim_cur < target {
+                assert_eq!(after.rlim_cur, target);
+            }
         }
     }
 }
