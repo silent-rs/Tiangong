@@ -1,3 +1,60 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#7C3AED" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M6 3c-1-1-2.7-1.2-4.5-.8v7C3.3 8.8 5 9 6 10c1-1 2.7-1.2 4.5-.8v-7C8.7 1.8 7 2 6 3z" fill="#7C3AED" fill-opacity="0.18"/><path d="M6 3v7"/><path d="M9.5 4.5v2M8.5 5.5h2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="head" x1="8" y1="12" x2="38" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A895FF"/>
+      <stop offset="0.5" stop-color="#7C63F4"/>
+      <stop offset="1" stop-color="#5A3FD8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="15" cy="15" r="17" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="visor" x1="24" y1="19" x2="24" y2="33" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1F1B4D"/>
+      <stop offset="1" stop-color="#2E2770"/>
+    </linearGradient>
+    <linearGradient id="eye" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9DF5FF"/>
+      <stop offset="1" stop-color="#3FD3F0"/>
+    </linearGradient>
+    <radialGradient id="bulb" cx="23" cy="6" r="4" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.45" stop-color="#9DF5FF"/>
+      <stop offset="1" stop-color="#3FD3F0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- 天线 -->
+  <path d="M24 14V9" stroke="#6B52E8" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="24" cy="7" r="5" fill="#3FD3F0" fill-opacity="0.18"/>
+  <circle cx="24" cy="7" r="3.2" fill="url(#bulb)"/>
+
+  <!-- 耳 -->
+  <rect x="3.5" y="22" width="5" height="10" rx="2.5" fill="#5A3FD8"/>
+  <rect x="39.5" y="22" width="5" height="10" rx="2.5" fill="#5A3FD8"/>
+
+  <!-- 头部 -->
+  <rect x="7" y="14.2" width="34" height="27" rx="9" fill="#3A22A8" fill-opacity="0.22"/>
+  <rect x="7" y="13" width="34" height="27" rx="9" fill="url(#head)"/>
+  <rect x="7" y="13" width="34" height="27" rx="9" fill="url(#glow)"/>
+  <rect x="7.6" y="13.6" width="32.8" height="25.8" rx="8.4" stroke="#FFFFFF" stroke-opacity="0.3" stroke-width="1.2"/>
+
+  <!-- 面罩 -->
+  <rect x="12" y="19" width="24" height="14.5" rx="6" fill="url(#visor)"/>
+  <rect x="12.5" y="19.5" width="23" height="13.5" rx="5.5" stroke="#FFFFFF" stroke-opacity="0.12"/>
+
+  <!-- 眼睛（发光） -->
+  <rect x="16" y="23" width="5" height="6.5" rx="2.5" fill="url(#eye)"/>
+  <rect x="27" y="23" width="5" height="6.5" rx="2.5" fill="url(#eye)"/>
+  <circle cx="17.6" cy="24.6" r="0.9" fill="#FFFFFF" fill-opacity="0.9"/>
+  <circle cx="28.6" cy="24.6" r="0.9" fill="#FFFFFF" fill-opacity="0.9"/>
+
+  <!-- 嘴部指示灯 -->
+  <rect x="20" y="35.3" width="8" height="2" rx="1" fill="#FFFFFF" fill-opacity="0.7"/>
+
+  <!-- 能力角标 -->
+  <circle cx="39" cy="39" r="7.6" fill="#FFFFFF"/>
+  <circle cx="39" cy="39" r="6.2" fill="#D97706"/>
+  <path d="M36.8 36.4h3.4v4.6l-1.7-1.2-1.7 1.2z" fill="#FFFFFF"/>
+  <path d="M40.6 36.2v2.6M39.3 37.5h2.6" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" fill="none" stroke-width="1.2"/>
 </svg>
