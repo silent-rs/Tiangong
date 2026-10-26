@@ -437,6 +437,8 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
             "assets/tool-desktop-status.svg",
             "assets/tool-desktop-screenshot.svg",
             "assets/tool-desktop-input.svg",
+            "assets/tool-desktop-mouse.svg",
+            "assets/tool-desktop-keyboard.svg",
             "assets/tool-desktop-ui.svg",
             "assets/tool-desktop-wait.svg",
         ],
