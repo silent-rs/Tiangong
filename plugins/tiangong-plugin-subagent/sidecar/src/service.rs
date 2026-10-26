@@ -36,6 +36,26 @@ use crate::paths::{new_id, now_string};
 use crate::runner::{BeginFrame, CliEvent, ExitInfo, McpGuide, RunHooks, RunnerHub};
 use crate::runtime_store::RuntimeStore;
 
+/// 统一入口 subagent 的 action 解析：action 必须是已知工具操作名，
+/// 否则给出可读的工具级失败（而非「未知操作」通道错误）。
+fn resolve_action_entry(payload: &serde_json::Value) -> std::result::Result<String, String> {
+    let action = payload
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if action.is_empty() {
+        return Err("subagent 需要 action 参数区分功能（如 action=list_agents）".to_string());
+    }
+    if !TOOL_OPERATIONS.contains(&action) {
+        return Err(format!(
+            "subagent 未知动作: {action}（可用：{}）",
+            TOOL_OPERATIONS.join(", ")
+        ));
+    }
+    Ok(action.to_string())
+}
+
 /// 工具响应统一形状（对齐宿主 ToolOutcome 映射）。
 fn tool_ok(summary: String) -> serde_json::Value {
     json!({ "ok": true, "summary": summary, "exit_code": 0 })
@@ -43,6 +63,82 @@ fn tool_ok(summary: String) -> serde_json::Value {
 
 fn tool_fail(summary: String) -> serde_json::Value {
     json!({ "ok": false, "summary": summary, "exit_code": 1 })
+}
+
+/// 从 `lifecycle.on_turn_finished` 的本轮快照提取归因信息（原 WASM
+/// `forward_turn_finished` 迁入）：首条消息即本轮用户锚点，其后倒序第一条
+/// assistant（优先 summary 阶段、过滤空文本）即最终回复。
+fn extract_turn_finished(session: &serde_json::Value) -> SessionTurnFinishedRequest {
+    let session_id = session
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let messages = session
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // 本轮用户锚点：宿主快照只含本轮消息，锚点即首条。
+    let (user_text, turn_status) = match messages.first() {
+        Some(anchor) => (
+            message_text(anchor),
+            anchor
+                .get("turn_status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("success")
+                .to_string(),
+        ),
+        None => (String::new(), "success".to_string()),
+    };
+    // 最终回复：锚点之后倒序第一条 assistant（优先 summary 阶段，过滤空
+    // 文本）。锚点已排除，倒序第一条即本轮最后一条消息（最终答案），
+    // 不得再跳过。
+    let mut assistant_text = String::new();
+    for phase in ["summary", "normal"] {
+        for message in messages.iter().skip(1).rev() {
+            if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                && message
+                    .get("phase")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("normal")
+                    == phase
+            {
+                let text = message_text(message);
+                if !text.trim().is_empty() {
+                    assistant_text = text;
+                    break;
+                }
+            }
+        }
+        if !assistant_text.is_empty() {
+            break;
+        }
+    }
+    SessionTurnFinishedRequest {
+        session_id,
+        user_text,
+        assistant_text,
+        turn_status: Some(turn_status),
+    }
+}
+
+/// 从消息内容块提取文本（text 块拼接）。
+fn message_text(message: &serde_json::Value) -> String {
+    message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                })
+                .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
 }
 
 fn tool_detail(summary: String, detail: serde_json::Value) -> serde_json::Value {
@@ -231,6 +327,15 @@ impl SubagentService {
     }
 
     async fn dispatch_inner(&self, request: &Request) -> serde_json::Value {
+        // 统一入口 subagent（action 模式）：action 即底层操作名，入口改写后
+        // 走既有分发（与 terminal 的动作合并同构）。
+        let mut request = request.clone();
+        if request.operation == TOOL_SUBAGENT {
+            match resolve_action_entry(&request.payload) {
+                Ok(operation) => request.operation = operation,
+                Err(summary) => return tool_fail(summary),
+            }
+        }
         let operation = request.operation.as_str();
         let payload = request.payload.clone();
         let result: Result<serde_json::Value> = match operation {
@@ -281,7 +386,7 @@ impl SubagentService {
             UI_WRITE_MEMORY => self.ui_write_memory(&payload).await,
             UI_DELETE_MEMORY => self.ui_delete_memory(&payload).await,
             UI_COMPILE_MEMORY => self.ui_compile_memory(&payload).await,
-            // ── WASM 转发：@ 提及候选（启用且后端已实现的 Agent） ──
+            // ── @ 提及候选（manifest mention.candidates_op → sidecar）──
             MENTION_CANDIDATES => {
                 let candidates: Vec<serde_json::Value> = self
                     .agents
@@ -305,7 +410,22 @@ impl SubagentService {
                 serde_json::to_value(candidates)
                     .map_err(|error| anyhow::anyhow!("序列化提及候选失败: {error}"))
             }
-            // ── WASM 生命周期钩子转发 ──
+            // ── 生命周期钩子转发（capabilities.lifecycle；原 WASM 桥接迁入）──
+            "lifecycle.on_session_ready"
+            | "lifecycle.on_turn_started"
+            | "lifecycle.on_session_ended" => {
+                // 通知型钩子：sidecar 无需处理，确认即可。
+                Ok(json!({ "ok": true }))
+            }
+            "lifecycle.on_turn_finished" => {
+                // 本轮快照（messages 只含本轮，首条即本轮用户锚点）→ 提取
+                // 归因信息并完成运行回报。失败不阻断：通知型钩子，sidecar
+                // 侧有孤儿运行恢复兜底。
+                let request = extract_turn_finished(&payload);
+                self.handle_session_turn_finished(&request)
+                    .await
+                    .map(tool_ok)
+            }
             SESSION_TURN_FINISHED => match parse_request::<SessionTurnFinishedRequest>(&payload) {
                 Ok(request) => self
                     .handle_session_turn_finished(&request)
@@ -3247,6 +3367,7 @@ pub fn handshake_payload() -> serde_json::Value {
         .iter()
         .map(|tool| format!("tool:{tool}"))
         .collect();
+    capabilities.push("tool:subagent".to_string());
     capabilities.push("subagent".to_string());
     json!({
         "plugin_id": PLUGIN_ID,
@@ -3263,6 +3384,68 @@ pub fn handshake_payload() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// lifecycle.on_turn_finished 快照 → 归因信息提取（原 WASM 迁入）：
+    /// 首条为用户锚点，最终回复优先 summary 阶段的非空 assistant。
+    #[test]
+    fn 轮次完成快照提取_锚点与最终回复() {
+        let snapshot = serde_json::json!({
+            "id": "sess-1",
+            "messages": [
+                { "role": "user", "turn_status": "success", "content": [
+                    { "type": "text", "text": "【Subagent 任务】来自主会话：做一件事" }
+                ]},
+                { "role": "assistant", "phase": "normal", "content": [
+                    { "type": "text", "text": "中间过程" }
+                ]},
+                { "role": "assistant", "phase": "summary", "content": [
+                    { "type": "text", "text": "最终答案" }
+                ]},
+            ],
+        });
+        let request = extract_turn_finished(&snapshot);
+        assert_eq!(request.session_id, "sess-1");
+        assert!(request.user_text.contains("【Subagent 任务】"));
+        assert_eq!(request.assistant_text, "最终答案");
+        assert_eq!(request.turn_status.as_deref(), Some("success"));
+    }
+
+    #[test]
+    fn 轮次完成快照提取_空消息与缺省终态() {
+        let request = extract_turn_finished(&serde_json::json!({ "id": "sess-2" }));
+        assert_eq!(request.session_id, "sess-2");
+        assert_eq!(request.user_text, "");
+        assert_eq!(request.assistant_text, "");
+        assert_eq!(request.turn_status.as_deref(), Some("success"));
+    }
+
+    /// 清单 mention.candidates_op 声明的是含插件前缀的完整名，
+    /// 分发臂必须匹配同一常量——曾因缺前缀被 sidecar 拒绝。
+    #[test]
+    fn mention_op_matches_manifest_operation_name() {
+        assert_eq!(
+            MENTION_CANDIDATES, "subagent.mention_candidates",
+            "操作名须与清单 mention.candidates_op 一致（含插件前缀）"
+        );
+    }
+
+    /// 统一入口 subagent 的 action 解析：已知操作名放行，缺失/未知给出
+    /// 工具级失败信息。
+    #[test]
+    fn 统一入口action解析() {
+        assert_eq!(
+            resolve_action_entry(&serde_json::json!({ "action": "list_agents" })).unwrap(),
+            "list_agents"
+        );
+        let missing = resolve_action_entry(&serde_json::json!({})).unwrap_err();
+        assert!(missing.contains("需要 action 参数"), "{missing}");
+        let unknown =
+            resolve_action_entry(&serde_json::json!({ "action": "reboot_all" })).unwrap_err();
+        assert!(
+            unknown.contains("未知动作") && unknown.contains("reboot_all"),
+            "{unknown}"
+        );
+    }
 
     /// 正文尾部的标记才是本轮标记：注入段落（长期记忆、成员自维护的
     /// task/plan/context）里的历史标记不得抢先命中。

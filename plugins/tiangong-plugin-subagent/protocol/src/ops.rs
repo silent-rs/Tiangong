@@ -35,6 +35,10 @@ pub const TOOL_LIST_PENDING_WORK: &str = "list_pending_work";
 pub const TOOL_LOAD_WORKSPACE_STATE: &str = "load_workspace_state";
 pub const TOOL_UPDATE_WORKSPACE_STATE: &str = "update_workspace_state";
 
+/// 统一工具入口（清单只声明这一个工具；action 参数即底层操作名，
+/// sidecar 入口改写后走既有分发）。
+pub const TOOL_SUBAGENT: &str = "subagent";
+
 /// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_CREATE_AGENT,
@@ -87,8 +91,9 @@ pub const SHUTDOWN_OPERATION: &str = "subagent_shutdown";
 /// WASM 生命周期钩子转发操作：关联会话本轮完成（on_turn_finished → sidecar）。
 pub const SESSION_TURN_FINISHED: &str = "session_turn_finished";
 
-/// @ 提及候选查询（WASM mention-candidates → sidecar）：返回启用 Agent 的候选列表。
-pub const MENTION_CANDIDATES: &str = "mention_candidates";
+/// @ 提及候选查询（manifest mention.candidates_op → sidecar）：
+/// 返回启用 Agent 的候选列表。操作名含插件前缀（与清单声明一致）。
+pub const MENTION_CANDIDATES: &str = "subagent.mention_candidates";
 
 // ── 请求类型 ───────────────────────────────────────────────────
 

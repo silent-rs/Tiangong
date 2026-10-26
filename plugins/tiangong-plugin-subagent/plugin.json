@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "subagent",
-  "version": "0.2.44",
+  "version": "0.2.45",
   "entrypoints": [
     "desktop"
   ],
@@ -15,9 +15,6 @@
   "resources": [
     "assets"
   ],
-  "wasm": {
-    "binary": "tiangong_plugin_subagent_wasm.wasm"
-  },
   "ui": {
     "sandbox": "shadow",
     "contributions": [
@@ -52,6 +49,7 @@
   "capabilities": {
     "tools": true,
     "prompt": true,
+    "lifecycle": true,
     "events": [
       "tool.*",
       "sidecar.*"
@@ -64,5 +62,212 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 120000,
     "lifecycle": "resident"
+  },
+  "tools": [
+    {
+      "name": "subagent",
+      "description": "Subagent 统一入口（action 模式区分功能）：招募/激活/停用成员、发送协作消息、提交任务、跟踪运行与事件、读写长期记忆与指令、维护工作区状态、查询待处理工作、回报结果。需要帮手时 action=create_agent 招募；派活用 submit_agent_task / send_agent_message；进度与控制用 list_agent_events / get_agent_run / interrupt_agent_run / cancel_agent_run；具体动作与参数见各属性说明。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create_agent",
+              "list_agents",
+              "get_agent",
+              "activate_agent",
+              "deactivate_agent",
+              "list_active_agents",
+              "send_agent_message",
+              "submit_agent_task",
+              "get_agent_task",
+              "list_agent_tasks",
+              "get_agent_run",
+              "interrupt_agent_run",
+              "cancel_agent_run",
+              "list_agent_events",
+              "get_agent_artifacts",
+              "get_agent_memory",
+              "append_agent_memory",
+              "append_agent_instructions",
+              "load_workspace_state",
+              "update_workspace_state",
+              "list_pending_work",
+              "report_agent_result"
+            ],
+            "description": "create_agent：招募成员：创建持久身份（或复用同名成员并延续其指令与记忆），默认创建后立即在当前会话激活；list_agents：列出全部持久 Subagent、后端类型、激活状态与运行实例状态；get_agent：查看成员详情：身份配置、长期指令、最近任务与事件、产物数量；activate_agent：在当前会话激活成员，绑定当前 Workspace；deactivate_agent：停用成员：中断其在本会话的运行实例并释放 Workspace 写入所有权；list_active_agents：查看当前会话已激活的 Subagent 及运行实例状态；send_agent_message：发送协作消息：追问、补充背景、纠正方向；成员间协作同链路；submit_agent_task：提交正式任务：立即返回任务与运行编号，结果自动反馈到本会话；get_agent_task：查看任务详情与全部运行记录；list_agent_tasks：查看任务列表（默认当前会话，可选按 Agent 过滤）；get_agent_run：查看运行详情与事件流（输出摘要、终态、时间线）；interrupt_agent_run：中断运行（保留现场，可继续输出或被再次控制）；cancel_agent_run：取消运行（终态）：CLI 托管进程被终止，会话成员即时标记取消；list_agent_events：查看事件历史（运行状态、输出、阻塞、审批、完成、失败）；get_agent_artifacts：查看成员历史产物列表（身份目录 artifacts/ 下）；get_agent_memory：读取成员长期记忆（memory/ 下全部文件的注入形态摘要）；append_agent_memory：向成员长期记忆追加一条结论（可复用经验指定 memory_name 为 lessons.md）；append_agent_instructions：向成员长期指令追加一条稳定下来的新规则（只记结论，不记流水）；load_workspace_state：读取成员工作区自维护状态：plan 规划、context 约定、task 当前工作；update_workspace_state：成员更新工作区状态文件（task/plan/context，整文件覆盖）；list_pending_work：查看等待中的工作与协作关系：谁在为谁执行、谁在等结果；report_agent_result：成员向任务消息中的【回复地址】投递回报消息（Subagent 专用）"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "目标成员的 Agent ID 或名称（get/activate/deactivate/artifacts/memory/instructions 与 send_agent_message、submit_agent_task、list_agent_tasks、list_agent_events、list_pending_work 等动作使用；load_workspace_state 缺省=自己）"
+          },
+          "name": {
+            "type": "string",
+            "description": "create_agent：成员名称；同名已存在时直接复用"
+          },
+          "description": {
+            "type": "string",
+            "description": "create_agent：职责一句话说明"
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "agent_team",
+              "cli",
+              "tiangong_session"
+            ],
+            "description": "create_agent：运行后端，推荐默认 agent_team（原生 Subagent，无需额外参数）"
+          },
+          "command": {
+            "type": "string",
+            "description": "create_agent（cli 后端）：启动命令，stdin/stdout 走 JSONL 协议"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "create_agent（tiangong_session）：直接指定关联会话 ID"
+          },
+          "session_query": {
+            "type": "string",
+            "description": "create_agent（tiangong_session）：按标题关键词搜索会话并取最近匹配"
+          },
+          "workspace_policy": {
+            "type": "string",
+            "enum": [
+              "read-only",
+              "read-write-exclusive",
+              "isolated-worktree"
+            ],
+            "description": "create_agent：Workspace 策略，默认只读"
+          },
+          "instructions": {
+            "type": "string",
+            "description": "create_agent：长期指令（该成员的职责与工作要求，跨会话保留）"
+          },
+          "activate": {
+            "type": "boolean",
+            "description": "create_agent：创建后是否立即在当前会话激活，默认 true"
+          },
+          "content": {
+            "type": "string",
+            "description": "send_agent_message：消息内容；append_agent_memory：要记住的结论内容；update_workspace_state：状态文件完整新内容（markdown）"
+          },
+          "goal": {
+            "type": "string",
+            "description": "submit_agent_task：任务目标（要做什么）"
+          },
+          "completion_criteria": {
+            "type": "string",
+            "description": "submit_agent_task：完成条件（怎样算做完）"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "get_agent_task：任务 ID（submit_agent_task 结果中给出）"
+          },
+          "run_id": {
+            "type": "string",
+            "description": "get_agent_run / interrupt_agent_run / cancel_agent_run / list_agent_events：运行 ID"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "list_agent_events：返回条数上限，默认 20",
+            "minimum": 1
+          },
+          "memory_name": {
+            "type": "string",
+            "description": "append_agent_memory：目标记忆文件名，默认 notes.md；可复用经验用 lessons.md"
+          },
+          "note": {
+            "type": "string",
+            "description": "append_agent_memory：可选备注（来源或场景）；report_agent_result：可选备注（产物位置、后续建议）"
+          },
+          "addition": {
+            "type": "string",
+            "description": "append_agent_instructions：要追加的规则（简洁、可长期遵循，勿与既有指令重复）"
+          },
+          "file": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "context",
+              "task"
+            ],
+            "description": "update_workspace_state：目标文件（task=当前工作与待办）"
+          },
+          "result": {
+            "type": "string",
+            "description": "report_agent_result：回报结果正文（结论、关键产出、未尽事项、遇到的阻塞）"
+          },
+          "to_session": {
+            "type": "string",
+            "description": "report_agent_result：接收方会话 ID（任务消息中的【回复地址】）"
+          },
+          "run_marker": {
+            "type": "string",
+            "description": "report_agent_result：可选运行标记（消息尾部的 r-短码），仅用于追踪"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "timeout_ms": 120000
+    }
+  ],
+  "prompt": [
+    "Subagent 工具使用规范（统一入口 subagent，action 参数区分功能）：需要帮手时先用 subagent(action=create_agent) 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。subagent(action=list_agents) 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 subagent(action=send_agent_message) 转达给对应成员（必要时先 action=activate_agent）。追问、补充背景、纠正方向用 action=send_agent_message；有明确目标和完成条件的正式工作用 action=submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 action=list_agent_events / get_agent_run / get_agent_task；需要停止时用 action=interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 action=get_agent_memory / append_agent_memory；安排分工或判断进度时先用 action=list_pending_work 查看待处理工作与协作关系（谁在为谁执行、谁在等结果）。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。成员之间可组成集群协同作业：执行中需要同伴（其他 Subagent 成员）协助、提供信息或接续工作时，用 action=send_agent_message 向该成员发送协作消息（对方完成后的回复会自动送回本会话）；收到「【Subagent 消息】来自成员「XX」」即同伴的协作请求，处理后在最终回复中给出结果即可，也可继续协作更多成员。Subagent 具备成长进化能力：完成一项工作后，先用 action=report_agent_result 向任务消息中的【回复地址】回报结果（纯消息投递，务必调用工具而不是只在回复文本里写结论）；随后把可复用经验（成功做法、踩坑、用户偏好，一行一条结论式）用 action=append_agent_memory（memory_name 指定 lessons.md）沉淀为经验记忆（后续运行优先注入）；确有稳定下来的新规则时，用 action=append_agent_instructions 追加进自己的长期指令——只记结论，不记流水。成员维护自己的工作状态：收到消息先用 action=load_workspace_state 加载本工作区状态，判断其意图（新工作/补充/协作结果/控制）后决定关联、拆分或调整（不默认当作新任务）；执行中用 action=update_workspace_state 的 task 文件维护当前工作与待办（task.md 内自行组织多项工作的分区）、plan 文件更新中长期规划、context 文件积累背景约定；收尾后保存下一步所需上下文——工作的含义由你维护，执行事实由系统记录。收到任务时注意【任务工作区】——那是发起会话的工作区，你的会话默认目录可能与它不同，所有文件操作和命令执行都必须使用基于该工作区的绝对路径。"
+  ],
+  "mention": {
+    "candidates_op": "subagent.mention_candidates"
+  },
+  "tool_icons": {
+    "subagent": "assets/tool-subagent.svg",
+    "subagent:action=create_agent": "assets/tool-create-agent.svg",
+    "subagent:action=list_agents": "assets/tool-list-agents.svg",
+    "subagent:action=get_agent": "assets/tool-get-agent.svg",
+    "subagent:action=activate_agent": "assets/tool-activate-agent.svg",
+    "subagent:action=deactivate_agent": "assets/tool-deactivate-agent.svg",
+    "subagent:action=list_active_agents": "assets/tool-list-active-agents.svg",
+    "subagent:action=send_agent_message": "assets/tool-send-agent-message.svg",
+    "subagent:action=submit_agent_task": "assets/tool-submit-agent-task.svg",
+    "subagent:action=get_agent_task": "assets/tool-get-agent-task.svg",
+    "subagent:action=list_agent_tasks": "assets/tool-list-agent-tasks.svg",
+    "subagent:action=get_agent_run": "assets/tool-get-agent-run.svg",
+    "subagent:action=interrupt_agent_run": "assets/tool-interrupt-agent-run.svg",
+    "subagent:action=cancel_agent_run": "assets/tool-cancel-agent-run.svg",
+    "subagent:action=list_agent_events": "assets/tool-list-agent-events.svg",
+    "subagent:action=get_agent_artifacts": "assets/tool-get-agent-artifacts.svg",
+    "subagent:action=get_agent_memory": "assets/tool-get-agent-memory.svg",
+    "subagent:action=append_agent_memory": "assets/tool-append-agent-memory.svg",
+    "subagent:action=append_agent_instructions": "assets/tool-append-agent-instructions.svg",
+    "subagent:action=load_workspace_state": "assets/tool-load-workspace-state.svg",
+    "subagent:action=update_workspace_state": "assets/tool-update-workspace-state.svg",
+    "subagent:action=list_pending_work": "assets/tool-list-pending-work.svg",
+    "subagent:action=report_agent_result": "assets/tool-report-agent-result.svg"
+  },
+  "tool_titles": {
+    "subagent": "Subagent 操作",
+    "subagent:action=create_agent": "招募成员",
+    "subagent:action=list_agents": "列出成员",
+    "subagent:action=get_agent": "查看成员",
+    "subagent:action=activate_agent": "激活成员",
+    "subagent:action=deactivate_agent": "停用成员",
+    "subagent:action=list_active_agents": "已激活成员",
+    "subagent:action=send_agent_message": "发送协作消息",
+    "subagent:action=submit_agent_task": "提交任务",
+    "subagent:action=get_agent_task": "查看任务",
+    "subagent:action=list_agent_tasks": "任务列表",
+    "subagent:action=get_agent_run": "查看运行",
+    "subagent:action=interrupt_agent_run": "中断运行",
+    "subagent:action=cancel_agent_run": "取消运行",
+    "subagent:action=list_agent_events": "事件历史",
+    "subagent:action=get_agent_artifacts": "产物列表",
+    "subagent:action=get_agent_memory": "读取记忆",
+    "subagent:action=append_agent_memory": "追加记忆",
+    "subagent:action=append_agent_instructions": "追加指令",
+    "subagent:action=load_workspace_state": "加载工作状态",
+    "subagent:action=update_workspace_state": "更新工作状态",
+    "subagent:action=list_pending_work": "待处理工作",
+    "subagent:action=report_agent_result": "回报结果"
   }
 }
