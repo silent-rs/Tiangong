@@ -1074,10 +1074,14 @@ export interface AppState {
 
   /** 用户"按需进程沙箱"开关（全局）：null 表示尚未从宿主加载。 */
   sandboxDisabled: boolean | null;
+  /** 打开应用时自动更新开关（「关于与更新」）：null 表示尚未从宿主加载。 */
+  autoUpdate: boolean | null;
   /** 沙箱程序状态（设置页 / 输入区指示 / 启动门闸共用）：null 表示尚未加载。 */
   sandboxState: SandboxUpdateState | null;
   commandEnvBlocklist: string[] | null;
   loadSandboxDisabled: () => Promise<void>;
+  loadAutoUpdate: () => Promise<void>;
+  setAutoUpdate: (enabled: boolean) => Promise<void>;
   loadCommandEnvBlocklist: () => Promise<void>;
   setCommandEnvBlocklist: (blocklist: string[]) => Promise<void>;
   setSandboxDisabled: (disabled: boolean) => Promise<void>;
@@ -1129,6 +1133,7 @@ export const useStore = create<AppState>((set, get) => ({
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   sandboxDisabled: null,
+  autoUpdate: null,
   sandboxState: null,
   commandEnvBlocklist: null,
   reasoningEffort: 'medium',
@@ -2268,6 +2273,25 @@ export const useStore = create<AppState>((set, get) => ({
       set({ sandboxDisabled: disabled });
     } catch (error) {
       console.error('设置命令沙箱开关失败:', error);
+      throw error;
+    }
+  },
+  // 加载用户"自动更新"开关（关于与更新页与启动自动更新共用）
+  loadAutoUpdate: async () => {
+    try {
+      const enabled = await api.getAutoUpdate();
+      set({ autoUpdate: enabled });
+    } catch (error) {
+      console.error('加载自动更新开关失败:', error);
+    }
+  },
+  // 写入"自动更新"开关并同步宿主配置
+  setAutoUpdate: async (enabled: boolean) => {
+    try {
+      await api.setAutoUpdate(enabled);
+      set({ autoUpdate: enabled });
+    } catch (error) {
+      console.error('设置自动更新开关失败:', error);
       throw error;
     }
   },

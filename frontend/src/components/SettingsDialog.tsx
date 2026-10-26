@@ -1794,6 +1794,9 @@ async function checkGithubFallback(): Promise<Update | null> {
 
 function AppUpdateSettings() {
   const storeUpdate = useStore((s) => s.updateAvailable);
+  const autoUpdate = useStore((s) => s.autoUpdate);
+  const loadAutoUpdate = useStore((s) => s.loadAutoUpdate);
+  const setAutoUpdateAction = useStore((s) => s.setAutoUpdate);
   const [currentVersion, setCurrentVersion] = useState('');
   const [availableUpdate, setAvailableUpdate] = useState<{
     version: string;
@@ -1812,6 +1815,11 @@ function AppUpdateSettings() {
   // 安装失败且与网络无关（如更新源缺包）时，提供手动下载入口
   const [showReleaseLink, setShowReleaseLink] = useState(false);
   const { showSuccess, showError, showInfo } = useToast();
+
+  // 自动更新开关：null 表示尚未加载，按默认开启展示
+  useEffect(() => {
+    if (autoUpdate === null) void loadAutoUpdate();
+  }, [autoUpdate, loadAutoUpdate]);
 
   useEffect(() => {
     let mounted = true;
@@ -2004,16 +2012,29 @@ function AppUpdateSettings() {
     <div className="space-y-4 p-4">
       <div className="flex items-center justify-between gap-4">
         <h3 className="text-lg font-medium">关于与更新</h3>
-        <a
-          href="https://github.com/silent-rs/silent-Tiangong"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          title="在 GitHub 上查看本项目"
-        >
-          <Github className="h-4 w-4" />
-          <span>GitHub</span>
-        </a>
+        <div className="flex items-center gap-4">
+          <div
+            className="flex items-center gap-2"
+            title="打开天工时自动检查并安装新版本，安装完成后自动重启"
+          >
+            <span className="text-sm text-muted-foreground">自动更新</span>
+            <Switch
+              checked={autoUpdate !== false}
+              disabled={autoUpdate === null}
+              onCheckedChange={(checked) => void setAutoUpdateAction(checked)}
+            />
+          </div>
+          <a
+            href="https://github.com/silent-rs/silent-Tiangong"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            title="在 GitHub 上查看本项目"
+          >
+            <Github className="h-4 w-4" />
+            <span>GitHub</span>
+          </a>
+        </div>
       </div>
 
       <Card>

@@ -29,6 +29,8 @@ struct AppConfigFile {
     sandbox_disabled: bool,
     #[serde(default)]
     sandbox_policy: crate::config::SandboxUserPolicy,
+    #[serde(default = "default_auto_update")]
+    auto_update: bool,
     #[serde(default)]
     command_env_blocklist: Vec<String>,
     #[serde(default)]
@@ -42,6 +44,11 @@ struct LegacyAgentConfig {
     trust_mode: Option<TrustMode>,
     #[serde(default)]
     default_trust_mode: Option<TrustMode>,
+}
+
+/// 自动更新默认开启：旧 `app.json` 无该字段时按 true 加载。
+fn default_auto_update() -> bool {
+    true
 }
 
 impl AppConfigFile {
@@ -117,6 +124,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         workspace_dir,
         sandbox_disabled: app.sandbox_disabled,
         sandbox_policy,
+        auto_update: app.auto_update,
         command_env_blocklist: app.command_env_blocklist,
         server,
     }

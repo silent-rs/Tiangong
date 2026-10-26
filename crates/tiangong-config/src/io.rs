@@ -60,6 +60,9 @@ struct AppConfigFile<'a> {
     workspace_dir: &'a str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     sandbox_disabled: bool,
+    /// 默认开启；仅用户显式关闭时落盘，旧文件升级无 diff。
+    #[serde(skip_serializing_if = "is_true")]
+    auto_update: bool,
     #[serde(default, skip_serializing_if = "sandbox_policy_is_default")]
     sandbox_policy: &'a crate::config::SandboxUserPolicy,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -68,6 +71,9 @@ struct AppConfigFile<'a> {
 
 fn sandbox_policy_is_default(value: &&crate::config::SandboxUserPolicy) -> bool {
     **value == crate::config::SandboxUserPolicy::default()
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// 保存应用长期配置到 `app.json`。
@@ -78,6 +84,7 @@ pub fn save_app_config_at(
     default_trust_mode: TrustMode,
     workspace_dir: &str,
     sandbox_disabled: bool,
+    auto_update: bool,
     sandbox_policy: &crate::config::SandboxUserPolicy,
     command_env_blocklist: &Vec<String>,
 ) -> Result<()> {
@@ -90,6 +97,7 @@ pub fn save_app_config_at(
         default_trust_mode,
         workspace_dir,
         sandbox_disabled,
+        auto_update,
         sandbox_policy,
         command_env_blocklist,
     })
@@ -627,6 +635,7 @@ mod tests {
             TrustMode::default(),
             dir.path().to_str().unwrap(),
             true,
+            true,
             &crate::config::SandboxUserPolicy::default(),
             &vec!["MY_SECRET_TOKEN".to_string()],
         )
@@ -642,6 +651,7 @@ mod tests {
             TrustMode::default(),
             dir.path().to_str().unwrap(),
             false,
+            true,
             &crate::config::SandboxUserPolicy::default(),
             &Vec::new(),
         )
@@ -652,6 +662,45 @@ mod tests {
             "默认开启时不应写入字段: {raw}"
         );
         assert!(!crate::loader::load_tiangong_config_from_dir(dir.path()).sandbox_disabled);
+    }
+    /// 自动更新开关持久化：关闭状态写入 app.json 并能读回；默认开启时
+    /// 序列化省略该字段（旧版文件升级无 diff，缺失按 true 加载）。
+    #[test]
+    fn app_config_roundtrips_auto_update() {
+        let dir = tempfile::tempdir().unwrap();
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            false,
+            false,
+            &crate::config::SandboxUserPolicy::default(),
+            &Vec::new(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("app.json")).unwrap();
+        assert!(
+            raw.contains("\"auto_update\": false"),
+            "关闭时应写入字段: {raw}"
+        );
+        assert!(!crate::loader::load_tiangong_config_from_dir(dir.path()).auto_update);
+        // 默认开启：字段省略，读取按 true
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            false,
+            true,
+            &crate::config::SandboxUserPolicy::default(),
+            &Vec::new(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("app.json")).unwrap();
+        assert!(
+            !raw.contains("auto_update"),
+            "默认开启时不应写入字段: {raw}"
+        );
+        assert!(crate::loader::load_tiangong_config_from_dir(dir.path()).auto_update);
     }
 
     #[test]
@@ -666,6 +715,7 @@ mod tests {
             TrustMode::default(),
             dir.path().to_str().unwrap(),
             false,
+            true,
             &policy,
             &Vec::new(),
         )
