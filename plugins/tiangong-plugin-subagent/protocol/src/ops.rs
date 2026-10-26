@@ -35,6 +35,10 @@ pub const TOOL_LIST_PENDING_WORK: &str = "list_pending_work";
 pub const TOOL_LOAD_WORKSPACE_STATE: &str = "load_workspace_state";
 pub const TOOL_UPDATE_WORKSPACE_STATE: &str = "update_workspace_state";
 
+/// 统一工具入口（清单只声明这一个工具；action 参数即底层操作名，
+/// sidecar 入口改写后走既有分发）。
+pub const TOOL_SUBAGENT: &str = "subagent";
+
 /// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_CREATE_AGENT,

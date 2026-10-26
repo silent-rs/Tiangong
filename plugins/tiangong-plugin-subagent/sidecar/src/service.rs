@@ -36,6 +36,26 @@ use crate::paths::{new_id, now_string};
 use crate::runner::{BeginFrame, CliEvent, ExitInfo, McpGuide, RunHooks, RunnerHub};
 use crate::runtime_store::RuntimeStore;
 
+/// 统一入口 subagent 的 action 解析：action 必须是已知工具操作名，
+/// 否则给出可读的工具级失败（而非「未知操作」通道错误）。
+fn resolve_action_entry(payload: &serde_json::Value) -> std::result::Result<String, String> {
+    let action = payload
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if action.is_empty() {
+        return Err("subagent 需要 action 参数区分功能（如 action=list_agents）".to_string());
+    }
+    if !TOOL_OPERATIONS.contains(&action) {
+        return Err(format!(
+            "subagent 未知动作: {action}（可用：{}）",
+            TOOL_OPERATIONS.join(", ")
+        ));
+    }
+    Ok(action.to_string())
+}
+
 /// 工具响应统一形状（对齐宿主 ToolOutcome 映射）。
 fn tool_ok(summary: String) -> serde_json::Value {
     json!({ "ok": true, "summary": summary, "exit_code": 0 })
@@ -307,6 +327,15 @@ impl SubagentService {
     }
 
     async fn dispatch_inner(&self, request: &Request) -> serde_json::Value {
+        // 统一入口 subagent（action 模式）：action 即底层操作名，入口改写后
+        // 走既有分发（与 terminal 的动作合并同构）。
+        let mut request = request.clone();
+        if request.operation == TOOL_SUBAGENT {
+            match resolve_action_entry(&request.payload) {
+                Ok(operation) => request.operation = operation,
+                Err(summary) => return tool_fail(summary),
+            }
+        }
         let operation = request.operation.as_str();
         let payload = request.payload.clone();
         let result: Result<serde_json::Value> = match operation {
@@ -3338,6 +3367,7 @@ pub fn handshake_payload() -> serde_json::Value {
         .iter()
         .map(|tool| format!("tool:{tool}"))
         .collect();
+    capabilities.push("tool:subagent".to_string());
     capabilities.push("subagent".to_string());
     json!({
         "plugin_id": PLUGIN_ID,
@@ -3396,6 +3426,24 @@ mod tests {
         assert_eq!(
             MENTION_CANDIDATES, "subagent.mention_candidates",
             "操作名须与清单 mention.candidates_op 一致（含插件前缀）"
+        );
+    }
+
+    /// 统一入口 subagent 的 action 解析：已知操作名放行，缺失/未知给出
+    /// 工具级失败信息。
+    #[test]
+    fn 统一入口action解析() {
+        assert_eq!(
+            resolve_action_entry(&serde_json::json!({ "action": "list_agents" })).unwrap(),
+            "list_agents"
+        );
+        let missing = resolve_action_entry(&serde_json::json!({})).unwrap_err();
+        assert!(missing.contains("需要 action 参数"), "{missing}");
+        let unknown =
+            resolve_action_entry(&serde_json::json!({ "action": "reboot_all" })).unwrap_err();
+        assert!(
+            unknown.contains("未知动作") && unknown.contains("reboot_all"),
+            "{unknown}"
         );
     }
 
