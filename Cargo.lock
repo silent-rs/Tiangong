@@ -11130,6 +11130,7 @@ dependencies = [
  "http",
  "http-body-util",
  "if-addrs",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "open",
