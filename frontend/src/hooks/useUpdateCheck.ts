@@ -4,7 +4,7 @@ import { isBrowserHost } from '@/api/host';
 import { api } from '@/api/tauri';
 import { useToast } from '@/components/Toast';
 
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+const CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10min
 const INITIAL_DELAY_MS = 5000; // 5s
 
 export function useUpdateCheck() {
