@@ -480,7 +480,7 @@ fn 自制插件prompt不进系统段落_随清单注入() {
     stage_local_signed_manifest(
         root.path(),
         "local-prompt-a",
-        r#"{"schema_version":2,"id":"local-prompt-a","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true,"prompt":true},"tools":[],"prompt":["自制插件专属段落"]}"#,
+        r#"{"schema_version":2,"id":"local-prompt-a","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true},"tools":[],"prompt":["自制插件专属段落"]}"#,
     );
     // 未签名的 prompt-only 插件：保持现状——prompt 进 system prompt、
     // 计入指纹（官方/三方通道未变）。

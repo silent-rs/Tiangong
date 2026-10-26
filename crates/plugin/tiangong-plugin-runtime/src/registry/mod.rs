@@ -322,6 +322,11 @@ struct LoadedPlugin {
     sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
     verified_sidecar: Option<Vec<String>>,
+    /// **装载时组装**的动态 prompt 段落（清单声明 + 握手验证通过时经
+    /// [`PROMPT_SECTIONS_OPERATION`] 读取一次）。None=未声明或未获取；
+    /// Some(段落)（可为空数组）。sidecar 经 [`PROMPT_UPDATED_CHANNEL`]
+    /// 通知变更时重取；内容变化计入能力指纹，触发上下文交接。
+    prompt_sections: Option<Vec<String>>,
     /// 数据/制品/逻辑层加载错误（解释器不可发现、WASM 无法编译等）：
     /// 插件不满足安装条件，安装路径据此回滚。
     load_error: Option<String>,

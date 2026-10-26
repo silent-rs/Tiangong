@@ -229,6 +229,14 @@ fn load_plugin_record_with_prewarm(
     // 插件的验证进程与业务进程争用同一数据目录。
     let verified_sidecar =
         crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
+    // 装载时组装动态 prompt 段落：声明聚合只读快照，变更走
+    // runtime.prompt_updated 通知 + 能力指纹交接。
+    let prompt_sections = assemble_prompt_sections(
+        storage_root,
+        &installed.directory,
+        &installed.manifest,
+        verified_sidecar.as_deref(),
+    );
     // 常驻 sidecar 启动失败是运行异常：保留安装，插件管理显示启动异常
     //（重试验证/修复环境后恢复），不作为安装回滚条件。
     let mut runtime_error = None;
@@ -276,6 +284,7 @@ fn load_plugin_record_with_prewarm(
                 ts_instances: Vec::new(),
                 sidecar,
                 verified_sidecar,
+                prompt_sections: prompt_sections.clone(),
                 load_error,
                 runtime_error,
                 enabled: installed.enabled,
@@ -296,6 +305,7 @@ fn load_plugin_record_with_prewarm(
                 ts_instances: Vec::new(),
                 sidecar,
                 verified_sidecar,
+                prompt_sections,
                 load_error: load_error.or_else(|| Some(error.to_string())),
                 runtime_error,
                 enabled: installed.enabled,

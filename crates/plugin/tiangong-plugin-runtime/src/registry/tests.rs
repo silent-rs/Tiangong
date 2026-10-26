@@ -166,6 +166,7 @@ fn reload_clears_stale_connections_even_without_sidecar_declaration() {
                 std::sync::Arc::clone(&loaded_stub) as std::sync::Arc<dyn SidecarConnection>
             ),
             verified_sidecar: None,
+            prompt_sections: None,
             load_error: None,
             runtime_error: None,
             enabled: true,
@@ -418,6 +419,7 @@ fn refresh_verified_sidecar_clears_only_runtime_error() {
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
+        prompt_sections: None,
         load_error: Some("WASM 实例创建失败".into()),
         runtime_error: Some("sidecar 启动失败".into()),
         enabled: true,
@@ -473,6 +475,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
             ts_instances: Vec::new(),
             sidecar: None,
             verified_sidecar: None,
+            prompt_sections: None,
             load_error: None,
             runtime_error: None,
             enabled: true,
@@ -573,6 +576,7 @@ fn mention_sources_are_reachable_without_any_session_core() {
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
+        prompt_sections: None,
         load_error: None,
         runtime_error: None,
         enabled,
@@ -821,4 +825,62 @@ fn 静态mention声明生成入口候选() {
         crate::ts_plugin::mention_entry_candidate(&manifest, None, &broken).is_none(),
         "空 hint 不合成入口"
     );
+}
+
+/// 动态 prompt 段落装载时组装进注册表；内容变化必须改变能力指纹，
+/// 走插件变化的上下文交接（压缩 message）链路——这是段落变更的
+/// 唯一传播途径（声明聚合只读快照）。
+#[test]
+#[serial_test::serial]
+fn 动态prompt段落变化改变能力指纹() {
+    let manifest = serde_json::from_str::<PluginManifest>(
+        r#"{"schema_version":2,"id":"prompt-digest-demo","version":"1.0.0","sidecar":{"binary":"demo-sidecar"}}"#,
+    )
+    .expect("解析测试清单");
+    let record = |prompt_sections: Option<Vec<String>>| LoadedPlugin {
+        directory: std::path::PathBuf::from("/tmp/prompt-digest-demo"),
+        manifest: manifest.clone(),
+        signed_release: None,
+        wasm_bytes: None,
+        component: None,
+        ui_plugin: None,
+        descriptor: None,
+        generation: 1,
+        instances: Vec::new(),
+        ts_instances: Vec::new(),
+        sidecar: None,
+        verified_sidecar: None,
+        prompt_sections,
+        load_error: None,
+        runtime_error: None,
+        enabled: true,
+    };
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert("prompt-digest-demo".into(), record(None));
+    }
+    let without_prompt = crate::registry::enabled_plugin_fingerprint();
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "prompt-digest-demo".into(),
+            record(Some(vec!["第一版段落".to_string()])),
+        );
+    }
+    let with_prompt_v1 = crate::registry::enabled_plugin_fingerprint();
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "prompt-digest-demo".into(),
+            record(Some(vec!["第二版段落".to_string()])),
+        );
+    }
+    let with_prompt_v2 = crate::registry::enabled_plugin_fingerprint();
+    loaded_plugins()
+        .lock()
+        .unwrap()
+        .remove("prompt-digest-demo");
+
+    assert_ne!(without_prompt, with_prompt_v1, "声明动态段落即能力变化");
+    assert_ne!(with_prompt_v1, with_prompt_v2, "段落内容变化必须改变指纹");
 }

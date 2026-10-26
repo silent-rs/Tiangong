@@ -411,7 +411,13 @@ pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String
         )
     };
     for adapter in ts_instances {
-        adapter.reconfigure(&manifest, enabled, Some(capabilities.clone()));
+        adapter.reconfigure(
+            &manifest,
+            enabled,
+            Some(capabilities.clone()),
+            // 迁移重配不触发段落重取：动态声明走装载与通知路径。
+            Vec::new(),
+        );
     }
 }
 

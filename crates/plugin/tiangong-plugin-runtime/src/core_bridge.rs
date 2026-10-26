@@ -292,6 +292,9 @@ impl RuntimeCorePlugin {
     /// 经反馈通道走 `Command::InjectTool` → 工具批次收敛后的安全点注入，
     /// 对话历史 append-only，KV cache 前缀不受影响。
     fn maybe_inject_local_inventory(&self) {
+        // 自制插件清单：prompt 段落由注册表的装载时组装快照提供（文本 /
+        // 文件 / sidecar 统一形态），内容仍走对话内 append-only 清单，不进
+        // system prompt。
         let inventory = registry::local_plugin_inventory();
         let text = inventory.to_string();
         let empty = inventory["plugins"]
