@@ -15,10 +15,11 @@ use tiangong_plugin_sidecar::protocol::{
 };
 use tiangong_plugin_skill_protocol::{
     Empty, GetSkillDetailRequest, GetSkillEnvRequest, GetSkillEnvResponse, InstalledSkillConfig,
-    ListSkillsResponse, PLUGIN_ID, PLUGIN_VERSION, RemoveSkillRequest, RemoveSkillResponse,
-    SKILL_PROTOCOL_VERSION, SetSkillEnabledRequest, SetSkillEnvRequest, SkillDetail,
-    SkillDetailResponse, SkillManifest, SkillMcpRequirementConfig, SkillSummaryItem,
-    SkillSummaryResponse,
+    ListSkillsResponse, MENTION_CANDIDATES_OPERATION, PLUGIN_ID, PLUGIN_VERSION,
+    RemoveSkillRequest, RemoveSkillResponse, SKILL_DETAIL_OPERATION, SKILL_PROTOCOL_VERSION,
+    SetSkillEnabledRequest, SetSkillEnvRequest, SkillDetail, SkillDetailResponse, SkillManifest,
+    SkillMcpRequirementConfig, SkillSummaryItem, SkillSummaryResponse, TOOL_GET_SKILL_DETAIL,
+    TOOL_GET_SKILL_DETAIL_OPERATION,
 };
 
 use crate::registry::SkillRegistry;
@@ -36,6 +37,14 @@ impl SkillService {
         let registry = SkillRegistry::new(root);
         registry.refresh();
         Ok(Self { registry })
+    }
+
+    /// 测试构造：指定 skills 根目录。
+    #[cfg(test)]
+    fn with_root(root: impl Into<std::path::PathBuf>) -> Self {
+        let registry = SkillRegistry::new(root);
+        registry.refresh();
+        Self { registry }
     }
 
     /// 按 sidecar 协议分发请求。
@@ -82,7 +91,12 @@ impl SkillService {
                 sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 business_protocol: SKILL_PROTOCOL_VERSION,
-                capabilities: vec!["skill".to_string()],
+                capabilities: vec![
+                    "skill".to_string(),
+                    // 动态 prompt 段落（宿主经固定操作 prompt_sections 获取）。
+                    tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY.to_string(),
+                    format!("tool:{TOOL_GET_SKILL_DETAIL}"),
+                ],
                 instance_id: format!("skill-sidecar-{}", std::process::id()),
                 status: ServiceStatus::Ready,
             })
@@ -95,12 +109,45 @@ impl SkillService {
                     .with_context(|| "序列化 list_skills 响应失败")
             }
 
-            "get_skill_detail" => {
+            // 设置页的结构化详情（与工具直连的 ToolOutcome 形状分离）。
+            SKILL_DETAIL_OPERATION => {
                 let req: GetSkillDetailRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 get_skill_detail 请求失败")?;
+                    .with_context(|| "解析 skill_detail 请求失败")?;
                 let detail = self.get_skill_detail(&req.id)?;
                 serde_json::to_value(SkillDetailResponse { detail })
-                    .with_context(|| "序列化 get_skill_detail 响应失败")
+                    .with_context(|| "序列化 skill_detail 响应失败")
+            }
+
+            // ── 工具直连（operation = 工具名，返回 ToolOutcome 形状）──
+            TOOL_GET_SKILL_DETAIL_OPERATION => self.tool_get_skill_detail(payload).await,
+
+            // ── 动态 prompt 段落（宿主声明聚合时经固定操作获取）──
+            tiangong_plugin_sidecar::protocol::PROMPT_SECTIONS_OPERATION => {
+                serde_json::to_value(self.prompt_sections())
+                    .with_context(|| "序列化 prompt_sections 响应失败")
+            }
+
+            // ── @ 提及候选（manifest mention.candidates_op，含插件前缀）──
+            MENTION_CANDIDATES_OPERATION => {
+                let candidates: Vec<serde_json::Value> = self
+                    .list_skills()
+                    .into_iter()
+                    .filter(|skill| skill.enabled)
+                    .map(|skill| {
+                        serde_json::json!({
+                            "value": format!("@skill:{}", skill.id),
+                            "label": skill.name,
+                            "kind": "skill",
+                            "hint": if skill.description.is_empty() {
+                                format!("v{}", skill.version)
+                            } else {
+                                skill.description
+                            },
+                            "mark": "S",
+                        })
+                    })
+                    .collect();
+                serde_json::to_value(candidates).with_context(|| "序列化提及候选失败")
             }
 
             "remove_skill" => {
@@ -174,6 +221,78 @@ impl SkillService {
     }
 
     // ── 业务实现 ──────────────────────────────────────────────────
+
+    /// get_skill_detail 工具直连入口（原 WASM 桥接迁入）：ToolOutcome 形状。
+    async fn tool_get_skill_detail(&self, payload: serde_json::Value) -> Result<serde_json::Value> {
+        let skill_id = payload
+            .get("skill_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if skill_id.is_empty() {
+            anyhow::bail!("缺少必填参数 skill_id");
+        }
+        let detail = self.get_skill_detail(&skill_id)?;
+        if !detail.enabled {
+            // 列出可用 skill 供 Agent 参考。
+            let summary = self.get_skill_summary();
+            let available = summary
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(serde_json::json!({
+                "ok": false,
+                "summary": format!("Skill {} 已禁用", detail.name),
+                "stdout": "",
+                "stderr": format!("Skill {} 当前已禁用。可用的 skill：{}", detail.name, available),
+                "exit_code": 1,
+            }));
+        }
+        // {skill_dir} 占位符替换：用 storage_root/<id> 还原真实目录。
+        let summary = self.get_skill_summary();
+        let skill_dir = format!(
+            "{}/{}",
+            summary.storage_root.trim_end_matches('/'),
+            detail.id
+        );
+        let readme = detail.readme.replace("{skill_dir}", &skill_dir);
+        Ok(serde_json::json!({
+            "ok": true,
+            "summary": format!("Skill {} 的使用说明", detail.name),
+            "stdout": readme,
+            "stderr": "",
+            "exit_code": 0,
+        }))
+    }
+
+    /// 系统提示注入段落（原 WASM build_prompt_sections 迁入）：已装 skill
+    /// 摘要、允许文件操作目录声明、创建规范，共三段。
+    fn prompt_sections(&self) -> Vec<String> {
+        let summary = self.get_skill_summary();
+        let mut sections = Vec::new();
+        if !summary.items.is_empty() {
+            let mut lines = String::from(
+                "已安装的 Skills（如果 Skill 能处理用户请求，优先调用 get_skill_detail 获取完整说明，然后按文档使用 run_command/run_shell 执行对应脚本）：\n",
+            );
+            for item in &summary.items {
+                let desc = if item.description.is_empty() {
+                    "无描述"
+                } else {
+                    &item.description
+                };
+                lines.push_str(&format!("- {} (id={}): {}\n", item.name, item.id, desc));
+            }
+            sections.push(lines);
+        }
+        if !summary.storage_root.is_empty() {
+            sections.push(format!("额外允许文件操作目录：{}", summary.storage_root));
+        }
+        sections.push(skill_creation_guide(&summary.storage_root));
+        sections
+    }
 
     /// 已安装 skill 列表（轻量，只读 skill.toml）。
     fn list_skills(&self) -> Vec<InstalledSkillConfig> {
@@ -395,6 +514,44 @@ impl tiangong_plugin_sidecar::SidecarService for SkillService {
 
 // ── 辅助函数 ──────────────────────────────────────────────────
 
+/// skill 创建规范模板（对齐原 wasm prompt.rs 的 skill_creation_guide）。
+fn skill_creation_guide(root: &str) -> String {
+    let root = if root.is_empty() {
+        "~/.tiangong/skills"
+    } else {
+        root
+    };
+    format!(
+        r#"创建新 Skill 的规范：
+- Skill 存储目录：{root}
+- 每个 Skill 是一个子目录，目录名即 skill id，需含 `skill.toml` 与 `SKILL.md` 两个文件。
+- 不要调用任何专用安装工具，直接用文件写入工具（fs 插件 file_write，action=write）在存储目录下创建文件即可。
+
+创建步骤：
+1. 在 `{root}` 下创建子目录（目录名即 skill id，只允许小写字母、数字、短横线）。
+2. 写入 `skill.toml`（最小模板）：
+   ```toml
+   id = "<skill id>"
+   name = "<显示名>"
+   version = "0.1.0"
+   entry = "SKILL.md"
+   available = true
+
+   [source]
+   kind = "local"
+   value = ""
+
+   [requires]
+
+   [permissions]
+   ```
+3. 写入 `SKILL.md`（使用说明，支持 `{{{{skill_dir}}}}` 占位符，运行时替换为 skill 目录绝对路径）。
+
+创建后需刷新（重启或等待缓存失效）才能生效。"#,
+        root = root
+    )
+}
+
 /// 解析 skills 存储根：优先 `TIANGONG_STORAGE_ROOT/skills`，回退 `~/.tiangong/skills`。
 fn resolve_skills_root() -> std::path::PathBuf {
     if let Some(root) = std::env::var(STORAGE_ROOT_ENV)
@@ -476,3 +633,6 @@ fn reveal_path_in_file_manager(dir: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

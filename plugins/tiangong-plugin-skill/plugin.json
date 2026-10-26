@@ -1,10 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "skill",
-  "version": "0.2.7",
-  "wasm": {
-    "binary": "tiangong_plugin_skill_wasm.wasm"
-  },
+  "version": "0.2.8",
   "sidecar": {
     "binary": "tiangong-skill-sidecar",
     "transport_protocol": "0.1.0",
@@ -12,5 +9,54 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["app-storage.read", "sidecar.invoke"]
+  "permissions": [
+    "app-storage.read",
+    "sidecar.invoke",
+    "tool.provide",
+    "bridge.call"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true
+  },
+  "tools": [
+    {
+      "name": "get_skill_detail",
+      "description": "获取已安装 Skill 的完整使用说明。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "skill_id": {
+            "type": "string",
+            "description": "Skill ID"
+          }
+        },
+        "required": ["skill_id"]
+      },
+      "timeout_ms": 30000
+    }
+  ],
+  "tool_icons": {
+    "get_skill_detail": "book-open"
+  },
+  "tool_titles": {
+    "get_skill_detail": "查看 Skill 说明"
+  },
+  "mention": {
+    "candidates_op": "skill.mention_candidates"
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "skill-settings",
+        "title": "Skills",
+        "description": "管理已安装的 Skill",
+        "icon": "sparkles",
+        "entry": "app/skill.html",
+        "context": []
+      }
+    ]
+  }
 }

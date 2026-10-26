@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-skill-sidecar"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 license = "Apache-2.0"
 description = "Skill 独立 sidecar 进程（承载 skill 注册表扫描、skill.toml 读写与审计日志）"
@@ -22,3 +22,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 toml = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
