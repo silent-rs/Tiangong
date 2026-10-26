@@ -313,6 +313,16 @@
     "desktop_ui": "monitor",
     "desktop_wait": "monitor"
   },
+  "tool_titles": {
+    "desktop_app": "应用窗口管理",
+    "desktop_app:action=open": "唤起应用",
+    "desktop_app:action=list": "列出应用",
+    "desktop_app:action=status": "能力探测",
+    "desktop_screenshot": "截取屏幕",
+    "desktop_input": "桌面输入",
+    "desktop_ui": "控件树操作",
+    "desktop_wait": "等待状态变化"
+  },
   "ui": {
     "sandbox": "shadow",
     "contributions": [
