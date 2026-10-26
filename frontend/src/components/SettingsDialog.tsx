@@ -2012,16 +2012,29 @@ function AppUpdateSettings() {
     <div className="space-y-4 p-4">
       <div className="flex items-center justify-between gap-4">
         <h3 className="text-lg font-medium">关于与更新</h3>
-        <a
-          href="https://github.com/silent-rs/silent-Tiangong"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          title="在 GitHub 上查看本项目"
-        >
-          <Github className="h-4 w-4" />
-          <span>GitHub</span>
-        </a>
+        <div className="flex items-center gap-4">
+          <div
+            className="flex items-center gap-2"
+            title="打开天工时自动检查并安装新版本，安装完成后自动重启"
+          >
+            <span className="text-sm text-muted-foreground">自动更新</span>
+            <Switch
+              checked={autoUpdate !== false}
+              disabled={autoUpdate === null}
+              onCheckedChange={(checked) => void setAutoUpdateAction(checked)}
+            />
+          </div>
+          <a
+            href="https://github.com/silent-rs/silent-Tiangong"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            title="在 GitHub 上查看本项目"
+          >
+            <Github className="h-4 w-4" />
+            <span>GitHub</span>
+          </a>
+        </div>
       </div>
 
       <Card>
@@ -2032,17 +2045,6 @@ function AppUpdateSettings() {
               <div className="mt-1 text-2xl font-semibold">{currentVersion || '读取中...'}</div>
             </div>
             <Badge variant="outline">OSS / GitHub</Badge>
-          </div>
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <Label>自动更新</Label>
-              <p className="text-xs text-muted-foreground">打开天工时自动检查并安装新版本，安装完成后自动重启</p>
-            </div>
-            <Switch
-              checked={autoUpdate !== false}
-              disabled={autoUpdate === null}
-              onCheckedChange={(checked) => void setAutoUpdateAction(checked)}
-            />
           </div>
 
           {availableUpdate ? (
