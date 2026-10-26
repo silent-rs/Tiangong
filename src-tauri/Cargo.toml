@@ -72,6 +72,10 @@ url = { workspace = true }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEvent", "NSView", "NSWindow"] }
 objc2 = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+# 启动时抬高 RLIMIT_NOFILE 软上限（main.rs raise_nofile_limit）
+libc = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serial_test = { workspace = true }

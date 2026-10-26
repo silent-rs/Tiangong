@@ -101,7 +101,51 @@ fn init_logging(terminal_output: bool) -> anyhow::Result<tiangong_config::loggin
     ))
 }
 
+/// 抬高本进程的文件描述符（RLIMIT_NOFILE）软上限。
+///
+/// macOS GUI 进程默认软上限仅 256（launchd `maxfiles 256 unlimited`），而
+/// 天工主进程集中持有全部子资源句柄：常驻/按需插件 sidecar 的管道与
+/// kqueue、终端 PTY、session 持久化文件、内嵌 webview 的 WebKit 基线，
+/// 空闲时即占 ~200 fd。多会话并行、批量建终端时余量耗尽触发 EMFILE
+/// （os error 24），日志表现为「用户消息保存失败 / 加载 Session 失败 /
+/// 启动 stdio sidecar 失败 / net_server accept connection failed」，
+/// 用户侧即「无法发送消息，重启才恢复」。
+///
+/// 系统硬上限远高于默认软上限（`kern.maxfilesperproc` 数十万级），启动
+/// 最早时点把软上限抬到 min(硬上限, 10240) 即可根治。失败不阻断启动，
+/// 仅输出到 stderr 便于排查。
+fn raise_nofile_limit() {
+    #[cfg(unix)]
+    unsafe {
+        let mut rlim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
+            eprintln!(
+                "读取 RLIMIT_NOFILE 失败: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        // 超过 OPEN_MAX（10240）的软上限在 macOS 上无益且可能引发兼容问题。
+        let target = rlim.rlim_max.min(10240);
+        if rlim.rlim_cur >= target {
+            return;
+        }
+        rlim.rlim_cur = target;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
+            eprintln!(
+                "提高 RLIMIT_NOFILE 软上限至 {target} 失败: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
 fn main() {
+    // fd 软上限抬升须先于一切子进程与句柄创建：主进程集中持有全部插件
+    // sidecar 管道、终端 PTY、会话文件与 WebKit 句柄，基线即可逼近 macOS
+    // GUI 进程默认的 256 软上限，多会话/多终端时触发 EMFILE（os error 24），
+    // 表现为消息保存失败、sidecar 无法拉起。详见 raise_nofile_limit 注释。
+    raise_nofile_limit();
     // 解释器环境注入须先于一切后台线程（std::env::set_var 非线程安全）：
     // GUI/受限环境下探测 node/python 并注入 TIANGONG_*_PATH 与 PATH 前置，
     // 供插件 sidecar 与命令通道子进程全树使用。
@@ -1195,4 +1239,41 @@ fn load_icon_rgba(data: &'static [u8]) -> Option<tauri::image::Image<'static>> {
     let height = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     let rgba = data[8..].to_vec();
     Some(tauri::image::Image::new_owned(rgba, width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证 raise_nofile_limit 的效果，兼容不同环境初始上限：
+    /// 低配环境（macOS 默认 256）调用后软上限应精确抬到 min(硬上限, 10240)；
+    /// 高配环境（CI runner 常见 1048576）已不低于目标则保持不变。
+    /// 两种环境下软上限都不允许降低。
+    #[cfg(unix)]
+    #[test]
+    fn raise_nofile_limit_lifts_soft_limit() {
+        unsafe {
+            let mut before: libc::rlimit = std::mem::zeroed();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut before), 0);
+            raise_nofile_limit();
+            let mut after: libc::rlimit = std::mem::zeroed();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut after), 0);
+
+            let target = before.rlim_max.min(10240);
+            assert!(
+                after.rlim_cur >= target,
+                "软上限未达到目标 {target}: {}",
+                after.rlim_cur
+            );
+            assert!(
+                after.rlim_cur >= before.rlim_cur,
+                "软上限不允许降低: {} -> {}",
+                before.rlim_cur,
+                after.rlim_cur
+            );
+            if before.rlim_cur < target {
+                assert_eq!(after.rlim_cur, target);
+            }
+        }
+    }
 }
