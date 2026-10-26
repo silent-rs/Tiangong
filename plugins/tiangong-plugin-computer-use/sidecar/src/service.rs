@@ -1,6 +1,7 @@
 //! Computer Use sidecar 业务服务：按操作名分发请求到平台后端。
 
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 
@@ -14,7 +15,8 @@ use tiangong_plugin_computer_use_protocol::ops::{
 };
 use tiangong_plugin_computer_use_protocol::{
     Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, MENTION_CANDIDATES_OPERATION, PLUGIN_ID,
-    PLUGIN_VERSION,
+    PLUGIN_VERSION, TOOL_DESKTOP_APP, TOOL_DESKTOP_INPUT, TOOL_DESKTOP_SCREENSHOT, TOOL_DESKTOP_UI,
+    TOOL_DESKTOP_WAIT,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -28,10 +30,13 @@ use crate::backend::{self, Backend};
 pub struct ComputerUseService {
     /// 平台无障碍后端。
     backend: Box<dyn Backend>,
-    /// 当前会话是否完全信任模式（由 WASM 注入）。
+    /// 当前会话是否完全信任模式。
     /// 注意：监督模式下的动作审批由宿主（Core）在工具调用层统一处理，
     /// sidecar 当前不做二次判断；此字段保留供未来在 sidecar 层增加细粒度限制。
+    /// （原 WASM set_workspace 注入链路已随桥接层移除，当前恒为 false。）
     full_trust: RwLock<bool>,
+    /// 本轮是否执行过鼠标手势（天工指针分身已出现），轮次结束据此收起。
+    cursor_summoned: AtomicBool,
 }
 
 impl ComputerUseService {
@@ -40,7 +45,20 @@ impl ComputerUseService {
         Ok(Self {
             backend: backend::current_backend(),
             full_trust: RwLock::new(false),
+            cursor_summoned: AtomicBool::new(false),
         })
+    }
+
+    /// 工具调用的访问上下文（full_trust 当前恒 false，见字段说明）。
+    pub(crate) fn access_context(&self) -> tiangong_plugin_computer_use_protocol::AccessContext {
+        tiangong_plugin_computer_use_protocol::AccessContext {
+            full_trust: self.full_trust.read().map(|guard| *guard).unwrap_or(false),
+        }
+    }
+
+    /// 鼠标手势成功：天工指针分身已出现，轮次结束收起。
+    pub(crate) fn note_cursor_summoned(&self) {
+        self.cursor_summoned.store(true, Ordering::Release);
     }
 
     /// 按 sidecar 协议分发请求。
@@ -75,7 +93,44 @@ impl ComputerUseService {
         Response::success(&request_id, payload)
     }
 
-    async fn dispatch_operation(
+    /// 分发单个操作：先接工具直连与生命周期入口，其余走协议操作分发
+    ///（工具直连 `crate::tools` 复用协议分发路径，二者不互相递归）。
+    pub(crate) async fn dispatch_operation(
+        &self,
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match operation {
+            // ── 工具直连（operation = 工具名，payload = 调用参数对象）──
+            TOOL_DESKTOP_APP
+            | TOOL_DESKTOP_SCREENSHOT
+            | TOOL_DESKTOP_INPUT
+            | TOOL_DESKTOP_UI
+            | TOOL_DESKTOP_WAIT => {
+                return crate::tools::dispatch(self, operation, payload).await;
+            }
+            // ── 生命周期钩子转发（capabilities.lifecycle）──
+            "lifecycle.on_session_ready"
+            | "lifecycle.on_turn_started"
+            | "lifecycle.on_session_ended" => {
+                // 通知型钩子：sidecar 无需处理，确认即可。
+                return serde_json::to_value(Ack {}).with_context(|| "序列化 lifecycle 响应失败");
+            }
+            "lifecycle.on_turn_finished" => {
+                // 本轮结束收起天工指针分身（未出现时为无操作）。失败静默：
+                // 指针是纯可视化，overlay 也有空闲兜底。
+                if self.cursor_summoned.swap(false, Ordering::AcqRel) {
+                    let _ = apply_virtual_cursor(false);
+                }
+                return serde_json::to_value(Ack {}).with_context(|| "序列化 lifecycle 响应失败");
+            }
+            _ => {}
+        }
+        self.dispatch_protocol(operation, payload).await
+    }
+
+    /// 协议操作分发（工具直连的底层操作也经由此执行）。
+    pub(crate) async fn dispatch_protocol(
         &self,
         operation: &str,
         payload: serde_json::Value,
@@ -87,7 +142,14 @@ impl ComputerUseService {
                 sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 business_protocol: COMPUTER_USE_PROTOCOL_VERSION,
-                capabilities: vec![CAPABILITY.to_string()],
+                capabilities: vec![
+                    CAPABILITY.to_string(),
+                    format!("tool:{TOOL_DESKTOP_APP}"),
+                    format!("tool:{TOOL_DESKTOP_SCREENSHOT}"),
+                    format!("tool:{TOOL_DESKTOP_INPUT}"),
+                    format!("tool:{TOOL_DESKTOP_UI}"),
+                    format!("tool:{TOOL_DESKTOP_WAIT}"),
+                ],
                 instance_id: format!("computer-use-sidecar-{}", std::process::id()),
                 status: ServiceStatus::Ready,
             })
@@ -394,5 +456,101 @@ mod tests {
         );
         let entry = response.payload.unwrap()["entry"].clone();
         assert!(!entry["hint"].as_str().unwrap_or("").trim().is_empty());
+    }
+
+    /// 工具直连（operation = 工具名）：参数错误返回 ok:false 的工具级结果，
+    /// 而非通道错误（与原 WASM 桥接语义一致）。
+    #[tokio::test]
+    async fn 工具直连分发_参数错误为工具级失败() {
+        let service = ComputerUseService::new().unwrap();
+        let response = service
+            .dispatch(Request::new(
+                TOOL_DESKTOP_APP,
+                serde_json::json!({ "action": "reboot" }),
+            ))
+            .await;
+        assert!(
+            response.success,
+            "工具分发臂必须命中: {:?}",
+            response.error_message
+        );
+        let outcome = response.payload.unwrap();
+        assert_eq!(outcome["ok"], serde_json::json!(false));
+        assert!(
+            outcome["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("action 需为 open/list/status")
+        );
+        assert_eq!(outcome["exit_code"], serde_json::json!(1));
+    }
+
+    /// 鼠标缺坐标在参数层即被拒绝（不触达平台后端）。
+    #[tokio::test]
+    async fn 工具直连分发_鼠标缺坐标被拒绝() {
+        let service = ComputerUseService::new().unwrap();
+        let response = service
+            .dispatch(Request::new(
+                TOOL_DESKTOP_INPUT,
+                serde_json::json!({ "action": "click" }),
+            ))
+            .await;
+        assert!(response.success);
+        let outcome = response.payload.unwrap();
+        assert_eq!(outcome["ok"], serde_json::json!(false));
+        assert!(
+            outcome["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("缺少 x/y 坐标")
+        );
+    }
+
+    /// 握手必须声明全部 5 个工具能力（清单 tools 与握手一致才可直连）。
+    #[tokio::test]
+    async fn 握手声明全部工具能力() {
+        let service = ComputerUseService::new().unwrap();
+        let response = service
+            .dispatch(Request::new(HANDSHAKE_OPERATION, serde_json::json!({})))
+            .await;
+        let capabilities = response.payload.unwrap()["capabilities"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for tool in [
+            TOOL_DESKTOP_APP,
+            TOOL_DESKTOP_SCREENSHOT,
+            TOOL_DESKTOP_INPUT,
+            TOOL_DESKTOP_UI,
+            TOOL_DESKTOP_WAIT,
+        ] {
+            assert!(
+                capabilities
+                    .iter()
+                    .any(|cap| cap.as_str() == Some(&format!("tool:{tool}"))),
+                "握手缺 tool:{tool}：{capabilities:?}"
+            );
+        }
+    }
+
+    /// 生命周期钩子为通知型：on_turn_finished 未召唤指针时为无操作确认。
+    #[tokio::test]
+    async fn 生命周期钩子_未召唤指针时确认即可() {
+        let service = ComputerUseService::new().unwrap();
+        for hook in [
+            "lifecycle.on_session_ready",
+            "lifecycle.on_turn_started",
+            "lifecycle.on_turn_finished",
+            "lifecycle.on_session_ended",
+        ] {
+            let response = service
+                .dispatch(Request::new(hook, serde_json::json!({})))
+                .await;
+            assert!(
+                response.success,
+                "{hook} 被拒绝: {:?}",
+                response.error_message
+            );
+        }
     }
 }

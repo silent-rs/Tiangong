@@ -11516,7 +11516,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-computer-use-protocol"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -11525,7 +11525,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-computer-use-sidecar"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11546,16 +11546,6 @@ dependencies = [
  "tracing-subscriber",
  "uiautomation",
  "windows 0.59.0",
-]
-
-[[package]]
-name = "tiangong-plugin-computer-use-wasm"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-computer-use-protocol",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]
