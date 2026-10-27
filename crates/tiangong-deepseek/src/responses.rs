@@ -188,10 +188,19 @@ fn apply_responses_buffer(
         }
         // 终止事件：completed / incomplete 前统一解析转出；failed 跳过。
         Ok(
-            terminal @ (ResponsesStreamEvent::ResponseCompleted { .. }
+            mut terminal @ (ResponsesStreamEvent::ResponseCompleted { .. }
             | ResponsesStreamEvent::ResponseIncomplete { .. }),
         ) => {
             let outcome = state.buffer.finish();
+            // 命中协议时同步重写终止事件携带的原始 output：message 文本替换
+            // 为整条流的可见文本（协议块已剥离，残缺协议已抛弃）。调用方从
+            // 终止事件兜底读取（含 `output_text()` 便捷访问）得到的内容与
+            // 流式输出一致，协议原文不再经任何路径回灌。
+            if outcome.was_confirmed
+                && let Some(response) = terminal_response_mut(&mut terminal)
+            {
+                rewrite_message_text(response, &outcome.total_visible_text);
+            }
             let mut events = Vec::new();
             if !outcome.visible_text.is_empty() {
                 events.push(Ok(text_delta_event(outcome.visible_text)));
@@ -217,6 +226,35 @@ fn apply_responses_buffer(
             events
         }
         other => vec![other],
+    }
+}
+
+/// 取终止事件（completed / incomplete）可变的完整 response。
+fn terminal_response_mut(event: &mut ResponsesStreamEvent) -> Option<&mut ResponseObject> {
+    match event {
+        ResponsesStreamEvent::ResponseCompleted { response, .. }
+        | ResponsesStreamEvent::ResponseIncomplete { response, .. } => Some(response),
+        _ => None,
+    }
+}
+
+/// 把 response 中全部 message 的输出文本重写为指定可见文本：
+/// 首个 output_text 块承载全文，其余清空。
+fn rewrite_message_text(response: &mut ResponseObject, text: &str) {
+    let mut assigned = false;
+    for item in &mut response.output {
+        if let ResponseOutputItem::Message(message) = item {
+            for block in &mut message.content {
+                if let crate::types::OutputContentBlock::OutputText(block) = block {
+                    if !assigned {
+                        block.text = text.to_string();
+                        assigned = true;
+                    } else {
+                        block.text.clear();
+                    }
+                }
+            }
+        }
     }
 }
 

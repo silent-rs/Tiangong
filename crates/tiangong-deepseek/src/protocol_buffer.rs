@@ -34,8 +34,14 @@ pub(crate) struct TextProtocolOutcome {
     /// 剥离协议块后的可见文本（协议前的说明文字在探测阶段已透传，
     /// 此处为协议块之间或之后的残余可见文本）。
     pub visible_text: String,
+    /// 整条流对调用方可见的全部文本（已透传部分 + `visible_text`）。
+    /// 终止事件重写 output 时使用，保证 `output_text()` 与流式输出一致。
+    pub total_visible_text: String,
     /// 解析出的工具调用（名称 + 参数 JSON 文本）。未命中协议时为空。
     pub tool_calls: Vec<DsmlToolCall>,
+    /// 本次 finish 是否处于 Confirmed（命中协议）状态——解析失败的
+    /// 残缺协议也在此列，调用方据此重写终止事件携带的原始 output。
+    pub was_confirmed: bool,
 }
 
 /// 文本协议流式缓冲状态机。
@@ -44,6 +50,8 @@ pub(crate) struct TextProtocolBuffer {
     phase: BufferPhase,
     /// Probing/Confirmed 期间暂存的文本。
     pending: String,
+    /// 已作为正文透传的全部文本（终止事件重写 output 时拼接）。
+    streamed_out: String,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -70,6 +78,7 @@ impl TextProtocolBuffer {
                 } else {
                     // 纯文本前导：即时透传但不锁定——说明文字之后
                     // 仍可能跟协议调用块（模型常见形态）。
+                    self.streamed_out.push_str(delta);
                     vec![delta.to_string()]
                 }
             }
@@ -81,7 +90,10 @@ impl TextProtocolBuffer {
                 self.pending.push_str(delta);
                 Vec::new()
             }
-            BufferPhase::Passthrough => vec![delta.to_string()],
+            BufferPhase::Passthrough => {
+                self.streamed_out.push_str(delta);
+                vec![delta.to_string()]
+            }
         }
     }
 
@@ -98,17 +110,23 @@ impl TextProtocolBuffer {
     /// 流末统一解析。Confirmed 时命中协议则剥离并转出工具调用；
     /// 解析失败则**整体抛弃**（残缺协议对用户无意义）。
     pub(crate) fn finish(&mut self) -> TextProtocolOutcome {
+        let total_visible_text = std::mem::take(&mut self.streamed_out);
         match self.phase {
             BufferPhase::Confirmed => {
+                let was_confirmed = true;
                 self.phase = BufferPhase::Idle;
                 let pending = self.pending.trim();
                 if let Some(calls) = dsml::parse_dsml_tool_calls(pending) {
                     tracing::info!(count = calls.len(), "工具调用文本协议兜底解析出工具调用");
                     let visible_text = dsml::strip_tool_call_block(pending);
                     self.pending.clear();
+                    let mut total = total_visible_text;
+                    total.push_str(&visible_text);
                     return TextProtocolOutcome {
                         visible_text,
+                        total_visible_text: total,
                         tool_calls: calls,
+                        was_confirmed,
                     };
                 }
                 tracing::warn!(
@@ -116,22 +134,33 @@ impl TextProtocolBuffer {
                     "工具调用文本缓冲解析失败，已确认协议的残缺内容整体抛弃"
                 );
                 self.pending.clear();
-                TextProtocolOutcome::default()
+                TextProtocolOutcome {
+                    total_visible_text,
+                    was_confirmed,
+                    ..Default::default()
+                }
             }
             BufferPhase::Probing | BufferPhase::Idle | BufferPhase::Passthrough => {
+                let visible_text = std::mem::take(&mut self.pending);
+                let mut total = total_visible_text;
+                total.push_str(&visible_text);
                 TextProtocolOutcome {
-                    visible_text: std::mem::take(&mut self.pending),
+                    visible_text,
+                    total_visible_text: total,
                     tool_calls: Vec::new(),
+                    was_confirmed: false,
                 }
             }
         }
     }
 
-    /// 流异常中断：Confirmed 先尝试解析（成功照常转出，失败抛弃——不回放
-    /// 残缺协议原文）；其余冲刷暂存文本回正文，已接收内容不丢失。
+    /// 流异常中断：Confirmed 的缓冲内容直接抛弃（不回放残缺协议原文，
+    /// 也不尝试转出工具调用）；探测期未定性文本冲刷回正文，不丢内容。
     pub(crate) fn abort(&mut self) -> Vec<String> {
         if self.phase == BufferPhase::Confirmed {
-            let _ = self.finish();
+            self.phase = BufferPhase::Idle;
+            self.pending.clear();
+            self.streamed_out.clear();
             Vec::new()
         } else {
             self.flush_pending()
@@ -148,7 +177,10 @@ impl TextProtocolBuffer {
         };
         let after_lt = &self.pending[lt_pos + 1..];
         let window_chars = after_lt.chars().count();
-        if contains_protocol_prefix(&self.pending) {
+        // 前缀只匹配最后一个 `<` 之后：协议前缀必然紧随协议起始 `<`，
+        // `<` 之前出现的 `｜tool` 等字样属于正文讨论，不得据此定性，
+        // 否则整段正文会被误判为协议并在解析失败后整体抛弃。
+        if contains_protocol_prefix(after_lt) {
             self.phase = BufferPhase::Confirmed;
             tracing::info!("DeepSeek 流式确认走工具调用文本协议，缓冲至流末统一解析");
             Vec::new()
@@ -167,6 +199,7 @@ impl TextProtocolBuffer {
         if self.pending.is_empty() {
             Vec::new()
         } else {
+            self.streamed_out.push_str(&self.pending);
             vec![std::mem::take(&mut self.pending)]
         }
     }
@@ -177,6 +210,7 @@ impl TextProtocolBuffer {
         if self.pending.is_empty() {
             Vec::new()
         } else {
+            self.streamed_out.push_str(&self.pending);
             vec![std::mem::take(&mut self.pending)]
         }
     }
@@ -202,6 +236,29 @@ mod tests {
         let outcome = buffer.finish();
         assert_eq!(outcome.visible_text, "");
         assert!(outcome.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn protocol_mention_before_angle_bracket_is_not_misjudged() {
+        // 第四轮 review P2-3 回归：正文里合法讨论「｜tool 标记的写法」再跟
+        // 普通尖括号内容——前缀匹配只看最后一个 < 之后，整段正文不得被
+        // 误判为协议并在解析失败后整体抛弃。
+        let mut buffer = TextProtocolBuffer::default();
+        let out = buffer.push_text("讨论 ｜tool 标记的写法 <div>正文继续");
+        let mut visible = out.concat();
+        visible.push_str(&buffer.finish().visible_text);
+        assert!(
+            visible.contains("讨论 ｜tool 标记的写法") && visible.contains("<div>正文继续"),
+            "正文必须完整透传：{visible:?}"
+        );
+        // 真协议不受影响：紧随 < 的前缀仍识别。
+        let mut buffer = TextProtocolBuffer::default();
+        assert!(
+            buffer
+                .push_text("说明 <｜｜DSML｜｜invoke name=\"f\">")
+                .is_empty()
+        );
+        assert!(buffer.finish().was_confirmed);
     }
 
     #[test]
