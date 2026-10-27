@@ -404,6 +404,17 @@ mod tests {
     }
 
     #[test]
+    fn text_call_ids_are_globally_unique() {
+        let a = dsml::next_text_call_id();
+        let b = dsml::next_text_call_id();
+        assert_ne!(a, b);
+        // textcall_ + scru128（时间有序 + 随机，跨进程天然唯一，
+        // 优于进程内单调计数器）。
+        assert!(a.len() > "textcall_".len());
+        assert!(a.starts_with("textcall_"));
+    }
+
+    #[test]
     fn abort_flushes_probing_text_as_plain() {
         // 探测期中断：未定性文本冲刷回正文，不丢内容。
         let mut buffer = TextProtocolBuffer::default();

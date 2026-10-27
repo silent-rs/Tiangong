@@ -27,14 +27,10 @@ pub struct DsmlToolCall {
     pub arguments: String,
 }
 
-/// 文本协议工具调用 id 全局计数器：进程内单调递增，保证跨轮唯一
-/// （官方要求 call_id 非空且唯一，Responses 历史每轮全量回传时不得重复）。
-static TEXT_CALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// 生成全局唯一的文本协议工具调用 id。
+/// 文本协议工具调用 id：scru128（时间有序 + 随机，跨进程天然唯一）。
+/// 官方要求 call_id 非空且唯一，Responses 历史每轮全量回传时不得重复。
 pub fn next_text_call_id() -> String {
-    use std::sync::atomic::Ordering;
-    format!("textcall_{}", TEXT_CALL_SEQ.fetch_add(1, Ordering::Relaxed))
+    format!("textcall_{}", scru128::new())
 }
 // ── 原生协议标记（全角竖线 U+FF5C + 下块 U+2581） ───────────────────────
 
