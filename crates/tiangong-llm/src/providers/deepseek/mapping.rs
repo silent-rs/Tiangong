@@ -26,14 +26,23 @@ pub fn to_deepseek_request(req: &ProviderRequest) -> Result<CreateResponseReques
         tools_value = Some(build_tools(&req.tools));
         tool_choice_value = build_tool_choice(req.tool_choice.as_ref());
     }
+    let input = build_input(req);
+    let instructions = req
+        .system
+        .as_ref()
+        .filter(|system| !system.trim().is_empty())
+        .cloned();
+    // 官方要求 input 与 instructions 至少提供一个；消息流为空且无系统提示
+    // 时提前失败，避免服务端 400 带来的不透明错误。
+    if matches!(&input, ResponseInput::Items(items) if items.is_empty()) && instructions.is_none() {
+        anyhow::bail!(
+            "DeepSeek Responses 请求缺少内容：input 与 instructions 至少需要一个（消息流为空且未提供系统提示）"
+        );
+    }
     Ok(CreateResponseRequest {
         model: req.model.clone(),
-        input: Some(build_input(req)),
-        instructions: req
-            .system
-            .as_ref()
-            .filter(|system| !system.trim().is_empty())
-            .cloned(),
+        input: Some(input),
+        instructions,
         // 官方文档：reasoning.effort 为 none 关闭思考，low/high/max 开启；
         // 不传则使用模型默认行为（默认开启），因此必须显式传 none 才能关闭。
         reasoning: Some(ReasoningConfig {
@@ -126,6 +135,16 @@ fn build_user_message(message: &ChatMessage) -> Option<InputMessage> {
             }
             MessageContent::Text(text) if !text.trim().is_empty() => {
                 blocks.push(ContentBlock::InputText(TextBlock { text: text.clone() }));
+            }
+            // File 附件（PDF/Office 等）：Responses API 的 message 输入不支持
+            // 文件块（官方文档明确「文件输入不支持」），目前与 chat 侧一致
+            // 不发送，显式告警避免静默丢失。
+            MessageContent::File(file) => {
+                tracing::warn!(
+                    title = file.title.as_deref().unwrap_or("attachment"),
+                    mime_type = %file.mime_type,
+                    "user 消息含文件附件，DeepSeek Responses 输入不支持文件块，附件未随请求发送"
+                );
             }
             _ => {}
         }
@@ -247,15 +266,28 @@ fn build_text_format(req: &ProviderRequest) -> Option<TextFormatConfig> {
     let format = match fmt {
         Value::String(value) => match value.as_str() {
             "json_object" => TextFormat::JsonObject,
-            // json_schema 缺 name/schema 无法构造，按默认文本处理。
             _ => TextFormat::Text,
         },
         Value::Object(object) => match object.get("type").and_then(Value::as_str) {
             Some("json_object") => TextFormat::JsonObject,
-            Some("json_schema") => TextFormat::JsonSchema {
-                name: object.get("name")?.as_str()?.to_string(),
-                schema: object.get("schema")?.clone(),
-            },
+            Some("json_schema") => {
+                let (name, schema) = match (
+                    object.get("name").and_then(Value::as_str),
+                    object.get("schema"),
+                ) {
+                    (Some(name), Some(schema)) => (name.to_string(), schema.clone()),
+                    _ => {
+                        // json_schema 缺 name/schema 无法构造：跳过整个 text 配置
+                        // 并告警（按默认文本输出），不静默吞掉配置错误。
+                        tracing::warn!(
+                            ?fmt,
+                            "response_format=json_schema 缺少 name/schema，已忽略结构化输出配置"
+                        );
+                        return None;
+                    }
+                };
+                TextFormat::JsonSchema { name, schema }
+            }
             _ => TextFormat::Text,
         },
         _ => return None,
@@ -310,12 +342,22 @@ pub fn from_deepseek_response(
     response: ResponseObject,
     tools_enabled: bool,
 ) -> Result<ProviderResponse> {
+    // failed 属于请求级错误（服务端在 error 字段给出原因），恢复 chat 版
+    // 行为直接报错，避免退化为「空回复 + Other("failed")」被上层当作正常
+    // 截断处理。
     if response.status == ResponseStatus::Failed {
-        tracing::warn!(
-            id = %response.id,
-            error = ?response.error,
-            "DeepSeek Responses 返回 failed 状态"
-        );
+        let detail = response
+            .error
+            .as_ref()
+            .map(|error| {
+                format!(
+                    "code={:?} message={:?}",
+                    error.code.clone().unwrap_or_default(),
+                    error.message.clone().unwrap_or_default()
+                )
+            })
+            .unwrap_or_else(|| "无错误详情".to_string());
+        anyhow::bail!("DeepSeek Responses 返回 failed 状态：{detail}");
     }
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_parts: Vec<String> = Vec::new();
@@ -656,7 +698,7 @@ mod tests {
             (ReasoningEffort::High, ReasoningEffortLevel::High),
             (ReasoningEffort::Max, ReasoningEffortLevel::Max),
         ] {
-            let mut req = base_request(Vec::new());
+            let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "参数")]);
             req.reasoning_effort = effort;
             let request = to_deepseek_request(&req).expect("request");
             assert_eq!(
@@ -670,7 +712,11 @@ mod tests {
     #[test]
     fn thinking_disabled_sends_none_effort_explicitly() {
         // 不传 reasoning 时服务端默认开启思考，关闭必须显式 effort=none。
-        let request = to_deepseek_request(&base_request(Vec::new())).expect("request");
+        let request = to_deepseek_request(&base_request(vec![ChatMessage::text(
+            MessageRole::User,
+            "参数",
+        )]))
+        .expect("request");
         assert_eq!(
             request.reasoning.and_then(|config| config.effort),
             Some(ReasoningEffortLevel::None)
@@ -679,7 +725,7 @@ mod tests {
 
     #[test]
     fn temperature_top_p_omitted_when_thinking_enabled() {
-        let mut req = base_request(Vec::new());
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "参数")]);
         req.reasoning_effort = ReasoningEffort::High;
         req.temperature = Some(0.7);
         req.top_p = Some(0.9);
@@ -690,7 +736,7 @@ mod tests {
 
     #[test]
     fn temperature_top_p_sent_when_thinking_disabled() {
-        let mut req = base_request(Vec::new());
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "参数")]);
         req.temperature = Some(0.7);
         req.top_p = Some(0.9);
         let request = to_deepseek_request(&req).expect("request");
@@ -701,7 +747,11 @@ mod tests {
     #[test]
     fn stop_sequences_are_dropped_silently() {
         // Responses API 无 stop 参数；请求序列化后不应出现 stop 字段。
-        let request = to_deepseek_request(&base_request(Vec::new())).expect("request");
+        let request = to_deepseek_request(&base_request(vec![ChatMessage::text(
+            MessageRole::User,
+            "参数",
+        )]))
+        .expect("request");
         let body = serde_json::to_value(&request).unwrap();
         assert!(body.get("stop").is_none());
     }
@@ -730,7 +780,7 @@ mod tests {
             "response_format".to_string(),
             Value::String("json_object".to_string()),
         );
-        let mut req = base_request(Vec::new());
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "参数")]);
         req.metadata = Some(metadata);
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(
@@ -745,7 +795,7 @@ mod tests {
             "response_format".to_string(),
             json!({"type": "json_schema", "name": "calendar", "schema": {"type": "object"}}),
         );
-        let mut req = base_request(Vec::new());
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "参数")]);
         req.metadata = Some(metadata);
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(
@@ -761,7 +811,11 @@ mod tests {
 
     #[test]
     fn text_format_absent_without_metadata() {
-        let request = to_deepseek_request(&base_request(Vec::new())).expect("request");
+        let request = to_deepseek_request(&base_request(vec![ChatMessage::text(
+            MessageRole::User,
+            "参数",
+        )]))
+        .expect("request");
         assert_eq!(request.text, None);
     }
 
@@ -939,6 +993,35 @@ mod tests {
         });
         let result = from_deepseek_response(response, false).expect("response");
         assert_eq!(result.stop_reason, Some(StopReason::MaxTokens));
+    }
+
+    #[test]
+    fn failed_response_returns_error_instead_of_empty_reply() {
+        // failed 是请求级错误：必须返回 Err（对齐 chat 版 choices 缺失行为），
+        // 不得退化为空回复 + Other("failed") 被上层当作正常截断。
+        let mut response = response_object(Vec::new());
+        response.status = ResponseStatus::Failed;
+        response.error = Some(tiangong_deepseek::types::ResponseError {
+            code: Some("server_error".to_string()),
+            message: Some("内部错误".to_string()),
+        });
+        let err = from_deepseek_response(response, false).expect_err("应返回错误");
+        assert!(
+            err.to_string().contains("failed") && err.to_string().contains("内部错误"),
+            "错误信息应包含状态与详情：{err}"
+        );
+    }
+
+    #[test]
+    fn empty_input_without_instructions_is_rejected() {
+        // 官方要求 input 与 instructions 至少一个；空消息流且无系统提示时
+        // 提前给出可读错误，而不是等服务端 400。
+        let req = base_request(Vec::new());
+        let err = to_deepseek_request(&req).expect_err("应拒绝空请求");
+        assert!(
+            err.to_string().contains("input 与 instructions"),
+            "错误应说明原因：{err}"
+        );
     }
 
     #[test]

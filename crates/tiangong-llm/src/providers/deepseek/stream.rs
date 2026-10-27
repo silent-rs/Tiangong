@@ -35,13 +35,17 @@ struct StreamState {
     /// output item 的服务端 id（如 `fc_1`）→ 回传用 call_id。
     /// 参数增量事件只携带 item_id，需要由此还原 call_id。
     item_call_ids: HashMap<String, String>,
-    /// 已收到过参数增量的 call_id（completed 兜底补发完整参数时去重）。
+    /// output_index → call_id：部分网关的增量事件不带（或带不同的）
+    /// item_id，以输出序号双键关联兜底。
+    index_call_ids: HashMap<u32, String>,
+    /// 已发过 ToolCallStart 的 call_id（completed 统一转出时去重）。
+    started_call_ids: HashSet<String>,
+    /// 已收到过参数增量的 call_id（done / completed 兜底补发完整参数时去重）。
     received_argument_deltas: HashSet<String>,
     /// 是否收到过正文 / 思考增量（completed 兜底补发时去重）。
     has_text_delta: bool,
     has_reasoning_delta: bool,
 }
-
 fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<ProviderStreamEvent> {
     match event {
         ResponsesStreamEvent::ResponseCreated { .. } => vec![ProviderStreamEvent::MessageStart],
@@ -54,36 +58,47 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             state.has_text_delta = true;
             vec![ProviderStreamEvent::TextDelta(delta)]
         }
-        ResponsesStreamEvent::OutputItemAdded { item, .. } => match item {
+        ResponsesStreamEvent::OutputItemAdded {
+            output_index, item, ..
+        } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                // item 的服务端 id 作为后续参数增量事件的 item_id 关联键。
-                let call_id = resolve_call_id(&call.call_id, call.id.as_deref());
+                let call_id = if !call.call_id.trim().is_empty() {
+                    call.call_id.clone()
+                } else {
+                    // call_id 缺失时以输出序号生成稳定占位，
+                    // 避免多个调用合并到同一空 id。
+                    call.id
+                        .clone()
+                        .unwrap_or_else(|| format!("item_{output_index}"))
+                };
                 if let Some(item_id) = call.id.as_deref() {
                     state
                         .item_call_ids
                         .insert(item_id.to_string(), call_id.clone());
                 }
-                let mut events = vec![ProviderStreamEvent::ToolCallStart(ToolCall {
-                    id: call_id.clone(),
+                state.index_call_ids.insert(output_index, call_id.clone());
+                state.started_call_ids.insert(call_id.clone());
+                // 不在 added 时下发参数：部分网关在 added item 携带完整参数后
+                // 仍会跟增量事件，立即下发会重复拼接；完整参数统一在
+                // done / completed 按需补发（增量以先到者为准）。
+                vec![ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: call_id,
                     name: call.name.clone(),
                     arguments: serde_json::json!({}),
-                })];
-                // 部分网关在 added item 中直接携带完整参数。
-                if !call.arguments.trim().is_empty() {
-                    state.received_argument_deltas.insert(call_id.clone());
-                    events.push(ProviderStreamEvent::ToolCallDelta {
-                        call_id,
-                        partial_json: call.arguments.clone(),
-                    });
-                }
-                events
+                })]
             }
             _ => Vec::new(),
         },
-        ResponsesStreamEvent::FunctionCallArgumentsDelta { item_id, delta, .. } => {
+        ResponsesStreamEvent::FunctionCallArgumentsDelta {
+            item_id,
+            output_index,
+            delta,
+            ..
+        } => {
             let call_id = state
                 .item_call_ids
                 .get(&item_id)
+                .or_else(|| state.index_call_ids.get(&output_index))
                 .cloned()
                 .unwrap_or(item_id);
             state.received_argument_deltas.insert(call_id.clone());
@@ -92,11 +107,34 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
                 partial_json: delta,
             }]
         }
-        ResponsesStreamEvent::OutputItemDone { item, .. } => match item {
+        ResponsesStreamEvent::OutputItemDone {
+            output_index, item, ..
+        } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                vec![ProviderStreamEvent::ToolCallEnd {
-                    call_id: resolve_call_id(&call.call_id, call.id.as_deref()),
-                }]
+                let call_id = if !call.call_id.trim().is_empty() {
+                    call.call_id.clone()
+                } else {
+                    state
+                        .index_call_ids
+                        .get(&output_index)
+                        .cloned()
+                        .or_else(|| call.id.clone())
+                        .unwrap_or_else(|| format!("item_{output_index}"))
+                };
+                let mut events = Vec::new();
+                // 网关在 added item 携带完整参数、且未发任何增量事件时，
+                // 在 done 补发一次完整参数，确保工具参数不丢失。
+                if !call.arguments.trim().is_empty()
+                    && !state.received_argument_deltas.contains(&call_id)
+                {
+                    state.received_argument_deltas.insert(call_id.clone());
+                    events.push(ProviderStreamEvent::ToolCallDelta {
+                        call_id: call_id.clone(),
+                        partial_json: call.arguments.clone(),
+                    });
+                }
+                events.push(ProviderStreamEvent::ToolCallEnd { call_id });
+                events
             }
             _ => Vec::new(),
         },
@@ -116,15 +154,21 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
                     events.push(ProviderStreamEvent::TextDelta(text));
                 }
             }
-            if let Some(usage) = &response.usage {
-                events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
-            }
-            // 兜底提取 function_call 的完整 arguments。部分中转/网关不发参数
-            // 增量事件，completed 的 output 里含完整 function_call items，
-            // 此处补发确保工具参数不丢失。
+            // 终止事件统一转出工具调用：一次性 JSON 合成流与不发增量事件的
+            // 网关只在此处携带完整 function_call items。未发过 Start 的调用
+            // 先补 Start（携带工具名），再按需补发完整参数；上层聚合依赖
+            // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
             for item in &response.output {
                 if let ResponseOutputItem::FunctionCall(call) = item {
                     let call_id = resolve_call_id(&call.call_id, call.id.as_deref());
+                    if !state.started_call_ids.contains(&call_id) {
+                        state.started_call_ids.insert(call_id.clone());
+                        events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
+                            id: call_id.clone(),
+                            name: call.name.clone(),
+                            arguments: serde_json::json!({}),
+                        }));
+                    }
                     if !call.arguments.trim().is_empty()
                         && !state.received_argument_deltas.contains(&call_id)
                     {
@@ -134,6 +178,9 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
                         });
                     }
                 }
+            }
+            if let Some(usage) = &response.usage {
+                events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
             }
             let has_tool_call = response
                 .output
@@ -148,21 +195,33 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             });
             events
         }
-        ResponsesStreamEvent::ResponseIncomplete { response, .. }
-        | ResponsesStreamEvent::ResponseFailed { response, .. } => {
+        ResponsesStreamEvent::ResponseIncomplete { response, .. } => {
             let mut events = Vec::new();
             if let Some(usage) = &response.usage {
                 events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
             }
+            // incomplete 是截断而非错误（如 max_output_tokens 上限），不得发
+            // Error：上层收到 Error 会立即中断收尾，导致截断信息被静默吞掉。
+            events.push(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(incomplete_stop_reason(&response)),
+            });
+            events
+        }
+        ResponsesStreamEvent::ResponseFailed { response, .. } => {
+            let mut events = Vec::new();
+            if let Some(usage) = &response.usage {
+                events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
+            }
+            // MessageEnd 先于 Error：上层遇 Error 即中断，先收尾才能保留 stop_reason。
+            events.push(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::Other("failed".to_string())),
+            });
             let message = response
                 .error
                 .as_ref()
                 .and_then(|error| error.message.clone())
                 .unwrap_or_else(|| "Responses 请求失败".to_string());
             events.push(ProviderStreamEvent::Error(message));
-            events.push(ProviderStreamEvent::MessageEnd {
-                stop_reason: Some(incomplete_stop_reason(&response)),
-            });
             events
         }
         // 其余事件（文本/思考完成片、web_search、custom 工具、未知事件）
@@ -468,11 +527,99 @@ mod tests {
             event,
             ProviderStreamEvent::Error(message) if message == "内部错误"
         )));
+        // MessageEnd 先于 Error：上层遇 Error 即中断，先收尾才能保留 stop_reason。
+        assert!(flattened.iter().any(|event| matches!(
+            event,
+            ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::Other(reason))
+            } if reason == "failed"
+        )));
+        assert!(matches!(
+            flattened.last(),
+            Some(ProviderStreamEvent::Error(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn incomplete_terminal_event_does_not_emit_error() {
+        // incomplete 是截断而非错误：只发 Usage + MessageEnd，不发 Error，
+        // 避免上层收到 Error 中断收尾导致截断信息被吞。
+        let mut response = completed_response(Vec::new());
+        response.status = ResponseStatus::Incomplete;
+        response.incomplete_details = Some(tiangong_deepseek::types::IncompleteDetails {
+            reason: Some("max_output_tokens".to_string()),
+        });
+        let events = vec![Ok(ResponsesStreamEvent::ResponseIncomplete {
+            sequence_number: 3,
+            response,
+        })];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        assert!(
+            !flattened
+                .iter()
+                .any(|event| matches!(event, ProviderStreamEvent::Error(_))),
+            "incomplete 不应发 Error：{flattened:?}"
+        );
         assert!(matches!(
             flattened.last(),
             Some(ProviderStreamEvent::MessageEnd {
-                stop_reason: Some(_)
+                stop_reason: Some(StopReason::MaxTokens)
             })
         ));
+        assert!(
+            flattened
+                .iter()
+                .any(|event| matches!(event, ProviderStreamEvent::Usage(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn full_arguments_in_added_item_do_not_duplicate_with_deltas() {
+        // 网关在 added item 携带完整参数后仍发增量：增量是权威，
+        // added 的快照不得再次下发（否则参数重复拼接）。
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: function_call_item("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 2,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "{\"path\":".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 3,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "\"/tmp\"}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemDone {
+                sequence_number: 4,
+                output_index: 0,
+                item: function_call_item("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 5,
+                response: completed_response(vec![function_call_item("{\"path\":\"/tmp\"}")]),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let joined: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta { partial_json, .. } => {
+                    Some(partial_json.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            joined, "{\"path\":\"/tmp\"}",
+            "参数只应来自增量拼接，added 快照不得重复下发：{flattened:?}"
+        );
     }
 }

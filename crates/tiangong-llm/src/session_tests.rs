@@ -601,6 +601,61 @@ fn provider_headers_survive_resolution_and_legacy_configs_remain_valid() {
 }
 
 #[tokio::test]
+async fn deepseek_gateway_json_stream_keeps_tool_calls() {
+    // 网关忽略 stream=true 返回一次性 JSON 时，SDK 在内部把完整响应合成事件流。
+    // 该兜底路径必须保留工具调用：function_call item 需要合成完整的
+    // Start → Delta → End 事件序列，否则上层聚合会因缺少 Start（工具名为空）
+    // 而静默丢弃整个工具调用（PR #739 review P1 回归用例）。
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_json_gateway",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "test-model",
+            "output": [
+                {"type": "function_call", "call_id": "call_1", "name": "read_file",
+                 "arguments": "{\"path\":\"/tmp/x\"}"}
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let req = ModelRequest {
+        tools: vec![ToolSpec {
+            name: "read_file".into(),
+            description: "读取".into(),
+            input_schema: json!({"type": "object"}),
+        }],
+        ..request("json-gateway")
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let response = client.stream_async(req, tx).await.unwrap();
+    assert_eq!(
+        response.tool_calls,
+        vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "/tmp/x"}),
+        }],
+        "一次性 JSON 兜底流不得丢弃工具调用"
+    );
+    assert_eq!(
+        response.stop_reason,
+        Some(crate::response::StopReason::ToolUse)
+    );
+    assert_eq!(response.usage.total_tokens, 2);
+}
+
+#[tokio::test]
 async fn deepseek_uses_user_and_openai_uses_prompt_cache_key() {
     for protocol in [ProviderProtocol::DeepSeek, ProviderProtocol::OpenAi] {
         let server = MockServer::start().await;
