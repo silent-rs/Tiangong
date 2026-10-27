@@ -26,6 +26,20 @@ pub const LIST_INSTANCES_OPERATION: &str = "listInstances";
 /// 检测到工具恢复时通知当前活动 Agent，不修改工具声明。
 pub const TOOLS_RECOVERED_CHANNEL: &str = "runtime.tools_recovered";
 
+/// 动态 prompt 段落的固定操作名：清单 prompt 声明 `{"type":"sidecar"}` 条目且 sidecar
+/// 握手声明 `prompt` 能力后，宿主在**插件装载时**经此操作读取段落（响应为
+/// 非空字符串数组 JSON，数组本身可为空）并组装进注册表记录——声明聚合
+/// 只做快照读取，不做 I/O。清单静态 `prompt` 段落非空时不探测本操作。
+pub const PROMPT_SECTIONS_OPERATION: &str = "prompt_sections";
+
+/// 握手能力：sidecar 声明自己提供 [`PROMPT_SECTIONS_OPERATION`]。
+pub const PROMPT_CAPABILITY: &str = "prompt";
+
+/// sidecar → 宿主的动态 prompt 变更通知通道：段落内容变化（如 skill 装卸）
+/// 时推送，宿主重取段落并更新注册表——内容变化经能力指纹触发上下文交接
+/// （压缩 message），与插件升级/启停走同一条链路。
+pub const PROMPT_UPDATED_CHANNEL: &str = "runtime.prompt_updated";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsRecovered {
     pub tools: Vec<String>,

@@ -54,6 +54,7 @@ impl ResponseWait {
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const MIN_DEADLINE_REMAINING_MS: u64 = 100;
 
 pub use tiangong_plugin_sidecar::env::{
     EXEC_ENV_JSON_ENV, INSTANCE_ROLE_AUXILIARY, INSTANCE_ROLE_ENV, INSTANCE_ROLE_PRIMARY,
@@ -1092,13 +1093,28 @@ impl ProcessSidecarConnection {
     ) -> Result<serde_json::Value> {
         let endpoint = load_endpoint(&self.config.endpoint)?;
         let mut stream = connect(&endpoint, self.config.request_timeout)?;
-        // 等待策略显式作用于读取端：握手类往返有限等待，业务 Handler 由
-        // 取消终止；写入端始终保留 request_timeout 保护，防永久阻塞。
-        stream
-            .set_read_timeout(match wait {
-                ResponseWait::Bounded(timeout) => Some(timeout),
-                ResponseWait::UntilCancelled => None,
+        // 与 stdio 一致：显式 invocation deadline 覆盖业务请求的无限等待。
+        // 普通 Agent Handler 不带 deadline，仍保持 UntilCancelled 语义。
+        let wait = invocation
+            .and_then(|context| context.deadline_ms)
+            .map(|deadline_ms| {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let remaining_ms = deadline_ms
+                    .saturating_sub(now_ms)
+                    .max(MIN_DEADLINE_REMAINING_MS);
+                ResponseWait::Bounded(Duration::from_millis(remaining_ms))
             })
+            .unwrap_or(wait);
+        let bounded_deadline = match wait {
+            ResponseWait::Bounded(timeout) => Some(std::time::Instant::now() + timeout),
+            ResponseWait::UntilCancelled => None,
+        };
+        // 周期唤醒让有界请求检查 deadline；普通无限请求超时时继续等待。
+        stream
+            .set_read_timeout(Some(wait.poll_interval()))
             .with_context(|| "设置 sidecar 读取等待策略失败")?;
         stream
             .set_write_timeout(Some(self.config.request_timeout))
@@ -1138,17 +1154,40 @@ impl ProcessSidecarConnection {
         )?;
 
         let mut reader = BufReader::new(stream);
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .with_context(|| "读取 sidecar 响应失败")?;
-            if line.is_empty() {
-                bail!("sidecar 在返回响应前关闭连接");
-            }
-            match serde_json::from_str::<IpcFrame>(line.trim_end())
-                .with_context(|| "解析 sidecar 响应帧失败")?
+            // 有界请求在每轮循环判定 deadline：sidecar 持续发 progress 帧
+            // 时读超时不会触发，只在读超时臂判定会让 deadline 永不生效。
+            if let Some(deadline) = bounded_deadline
+                && std::time::Instant::now() >= deadline
             {
+                return Err(SidecarInvokeError::Timeout)
+                    .with_context(|| format!("tcp sidecar 请求超时: {operation}"));
+            }
+            match reader.read_line(&mut line) {
+                Ok(0) => bail!("sidecar 在返回响应前关闭连接"),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    if let Some(deadline) = bounded_deadline
+                        && std::time::Instant::now() >= deadline
+                    {
+                        return Err(SidecarInvokeError::Timeout)
+                            .with_context(|| format!("tcp sidecar 请求超时: {operation}"));
+                    }
+                    // read_line 可能已追加部分帧；保留 buffer，下次继续补齐。
+                    continue;
+                }
+                Err(error) => return Err(error).context("读取 sidecar 响应失败"),
+            }
+            let frame = serde_json::from_str::<IpcFrame>(line.trim_end())
+                .with_context(|| "解析 sidecar 响应帧失败")?;
+            line.clear();
+            match frame {
                 IpcFrame::Progress {
                     request_id: progress_request_id,
                     message,
@@ -1490,6 +1529,13 @@ async fn run_notification_connection(
                 if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
                     crate::registry::dispatch_tools_recovered(plugin_id, &payload);
                 }
+                if channel == tiangong_plugin_sidecar::protocol::PROMPT_UPDATED_CHANNEL {
+                    // 段落重取是阻塞 I/O：通知读循环只投递，不等待完成。
+                    let plugin_id = plugin_id.to_string();
+                    std::thread::spawn(move || {
+                        crate::registry::refresh_prompt_sections(&plugin_id);
+                    });
+                }
                 if let Some(forwarder) = forwarder {
                     forwarder(plugin_id, &channel, &payload);
                 }
@@ -1745,5 +1791,150 @@ mod sandbox_switch_tests {
             ..handshake
         };
         assert!(handshake_handles_tool(&wildcard, "terminal_open"));
+    }
+}
+
+#[cfg(test)]
+mod tcp_response_wait_tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    fn epoch_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn connection_for_listener(
+        root: &tempfile::TempDir,
+        listener: &TcpListener,
+    ) -> ProcessSidecarConnection {
+        let address = listener.local_addr().expect("TCP 测试地址");
+        let endpoint = IpcEndpoint {
+            service: "tcp-deadline-test".into(),
+            host: address.ip().to_string(),
+            port: address.port(),
+            pid: std::process::id(),
+            token: "test-token".into(),
+            updated_at: "test".into(),
+        };
+        let endpoint_path = root.path().join("endpoint.json");
+        std::fs::write(
+            &endpoint_path,
+            serde_json::to_vec(&endpoint).expect("序列化测试 endpoint"),
+        )
+        .expect("写入测试 endpoint");
+        let config = SidecarConfig::new(
+            "tcp-deadline-test",
+            "1.0.0",
+            root.path().join("unused-binary"),
+            endpoint_path,
+            root.path().join("sidecar.log"),
+            root.path().join("data"),
+            root.path(),
+        );
+        ProcessSidecarConnection::new(config)
+    }
+
+    fn read_request(stream: &std::net::TcpStream) -> IpcRequest {
+        let mut reader = BufReader::new(stream);
+        let mut auth_line = String::new();
+        reader.read_line(&mut auth_line).expect("读取 Auth 帧");
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("读取 Request 帧");
+        match serde_json::from_str::<IpcFrame>(request_line.trim_end()).expect("解析 Request 帧")
+        {
+            IpcFrame::Request(request) => request,
+            _ => panic!("第二帧必须是 Request"),
+        }
+    }
+
+    fn invocation(deadline_ms: u64) -> crate::protocol::RequestInvocationContext {
+        crate::protocol::RequestInvocationContext {
+            session_id: "tcp-deadline-session".into(),
+            invocation_id: "tcp-deadline-invocation".into(),
+            workspace: String::new(),
+            actor_id: String::new(),
+            deadline_ms: Some(deadline_ms),
+        }
+    }
+
+    #[test]
+    fn tcp业务请求_deadline到期必须返回而不是永久等待() {
+        let root = tempfile::tempdir().expect("TCP 测试目录");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 TCP 测试服务");
+        let connection = connection_for_listener(&root, &listener);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("接受 TCP 请求");
+            let _request = read_request(&stream);
+            release_rx.recv().expect("等待测试释放 TCP 服务");
+        });
+
+        let started = std::time::Instant::now();
+        let result = connection.invoke_protocol_once_inner(
+            "never_responds",
+            serde_json::json!({}),
+            Some(&invocation(epoch_ms() + 100)),
+            ResponseWait::UntilCancelled,
+            &mut |_| {},
+        );
+        let elapsed = started.elapsed();
+        release_tx.send(()).expect("释放 TCP 测试服务");
+        server.join().expect("TCP 测试服务退出");
+
+        assert!(result.is_err(), "无响应请求必须在 deadline 后失败");
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<SidecarInvokeError>())
+                .is_some_and(|error| matches!(error, SidecarInvokeError::Timeout)),
+            "错误应分类为 Timeout：{result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "deadline 不应退化成无限等待：{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn tcp响应分片跨越读取轮询仍能完整解析() {
+        let root = tempfile::tempdir().expect("TCP 测试目录");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 TCP 测试服务");
+        let connection = connection_for_listener(&root, &listener);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("接受 TCP 请求");
+            let request = read_request(&stream);
+            let response =
+                Response::success(request.request_id.clone(), serde_json::json!(["分段响应"]));
+            let frame = IpcFrame::Response(tiangong_plugin_sidecar::protocol::IpcResponse {
+                request_id: request.request_id,
+                payload: serde_json::to_value(response).expect("序列化协议响应"),
+            });
+            let mut bytes = serde_json::to_vec(&frame).expect("序列化响应帧");
+            bytes.push(b'\n');
+            let split = bytes.len() / 2;
+            stream.write_all(&bytes[..split]).expect("写入首个分片");
+            stream.flush().expect("刷新首个分片");
+            std::thread::sleep(POLL_INTERVAL + Duration::from_millis(100));
+            stream.write_all(&bytes[split..]).expect("写入剩余分片");
+        });
+
+        let value = connection
+            .invoke_protocol_once_inner(
+                "fragmented_response",
+                serde_json::json!({}),
+                Some(&invocation(epoch_ms() + 2_000)),
+                ResponseWait::UntilCancelled,
+                &mut |_| {},
+            )
+            .expect("跨轮询分片不应丢失");
+        server.join().expect("TCP 测试服务退出");
+        assert_eq!(value, serde_json::json!(["分段响应"]));
     }
 }

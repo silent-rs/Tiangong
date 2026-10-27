@@ -216,14 +216,21 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // 单次装载快照：验证记录 + prompt 段落各读取一次（前者重算制品
+        // 摘要、后者含阻塞 sidecar I/O），适配器与最终记录完全共用。
+        let snapshot = PluginLoadSnapshot::read(storage_root, installed);
+        // reconfigure 消费 Vec<String>；None 只在注册表中表示「未声明」。
+        let adapter_sections = snapshot.prompt_sections.clone().unwrap_or_default();
         for adapter in &ts_instances {
-            let verified_sidecar = crate::verification::load_valid_capabilities(
-                &installed.directory,
+            adapter.reconfigure(
                 &installed.manifest,
+                installed.enabled,
+                snapshot.verified_sidecar.clone(),
+                adapter_sections.clone(),
             );
-            adapter.reconfigure(&installed.manifest, installed.enabled, verified_sidecar);
         }
-        let mut loaded = load_plugin_record(storage_root, installed.clone());
+        let mut loaded =
+            load_plugin_record_with_snapshot(storage_root, installed.clone(), snapshot);
         loaded.ts_instances = ts_instances.iter().map(Arc::downgrade).collect();
         loaded_plugins()
             .lock()
@@ -315,7 +322,13 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
     loaded.generation = next_generation;
     loaded.instances = instances.iter().map(Arc::downgrade).collect();
     loaded.sidecar = sidecar;
-    loaded.verified_sidecar = verified_sidecar;
+    loaded.verified_sidecar = verified_sidecar.clone();
+    loaded.prompt_sections = assemble_prompt_sections(
+        storage_root,
+        &installed.directory,
+        &installed.manifest,
+        verified_sidecar.as_deref(),
+    );
     loaded.load_error = None;
     loaded.runtime_error = preload_error;
     loaded.enabled = installed.enabled;
@@ -693,12 +706,274 @@ pub(crate) fn tools_served_by_sidecar(
         })
 }
 
+/// 动态 prompt 段落读取预算：装载/通知刷新路径使用，防止故障 sidecar
+/// 长时间拖住装载（与 @提及交互预算同量级）。
+const DYNAMIC_PROMPT_QUERY_BUDGET_MS: u64 = 3_000;
+
+/// 单个 prompt 文件的大小上限（64 KiB）。
+const MAX_PROMPT_FILE_BYTES: u64 = 64 * 1024;
+
+/// 测试观测：assemble_prompt_sections 的调用计数（验证装载快照只组装一次）。
+#[cfg(test)]
+pub(crate) static ASSEMBLE_PROMPT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// 解析 [`PROMPT_SECTIONS_OPERATION`] 响应：字符串数组，段落非空。
+fn parse_prompt_sections_response(value: serde_json::Value) -> anyhow::Result<Vec<String>> {
+    let mut sections = serde_json::from_value::<Vec<String>>(value)
+        .map_err(|error| anyhow::anyhow!("解析响应失败: {error}"))?;
+    // 单条空段落只丢弃该条（warn），不让整批段落丢失。
+    sections.retain(|section| {
+        let non_empty = !section.trim().is_empty();
+        if !non_empty {
+            tracing::warn!("sidecar 返回了空 prompt 段落，已丢弃");
+        }
+        non_empty
+    });
+    Ok(sections)
+}
+
+/// **装载/刷新时**把清单 prompt 条目统一解析为段落快照：
+/// - 内联文本：原样成段；
+/// - 随包文件：读插件目录内文件全文成段；
+/// - sidecar 条目：安装验证记录含 `prompt` 能力时经固定操作读取，
+///   否则（未验证/未声明能力）fail-honest 跳过并告警。
+///
+/// 任何条目失败都只跳过该条目（warn），不阻断装载——声明聚合只读注册表
+/// 快照，不做 I/O；文件与 sidecar 内容变化经 [`PROMPT_UPDATED_CHANNEL`]
+/// 通知 / 重载重取，计入能力指纹走上下文交接。清单未声明 prompt 时返回
+/// None（与「声明了但当前解析为空」区分，指纹只对 Some 计入段落摘要）。
+pub(crate) fn assemble_prompt_sections(
+    storage_root: &Path,
+    plugin_directory: &Path,
+    manifest: &PluginManifest,
+    verified_capabilities: Option<&[String]>,
+) -> Option<Vec<String>> {
+    let entries = manifest.prompt.as_ref()?;
+    #[cfg(test)]
+    ASSEMBLE_PROMPT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut sections = Vec::new();
+    for entry in entries {
+        match entry {
+            crate::manifest::PromptSectionDecl::Text(text) => sections.push(text.clone()),
+            crate::manifest::PromptSectionDecl::Entry(
+                crate::manifest::PromptSectionEntry::Text { text },
+            ) => sections.push(text.clone()),
+            crate::manifest::PromptSectionDecl::Entry(
+                crate::manifest::PromptSectionEntry::File { file },
+            ) => {
+                // 超上限（误指向二进制/数据文件）只跳过并告警：段落会整段
+                // 进入 system prompt / 对话内清单与能力指纹。
+                let path = plugin_directory.join(file.trim());
+                match std::fs::metadata(&path) {
+                    Ok(meta) if meta.len() > MAX_PROMPT_FILE_BYTES => {
+                        tracing::warn!(plugin_id = %manifest.id, file, size = meta.len(), "prompt 文件超过上限，跳过");
+                    }
+                    _ => match std::fs::read_to_string(&path) {
+                        Ok(content) if !content.trim().is_empty() => sections.push(content),
+                        Ok(_) => {
+                            tracing::warn!(plugin_id = %manifest.id, file, "prompt 文件内容为空，跳过")
+                        }
+                        Err(error) => {
+                            tracing::warn!(plugin_id = %manifest.id, file, %error, "prompt 文件读取失败，跳过该条目")
+                        }
+                    },
+                }
+            }
+            crate::manifest::PromptSectionDecl::Entry(
+                crate::manifest::PromptSectionEntry::Sidecar,
+            ) => {
+                sections.extend(fetch_sidecar_prompt_sections(
+                    storage_root,
+                    manifest,
+                    verified_capabilities,
+                ));
+            }
+        }
+    }
+    Some(sections)
+}
+
+/// sidecar 动态条目读取：验证记录含 `prompt` 能力时经固定操作获取
+/// （短预算，见 [`DYNAMIC_PROMPT_QUERY_BUDGET_MS`]）；失败 fail-honest
+/// 返回空（warn），通知或重载时重试。
+fn fetch_sidecar_prompt_sections(
+    storage_root: &Path,
+    manifest: &PluginManifest,
+    verified_capabilities: Option<&[String]>,
+) -> Vec<String> {
+    let verified_prompt = verified_capabilities.is_some_and(|capabilities| {
+        capabilities
+            .iter()
+            .any(|capability| capability == tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY)
+    });
+    if !verified_prompt {
+        tracing::warn!(plugin_id = %manifest.id, "sidecar 未验证 prompt 能力，动态 prompt 条目不注入");
+        return Vec::new();
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let context = crate::protocol::RequestInvocationContext {
+        session_id: String::new(),
+        invocation_id: scru128::new().to_string(),
+        workspace: String::new(),
+        actor_id: String::new(),
+        deadline_ms: Some(now_ms.saturating_add(DYNAMIC_PROMPT_QUERY_BUDGET_MS)),
+    };
+    let plugin_id = manifest.id.clone();
+    let fetch = move || {
+        invoke_sidecar_op(
+            storage_root,
+            &plugin_id,
+            tiangong_plugin_sidecar::protocol::PROMPT_SECTIONS_OPERATION,
+            serde_json::json!({}),
+            None,
+            Some(&context),
+        )
+    };
+    match crate::execution::run_outside_tokio(fetch).and_then(parse_prompt_sections_response) {
+        Ok(sections) => sections,
+        Err(error) => {
+            tracing::warn!(plugin_id = %manifest.id, %error, "动态 prompt 段落获取失败，本次不注入");
+            Vec::new()
+        }
+    }
+}
+
+/// sidecar 经 [`PROMPT_UPDATED_CHANNEL`] 通知段落变更时重取并更新注册表；
+/// 内容变化由 [`crate::registry::enabled_plugin_fingerprint`] 计入，触发
+/// 上下文交接（压缩 message）。通知线程调用，阻塞 I/O 无碍。
+pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
+    // plugin_install_directory 返回 <root>/plugins/<id>，即插件目录本身；
+    // 存储根再上溯两级。
+    let Some(plugin_dir) = plugin_install_directory(plugin_id) else {
+        return;
+    };
+    let Some(storage_root) = plugin_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+    else {
+        return;
+    };
+    let (manifest, verified, enabled, generation, ts_instances) = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get(plugin_id).filter(|loaded| loaded.enabled) else {
+            return;
+        };
+        (
+            loaded.manifest.clone(),
+            loaded.verified_sidecar.clone(),
+            loaded.enabled,
+            loaded.generation,
+            loaded
+                .ts_instances
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let sections =
+        assemble_prompt_sections(&storage_root, &plugin_dir, &manifest, verified.as_deref());
+    let changed = {
+        let Ok(mut plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get_mut(plugin_id) else {
+            return;
+        };
+        // 组装期间插件可能被升级/重载换代（directory+generation 变化）：
+        // 旧线程的结果不得写进新记录，丢弃等待新代自己的装载/通知。
+        if loaded.directory != plugin_dir || loaded.generation != generation {
+            tracing::warn!(plugin_id, "prompt 重取期间插件已换代，丢弃本次结果");
+            return;
+        }
+        let changed = loaded.prompt_sections != sections;
+        loaded.prompt_sections = sections.clone();
+        changed
+    };
+    if !changed {
+        return;
+    }
+    // 存活适配器同步同一份结果（裸写 state 会漏 sidecar_direct 等派生项，
+    // reconfigure 正是干这个的）。
+    let adapter_sections = sections.unwrap_or_default();
+    for adapter in &ts_instances {
+        adapter.reconfigure(
+            &manifest,
+            enabled,
+            verified.clone(),
+            adapter_sections.clone(),
+        );
+    }
+    // 内容变化即插件能力变化：与升级/启停同一事件通道，宿主（UI 刷新、
+    // 上下文交接打标）按指纹定档响应。锁全部释放后发布。
+    crate::events::announce_plugin_change(
+        crate::events::PluginChangeKind::PromptSectionsChanged,
+        plugin_id,
+    );
+}
+
+/// TS 适配器（清单直连形态）是否承接该插件——两个条件同时成立：
+///
+/// 1. **清单带 TS 贡献**：工具、静态 prompt 段落，或动态 prompt 声明
+///    （prompt 条目声明）；都没有则交给 WASM 组件或跳过。
+/// 2. **当前运行形态提供得了这些贡献**：Desktop 恒可（页面可深度参与）；
+///    CLI/Server 无页面，贡献必须由**经过安装验证的 sidecar** 承接——
+///    工具全部覆盖，或无工具的纯动态 prompt 插件由握手声明 `prompt`
+///    能力的 sidecar 提供段落（sidecar 自行多报不能扩大 manifest 接缝；
+///    纯动态 prompt 插件即使带设置页等 UI 也可用，页面只负责交互展示）。
+fn ts_adapter_serves(
+    manifest: &PluginManifest,
+    runtime: RuntimeKind,
+    verified_capabilities: Option<&[String]>,
+) -> bool {
+    let tools = manifest.tools.as_deref().unwrap_or_default();
+    let prompt_declared = manifest
+        .prompt
+        .as_ref()
+        .is_some_and(|entries| !entries.is_empty());
+    if tools.is_empty() && !prompt_declared {
+        return false;
+    }
+    if runtime == RuntimeKind::Desktop {
+        return true;
+    }
+    if tools_served_by_sidecar(manifest, verified_capabilities) {
+        return true;
+    }
+    // 无头入口的无工具纯 prompt 插件：文本 / 文件条目装载时已组装成快照，
+    // 天然可用；sidecar 条目要求已验证的 `prompt` 能力（sidecar 自行多报
+    // 不能扩大 manifest 接缝）。带设置页等 UI 也不受限——页面只负责展示。
+    tools.is_empty()
+        && prompt_declared
+        && (!manifest.declares_sidecar_prompt()
+            || verified_capabilities.is_some_and(|capabilities| {
+                capabilities.iter().any(|capability| {
+                    capability == tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY
+                })
+            }))
+}
+
 pub fn load_core_plugin(
     plugin_id: &str,
     runtime: RuntimeKind,
     session_id: &str,
 ) -> Option<Arc<dyn Plugin>> {
-    let (manifest, component, descriptor_id, sidecar, enabled, storage_access, verified_sidecar) = {
+    let (
+        manifest,
+        component,
+        descriptor_id,
+        sidecar,
+        enabled,
+        storage_access,
+        verified_sidecar,
+        dynamic_prompt_sections,
+    ) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
@@ -713,25 +988,18 @@ pub fn load_core_plugin(
             loaded.enabled,
             loaded.manifest.storage_access,
             loaded.verified_sidecar.clone(),
+            loaded.prompt_sections.clone(),
         )
     };
 
-    let has_ts_contributions = manifest
-        .tools
-        .as_ref()
-        .is_some_and(|tools| !tools.is_empty())
-        || manifest
-            .prompt
-            .as_ref()
-            .is_some_and(|prompts| !prompts.is_empty());
-    if has_ts_contributions
-        && (runtime == RuntimeKind::Desktop
-            || tools_served_by_sidecar(&manifest, verified_sidecar.as_deref()))
-    {
+    if ts_adapter_serves(&manifest, runtime, verified_sidecar.as_deref()) {
+        // 段落装载时已组装（内联文本 / 文件 / sidecar 统一快照），此处只读。
+        let prompt_sections = dynamic_prompt_sections.unwrap_or_default();
         let adapter = Arc::new(TsPluginAdapter::from_manifest(
             &manifest,
             enabled,
             verified_sidecar,
+            prompt_sections,
         ));
         adapter.set_session_id(session_id);
         if let Ok(mut plugins) = loaded_plugins().lock()
@@ -1047,5 +1315,157 @@ mod tests {
             " ",
             "a.rs"
         )));
+    }
+}
+
+#[cfg(test)]
+mod dynamic_prompt_loader_tests {
+    use super::*;
+
+    fn prompt_manifest() -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "id": "prompt-with-settings",
+            "version": "1.0.0",
+            "permissions": ["sidecar.invoke"],
+            "sidecar": {"runtime": "node", "entry": "sidecar/main.mjs"},
+            "prompt": [{"type": "sidecar"}],
+            "ui": {"contributions": [{
+                "slot": "settings.plugin-page",
+                "id": "settings",
+                "title": "设置",
+                "entry": "app/settings.html"
+            }]}
+        }))
+        .expect("纯动态 prompt 测试清单")
+    }
+
+    #[test]
+    fn 纯动态prompt带ui也可在无头入口加载() {
+        let manifest = prompt_manifest();
+        let verified = vec![tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY.to_string()];
+        assert!(!tools_served_by_sidecar(&manifest, Some(&verified)));
+        assert!(ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Server,
+            Some(&verified)
+        ));
+        assert!(ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Cli,
+            Some(&verified)
+        ));
+    }
+
+    #[test]
+    fn 无头动态prompt必须有已验证的sidecar能力() {
+        let manifest = prompt_manifest();
+        assert!(!ts_adapter_serves(&manifest, RuntimeKind::Server, None));
+        assert!(!ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Server,
+            Some(&[])
+        ));
+        assert!(ts_adapter_serves(&manifest, RuntimeKind::Desktop, None));
+    }
+
+    #[test]
+    fn 无ts贡献的插件不创建适配器() {
+        let manifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "id": "ui-only",
+            "version": "1.0.0",
+            "sidecar": {"runtime": "node", "entry": "sidecar/main.mjs"},
+            "ui": {"contributions": [{
+                "slot": "settings.plugin-page",
+                "id": "settings",
+                "title": "设置",
+                "entry": "app/settings.html"
+            }]}
+        }))
+        .expect("纯 UI 测试清单");
+        assert!(!ts_adapter_serves(&manifest, RuntimeKind::Desktop, None));
+        assert!(!ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Server,
+            Some(&[tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY.to_string()])
+        ));
+    }
+
+    #[test]
+    fn 动态prompt响应必须是字符串数组且段落非空() {
+        assert_eq!(
+            parse_prompt_sections_response(serde_json::json!([])).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_prompt_sections_response(serde_json::json!(["a", "b"])).unwrap(),
+            ["a", "b"]
+        );
+        // 单条空段落被丢弃而非整批失败；结构错误才失败
+        assert_eq!(
+            parse_prompt_sections_response(serde_json::json!(["a", " ", "b"])).unwrap(),
+            ["a", "b"]
+        );
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!({"sections": ["a"]}),
+            serde_json::json!(["a", 1]),
+        ] {
+            assert!(parse_prompt_sections_response(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn prompt组装_条目形态与门控() {
+        use crate::manifest::PromptSectionDecl;
+        let text = PromptSectionDecl::Text("内联段落".to_string());
+        let tagged_text = PromptSectionDecl::Entry(crate::manifest::PromptSectionEntry::Text {
+            text: "标签段落".to_string(),
+        });
+        let sidecar = PromptSectionDecl::Entry(crate::manifest::PromptSectionEntry::Sidecar);
+        // 组装含文件条目：临时目录写文件验证读取成段
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("guide.md"), "文件段落").unwrap();
+        let file = PromptSectionDecl::Entry(crate::manifest::PromptSectionEntry::File {
+            file: "guide.md".to_string(),
+        });
+        let mut manifest = prompt_manifest();
+        manifest.prompt = Some(vec![text, tagged_text, file]);
+        assert_eq!(
+            assemble_prompt_sections(std::path::Path::new("/tmp"), dir.path(), &manifest, None),
+            Some(vec![
+                "内联段落".to_string(),
+                "标签段落".to_string(),
+                "文件段落".to_string()
+            ])
+        );
+
+        // sidecar 条目：验证记录无 prompt 能力 → fail-honest 跳过（其余条目保留）
+        manifest.prompt = Some(vec![
+            PromptSectionDecl::Text("保留".to_string()),
+            sidecar.clone(),
+        ]);
+        assert_eq!(
+            assemble_prompt_sections(std::path::Path::new("/tmp"), dir.path(), &manifest, None),
+            Some(vec!["保留".to_string()])
+        );
+        // 验证记录含能力但 sidecar 不可达（/tmp 无安装）→ 跳过不 panic
+        let verified = vec![tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY.to_string()];
+        assert_eq!(
+            assemble_prompt_sections(
+                std::path::Path::new("/tmp"),
+                dir.path(),
+                &manifest,
+                Some(&verified)
+            ),
+            Some(vec!["保留".to_string()])
+        );
+        // 未声明 prompt → None（区别于空组装）
+        manifest.prompt = None;
+        assert_eq!(
+            assemble_prompt_sections(std::path::Path::new("/tmp"), dir.path(), &manifest, None),
+            None
+        );
     }
 }

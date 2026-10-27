@@ -20,9 +20,10 @@ pub fn is_local_plugin(plugin_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 本机自制插件的对话内能力清单（JSON）。
+/// 本机自制插件的对话内能力清单（JSON）的静态基线。
 ///
-/// 纯 manifest 级信息（不实例化 WASM）：每个自制插件的版本与工具签名。
+/// 纯 manifest 级信息（不实例化 WASM）：每个自制插件的版本、工具签名与
+/// 静态 prompt。RuntimeCorePlugin 注入前会通过存活适配器补充动态 prompt。
 /// 该清单经注入通道追加到会话历史（append-only，cache 前缀不受影响），
 /// 模型据此填写 `call_local_plugin` 的 plugin_name / function_name。
 pub fn local_plugin_inventory() -> serde_json::Value {
@@ -58,16 +59,15 @@ pub fn local_plugin_inventory() -> serde_json::Value {
                 "version": loaded.manifest.version,
                 "functions": functions,
             });
-            // prompt 段落同样经清单注入对话（local 插件的 prompt_sections
-            // 不进 system prompt，见 core_bridge 的分流），保持两头一致：
-            // 纯 prompt 的自制插件也出现在清单里。
-            if let Some(prompts) = loaded
-                .manifest
-                .prompt
+            // prompt 段落同样经清单注入对话（local 插件的段落不进 system
+            // prompt，见 core_bridge 的分流），保持两头一致：装载时组装的
+            // 快照（文本 / 文件 / sidecar 统一形态）即为注入内容。
+            if let Some(sections) = loaded
+                .prompt_sections
                 .as_ref()
-                .filter(|prompts| !prompts.is_empty())
+                .filter(|sections| !sections.is_empty())
             {
-                entry["prompt"] = serde_json::json!(prompts);
+                entry["prompt"] = serde_json::json!(sections);
             }
             entry
         })
@@ -134,7 +134,10 @@ pub fn enabled_plugin_fingerprint() -> String {
                         .manifest
                         .prompt
                         .as_ref()
-                        .is_some_and(|prompts| !prompts.is_empty()))
+                        .is_some_and(|prompts| !prompts.is_empty())
+                    // 装载时组装的动态 prompt 段落（清单位于 capabilities，
+                    // 上面的静态字段看不到）。
+                    || loaded.prompt_sections.is_some())
         })
         .map(|(id, loaded)| {
             let version = loaded
@@ -142,14 +145,40 @@ pub fn enabled_plugin_fingerprint() -> String {
                 .as_ref()
                 .map(|value| value.version.clone())
                 .unwrap_or_else(|| loaded.manifest.version.clone());
-            if version.is_empty() {
-                id.clone()
-            } else {
-                format!("{id}@{version}")
+            // 动态 prompt 段落内容计入键：装载时组装、通知重取更新——内容
+            // 变化即能力变化，触发上下文交接（与版本升级同链路）。
+            let prompt_digest = loaded
+                .prompt_sections
+                .as_ref()
+                .map(|sections| prompt_sections_digest(sections));
+            match (version.is_empty(), prompt_digest) {
+                (true, None) => id.clone(),
+                (true, Some(digest)) => format!("{id}#{digest}"),
+                (false, None) => format!("{id}@{version}"),
+                (false, Some(digest)) => format!("{id}@{version}#{digest}"),
             }
         })
         .collect();
     fingerprint_of(&keys)
+}
+
+/// prompt 段落集合的内容摘要（32 bit 截断）：**保持顺序与重复**——
+/// 段落列表是有序声明，复用键集合的 sort+dedup 会把顺序变化与重复
+/// 段落漏判为未变化。长度前缀避免相邻段落的拼接歧义。
+fn prompt_sections_digest(sections: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for section in sections {
+        hasher.update((section.len() as u64).to_le_bytes());
+        hasher.update(section.as_bytes());
+    }
+    let mut digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    digest.truncate(8);
+    digest
 }
 
 /// 插件键集合的稳定摘要：排序去重后以分隔符拼接求 SHA-256。

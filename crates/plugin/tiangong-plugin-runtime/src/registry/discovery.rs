@@ -207,15 +207,70 @@ pub(super) fn remove_invalid_plugin_if_registered(
     Ok(true)
 }
 
+/// 单次插件装载使用的运行态快照。
+///
+/// 同一次重载中，存活适配器与最终 `LoadedPlugin` 必须复用该快照——
+/// `load_valid_capabilities` 会重算制品摘要、`assemble_prompt_sections`
+/// 含阻塞 sidecar I/O，逐适配器重复调用既浪费也可能产生不一致结果。
+#[derive(Debug, Clone)]
+pub(crate) struct PluginLoadSnapshot {
+    pub(crate) verified_sidecar: Option<Vec<String>>,
+    pub(crate) prompt_sections: Option<Vec<String>>,
+}
+
+impl PluginLoadSnapshot {
+    pub(crate) fn read(storage_root: &Path, installed: &InstalledPlugin) -> Self {
+        // 读取安装阶段保存的验证记录（校验 ID、版本、制品摘要与协议兼容）；
+        // 缺失或失效时先由独立进程完成补验证，再启动常驻进程，避免数据库类
+        // 插件的验证进程与业务进程争用同一数据目录。
+        let verified_sidecar =
+            crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
+        // 装载时组装 prompt 段落快照（文本 / 文件 / sidecar 统一形态）：
+        // 声明聚合只读快照，变更走 runtime.prompt_updated 通知 + 指纹交接。
+        let prompt_sections = assemble_prompt_sections(
+            storage_root,
+            &installed.directory,
+            &installed.manifest,
+            verified_sidecar.as_deref(),
+        );
+        Self {
+            verified_sidecar,
+            prompt_sections,
+        }
+    }
+}
+
 pub(super) fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> LoadedPlugin {
     load_plugin_record_with_prewarm(storage_root, installed, true)
 }
-
 fn load_plugin_record_with_prewarm(
     storage_root: &Path,
     installed: InstalledPlugin,
     prewarm: bool,
 ) -> LoadedPlugin {
+    let snapshot = PluginLoadSnapshot::read(storage_root, &installed);
+    load_plugin_record_from_snapshot(storage_root, installed, prewarm, snapshot)
+}
+
+/// 供无 WASM 重载复用外部已读取的快照（prewarm 与装载路径一致）。
+pub(super) fn load_plugin_record_with_snapshot(
+    storage_root: &Path,
+    installed: InstalledPlugin,
+    snapshot: PluginLoadSnapshot,
+) -> LoadedPlugin {
+    load_plugin_record_from_snapshot(storage_root, installed, true, snapshot)
+}
+
+fn load_plugin_record_from_snapshot(
+    storage_root: &Path,
+    installed: InstalledPlugin,
+    prewarm: bool,
+    snapshot: PluginLoadSnapshot,
+) -> LoadedPlugin {
+    let PluginLoadSnapshot {
+        verified_sidecar,
+        prompt_sections,
+    } = snapshot;
     // 连接构造失败（解释器不可发现、签名/信任/权限不合法）属于安装
     // 前提类错误：写入 load_error，安装路径据此回滚。
     let signed_release = installed.signed_release.clone();
@@ -224,11 +279,6 @@ fn load_plugin_record_with_prewarm(
         Ok(connection) => (connection, None),
         Err(error) => (None, Some(error.to_string())),
     };
-    // 读取安装阶段保存的验证记录（校验 ID、版本、制品摘要与协议兼容）；
-    // 缺失或失效时先由独立进程完成补验证，再启动常驻进程，避免数据库类
-    // 插件的验证进程与业务进程争用同一数据目录。
-    let verified_sidecar =
-        crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
     // 常驻 sidecar 启动失败是运行异常：保留安装，插件管理显示启动异常
     //（重试验证/修复环境后恢复），不作为安装回滚条件。
     let mut runtime_error = None;
@@ -276,6 +326,7 @@ fn load_plugin_record_with_prewarm(
                 ts_instances: Vec::new(),
                 sidecar,
                 verified_sidecar,
+                prompt_sections,
                 load_error,
                 runtime_error,
                 enabled: installed.enabled,
@@ -296,6 +347,7 @@ fn load_plugin_record_with_prewarm(
                 ts_instances: Vec::new(),
                 sidecar,
                 verified_sidecar,
+                prompt_sections,
                 load_error: load_error.or_else(|| Some(error.to_string())),
                 runtime_error,
                 enabled: installed.enabled,

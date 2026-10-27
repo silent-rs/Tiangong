@@ -173,6 +173,7 @@ mod tests {
             ts_instances: Vec::new(),
             sidecar: None,
             verified_sidecar: Some(Vec::new()),
+            prompt_sections: None,
             load_error: None,
             runtime_error: None,
             enabled,

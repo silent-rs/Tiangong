@@ -59,9 +59,10 @@ pub struct PluginManifest {
     /// Desktop 纯 TypeScript 插件声明的工具规格。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<TsToolDecl>>,
-    /// 系统提示注入段落。
+    /// 系统提示注入条目（见 [`PromptSectionDecl`]）：内联文本、随包文件
+    /// 或 sidecar 动态提供，三种形态装载时统一解析为段落快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<Vec<String>>,
+    pub prompt: Option<Vec<PromptSectionDecl>>,
     /// 随插件分发的静态资源目录（相对插件目录，导入时递归复制进安装目录）。
     ///
     /// 供插件携带模板、示例等只读资产；不得声明宿管保留目录。
@@ -81,6 +82,68 @@ pub struct PluginManifest {
     /// 再查本表。见 [`crate::tool_titles`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_titles: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// prompt 条目声明：内联文本、随包文件或 sidecar 动态提供。
+///
+/// 对象条目经 `type` 标签精确区分（[`PromptSectionEntry`]，
+/// `deny_unknown_fields`——拼错字段 / 拼错标签直接解析失败）；字符串条目
+/// 是 v0.17.6 兼容的内联文本简写。三种形态都在**插件装载时**解析为段落
+/// 文本快照（registry 的组装与 `runtime.prompt_updated` 通知重取），声明
+/// 聚合只读快照、不做 I/O；文件与 sidecar 段落的内容变化计入能力指纹，
+/// 走插件变化的上下文交接。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PromptSectionDecl {
+    /// 内联文本（字符串条目，兼容 v0.17.6 字符串数组形态）。
+    Text(String),
+    /// 标签形态（对象条目，`type` 精确分发）。
+    Entry(PromptSectionEntry),
+}
+
+/// prompt 条目的标签形态（对象条目）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PromptSectionEntry {
+    /// 内联文本段落。
+    Text {
+        /// 段落全文。
+        text: String,
+    },
+    /// 随包文件：装载时读取插件目录内该文件全文为一段（如自定义提示词
+    /// 模板——纯清单 + 文件即可实现 prompt 类插件，无需 wasm / sidecar）。
+    File {
+        /// 插件目录内的安全相对路径。
+        file: String,
+    },
+    /// sidecar 动态提供：装载时经固定操作 `prompt_sections` 读取；声明
+    /// 即要求 `sidecar` 声明（内容由其提供）。
+    Sidecar,
+}
+
+impl PluginManifest {
+    /// prompt 是否声明了 sidecar 动态条目（装载期组装与适配器承接判定
+    /// 共用口径；条目本身要求 `sidecar` 声明，见 validate）。
+    pub fn declares_sidecar_prompt(&self) -> bool {
+        self.prompt.as_ref().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| matches!(entry, PromptSectionDecl::Entry(PromptSectionEntry::Sidecar)))
+        })
+    }
+
+    /// prompt 条目引用的随包文件（安装期制品校验用）。
+    pub fn prompt_files(&self) -> Vec<&str> {
+        self.prompt
+            .iter()
+            .flatten()
+            .filter_map(|entry| match entry {
+                PromptSectionDecl::Entry(PromptSectionEntry::File { file }) => Some(file.trim()),
+                _ => None,
+            })
+            .filter(|file| !file.is_empty())
+            .collect()
+    }
 }
 
 /// @提及声明（`mention` 字段）：`candidates_op`（新）与 `hint`/`mark`
@@ -123,7 +186,8 @@ pub struct CapabilitiesManifest {
     /// 实现工具接缝（WASM 内 tool-specs/handle-tool）。
     #[serde(default)]
     pub tools: bool,
-    /// 实现提示词接缝。
+    /// 遗留字段：prompt 接缝改为「条目有即加载」（`prompt` 数组声明即
+    /// 生效），本字段不再参与任何判定，仅为兼容已发布清单保留。
     #[serde(default)]
     pub prompt: bool,
     /// 实现生命周期接缝。
@@ -381,13 +445,13 @@ impl PluginManifest {
                 let has_contribution = !self.ui_contributions().is_empty()
                     || self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
                     || self
-                        .capabilities
+                        .prompt
                         .as_ref()
-                        .is_some_and(|capabilities| capabilities.prompt)
+                        .is_some_and(|entries| !entries.is_empty())
                     || self.mention.is_some();
                 if !has_contribution {
                     bail!(
-                        "插件 {} 未声明任何贡献（ui.contributions / tools / capabilities.prompt / mention 至少其一）",
+                        "插件 {} 未声明任何贡献（ui.contributions / tools / prompt / mention 至少其一）",
                         self.id
                     );
                 }
@@ -836,18 +900,33 @@ impl PluginManifest {
         }
 
         if !prompts.is_empty() {
-            if !self
-                .capabilities
-                .as_ref()
-                .is_some_and(|capabilities| capabilities.prompt)
-            {
-                bail!(
-                    "插件 {} 声明 prompt 时必须启用 capabilities.prompt",
-                    self.id
-                );
-            }
-            if prompts.iter().any(|section| section.trim().is_empty()) {
-                bail!("插件 {} prompt 段落不能为空", self.id);
+            // 有即加载：prompt 条目本身即声明，不再要求 capabilities.prompt
+            //（该字段保留为遗留兼容，不参与判定）。
+            for entry in prompts {
+                match entry {
+                    PromptSectionDecl::Text(text) => validate_prompt_text(&self.id, text)?,
+                    PromptSectionDecl::Entry(PromptSectionEntry::Text { text }) => {
+                        validate_prompt_text(&self.id, text)?
+                    }
+                    PromptSectionDecl::Entry(PromptSectionEntry::File { file }) => {
+                        let file = file.trim();
+                        if file.is_empty() {
+                            bail!("插件 {} prompt 文件路径不能为空", self.id);
+                        }
+                        if let Err(error) = validate_relative_path(Path::new(file), "prompt 文件")
+                        {
+                            bail!("插件 {} prompt 文件路径不合法：{error}", self.id);
+                        }
+                    }
+                    PromptSectionDecl::Entry(PromptSectionEntry::Sidecar) => {
+                        if self.sidecar.is_none() {
+                            bail!(
+                                "插件 {} prompt 声明 sidecar 条目时必须声明 sidecar（内容由其提供）",
+                                self.id
+                            );
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -855,13 +934,19 @@ impl PluginManifest {
 
     /// UI 制品必须包含全部页面入口；附属文件仅允许位于已声明的资源目录。
     pub(crate) fn validate_ui_artifacts(&self, paths: &BTreeSet<PathBuf>) -> Result<()> {
-        let entries = self
+        // 清单直接引用的随包制品：页面入口 + prompt 文件条目（安装制品
+        // 集与签名制品集两侧复用同一契约——缺一即拒，多出须落在 resources）。
+        let mut entries = self
             .ui_contributions()
             .into_iter()
             .map(|contribution| PathBuf::from(contribution.entry))
             .collect::<BTreeSet<_>>();
+        entries.extend(self.prompt_files().into_iter().map(PathBuf::from));
         if !entries.is_subset(paths) {
-            bail!("插件 {} 的 UI 制品缺少声明的页面入口", self.id);
+            bail!(
+                "插件 {} 的随包制品缺少声明的页面入口或 prompt 文件",
+                self.id
+            );
         }
         for path in paths {
             validate_relative_path(path, "UI 制品")?;
@@ -989,6 +1074,13 @@ const fn default_request_timeout_ms() -> u64 {
     30_000
 }
 
+fn validate_prompt_text(plugin_id: &str, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        bail!("插件 {plugin_id} prompt 段落不能为空");
+    }
+    Ok(())
+}
+
 fn validate_relative_path(path: &Path, field: &str) -> Result<()> {
     if path.as_os_str().is_empty()
         || path.components().any(|component| {
@@ -1091,6 +1183,68 @@ mod tests {
         let mut undeclared = entries;
         undeclared.insert(PathBuf::from("ui/settings.js"));
         assert!(manifest.validate_ui_artifacts(&undeclared).is_err());
+    }
+
+    #[test]
+    fn prompt文件计入随包制品契约() {
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"pf-demo","version":"1.0.0","entrypoints":["desktop"],"prompt":[{"type":"file","file":"prompts/guide.md"}]}"#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+        // 制品集缺 prompt 文件 → 拒
+        let entries = [PathBuf::from("dist/index.html")]
+            .into_iter()
+            .collect::<BTreeSet<PathBuf>>();
+        assert!(manifest.validate_ui_artifacts(&entries).is_err());
+        // 补齐后通过（prompt 文件无需位于 resources）
+        let entries = [PathBuf::from("prompts/guide.md")]
+            .into_iter()
+            .collect::<BTreeSet<PathBuf>>();
+        assert!(manifest.validate_ui_artifacts(&entries).is_ok());
+    }
+
+    #[test]
+    fn prompt条目_三种形态解析与兼容() {
+        // 混合形态：字符串（兼容）+ 三种标签条目
+        let json = r#"{"schema_version":2,"id":"p-demo","version":"0.1.0","entrypoints":["desktop","server"],"permissions":["sidecar.invoke"],"sidecar":{"binary":"demo"},"capabilities":{"prompt":true},"prompt":["内联",{"type":"text","text":"标签文本"},{"type":"file","file":"assets/guide.md"},{"type":"sidecar"}],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        manifest.validate().unwrap();
+        let entries = manifest.prompt.clone().unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(&entries[0], PromptSectionDecl::Text(text) if text == "内联"));
+        assert!(matches!(
+            &entries[2],
+            PromptSectionDecl::Entry(PromptSectionEntry::File { file }) if file == "assets/guide.md"
+        ));
+        assert!(manifest.declares_sidecar_prompt());
+        assert_eq!(manifest.prompt_files(), ["assets/guide.md"]);
+        // 拼错标签 / 未知字段：解析失败（deny_unknown_fields 精确报错）
+        for bad in [
+            json.replace(r#"{"type":"sidecar"}"#, r#"{"type":"sidcar"}"#),
+            json.replace(
+                r#"{"type":"file","file":"assets/guide.md"}"#,
+                r#"{"type":"file","path":"assets/guide.md"}"#,
+            ),
+        ] {
+            assert!(
+                serde_json::from_str::<PluginManifest>(&bad).is_err(),
+                "标签/字段拼错应解析失败"
+            );
+        }
+        // sidecar 条目无 sidecar 声明：校验拒绝（入口收窄为 desktop，
+        // 避免先撞上「无 sidecar 的 TS 插件只能 desktop」规则）
+        let no_sidecar = json.replace(r#""sidecar":{"binary":"demo"},"#, "").replace(
+            r#""entrypoints":["desktop","server"]"#,
+            r#""entrypoints":["desktop"]"#,
+        );
+        let manifest: PluginManifest = serde_json::from_str(&no_sidecar).unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("必须声明 sidecar"), "{error}");
+        // 空文本条目：校验拒绝
+        let empty_text = json.replace(r#""text":"标签文本""#, r#""text":"  ""#);
+        let manifest: PluginManifest = serde_json::from_str(&empty_text).unwrap();
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

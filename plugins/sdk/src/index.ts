@@ -85,7 +85,6 @@ export interface ToolViewData {
 /** manifest v2 `capabilities` 声明。 */
 export interface PluginCapabilities {
   tools: boolean;
-  prompt: boolean;
   lifecycle: boolean;
   approval: boolean;
   interaction: boolean;

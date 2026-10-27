@@ -1320,6 +1320,13 @@ fn spawn_stdio_reader(
                         if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
                             crate::registry::dispatch_tools_recovered(&plugin_id, &payload);
                         }
+                        if channel == tiangong_plugin_sidecar::protocol::PROMPT_UPDATED_CHANNEL {
+                            // 段落重取是阻塞 I/O：通知读循环只投递，不等待完成。
+                            let plugin_id = plugin_id.clone();
+                            std::thread::spawn(move || {
+                                crate::registry::refresh_prompt_sections(&plugin_id);
+                            });
+                        }
                         if let Some(forwarder) = crate::sidecar::sidecar_notification_forwarder() {
                             forwarder(&plugin_id, &channel, &payload);
                         }

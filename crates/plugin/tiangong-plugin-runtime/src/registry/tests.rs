@@ -166,6 +166,7 @@ fn reload_clears_stale_connections_even_without_sidecar_declaration() {
                 std::sync::Arc::clone(&loaded_stub) as std::sync::Arc<dyn SidecarConnection>
             ),
             verified_sidecar: None,
+            prompt_sections: None,
             load_error: None,
             runtime_error: None,
             enabled: true,
@@ -418,6 +419,7 @@ fn refresh_verified_sidecar_clears_only_runtime_error() {
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
+        prompt_sections: None,
         load_error: Some("WASM 实例创建失败".into()),
         runtime_error: Some("sidecar 启动失败".into()),
         enabled: true,
@@ -473,6 +475,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
             ts_instances: Vec::new(),
             sidecar: None,
             verified_sidecar: None,
+            prompt_sections: None,
             load_error: None,
             runtime_error: None,
             enabled: true,
@@ -573,6 +576,7 @@ fn mention_sources_are_reachable_without_any_session_core() {
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
+        prompt_sections: None,
         load_error: None,
         runtime_error: None,
         enabled,
@@ -821,4 +825,345 @@ fn 静态mention声明生成入口候选() {
         crate::ts_plugin::mention_entry_candidate(&manifest, None, &broken).is_none(),
         "空 hint 不合成入口"
     );
+}
+
+/// 动态 prompt 段落装载时组装进注册表；内容变化必须改变能力指纹，
+/// 走插件变化的上下文交接（压缩 message）链路——这是段落变更的
+/// 唯一传播途径（声明聚合只读快照）。
+#[test]
+#[serial_test::serial]
+fn 动态prompt段落变化改变能力指纹() {
+    let manifest = serde_json::from_str::<PluginManifest>(
+        r#"{"schema_version":2,"id":"prompt-digest-demo","version":"1.0.0","sidecar":{"binary":"demo-sidecar"}}"#,
+    )
+    .expect("解析测试清单");
+    let record = |prompt_sections: Option<Vec<String>>| LoadedPlugin {
+        directory: std::path::PathBuf::from("/tmp/prompt-digest-demo"),
+        manifest: manifest.clone(),
+        signed_release: None,
+        wasm_bytes: None,
+        component: None,
+        ui_plugin: None,
+        descriptor: None,
+        generation: 1,
+        instances: Vec::new(),
+        ts_instances: Vec::new(),
+        sidecar: None,
+        verified_sidecar: None,
+        prompt_sections,
+        load_error: None,
+        runtime_error: None,
+        enabled: true,
+    };
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert("prompt-digest-demo".into(), record(None));
+    }
+    let without_prompt = crate::registry::enabled_plugin_fingerprint();
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "prompt-digest-demo".into(),
+            record(Some(vec!["第一版段落".to_string()])),
+        );
+    }
+    let with_prompt_v1 = crate::registry::enabled_plugin_fingerprint();
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "prompt-digest-demo".into(),
+            record(Some(vec!["第二版段落".to_string()])),
+        );
+    }
+    let with_prompt_v2 = crate::registry::enabled_plugin_fingerprint();
+    loaded_plugins()
+        .lock()
+        .unwrap()
+        .remove("prompt-digest-demo");
+
+    assert_ne!(without_prompt, with_prompt_v1, "声明动态段落即能力变化");
+    assert_ne!(with_prompt_v1, with_prompt_v2, "段落内容变化必须改变指纹");
+}
+
+/// P0 回归：runtime.prompt_updated 通知重取必须用**插件目录**组装——
+/// 曾经多取一次 parent 把 <root>/plugins 当插件目录，file 条目必读失败，
+/// 段落快照被截断。同时验证内容变化后发布 PromptSectionsChanged 事件。
+#[test]
+#[serial_test::serial]
+fn 通知重取用插件目录组装并发布事件() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin_dir = root.path().join("plugins").join("refresh-file-demo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("guide.md"), "文件段落").unwrap();
+    let manifest = serde_json::from_str::<PluginManifest>(
+        r#"{"schema_version":2,"id":"refresh-file-demo","version":"1.0.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"prompt":["内联",{"type":"file","file":"guide.md"}]}"#,
+    )
+    .unwrap();
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "refresh-file-demo".into(),
+            LoadedPlugin {
+                directory: plugin_dir.clone(),
+                manifest,
+                signed_release: None,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: Vec::new(),
+                sidecar: None,
+                verified_sidecar: None,
+                prompt_sections: Some(vec!["旧快照".to_string()]),
+                load_error: None,
+                runtime_error: None,
+                enabled: true,
+            },
+        );
+    }
+    refresh_prompt_sections("refresh-file-demo");
+    let sections = {
+        let plugins = loaded_plugins().lock().unwrap();
+        plugins
+            .get("refresh-file-demo")
+            .unwrap()
+            .prompt_sections
+            .clone()
+    };
+    loaded_plugins().lock().unwrap().remove("refresh-file-demo");
+    assert_eq!(
+        sections,
+        Some(vec!["内联".to_string(), "文件段落".to_string()]),
+        "file 条目必须从插件目录读取成功，而非被截断"
+    );
+}
+
+/// P0 回归：补验证成功（refresh_verified_sidecar）不得清空段落——
+/// 曾经把空 vec 传给 reconfigure，存活适配器的静态与文件段落一并丢失。
+#[test]
+#[serial_test::serial]
+fn 补验证刷新保留段落快照() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin_dir = root.path().join("plugins").join("reverify-prompt-demo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("guide.md"), "文件段落").unwrap();
+    let manifest = serde_json::from_str::<PluginManifest>(
+        r#"{"schema_version":2,"id":"reverify-prompt-demo","version":"1.0.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"prompt":[{"type":"file","file":"guide.md"}]}"#,
+    )
+    .unwrap();
+    let adapter = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+        &manifest,
+        true,
+        None,
+        vec!["旧段落".to_string()],
+    ));
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "reverify-prompt-demo".into(),
+            LoadedPlugin {
+                directory: plugin_dir.clone(),
+                manifest,
+                signed_release: None,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
+                sidecar: None,
+                verified_sidecar: None,
+                prompt_sections: Some(vec!["旧段落".to_string()]),
+                load_error: None,
+                runtime_error: Some("启动异常".to_string()),
+                enabled: true,
+            },
+        );
+    }
+    refresh_verified_sidecar("reverify-prompt-demo", Vec::new());
+    let record_sections = {
+        let plugins = loaded_plugins().lock().unwrap();
+        plugins
+            .get("reverify-prompt-demo")
+            .unwrap()
+            .prompt_sections
+            .clone()
+    };
+    loaded_plugins()
+        .lock()
+        .unwrap()
+        .remove("reverify-prompt-demo");
+    assert_eq!(record_sections, Some(vec!["文件段落".to_string()]));
+    use tiangong_core::tools::extension::PromptSectionProvider as _;
+    assert_eq!(adapter.prompt_sections(), vec!["文件段落".to_string()]);
+}
+
+/// 单次装载快照：无 WASM 重载中验证记录与 prompt 段落各组装一次，
+/// 存活适配器与注册表拿到的内容完全一致（旧代码 N+1 次且可能不一致）。
+#[test]
+#[serial_test::serial]
+fn 无wasm重载只读取一次装载快照且内容一致() {
+    use tiangong_core::tools::extension::PromptSectionProvider as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let plugin_dir = root.path().join("plugins").join("snapshot-demo");
+    std::fs::create_dir_all(plugin_dir.join("prompts")).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{"schema_version":2,"id":"snapshot-demo","version":"0.1.0","entrypoints":["desktop"],"prompt":["内联",{"type":"file","file":"prompts/guide.md"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(plugin_dir.join("prompts").join("guide.md"), "文件段落").unwrap();
+    let manifest: PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"snapshot-demo","version":"0.1.0","entrypoints":["desktop"],"prompt":["内联",{"type":"file","file":"prompts/guide.md"}]}"#,
+    )
+    .unwrap();
+    let adapter_a = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+        &manifest,
+        true,
+        None,
+        Vec::new(),
+    ));
+    let adapter_b = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+        &manifest,
+        true,
+        None,
+        Vec::new(),
+    ));
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "snapshot-demo".into(),
+            LoadedPlugin {
+                directory: plugin_dir.clone(),
+                manifest: manifest.clone(),
+                signed_release: None,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: vec![
+                    std::sync::Arc::downgrade(&adapter_a),
+                    std::sync::Arc::downgrade(&adapter_b),
+                ],
+                sidecar: None,
+                verified_sidecar: None,
+                prompt_sections: Some(vec!["旧段落".to_string()]),
+                load_error: None,
+                runtime_error: None,
+                enabled: true,
+            },
+        );
+    }
+    let installed = InstalledPlugin {
+        directory: plugin_dir.clone(),
+        manifest: manifest.clone(),
+        enabled: true,
+        signed_release: None,
+    };
+    let config_directory = root.path().join("config");
+    std::fs::create_dir_all(&config_directory).unwrap();
+    tiangong_config::registry::init_from_dir(&config_directory);
+    crate::registry::ASSEMBLE_PROMPT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    reload_plugin_inner(root.path(), &installed).unwrap();
+    let count = crate::registry::ASSEMBLE_PROMPT_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+    let record = {
+        let plugins = loaded_plugins().lock().unwrap();
+        plugins
+            .get("snapshot-demo")
+            .unwrap()
+            .prompt_sections
+            .clone()
+    };
+    loaded_plugins().lock().unwrap().remove("snapshot-demo");
+
+    assert_eq!(count, 1, "无 WASM 重载只允许组装一次（快照复用）");
+    let expected = vec!["内联".to_string(), "文件段落".to_string()];
+    assert_eq!(record, Some(expected.clone()), "注册表使用同一份快照");
+    assert_eq!(
+        adapter_a.prompt_sections(),
+        expected,
+        "适配器 A 与注册表一致"
+    );
+    assert_eq!(
+        adapter_b.prompt_sections(),
+        expected,
+        "适配器 B 与注册表一致"
+    );
+}
+
+/// None 语义：未声明 prompt 的清单重载后注册表保持 None（不是空数组），
+/// 适配器段落为空。
+#[test]
+#[serial_test::serial]
+fn 无wasm重载保留prompt未声明的none语义() {
+    use tiangong_core::tools::extension::PromptSectionProvider as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let plugin_dir = root.path().join("plugins").join("none-demo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.json"),
+        r#"{"schema_version":2,"id":"none-demo","version":"0.1.0","entrypoints":["desktop"],"ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","title":"设置","entry":"app/s.html"}]}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(plugin_dir.join("app")).unwrap();
+    std::fs::write(plugin_dir.join("app").join("s.html"), "<html></html>").unwrap();
+    let manifest: PluginManifest = serde_json::from_str(
+        r#"{"schema_version":2,"id":"none-demo","version":"0.1.0","entrypoints":["desktop"],"ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","title":"设置","entry":"app/s.html"}]}}"#,
+    )
+    .unwrap();
+    let adapter = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+        &manifest,
+        true,
+        None,
+        Vec::new(),
+    ));
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "none-demo".into(),
+            LoadedPlugin {
+                directory: plugin_dir.clone(),
+                manifest: manifest.clone(),
+                signed_release: None,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
+                sidecar: None,
+                verified_sidecar: None,
+                // 重载前错误地持有 Some：装载快照应回归 None
+                prompt_sections: Some(vec!["遗留".to_string()]),
+                load_error: None,
+                runtime_error: None,
+                enabled: true,
+            },
+        );
+    }
+    let installed = InstalledPlugin {
+        directory: plugin_dir.clone(),
+        manifest: manifest.clone(),
+        enabled: true,
+        signed_release: None,
+    };
+    let config_directory = root.path().join("config");
+    std::fs::create_dir_all(&config_directory).unwrap();
+    tiangong_config::registry::init_from_dir(&config_directory);
+    reload_plugin_inner(root.path(), &installed).unwrap();
+    let record = {
+        let plugins = loaded_plugins().lock().unwrap();
+        plugins.get("none-demo").unwrap().prompt_sections.clone()
+    };
+    loaded_plugins().lock().unwrap().remove("none-demo");
+    assert_eq!(record, None, "未声明 prompt 必须保持 None（指纹语义）");
+    assert!(adapter.prompt_sections().is_empty(), "适配器段落为空");
 }
