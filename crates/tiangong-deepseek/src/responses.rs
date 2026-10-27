@@ -118,60 +118,37 @@ struct ResponsesBufferState {
     buffer: crate::protocol_buffer::TextProtocolBuffer,
 }
 
-/// 对单个 Responses 流事件施加文本协议缓冲，可能产出 0~N 个事件。
-///
-/// 普通文本正常透传；确认命中文本工具协议后，等终止事件到达再统一解析，
-/// 并把工具调用合成为结构化 function_call 事件组（added → arguments.delta →
-/// done），与真实流式行为保持一致。
+/// 对单个 Responses 流事件施加旁路收集：正文一律正常透传（不拦截、
+/// 不撤回），同时收集完整文本；终止事件到达时统一识别，命中文本工具
+/// 协议则在终止事件前把解析结果转出为结构化 function_call 事件组
+/// （added → arguments.delta → done），由上层正常发起工具调用。
 fn apply_responses_buffer(
     state: &mut ResponsesBufferState,
     result: Result<ResponsesStreamEvent, DeepSeekError>,
 ) -> Vec<Result<ResponsesStreamEvent, DeepSeekError>> {
-    /// 用透传文本重建 OutputTextDelta 事件（合成分片无真实序号，置 0）。
-    fn text_delta_event(delta: String) -> ResponsesStreamEvent {
-        ResponsesStreamEvent::OutputTextDelta {
-            sequence_number: 0,
-            item_id: String::new(),
-            output_index: 0,
-            content_index: 0,
-            delta,
-        }
-    }
     match result {
-        Ok(ResponsesStreamEvent::OutputTextDelta { delta, .. }) => state
-            .buffer
-            .push_text(&delta)
-            .into_iter()
-            .map(|text| Ok(text_delta_event(text)))
-            .collect(),
-        // 结构化工具调用 item 出现：此后不可能再走文本协议，冲刷缓冲并透传。
+        Ok(ResponsesStreamEvent::OutputTextDelta { ref delta, .. }) => {
+            state.buffer.push_text(delta);
+            vec![result]
+        }
+        // 结构化工具调用 item 出现：停止收集（正文继续透传）。
         Ok(
             event @ ResponsesStreamEvent::OutputItemAdded {
                 item: ResponseOutputItem::FunctionCall(_) | ResponseOutputItem::CustomToolCall(_),
                 ..
             },
         ) => {
-            let mut events: Vec<_> = state
-                .buffer
-                .note_structured_tool_call()
-                .into_iter()
-                .map(|text| Ok(text_delta_event(text)))
-                .collect();
-            events.push(Ok(event));
-            events
+            state.buffer.note_structured_tool_call();
+            vec![Ok(event)]
         }
-        // 终止事件：统一解析缓冲文本后再放行，保证合成事件组先于终止事件。
+        // 终止事件：流末统一识别，合成事件组先于终止事件放行。
         Ok(
             terminal @ (ResponsesStreamEvent::ResponseCompleted { .. }
             | ResponsesStreamEvent::ResponseIncomplete { .. }
             | ResponsesStreamEvent::ResponseFailed { .. }),
         ) => {
-            let outcome = state.buffer.finish();
             let mut events = Vec::new();
-            if !outcome.leftover_text.is_empty() {
-                events.push(Ok(text_delta_event(outcome.leftover_text)));
-            }
-            for (index, call) in outcome.tool_calls.into_iter().enumerate() {
+            for (index, call) in state.buffer.finish().into_iter().enumerate() {
                 events.extend(text_protocol_call_events(index as u32, call));
             }
             events.push(Ok(terminal));
@@ -264,21 +241,66 @@ fn looks_like_json(first: &[u8]) -> bool {
 /// 把一次性完整响应合成为等价的流事件序列。
 ///
 /// 网关忽略 stream 参数返回 application/json 时，SDK 在内部按完整响应
-/// 接住并合成事件流，调用方无需感知差异。ResponseCompleted 为终止事件，
-/// 流在其后自然结束。
+/// 接住并合成事件流，调用方无需感知差异。合成序列只承载正文流：
+/// created → reasoning / text 增量 → completed（终止事件，携带完整
+/// response，含 function_call items）。结构化工具调用不在中途模拟增量
+/// 事件，统一交由调用方在终止事件处按完整 output 一次转出。
 fn complete_response_events(response: ResponseObject) -> Vec<ResponsesStreamEvent> {
-    vec![
-        ResponsesStreamEvent::ResponseCreated {
-            sequence_number: 0,
-            response: response.clone(),
-        },
-        ResponsesStreamEvent::ResponseCompleted {
-            sequence_number: 1,
-            response,
-        },
-    ]
+    use crate::types::OutputContentBlock;
+    let mut sequence_number = 0u64;
+    let mut events = vec![ResponsesStreamEvent::ResponseCreated {
+        sequence_number,
+        response: response.clone(),
+    }];
+    for (output_index, item) in response.output.iter().enumerate() {
+        let output_index = output_index as u32;
+        match item {
+            crate::types::ResponseOutputItem::Reasoning(reasoning) => {
+                let reasoning_text = reasoning
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        OutputContentBlock::ReasoningText(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                if !reasoning_text.is_empty() {
+                    sequence_number += 1;
+                    events.push(ResponsesStreamEvent::ReasoningTextDelta {
+                        sequence_number,
+                        item_id: reasoning.id.clone().unwrap_or_default(),
+                        output_index,
+                        content_index: 0,
+                        delta: reasoning_text,
+                    });
+                }
+            }
+            crate::types::ResponseOutputItem::Message(message) => {
+                for (content_index, block) in message.content.iter().enumerate() {
+                    if let OutputContentBlock::OutputText(text) = block
+                        && !text.text.is_empty()
+                    {
+                        sequence_number += 1;
+                        events.push(ResponsesStreamEvent::OutputTextDelta {
+                            sequence_number,
+                            item_id: message.id.clone().unwrap_or_default(),
+                            output_index,
+                            content_index: content_index as u32,
+                            delta: text.text.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    sequence_number += 1;
+    events.push(ResponsesStreamEvent::ResponseCompleted {
+        sequence_number,
+        response,
+    });
+    events
 }
-
 /// 解析单条 SSE data 为流事件。
 ///
 /// 未知事件类型（服务端新增而 SDK 尚未支持）降级为

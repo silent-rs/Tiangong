@@ -180,40 +180,28 @@ fn looks_like_json(first: &[u8]) -> bool {
         .is_some_and(|byte| *byte == b'{' || *byte == b'[')
 }
 
-/// 文本协议缓冲状态（三态状态机见 [`crate::protocol_buffer`]）。
+/// 文本协议旁路收集状态（见 [`crate::protocol_buffer`]）。
 #[derive(Default)]
 struct BufferState {
     buffer: crate::protocol_buffer::TextProtocolBuffer,
 }
-/// 对单个事件施加缓冲逻辑，可能产出 0~N 个事件。
+/// 对单个事件施加收集逻辑：正文一律透传，流末统一识别转出工具调用。
 fn apply_buffer(
     state: &mut BufferState,
     result: Result<StreamEvent, DeepSeekError>,
 ) -> Vec<Result<StreamEvent, DeepSeekError>> {
     match result {
-        Ok(StreamEvent::TextDelta(delta)) => state
-            .buffer
-            .push_text(&delta)
-            .into_iter()
-            .map(|text| Ok(StreamEvent::TextDelta(text)))
-            .collect(),
+        Ok(StreamEvent::TextDelta(ref delta)) => {
+            state.buffer.push_text(delta);
+            vec![result]
+        }
         Ok(StreamEvent::ToolCallStart { .. }) => {
-            let mut events: Vec<_> = state
-                .buffer
-                .note_structured_tool_call()
-                .into_iter()
-                .map(|text| Ok(StreamEvent::TextDelta(text)))
-                .collect();
-            events.push(result);
-            events
+            state.buffer.note_structured_tool_call();
+            vec![result]
         }
         Ok(StreamEvent::Done) => {
-            let outcome = state.buffer.finish();
             let mut events = Vec::new();
-            if !outcome.leftover_text.is_empty() {
-                events.push(Ok(StreamEvent::TextDelta(outcome.leftover_text)));
-            }
-            for (idx, call) in outcome.tool_calls.into_iter().enumerate() {
+            for (idx, call) in state.buffer.finish().into_iter().enumerate() {
                 events.push(Ok(StreamEvent::TextProtocolToolCall {
                     id: format!("textcall_{idx}"),
                     name: call.name,
@@ -287,11 +275,9 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Vec<Result<StreamEvent, DeepSeek
 mod buffer_tests {
     use super::*;
     use crate::types::Usage;
-
     fn text_delta(s: &str) -> Result<StreamEvent, DeepSeekError> {
         Ok(StreamEvent::TextDelta(s.into()))
     }
-
     fn collect(events: Vec<Result<StreamEvent, DeepSeekError>>) -> Vec<String> {
         let mut state = BufferState::default();
         let mut out = Vec::new();
@@ -302,49 +288,70 @@ mod buffer_tests {
         }
         out
     }
-
+    /// 收集 Done 之前产出的事件（不含流末转换）。
+    fn collect_until_done(events: Vec<Result<StreamEvent, DeepSeekError>>) -> Vec<String> {
+        let mut state = BufferState::default();
+        let mut out = Vec::new();
+        for event in events {
+            for mapped in apply_buffer(&mut state, event) {
+                if matches!(mapped, Ok(StreamEvent::Done)) {
+                    continue;
+                }
+                out.push(format!("{:?}", mapped.expect("应为 Ok")));
+            }
+        }
+        out
+    }
     #[test]
     fn plain_text_without_angle_bracket_passes_through() {
-        // 不含 < 的纯文本逐字透传，不触发缓冲。
         let out = collect(vec![text_delta("普通回复"), Ok(StreamEvent::Done)]);
         assert!(out.iter().any(|e| e.contains("TextDelta(\"普通回复")));
         assert!(!out.iter().any(|e| e.contains("TextProtocolToolCall")));
     }
-
     #[test]
-    fn angle_bracket_in_normal_text_flushes_after_window() {
-        // 正常文本里的 < 触发缓冲，窗口满（10 字符）仍无 tool/dsml → 整块吐出。
-        let out = collect(vec![
+    fn angle_bracket_and_code_block_text_pass_through_immediately() {
+        // 正文一律透传：含 < 的正常文本、代码块都即时流出，无窗口探测延迟。
+        let out = collect_until_done(vec![
             text_delta("比较 a < b 这是正常文本无关键词"),
+            text_delta("```html\n<div><span>hello</span></div>\n```"),
+        ]);
+        assert!(
+            out.iter().any(|e| e.contains("比较 a < b")),
+            "尖括号文本应即时透传：{out:?}"
+        );
+        assert!(
+            out.iter().any(|e| e.contains("<div>")),
+            "代码块应即时透传：{out:?}"
+        );
+    }
+    #[test]
+    fn toolbar_text_passes_through_without_tool_call() {
+        let out = collect(vec![
+            text_delta("<toolbar>普通内容继续输出，不是工具协议"),
             Ok(StreamEvent::Done),
         ]);
-        let combined: String = out
-            .iter()
-            .filter(|e| e.contains("TextDelta"))
-            .cloned()
-            .collect();
-        assert!(
-            combined.contains("比较 a < b 这是正常文本无关键词"),
-            "正常尖括号文本应完整吐出：{out:?}"
-        );
+        assert!(out.iter().any(|event| matches!(
+            event.as_str(),
+            e if e.contains("TextDelta") && e.contains("<toolbar>")
+        )));
         assert!(!out.iter().any(|e| e.contains("TextProtocolToolCall")));
     }
-
     #[test]
-    fn dsml_text_buffered_and_resolved_as_tool_call() {
+    fn dsml_text_streams_verbatim_and_resolves_as_tool_call_at_done() {
+        // 正文按原文透传（不拦截、不撤回），Done 时统一转出工具调用。
         let dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
         let out = collect(vec![text_delta(dsml), Ok(StreamEvent::Done)]);
         assert!(
-            !out.iter().any(|e| e.contains("DSML") || e.contains("｜｜")),
-            "DSML 标记原文不应透传：{out:?}"
+            out.iter()
+                .any(|e| e.contains("TextDelta") && e.contains("DSML")),
+            "协议原文应按正文透传：{out:?}"
         );
         assert!(
             out.iter()
                 .any(|e| e.contains("TextProtocolToolCall") && e.contains("read_file")),
-            "应产出工具调用：{out:?}"
+            "Done 时应转出工具调用：{out:?}"
         );
     }
-
     #[test]
     fn dsml_preserves_explanatory_text() {
         let text = format!(
@@ -354,13 +361,17 @@ mod buffer_tests {
         let out = collect(vec![text_delta(&text), Ok(StreamEvent::Done)]);
         assert!(
             out.iter().any(|e| e.contains("我来读取文件")),
-            "说明文字应补发：{out:?}"
+            "说明文字应透传：{out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|e| e.contains("TextProtocolToolCall") && e.contains("read_file")),
+            "Done 时应转出工具调用：{out:?}"
         );
     }
-
     #[test]
-    fn dsml_split_across_chunks_is_detected() {
-        // 分片到达：每个碎片单独不含完整关键词，但累积后窗口内出现 dsml → 确认。
+    fn dsml_split_across_chunks_is_detected_at_done() {
+        // 分片到达：每片即时透传（正文完整），累积后在 Done 统一识别。
         let out = collect(vec![
             text_delta("<"),
             text_delta("｜"),
@@ -372,89 +383,36 @@ mod buffer_tests {
             text_delta("</｜｜DSML｜｜invoke>"),
             Ok(StreamEvent::Done),
         ]);
-        let leaked: Vec<_> = out
-            .iter()
-            .filter(|e| e.contains("DSML") || e.contains("｜｜"))
-            .collect();
-        assert!(leaked.is_empty(), "分片到达不应透传 DSML 碎片：{leaked:?}");
-        assert!(out.iter().any(|e| e.contains("TextProtocolToolCall")));
+        assert!(
+            out.iter()
+                .any(|e| e.contains("TextProtocolToolCall") && e.contains("fn")),
+            "分片累积后应在 Done 识别出工具调用：{out:?}"
+        );
     }
-
     #[test]
-    fn structured_tool_call_flushes_pending_and_disables_buffering() {
-        // Probing 期间出现结构化 ToolCallStart：先吐出 pending，后续不再缓冲。
+    fn structured_tool_call_disables_stream_end_resolution() {
+        // 结构化工具调用出现后：正文照常透传，Done 不再做文本协议识别，
+        // 防止把协议讨论样文本误判为调用。
+        let dsml = "<｜｜DSML｜｜invoke name=\"fn\">\n<｜｜DSML｜｜parameter name=\"x\" string=\"true\">1</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>";
         let out = collect(vec![
-            text_delta("读取"),  // 无 <，正常透传
-            text_delta("<未完"), // < 触发 Probing
+            text_delta(dsml),
             Ok(StreamEvent::ToolCallStart {
                 id: "call_0".into(),
                 name: "read_file".into(),
             }),
-            text_delta("正在执行"), // 结构化已出现，不再缓冲
+            text_delta("结构化调用之后的正文"),
             Ok(StreamEvent::Done),
         ]);
-        assert!(
-            out.iter().any(|e| e.contains("TextDelta(\"读取")),
-            "缓冲前文本应透传：{out:?}"
-        );
-        assert!(
-            out.iter().any(|e| e.contains("TextDelta(\"<未完")),
-            "pending 应在 ToolCallStart 前吐出：{out:?}"
-        );
         assert!(out.iter().any(|e| e.contains("ToolCallStart")));
+        assert!(out.iter().any(|e| e.contains("结构化调用之后的正文")));
         assert!(
-            out.iter().any(|e| e.contains("TextDelta(\"正在执行")),
-            "结构化工具调用后文本应正常透传：{out:?}"
+            !out.iter().any(|e| e.contains("TextProtocolToolCall")),
+            "结构化通道出现后不应再转出文本协议调用：{out:?}"
         );
     }
-
     #[test]
-    fn probing_exits_when_window_exhausted() {
-        // < 后 10 字符内无 tool/dsml → 窗口耗尽整块吐出，恢复正常透传。
-        let out = collect(vec![
-            text_delta("前文"),
-            text_delta("<abcdefghij"), // 10 字符无关键词 → 窗口耗尽吐出
-            text_delta("后续正常"),    // 已回 Idle，正常透传
-            Ok(StreamEvent::Done),
-        ]);
-        let combined: String = out
-            .iter()
-            .filter(|e| e.contains("TextDelta"))
-            .cloned()
-            .collect();
-        assert!(
-            combined.contains("<abcdefghij"),
-            "窗口耗尽应整块吐出：{out:?}"
-        );
-        assert!(
-            out.iter().any(|e| e.contains("TextDelta(\"后续正常")),
-            "退出后应正常透传：{out:?}"
-        );
-        assert!(!out.iter().any(|e| e.contains("TextProtocolToolCall")));
-    }
-
-    #[test]
-    fn code_block_not_infinitely_buffered() {
-        // 代码块含多个 <，每个 < 后窗口内均无关键词 → 各自整块吐出。
-        let out = collect(vec![
-            text_delta("```html\n<div><span>hello</span></div>\n```"),
-            Ok(StreamEvent::Done),
-        ]);
-        let combined: String = out
-            .iter()
-            .filter(|e| e.contains("TextDelta"))
-            .cloned()
-            .collect();
-        assert!(
-            combined.contains("<div>") && combined.contains("<span>hello</span>"),
-            "代码块应完整吐出不被吞：{out:?}"
-        );
-        assert!(!out.iter().any(|e| e.contains("TextProtocolToolCall")));
-    }
-
-    #[test]
-    fn usage_waits_for_done_before_resolution() {
-        // Usage 可能先于 Done 到达，不能用它提前解析尚未结束的 content。
+    fn usage_passes_through_and_resolution_waits_for_done() {
+        // Usage 先于 Done 到达时正文已透传，工具转换仍等 Done。
         let dsml = "<｜｜DSML｜｜invoke name=\"fn\">\n<｜｜DSML｜｜parameter name=\"x\" string=\"true\">1</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>";
         let usage = Usage {
             prompt_tokens: 10,
@@ -465,7 +423,13 @@ mod buffer_tests {
             completion_tokens_details: None,
         };
         let mut state = BufferState::default();
-        assert!(apply_buffer(&mut state, text_delta(dsml)).is_empty());
+        let text_events = apply_buffer(&mut state, text_delta(dsml));
+        assert!(
+            text_events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::TextDelta(_)))),
+            "正文应即时透传：{text_events:?}"
+        );
         let usage_events = apply_buffer(&mut state, Ok(StreamEvent::Usage(usage)));
         assert!(
             usage_events
@@ -475,9 +439,9 @@ mod buffer_tests {
         assert!(
             usage_events
                 .iter()
-                .all(|event| !matches!(event, Ok(StreamEvent::TextProtocolToolCall { .. })))
+                .all(|event| !matches!(event, Ok(StreamEvent::TextProtocolToolCall { .. }))),
+            "Done 前不得转出工具调用"
         );
-
         let done_events = apply_buffer(&mut state, Ok(StreamEvent::Done));
         assert!(
             done_events
@@ -485,9 +449,8 @@ mod buffer_tests {
                 .any(|event| matches!(event, Ok(StreamEvent::TextProtocolToolCall { .. })))
         );
     }
-
     #[test]
-    fn complete_response_resolves_multiple_invokes_as_one_group() {
+    fn done_resolves_multiple_invokes_as_one_group() {
         let dsml = "<｜｜DSML｜｜tool_calls>
 <｜｜DSML｜｜invoke name=\"fn_a\">
 <｜｜DSML｜｜parameter name=\"x\" string=\"true\">1</｜｜DSML｜｜parameter>
@@ -499,15 +462,14 @@ mod buffer_tests {
         let mut state = BufferState::default();
         let first_invoke_end =
             dsml.find("</｜｜DSML｜｜invoke>").unwrap() + "</｜｜DSML｜｜invoke>".len();
+        let mid_events = apply_buffer(&mut state, text_delta(&dsml[..first_invoke_end]));
         assert!(
-            apply_buffer(&mut state, text_delta(&dsml[..first_invoke_end])).is_empty(),
-            "第一个 invoke 结束时不能提前解析"
+            mid_events
+                .iter()
+                .all(|event| !matches!(event, Ok(StreamEvent::TextProtocolToolCall { .. }))),
+            "完整流结束前不得提前转出"
         );
-        assert!(
-            apply_buffer(&mut state, text_delta(&dsml[first_invoke_end..])).is_empty(),
-            "完整 content 结束前不能提前解析"
-        );
-
+        apply_buffer(&mut state, text_delta(&dsml[first_invoke_end..]));
         let out = apply_buffer(&mut state, Ok(StreamEvent::Done));
         let calls = out
             .iter()
@@ -519,16 +481,9 @@ mod buffer_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(calls, vec![("textcall_0", "fn_a"), ("textcall_1", "fn_b")]);
-        assert!(
-            out.iter().all(
-                |event| !matches!(event, Ok(StreamEvent::TextDelta(text)) if text.contains("DSML"))
-            ),
-            "完整工具调用组不应泄漏协议标记：{out:?}"
-        );
     }
-
     #[test]
-    fn long_tool_arguments_are_not_downgraded_to_plain_text() {
+    fn long_tool_arguments_still_resolve_as_tool_call() {
         let value = "a".repeat(5_000);
         let dsml = format!(
             "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"write_file\">\n<｜｜DSML｜｜parameter name=\"content\" string=\"true\">{value}</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
@@ -537,32 +492,7 @@ mod buffer_tests {
         assert!(
             out.iter()
                 .any(|event| event.contains("TextProtocolToolCall") && event.contains("write_file")),
-            "长参数仍应识别为工具调用"
-        );
-        assert!(
-            !out.iter()
-                .any(|event| event.contains("TextDelta") && event.contains("DSML")),
-            "长参数工具调用不应作为普通文本透传"
-        );
-    }
-
-    #[test]
-    fn toolbar_text_does_not_enter_protocol_buffering() {
-        let mut state = BufferState::default();
-        let out = apply_buffer(
-            &mut state,
-            text_delta("<toolbar>普通内容继续输出，不是工具协议"),
-        );
-        assert!(out.iter().any(|event| matches!(
-            event,
-            Ok(StreamEvent::TextDelta(text)) if text.contains("<toolbar>")
-        )));
-        assert!(
-            matches!(
-                out.last(),
-                Some(Ok(StreamEvent::TextDelta(_))) | Some(Ok(StreamEvent::Done))
-            ),
-            "非协议文本应即时吐出而非滞留缓冲：{out:?}"
+            "长参数仍应在 Done 识别为工具调用"
         );
     }
 }
