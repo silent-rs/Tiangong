@@ -735,7 +735,7 @@ fn parse_prompt_sections_response(value: serde_json::Value) -> anyhow::Result<Ve
 /// 快照，不做 I/O；文件与 sidecar 内容变化经 [`PROMPT_UPDATED_CHANNEL`]
 /// 通知 / 重载重取，计入能力指纹走上下文交接。清单未声明 prompt 时返回
 /// None（与「声明了但当前解析为空」区分，指纹只对 Some 计入段落摘要）。
-pub(super) fn assemble_prompt_sections(
+pub(crate) fn assemble_prompt_sections(
     storage_root: &Path,
     plugin_directory: &Path,
     manifest: &PluginManifest,
@@ -826,10 +826,12 @@ fn fetch_sidecar_prompt_sections(
 /// 内容变化由 [`crate::registry::enabled_plugin_fingerprint`] 计入，触发
 /// 上下文交接（压缩 message）。通知线程调用，阻塞 I/O 无碍。
 pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
-    let Some(install_dir) = plugin_install_directory(plugin_id) else {
+    // plugin_install_directory 返回 <root>/plugins/<id>，即插件目录本身；
+    // 存储根再上溯两级。
+    let Some(plugin_dir) = plugin_install_directory(plugin_id) else {
         return;
     };
-    let Some(storage_root) = install_dir
+    let Some(storage_root) = plugin_dir
         .parent()
         .and_then(std::path::Path::parent)
         .map(std::path::Path::to_path_buf)
@@ -845,15 +847,20 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
         };
         (loaded.manifest.clone(), loaded.verified_sidecar.clone())
     };
-    let Some(install_dir) = install_dir.parent().map(Path::to_path_buf) else {
-        return;
-    };
     let sections =
-        assemble_prompt_sections(&storage_root, &install_dir, &manifest, verified.as_deref());
+        assemble_prompt_sections(&storage_root, &plugin_dir, &manifest, verified.as_deref());
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(loaded) = plugins.get_mut(plugin_id)
+        && loaded.prompt_sections != sections
     {
         loaded.prompt_sections = sections;
+        drop(plugins);
+        // 内容变化即插件能力变化：与升级/启停同一事件通道，宿主（UI 刷新、
+        // 上下文交接打标）按指纹定档响应。锁全部释放后发布。
+        crate::events::announce_plugin_change(
+            crate::events::PluginChangeKind::PromptSectionsChanged,
+            plugin_id,
+        );
     }
 }
 

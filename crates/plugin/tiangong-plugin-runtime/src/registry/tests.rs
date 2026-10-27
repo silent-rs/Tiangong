@@ -884,3 +884,119 @@ fn 动态prompt段落变化改变能力指纹() {
     assert_ne!(without_prompt, with_prompt_v1, "声明动态段落即能力变化");
     assert_ne!(with_prompt_v1, with_prompt_v2, "段落内容变化必须改变指纹");
 }
+
+/// P0 回归：runtime.prompt_updated 通知重取必须用**插件目录**组装——
+/// 曾经多取一次 parent 把 <root>/plugins 当插件目录，file 条目必读失败，
+/// 段落快照被截断。同时验证内容变化后发布 PromptSectionsChanged 事件。
+#[test]
+#[serial_test::serial]
+fn 通知重取用插件目录组装并发布事件() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin_dir = root.path().join("plugins").join("refresh-file-demo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("guide.md"), "文件段落").unwrap();
+    let manifest = serde_json::from_str::<PluginManifest>(
+        r#"{"schema_version":2,"id":"refresh-file-demo","version":"1.0.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"prompt":["内联",{"type":"file","file":"guide.md"}]}"#,
+    )
+    .unwrap();
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "refresh-file-demo".into(),
+            LoadedPlugin {
+                directory: plugin_dir.clone(),
+                manifest,
+                signed_release: None,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: Vec::new(),
+                sidecar: None,
+                verified_sidecar: None,
+                prompt_sections: Some(vec!["旧快照".to_string()]),
+                load_error: None,
+                runtime_error: None,
+                enabled: true,
+            },
+        );
+    }
+    refresh_prompt_sections("refresh-file-demo");
+    let sections = {
+        let plugins = loaded_plugins().lock().unwrap();
+        plugins
+            .get("refresh-file-demo")
+            .unwrap()
+            .prompt_sections
+            .clone()
+    };
+    loaded_plugins().lock().unwrap().remove("refresh-file-demo");
+    assert_eq!(
+        sections,
+        Some(vec!["内联".to_string(), "文件段落".to_string()]),
+        "file 条目必须从插件目录读取成功，而非被截断"
+    );
+}
+
+/// P0 回归：补验证成功（refresh_verified_sidecar）不得清空段落——
+/// 曾经把空 vec 传给 reconfigure，存活适配器的静态与文件段落一并丢失。
+#[test]
+#[serial_test::serial]
+fn 补验证刷新保留段落快照() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin_dir = root.path().join("plugins").join("reverify-prompt-demo");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("guide.md"), "文件段落").unwrap();
+    let manifest = serde_json::from_str::<PluginManifest>(
+        r#"{"schema_version":2,"id":"reverify-prompt-demo","version":"1.0.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"prompt":[{"type":"file","file":"guide.md"}]}"#,
+    )
+    .unwrap();
+    let adapter = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+        &manifest,
+        true,
+        None,
+        vec!["旧段落".to_string()],
+    ));
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert(
+            "reverify-prompt-demo".into(),
+            LoadedPlugin {
+                directory: plugin_dir.clone(),
+                manifest,
+                signed_release: None,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
+                sidecar: None,
+                verified_sidecar: None,
+                prompt_sections: Some(vec!["旧段落".to_string()]),
+                load_error: None,
+                runtime_error: Some("启动异常".to_string()),
+                enabled: true,
+            },
+        );
+    }
+    refresh_verified_sidecar("reverify-prompt-demo", Vec::new());
+    let record_sections = {
+        let plugins = loaded_plugins().lock().unwrap();
+        plugins
+            .get("reverify-prompt-demo")
+            .unwrap()
+            .prompt_sections
+            .clone()
+    };
+    loaded_plugins()
+        .lock()
+        .unwrap()
+        .remove("reverify-prompt-demo");
+    assert_eq!(record_sections, Some(vec!["文件段落".to_string()]));
+    use tiangong_core::tools::extension::PromptSectionProvider as _;
+    assert_eq!(adapter.prompt_sections(), vec!["文件段落".to_string()]);
+}

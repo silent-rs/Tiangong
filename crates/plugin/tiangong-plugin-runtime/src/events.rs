@@ -24,6 +24,10 @@ pub enum PluginChangeKind {
     Disabled,
     /// 卸载（含无效插件清理）。
     Uninstalled,
+    /// 动态 prompt 段落内容变化（sidecar 经 `runtime.prompt_updated` 通知
+    /// 重取后内容有变）：能力指纹随段落摘要变化，订阅者按指纹触发上下文
+    /// 交接（压缩 message），与升级/启停同链路。
+    PromptSectionsChanged,
 }
 
 /// 插件生命周期变化事件：迁移成功后由 runtime 发布。

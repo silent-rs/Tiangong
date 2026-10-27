@@ -389,7 +389,7 @@ fn set_plugin_enabled_inner(
 /// 后台补验证/重新验证成功后，同步刷新注册表与存活 TS 适配器的验证能力
 ///（已构建的 Core 实例立即按新能力路由，无需等待下一次 Core 构建）。
 pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String>) {
-    let (manifest, enabled, ts_instances) = {
+    let (manifest, enabled, directory, ts_instances) = {
         let Ok(mut plugins) = loaded_plugins().lock() else {
             return;
         };
@@ -403,6 +403,7 @@ pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String
         (
             loaded.manifest.clone(),
             loaded.enabled,
+            loaded.directory.clone(),
             loaded
                 .ts_instances
                 .iter()
@@ -410,14 +411,39 @@ pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String
                 .collect::<Vec<_>>(),
         )
     };
-    for adapter in ts_instances {
+    // 能力变化可能改变段落门控（sidecar 条目）：按新能力在锁外重新组装
+    // （组装含阻塞 I/O，不得持锁），记录与适配器共用同一份结果。
+    let storage_root = directory
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf);
+    let sections = storage_root
+        .as_deref()
+        .and_then(|root| {
+            crate::registry::assemble_prompt_sections(
+                root,
+                &directory,
+                &manifest,
+                Some(capabilities.as_slice()),
+            )
+        })
+        .unwrap_or_default();
+    for adapter in &ts_instances {
         adapter.reconfigure(
             &manifest,
             enabled,
             Some(capabilities.clone()),
-            // 迁移重配不触发段落重取：动态声明走装载与通知路径。
-            Vec::new(),
+            sections.clone(),
         );
+    }
+    if let Ok(mut plugins) = loaded_plugins().lock()
+        && let Some(loaded) = plugins.get_mut(plugin_id)
+    {
+        loaded.prompt_sections = if manifest.prompt.is_some() {
+            Some(sections)
+        } else {
+            None
+        };
     }
 }
 
