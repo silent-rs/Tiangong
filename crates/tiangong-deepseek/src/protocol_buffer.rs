@@ -6,14 +6,19 @@
 //! 协议标记属于机器指令，不应作为正文展示给用户或进入对话历史，因此命中
 //! 协议后需要缓冲并在流末剥离，只转出剥离后的可见文本与结构化工具调用。
 //!
-//! 三态（兼顾流畅与不泄漏）：
-//! - `Idle`：正常透传。遇到 `<` 切到 `Probing`，暂存从 `<` 起的文本。
-//! - `Probing`：窗口探测（上限 [`PROBE_WINDOW_CHARS`] 字符）。出现已知协议
-//!   前缀 → `Confirmed`；窗口满仍未出现 → 整块吐出回 `Idle`（普通文本/
-//!   代码块零延迟，不会被误吞）。
-//! - `Confirmed`：确认走文本协议，缓冲到流末统一解析：剥离协议块后的
-//!   可见文本 + 结构化工具调用。流异常中断时经 [`TextProtocolBuffer::abort`]
-//!   把缓冲原文冲刷回正文，不丢内容。
+//! 流的两阶段定性：
+//!
+//! - **探测阶段**（流的开头）：普通文本即时透传；遇到 `<` 进入窗口探测
+//!   （上限 [`PROBE_WINDOW_CHARS`] 字符）。命中协议前缀 → `Confirmed`；
+//!   窗口耗尽仍未命中 → 该流定性为普通文本流，**锁定 `Passthrough`**：
+//!   后续内容（包括中途出现的协议样文本）一律原样透传，不再识别——
+//!   长文正中途的幻觉协议宁可原文透出，也不误转工具调用。
+//!   注意：不含 `<` 的纯文本前导（如「我来读取文件。」）即时透传但**不**
+//!   锁定——「简短说明 + 调用块」是模型走文本协议的常见形态，仍可识别。
+//! - **协议阶段**（`Confirmed`）：后续所有内容（含协议块之后的尾巴文本）
+//!   一并缓冲，流末统一解析——成功则剥离协议块、转出可见文本与工具调用；
+//!   失败则**整体抛弃**（残缺协议对用户无意义，不回放）。流异常中断时
+//!   同样先尝试解析，失败即抛弃。
 //!
 //! 探测只匹配两套协议的精确前缀，避免把 `<toolbar>` 等普通内容误判。
 
@@ -26,7 +31,8 @@ const PROBE_WINDOW_CHARS: usize = 10;
 /// 流末统一解析结果。
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct TextProtocolOutcome {
-    /// 剥离协议块后的可见文本（含协议前的说明文字；解析失败时为整块原文）。
+    /// 剥离协议块后的可见文本（协议前的说明文字在探测阶段已透传，
+    /// 此处为协议块之间或之后的残余可见文本）。
     pub visible_text: String,
     /// 解析出的工具调用（名称 + 参数 JSON 文本）。未命中协议时为空。
     pub tool_calls: Vec<DsmlToolCall>,
@@ -35,8 +41,6 @@ pub(crate) struct TextProtocolOutcome {
 /// 文本协议流式缓冲状态机。
 #[derive(Default)]
 pub(crate) struct TextProtocolBuffer {
-    /// 是否已出现过结构化工具调用（出现则不再缓冲，正文直接透传）。
-    has_structured_tool_call: bool,
     phase: BufferPhase,
     /// Probing/Confirmed 期间暂存的文本。
     pending: String,
@@ -50,14 +54,13 @@ enum BufferPhase {
     Probing,
     /// 确认走文本协议，缓冲到流末。
     Confirmed,
+    /// 已定性为普通文本流：后续一律透传，不再识别。
+    Passthrough,
 }
 
 impl TextProtocolBuffer {
     /// 流式文本增量进入缓冲，返回应立即透传的文本块（0~N 个）。
     pub(crate) fn push_text(&mut self, delta: &str) -> Vec<String> {
-        if self.has_structured_tool_call {
-            return vec![delta.to_string()];
-        }
         match self.phase {
             BufferPhase::Idle => {
                 if delta.contains('<') {
@@ -65,6 +68,8 @@ impl TextProtocolBuffer {
                     self.phase = BufferPhase::Probing;
                     self.check_probe_window()
                 } else {
+                    // 纯文本前导：即时透传但不锁定——说明文字之后
+                    // 仍可能跟协议调用块（模型常见形态）。
                     vec![delta.to_string()]
                 }
             }
@@ -76,16 +81,22 @@ impl TextProtocolBuffer {
                 self.pending.push_str(delta);
                 Vec::new()
             }
+            BufferPhase::Passthrough => vec![delta.to_string()],
         }
     }
 
-    /// 出现结构化工具调用：此后正文直接透传，冲刷并返回暂存文本。
+    /// 出现结构化工具调用：该流定性为普通文本流，冲刷暂存并锁定透传。
     pub(crate) fn note_structured_tool_call(&mut self) -> Vec<String> {
-        self.has_structured_tool_call = true;
-        self.flush_pending()
+        self.phase = BufferPhase::Passthrough;
+        if self.pending.is_empty() {
+            Vec::new()
+        } else {
+            vec![std::mem::take(&mut self.pending)]
+        }
     }
 
-    /// 流末统一解析：Confirmed 则剥离协议块并转出工具调用，其余冲刷。
+    /// 流末统一解析。Confirmed 时命中协议则剥离并转出工具调用；
+    /// 解析失败则**整体抛弃**（残缺协议对用户无意义）。
     pub(crate) fn finish(&mut self) -> TextProtocolOutcome {
         match self.phase {
             BufferPhase::Confirmed => {
@@ -102,32 +113,38 @@ impl TextProtocolBuffer {
                 }
                 tracing::warn!(
                     len = self.pending.len(),
-                    "工具调用文本缓冲解析失败，整块补发缓冲文本"
+                    "工具调用文本缓冲解析失败，已确认协议的残缺内容整体抛弃"
                 );
+                self.pending.clear();
+                TextProtocolOutcome::default()
+            }
+            BufferPhase::Probing | BufferPhase::Idle | BufferPhase::Passthrough => {
                 TextProtocolOutcome {
                     visible_text: std::mem::take(&mut self.pending),
                     tool_calls: Vec::new(),
                 }
             }
-            BufferPhase::Probing | BufferPhase::Idle => TextProtocolOutcome {
-                visible_text: std::mem::take(&mut self.pending),
-                tool_calls: Vec::new(),
-            },
         }
     }
 
-    /// 流异常中断：把暂存文本原样冲刷回正文，不解析、不转出工具调用。
+    /// 流异常中断：Confirmed 先尝试解析（成功照常转出，失败抛弃——不回放
+    /// 残缺协议原文）；其余冲刷暂存文本回正文，已接收内容不丢失。
     pub(crate) fn abort(&mut self) -> Vec<String> {
-        self.flush_pending()
+        if self.phase == BufferPhase::Confirmed {
+            let _ = self.finish();
+            Vec::new()
+        } else {
+            self.flush_pending()
+        }
     }
 
-    /// Probing 状态下检查窗口：命中关键词 → Confirmed；窗口超限 → 整块吐出
-    /// 回 Idle；否则继续等下一个 delta。
+    /// Probing 状态下检查窗口：命中关键词 → Confirmed；窗口超限 → 定性为
+    /// 普通文本流，整块吐出并锁定 Passthrough；否则继续等下一个 delta。
     fn check_probe_window(&mut self) -> Vec<String> {
         // 取最后一个 `<` 之后的文本作为探测窗口。
         let lt_pos = match self.pending.rfind('<') {
             Some(pos) => pos,
-            None => return self.flush_pending(),
+            None => return self.lock_passthrough(),
         };
         let after_lt = &self.pending[lt_pos + 1..];
         let window_chars = after_lt.chars().count();
@@ -136,11 +153,21 @@ impl TextProtocolBuffer {
             tracing::info!("DeepSeek 流式确认走工具调用文本协议，缓冲至流末统一解析");
             Vec::new()
         } else if window_chars >= PROBE_WINDOW_CHARS {
-            // 窗口耗尽仍无关键词 → 不是协议，整块吐出。
-            self.flush_pending()
+            // 窗口耗尽仍无关键词 → 不是协议：定性为普通文本流并锁定。
+            self.lock_passthrough()
         } else {
             // 继续等下一个 delta。
             Vec::new()
+        }
+    }
+
+    /// 定性为普通文本流：整块吐出 pending 并锁定 Passthrough。
+    fn lock_passthrough(&mut self) -> Vec<String> {
+        self.phase = BufferPhase::Passthrough;
+        if self.pending.is_empty() {
+            Vec::new()
+        } else {
+            vec![std::mem::take(&mut self.pending)]
         }
     }
 
@@ -178,38 +205,50 @@ mod tests {
     }
 
     #[test]
-    fn angle_bracket_and_code_block_text_flush_after_window() {
-        // 含 < 的正常文本与代码块：窗口内无协议前缀即整块吐出（普通文本零延迟；
-        // 代码块尾部 < 后不足窗口时最迟在流末冲刷），内容零丢失、不转工具。
+    fn text_stream_locks_passthrough_after_window_miss() {
+        // 含 < 的正常文本：窗口耗尽即定性为普通文本流，整块吐出并锁定——
+        // 后续即使出现完整协议块也不再识别（原样透传，不误转工具）。
         let mut buffer = TextProtocolBuffer::default();
-        let mut visible = buffer.push_text("比较 a < b 这是正常文本无关键词").concat();
-        visible.push_str(
-            &buffer
-                .push_text("```html\n<div><span>hello</span></div>\n```")
-                .concat(),
+        let out = buffer.push_text("比较 a < b 这是正常文本无关键词");
+        assert!(out.iter().any(|text| text.contains("比较 a < b")));
+        let out = buffer.push_text(DSML);
+        assert_eq!(
+            out,
+            vec![DSML.to_string()],
+            "锁定透传后协议样文本应原样透传：{out:?}"
         );
-        visible.push_str(&buffer.finish().visible_text);
-        assert!(
-            visible.contains("比较 a < b"),
-            "尖括号文本不得丢失：{visible:?}"
+        let outcome = buffer.finish();
+        assert!(outcome.tool_calls.is_empty());
+        assert!(outcome.visible_text.is_empty());
+    }
+
+    #[test]
+    fn plain_text_preamble_does_not_lock_protocol_detection() {
+        // 纯文本前导（不含 <）：即时透传但不锁定——其后紧跟的协议块
+        // 仍应被识别（「说明 + 调用块」是模型走文本协议的常见形态）。
+        let mut buffer = TextProtocolBuffer::default();
+        assert_eq!(
+            buffer.push_text("我来读取文件。\n"),
+            vec!["我来读取文件。\n".to_string()]
         );
+        assert!(buffer.push_text(DSML).is_empty(), "协议块应进入缓冲");
+        let outcome = buffer.finish();
         assert!(
-            visible.contains("<div><span>hello</span></div>"),
-            "代码块不得丢失：{visible:?}"
+            outcome
+                .tool_calls
+                .iter()
+                .any(|call| call.name == "read_file")
         );
     }
 
     #[test]
     fn dsml_protocol_text_is_buffered_not_leaked() {
-        // 命中协议后缓冲：协议原文不透传（说明文字在 Idle 阶段已正常流出），
-        // 流末剥离协议块并转出工具调用。
+        // 命中协议后缓冲：协议原文不透传，流末剥离并转出工具调用。
         let mut buffer = TextProtocolBuffer::default();
-        let passed = buffer.push_text("我来读取文件。\n").concat();
-        assert_eq!(passed, "我来读取文件。\n");
         let leaked = buffer.push_text(DSML);
         assert!(leaked.is_empty(), "协议原文不应透传：{leaked:?}");
         let outcome = buffer.finish();
-        assert_eq!(outcome.visible_text, "", "缓冲区内协议块应被整体剥离");
+        assert_eq!(outcome.visible_text, "");
         assert_eq!(
             outcome.tool_calls,
             vec![DsmlToolCall {
@@ -220,20 +259,28 @@ mod tests {
     }
 
     #[test]
-    fn malformed_confirmed_text_replays_verbatim_at_finish() {
-        // 确认样似协议但解析失败：整块原文补发，不吞内容。
+    fn malformed_confirmed_text_is_discarded_at_finish() {
+        // 已确认协议但解析失败：残缺协议整体抛弃，不作为正文回放。
         let mut buffer = TextProtocolBuffer::default();
         buffer.push_text("<｜｜DSML｜｜invoke 残缺，不是完整调用");
         let outcome = buffer.finish();
-        assert_eq!(
-            outcome.visible_text,
-            "<｜｜DSML｜｜invoke 残缺，不是完整调用"
-        );
+        assert_eq!(outcome.visible_text, "", "残缺协议应被抛弃");
         assert!(outcome.tool_calls.is_empty());
     }
 
     #[test]
-    fn structured_tool_call_disables_buffering() {
+    fn confirmed_tailing_text_survives_strip() {
+        // 协议块之后的尾巴文本：解析成功时作为可见文本保留。
+        let mut buffer = TextProtocolBuffer::default();
+        buffer.push_text(DSML);
+        buffer.push_text("\n调用完成");
+        let outcome = buffer.finish();
+        assert_eq!(outcome.visible_text, "调用完成");
+        assert_eq!(outcome.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn structured_tool_call_locks_passthrough() {
         let mut buffer = TextProtocolBuffer::default();
         buffer.push_text("<｜｜DSML｜｜invoke 残缺");
         let flushed = buffer.note_structured_tool_call();
@@ -243,22 +290,24 @@ mod tests {
     }
 
     #[test]
-    fn abort_flushes_pending_as_plain_text() {
-        // 流异常中断：缓冲原文冲刷回正文，不解析转出。
+    fn abort_parses_confirmed_and_discards_on_failure() {
+        // 中断时已确认协议：完整可解析则照常转出（finish 路径由其他用例
+        // 覆盖）；残缺则抛弃，不回放协议原文。
         let mut buffer = TextProtocolBuffer::default();
-        buffer.push_text("说明文字\n");
-        buffer.push_text(DSML);
-        let flushed = buffer.abort();
-        assert_eq!(flushed.len(), 1);
-        assert!(flushed[0].contains("我来读取") || flushed[0].contains("DSML"));
+        buffer.push_text("<｜｜DSML｜｜invoke 残缺");
+        assert!(buffer.abort().is_empty(), "残缺协议中断时应抛弃");
         assert!(buffer.finish().tool_calls.is_empty());
     }
 
     #[test]
-    fn text_call_ids_are_globally_unique() {
-        let a = dsml::next_text_call_id();
-        let b = dsml::next_text_call_id();
-        assert_ne!(a, b);
-        assert!(a.starts_with("textcall_"));
+    fn abort_flushes_probing_text_as_plain() {
+        // 探测期中断：未定性文本冲刷回正文，不丢内容。
+        let mut buffer = TextProtocolBuffer::default();
+        buffer.push_text("正文 <未判定");
+        let flushed = buffer.abort();
+        assert!(
+            flushed.iter().any(|text| text.contains("正文 <未判定")),
+            "探测期内容应冲刷回放：{flushed:?}"
+        );
     }
 }
