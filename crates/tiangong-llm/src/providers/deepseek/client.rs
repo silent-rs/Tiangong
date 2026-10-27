@@ -1,28 +1,23 @@
-use std::time::Duration;
-
-use async_trait::async_trait;
-use futures_util::Stream;
-use tiangong_deepseek::types::{ChatCompletionRequest, ChatCompletionResponse, EventStream};
-
-use crate::error::LlmError;
-use crate::model::ProviderModelInfo;
-use crate::stream::ProviderStreamEvent;
-
 use super::config::DeepSeekConfig;
 use super::error::map_deepseek_error;
+use crate::error::LlmError;
+use crate::model::ProviderModelInfo;
+use async_trait::async_trait;
+use futures_util::Stream;
+use std::time::Duration;
+use tiangong_deepseek::types::{CreateResponseRequest, ResponseObject, ResponsesEventStream};
 
-pub type DeepSeekStream =
-    std::pin::Pin<Box<dyn Stream<Item = Result<ProviderStreamEvent, LlmError>> + Send>>;
+pub type DeepSeekStream = std::pin::Pin<
+    Box<dyn Stream<Item = Result<crate::stream::ProviderStreamEvent, LlmError>> + Send>,
+>;
 
 #[async_trait]
 pub(crate) trait DeepSeekTransport: Send + Sync {
-    async fn create(
+    async fn create(&self, request: CreateResponseRequest) -> Result<ResponseObject, LlmError>;
+    async fn create_stream(
         &self,
-        request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse, LlmError>;
-
-    async fn create_stream(&self, request: ChatCompletionRequest) -> Result<EventStream, LlmError>;
-
+        request: CreateResponseRequest,
+    ) -> Result<ResponsesEventStream, LlmError>;
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError>;
 }
 
@@ -68,21 +63,21 @@ impl NativeDeepSeekTransport {
 
 #[async_trait]
 impl DeepSeekTransport for NativeDeepSeekTransport {
-    async fn create(
-        &self,
-        request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse, LlmError> {
+    async fn create(&self, request: CreateResponseRequest) -> Result<ResponseObject, LlmError> {
         self.with_direct_retry(|client| {
             let request = request.clone();
-            async move { client.chat().create(request).await }
+            async move { client.responses().create(request).await }
         })
         .await
     }
 
-    async fn create_stream(&self, request: ChatCompletionRequest) -> Result<EventStream, LlmError> {
+    async fn create_stream(
+        &self,
+        request: CreateResponseRequest,
+    ) -> Result<ResponsesEventStream, LlmError> {
         self.with_direct_retry(|client| {
             let request = request.clone();
-            async move { client.chat().create_stream(request).await }
+            async move { client.responses().create_stream(request).await }
         })
         .await
     }
@@ -120,10 +115,7 @@ impl<T> DeepSeekClient<T>
 where
     T: DeepSeekTransport,
 {
-    pub async fn create(
-        &self,
-        request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse, LlmError> {
+    pub async fn create(&self, request: CreateResponseRequest) -> Result<ResponseObject, LlmError> {
         let model = request.model.clone();
         self.run_with_retry("deepseek_complete", &model, false, || {
             let request = request.clone();
@@ -134,8 +126,8 @@ where
 
     pub async fn create_stream(
         &self,
-        request: ChatCompletionRequest,
-    ) -> Result<EventStream, LlmError> {
+        request: CreateResponseRequest,
+    ) -> Result<ResponsesEventStream, LlmError> {
         let model = request.model.clone();
         self.run_with_retry("deepseek_stream", &model, true, || {
             let request = request.clone();
@@ -164,7 +156,6 @@ where
     {
         let mut attempt = 0u32;
         let mut delay_ms = 1000u64;
-
         loop {
             let start = std::time::Instant::now();
             tracing::info!(

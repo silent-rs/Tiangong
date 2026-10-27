@@ -64,7 +64,8 @@ fn chat_reply(protocol: ProviderProtocol) -> serde_json::Value {
             "content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn",
             "usage":{"input_tokens":1,"output_tokens":1}
         }),
-        ProviderProtocol::OpenAi => json!({
+        // OpenAI 与 DeepSeek 均走 Responses API（POST /responses）。
+        ProviderProtocol::OpenAi | ProviderProtocol::DeepSeek => json!({
             "id":"resp","status":"completed","model":"test-model",
             "output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}

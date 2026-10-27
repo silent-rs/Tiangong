@@ -1,40 +1,36 @@
 {
-  "max_tokens": 1024,
-  "messages": [
-    {
-      "content": "系统提示",
-      "role": "system"
-    },
+  "input": [
     {
       "content": "继续",
-      "role": "user"
+      "role": "user",
+      "type": "message"
     }
   ],
+  "instructions": "系统提示",
+  "max_output_tokens": 1024,
   "model": "test-model",
-  "reasoning_effort": "high",
-  "thinking": {
-    "type": "enabled"
+  "reasoning": {
+    "effort": "high"
   },
+  "stream": false,
   "tool_choice": "auto",
   "tools": [
     {
-      "function": {
-        "description": "读取文件",
-        "name": "read_file",
-        "parameters": {
-          "properties": {
-            "path": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "path"
-          ],
-          "type": "object"
-        }
+      "description": "读取文件",
+      "name": "read_file",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
       },
       "type": "function"
     }
   ],
-  "user_id": "snapshot-session"
+  "user": "snapshot-session"
 }

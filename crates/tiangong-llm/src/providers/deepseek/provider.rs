@@ -1,16 +1,14 @@
-use async_trait::async_trait;
-
+use super::client::{DeepSeekClient, NativeDeepSeekTransport};
+use super::config::DeepSeekConfig;
+use super::mapping::{from_deepseek_response, to_deepseek_request};
+use super::stream::map_deepseek_stream;
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::provider::{LlmProvider, ProviderCapabilities};
 use crate::request::ProviderRequest;
 use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
-
-use super::client::{DeepSeekClient, NativeDeepSeekTransport};
-use super::config::DeepSeekConfig;
-use super::mapping::{from_deepseek_response, to_deepseek_request};
-use super::stream::map_deepseek_stream;
+use async_trait::async_trait;
 
 #[derive(Clone)]
 pub struct DeepSeekProvider<T = NativeDeepSeekTransport> {
@@ -23,7 +21,6 @@ impl DeepSeekProvider<NativeDeepSeekTransport> {
             client: DeepSeekClient::from_config(config)?,
         })
     }
-
     pub fn new(config: DeepSeekConfig) -> Result<Self, LlmError> {
         Self::from_config(config)
     }
@@ -54,13 +51,10 @@ where
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
-        let mut request =
+        let request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
-        // 流式请求必须显式开启 stream，并要求在流末返回 usage 统计。
-        request.stream = Some(true);
-        request.stream_options = Some(tiangong_deepseek::types::StreamOptions {
-            include_usage: true,
-        });
+        // Responses 模式下 stream 标志由 SDK 在 create_stream 内强制开启
+        // （语义化 SSE，终止事件后无 [DONE] 标记），无需在此设置。
         let event_stream = self.client.create_stream(request).await?;
         Ok(map_deepseek_stream(event_stream))
     }
