@@ -18,4 +18,8 @@ pub use config::DeepSeekConfig;
 pub use error::DeepSeekError;
 
 #[cfg(test)]
+mod responses_stream_tests;
+#[cfg(test)]
+pub(crate) mod testing;
+#[cfg(test)]
 mod tests;
