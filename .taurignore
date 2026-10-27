@@ -5,3 +5,6 @@
 plugins/
 bots/
 xtask/
+# tests/：集成测试与请求组装快照的读写（cargo test、UPDATE_REQUEST_SNAPSHOTS）
+# 同样不需要重启 dev 模式下的应用。
+tests/
