@@ -6,6 +6,7 @@ pub mod dsml;
 pub mod error;
 pub mod files;
 pub mod models;
+pub(crate) mod protocol_buffer;
 pub mod responses;
 pub mod tools;
 pub mod types;

@@ -1,7 +1,6 @@
 use futures_util::{StreamExt, stream};
 
 use crate::client::DeepSeekClient;
-use crate::dsml;
 use crate::error::DeepSeekError;
 use crate::types::{
     ChatCompletionRequest, ChatCompletionResponse, EventStream, StreamChunk, StreamEvent,
@@ -181,182 +180,54 @@ fn looks_like_json(first: &[u8]) -> bool {
         .is_some_and(|byte| *byte == b'{' || *byte == b'[')
 }
 
-/// 文本协议缓冲状态机。
-///
-/// 三态：
-/// - `Idle`：正常透传。遇到 `<` 切到 `Probing`，暂存从 `<` 起的文本。
-/// - `Probing`：窗口探测。累积 `<` 后的文本（窗口上限 `PROBE_WINDOW_CHARS` 字符），
-///   出现已知协议前缀 → `Confirmed`；窗口满仍未出现 → 整块吐出回 `Idle`。
-/// - `Confirmed`：确认走文本协议，持续缓冲到完整响应结束后统一解析。
-///
-/// 探测只匹配两套协议的精确前缀，避免把 `<toolbar>` 等普通内容误判为工具调用。
+/// 文本协议缓冲状态（三态状态机见 [`crate::protocol_buffer`]）。
 #[derive(Default)]
 struct BufferState {
-    /// 是否已出现过结构化 ToolCallStart（出现则永不缓冲）。
-    has_structured_tool_call: bool,
-    /// 当前状态。
-    phase: BufferPhase,
-    /// Probing/Confirmed 期间暂存的文本。
-    pending: String,
+    buffer: crate::protocol_buffer::TextProtocolBuffer,
 }
-
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
-enum BufferPhase {
-    #[default]
-    Idle,
-    /// 遇到 `<`，在窗口内探测协议关键词。
-    Probing,
-    /// 确认走文本协议，缓冲到流末。
-    Confirmed,
-}
-
-/// Probing 窗口：`<` 后最多探测多少字符。覆盖两套协议的标记前缀
-/// （原生 `<｜tool` 约 5 字符，DSML `<｜｜DSML` 约 6 字符），留足余量。
-const PROBE_WINDOW_CHARS: usize = 10;
-
-/// 判断累计文本是否含已知协议前缀（不区分大小写）。
-fn contains_protocol_prefix(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("｜tool") || lower.contains("｜｜dsml")
-}
-
 /// 对单个事件施加缓冲逻辑，可能产出 0~N 个事件。
 fn apply_buffer(
     state: &mut BufferState,
     result: Result<StreamEvent, DeepSeekError>,
 ) -> Vec<Result<StreamEvent, DeepSeekError>> {
     match result {
-        Ok(StreamEvent::TextDelta(delta)) => {
-            // 结构化工具调用已出现 → 不可能再走文本协议，直接透传。
-            if state.has_structured_tool_call {
-                return vec![Ok(StreamEvent::TextDelta(delta))];
-            }
-            handle_text_delta(state, delta)
-                .into_iter()
-                .map(Ok)
-                .collect()
-        }
+        Ok(StreamEvent::TextDelta(delta)) => state
+            .buffer
+            .push_text(&delta)
+            .into_iter()
+            .map(|text| Ok(StreamEvent::TextDelta(text)))
+            .collect(),
         Ok(StreamEvent::ToolCallStart { .. }) => {
-            state.has_structured_tool_call = true;
-            let mut events = flush_pending(state);
+            let mut events: Vec<_> = state
+                .buffer
+                .note_structured_tool_call()
+                .into_iter()
+                .map(|text| Ok(StreamEvent::TextDelta(text)))
+                .collect();
             events.push(result);
             events
         }
-        Ok(StreamEvent::Usage(usage)) => {
-            // Usage 不是内容结束标记。继续等待 Done，确保根据完整 content 统一识别。
-            vec![Ok(StreamEvent::Usage(usage))]
-        }
         Ok(StreamEvent::Done) => {
+            let outcome = state.buffer.finish();
             let mut events = Vec::new();
-            if state.phase == BufferPhase::Confirmed {
-                events = resolve_confirmed(state);
-            } else if state.phase == BufferPhase::Probing {
-                events = flush_pending(state);
+            if !outcome.leftover_text.is_empty() {
+                events.push(Ok(StreamEvent::TextDelta(outcome.leftover_text)));
+            }
+            for (idx, call) in outcome.tool_calls.into_iter().enumerate() {
+                events.push(Ok(StreamEvent::TextProtocolToolCall {
+                    id: format!("textcall_{idx}"),
+                    name: call.name,
+                    arguments: call.arguments,
+                }));
             }
             events.push(Ok(StreamEvent::Done));
             events
         }
+        // Usage 等其余事件不是内容结束标记，原样透传；
+        // 完整 content 的统一识别留到 Done。
         other => vec![other],
     }
 }
-
-/// 处理 TextDelta，返回 0~N 个事件（不含 Err）。
-fn handle_text_delta(state: &mut BufferState, delta: String) -> Vec<StreamEvent> {
-    match state.phase {
-        BufferPhase::Idle => {
-            if delta.contains('<') {
-                // 含 `<`：暂存并进入窗口探测。
-                state.pending.push_str(&delta);
-                state.phase = BufferPhase::Probing;
-                check_probe_window(state)
-            } else {
-                vec![StreamEvent::TextDelta(delta)]
-            }
-        }
-        BufferPhase::Probing => {
-            state.pending.push_str(&delta);
-            check_probe_window(state)
-        }
-        BufferPhase::Confirmed => {
-            state.pending.push_str(&delta);
-            Vec::new()
-        }
-    }
-}
-
-/// 完整响应结束后对确认的协议文本做最终解析。
-fn resolve_confirmed(state: &mut BufferState) -> Vec<Result<StreamEvent, DeepSeekError>> {
-    state.phase = BufferPhase::Idle;
-    if let Some(calls) = dsml::parse_dsml_tool_calls(state.pending.trim()) {
-        tracing::info!(count = calls.len(), "工具调用文本协议兜底解析出工具调用");
-        let leftover = dsml::strip_tool_call_block(state.pending.trim());
-        state.pending.clear();
-        let mut events = Vec::new();
-        if !leftover.is_empty() {
-            events.push(Ok(StreamEvent::TextDelta(leftover)));
-        }
-        for (idx, call) in calls.into_iter().enumerate() {
-            events.push(Ok(StreamEvent::TextProtocolToolCall {
-                id: format!("textcall_{idx}"),
-                name: call.name,
-                arguments: call.arguments,
-            }));
-        }
-        events
-    } else {
-        tracing::warn!(
-            len = state.pending.len(),
-            "工具调用文本缓冲解析失败，整块补发缓冲文本"
-        );
-        flush_pending(state)
-    }
-}
-
-/// Probing 状态下检查窗口：命中关键词 → Confirmed；窗口超限 → 整块吐出回 Idle；否则继续等。
-fn check_probe_window(state: &mut BufferState) -> Vec<StreamEvent> {
-    // 取最后一个 `<` 之后的文本作为探测窗口。
-    let lt_pos = match state.pending.rfind('<') {
-        Some(pos) => pos,
-        None => return flush_to_events(state),
-    };
-    let after_lt = &state.pending[lt_pos + 1..];
-    let window_chars = after_lt.chars().count();
-
-    if contains_protocol_prefix(&state.pending) {
-        state.phase = BufferPhase::Confirmed;
-        tracing::info!("DeepSeek 流式确认走工具调用文本协议，等待完整响应");
-        Vec::new()
-    } else if window_chars >= PROBE_WINDOW_CHARS {
-        // 窗口耗尽仍无关键词 → 不是协议，整块吐出。
-        flush_to_events(state)
-    } else {
-        // 继续等下一个 delta。
-        Vec::new()
-    }
-}
-
-/// 整块吐出 pending 并回 Idle。
-fn flush_to_events(state: &mut BufferState) -> Vec<StreamEvent> {
-    if state.pending.is_empty() {
-        state.phase = BufferPhase::Idle;
-        return Vec::new();
-    }
-    let text = std::mem::take(&mut state.pending);
-    state.phase = BufferPhase::Idle;
-    vec![StreamEvent::TextDelta(text)]
-}
-
-/// 整块透传 pending 并回 Idle。
-fn flush_pending(state: &mut BufferState) -> Vec<Result<StreamEvent, DeepSeekError>> {
-    if state.pending.is_empty() {
-        state.phase = BufferPhase::Idle;
-        return Vec::new();
-    }
-    let text = std::mem::take(&mut state.pending);
-    state.phase = BufferPhase::Idle;
-    vec![Ok(StreamEvent::TextDelta(text))]
-}
-
 /// 解析单个 SSE chunk，可能产出多个事件。
 ///
 /// 同一 delta 理论上可同时携带 reasoning_content / content / tool_calls，
@@ -686,6 +557,12 @@ mod buffer_tests {
             event,
             Ok(StreamEvent::TextDelta(text)) if text.contains("<toolbar>")
         )));
-        assert!(state.phase == BufferPhase::Idle);
+        assert!(
+            matches!(
+                out.last(),
+                Some(Ok(StreamEvent::TextDelta(_))) | Some(Ok(StreamEvent::Done))
+            ),
+            "非协议文本应即时吐出而非滞留缓冲：{out:?}"
+        );
     }
 }
