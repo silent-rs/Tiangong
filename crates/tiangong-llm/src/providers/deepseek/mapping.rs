@@ -417,8 +417,10 @@ pub fn from_deepseek_response(
                     if !leftover.trim().is_empty() {
                         content.push(MessageContent::Text(leftover.trim().to_string()));
                     }
-                    for (idx, call) in text_calls.into_iter().enumerate() {
-                        let call_id = format!("textcall_{idx}");
+                    for call in text_calls {
+                        // 官方要求 call_id 唯一：历史每轮全量回传，
+                        // 局部下标会跨轮重复，取全局唯一 id。
+                        let call_id = tiangong_deepseek::dsml::next_text_call_id();
                         content.push(MessageContent::ToolCall(crate::tool::ToolCall {
                             id: call_id.clone(),
                             name: call.name.clone(),

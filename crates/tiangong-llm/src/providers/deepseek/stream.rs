@@ -158,9 +158,17 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             // 网关只在此处携带完整 function_call items。未发过 Start 的调用
             // 先补 Start（携带工具名），再按需补发完整参数；上层聚合依赖
             // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
-            for item in &response.output {
+            for (output_index, item) in response.output.iter().enumerate() {
                 if let ResponseOutputItem::FunctionCall(call) = item {
-                    let call_id = resolve_call_id(&call.call_id, call.id.as_deref());
+                    // 与 added / done 的占位规则统一：call_id 与 item id 均缺失时
+                    // 以输出序号生成稳定占位，避免多个调用合并到同一空 id。
+                    let call_id = if !call.call_id.trim().is_empty() {
+                        call.call_id.clone()
+                    } else {
+                        call.id
+                            .clone()
+                            .unwrap_or_else(|| format!("item_{output_index}"))
+                    };
                     if !state.started_call_ids.contains(&call_id) {
                         state.started_call_ids.insert(call_id.clone());
                         events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
@@ -237,15 +245,6 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
         | ResponsesStreamEvent::WebSearchCallSearching { .. }
         | ResponsesStreamEvent::WebSearchCallCompleted { .. }
         | ResponsesStreamEvent::Unknown { .. } => Vec::new(),
-    }
-}
-
-/// 解析回传用 call_id：优先 call_id 字段，缺失时退回 item 的服务端 id。
-fn resolve_call_id(call_id: &str, item_id: Option<&str>) -> String {
-    if !call_id.trim().is_empty() {
-        call_id.to_string()
-    } else {
-        item_id.unwrap_or_default().to_string()
     }
 }
 
