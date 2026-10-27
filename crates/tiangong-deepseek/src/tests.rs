@@ -1121,6 +1121,52 @@ fn mock_client(addr: &str) -> crate::client::DeepSeekClient {
 }
 
 #[tokio::test]
+async fn responses_stream_failed_terminal_skips_text_protocol_resolution() {
+    // P2-2 回归：SSE 正文命中协议（Confirmed 缓冲）后收到 response.failed，
+    // 失败响应不得把缓冲的协议文本转出为工具调用。
+    use crate::types::ResponsesStreamEvent;
+    use futures_util::StreamExt;
+    let dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+    let sse = format!(
+        "data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":{dsml_json}}}\n\n\
+         data: {{\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{{\"id\":\"resp_f\",\"object\":\"response\",\"created_at\":0,\"status\":\"failed\",\"error\":{{\"code\":\"s\",\"message\":\"m\"}},\"model\":\"m\",\"output\":[]}}}}\n\n",
+        dsml_json = serde_json::to_string(dsml).unwrap()
+    );
+    let server = MockServer::start(vec![sse_response(&sse)]);
+    let client = mock_client(&server.addr);
+    let mut stream = client
+        .responses()
+        .create_stream(crate::types::CreateResponseRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            instructions: Some("hi".into()),
+            tools: Some(vec![crate::types::ResponsesTool::Function(
+                crate::types::ResponsesFunctionTool {
+                    name: "read_file".into(),
+                    description: None,
+                    parameters: None,
+                },
+            )]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut call_events = 0usize;
+    let mut saw_failed = false;
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            ResponsesStreamEvent::OutputItemAdded {
+                item: crate::types::ResponseOutputItem::FunctionCall(_),
+                ..
+            } => call_events += 1,
+            ResponsesStreamEvent::ResponseFailed { .. } => saw_failed = true,
+            _ => {}
+        }
+    }
+    assert!(saw_failed, "流应以 failed 终止");
+    assert_eq!(call_events, 0, "failed 不得转出文本协议工具调用");
+}
+
+#[tokio::test]
 async fn responses_json_stream_with_structured_call_skips_text_protocol() {
     // 网关忽略 stream 返回一次性 JSON：output 同时含结构化 function_call 与
     // 协议样正文（如模型在讨论 DSML）。合成流不产结构化 item 事件，缓冲层

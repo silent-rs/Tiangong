@@ -540,6 +540,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_backfills_multiple_calls_with_missing_ids() {
+        // P2-1 回归：completed 携带多个 call_id 与 item id 均缺失的 function_call，
+        // 各自按 output_index 生成稳定占位（item_N），第二个不得因 id 相同
+        // 被 started 去重集合跳过而整条丢失。
+        let bare_call = |name: &str, arguments: &str| {
+            ResponseOutputItem::FunctionCall(OutputFunctionCall {
+                id: None,
+                status: None,
+                call_id: String::new(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            })
+        };
+        let events = vec![Ok(ResponsesStreamEvent::ResponseCompleted {
+            sequence_number: 1,
+            response: completed_response(vec![
+                bare_call("read_file", "{\"a\":1}"),
+                bare_call("write_file", "{\"b\":2}"),
+            ]),
+        })];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let starts: Vec<&ToolCall> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallStart(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts.len(),
+            2,
+            "两个双缺 id 调用都应补发 Start：{starts:?}"
+        );
+        assert_ne!(starts[0].id, starts[1].id, "占位 id 不得重复");
+        assert_eq!(starts[0].name, "read_file");
+        assert_eq!(starts[1].name, "write_file");
+    }
+
+    #[tokio::test]
     async fn incomplete_terminal_event_does_not_emit_error() {
         // incomplete 是截断而非错误：只发 Usage + MessageEnd，不发 Error，
         // 避免上层收到 Error 中断收尾导致截断信息被吞。
