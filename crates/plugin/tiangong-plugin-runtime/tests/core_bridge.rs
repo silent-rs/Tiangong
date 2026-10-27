@@ -97,6 +97,63 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
         .expect("清理测试插件 A");
 }
 
+/// 造一个仅声明 prompt 段落的 Desktop 插件（无 wasm/sidecar/tools）。
+fn stage_prompt_only_plugin(root: &Path, id: &str, marker: &str) {
+    let dir = root.join("plugins").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        format!(
+            r#"{{"schema_version":2,"id":"{id}","version":"0.1.0","entrypoints":["desktop"],"prompt":["{marker}"]}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// 段落聚合顺序回归：必须按 core_plugin_ids 的（prompt 置顶 + id 字典序）
+/// 输出，而非 `delivered` HashMap 的遍历序（每进程随机，会改写 system
+/// prompt 前缀）。7 个插件乱序装载，固定代码下顺序确定；旧实现靠随机
+/// 碰巧满足的概率仅 1/5040。
+#[test]
+fn 桥聚合_prompt段落顺序为prompt置顶加字典序() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    let staged = [
+        ("sz-order-e", "E"),
+        ("sz-order-c", "C"),
+        ("prompt", "IDENTITY"),
+        ("sz-order-a", "A"),
+        ("sz-order-d", "D"),
+        ("sz-order-b", "B"),
+    ];
+    for (id, marker) in staged {
+        stage_prompt_only_plugin(root.path(), id, marker);
+    }
+    assert!(
+        tiangong_plugin_runtime::registry::preload_installed_plugins(root.path()) >= 6,
+        "六个顺序测试插件应全部装入注册表"
+    );
+
+    let bridge = RuntimeCorePlugin::new(
+        RuntimeKind::Desktop,
+        root.path().to_path_buf(),
+        "bridge-order-test-session",
+    );
+    let sections = bridge.prompt_sections();
+    assert_eq!(
+        sections,
+        vec!["IDENTITY", "A", "B", "C", "D", "E"],
+        "段落顺序必须为 prompt 置顶 + id 字典序，与 prepare_plugins 一致"
+    );
+
+    for (id, _) in staged {
+        tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), id, false)
+            .unwrap_or_else(|error| panic!("清理顺序测试插件 {id} 失败：{error}"));
+    }
+}
+
 /// 并发聚合首见同一新插件：装载在锁外进行，双方结果一致且线程不卡死。
 #[test]
 fn 桥聚合_并发首见收敛() {

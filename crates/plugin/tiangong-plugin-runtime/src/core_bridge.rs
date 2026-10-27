@@ -226,8 +226,14 @@ impl RuntimeCorePlugin {
             delivered.entry(id).or_insert(adapter);
         }
         // core_plugin_ids 已按（prompt 置顶 + id 字典序）排序，
-        // 与 core::plugin::prepare_plugins 的插件序一致。
-        delivered.values().cloned().collect()
+        // 与 core::plugin::prepare_plugins 的插件序一致。按该序取值，
+        // 不能用 HashMap 遍历序——后者每进程随机，会改写 system prompt
+        // 前缀与工具声明顺序（破坏 KV cache 稳定与冲突裁决的确定性）。
+        // delivered 中不存在于当前 ids 的残留条目自然被跳过（与开头
+        // retain 同语义）。
+        ids.iter()
+            .filter_map(|id| delivered.get(id).cloned())
+            .collect()
     }
 
     /// 用聚合结果重建工具路由表，返回聚合的工具声明（含去重）。
