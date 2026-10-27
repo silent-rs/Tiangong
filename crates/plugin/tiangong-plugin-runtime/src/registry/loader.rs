@@ -715,13 +715,21 @@ pub(crate) fn tools_served_by_sidecar(
 /// 长时间拖住装载（与 @提及交互预算同量级）。
 const DYNAMIC_PROMPT_QUERY_BUDGET_MS: u64 = 3_000;
 
+/// 单个 prompt 文件的大小上限（64 KiB）。
+const MAX_PROMPT_FILE_BYTES: u64 = 64 * 1024;
+
 /// 解析 [`PROMPT_SECTIONS_OPERATION`] 响应：字符串数组，段落非空。
 fn parse_prompt_sections_response(value: serde_json::Value) -> anyhow::Result<Vec<String>> {
-    let sections = serde_json::from_value::<Vec<String>>(value)
+    let mut sections = serde_json::from_value::<Vec<String>>(value)
         .map_err(|error| anyhow::anyhow!("解析响应失败: {error}"))?;
-    if sections.iter().any(|section| section.trim().is_empty()) {
-        anyhow::bail!("动态 prompt 段落不能为空");
-    }
+    // 单条空段落只丢弃该条（warn），不让整批段落丢失。
+    sections.retain(|section| {
+        let non_empty = !section.trim().is_empty();
+        if !non_empty {
+            tracing::warn!("sidecar 返回了空 prompt 段落，已丢弃");
+        }
+        non_empty
+    });
     Ok(sections)
 }
 
@@ -751,15 +759,25 @@ pub(crate) fn assemble_prompt_sections(
             ) => sections.push(text.clone()),
             crate::manifest::PromptSectionDecl::Entry(
                 crate::manifest::PromptSectionEntry::File { file },
-            ) => match std::fs::read_to_string(plugin_directory.join(file.trim())) {
-                Ok(content) if !content.trim().is_empty() => sections.push(content),
-                Ok(_) => {
-                    tracing::warn!(plugin_id = %manifest.id, file, "prompt 文件内容为空，跳过")
+            ) => {
+                // 超上限（误指向二进制/数据文件）只跳过并告警：段落会整段
+                // 进入 system prompt / 对话内清单与能力指纹。
+                let path = plugin_directory.join(file.trim());
+                match std::fs::metadata(&path) {
+                    Ok(meta) if meta.len() > MAX_PROMPT_FILE_BYTES => {
+                        tracing::warn!(plugin_id = %manifest.id, file, size = meta.len(), "prompt 文件超过上限，跳过");
+                    }
+                    _ => match std::fs::read_to_string(&path) {
+                        Ok(content) if !content.trim().is_empty() => sections.push(content),
+                        Ok(_) => {
+                            tracing::warn!(plugin_id = %manifest.id, file, "prompt 文件内容为空，跳过")
+                        }
+                        Err(error) => {
+                            tracing::warn!(plugin_id = %manifest.id, file, %error, "prompt 文件读取失败，跳过该条目")
+                        }
+                    },
                 }
-                Err(error) => {
-                    tracing::warn!(plugin_id = %manifest.id, file, %error, "prompt 文件读取失败，跳过该条目")
-                }
-            },
+            }
             crate::manifest::PromptSectionDecl::Entry(
                 crate::manifest::PromptSectionEntry::Sidecar,
             ) => {
@@ -838,7 +856,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
     else {
         return;
     };
-    let (manifest, verified, enabled, ts_instances) = {
+    let (manifest, verified, enabled, generation, ts_instances) = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return;
         };
@@ -849,6 +867,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
             loaded.manifest.clone(),
             loaded.verified_sidecar.clone(),
             loaded.enabled,
+            loaded.generation,
             loaded
                 .ts_instances
                 .iter()
@@ -865,6 +884,12 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
         let Some(loaded) = plugins.get_mut(plugin_id) else {
             return;
         };
+        // 组装期间插件可能被升级/重载换代（directory+generation 变化）：
+        // 旧线程的结果不得写进新记录，丢弃等待新代自己的装载/通知。
+        if loaded.directory != plugin_dir || loaded.generation != generation {
+            tracing::warn!(plugin_id, "prompt 重取期间插件已换代，丢弃本次结果");
+            return;
+        }
         let changed = loaded.prompt_sections != sections;
         loaded.prompt_sections = sections.clone();
         changed
@@ -1375,10 +1400,14 @@ mod dynamic_prompt_loader_tests {
             parse_prompt_sections_response(serde_json::json!(["a", "b"])).unwrap(),
             ["a", "b"]
         );
+        // 单条空段落被丢弃而非整批失败；结构错误才失败
+        assert_eq!(
+            parse_prompt_sections_response(serde_json::json!(["a", " ", "b"])).unwrap(),
+            ["a", "b"]
+        );
         for invalid in [
             serde_json::json!(null),
             serde_json::json!({"sections": ["a"]}),
-            serde_json::json!([" "]),
             serde_json::json!(["a", 1]),
         ] {
             assert!(parse_prompt_sections_response(invalid).is_err());

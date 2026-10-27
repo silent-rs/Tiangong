@@ -1156,6 +1156,14 @@ impl ProcessSidecarConnection {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         loop {
+            // 有界请求在每轮循环判定 deadline：sidecar 持续发 progress 帧
+            // 时读超时不会触发，只在读超时臂判定会让 deadline 永不生效。
+            if let Some(deadline) = bounded_deadline
+                && std::time::Instant::now() >= deadline
+            {
+                return Err(SidecarInvokeError::Timeout)
+                    .with_context(|| format!("tcp sidecar 请求超时: {operation}"));
+            }
             match reader.read_line(&mut line) {
                 Ok(0) => bail!("sidecar 在返回响应前关闭连接"),
                 Ok(_) => {}

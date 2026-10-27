@@ -147,11 +147,10 @@ pub fn enabled_plugin_fingerprint() -> String {
                 .unwrap_or_else(|| loaded.manifest.version.clone());
             // 动态 prompt 段落内容计入键：装载时组装、通知重取更新——内容
             // 变化即能力变化，触发上下文交接（与版本升级同链路）。
-            let prompt_digest = loaded.prompt_sections.as_ref().map(|sections| {
-                let mut digest = fingerprint_of(sections);
-                digest.truncate(8);
-                digest
-            });
+            let prompt_digest = loaded
+                .prompt_sections
+                .as_ref()
+                .map(|sections| prompt_sections_digest(sections));
             match (version.is_empty(), prompt_digest) {
                 (true, None) => id.clone(),
                 (true, Some(digest)) => format!("{id}#{digest}"),
@@ -161,6 +160,25 @@ pub fn enabled_plugin_fingerprint() -> String {
         })
         .collect();
     fingerprint_of(&keys)
+}
+
+/// prompt 段落集合的内容摘要（32 bit 截断）：**保持顺序与重复**——
+/// 段落列表是有序声明，复用键集合的 sort+dedup 会把顺序变化与重复
+/// 段落漏判为未变化。长度前缀避免相邻段落的拼接歧义。
+fn prompt_sections_digest(sections: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for section in sections {
+        hasher.update((section.len() as u64).to_le_bytes());
+        hasher.update(section.as_bytes());
+    }
+    let mut digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    digest.truncate(8);
+    digest
 }
 
 /// 插件键集合的稳定摘要：排序去重后以分隔符拼接求 SHA-256。
