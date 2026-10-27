@@ -42,8 +42,9 @@
     }
   ],
   "tool_icons": {
-    "get_skill_detail": "book-open"
+    "get_skill_detail": "assets/tool-get-skill-detail.svg"
   },
+  "resources": ["assets"],
   "tool_titles": {
     "get_skill_detail": "查看 Skill 说明"
   },

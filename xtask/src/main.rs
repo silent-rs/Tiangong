@@ -457,7 +457,10 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
             "assets/tool-file-write.svg",
             "assets/tool-clock.svg",
         ],
+        // plugin.json tool_icons 引用的工具图标。
         "memory" => &["assets/tool-recall-memory.svg"],
+        // plugin.json tool_icons 引用的工具图标（翻开的书 + 星芒）。
+        "skill" => &["assets/tool-get-skill-detail.svg"],
         "computer-use" => &[
             "assets/tool-desktop-app.svg",
             "assets/tool-desktop-open.svg",
