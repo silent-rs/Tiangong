@@ -56,7 +56,7 @@ where
         // Responses 模式下 stream 标志由 SDK 在 create_stream 内强制开启
         // （语义化 SSE，终止事件后无 [DONE] 标记），无需在此设置。
         let event_stream = self.client.create_stream(request).await?;
-        Ok(map_deepseek_stream(event_stream))
+        Ok(map_deepseek_stream(event_stream, !req.tools.is_empty()))
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {

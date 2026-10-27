@@ -13,13 +13,16 @@ use tiangong_deepseek::types::{ResponseObject, ResponseOutputItem, ResponsesStre
 /// `response.incomplete` / `response.failed` 终止（无 `[DONE]` 标记）。
 /// 文本工具调用协议的兜底解析已下沉到 SDK（`tiangong_deepseek::responses`
 /// 内置缓冲并合成结构化 function_call 事件组），本函数只做事件类型转换。
+/// `tools_enabled` 与请求是否携带 tools 一致：completed 兜底补发正文时，
+/// 仅在启用工具的场景剥离文本协议块（无 tools 时协议文本按普通正文保留）。
 pub fn map_deepseek_stream(
     event_stream: tiangong_deepseek::types::ResponsesEventStream,
+    tools_enabled: bool,
 ) -> super::client::DeepSeekStream {
     let state = StreamState::default();
-    let mapped = event_stream.scan(state, |state, result| {
+    let mapped = event_stream.scan(state, move |state, result| {
         std::future::ready(Some(match result {
-            Ok(event) => map_event(state, event)
+            Ok(event) => map_event(state, event, tools_enabled)
                 .into_iter()
                 .map(Ok)
                 .collect::<Vec<_>>(),
@@ -46,7 +49,11 @@ struct StreamState {
     has_text_delta: bool,
     has_reasoning_delta: bool,
 }
-fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<ProviderStreamEvent> {
+fn map_event(
+    state: &mut StreamState,
+    event: ResponsesStreamEvent,
+    tools_enabled: bool,
+) -> Vec<ProviderStreamEvent> {
     match event {
         ResponsesStreamEvent::ResponseCreated { .. } => vec![ProviderStreamEvent::MessageStart],
         ResponsesStreamEvent::ResponseInProgress { .. } => Vec::new(),
@@ -62,15 +69,7 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = if !call.call_id.trim().is_empty() {
-                    call.call_id.clone()
-                } else {
-                    // call_id 缺失时以输出序号生成稳定占位，
-                    // 避免多个调用合并到同一空 id。
-                    call.id
-                        .clone()
-                        .unwrap_or_else(|| format!("item_{output_index}"))
-                };
+                let call_id = call_id_or_placeholder(&call, output_index);
                 if let Some(item_id) = call.id.as_deref() {
                     state
                         .item_call_ids
@@ -111,16 +110,7 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = if !call.call_id.trim().is_empty() {
-                    call.call_id.clone()
-                } else {
-                    state
-                        .index_call_ids
-                        .get(&output_index)
-                        .cloned()
-                        .or_else(|| call.id.clone())
-                        .unwrap_or_else(|| format!("item_{output_index}"))
-                };
+                let call_id = call_id_or_placeholder(&call, output_index);
                 let mut events = Vec::new();
                 // 网关在 added item 携带完整参数、且未发任何增量事件时，
                 // 在 done 补发一次完整参数，确保工具参数不丢失。
@@ -150,6 +140,17 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             }
             if !state.has_text_delta {
                 let text = collect_message_text(&response);
+                // 兜底文本可能含未剥离的协议块：纯协议回复时 SDK 缓冲层已把
+                // 协议文本消费为工具调用（不产文本增量），此处读到的是服务端
+                // 原始 output——统一做一次协议剥离，保证与增量路径同样干净，
+                // 协议原文不回灌正文或进入对话历史。
+                let text = if tiangong_deepseek::dsml::parse_dsml_tool_calls(text.trim()).is_some()
+                    && tools_enabled
+                {
+                    tiangong_deepseek::dsml::strip_tool_call_block(text.trim())
+                } else {
+                    text
+                };
                 if !text.is_empty() {
                     events.push(ProviderStreamEvent::TextDelta(text));
                 }
@@ -160,15 +161,7 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
             // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
             for (output_index, item) in response.output.iter().enumerate() {
                 if let ResponseOutputItem::FunctionCall(call) = item {
-                    // 与 added / done 的占位规则统一：call_id 与 item id 均缺失时
-                    // 以输出序号生成稳定占位，避免多个调用合并到同一空 id。
-                    let call_id = if !call.call_id.trim().is_empty() {
-                        call.call_id.clone()
-                    } else {
-                        call.id
-                            .clone()
-                            .unwrap_or_else(|| format!("item_{output_index}"))
-                    };
+                    let call_id = call_id_or_placeholder(call, output_index as u32);
                     if !state.started_call_ids.contains(&call_id) {
                         state.started_call_ids.insert(call_id.clone());
                         events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
@@ -248,6 +241,23 @@ fn map_event(state: &mut StreamState, event: ResponsesStreamEvent) -> Vec<Provid
     }
 }
 
+/// 解析回传用 call_id：优先 `call_id` 字段，缺失时退回 item 的服务端 id，
+/// 双缺时以输出序号生成稳定占位（`item_{output_index}`）。
+/// added / done / completed 三处共用同一规则，保证同一调用在各事件中
+/// 解析出相同 id（去重集合依赖此一致性）。
+fn call_id_or_placeholder(
+    call: &tiangong_deepseek::types::OutputFunctionCall,
+    output_index: u32,
+) -> String {
+    if !call.call_id.trim().is_empty() {
+        call.call_id.clone()
+    } else {
+        call.id
+            .clone()
+            .unwrap_or_else(|| format!("item_{output_index}"))
+    }
+}
+
 /// 收集全部 message item 的输出文本（等价 SDK 的 `output_text` 便捷访问）。
 fn collect_message_text(response: &ResponseObject) -> String {
     response
@@ -310,12 +320,15 @@ mod tests {
     async fn collect(
         events: Vec<Result<ResponsesStreamEvent, tiangong_deepseek::DeepSeekError>>,
     ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
+        collect_with_tools(events, true).await
+    }
+    async fn collect_with_tools(
+        events: Vec<Result<ResponsesStreamEvent, tiangong_deepseek::DeepSeekError>>,
+        tools_enabled: bool,
+    ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
         let stream: tiangong_deepseek::types::ResponsesEventStream =
             Box::pin(futures_util::stream::iter(events));
-        map_deepseek_stream(stream)
-            .map(|result| result)
-            .collect()
-            .await
+        map_deepseek_stream(stream, tools_enabled).collect().await
     }
 
     fn text_event(delta: &str) -> ResponsesStreamEvent {
@@ -577,6 +590,55 @@ mod tests {
         assert_ne!(starts[0].id, starts[1].id, "占位 id 不得重复");
         assert_eq!(starts[0].name, "read_file");
         assert_eq!(starts[1].name, "write_file");
+    }
+
+    #[tokio::test]
+    async fn completed_backfill_text_strips_protocol_block() {
+        // 第三轮 review P1 回归：纯协议回复时 SDK 缓冲层已把协议文本消费为
+        // 工具调用（无文本增量），completed 兜底读到的服务端原始 output 仍含
+        // 协议原文——启用 tools 时必须剥离，原文不得回灌正文；无 tools 时
+        // 协议文本按普通正文保留。
+        let dsml = "我来读取。\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+        let response = |text: &str| {
+            let mut response = completed_response(Vec::new());
+            response.output = vec![ResponseOutputItem::Message(OutputMessage {
+                id: Some("msg_1".to_string()),
+                status: None,
+                role: "assistant".to_string(),
+                content: vec![OutputContentBlock::OutputText(TextBlock {
+                    text: text.to_string(),
+                })],
+            })];
+            response
+        };
+        let events = |text: &str| {
+            vec![Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 1,
+                response: response(text),
+            })]
+        };
+        // 带 tools：协议块剥离，仅保留说明文字。
+        let out = collect_with_tools(events(dsml), true).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let text: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::TextDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "我来读取。", "协议原文不得回灌：{flattened:?}");
+        // 无 tools：协议文本按普通正文原样保留。
+        let out = collect_with_tools(events(dsml), false).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let text: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::TextDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("DSML"), "无 tools 时正文应原样保留：{text:?}");
     }
 
     #[tokio::test]

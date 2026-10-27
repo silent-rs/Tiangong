@@ -975,7 +975,11 @@ mod tests {
             panic!("应兜底解析出工具调用：{:?}", result.assistant_message);
         };
         assert_eq!(call.name, "read_file");
-        assert_eq!(call.id, "textcall_0");
+        assert!(
+            call.id.starts_with("textcall_"),
+            "应使用全局唯一 textcall id（不依赖执行顺序）：{}",
+            call.id
+        );
         assert_eq!(call.arguments, json!({"path": "/tmp/x"}));
         let MessageContent::Text(text) = &result.assistant_message.content[0] else {
             panic!("说明文字应保留");

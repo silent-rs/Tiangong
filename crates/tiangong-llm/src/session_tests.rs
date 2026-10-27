@@ -601,6 +601,67 @@ fn provider_headers_survive_resolution_and_legacy_configs_remain_valid() {
 }
 
 #[tokio::test]
+async fn deepseek_pure_protocol_stream_does_not_leak_text() {
+    // 第三轮 review P1 端到端回归：整条回复只有协议块（无普通正文增量）。
+    // SDK 缓冲层把协议文本消费为 textcall 工具调用，completed 兜底不得把
+    // 服务端原始 output 里的协议原文回灌为正文。
+    let dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+    let delta = format!(
+        "data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":{}}}\n\n",
+        serde_json::to_string(dsml).unwrap()
+    );
+    let completed = json!({
+        "type": "response.completed",
+        "sequence_number": 2,
+        "response": {
+            "id": "resp_dsml", "object": "response", "created_at": 0,
+            "status": "completed", "model": "test-model",
+            "output": [{"type": "message", "id": "msg_1", "role": "assistant",
+                "content": [{"type": "output_text", "text": dsml}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }
+    });
+    let body = format!("{delta}data: {completed}\n\n");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let req = ModelRequest {
+        tools: vec![ToolSpec {
+            name: "read_file".into(),
+            description: "读取".into(),
+            input_schema: json!({"type": "object"}),
+        }],
+        ..request("dsml-stream")
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let response = client.stream_async(req, tx).await.unwrap();
+    assert!(
+        !response.text.contains("DSML") && !response.text.contains("｜｜"),
+        "协议原文不得回灌正文：{:?}",
+        response.text
+    );
+    assert_eq!(response.tool_calls.len(), 1, "应转出一个工具调用");
+    assert_eq!(response.tool_calls[0].name, "read_file");
+    assert_eq!(
+        response.stop_reason,
+        Some(crate::response::StopReason::EndTurn)
+    );
+}
+
+#[tokio::test]
 async fn deepseek_gateway_json_stream_keeps_tool_calls() {
     // 网关忽略 stream=true 返回一次性 JSON 时，SDK 在内部把完整响应合成事件流。
     // 该兜底路径必须保留工具调用：function_call item 需要合成完整的
