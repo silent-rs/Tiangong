@@ -69,7 +69,7 @@ fn map_event(
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = call_id_or_placeholder(&call, output_index);
+                let call_id = call_id_or_placeholder(state, &call, output_index);
                 if let Some(item_id) = call.id.as_deref() {
                     state
                         .item_call_ids
@@ -110,7 +110,7 @@ fn map_event(
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = call_id_or_placeholder(&call, output_index);
+                let call_id = call_id_or_placeholder(state, &call, output_index);
                 let mut events = Vec::new();
                 // 网关在 added item 携带完整参数、且未发任何增量事件时，
                 // 在 done 补发一次完整参数，确保工具参数不丢失。
@@ -161,7 +161,7 @@ fn map_event(
             // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
             for (output_index, item) in response.output.iter().enumerate() {
                 if let ResponseOutputItem::FunctionCall(call) = item {
-                    let call_id = call_id_or_placeholder(call, output_index as u32);
+                    let call_id = call_id_or_placeholder(state, call, output_index as u32);
                     if !state.started_call_ids.contains(&call_id) {
                         state.started_call_ids.insert(call_id.clone());
                         events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
@@ -241,16 +241,22 @@ fn map_event(
     }
 }
 
-/// 解析回传用 call_id：优先 `call_id` 字段，缺失时退回 item 的服务端 id，
-/// 双缺时以输出序号生成稳定占位（`item_{output_index}`）。
-/// added / done / completed 三处共用同一规则，保证同一调用在各事件中
-/// 解析出相同 id（去重集合依赖此一致性）。
+/// 解析回传用 call_id。优先级：`call_id` 字段 → added 阶段按输出序号
+/// 登记的映射（`index_call_ids`，网关在 done / completed 省略 item id 时
+/// 由此还原同一 id）→ item 的服务端 id → 输出序号占位
+/// （`item_{output_index}`）。added / done / completed 三处共用同一规则，
+/// 保证同一调用在各事件中解析出相同 id——去重集合（started /
+/// received_argument_deltas）依赖此一致性，id 漂移会导致参数重复补发
+/// 或同一调用重复转出。
 fn call_id_or_placeholder(
+    state: &StreamState,
     call: &tiangong_deepseek::types::OutputFunctionCall,
     output_index: u32,
 ) -> String {
     if !call.call_id.trim().is_empty() {
         call.call_id.clone()
+    } else if let Some(mapped) = state.index_call_ids.get(&output_index) {
+        mapped.clone()
     } else {
         call.id
             .clone()
@@ -639,6 +645,88 @@ mod tests {
             })
             .collect();
         assert!(text.contains("DSML"), "无 tools 时正文应原样保留：{text:?}");
+    }
+
+    fn bare_function_call(id: Option<&str>, call_id: &str, arguments: &str) -> ResponseOutputItem {
+        ResponseOutputItem::FunctionCall(OutputFunctionCall {
+            id: id.map(str::to_string),
+            status: None,
+            call_id: call_id.to_string(),
+            name: "read_file".to_string(),
+            arguments: arguments.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn done_without_item_id_does_not_duplicate_arguments() {
+        // 第四轮 review P2-1 回归：added 带 item id、done 省略 id——done 应经
+        // index_call_ids 还原同一 call_id，参数只补发一份（不得拼成两份 JSON）。
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: bare_function_call(Some("fc_1"), "", ""),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 2,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "{\"path\":\"/tmp\"}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemDone {
+                sequence_number: 3,
+                output_index: 0,
+                item: bare_function_call(None, "", "{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 4,
+                response: completed_response(Vec::new()),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let joined: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta { partial_json, .. } => {
+                    Some(partial_json.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            joined, "{\"path\":\"/tmp\"}",
+            "参数只应有一份：{flattened:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_without_item_id_does_not_duplicate_call() {
+        // 第四轮 review P2-2 回归：added 带 item id、completed 省略 id——
+        // completed 应经 index_call_ids 还原同一 call_id，同一调用只转出一次。
+        let mut response = completed_response(Vec::new());
+        response.output = vec![bare_function_call(None, "", "{\"path\":\"/tmp\"}")];
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: bare_function_call(Some("fc_1"), "", ""),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 4,
+                response,
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let starts: Vec<&str> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallStart(call) => Some(call.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, vec!["fc_1"], "同一调用只应有一个 Start：{starts:?}");
     }
 
     #[tokio::test]

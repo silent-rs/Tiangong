@@ -601,6 +601,62 @@ fn provider_headers_survive_resolution_and_legacy_configs_remain_valid() {
 }
 
 #[tokio::test]
+async fn deepseek_malformed_protocol_stream_discards_text() {
+    // 第四轮 review P2-4 回归：纯残缺协议（SDK Confirmed 后解析失败、整体
+    // 抛弃、无文本增量）——终止事件 output 被 SDK 重写为可见文本（空），
+    // llm 兜底不得把原始协议文本回灌为正文。
+    let malformed = "<｜｜DSML｜｜tool_calls>\n这不是调用，只是一段说明";
+    let delta = format!(
+        "data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":{}}}\n\n",
+        serde_json::to_string(malformed).unwrap()
+    );
+    let completed = json!({
+        "type": "response.completed",
+        "sequence_number": 2,
+        "response": {
+            "id": "resp_bad", "object": "response", "created_at": 0,
+            "status": "completed", "model": "test-model",
+            "output": [{"type": "message", "id": "msg_1", "role": "assistant",
+                "content": [{"type": "output_text", "text": malformed}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }
+    });
+    let body = format!("{delta}data: {completed}\n\n");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let req = ModelRequest {
+        tools: vec![ToolSpec {
+            name: "read_file".into(),
+            description: "读取".into(),
+            input_schema: json!({"type": "object"}),
+        }],
+        ..request("malformed-dsml")
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let response = client.stream_async(req, tx).await.unwrap();
+    assert!(
+        !response.text.contains("DSML") && !response.text.contains("｜｜"),
+        "残缺协议原文不得回灌正文：{:?}",
+        response.text
+    );
+    assert!(response.tool_calls.is_empty(), "残缺协议不得转出工具调用");
+}
+
+#[tokio::test]
 async fn deepseek_pure_protocol_stream_does_not_leak_text() {
     // 第三轮 review P1 端到端回归：整条回复只有协议块（无普通正文增量）。
     // SDK 缓冲层把协议文本消费为 textcall 工具调用，completed 兜底不得把
