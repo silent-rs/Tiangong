@@ -11270,6 +11270,7 @@ dependencies = [
  "eventsource-stream",
  "futures-util",
  "reqwest 0.13.4",
+ "scru128",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

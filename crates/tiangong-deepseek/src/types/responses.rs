@@ -327,6 +327,11 @@ pub enum ResponseOutputItem {
     CustomToolCall(OutputCustomToolCall),
     #[serde(rename = "web_search_call")]
     WebSearchCall(WebSearchCallItem),
+    /// 服务端新增而 SDK 尚未支持的输出 item（如官方文档列出的 `tool_search_call`），
+    /// 按未知类型兜底反序列化，避免整个 ResponseObject 解析失败；回传时
+    /// 服务端会忽略不认识的 item 类型。
+    #[serde(other)]
+    Unknown,
 }
 
 impl Default for ResponseOutputItem {

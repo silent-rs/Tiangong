@@ -1,74 +1,814 @@
-use futures_util::{StreamExt, stream};
-
-use crate::error::LlmError;
-use crate::stream::ProviderStreamEvent;
-use crate::tool::ToolCall;
-
 use super::error::map_deepseek_error;
 use super::mapping::parse_stream_usage;
+use crate::response::StopReason;
+use crate::stream::ProviderStreamEvent;
+use crate::tool::ToolCall;
+use futures_util::{StreamExt, stream};
+use std::collections::{HashMap, HashSet};
+use tiangong_deepseek::types::{ResponseObject, ResponseOutputItem, ResponsesStreamEvent};
 
-/// 把 SDK 的 EventStream 机械映射为统一的 ProviderStreamEvent 流。
+/// 把 SDK 的 ResponsesEventStream 映射为统一的 ProviderStreamEvent 流。
 ///
-/// 文本工具调用协议的兜底解析已下沉到 SDK（`tiangong_deepseek::chat` 内置缓冲），
-/// 本函数只做事件类型转换，不含 DeepSeek 特有逻辑。
+/// Responses SSE 事件以 `type` 区分、以 `response.completed` /
+/// `response.incomplete` / `response.failed` 终止（无 `[DONE]` 标记）。
+/// 文本工具调用协议的兜底解析已下沉到 SDK（`tiangong_deepseek::responses`
+/// 内置缓冲并合成结构化 function_call 事件组），本函数只做事件类型转换。
+/// `tools_enabled` 与请求是否携带 tools 一致：completed 兜底补发正文时，
+/// 仅在启用工具的场景剥离文本协议块（无 tools 时协议文本按普通正文保留）。
 pub fn map_deepseek_stream(
-    event_stream: tiangong_deepseek::types::EventStream,
+    event_stream: tiangong_deepseek::types::ResponsesEventStream,
+    tools_enabled: bool,
 ) -> super::client::DeepSeekStream {
-    let mapped = event_stream.map(|result| match result {
-        Ok(event) => map_event(event),
-        Err(err) => vec![Err(map_deepseek_error(err))],
+    let state = StreamState::default();
+    let mapped = event_stream.scan(state, move |state, result| {
+        std::future::ready(Some(match result {
+            Ok(event) => map_event(state, event, tools_enabled)
+                .into_iter()
+                .map(Ok)
+                .collect::<Vec<_>>(),
+            Err(err) => vec![Err(map_deepseek_error(err))],
+        }))
     });
     Box::pin(mapped.flat_map(stream::iter))
 }
 
+/// 流式映射状态。
+#[derive(Default)]
+struct StreamState {
+    /// output item 的服务端 id（如 `fc_1`）→ 回传用 call_id。
+    /// 参数增量事件只携带 item_id，需要由此还原 call_id。
+    item_call_ids: HashMap<String, String>,
+    /// output_index → call_id：部分网关的增量事件不带（或带不同的）
+    /// item_id，以输出序号双键关联兜底。
+    index_call_ids: HashMap<u32, String>,
+    /// 已发过 ToolCallStart 的 call_id（completed 统一转出时去重）。
+    started_call_ids: HashSet<String>,
+    /// 已收到过参数增量的 call_id（done / completed 兜底补发完整参数时去重）。
+    received_argument_deltas: HashSet<String>,
+    /// 是否收到过正文 / 思考增量（completed 兜底补发时去重）。
+    has_text_delta: bool,
+    has_reasoning_delta: bool,
+}
 fn map_event(
-    event: tiangong_deepseek::types::StreamEvent,
-) -> Vec<Result<ProviderStreamEvent, LlmError>> {
-    use tiangong_deepseek::types::StreamEvent as E;
+    state: &mut StreamState,
+    event: ResponsesStreamEvent,
+    tools_enabled: bool,
+) -> Vec<ProviderStreamEvent> {
     match event {
-        E::ReasoningDelta(delta) => vec![Ok(ProviderStreamEvent::ReasoningDelta(delta))],
-        E::TextDelta(delta) => vec![Ok(ProviderStreamEvent::TextDelta(delta))],
-        E::ToolCallStart { id, name } => {
-            vec![Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                id,
-                name,
-                arguments: serde_json::json!({}),
-            }))]
+        ResponsesStreamEvent::ResponseCreated { .. } => vec![ProviderStreamEvent::MessageStart],
+        ResponsesStreamEvent::ResponseInProgress { .. } => Vec::new(),
+        ResponsesStreamEvent::ReasoningTextDelta { delta, .. } => {
+            state.has_reasoning_delta = true;
+            vec![ProviderStreamEvent::ReasoningDelta(delta)]
         }
-        E::ToolCallDelta { index, arguments } => {
-            vec![Ok(ProviderStreamEvent::ToolCallDelta {
-                call_id: index.to_string(),
-                partial_json: arguments,
-            })]
+        ResponsesStreamEvent::OutputTextDelta { delta, .. } => {
+            state.has_text_delta = true;
+            vec![ProviderStreamEvent::TextDelta(delta)]
         }
-        E::TextProtocolToolCall {
-            id,
-            name,
-            arguments,
-        } => {
-            // SDK 文本协议兜底解析出的完整工具调用，映射为 Start→Delta→End 三件套，
-            // 与结构化流式 tool_calls 的消费路径保持一致。
-            vec![
-                Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                    id: id.clone(),
-                    name,
+        ResponsesStreamEvent::OutputItemAdded {
+            output_index, item, ..
+        } => match item {
+            ResponseOutputItem::FunctionCall(call) => {
+                let call_id = call_id_or_placeholder(state, &call, output_index);
+                if let Some(item_id) = call.id.as_deref() {
+                    state
+                        .item_call_ids
+                        .insert(item_id.to_string(), call_id.clone());
+                }
+                state.index_call_ids.insert(output_index, call_id.clone());
+                state.started_call_ids.insert(call_id.clone());
+                // 不在 added 时下发参数：部分网关在 added item 携带完整参数后
+                // 仍会跟增量事件，立即下发会重复拼接；完整参数统一在
+                // done / completed 按需补发（增量以先到者为准）。
+                vec![ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: call_id,
+                    name: call.name.clone(),
                     arguments: serde_json::json!({}),
-                })),
-                Ok(ProviderStreamEvent::ToolCallDelta {
-                    call_id: id.clone(),
-                    partial_json: arguments,
-                }),
-                Ok(ProviderStreamEvent::ToolCallEnd { call_id: id }),
-            ]
+                })]
+            }
+            _ => Vec::new(),
+        },
+        ResponsesStreamEvent::FunctionCallArgumentsDelta {
+            item_id,
+            output_index,
+            delta,
+            ..
+        } => {
+            let call_id = state
+                .item_call_ids
+                .get(&item_id)
+                .or_else(|| state.index_call_ids.get(&output_index))
+                .cloned()
+                .unwrap_or(item_id);
+            state.received_argument_deltas.insert(call_id.clone());
+            vec![ProviderStreamEvent::ToolCallDelta {
+                call_id,
+                partial_json: delta,
+            }]
         }
-        E::Usage(usage) => vec![Ok(ProviderStreamEvent::Usage(parse_stream_usage(&usage)))],
-        E::FinishReason(reason) => vec![Ok(ProviderStreamEvent::MessageEnd {
-            stop_reason: Some(super::mapping::map_stop_reason(&reason)),
-        })],
-        E::Done => vec![Ok(ProviderStreamEvent::MessageEnd { stop_reason: None })],
-        E::Error(message) => vec![Err(LlmError::Provider {
-            provider: "deepseek",
-            message,
-        })],
+        ResponsesStreamEvent::OutputItemDone {
+            output_index, item, ..
+        } => match item {
+            ResponseOutputItem::FunctionCall(call) => {
+                let call_id = call_id_or_placeholder(state, &call, output_index);
+                let mut events = Vec::new();
+                // 网关在 added item 携带完整参数、且未发任何增量事件时，
+                // 在 done 补发一次完整参数，确保工具参数不丢失。
+                if !call.arguments.trim().is_empty()
+                    && !state.received_argument_deltas.contains(&call_id)
+                {
+                    state.received_argument_deltas.insert(call_id.clone());
+                    events.push(ProviderStreamEvent::ToolCallDelta {
+                        call_id: call_id.clone(),
+                        partial_json: call.arguments.clone(),
+                    });
+                }
+                events.push(ProviderStreamEvent::ToolCallEnd { call_id });
+                events
+            }
+            _ => Vec::new(),
+        },
+        ResponsesStreamEvent::ResponseCompleted { response, .. } => {
+            let mut events = Vec::new();
+            // 兜底补发正文与思考：部分网关/一次性 JSON 合成流不发增量事件，
+            // completed 的 output 里带完整内容，此处补发确保不丢文本。
+            if !state.has_reasoning_delta {
+                let reasoning = collect_reasoning_text(&response);
+                if !reasoning.is_empty() {
+                    events.push(ProviderStreamEvent::ReasoningDelta(reasoning));
+                }
+            }
+            if !state.has_text_delta {
+                let text = collect_message_text(&response);
+                // 兜底文本可能含未剥离的协议块：纯协议回复时 SDK 缓冲层已把
+                // 协议文本消费为工具调用（不产文本增量），此处读到的是服务端
+                // 原始 output——统一做一次协议剥离，保证与增量路径同样干净，
+                // 协议原文不回灌正文或进入对话历史。
+                let text = if tiangong_deepseek::dsml::parse_dsml_tool_calls(text.trim()).is_some()
+                    && tools_enabled
+                {
+                    tiangong_deepseek::dsml::strip_tool_call_block(text.trim())
+                } else {
+                    text
+                };
+                if !text.is_empty() {
+                    events.push(ProviderStreamEvent::TextDelta(text));
+                }
+            }
+            // 终止事件统一转出工具调用：一次性 JSON 合成流与不发增量事件的
+            // 网关只在此处携带完整 function_call items。未发过 Start 的调用
+            // 先补 Start（携带工具名），再按需补发完整参数；上层聚合依赖
+            // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
+            for (output_index, item) in response.output.iter().enumerate() {
+                if let ResponseOutputItem::FunctionCall(call) = item {
+                    let call_id = call_id_or_placeholder(state, call, output_index as u32);
+                    if !state.started_call_ids.contains(&call_id) {
+                        state.started_call_ids.insert(call_id.clone());
+                        events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
+                            id: call_id.clone(),
+                            name: call.name.clone(),
+                            arguments: serde_json::json!({}),
+                        }));
+                    }
+                    if !call.arguments.trim().is_empty()
+                        && !state.received_argument_deltas.contains(&call_id)
+                    {
+                        events.push(ProviderStreamEvent::ToolCallDelta {
+                            call_id,
+                            partial_json: call.arguments.clone(),
+                        });
+                    }
+                }
+            }
+            if let Some(usage) = &response.usage {
+                events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
+            }
+            let has_tool_call = response
+                .output
+                .iter()
+                .any(|item| matches!(item, ResponseOutputItem::FunctionCall(_)));
+            events.push(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(if has_tool_call {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::EndTurn
+                }),
+            });
+            events
+        }
+        ResponsesStreamEvent::ResponseIncomplete { response, .. } => {
+            let mut events = Vec::new();
+            if let Some(usage) = &response.usage {
+                events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
+            }
+            // incomplete 是截断而非错误（如 max_output_tokens 上限），不得发
+            // Error：上层收到 Error 会立即中断收尾，导致截断信息被静默吞掉。
+            events.push(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(incomplete_stop_reason(&response)),
+            });
+            events
+        }
+        ResponsesStreamEvent::ResponseFailed { response, .. } => {
+            let mut events = Vec::new();
+            if let Some(usage) = &response.usage {
+                events.push(ProviderStreamEvent::Usage(parse_stream_usage(usage)));
+            }
+            // MessageEnd 先于 Error：上层遇 Error 即中断，先收尾才能保留 stop_reason。
+            events.push(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::Other("failed".to_string())),
+            });
+            let message = response
+                .error
+                .as_ref()
+                .and_then(|error| error.message.clone())
+                .unwrap_or_else(|| "Responses 请求失败".to_string());
+            events.push(ProviderStreamEvent::Error(message));
+            events
+        }
+        // 其余事件（文本/思考完成片、web_search、custom 工具、未知事件）
+        // 不产生统一流事件，静默忽略。
+        ResponsesStreamEvent::OutputTextDone { .. }
+        | ResponsesStreamEvent::ReasoningTextDone { .. }
+        | ResponsesStreamEvent::FunctionCallArgumentsDone { .. }
+        | ResponsesStreamEvent::CustomToolCallInputDelta { .. }
+        | ResponsesStreamEvent::CustomToolCallInputDone { .. }
+        | ResponsesStreamEvent::ContentPartAdded { .. }
+        | ResponsesStreamEvent::ContentPartDone { .. }
+        | ResponsesStreamEvent::WebSearchCallInProgress { .. }
+        | ResponsesStreamEvent::WebSearchCallSearching { .. }
+        | ResponsesStreamEvent::WebSearchCallCompleted { .. }
+        | ResponsesStreamEvent::Unknown { .. } => Vec::new(),
+    }
+}
+
+/// 解析回传用 call_id。优先级：`call_id` 字段 → added 阶段按输出序号
+/// 登记的映射（`index_call_ids`，网关在 done / completed 省略 item id 时
+/// 由此还原同一 id）→ item 的服务端 id → 输出序号占位
+/// （`item_{output_index}`）。added / done / completed 三处共用同一规则，
+/// 保证同一调用在各事件中解析出相同 id——去重集合（started /
+/// received_argument_deltas）依赖此一致性，id 漂移会导致参数重复补发
+/// 或同一调用重复转出。
+fn call_id_or_placeholder(
+    state: &StreamState,
+    call: &tiangong_deepseek::types::OutputFunctionCall,
+    output_index: u32,
+) -> String {
+    if !call.call_id.trim().is_empty() {
+        call.call_id.clone()
+    } else if let Some(mapped) = state.index_call_ids.get(&output_index) {
+        mapped.clone()
+    } else {
+        call.id
+            .clone()
+            .unwrap_or_else(|| format!("item_{output_index}"))
+    }
+}
+
+/// 收集全部 message item 的输出文本（等价 SDK 的 `output_text` 便捷访问）。
+fn collect_message_text(response: &ResponseObject) -> String {
+    response
+        .output
+        .iter()
+        .filter_map(|item| match item {
+            ResponseOutputItem::Message(message) => Some(message),
+            _ => None,
+        })
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            tiangong_deepseek::types::OutputContentBlock::OutputText(text) => {
+                Some(text.text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// 收集全部 reasoning item 的思考文本。
+fn collect_reasoning_text(response: &ResponseObject) -> String {
+    response
+        .output
+        .iter()
+        .filter_map(|item| match item {
+            ResponseOutputItem::Reasoning(reasoning) => Some(reasoning),
+            _ => None,
+        })
+        .flat_map(|reasoning| reasoning.content.iter())
+        .filter_map(|block| match block {
+            tiangong_deepseek::types::OutputContentBlock::ReasoningText(text) => {
+                Some(text.text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn incomplete_stop_reason(response: &ResponseObject) -> StopReason {
+    match response
+        .incomplete_details
+        .as_ref()
+        .and_then(|details| details.reason.as_deref())
+    {
+        Some("max_output_tokens") => StopReason::MaxTokens,
+        Some("content_filter") => StopReason::Other("content_filter".to_string()),
+        _ => StopReason::Other("incomplete".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::LlmError;
+    use futures_util::StreamExt;
+    use tiangong_deepseek::types::{
+        OutputContentBlock, OutputFunctionCall, OutputMessage, ResponseStatus, TextBlock,
+    };
+
+    async fn collect(
+        events: Vec<Result<ResponsesStreamEvent, tiangong_deepseek::DeepSeekError>>,
+    ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
+        collect_with_tools(events, true).await
+    }
+    async fn collect_with_tools(
+        events: Vec<Result<ResponsesStreamEvent, tiangong_deepseek::DeepSeekError>>,
+        tools_enabled: bool,
+    ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
+        let stream: tiangong_deepseek::types::ResponsesEventStream =
+            Box::pin(futures_util::stream::iter(events));
+        map_deepseek_stream(stream, tools_enabled).collect().await
+    }
+
+    fn text_event(delta: &str) -> ResponsesStreamEvent {
+        ResponsesStreamEvent::OutputTextDelta {
+            sequence_number: 1,
+            item_id: "msg_1".to_string(),
+            output_index: 1,
+            content_index: 0,
+            delta: delta.to_string(),
+        }
+    }
+
+    fn function_call_item(arguments: &str) -> ResponseOutputItem {
+        ResponseOutputItem::FunctionCall(OutputFunctionCall {
+            id: Some("fc_1".to_string()),
+            status: None,
+            call_id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: arguments.to_string(),
+        })
+    }
+
+    fn completed_response(output: Vec<ResponseOutputItem>) -> ResponseObject {
+        ResponseObject {
+            id: "resp_1".to_string(),
+            object: "response".to_string(),
+            created_at: 0,
+            status: ResponseStatus::Completed,
+            error: None,
+            incomplete_details: None,
+            model: "deepseek-v4-pro".to_string(),
+            output,
+            usage: Some(tiangong_deepseek::types::ResponseUsage {
+                input_tokens: 10,
+                input_tokens_details: None,
+                output_tokens: 5,
+                output_tokens_details: None,
+                total_tokens: 15,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn text_stream_maps_to_start_delta_end() {
+        let events = vec![
+            Ok(ResponsesStreamEvent::ResponseCreated {
+                sequence_number: 0,
+                response: completed_response(Vec::new()),
+            }),
+            Ok(text_event("你")),
+            Ok(text_event("好")),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 9,
+                response: completed_response(vec![ResponseOutputItem::Message(OutputMessage {
+                    id: Some("msg_1".to_string()),
+                    status: None,
+                    role: "assistant".to_string(),
+                    content: vec![OutputContentBlock::OutputText(TextBlock {
+                        text: "你好".to_string(),
+                    })],
+                })]),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        assert!(matches!(flattened[0], ProviderStreamEvent::MessageStart));
+        assert!(matches!(
+            &flattened[1],
+            ProviderStreamEvent::TextDelta(text) if text == "你"
+        ));
+        // usage 在 completed 时发出。
+        assert!(
+            flattened
+                .iter()
+                .any(|event| matches!(event, ProviderStreamEvent::Usage(_)))
+        );
+        assert!(matches!(
+            flattened.last(),
+            Some(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::EndTurn)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn function_call_delta_events_assemble_to_tool_call() {
+        let events = vec![
+            Ok(ResponsesStreamEvent::ResponseCreated {
+                sequence_number: 0,
+                response: completed_response(Vec::new()),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 2,
+                output_index: 0,
+                item: function_call_item(""),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 3,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "{\"path\":".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 4,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "\"/tmp\"}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemDone {
+                sequence_number: 5,
+                output_index: 0,
+                item: function_call_item("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 6,
+                response: completed_response(vec![function_call_item("{\"path\":\"/tmp\"}")]),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        // 增量已收到，completed 不再重复补发参数。
+        let argument_deltas: Vec<_> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                } => Some((call_id.clone(), partial_json.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            argument_deltas,
+            vec![
+                ("call_1".to_string(), "{\"path\":".to_string()),
+                ("call_1".to_string(), "\"/tmp\"}".to_string()),
+            ],
+            "completed 兜底不应重复补发：{argument_deltas:?}"
+        );
+        assert!(matches!(
+            &flattened[1],
+            ProviderStreamEvent::ToolCallStart(call) if call.id == "call_1"
+        ));
+        assert!(flattened.iter().any(|event| matches!(
+            event,
+            ProviderStreamEvent::ToolCallEnd { call_id } if call_id == "call_1"
+        )));
+        assert!(matches!(
+            flattened.last(),
+            Some(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::ToolUse)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_backfills_full_arguments_without_deltas() {
+        // 网关不发参数增量：completed 的 output 里补发完整参数。
+        let events = vec![
+            Ok(ResponsesStreamEvent::ResponseCreated {
+                sequence_number: 0,
+                response: completed_response(Vec::new()),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 2,
+                output_index: 0,
+                item: function_call_item("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 6,
+                response: completed_response(vec![function_call_item("{\"path\":\"/tmp\"}")]),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        // added 已携带完整参数并即时下发，completed 不重复。
+        let argument_deltas: Vec<_> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                } => Some((call_id.clone(), partial_json.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            argument_deltas,
+            vec![("call_1".to_string(), "{\"path\":\"/tmp\"}".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_event_maps_to_error_and_end() {
+        let mut response = completed_response(Vec::new());
+        response.status = ResponseStatus::Failed;
+        response.error = Some(tiangong_deepseek::types::ResponseError {
+            code: Some("server_error".to_string()),
+            message: Some("内部错误".to_string()),
+        });
+        let events = vec![Ok(ResponsesStreamEvent::ResponseFailed {
+            sequence_number: 3,
+            response,
+        })];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        assert!(flattened.iter().any(|event| matches!(
+            event,
+            ProviderStreamEvent::Error(message) if message == "内部错误"
+        )));
+        // MessageEnd 先于 Error：上层遇 Error 即中断，先收尾才能保留 stop_reason。
+        assert!(flattened.iter().any(|event| matches!(
+            event,
+            ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::Other(reason))
+            } if reason == "failed"
+        )));
+        assert!(matches!(
+            flattened.last(),
+            Some(ProviderStreamEvent::Error(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_backfills_multiple_calls_with_missing_ids() {
+        // P2-1 回归：completed 携带多个 call_id 与 item id 均缺失的 function_call，
+        // 各自按 output_index 生成稳定占位（item_N），第二个不得因 id 相同
+        // 被 started 去重集合跳过而整条丢失。
+        let bare_call = |name: &str, arguments: &str| {
+            ResponseOutputItem::FunctionCall(OutputFunctionCall {
+                id: None,
+                status: None,
+                call_id: String::new(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            })
+        };
+        let events = vec![Ok(ResponsesStreamEvent::ResponseCompleted {
+            sequence_number: 1,
+            response: completed_response(vec![
+                bare_call("read_file", "{\"a\":1}"),
+                bare_call("write_file", "{\"b\":2}"),
+            ]),
+        })];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let starts: Vec<&ToolCall> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallStart(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts.len(),
+            2,
+            "两个双缺 id 调用都应补发 Start：{starts:?}"
+        );
+        assert_ne!(starts[0].id, starts[1].id, "占位 id 不得重复");
+        assert_eq!(starts[0].name, "read_file");
+        assert_eq!(starts[1].name, "write_file");
+    }
+
+    #[tokio::test]
+    async fn completed_backfill_text_strips_protocol_block() {
+        // 第三轮 review P1 回归：纯协议回复时 SDK 缓冲层已把协议文本消费为
+        // 工具调用（无文本增量），completed 兜底读到的服务端原始 output 仍含
+        // 协议原文——启用 tools 时必须剥离，原文不得回灌正文；无 tools 时
+        // 协议文本按普通正文保留。
+        let dsml = "我来读取。\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+        let response = |text: &str| {
+            let mut response = completed_response(Vec::new());
+            response.output = vec![ResponseOutputItem::Message(OutputMessage {
+                id: Some("msg_1".to_string()),
+                status: None,
+                role: "assistant".to_string(),
+                content: vec![OutputContentBlock::OutputText(TextBlock {
+                    text: text.to_string(),
+                })],
+            })];
+            response
+        };
+        let events = |text: &str| {
+            vec![Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 1,
+                response: response(text),
+            })]
+        };
+        // 带 tools：协议块剥离，仅保留说明文字。
+        let out = collect_with_tools(events(dsml), true).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let text: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::TextDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "我来读取。", "协议原文不得回灌：{flattened:?}");
+        // 无 tools：协议文本按普通正文原样保留。
+        let out = collect_with_tools(events(dsml), false).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let text: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::TextDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("DSML"), "无 tools 时正文应原样保留：{text:?}");
+    }
+
+    fn bare_function_call(id: Option<&str>, call_id: &str, arguments: &str) -> ResponseOutputItem {
+        ResponseOutputItem::FunctionCall(OutputFunctionCall {
+            id: id.map(str::to_string),
+            status: None,
+            call_id: call_id.to_string(),
+            name: "read_file".to_string(),
+            arguments: arguments.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn done_without_item_id_does_not_duplicate_arguments() {
+        // 第四轮 review P2-1 回归：added 带 item id、done 省略 id——done 应经
+        // index_call_ids 还原同一 call_id，参数只补发一份（不得拼成两份 JSON）。
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: bare_function_call(Some("fc_1"), "", ""),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 2,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "{\"path\":\"/tmp\"}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemDone {
+                sequence_number: 3,
+                output_index: 0,
+                item: bare_function_call(None, "", "{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 4,
+                response: completed_response(Vec::new()),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let joined: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta { partial_json, .. } => {
+                    Some(partial_json.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            joined, "{\"path\":\"/tmp\"}",
+            "参数只应有一份：{flattened:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_without_item_id_does_not_duplicate_call() {
+        // 第四轮 review P2-2 回归：added 带 item id、completed 省略 id——
+        // completed 应经 index_call_ids 还原同一 call_id，同一调用只转出一次。
+        let mut response = completed_response(Vec::new());
+        response.output = vec![bare_function_call(None, "", "{\"path\":\"/tmp\"}")];
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: bare_function_call(Some("fc_1"), "", ""),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 4,
+                response,
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let starts: Vec<&str> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallStart(call) => Some(call.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, vec!["fc_1"], "同一调用只应有一个 Start：{starts:?}");
+    }
+
+    #[tokio::test]
+    async fn incomplete_terminal_event_does_not_emit_error() {
+        // incomplete 是截断而非错误：只发 Usage + MessageEnd，不发 Error，
+        // 避免上层收到 Error 中断收尾导致截断信息被吞。
+        let mut response = completed_response(Vec::new());
+        response.status = ResponseStatus::Incomplete;
+        response.incomplete_details = Some(tiangong_deepseek::types::IncompleteDetails {
+            reason: Some("max_output_tokens".to_string()),
+        });
+        let events = vec![Ok(ResponsesStreamEvent::ResponseIncomplete {
+            sequence_number: 3,
+            response,
+        })];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        assert!(
+            !flattened
+                .iter()
+                .any(|event| matches!(event, ProviderStreamEvent::Error(_))),
+            "incomplete 不应发 Error：{flattened:?}"
+        );
+        assert!(matches!(
+            flattened.last(),
+            Some(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(StopReason::MaxTokens)
+            })
+        ));
+        assert!(
+            flattened
+                .iter()
+                .any(|event| matches!(event, ProviderStreamEvent::Usage(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn full_arguments_in_added_item_do_not_duplicate_with_deltas() {
+        // 网关在 added item 携带完整参数后仍发增量：增量是权威，
+        // added 的快照不得再次下发（否则参数重复拼接）。
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: function_call_item("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 2,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "{\"path\":".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 3,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "\"/tmp\"}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemDone {
+                sequence_number: 4,
+                output_index: 0,
+                item: function_call_item("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 5,
+                response: completed_response(vec![function_call_item("{\"path\":\"/tmp\"}")]),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let joined: String = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta { partial_json, .. } => {
+                    Some(partial_json.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            joined, "{\"path\":\"/tmp\"}",
+            "参数只应来自增量拼接，added 快照不得重复下发：{flattened:?}"
+        );
     }
 }

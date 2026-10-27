@@ -27,6 +27,11 @@ pub struct DsmlToolCall {
     pub arguments: String,
 }
 
+/// 文本协议工具调用 id：scru128（时间有序 + 随机，跨进程天然唯一）。
+/// 官方要求 call_id 非空且唯一，Responses 历史每轮全量回传时不得重复。
+pub fn next_text_call_id() -> String {
+    format!("textcall_{}", scru128::new())
+}
 // ── 原生协议标记（全角竖线 U+FF5C + 下块 U+2581） ───────────────────────
 
 pub const NATIVE_CALLS_BEGIN: &str = "<｜tool▁calls▁begin｜>";

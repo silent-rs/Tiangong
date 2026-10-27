@@ -137,14 +137,16 @@ fn tool_history(call_id: &str, text: &str) -> ChatMessage {
 }
 
 fn reply(protocol: ProviderProtocol) -> Value {
-    if protocol == ProviderProtocol::OpenAi {
-        json!({"id":"resp_test","status":"completed","model":"test-model",
-            "output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
-            "usage":{"input_tokens":100,"output_tokens":2,"total_tokens":102,"input_tokens_details":{"cached_tokens":80}}})
-    } else {
-        json!({"id":"chat_test","created":0,"object":"chat.completion","model":"test-model",
+    match protocol {
+        // OpenAI 与 DeepSeek 均走 Responses API（POST /responses）。
+        ProviderProtocol::OpenAi | ProviderProtocol::DeepSeek => {
+            json!({"id":"resp_test","status":"completed","model":"test-model",
+                "output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
+                "usage":{"input_tokens":100,"output_tokens":2,"total_tokens":102,"input_tokens_details":{"cached_tokens":80}}})
+        }
+        _ => json!({"id":"chat_test","created":0,"object":"chat.completion","model":"test-model",
             "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"OK"}}],
-            "usage":{"prompt_tokens":100,"completion_tokens":2,"total_tokens":102,"prompt_tokens_details":{"cached_tokens":80}}})
+            "usage":{"prompt_tokens":100,"completion_tokens":2,"total_tokens":102,"prompt_tokens_details":{"cached_tokens":80}}}),
     }
 }
 
@@ -599,7 +601,7 @@ fn provider_headers_survive_resolution_and_legacy_configs_remain_valid() {
 }
 
 #[tokio::test]
-async fn deepseek_uses_user_id_and_openai_uses_prompt_cache_key() {
+async fn deepseek_uses_user_and_openai_uses_prompt_cache_key() {
     for protocol in [ProviderProtocol::DeepSeek, ProviderProtocol::OpenAi] {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -624,8 +626,10 @@ async fn deepseek_uses_user_id_and_openai_uses_prompt_cache_key() {
             .zip(["session_one", "session_two"])
         {
             let payload: Value = serde_json::from_slice(&request.body).unwrap();
+            // DeepSeek Responses API 的用户标识字段为 user（chat 为 user_id）；
+            // OpenAI Responses 用 prompt_cache_key。
             let field = if protocol == ProviderProtocol::DeepSeek {
-                "user_id"
+                "user"
             } else {
                 "prompt_cache_key"
             };

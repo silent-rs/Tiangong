@@ -1152,7 +1152,18 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     } else {
         tool_calls
             .into_iter()
-            .filter(|(_, (name, _))| !name.is_empty())
+            .filter(|entry| {
+                let keep = !entry.1.0.is_empty();
+                if !keep {
+                    // 仅有增量片段、缺少 ToolCallStart 的调用无法还原工具名，
+                    // 过滤前显式告警，避免上游漏发 Start 事件时静默丢数据。
+                    tracing::warn!(
+                        call_id = %entry.0,
+                        "丢弃缺少 Start 事件的流式工具调用增量（工具名未知）"
+                    );
+                }
+                keep
+            })
             .map(|(id, (name, raw_args))| ToolCall {
                 arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
                 id,
