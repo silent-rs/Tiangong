@@ -52,6 +52,10 @@ pub(crate) struct TextProtocolBuffer {
     pending: String,
     /// 已作为正文透传的全部文本（终止事件重写 output 时拼接）。
     streamed_out: String,
+    /// 本流是否曾进入过 Confirmed（sticky：结构化调用把状态切走后仍保留，
+    /// 供 finish 判定 was_confirmed，据此重写终止事件 output——否则混合
+    /// 场景下残缺协议原文仍会经终止事件回灌）。
+    confirmed_once: bool,
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -97,13 +101,31 @@ impl TextProtocolBuffer {
         }
     }
 
-    /// 出现结构化工具调用：该流定性为普通文本流，冲刷暂存并锁定透传。
+    /// 出现结构化工具调用：该流定性为普通文本流，锁定透传。
+    /// 已处于 Confirmed 时，缓冲中的协议部分（机器指令）直接丢弃——结构化
+    /// 调用才是权威通道，不作为正文冲刷；协议块之前的可见文本（如说明
+    /// 文字与协议标记同片到达）保留冲刷，不连带丢弃。
     pub(crate) fn note_structured_tool_call(&mut self) -> Vec<String> {
-        self.phase = BufferPhase::Passthrough;
-        if self.pending.is_empty() {
-            Vec::new()
+        if self.phase == BufferPhase::Confirmed {
+            let visible = match find_protocol_start(&self.pending) {
+                Some(start) => self.pending[..start].to_string(),
+                None => String::new(),
+            };
+            self.pending.clear();
+            self.phase = BufferPhase::Passthrough;
+            if visible.is_empty() {
+                Vec::new()
+            } else {
+                self.streamed_out.push_str(&visible);
+                vec![visible]
+            }
         } else {
-            vec![std::mem::take(&mut self.pending)]
+            self.phase = BufferPhase::Passthrough;
+            if self.pending.is_empty() {
+                Vec::new()
+            } else {
+                vec![std::mem::take(&mut self.pending)]
+            }
         }
     }
 
@@ -111,9 +133,12 @@ impl TextProtocolBuffer {
     /// 解析失败则**整体抛弃**（残缺协议对用户无意义）。
     pub(crate) fn finish(&mut self) -> TextProtocolOutcome {
         let total_visible_text = std::mem::take(&mut self.streamed_out);
+        if self.phase == BufferPhase::Confirmed {
+            self.confirmed_once = true;
+        }
+        let was_confirmed = self.confirmed_once;
         match self.phase {
             BufferPhase::Confirmed => {
-                let was_confirmed = true;
                 self.phase = BufferPhase::Idle;
                 let pending = self.pending.trim();
                 if let Some(calls) = dsml::parse_dsml_tool_calls(pending) {
@@ -148,7 +173,7 @@ impl TextProtocolBuffer {
                     visible_text,
                     total_visible_text: total,
                     tool_calls: Vec::new(),
-                    was_confirmed: false,
+                    was_confirmed,
                 }
             }
         }
@@ -182,6 +207,8 @@ impl TextProtocolBuffer {
         // 否则整段正文会被误判为协议并在解析失败后整体抛弃。
         if contains_protocol_prefix(after_lt) {
             self.phase = BufferPhase::Confirmed;
+            // sticky：结构化调用把状态切走后 finish 仍能据此判定 was_confirmed。
+            self.confirmed_once = true;
             tracing::info!("DeepSeek 流式确认走工具调用文本协议，缓冲至流末统一解析");
             Vec::new()
         } else if window_chars >= PROBE_WINDOW_CHARS {
@@ -214,6 +241,19 @@ impl TextProtocolBuffer {
             vec![std::mem::take(&mut self.pending)]
         }
     }
+}
+
+/// 定位文本中第一个协议块的起点：`<` 后紧跟协议前缀的位置。
+fn find_protocol_start(text: &str) -> Option<usize> {
+    let mut cursor = 0usize;
+    while let Some(rel) = text[cursor..].find('<') {
+        let abs = cursor + rel;
+        if contains_protocol_prefix(&text[abs + 1..]) {
+            return Some(abs);
+        }
+        cursor = abs + 1;
+    }
+    None
 }
 
 /// 判断累计文本是否含已知协议前缀（不区分大小写）。
@@ -337,13 +377,20 @@ mod tests {
     }
 
     #[test]
-    fn structured_tool_call_locks_passthrough() {
+    fn structured_tool_call_discards_confirmed_protocol_text() {
+        // Confirmed 的协议文本在结构化调用出现时直接丢弃（结构化调用才是
+        // 权威通道），不作为正文冲刷；锁定透传后普通正文照常流出。
         let mut buffer = TextProtocolBuffer::default();
         buffer.push_text("<｜｜DSML｜｜invoke 残缺");
         let flushed = buffer.note_structured_tool_call();
-        assert!(flushed.iter().any(|text| text.contains("残缺")));
+        assert!(
+            flushed.is_empty(),
+            "Confirmed 协议文本不得冲刷为正文：{flushed:?}"
+        );
         assert_eq!(buffer.push_text("<div>"), vec!["<div>".to_string()]);
-        assert!(buffer.finish().tool_calls.is_empty());
+        // was_confirmed 保持 sticky：finish 仍报告本流确认过协议，
+        // 供终止事件重写 output。
+        assert!(buffer.finish().was_confirmed);
     }
 
     #[test]

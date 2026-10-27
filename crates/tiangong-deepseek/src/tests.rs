@@ -1121,6 +1121,71 @@ fn mock_client(addr: &str) -> crate::client::DeepSeekClient {
 }
 
 #[tokio::test]
+async fn responses_stream_confirmed_protocol_plus_structured_call_no_leak() {
+    // 第五轮 review 混合场景 a：SSE 正文先命中协议（Confirmed 缓冲完整
+    // 调用块），随后出现结构化 function_call——缓冲的协议文本必须丢弃
+    // （不得冲刷为正文），也不得再转出 textcall（结构化调用权威，
+    // 恰好一个调用）。
+    use crate::types::ResponsesStreamEvent;
+    use futures_util::StreamExt;
+    let dsml =
+        "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"demo\">\n</｜｜DSML｜｜tool_calls>";
+    let added = r#"{"type":"response.output_item.added","sequence_number":2,"output_index":1,"item":{"type":"function_call","call_id":"call_real","name":"read_file","arguments":""}}"#;
+    let completed = r#"{"type":"response.completed","sequence_number":3,"response":{"id":"resp_m","object":"response","created_at":0,"status":"completed","model":"m","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":REPLACE_ME}]},{"type":"function_call","call_id":"call_real","name":"read_file","arguments":"{\"path\":\"/tmp/x\"}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#
+        .replace("REPLACE_ME", &serde_json::to_string(&format!("说明文字\n{dsml}")).unwrap());
+    let mixed_json = serde_json::to_string(&format!("说明文字\n{dsml}")).unwrap();
+    let sse = format!(
+        "data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":{mixed_json}}}\n\n\
+         data: {added}\n\n\
+         data: {completed}\n\n"
+    );
+    let server = MockServer::start(vec![sse_response(&sse)]);
+    let client = mock_client(&server.addr);
+    let mut stream = client
+        .responses()
+        .create_stream(crate::types::CreateResponseRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            instructions: Some("hi".into()),
+            tools: Some(vec![crate::types::ResponsesTool::Function(
+                crate::types::ResponsesFunctionTool {
+                    name: "demo".into(),
+                    description: None,
+                    parameters: None,
+                },
+            )]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut text = String::new();
+    let mut calls = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            ResponsesStreamEvent::OutputTextDelta { delta, .. } => text.push_str(&delta),
+            ResponsesStreamEvent::OutputItemAdded {
+                item: crate::types::ResponseOutputItem::FunctionCall(call),
+                ..
+            } => calls.push(call.call_id),
+            ResponsesStreamEvent::ResponseCompleted { response, .. } => {
+                // 终止事件 output 已被重写：可见文本不含协议原文。
+                assert!(
+                    !response.output_text().contains("DSML"),
+                    "重写后 output_text 不得含协议原文：{}",
+                    response.output_text()
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !text.contains("DSML") && !text.contains("｜｜"),
+        "协议原文不得作为正文透出：{text:?}"
+    );
+    assert!(text.contains("说明文字"), "说明文字应保留：{text:?}");
+    assert_eq!(calls, vec!["call_real"], "只应转出结构化调用");
+}
+
+#[tokio::test]
 async fn responses_stream_failed_terminal_skips_text_protocol_resolution() {
     // P2-2 回归：SSE 正文命中协议（Confirmed 缓冲）后收到 response.failed，
     // 失败响应不得把缓冲的协议文本转出为工具调用。

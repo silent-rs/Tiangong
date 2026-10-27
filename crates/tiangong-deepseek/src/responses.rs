@@ -171,10 +171,10 @@ fn apply_responses_buffer(
             events.push(Ok(event));
             events
         }
-        // created / completed 携带完整 output：一次性 JSON 合成流的结构化
-        // 调用只在这里可见（SSE 流 created 时 output 为空，无副作用）。
+        // created 携带完整 output 且含结构化调用（一次性 JSON 合成流的开场，
+        // SSE 流 created 时 output 为空不命中）：只锁定透传——此时缓冲层
+        // 尚未消费任何协议文本，交给后续 completed 分支统一收尾。
         Ok(ref event @ ResponsesStreamEvent::ResponseCreated { ref response, .. })
-        | Ok(ref event @ ResponsesStreamEvent::ResponseCompleted { ref response, .. })
             if has_structured_call(response) =>
         {
             let mut events: Vec<_> = state
@@ -184,6 +184,29 @@ fn apply_responses_buffer(
                 .map(|text| Ok(text_delta_event(text)))
                 .collect();
             events.push(Ok(event.clone()));
+            events
+        }
+        // completed 携带结构化调用：执行 finish（冲刷可见文本、按
+        // was_confirmed 重写 output），但忽略文本协议解析出的 tool_calls
+        // ——结构化调用才是权威通道，避免 textcall 与之重复执行。
+        Ok(mut event @ ResponsesStreamEvent::ResponseCompleted { .. })
+            if matches!(
+                &event,
+                ResponsesStreamEvent::ResponseCompleted { response, .. }
+                    if has_structured_call(response)
+            ) =>
+        {
+            let outcome = state.buffer.finish();
+            if outcome.was_confirmed
+                && let Some(response) = terminal_response_mut(&mut event)
+            {
+                rewrite_message_text(response, &outcome.total_visible_text);
+            }
+            let mut events: Vec<_> = (!outcome.visible_text.is_empty())
+                .then(|| Ok(text_delta_event(outcome.visible_text)))
+                .into_iter()
+                .collect();
+            events.push(Ok(event));
             events
         }
         // 终止事件：completed / incomplete 前统一解析转出；failed 跳过。
