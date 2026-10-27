@@ -51,7 +51,7 @@
 | generate-image-openai | 271 | ✅ 已迁移（v0.2.12，设置页迁 `ui.contributions` 静态贡献） |
 | analyze-attachment | 246 | ✅ 已迁移 |
 | command | 345 | ✅ 已迁移（146877cf） |
-| skill | 425 | 待迁移（工具 + skill 详情查询） |
+| skill | 425 | ✅ 已迁移（v0.2.8；动态 prompt 段落经握手 `prompt` 能力 + 固定操作 `prompt_sections`，设置页迁 app/skill.html） |
 | volcengine | 425 | ✅ 已迁移（f5901bc2） |
 
 ### 阶段三：中等复杂度（v1，多工具/带状态）

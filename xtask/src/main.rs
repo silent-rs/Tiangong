@@ -143,8 +143,8 @@ const SKILL: PluginConfig = PluginConfig {
     name: "Skill",
     description: "Skill 注册表管理、详情查询与 prompt 段落注入",
     protocol_crate: Some("tiangong-plugin-skill-protocol"),
-    wasm_crate: Some("tiangong-plugin-skill-wasm"),
-    wasm_artifact: Some("tiangong_plugin_skill_wasm.wasm"),
+    wasm_crate: None,
+    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-skill-sidecar"),
     sidecar_artifact: Some("tiangong-skill-sidecar"),
     plugin_root: "plugins/tiangong-plugin-skill",
@@ -383,6 +383,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "subagent" => &["dist/index.html", "app/agent-message.html"],
         // 手写自包含单文件 UI（无前端构建链）。
         "coding" => &["app/index.html"],
+        "skill" => &["app/skill.html"],
         "computer-use" => &["app/restore-window.html"],
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
         // 工具视图（session.message-item replace + tools）。
@@ -456,7 +457,10 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
             "assets/tool-file-write.svg",
             "assets/tool-clock.svg",
         ],
+        // plugin.json tool_icons 引用的工具图标。
         "memory" => &["assets/tool-recall-memory.svg"],
+        // plugin.json tool_icons 引用的工具图标（翻开的书 + 星芒）。
+        "skill" => &["assets/tool-get-skill-detail.svg"],
         "computer-use" => &[
             "assets/tool-desktop-app.svg",
             "assets/tool-desktop-open.svg",

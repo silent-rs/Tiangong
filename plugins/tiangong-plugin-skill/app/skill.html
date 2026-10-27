@@ -1,4 +1,627 @@
-// Skill 设置页脚本（与 scheduler/memory/index 同构的桥接框架）。
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skills</title>
+  <style>/* Skill 设置页样式（与 scheduler/memory/index 同一套宿主 token 体系）。 */
+
+:root {
+  color-scheme: light;
+  --bg: hsl(var(--host-background, 210 20% 98%));
+  --surface: hsl(var(--host-card, 0 0% 100%));
+  --surface-subtle: hsl(var(--host-muted, 210 20% 96%));
+  --text: hsl(var(--host-foreground, 222 47% 11%));
+  --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
+  --border: hsl(var(--host-border, 214 18% 88%));
+  --border-strong: color-mix(in srgb, var(--text) 28%, var(--border));
+  --primary: hsl(var(--host-primary, 222 47% 11%));
+  --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+  --primary-hover: color-mix(in srgb, var(--primary) 88%, var(--text));
+  --accent: hsl(var(--host-accent, 210 20% 96%));
+  --accent-foreground: hsl(var(--host-accent-foreground, 222 47% 11%));
+  --danger: hsl(var(--host-destructive, 0 84% 60%));
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  --shadow: 0 10px 28px color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+button,
+input,
+textarea {
+  color: inherit;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+/* ── 页面骨架 ── */
+
+.page {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.loading-state {
+  color: var(--muted);
+}
+
+.skill-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.skill-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.skill-count {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.skill-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-status {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.page-status.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.page-status.success {
+  color: var(--text);
+}
+
+/* ── 按钮 ── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 500;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-subtle);
+}
+
+.btn-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+.btn-outline {
+  background: transparent;
+}
+
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.btn-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.spinable.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 空态 ── */
+
+.empty-state {
+  text-align: center;
+  padding: 48px 16px;
+  color: var(--muted);
+}
+
+.empty-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+/* ── 列表 ── */
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  transition: border-color 0.15s;
+}
+
+.skill-row:hover {
+  border-color: var(--border-strong);
+}
+
+.skill-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.skill-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.skill-description {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.badge-enabled {
+  background: color-mix(in srgb, hsl(142 71% 45%) 14%, var(--surface));
+  color: hsl(142 71% 35%);
+}
+
+.badge-disabled {
+  background: var(--surface-subtle);
+}
+
+.skill-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ── 开关 ── */
+
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--border);
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex: 0 0 auto;
+}
+
+.switch[data-on="true"] {
+  background: var(--primary);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--primary-foreground);
+  transition: transform 0.15s;
+}
+
+.switch[data-on="true"]::after {
+  transform: translateX(16px);
+}
+
+/* ── 模态框 ── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 480px;
+  max-height: 80vh;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.modal-large {
+  max-width: 640px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.detail-desc {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.detail-readme {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── SKILL.md 编辑 ── */
+
+.detail-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-textarea {
+  width: 100%;
+  min-height: 320px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--host-font-family, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.detail-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* ── env 编辑 ── */
+
+.env-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.env-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.env-row input {
+  flex: 1 1 auto;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.env-row input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.env-row .env-key {
+  flex: 0 0 140px;
+}
+
+@media (max-width: 480px) {
+  .page {
+    padding: 16px;
+  }
+
+  .skill-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .skill-description {
+    white-space: normal;
+  }
+
+  .env-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .env-row .env-key {
+    flex: 1 1 auto;
+  }
+}
+</style>
+</head>
+<body>
+  <main class="page">
+    <div id="loading-state" class="loading-state">加载中...</div>
+
+    <section id="skill-content" class="skill-content" hidden>
+      <div class="skill-toolbar">
+        <p class="skill-count">共 <span id="skill-count-num">0</span> 个 Skill</p>
+        <div class="skill-toolbar-actions">
+          <button id="refresh-btn" class="btn btn-outline btn-sm" type="button">
+            <svg id="refresh-icon" class="btn-icon spinable" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M8 16H3v5" />
+            </svg>
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <p id="status" class="page-status" role="status" hidden></p>
+
+      <div id="empty-state" class="empty-state" hidden>
+        <p class="empty-title">暂无已安装的 Skills</p>
+      </div>
+
+      <div id="list" class="skill-list" hidden></div>
+    </section>
+  </main>
+
+  <!-- 详情/编辑模态框 -->
+  <div id="detail-modal" class="modal-overlay" hidden>
+    <div class="modal modal-large">
+      <div class="modal-header">
+        <h2 id="detail-title">Skill 详情</h2>
+        <div class="modal-header-actions">
+          <button id="detail-edit-btn" class="btn btn-outline btn-sm" type="button" hidden>编辑说明</button>
+          <button id="detail-reveal-btn" class="btn btn-outline btn-sm" type="button" hidden>打开目录</button>
+          <button class="icon-btn" type="button" data-close="detail-modal" aria-label="关闭">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="detail-badges" class="badge-row"></div>
+        <p id="detail-desc" class="detail-desc"></p>
+        <!-- 查看模式 -->
+        <pre id="detail-readme" class="detail-readme"></pre>
+        <!-- 编辑模式 -->
+        <div id="detail-editor" class="detail-editor" hidden>
+          <textarea id="detail-textarea" class="detail-textarea"></textarea>
+          <p id="detail-edit-status" class="page-status" role="status" hidden></p>
+        </div>
+      </div>
+      <div id="detail-footer" class="modal-footer" hidden>
+        <button id="detail-cancel-btn" class="btn btn-outline" type="button">取消</button>
+        <button id="detail-save-btn" class="btn btn-primary" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 环境变量编辑模态框 -->
+  <div id="env-modal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="env-title">编辑环境变量</h2>
+        <button class="icon-btn" type="button" data-close="env-modal" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div id="env-rows" class="env-rows"></div>
+        <button id="env-add-btn" class="btn btn-outline btn-sm" type="button">+ 添加变量</button>
+        <p id="env-status" class="page-status" role="status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" type="button" data-close="env-modal">取消</button>
+        <button id="env-save-btn" class="btn btn-primary" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 删除确认模态框（插件页运行在未开放 allow-modals 的沙箱 iframe 中，window.confirm 会被静默拦截） -->
+  <div id="remove-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="remove-title">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="remove-title">删除 Skill</h2>
+        <button class="icon-btn" type="button" data-close="remove-modal" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p id="remove-message" class="detail-desc"></p>
+        <p id="remove-status" class="page-status error" role="status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" type="button" data-close="remove-modal">取消</button>
+        <button id="remove-confirm-btn" class="btn btn-danger" type="button">删除</button>
+      </div>
+    </div>
+  </div>
+  <script>// Skill 设置页脚本（与 scheduler/memory/index 同构的桥接框架）。
 
 const HOST_TIMEOUT_MS = 60000;
 let hostChannel = null;
@@ -104,7 +727,7 @@ async function loadSkills() {
   loadingState.hidden = false;
   skillContent.hidden = true;
   try {
-    const raw = await callHost("list", "{}");
+    const raw = await callHost("sidecar.list_skills", "{}");
     const data = raw ? JSON.parse(raw) : { skills: [] };
     skills = Array.isArray(data.skills) ? data.skills : [];
     renderList();
@@ -222,7 +845,7 @@ function renderRow(skill) {
 
 async function toggleEnabled(id, enabled) {
   try {
-    await callHost("toggle", JSON.stringify({ id, enabled }));
+    await callHost("sidecar.set_skill_enabled", JSON.stringify({ id, enabled }));
     await loadSkills();
   } catch (error) {
     showStatus(`操作失败：${error.message || error}`, true);
@@ -255,7 +878,7 @@ async function confirmRemoveSkill() {
   const confirmBtn = document.getElementById("remove-confirm-btn");
   confirmBtn.disabled = true;
   try {
-    const raw = await callHost("remove", JSON.stringify({ id }));
+    const raw = await callHost("sidecar.remove_skill", JSON.stringify({ id }));
     const data = raw ? JSON.parse(raw) : {};
     // 孤儿 MCP 清理由 host 入口层处理（wasm 仅返回 orphan 列表）。
     removingSkillId = null;
@@ -275,7 +898,7 @@ async function refreshSkills() {
   refreshBtn.disabled = true;
   refreshIcon.classList.add("spinning");
   try {
-    const raw = await callHost("refresh", "{}");
+    const raw = await callHost("sidecar.refresh_skills", "{}");
     const data = raw ? JSON.parse(raw) : {};
     await loadSkills();
     showStatus(data.message || "已刷新", false);
@@ -295,7 +918,7 @@ let detailEditing = false;
 
 async function showDetail(id) {
   try {
-    const raw = await callHost("detail", JSON.stringify({ id }));
+    const raw = await callHost("sidecar.skill_detail", JSON.stringify({ id }));
     const data = raw ? JSON.parse(raw) : {};
     const detail = data.detail || {};
 
@@ -351,7 +974,7 @@ async function saveSkillMd() {
   const saveBtn = document.getElementById("detail-save-btn");
   saveBtn.disabled = true;
   try {
-    await callHost("update_md", JSON.stringify({ id: detailSkillId, content }));
+    await callHost("sidecar.update_skill_md", JSON.stringify({ id: detailSkillId, content }));
     // 保存成功后回到查看模式并刷新 readme 展示
     document.getElementById("detail-readme").textContent = content || "（无说明）";
     setDetailEditMode(false);
@@ -377,7 +1000,7 @@ async function revealDir(id) {
     return;
   }
   try {
-    await callHost("reveal", JSON.stringify({ id }));
+    await callHost("sidecar.reveal_skill_dir", JSON.stringify({ id }));
   } catch (error) {
     showStatus(`打开目录失败：${error.message || error}`, true);
   }
@@ -393,7 +1016,7 @@ async function showEnvEditor(id) {
   hideStatus();
 
   try {
-    const raw = await callHost("get_env", JSON.stringify({ id }));
+    const raw = await callHost("sidecar.get_skill_env", JSON.stringify({ id }));
     const data = raw ? JSON.parse(raw) : {};
     const env = data.env || {};
     for (const [key, value] of Object.entries(env)) {
@@ -454,7 +1077,7 @@ async function saveEnv() {
   const saveBtn = document.getElementById("env-save-btn");
   saveBtn.disabled = true;
   try {
-    await callHost("set_env", JSON.stringify({ id: editingEnvId, env }));
+    await callHost("sidecar.set_skill_env", JSON.stringify({ id: editingEnvId, env }));
     closeModal("env-modal");
     showStatus("环境变量已保存", false);
   } catch (error) {
@@ -532,3 +1155,6 @@ document.addEventListener("keydown", (event) => {
 
 // 初始加载。
 loadSkills();
+</script>
+</body>
+</html>

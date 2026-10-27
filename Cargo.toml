@@ -51,7 +51,6 @@ members = [
     "plugins/tiangong-plugin-analyze-attachment/sidecar",
     "plugins/tiangong-plugin-skill/protocol",
     "plugins/tiangong-plugin-skill/sidecar",
-    "plugins/tiangong-plugin-skill/wasm",
     "plugins/tiangong-plugin-mcp/protocol",
     "plugins/tiangong-plugin-mcp/sidecar",
     "plugins/tiangong-plugin-mcp/wasm",
@@ -108,7 +107,6 @@ tiangong-plugin-analyze-attachment-protocol = { path = "plugins/tiangong-plugin-
 tiangong-plugin-analyze-attachment-sidecar = { path = "plugins/tiangong-plugin-analyze-attachment/sidecar" }
 tiangong-plugin-skill-protocol = { path = "plugins/tiangong-plugin-skill/protocol" }
 tiangong-plugin-skill-sidecar = { path = "plugins/tiangong-plugin-skill/sidecar" }
-tiangong-plugin-skill-wasm = { path = "plugins/tiangong-plugin-skill/wasm" }
 tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
 tiangong-plugin-prompt-wasm = { path = "plugins/tiangong-plugin-prompt/wasm" }

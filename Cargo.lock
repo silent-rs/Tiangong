@@ -11905,7 +11905,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-protocol"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -11913,29 +11913,20 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-sidecar"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "serde",
  "serde_json",
+ "tempfile",
  "tiangong-plugin-sidecar",
  "tiangong-plugin-skill-protocol",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "tiangong-plugin-skill-wasm"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tiangong-plugin-skill-protocol",
- "wit-bindgen 0.60.0",
 ]
 
 [[package]]

@@ -30,7 +30,11 @@ pub trait SkillOperation {
 // ── 操作名常量 ────────────────────────────────────────────────
 
 pub const LIST_SKILLS_OPERATION: &str = "list_skills";
-pub const GET_SKILL_DETAIL_OPERATION: &str = "get_skill_detail";
+/// 设置页的结构化详情操作（与工具名 `get_skill_detail` 分离：工具直连返回
+/// ToolOutcome 形状，管理页需要结构化 SkillDetailResponse）。
+pub const SKILL_DETAIL_OPERATION: &str = "skill_detail";
+/// 工具直连操作名（与清单 tools 声明一致，返回 ToolOutcome 形状）。
+pub const TOOL_GET_SKILL_DETAIL_OPERATION: &str = TOOL_GET_SKILL_DETAIL;
 pub const REMOVE_SKILL_OPERATION: &str = "remove_skill";
 pub const SET_SKILL_ENABLED_OPERATION: &str = "set_skill_enabled";
 pub const REFRESH_SKILLS_OPERATION: &str = "refresh_skills";
@@ -40,6 +44,9 @@ pub const GET_SKILL_SUMMARY_OPERATION: &str = "get_skill_summary";
 pub const INIT_SKILL_OPERATION: &str = "init_skill";
 pub const UPDATE_SKILL_MD_OPERATION: &str = "update_skill_md";
 pub const REVEAL_SKILL_DIR_OPERATION: &str = "reveal_skill_dir";
+
+/// @ 提及候选查询（manifest mention.candidates_op → sidecar，含插件前缀）。
+pub const MENTION_CANDIDATES_OPERATION: &str = "skill.mention_candidates";
 
 // ── marker 类型 ───────────────────────────────────────────────
 
@@ -62,7 +69,7 @@ impl SkillOperation for ListSkills {
 }
 
 impl SkillOperation for GetSkillDetail {
-    const NAME: &'static str = GET_SKILL_DETAIL_OPERATION;
+    const NAME: &'static str = SKILL_DETAIL_OPERATION;
     type Request = GetSkillDetailRequest;
     type Response = SkillDetailResponse;
 }
