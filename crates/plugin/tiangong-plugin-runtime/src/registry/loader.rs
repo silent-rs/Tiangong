@@ -216,26 +216,21 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // 单次装载快照：验证记录 + prompt 段落各读取一次（前者重算制品
+        // 摘要、后者含阻塞 sidecar I/O），适配器与最终记录完全共用。
+        let snapshot = PluginLoadSnapshot::read(storage_root, installed);
+        // reconfigure 消费 Vec<String>；None 只在注册表中表示「未声明」。
+        let adapter_sections = snapshot.prompt_sections.clone().unwrap_or_default();
         for adapter in &ts_instances {
-            let verified_sidecar = crate::verification::load_valid_capabilities(
-                &installed.directory,
-                &installed.manifest,
-            );
-            let prompt_sections = assemble_prompt_sections(
-                storage_root,
-                &installed.directory,
-                &installed.manifest,
-                verified_sidecar.as_deref(),
-            )
-            .unwrap_or_default();
             adapter.reconfigure(
                 &installed.manifest,
                 installed.enabled,
-                verified_sidecar,
-                prompt_sections,
+                snapshot.verified_sidecar.clone(),
+                adapter_sections.clone(),
             );
         }
-        let mut loaded = load_plugin_record(storage_root, installed.clone());
+        let mut loaded =
+            load_plugin_record_with_snapshot(storage_root, installed.clone(), snapshot);
         loaded.ts_instances = ts_instances.iter().map(Arc::downgrade).collect();
         loaded_plugins()
             .lock()
@@ -718,6 +713,11 @@ const DYNAMIC_PROMPT_QUERY_BUDGET_MS: u64 = 3_000;
 /// 单个 prompt 文件的大小上限（64 KiB）。
 const MAX_PROMPT_FILE_BYTES: u64 = 64 * 1024;
 
+/// 测试观测：assemble_prompt_sections 的调用计数（验证装载快照只组装一次）。
+#[cfg(test)]
+pub(crate) static ASSEMBLE_PROMPT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// 解析 [`PROMPT_SECTIONS_OPERATION`] 响应：字符串数组，段落非空。
 fn parse_prompt_sections_response(value: serde_json::Value) -> anyhow::Result<Vec<String>> {
     let mut sections = serde_json::from_value::<Vec<String>>(value)
@@ -750,6 +750,8 @@ pub(crate) fn assemble_prompt_sections(
     verified_capabilities: Option<&[String]>,
 ) -> Option<Vec<String>> {
     let entries = manifest.prompt.as_ref()?;
+    #[cfg(test)]
+    ASSEMBLE_PROMPT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut sections = Vec::new();
     for entry in entries {
         match entry {
