@@ -1121,6 +1121,106 @@ fn mock_client(addr: &str) -> crate::client::DeepSeekClient {
 }
 
 #[tokio::test]
+async fn responses_json_stream_with_structured_call_skips_text_protocol() {
+    // 网关忽略 stream 返回一次性 JSON：output 同时含结构化 function_call 与
+    // 协议样正文（如模型在讨论 DSML）。合成流不产结构化 item 事件，缓冲层
+    // 必须从 created / completed 的完整 output 感知结构化通道并停用文本协议
+    // 识别，否则协议讨论样文本会被额外转出 textcall 与真实调用叠加执行。
+    use crate::types::ResponsesStreamEvent;
+    use futures_util::StreamExt;
+    let body = r#"{"id":"resp_1","object":"response","status":"completed","model":"m","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"DSML 协议示例：<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"demo\">\n</｜｜DSML｜｜tool_calls>"}]},{"type":"function_call","call_id":"call_real","name":"read_file","arguments":"{\"path\":\"/tmp/x\"}"}]}"#.as_bytes();
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+    let mut stream = client
+        .responses()
+        .create_stream(crate::types::CreateResponseRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            instructions: Some("hi".into()),
+            tools: Some(vec![crate::types::ResponsesTool::Function(
+                crate::types::ResponsesFunctionTool {
+                    name: "demo".into(),
+                    description: None,
+                    parameters: None,
+                },
+            )]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // SDK 合成流不模拟 function_call 事件（真实调用由调用方在终止事件的
+    // 完整 output 中统一转出），因此这里断言：任何 function_call 事件都
+    // 不出现——包括协议样文本被误转出的 textcall。
+    let mut call_events = 0usize;
+    let mut saw_completed = false;
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            ResponsesStreamEvent::OutputItemAdded {
+                item: crate::types::ResponseOutputItem::FunctionCall(_),
+                ..
+            } => call_events += 1,
+            ResponsesStreamEvent::ResponseCompleted { response, .. } => {
+                saw_completed = true;
+                // 真实结构化调用仍完整保留在终止事件的 output 里，
+                // 供调用方转出。
+                assert!(response.output.iter().any(|item| matches!(
+                    item,
+                    crate::types::ResponseOutputItem::FunctionCall(call)
+                        if call.call_id == "call_real"
+                )));
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_completed, "流应以 completed 终止");
+    assert_eq!(call_events, 0, "协议样文本不应被额外转出为调用事件");
+}
+
+#[tokio::test]
+async fn responses_json_stream_resolves_pure_text_protocol_call() {
+    // 一次性 JSON 只含协议正文（无结构化调用）：缓冲层在 completed 前解析并
+    // 转出结构化 function_call 事件组，协议原文不作为正文透传。
+    use crate::types::ResponsesStreamEvent;
+    use futures_util::StreamExt;
+    let body = r#"{"id":"resp_2","object":"response","status":"completed","model":"m","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我来读取。\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"}]}]}"#.as_bytes();
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+    let mut stream = client
+        .responses()
+        .create_stream(crate::types::CreateResponseRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            instructions: Some("hi".into()),
+            tools: Some(vec![crate::types::ResponsesTool::Function(
+                crate::types::ResponsesFunctionTool {
+                    name: "read_file".into(),
+                    description: None,
+                    parameters: None,
+                },
+            )]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut text = String::new();
+    let mut resolved_calls = 0usize;
+    while let Some(event) = stream.next().await {
+        match event.unwrap() {
+            ResponsesStreamEvent::OutputTextDelta { delta, .. } => text.push_str(&delta),
+            ResponsesStreamEvent::OutputItemAdded {
+                item: crate::types::ResponseOutputItem::FunctionCall(call),
+                ..
+            } => {
+                assert_eq!(call.name, "read_file");
+                resolved_calls += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(resolved_calls, 1, "纯协议文本应转出一个调用");
+    assert!(!text.contains("DSML"), "协议原文不应作为正文透传：{text:?}");
+    assert!(text.contains("我来读取。"), "说明文字应保留：{text:?}");
+}
+
+#[tokio::test]
 async fn responses_create_forces_non_stream() {
     let body =
         br#"{"id":"resp_1","object":"response","status":"completed","model":"m","output":[]}"#;

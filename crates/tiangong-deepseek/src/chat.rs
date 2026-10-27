@@ -180,35 +180,62 @@ fn looks_like_json(first: &[u8]) -> bool {
         .is_some_and(|byte| *byte == b'{' || *byte == b'[')
 }
 
-/// 文本协议旁路收集状态（见 [`crate::protocol_buffer`]）。
+/// 文本协议旁路缓冲状态（三态机见 [`crate::protocol_buffer`]）。
 #[derive(Default)]
 struct BufferState {
     buffer: crate::protocol_buffer::TextProtocolBuffer,
 }
-/// 对单个事件施加收集逻辑：正文一律透传，流末统一识别转出工具调用。
+/// 对单个事件施加缓冲逻辑，可能产出 0~N 个事件。
+///
+/// 普通文本即时透传；确认命中文本协议后缓冲到流末，剥离协议原文并统一
+/// 转出工具调用（协议标记不作为正文展示、不进入对话历史）；流异常中断时
+/// 把缓冲原文冲刷回正文，不丢内容。
 fn apply_buffer(
     state: &mut BufferState,
     result: Result<StreamEvent, DeepSeekError>,
 ) -> Vec<Result<StreamEvent, DeepSeekError>> {
     match result {
-        Ok(StreamEvent::TextDelta(ref delta)) => {
-            state.buffer.push_text(delta);
-            vec![result]
-        }
+        Ok(StreamEvent::TextDelta(ref delta)) => state
+            .buffer
+            .push_text(delta)
+            .into_iter()
+            .map(|text| Ok(StreamEvent::TextDelta(text)))
+            .collect(),
         Ok(StreamEvent::ToolCallStart { .. }) => {
-            state.buffer.note_structured_tool_call();
-            vec![result]
+            let mut events: Vec<_> = state
+                .buffer
+                .note_structured_tool_call()
+                .into_iter()
+                .map(|text| Ok(StreamEvent::TextDelta(text)))
+                .collect();
+            events.push(result);
+            events
         }
         Ok(StreamEvent::Done) => {
+            let outcome = state.buffer.finish();
             let mut events = Vec::new();
-            for (idx, call) in state.buffer.finish().into_iter().enumerate() {
+            if !outcome.visible_text.is_empty() {
+                events.push(Ok(StreamEvent::TextDelta(outcome.visible_text)));
+            }
+            for call in outcome.tool_calls {
                 events.push(Ok(StreamEvent::TextProtocolToolCall {
-                    id: format!("textcall_{idx}"),
+                    id: crate::dsml::next_text_call_id(),
                     name: call.name,
                     arguments: call.arguments,
                 }));
             }
             events.push(Ok(StreamEvent::Done));
+            events
+        }
+        // 流异常中断：冲刷缓冲原文，避免已接收内容丢失。
+        Err(error) => {
+            let mut events: Vec<_> = state
+                .buffer
+                .abort()
+                .into_iter()
+                .map(|text| Ok(StreamEvent::TextDelta(text)))
+                .collect();
+            events.push(Err(error));
             events
         }
         // Usage 等其余事件不是内容结束标记，原样透传；
@@ -288,20 +315,6 @@ mod buffer_tests {
         }
         out
     }
-    /// 收集 Done 之前产出的事件（不含流末转换）。
-    fn collect_until_done(events: Vec<Result<StreamEvent, DeepSeekError>>) -> Vec<String> {
-        let mut state = BufferState::default();
-        let mut out = Vec::new();
-        for event in events {
-            for mapped in apply_buffer(&mut state, event) {
-                if matches!(mapped, Ok(StreamEvent::Done)) {
-                    continue;
-                }
-                out.push(format!("{:?}", mapped.expect("应为 Ok")));
-            }
-        }
-        out
-    }
     #[test]
     fn plain_text_without_angle_bracket_passes_through() {
         let out = collect(vec![text_delta("普通回复"), Ok(StreamEvent::Done)]);
@@ -309,19 +322,20 @@ mod buffer_tests {
         assert!(!out.iter().any(|e| e.contains("TextProtocolToolCall")));
     }
     #[test]
-    fn angle_bracket_and_code_block_text_pass_through_immediately() {
-        // 正文一律透传：含 < 的正常文本、代码块都即时流出，无窗口探测延迟。
-        let out = collect_until_done(vec![
+    fn angle_bracket_and_code_block_text_are_not_swallowed() {
+        // 含 < 的正常文本与代码块：窗口内无协议前缀即吐出，内容零丢失。
+        let out = collect(vec![
             text_delta("比较 a < b 这是正常文本无关键词"),
             text_delta("```html\n<div><span>hello</span></div>\n```"),
+            Ok(StreamEvent::Done),
         ]);
         assert!(
             out.iter().any(|e| e.contains("比较 a < b")),
-            "尖括号文本应即时透传：{out:?}"
+            "尖括号文本不得丢失：{out:?}"
         );
         assert!(
             out.iter().any(|e| e.contains("<div>")),
-            "代码块应即时透传：{out:?}"
+            "代码块不得丢失：{out:?}"
         );
     }
     #[test]
@@ -337,14 +351,15 @@ mod buffer_tests {
         assert!(!out.iter().any(|e| e.contains("TextProtocolToolCall")));
     }
     #[test]
-    fn dsml_text_streams_verbatim_and_resolves_as_tool_call_at_done() {
-        // 正文按原文透传（不拦截、不撤回），Done 时统一转出工具调用。
+    fn dsml_text_is_buffered_and_resolves_as_tool_call_at_done() {
+        // 命中协议后缓冲：协议原文不透传（不展示给用户、不进入历史），
+        // Done 时统一转出工具调用。
         let dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
         let out = collect(vec![text_delta(dsml), Ok(StreamEvent::Done)]);
         assert!(
-            out.iter()
+            !out.iter()
                 .any(|e| e.contains("TextDelta") && e.contains("DSML")),
-            "协议原文应按正文透传：{out:?}"
+            "协议原文不应作为正文透传：{out:?}"
         );
         assert!(
             out.iter()
@@ -412,7 +427,7 @@ mod buffer_tests {
     }
     #[test]
     fn usage_passes_through_and_resolution_waits_for_done() {
-        // Usage 先于 Done 到达时正文已透传，工具转换仍等 Done。
+        // Usage 先于 Done 到达：协议文本处于缓冲（不透传），Done 前不转出。
         let dsml = "<｜｜DSML｜｜invoke name=\"fn\">\n<｜｜DSML｜｜parameter name=\"x\" string=\"true\">1</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>";
         let usage = Usage {
             prompt_tokens: 10,
@@ -425,10 +440,8 @@ mod buffer_tests {
         let mut state = BufferState::default();
         let text_events = apply_buffer(&mut state, text_delta(dsml));
         assert!(
-            text_events
-                .iter()
-                .any(|event| matches!(event, Ok(StreamEvent::TextDelta(_)))),
-            "正文应即时透传：{text_events:?}"
+            text_events.is_empty(),
+            "命中协议的文本应缓冲至 Done：{text_events:?}"
         );
         let usage_events = apply_buffer(&mut state, Ok(StreamEvent::Usage(usage)));
         assert!(
@@ -480,7 +493,11 @@ mod buffer_tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(calls, vec![("textcall_0", "fn_a"), ("textcall_1", "fn_b")]);
+        // id 来自全局唯一计数器（断言唯一与前缀），名称按序。
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0 != calls[1].0 && calls[0].0.starts_with("textcall_"));
+        assert_eq!(calls[0].1, "fn_a");
+        assert_eq!(calls[1].1, "fn_b");
     }
     #[test]
     fn long_tool_arguments_still_resolve_as_tool_call() {

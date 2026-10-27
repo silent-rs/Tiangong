@@ -36,16 +36,12 @@ impl<'c> Responses<'c> {
     /// DeepSeek 不发送 `[DONE]` 标记；终止事件
     /// （`response.completed` / `response.incomplete` / `response.failed`）
     /// 产出后流即结束，其余后续消息被忽略。
-    /// 创建流式响应。
-    ///
-    /// DeepSeek 不发送 `[DONE]` 标记；终止事件
-    /// （`response.completed` / `response.incomplete` / `response.failed`）
-    /// 产出后流即结束，其余后续消息被忽略。
     ///
     /// 与 chat 一致，SDK 内置文本工具调用协议兜底：当请求携带 tools 且模型把
     /// 工具调用写进 `output_text` 正文（原生协议或 DSML 协议）而非结构化
-    /// `function_call` item 时，SDK 在正常接收流式响应的同时收集协议文本，
-    /// 并在终止事件前统一解析、合成结构化 function_call 事件组，调用方无需感知。
+    /// `function_call` item 时，SDK 会缓冲协议文本并在终止事件前统一解析、
+    /// 剥离协议原文并合成结构化 function_call 事件组；普通文本即时透传，
+    /// 流异常中断时缓冲原文冲刷回正文，不丢内容。
     pub async fn create_stream(
         &self,
         mut request: CreateResponseRequest,
@@ -118,40 +114,106 @@ struct ResponsesBufferState {
     buffer: crate::protocol_buffer::TextProtocolBuffer,
 }
 
-/// 对单个 Responses 流事件施加旁路收集：正文一律正常透传（不拦截、
-/// 不撤回），同时收集完整文本；终止事件到达时统一识别，命中文本工具
-/// 协议则在终止事件前把解析结果转出为结构化 function_call 事件组
-/// （added → arguments.delta → done），由上层正常发起工具调用。
+/// 对单个 Responses 流事件施加文本协议缓冲：
+///
+/// - 普通文本即时透传；`<` 后窗口内命中协议前缀才转入缓冲，协议原文
+///   不作为正文透传（不展示给用户、不进入对话历史）；
+/// - 终止事件前统一解析：剥离协议块后的可见文本 + 结构化 function_call
+///   事件组（added → arguments.delta → done），由上层正常发起工具调用；
+///   `response.failed` 属于请求级失败，跳过解析（失败响应不触发工具）；
+/// - 一次性 JSON 合成流不产结构化 item 事件，因此在 created / completed
+///   携带完整 output 时按其内容标记结构化通道，防止协议讨论样文本被
+///   额外转出调用；
+/// - 流异常中断时冲刷缓冲原文回正文，不丢内容。
 fn apply_responses_buffer(
     state: &mut ResponsesBufferState,
     result: Result<ResponsesStreamEvent, DeepSeekError>,
 ) -> Vec<Result<ResponsesStreamEvent, DeepSeekError>> {
-    match result {
-        Ok(ResponsesStreamEvent::OutputTextDelta { ref delta, .. }) => {
-            state.buffer.push_text(delta);
-            vec![result]
+    /// 把透传文本重建为 OutputTextDelta 事件（合成分片无真实序号，置 0）。
+    fn text_delta_event(delta: String) -> ResponsesStreamEvent {
+        ResponsesStreamEvent::OutputTextDelta {
+            sequence_number: 0,
+            item_id: String::new(),
+            output_index: 0,
+            content_index: 0,
+            delta,
         }
-        // 结构化工具调用 item 出现：停止收集（正文继续透传）。
+    }
+    /// 完整 output 中是否含结构化工具调用 item。
+    fn has_structured_call(response: &ResponseObject) -> bool {
+        response.output.iter().any(|item| {
+            matches!(
+                item,
+                ResponseOutputItem::FunctionCall(_) | ResponseOutputItem::CustomToolCall(_)
+            )
+        })
+    }
+    match result {
+        Ok(ResponsesStreamEvent::OutputTextDelta { ref delta, .. }) => state
+            .buffer
+            .push_text(delta)
+            .into_iter()
+            .map(|text| Ok(text_delta_event(text)))
+            .collect(),
+        // 结构化工具调用 item 出现：冲刷缓冲并停用文本协议识别。
         Ok(
             event @ ResponsesStreamEvent::OutputItemAdded {
                 item: ResponseOutputItem::FunctionCall(_) | ResponseOutputItem::CustomToolCall(_),
                 ..
             },
         ) => {
-            state.buffer.note_structured_tool_call();
-            vec![Ok(event)]
+            let mut events: Vec<_> = state
+                .buffer
+                .note_structured_tool_call()
+                .into_iter()
+                .map(|text| Ok(text_delta_event(text)))
+                .collect();
+            events.push(Ok(event));
+            events
         }
-        // 终止事件：流末统一识别，合成事件组先于终止事件放行。
+        // created / completed 携带完整 output：一次性 JSON 合成流的结构化
+        // 调用只在这里可见（SSE 流 created 时 output 为空，无副作用）。
+        Ok(ref event @ ResponsesStreamEvent::ResponseCreated { ref response, .. })
+        | Ok(ref event @ ResponsesStreamEvent::ResponseCompleted { ref response, .. })
+            if has_structured_call(response) =>
+        {
+            let mut events: Vec<_> = state
+                .buffer
+                .note_structured_tool_call()
+                .into_iter()
+                .map(|text| Ok(text_delta_event(text)))
+                .collect();
+            events.push(Ok(event.clone()));
+            events
+        }
+        // 终止事件：completed / incomplete 前统一解析转出；failed 跳过。
         Ok(
             terminal @ (ResponsesStreamEvent::ResponseCompleted { .. }
-            | ResponsesStreamEvent::ResponseIncomplete { .. }
-            | ResponsesStreamEvent::ResponseFailed { .. }),
+            | ResponsesStreamEvent::ResponseIncomplete { .. }),
         ) => {
+            let outcome = state.buffer.finish();
             let mut events = Vec::new();
-            for (index, call) in state.buffer.finish().into_iter().enumerate() {
+            if !outcome.visible_text.is_empty() {
+                events.push(Ok(text_delta_event(outcome.visible_text)));
+            }
+            for (index, call) in outcome.tool_calls.into_iter().enumerate() {
                 events.extend(text_protocol_call_events(index as u32, call));
             }
             events.push(Ok(terminal));
+            events
+        }
+        Ok(terminal @ ResponsesStreamEvent::ResponseFailed { .. }) => {
+            vec![Ok(terminal)]
+        }
+        // 流异常中断：冲刷缓冲原文，避免已接收内容丢失。
+        Err(error) => {
+            let mut events: Vec<_> = state
+                .buffer
+                .abort()
+                .into_iter()
+                .map(|text| Ok(text_delta_event(text)))
+                .collect();
+            events.push(Err(error));
             events
         }
         other => vec![other],
@@ -159,11 +221,13 @@ fn apply_responses_buffer(
 }
 
 /// 把文本协议解析出的单个工具调用合成为结构化 function_call 事件组。
+/// call_id 取自全局唯一计数器（官方要求 call_id 唯一，历史每轮全量回传
+/// 时不得重复）。
 fn text_protocol_call_events(
     index: u32,
     call: crate::dsml::DsmlToolCall,
 ) -> Vec<Result<ResponsesStreamEvent, DeepSeekError>> {
-    let call_id = format!("textcall_{index}");
+    let call_id = crate::dsml::next_text_call_id();
     let make_item = |arguments: String| {
         ResponseOutputItem::FunctionCall(crate::types::OutputFunctionCall {
             id: None,

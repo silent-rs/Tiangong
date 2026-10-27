@@ -326,15 +326,16 @@ DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回�
 仅当请求携带 `tools` 时启用。无 tools 时（如总结阶段 `ToolChoice::None`）模型不可能走工具调用，兜底关闭，避免误伤讨论协议的正常文本。
 
 ### 工作方式
-
-**流式**（`create_stream`）：SDK 在接收流式响应的同时收集文本，使用三态状态机判定：
-- `Idle` → 遇到 `<` 进入探测
-- `Probing` → 窗口内（10 字符）匹配协议精确前缀（`｜tool` / `｜｜dsml`）→ `Confirmed`；窗口满未命中 → 整块吐出回 `Idle`
-- `Confirmed` → 持续缓冲，完整响应结束后统一解析为 `StreamEvent::TextProtocolToolCall`
+**流式**（`create_stream`，chat 与 responses 共用同一状态机）：SDK 在接收流式响应的同时缓冲文本，使用三态状态机判定：
+- `Idle` → 普通文本即时透传；遇到 `<` 进入探测
+- `Probing` → 窗口内（10 字符）匹配协议精确前缀（`｜tool` / `｜｜dsml`）→ `Confirmed`；窗口满未命中 → 整块吐出回 `Idle`（普通文本、代码块零延迟、零丢失）
+- `Confirmed` → 协议原文持续缓冲（不作为正文透传，避免泄漏给用户或进入对话历史），流末统一解析：剥离协议块后的可见文本 + 工具调用（chat 产出 `StreamEvent::TextProtocolToolCall`，responses 合成结构化 `function_call` 事件组），`call_id` 取全局唯一计数器
+- 流异常中断时缓冲原文冲刷回正文，已接收内容不丢失
+- 出现结构化工具调用（`tool_calls` / `function_call` item，含一次性 JSON 合成流在终止事件携带的完整 output）后停用文本协议识别，协议讨论样文本按正文对待
 
 探测使用精确前缀而非宽泛关键词，避免把 `<toolbar>`、`<dsml>` 等普通内容误判为工具调用。
 
-**非流式**：`tiangong_deepseek::dsml::parse_dsml_tool_calls(content)` 从文本提取工具调用，`strip_tool_call_block(content)` 剥离标记文本。
+**非流式**：`tiangong_deepseek::dsml::parse_dsml_tool_calls(content)` 从文本提取工具调用，`strip_tool_call_block(content)` 剥离标记文本；`dsml::next_text_call_id()` 生成全局唯一的文本协议调用 id。
 
 ### 底层支撑
 
