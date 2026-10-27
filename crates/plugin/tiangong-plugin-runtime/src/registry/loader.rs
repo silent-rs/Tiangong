@@ -838,30 +838,57 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
     else {
         return;
     };
-    let (manifest, verified) = {
+    let (manifest, verified, enabled, ts_instances) = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return;
         };
         let Some(loaded) = plugins.get(plugin_id).filter(|loaded| loaded.enabled) else {
             return;
         };
-        (loaded.manifest.clone(), loaded.verified_sidecar.clone())
+        (
+            loaded.manifest.clone(),
+            loaded.verified_sidecar.clone(),
+            loaded.enabled,
+            loaded
+                .ts_instances
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect::<Vec<_>>(),
+        )
     };
     let sections =
         assemble_prompt_sections(&storage_root, &plugin_dir, &manifest, verified.as_deref());
-    if let Ok(mut plugins) = loaded_plugins().lock()
-        && let Some(loaded) = plugins.get_mut(plugin_id)
-        && loaded.prompt_sections != sections
-    {
-        loaded.prompt_sections = sections;
-        drop(plugins);
-        // 内容变化即插件能力变化：与升级/启停同一事件通道，宿主（UI 刷新、
-        // 上下文交接打标）按指纹定档响应。锁全部释放后发布。
-        crate::events::announce_plugin_change(
-            crate::events::PluginChangeKind::PromptSectionsChanged,
-            plugin_id,
+    let changed = {
+        let Ok(mut plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get_mut(plugin_id) else {
+            return;
+        };
+        let changed = loaded.prompt_sections != sections;
+        loaded.prompt_sections = sections.clone();
+        changed
+    };
+    if !changed {
+        return;
+    }
+    // 存活适配器同步同一份结果（裸写 state 会漏 sidecar_direct 等派生项，
+    // reconfigure 正是干这个的）。
+    let adapter_sections = sections.unwrap_or_default();
+    for adapter in &ts_instances {
+        adapter.reconfigure(
+            &manifest,
+            enabled,
+            verified.clone(),
+            adapter_sections.clone(),
         );
     }
+    // 内容变化即插件能力变化：与升级/启停同一事件通道，宿主（UI 刷新、
+    // 上下文交接打标）按指纹定档响应。锁全部释放后发布。
+    crate::events::announce_plugin_change(
+        crate::events::PluginChangeKind::PromptSectionsChanged,
+        plugin_id,
+    );
 }
 
 /// TS 适配器（清单直连形态）是否承接该插件——两个条件同时成立：

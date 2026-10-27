@@ -934,13 +934,19 @@ impl PluginManifest {
 
     /// UI 制品必须包含全部页面入口；附属文件仅允许位于已声明的资源目录。
     pub(crate) fn validate_ui_artifacts(&self, paths: &BTreeSet<PathBuf>) -> Result<()> {
-        let entries = self
+        // 清单直接引用的随包制品：页面入口 + prompt 文件条目（安装制品
+        // 集与签名制品集两侧复用同一契约——缺一即拒，多出须落在 resources）。
+        let mut entries = self
             .ui_contributions()
             .into_iter()
             .map(|contribution| PathBuf::from(contribution.entry))
             .collect::<BTreeSet<_>>();
+        entries.extend(self.prompt_files().into_iter().map(PathBuf::from));
         if !entries.is_subset(paths) {
-            bail!("插件 {} 的 UI 制品缺少声明的页面入口", self.id);
+            bail!(
+                "插件 {} 的随包制品缺少声明的页面入口或 prompt 文件",
+                self.id
+            );
         }
         for path in paths {
             validate_relative_path(path, "UI 制品")?;
@@ -1177,6 +1183,25 @@ mod tests {
         let mut undeclared = entries;
         undeclared.insert(PathBuf::from("ui/settings.js"));
         assert!(manifest.validate_ui_artifacts(&undeclared).is_err());
+    }
+
+    #[test]
+    fn prompt文件计入随包制品契约() {
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"pf-demo","version":"1.0.0","entrypoints":["desktop"],"prompt":[{"type":"file","file":"prompts/guide.md"}]}"#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+        // 制品集缺 prompt 文件 → 拒
+        let entries = [PathBuf::from("dist/index.html")]
+            .into_iter()
+            .collect::<BTreeSet<PathBuf>>();
+        assert!(manifest.validate_ui_artifacts(&entries).is_err());
+        // 补齐后通过（prompt 文件无需位于 resources）
+        let entries = [PathBuf::from("prompts/guide.md")]
+            .into_iter()
+            .collect::<BTreeSet<PathBuf>>();
+        assert!(manifest.validate_ui_artifacts(&entries).is_ok());
     }
 
     #[test]

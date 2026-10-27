@@ -472,12 +472,35 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
         _ => &[],
     }
 }
-/// 需要分发的全部 UI 制品：页面入口 + 随行资产。
-fn plugin_ui_artifacts(config: &PluginConfig) -> Vec<&'static str> {
+/// 需要分发的全部 UI 制品：页面入口 + 随行资产 + 清单 prompt 条目引用的
+/// 随包文件（`{"type":"file"}`，动态读取 plugin.json，不依赖每插件硬编码
+/// 清单）。
+fn plugin_ui_artifacts(config: &PluginConfig) -> Vec<String> {
     plugin_ui_entries(config)
         .iter()
         .chain(plugin_ui_assets(config))
-        .copied()
+        .map(|entry| entry.to_string())
+        .chain(manifest_prompt_files(config.plugin_root))
+        .collect()
+}
+
+/// 清单 prompt 条目引用的随包文件：打包 / 签名 / 目录制品统一纳入。
+fn manifest_prompt_files(plugin_root: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(format!("{plugin_root}/plugin.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    manifest
+        .get("prompt")
+        .and_then(|prompt| prompt.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.get("file")?.as_str()?.trim();
+            (!file.is_empty()).then(|| file.to_string())
+        })
         .collect()
 }
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
@@ -846,9 +869,9 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
             .as_ref()
             .filter(|_| entry.starts_with("dist/"))
             .cloned()
-            .unwrap_or_else(|| workspace_root.join(config.plugin_root).join(entry));
+            .unwrap_or_else(|| workspace_root.join(config.plugin_root).join(&entry));
         require_file(&source)?;
-        let destination = staging.join(entry);
+        let destination = staging.join(&entry);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1376,13 +1399,13 @@ fn generate_oss_distribution(
     }
     let mut ui_artifacts = serde_json::Map::new();
     for entry in plugin_ui_artifacts(config) {
-        let destination = release_root.join(entry);
+        let destination = release_root.join(&entry);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(plugin.join(entry), &destination)?;
+        std::fs::copy(plugin.join(&entry), &destination)?;
         ui_artifacts.insert(
-            (*entry).to_string(),
+            entry.clone(),
             serde_json::json!({
                 "url": format!("{release_url}/{entry}"),
                 "checksum": format!("sha256:{}", sha256(&destination)?),
@@ -1496,7 +1519,7 @@ fn generate_oss_distribution(
     for entry in plugin_ui_artifacts(config) {
         checksums.push_str(&format!(
             "{}  {}\n",
-            sha256(&release_root.join(entry))?,
+            sha256(&release_root.join(&entry))?,
             entry,
         ));
     }
@@ -2775,7 +2798,7 @@ mod tests {
         assert_eq!(plugin_ui_entries(&FS), ["app/tool-view.html"]);
         stage_plugin_ui(&workspace, &staging, &FS).unwrap();
         for asset in plugin_ui_artifacts(&FS) {
-            assert!(staging.join(asset).is_file(), "缺少 {asset}");
+            assert!(staging.join(&asset).is_file(), "缺少 {asset}");
         }
         let _ = std::fs::remove_dir_all(&staging);
     }
