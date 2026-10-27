@@ -19,6 +19,11 @@
     "tools": true,
     "prompt": true
   },
+  "prompt": [
+    {
+      "type": "sidecar"
+    }
+  ],
   "tools": [
     {
       "name": "get_skill_detail",
