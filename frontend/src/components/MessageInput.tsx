@@ -86,7 +86,8 @@ function TokenRing({ progress }: { progress: number }) {
             />
           </mask>
         </defs>
-        <circle cx="12.5" cy="12.5" r="9" fill="none" stroke="#e6eaf0" strokeWidth={7} />
+        {/* 背景圈跟随主题（与原线性条轨道 bg-muted 同源），暗色下不发白。 */}
+        <circle cx="12.5" cy="12.5" r="9" fill="none" strokeWidth={7} className="stroke-muted" />
         <foreignObject x="0" y="0" width="25" height="25" mask={`url(#${maskId}-green)`}>
           <div style={{ width: 25, height: 25, background: '#22c55e' }} />
         </foreignObject>
