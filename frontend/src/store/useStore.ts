@@ -2379,7 +2379,9 @@ export const useStore = create<AppState>((set, get) => ({
       const event = envelope.event;
       // 实时 TPS：输出事件（正文与思考，均携带累计 tokens）驱动跳秒计时
       // 与速度样本（前端差分）。累计字段缺失（旧后端 / 插件反馈）时仍
-      // 跳秒、不计速。
+      // 跳秒、不计速。速度跨轮次保留（tracker.lastTps）：轮次结束不清空，
+      // 直到 app 重启或会话（core 实例）销毁才随内存消失；轮内新一次
+      // LLM 请求的计数回退由 tracker 重开样本窗口并保留最近显示。
       if (
         event.type === 'delta'
         || event.type === 'react_text'
@@ -2387,8 +2389,6 @@ export const useStore = create<AppState>((set, get) => ({
         || event.type === 'reasoning'
       ) {
         liveTpsTracker.record(sessionId, event.tokens);
-      } else if (event.type === 'user_message' || event.type === 'done' || event.type === 'error') {
-        liveTpsTracker.reset(sessionId);
       }
       // title_changed：直接改对应会话标题，不进入会话视图状态机。
       if (event.type === 'title_changed' && typeof event.title === 'string') {

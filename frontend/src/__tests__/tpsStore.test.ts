@@ -52,13 +52,19 @@ describe('实时 TPS 全链路（applyStreamEvents → LiveTpsTracker）', () =>
     expect(snap.tps).toBe(0);
   });
 
-  it('user_message / done 清空窗口（轮次边界）', () => {
+  it('轮次结束（done）速度保留显示，不清空', () => {
     feed('e2e-1', [
       { type: 'react_text', message_id: 'm1', content: 'x', tokens: 5 },
       { type: 'react_text', message_id: 'm1', content: 'y', tokens: 9 },
     ]);
-    expect(liveTpsTracker.snapshot('e2e-1').active).toBe(true);
+    const before = liveTpsTracker.snapshot('e2e-1');
+    expect(before.active).toBe(true);
+    expect(before.tps).toBeGreaterThanOrEqual(0);
     feed('e2e-1', [{ type: 'done', usage: null }]);
-    expect(liveTpsTracker.snapshot('e2e-1').active).toBe(false);
+    // 轮次边界不再清空：底部统计区保留最近速度（仅 app 重启 / core
+    // 实例销毁才随内存消失）。
+    const after = liveTpsTracker.snapshot('e2e-1');
+    expect(after.active).toBe(true);
+    expect(after.tps).toBe(before.tps);
   });
 });

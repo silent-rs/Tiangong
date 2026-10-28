@@ -33,15 +33,15 @@ import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
 
 /** 输入框底栏的「速度 + token 用量」合并区域：同一行、一块区域。
- *  速度（轮次执行期间且已产生有效值时，等待期保留最近显示）与 token
- *  统计（进度条 + 当前 / 总计）以竖分隔线隔开；两者皆无内容时整块不
- *  渲染。会话切换时随当前会话的采样目标自动切换/隐藏。 */
+ *  速度在轮次执行期间实时更新，轮次结束后保留最近值（仅 app 重启 /
+ *  core 实例销毁才随内存清空）；与 token 统计（进度条 + 当前 / 总计）
+ *  以竖分隔线隔开；两者皆无内容时整块不渲染。会话切换时随当前会话的
+ *  采样目标自动切换。 */
 function TokenStatsBlock({ compact }: { compact?: boolean }) {
   const sessionId = useLiveSessionId();
-  const runStatus = useStore((s) => s.runStatus);
   const tokenStats = useStore((s) => s.tokenStats);
-  const executing = runStatus === 'executing';
-  const { tps } = useLiveTps(sessionId, executing);
+  // 持续采样：轮次结束后无新样本，tracker 返回保留的最近速度。
+  const { tps } = useLiveTps(sessionId, true);
 
   const displayTokens = tokenStats?.current_tokens ?? 0;
   const totalTokens = tokenStats?.total_tokens ?? 0;
@@ -49,7 +49,7 @@ function TokenStatsBlock({ compact }: { compact?: boolean }) {
   const compressionProgress =
     compressionThreshold > 0 ? Math.min(100, (displayTokens / compressionThreshold) * 100) : 0;
 
-  const showTps = executing && tps > 0;
+  const showTps = tps > 0;
   const showTokens = displayTokens > 0 || totalTokens > 0;
   if (!showTps && !showTokens) return null;
   return (
