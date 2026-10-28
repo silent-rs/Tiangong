@@ -32,22 +32,23 @@ import { useLiveSessionId, useLiveTps } from '@/hooks/useLiveTps';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
 
-/** 输入框底栏的常驻速度小字：流式期间显示实时 TPS（后端真实 token 计数），
- *  空闲灰化占位「—」（宽度稳定不跳动）；速度未出样本时也显示占位。 */
+/** 输入框底栏的速度小字：当前会话流式期间、且已产生有效速度（后端累计
+ *  tokens 差分）时显示在 token 统计左侧；空闲或尚无速度样本时不渲染
+ *  （不占位）。会话切换时随当前会话的采样目标自动切换/隐藏。 */
 function InputTpsBadge() {
   const sessionId = useLiveSessionId();
   const streamingMessageId = useStore((s) => s.streamingMessageId);
   const streaming = streamingMessageId != null;
   const { tps } = useLiveTps(sessionId, streaming);
-  const showTps = streaming && tps > 0;
+  if (!streaming || tps <= 0) return null;
   return (
     <span
       className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground/70 tabular-nums"
       aria-live="polite"
-      aria-label={showTps ? `当前生成速度 ${formatTps(round1(tps))}` : '当前无进行中的生成'}
+      aria-label={`当前生成速度 ${formatTps(round1(tps))}`}
     >
-      <Zap className={`h-3 w-3 ${showTps ? 'text-foreground/70' : 'opacity-40'}`} aria-hidden="true" />
-      {showTps ? formatTps(round1(tps)) : '—'}
+      <Zap className="h-3 w-3 text-foreground/70" aria-hidden="true" />
+      {formatTps(round1(tps))}
     </span>
   );
 }

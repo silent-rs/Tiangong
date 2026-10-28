@@ -2377,9 +2377,15 @@ export const useStore = create<AppState>((set, get) => ({
     for (const envelope of events) {
       const sessionId = envelope.session_id;
       const event = envelope.event;
-      // 实时 TPS：正文事件驱动跳秒计时；携带的累计 tokens 计速度样本
-      //（前端差分）。累计字段缺失（旧后端 / 插件反馈）时仍跳秒、不计速。
-      if (event.type === 'delta' || event.type === 'react_text' || event.type === 'summary_text') {
+      // 实时 TPS：输出事件（正文与思考，均携带累计 tokens）驱动跳秒计时
+      // 与速度样本（前端差分）。累计字段缺失（旧后端 / 插件反馈）时仍
+      // 跳秒、不计速。
+      if (
+        event.type === 'delta'
+        || event.type === 'react_text'
+        || event.type === 'summary_text'
+        || event.type === 'reasoning'
+      ) {
         liveTpsTracker.record(sessionId, event.tokens);
       } else if (event.type === 'user_message' || event.type === 'done' || event.type === 'error') {
         liveTpsTracker.reset(sessionId);

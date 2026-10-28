@@ -64,6 +64,10 @@ pub enum StreamEvent {
         /// 所属消息 ID
         message_id: String,
         content: String,
+        /// 同 [`StreamEvent::Delta::tokens`]（含思考增量的累计口径——
+        /// DeepSeek / Anthropic 的官方 completion_tokens 均包含思考 token）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
     },
     /// 工具开始执行
     ToolStart { name: String, args_summary: String },

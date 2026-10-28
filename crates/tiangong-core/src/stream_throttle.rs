@@ -187,6 +187,7 @@ fn flush_buffers(
         let _ = tx.send(StreamEvent::Reasoning {
             message_id: message_id.to_string(),
             content: reasoning,
+            tokens: buffers.cumulative_tokens,
         });
     }
 }
@@ -287,5 +288,24 @@ mod tests {
         let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
         let events = push_and_flush(&buffers, &[]);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn reasoning_flush_carries_cumulative_tokens() {
+        // 思考增量事件同样携带累计（思考阶段即有实时速度）。
+        let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut b = buffers.lock().unwrap();
+            b.cumulative_tokens = Some(42);
+            b.reasoning.push_str("思考片段");
+        }
+        flush_buffers(&buffers, &tx, "msg-1", StreamTextKind::React);
+        drop(tx);
+        let events: Vec<StreamEvent> = rx.into_iter().collect();
+        match events.as_slice() {
+            [StreamEvent::Reasoning { tokens, .. }] => assert_eq!(*tokens, Some(42)),
+            other => panic!("应为 Reasoning 事件：{other:?}"),
+        }
     }
 }
