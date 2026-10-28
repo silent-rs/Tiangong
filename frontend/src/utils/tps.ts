@@ -1,10 +1,11 @@
 /** 实时 TPS 的前端消费工具。
  *
- * 数据源是 stream 上的官方 usage 累计：`StreamEvent::Delta/ReactText/
- * SummaryText.tokens` 携带该消息截至本批的累计 output tokens（provider
- * 官方口径——Anthropic 逐事件提供，DeepSeek / OpenAI 系仅在流末，正文
- * 期间字段缺失）。前端按相邻事件差分得到实时速度，不做任何本地估算；
- * 字段缺失（旧后端 / 插件反馈 / DeepSeek 流中）时不记样本。
+ * 数据源是 stream 的累计计数：`StreamEvent::Delta/ReactText/SummaryText.tokens`
+ * 携带该消息截至本批的累计 output tokens（provider 层按正文 delta 事件
+ * 计数——DeepSeek Responses / Anthropic 的 delta 事件即服务端 token 粒度；
+ * 官方 usage 到达时校准覆盖）。前端按相邻事件差分得到实时速度，不做
+ * 本地分词；字段缺失（旧后端 / 插件反馈）时不计速度，但跳秒仍由
+ * `startedAt` 独立驱动。
  *
  * 本模块是纯函数 / 纯数据结构，不依赖 React 与 store（hook 见 hooks/useLiveTps.ts）。
  */
@@ -25,54 +26,66 @@ export const TPS_WINDOW_MS = 2000;
 const MIN_SPAN_MS = 300;
 
 export interface LiveTpsSnapshot {
-  /** 本轮是否已有官方累计样本（区分「无官方数据」与「速度为 0」）。 */
+  /** 本轮是否已开始（首个流式文本事件起即 true，与是否有速度样本无关）。 */
   active: boolean;
-  /** 实时速度（tokens/s，官方累计差分）；样本不足时为 0。 */
+  /** 实时速度（tokens/s，累计差分）；样本不足时为 0。 */
   tps: number;
-  /** 首个样本距今的毫秒数；无样本为 null。 */
+  /** 首个流式文本事件距今的毫秒数；独立于速度样本窗口，长流不回退。 */
   elapsedMs: number | null;
 }
 
 interface TpsSample {
   at: number;
-  /** 该时点的官方累计 output tokens。 */
+  /** 该时点的累计 output tokens。 */
   cumulative: number;
 }
 
 interface TpsSessionState {
+  /** 首个流式文本事件时刻（跳秒基准，不随窗口裁剪删除）。 */
+  startedAt: number | null;
   samples: TpsSample[];
 }
 
-/** 实时 TPS 滑动窗口：消费官方累计样本，窗口内首尾差分（纯数据结构，时间可注入便于测试）。 */
+/** 实时 TPS 滑动窗口：累计样本差分 + 独立开始计时（纯数据结构，时间可注入便于测试）。 */
 export class LiveTpsTracker {
   private sessions = new Map<string, TpsSessionState>();
 
-  /** 记录一个官方累计样本（`cumulative` 缺失 / 非法时忽略本事件）。 */
-  recordCumulative(
+  private stateOf(sessionId: string): TpsSessionState {
+    let state = this.sessions.get(sessionId);
+    if (!state) {
+      state = { startedAt: null, samples: [] };
+      this.sessions.set(sessionId, state);
+    }
+    return state;
+  }
+
+  /** 记录一个流式文本事件：驱动跳秒计时；携带累计值时另计速度样本。 */
+  record(
     sessionId: string,
     cumulative: number | null | undefined,
     now: number = Date.now(),
   ): void {
     if (!sessionId) return;
-    if (typeof cumulative !== 'number' || !Number.isFinite(cumulative) || cumulative < 0) return;
-    const state = this.sessions.get(sessionId) ?? { samples: [] };
-    const last = state.samples[state.samples.length - 1];
-    // 同批（≤1ms）样本合并；累计值回退（消息切换）时重开窗口。
-    if (last && now - last.at <= 1 && cumulative >= last.cumulative) {
-      state.samples[state.samples.length - 1] = { at: last.at, cumulative };
-      this.prune(state, now);
-      this.sessions.set(sessionId, state);
+    const state = this.stateOf(sessionId);
+    if (state.startedAt == null) state.startedAt = now;
+
+    if (typeof cumulative !== 'number' || !Number.isFinite(cumulative) || cumulative < 0) {
       return;
     }
-    if (last && cumulative < last.cumulative) {
-      state.samples = [];
+    const last = state.samples[state.samples.length - 1];
+    if (last && now - last.at <= 1 && cumulative >= last.cumulative) {
+      // 同批（≤1ms）样本合并。
+      state.samples[state.samples.length - 1] = { at: last.at, cumulative };
+    } else if (last && cumulative < last.cumulative) {
+      // 累计回退（异常时序）：重开样本窗口，不影响跳秒计时。
+      state.samples = [{ at: now, cumulative }];
+    } else {
+      state.samples.push({ at: now, cumulative });
     }
-    state.samples.push({ at: now, cumulative });
     this.prune(state, now);
-    this.sessions.set(sessionId, state);
   }
 
-  /** 轮次结束 / 新轮次开始：清空该会话窗口。 */
+  /** 轮次结束 / 新轮次开始：清空该会话窗口与计时。 */
   reset(sessionId: string): void {
     if (sessionId) this.sessions.delete(sessionId);
   }
@@ -80,12 +93,12 @@ export class LiveTpsTracker {
   /** 当前窗口快照。 */
   snapshot(sessionId: string, now: number = Date.now()): LiveTpsSnapshot {
     const state = this.sessions.get(sessionId);
-    if (!state || state.samples.length === 0) {
+    if (!state || state.startedAt == null) {
       return { active: false, tps: 0, elapsedMs: null };
     }
+    const elapsedMs = now - state.startedAt;
     this.prune(state, now);
     const samples = state.samples;
-    const elapsedMs = now - samples[0].at;
     if (samples.length < 2) return { active: true, tps: 0, elapsedMs };
     const produced = samples[samples.length - 1].cumulative - samples[0].cumulative;
     if (produced <= 0) return { active: true, tps: 0, elapsedMs };
@@ -97,7 +110,7 @@ export class LiveTpsTracker {
     return { active: true, tps: produced / (span / 1000), elapsedMs };
   }
 
-  /** 滑出窗口的样本移除；至少保留 1 个。 */
+  /** 滑出窗口的速度样本移除（startedAt 不参与裁剪）；至少保留 1 个。 */
   private prune(state: TpsSessionState, now: number): void {
     if (state.samples.length <= 1) return;
     const cutoff = now - TPS_WINDOW_MS;

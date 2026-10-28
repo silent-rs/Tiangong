@@ -2377,11 +2377,10 @@ export const useStore = create<AppState>((set, get) => ({
     for (const envelope of events) {
       const sessionId = envelope.session_id;
       const event = envelope.event;
-      // 实时 TPS：正文事件附带的官方累计 output tokens 入窗（前端差分）；
-      // 轮次边界清零。累计字段缺失（DeepSeek 流中 / 旧后端 / 插件反馈）
-      // 时不记样本，UI 只显示进行态。
+      // 实时 TPS：正文事件驱动跳秒计时；携带的累计 tokens 计速度样本
+      //（前端差分）。累计字段缺失（旧后端 / 插件反馈）时仍跳秒、不计速。
       if (event.type === 'delta' || event.type === 'react_text' || event.type === 'summary_text') {
-        liveTpsTracker.recordCumulative(sessionId, event.tokens);
+        liveTpsTracker.record(sessionId, event.tokens);
       } else if (event.type === 'user_message' || event.type === 'done' || event.type === 'error') {
         liveTpsTracker.reset(sessionId);
       }

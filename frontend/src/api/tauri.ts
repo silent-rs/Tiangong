@@ -272,9 +272,9 @@ export interface StreamEvent {
   type: string;
   message_id?: string;
   content?: string;
-  /** 该消息截至本批的累计 output tokens（provider 流上官方 usage 口径：
-   *  Anthropic 逐事件携带；DeepSeek / OpenAI 系仅在流末，正文期间缺失）。
-   *  前端按相邻事件差分得实时 TPS；缺失时不计速度。 */
+  /** 该消息截至本批的累计 output tokens（provider 层按正文 delta 事件
+   *  计数，官方 usage 到达时校准；DeepSeek Responses / Anthropic 的 delta
+   *  事件即 token 粒度）。前端按相邻事件差分得实时 TPS；缺失时仅跳秒。 */
   tokens?: number | null;
   content_blocks?: ContentBlock[];
   media?: MediaAsset[];

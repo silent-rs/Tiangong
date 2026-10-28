@@ -26,10 +26,11 @@ pub enum StreamEvent {
         /// 所属消息 ID（前端据此组装到正确的消息）
         message_id: String,
         content: String,
-        /// 该消息截至本批的**累计** output tokens，来自 provider 流上
-        /// 官方 usage（Anthropic 逐 message_delta 携带；DeepSeek / OpenAI
-        /// 系仅在流末，正文期间字段缺失）。前端按相邻事件差分得到实时
-        /// 速度；不计入 usage，精确计量以 `TokenUsage` / `Done.usage` 为准。
+        /// 该消息截至本批的**累计** output tokens（实时 TPS 数据源）：
+        /// provider 层按正文 delta 事件计数（DeepSeek Responses / Anthropic
+        /// 的 delta 事件即服务端 token 粒度），官方 usage 到达时校准覆盖。
+        /// 前端按相邻事件差分得实时速度；不计入 usage，精确计量以
+        /// `TokenUsage` / `Done.usage` 为准。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens: Option<u64>,
     },

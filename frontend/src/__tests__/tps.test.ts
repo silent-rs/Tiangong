@@ -66,11 +66,11 @@ describe('messageTpsOf（持久化优先 + 旧数据折算兼容）', () => {
   });
 });
 
-describe('LiveTpsTracker（官方累计样本差分）', () => {
+describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
   it('按累计值差分计算窗口速度', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordCumulative('s1', 100, 0);
-    tracker.recordCumulative('s1', 300, 2000);
+    tracker.record('s1', 100, 0);
+    tracker.record('s1', 300, 2000);
     const snap = tracker.snapshot('s1', 2000);
     expect(snap.active).toBe(true);
     expect(snap.elapsedMs).toBe(2000);
@@ -78,45 +78,62 @@ describe('LiveTpsTracker（官方累计样本差分）', () => {
     expect(round1(snap.tps)).toBe(100);
   });
 
-  it('累计值回退（新消息）时重开窗口，不产生负速度', () => {
+  it('无累计（tokens 缺失）仍跳秒，速度为 0（review：无 usage 仍跳秒）', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordCumulative('s1', 500, 0);
-    tracker.recordCumulative('s1', 10, 1000);
-    const snap = tracker.snapshot('s1', 1000);
-    // 回退样本重开窗口：单样本不足计算速度。
+    tracker.record('s1', undefined, 0);
+    tracker.record('s1', null, 1200);
+    const snap = tracker.snapshot('s1', 3000);
     expect(snap.active).toBe(true);
     expect(snap.tps).toBe(0);
+    expect(snap.elapsedMs).toBe(3000);
   });
 
-  it('tokens 缺失 / 非法（DeepSeek 流中、旧后端、插件反馈）不计样本', () => {
+  it('持续生成超过 2 秒：旧样本滑出窗口，跳秒不回退（review：长流秒数反复回退）', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordCumulative('s1', undefined, 0);
-    tracker.recordCumulative('s1', null, 0);
-    tracker.recordCumulative('s1', Number.NaN, 0);
-    tracker.recordCumulative('s1', -1, 0);
-    expect(tracker.snapshot('s1', 1000).active).toBe(false);
+    tracker.record('s1', 10, 0);
+    tracker.record('s1', 200, 1500);
+    tracker.record('s1', 400, 3000);
+    tracker.record('s1', 600, 4500);
+    const snap = tracker.snapshot('s1', 5000);
+    // 跳秒从首个事件起累计（独立于速度窗口）。
+    expect(snap.elapsedMs).toBe(5000);
+    // 速度窗口内（cutoff=3000，保留 3000 与 4500 两个样本）：
+    // 400→600 = 200 tokens / 1.5s 跨度。
+    expect(round1(snap.tps)).toBe(133.3);
   });
 
-  it('reset 清空窗口；旧样本随时间滑出窗口', () => {
+  it('累计值回退（异常时序）时重开样本窗口，不产生负速度且跳秒保留', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordCumulative('s1', 100, 0);
-    tracker.recordCumulative('s1', 200, 1000);
+    tracker.record('s1', 500, 0);
+    tracker.record('s1', 10, 1000);
+    const snap = tracker.snapshot('s1', 1000);
+    expect(snap.active).toBe(true);
+    expect(snap.tps).toBe(0);
+    expect(snap.elapsedMs).toBe(1000);
+  });
+
+  it('tokens 非法值不计样本，但事件仍驱动跳秒', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', Number.NaN, 0);
+    tracker.record('s1', -1, 500);
+    const snap = tracker.snapshot('s1', 900);
+    expect(snap.active).toBe(true);
+    expect(snap.tps).toBe(0);
+    expect(snap.elapsedMs).toBe(900);
+  });
+
+  it('reset 清空窗口与计时', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 100, 0);
+    tracker.record('s1', 200, 1000);
     tracker.reset('s1');
     expect(tracker.snapshot('s1', 600).active).toBe(false);
-
-    tracker.recordCumulative('s2', 100, 0);
-    tracker.recordCumulative('s2', 200, 1000);
-    // 3.5s 后：前两个样本已滑出窗口，只剩新样本（无速度）。
-    tracker.recordCumulative('s2', 240, 3500);
-    const snap = tracker.snapshot('s2', 3500);
-    expect(snap.active).toBe(true);
-    expect(snap.tps).toBe(0);
   });
 
   it('同批（≤1ms）样本合并，不堆积', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordCumulative('s1', 100, 1000);
-    tracker.recordCumulative('s1', 150, 1000);
+    tracker.record('s1', 100, 1000);
+    tracker.record('s1', 150, 1000);
     const snap = tracker.snapshot('s1', 1000);
     expect(snap.active).toBe(true);
     // 单样本（合并后）不足计算速度。
@@ -125,8 +142,8 @@ describe('LiveTpsTracker（官方累计样本差分）', () => {
 
   it('开局分母下限：极短跨度不产生数值尖峰', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordCumulative('s1', 0, 0);
-    tracker.recordCumulative('s1', 20, 50);
+    tracker.record('s1', 0, 0);
+    tracker.record('s1', 20, 50);
     const snap = tracker.snapshot('s1', 50);
     // 分母下限 300ms：20 tokens / 0.3s ≈ 66.7，而不是 20/0.05=400。
     expect(round1(snap.tps)).toBe(66.7);

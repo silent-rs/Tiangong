@@ -88,18 +88,23 @@
 
 ## 4. 实施记录（替代原 mock 策略章节）
 
-原设计稿阶段的 mock 工具（`utils/tpsMock.ts`、`tps-mock.html` 预览页及其测试）已随真实实现完成而移除。实际数据链路与原设计的关键差异：**TPS 全部来自 stream 上的官方 usage 累计，不做任何本地 token 计算**（曾试过在 llm crate 用 BPE tokenizer 逐批计数，因逐事件全量分词 O(n²) 阻塞 SSE 读取把流拖成数秒一批，且引入额外 tokenizer 依赖，已按「统一使用 stream 累计计算」移除）。
+原设计稿阶段的 mock 工具（`utils/tpsMock.ts`、`tps-mock.html` 预览页及其测试）已随真实实现完成而移除。实时 TPS 数据源历经三次口径调整，最终定稿：
 
-### 4.1 后端（官方 usage 累计透传与持久化）
+1. ~~前端对流式 delta 字符估算~~（用户否决：不做前端估算）；
+2. ~~llm crate BPE tokenizer 逐事件分词~~（实测否决：逐事件全量分词 O(n²) 阻塞 SSE 读取，流被拖成数秒一批，且引入额外 tokenizer 依赖）；
+3. ~~仅透传官方 usage 累计~~（实测否决：三家 provider 流中均无逐事件 usage——Anthropic 也只在 `message_start` 与流末 `message_delta` 携带，流中数字恒为 0）；
+4. **定稿：provider 层按正文 delta 事件计数（stream 累计），官方 usage 到达时校准覆盖**。
 
-- **provider 事实**：Anthropic 的 `message_delta` 逐事件携带官方累计 `output_tokens`；DeepSeek Responses / OpenAI 系仅在流末（`response.completed` / 最后 chunk）给出 usage，正文期间无官方计量。
-- **透传**：core 节流层（`stream_throttle`）记录流上最近一次官方 usage 的累计 `completion_tokens`，随下一批正文事件携带：`StreamEvent::{Delta,ReactText,SummaryText}.tokens`（`Option<u64>`，语义 = 该消息截至本批的**累计** output tokens；serde default + skip，旧后端 / 插件文本反馈 / DeepSeek 正文期间无此字段）。累计保存在节流缓冲，不存在「取走累计却无事件可搭」的丢失路径。
+### 4.1 后端（stream 累计计数与持久化）
+
+- **计数**（`tiangong-llm` consume 循环，O(1) 零分词）：每个正文 `TextDelta` 事件计数 +1——DeepSeek Responses / Anthropic 的 delta 事件即服务端 token 粒度，计数即真实值；`Usage` 事件到达时用官方 `completion_tokens` 覆盖计数（校准），流中数字与结束计量收敛一致。思考增量不计（正文口径）。
+- **透传**：`ModelStreamChunk.cumulative_tokens` → core 节流层（`stream_throttle`）记录最近累计，随下一批正文事件携带：`StreamEvent::{Delta,ReactText,SummaryText}.tokens`（`Option<u64>`，累计语义；serde default + skip，旧后端 / 插件文本反馈无此字段）。累计保存在节流缓冲，不存在「取走累计却无事件可搭」的丢失路径。
 - **持久化复现**：`Message`（assistant）新增 `text_tps: Option<f64>`，`set_usage` 定稿时按 `completion_tokens / text_elapsed_ms` 算好写入（流式快照递增时重算收敛）；序列化 / 旧格式迁移 / 访问器全链路兼容，旧数据无该字段可正常加载。
 
 ### 4.2 前端（差分消费与展示）
 
-- **实时 TPS**：`LiveTpsTracker`（`utils/tps.ts`）按「(时刻, 官方累计)」样本维护约 2s 滑动窗口，窗口内首尾差分得速度（分母下限 300ms 防尖峰；累计回退即新消息时重开窗口）；`useLiveTps` 流式期间 600ms 采样。前端零估算：字段缺失（DeepSeek 正文期间 / 旧后端 / 插件反馈）时不记样本。
-- **实时展示预期**：Anthropic 全程有实时数字；**DeepSeek / OpenAI 正文期间无官方数据，扫光行只显示「正在生成 · Ns」与输入框进行态，速度数字在结束后由操作行 / 统计呈现**（真实值，非实时估算）。
+- **实时 TPS**：`LiveTpsTracker`（`utils/tps.ts`）维护「(时刻, 累计)」样本约 2s 滑动窗口，窗口内首尾差分得速度（分母下限 300ms 防尖峰）；**`startedAt` 独立保存**——首个流式正文事件即开始计时，不随速度窗口裁剪回退，累计字段缺失（旧后端 / 插件反馈）时仍跳秒、仅无速度数字。`useLiveTps` 流式期间 600ms 采样。
+- **实时展示**：扫光行「正在生成 XX tok/s · Ns」（Anthropic / DeepSeek Responses 流中即有真实数字；跳秒全程可用）+ 输入框常驻小字。
 - **每条消息 TPS**：`messageTpsOf` 优先读持久化 `text_tps`（历史复现），旧数据按 usage/耗时折算兼容；`MessageActions` 操作行显示 `⚡ 87.3 tok/s`（hover 明细：tokens · 耗时）。
 - **token 统计**：`CallUsageDetails` 表格新增「时间」「速度」两列——时间取消息创建时间，速度读持久化 `text_tps`（无数据行显示 `—`，hover 给出 tokens/耗时明细）。
 

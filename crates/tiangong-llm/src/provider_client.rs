@@ -263,6 +263,13 @@ pub struct ModelStreamChunk {
     pub content: String,
     pub reasoning_content: String,
     pub usage: Option<TokenUsageData>,
+    /// 截至本 chunk 的累计 output tokens（实时 TPS 数据源）。
+    ///
+    /// 口径：流中按正文 delta 事件计数（DeepSeek Responses / Anthropic 的
+    /// delta 事件即服务端 token 粒度，计数即真实值；无任何分词开销）；
+    /// `Usage` 事件到达时用官方 `completion_tokens` 校准覆盖，结束收敛
+    /// 到官方计量。思考增量不计（正文口径）。
+    pub cumulative_tokens: Option<u64>,
 }
 
 pub trait ModelClient {
@@ -1061,13 +1068,14 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
     let mut stop_reason = None;
+    // 实时 TPS：流中按正文 delta 事件计数（Responses / Anthropic 的 delta
+    // 事件即 token 粒度，O(1) 计数零开销、不阻塞 SSE 读取）；官方 usage
+    // 到达时校准覆盖，结束收敛到官方计量。
+    let mut text_delta_events: u64 = 0;
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
     let mut tool_call_order: Vec<String> = Vec::new();
 
-    // 注：实时 TPS 不在本循环做任何 token 计算——统一使用 stream 上的
-    // 官方 usage 累计（`Usage` 事件 → chunk.usage.completion_tokens，由
-    // core 节流层透传给前端差分）。流读取路径保持零计数开销。
     while let Some(event) = stream.next().await {
         let event = match event {
             Ok(event) => event,
@@ -1084,6 +1092,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                         content: String::new(),
                         reasoning_content: delta,
                         usage: None,
+                        cumulative_tokens: None,
                     });
                 }
             }
@@ -1095,10 +1104,12 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             ProviderStreamEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text.push_str(&delta);
+                    text_delta_events += 1;
                     on_delta(&ModelStreamChunk {
                         content: delta,
                         reasoning_content: String::new(),
                         usage: None,
+                        cumulative_tokens: Some(text_delta_events),
                     });
                 }
             }
@@ -1129,10 +1140,16 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             }
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage);
+                // 官方计量到达：校准累计值（覆盖 delta 事件计数），流中
+                // 数字与结束时计量收敛一致。
+                if usage.completion_tokens > 0 {
+                    text_delta_events = usage.completion_tokens as u64;
+                }
                 on_delta(&ModelStreamChunk {
                     content: String::new(),
                     reasoning_content: String::new(),
                     usage: Some(usage.clone()),
+                    cumulative_tokens: Some(text_delta_events),
                 });
             }
             ProviderStreamEvent::Error(message) => {
