@@ -4,9 +4,10 @@
 //! 这里将 token 先累积到内存缓冲，再按固定节奏向外发送，避免前端事件队列被打爆。
 //!
 //! 实时 TPS 数据源也在此层透传：`ModelStreamChunk.cumulative_tokens`
-//! （provider 层按正文 delta 事件计数、官方 usage 到达时校准的累计
-//! output tokens）被记录，随下一批正文事件的 `tokens` 字段下发。
-//! 前端按相邻事件差分得到实时速度。流读取路径不做任何分词计算。
+//! （provider 层按输出 delta 事件计数——正文与思考增量各计 1，作为 token
+//! 数的近似；官方 usage 到达时校准的累计 output tokens）被记录，随下一批
+//! 正文事件的 `tokens` 字段下发。前端按相邻事件差分得到实时速度。流读取
+//! 路径不做任何分词计算。
 
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};

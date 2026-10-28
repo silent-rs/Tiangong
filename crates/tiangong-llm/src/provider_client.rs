@@ -1069,9 +1069,11 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     let mut usage = TokenUsageData::default();
     let mut stop_reason = None;
     // 实时 TPS：流中按输出 delta 事件计数（正文与思考都算——官方
-    // completion_tokens 口径包含思考 token；Responses / Anthropic 的
-    // delta 事件即 token 粒度，O(1) 计数零开销、不阻塞 SSE 读取）；
-    // 官方 usage 到达时校准覆盖，结束收敛到官方计量。
+    // completion_tokens 口径包含思考 token）。这是 token 数的**近似**：
+    // 各 provider 的 delta 粒度不一（Anthropic thinking_delta 常为整句、
+    // text_delta 多为单 token 但不保证；Responses 的 output_text.delta 同
+    // 样是文本片段），故流中数字通常低于官方计量；O(1) 计数零开销、不阻塞
+    // SSE 读取，官方 usage 到达时校准覆盖，结束收敛到官方计量。
     let mut output_delta_events: u64 = 0;
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
