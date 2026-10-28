@@ -34,8 +34,23 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
       <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
         {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
       </button>
-      {/* 生成度量（速度 + token 用量）合并块紧跟复制按钮：位置固定，
-          流式期间的速度行（StreamingTpsRow）以同宽占位对齐此处。 */}
+      {/* 插件消息操作（如朗读）：由插件经 session.message-action 注入 */}
+      <MessagePluginHost
+        slot="session.message-action"
+        message={{ id: messageId, role: "assistant", text, attachments: [] }}
+      />
+      {time && (
+        <span className="ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">{time}</span>
+      )}
+      {durationMs != null && durationMs > 0 && (
+        <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">
+          <Clock className="w-3 h-3" />
+          {formatDuration(durationMs)}
+        </span>
+      )}
+      {/* 生成度量（速度 + token 用量）合并块：内容（时间 / 时长）右侧
+          自然排列（原用量徽标位置不变）；流式期间的速度行以同构前缀
+          （复制占位 + 时间）对齐此位置。 */}
       {(showTps || usageMessages) && (
         <span className="inline-flex items-center gap-1.5 ml-1 pl-1.5 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">
           {showTps && (
@@ -51,20 +66,6 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
             </span>
           )}
           {usageMessages && <CallUsageDetails messages={usageMessages} />}
-        </span>
-      )}
-      {/* 插件消息操作（如朗读）：由插件经 session.message-action 注入 */}
-      <MessagePluginHost
-        slot="session.message-action"
-        message={{ id: messageId, role: "assistant", text, attachments: [] }}
-      />
-      {time && (
-        <span className="ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">{time}</span>
-      )}
-      {durationMs != null && durationMs > 0 && (
-        <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">
-          <Clock className="w-3 h-3" />
-          {formatDuration(durationMs)}
         </span>
       )}
     </div>

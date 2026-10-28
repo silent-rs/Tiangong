@@ -435,7 +435,7 @@ function AgentTurnView({
                 {isStreaming ? (
                   <>
                     <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
-                    <StreamingTpsRow />
+                    <StreamingTpsRow time={formatMessageTime(msg.created_at)} />
                   </>
                 ) : (
                   renderWithHighlight(msg.id, body)
@@ -448,7 +448,7 @@ function AgentTurnView({
               {isStreaming ? (
                 <>
                   <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
-                  <StreamingTpsRow />
+                  <StreamingTpsRow time={formatMessageTime(msg.created_at)} />
                 </>
               ) : visibleText || hasMediaBlocks(msg) ? (
                 <div>
