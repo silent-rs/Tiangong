@@ -27,6 +27,7 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
   };
 
   const btnClass = "p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors";
+  const showTps = tps != null && tps > 0;
 
   return (
     <div className="flex flex-wrap items-center gap-0.5 mt-1">
@@ -47,19 +48,25 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
           {formatDuration(durationMs)}
         </span>
       )}
-      {tps != null && tps > 0 && (
-        <span
-          className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums"
-          title={tpsDetail
-            ? `正文输出 ${tpsDetail.tokens.toLocaleString()} tokens · 耗时 ${formatDuration(tpsDetail.elapsedMs)}（${formatTpsText(tps)}）`
-            : "正文生成速度"}
-          aria-label={`正文生成速度 ${formatTpsText(tps)}`}
-        >
-          <Zap className="w-3 h-3" />
-          {formatTpsText(tps)}
+      {/* 生成度量（速度 + token 用量）合并为一块区域：同类信息聚合，
+          共享一个左侧分隔；两者皆无时不渲染。 */}
+      {(showTps || usageMessages) && (
+        <span className="inline-flex items-center gap-1.5 ml-1 pl-1.5 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">
+          {showTps && (
+            <span
+              className="inline-flex items-center gap-0.5"
+              title={tpsDetail
+                ? `正文输出 ${tpsDetail.tokens.toLocaleString()} tokens · 耗时 ${formatDuration(tpsDetail.elapsedMs)}（${formatTpsText(tps)}）`
+                : "正文生成速度"}
+              aria-label={`正文生成速度 ${formatTpsText(tps)}`}
+            >
+              <Zap className="w-3 h-3" />
+              {formatTpsText(tps)}
+            </span>
+          )}
+          {usageMessages && <CallUsageDetails messages={usageMessages} />}
         </span>
       )}
-      {usageMessages && <CallUsageDetails messages={usageMessages} />}
     </div>
   );
 }

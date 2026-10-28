@@ -78,7 +78,11 @@ describe('模型调用用量', () => {
     await act(async () => root.render(<MessageActions text="回复" showTts={false} durationMs={9000} usageMessages={[message('a', usage(100, 80))]} />));
     const time = container.querySelector('[title="本轮执行总时长"]')!;
     const trigger = container.querySelector('[aria-label="查看调用用量详情"]') as HTMLButtonElement;
-    expect(time.nextElementSibling).toBe(trigger);
+    // 生成度量（速度 + 用量徽标）合并为一块区域：时长的下一兄弟是合并块，
+    // 用量徽标位于其中。
+    const mergedBlock = time.nextElementSibling;
+    expect(mergedBlock).not.toBeNull();
+    expect(mergedBlock!.contains(trigger)).toBe(true);
     expect(container.querySelector('[title="回复生成耗时"]')).toBeNull();
     expect(trigger.querySelector('[aria-label="输入 100"] .lucide-arrow-up')).not.toBeNull();
     expect(trigger.querySelector('[aria-label="输出 10"] .lucide-arrow-down')).not.toBeNull();

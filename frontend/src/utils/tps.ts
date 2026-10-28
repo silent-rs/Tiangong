@@ -44,6 +44,10 @@ interface TpsSessionState {
   /** 首个流式文本事件时刻（跳秒基准，不随窗口裁剪删除）。 */
   startedAt: number | null;
   samples: TpsSample[];
+  /** 最近一次算出的速度：等待期（TTFT / 工具执行，无新样本到达）保留
+   *  显示，避免速度数字消失重来的跳动；轮次边界 reset 时清空。
+   *  新样本重新算出速度后自然覆盖。 */
+  lastTps: number;
 }
 
 /** 实时 TPS 滑动窗口：累计样本差分 + 独立开始计时（纯数据结构，时间可注入便于测试）。 */
@@ -53,7 +57,7 @@ export class LiveTpsTracker {
   private stateOf(sessionId: string): TpsSessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = { startedAt: null, samples: [] };
+      state = { startedAt: null, samples: [], lastTps: 0 };
       this.sessions.set(sessionId, state);
     }
     return state;
@@ -77,7 +81,9 @@ export class LiveTpsTracker {
       // 同批（≤1ms）样本合并。
       state.samples[state.samples.length - 1] = { at: last.at, cumulative };
     } else if (last && cumulative < last.cumulative) {
-      // 累计回退（异常时序）：重开样本窗口，不影响跳秒计时。
+      // 累计回退：ReAct 轮内新一次 LLM 请求的计数从 1 重新开始（每流独立
+      // 计数），重开样本窗口重新累计；lastTps 保留——新窗口算出速度前
+      //（工具执行等待 / 新流爬升期）沿用最近显示，不跳动。
       state.samples = [{ at: now, cumulative }];
     } else {
       state.samples.push({ at: now, cumulative });
@@ -90,7 +96,7 @@ export class LiveTpsTracker {
     if (sessionId) this.sessions.delete(sessionId);
   }
 
-  /** 当前窗口快照。 */
+  /** 当前窗口快照。样本不足或全部老化时返回最近速度（等待期保留显示）。 */
   snapshot(sessionId: string, now: number = Date.now()): LiveTpsSnapshot {
     const state = this.sessions.get(sessionId);
     if (!state || state.startedAt == null) {
@@ -99,15 +105,17 @@ export class LiveTpsTracker {
     const elapsedMs = now - state.startedAt;
     this.prune(state, now);
     const samples = state.samples;
-    if (samples.length < 2) return { active: true, tps: 0, elapsedMs };
+    if (samples.length < 2) return { active: true, tps: state.lastTps, elapsedMs };
     const produced = samples[samples.length - 1].cumulative - samples[0].cumulative;
-    if (produced <= 0) return { active: true, tps: 0, elapsedMs };
+    if (produced <= 0) return { active: true, tps: state.lastTps, elapsedMs };
     // 分母取窗口内首尾样本的实际跨度（≥下限、≤窗口长）。
     const span = Math.max(
       MIN_SPAN_MS,
       Math.min(TPS_WINDOW_MS, samples[samples.length - 1].at - samples[0].at),
     );
-    return { active: true, tps: produced / (span / 1000), elapsedMs };
+    const tps = produced / (span / 1000);
+    state.lastTps = tps;
+    return { active: true, tps, elapsedMs };
   }
 
   /** 滑出窗口的速度样本移除（startedAt 不参与裁剪）；至少保留 1 个。 */

@@ -102,14 +102,34 @@ describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
     expect(round1(snap.tps)).toBe(133.3);
   });
 
-  it('累计值回退（异常时序）时重开样本窗口，不产生负速度且跳秒保留', () => {
+  it('累计值回退（轮内新一次 LLM 请求）重开样本窗口，保留最近速度', () => {
     const tracker = new LiveTpsTracker();
-    tracker.record('s1', 500, 0);
-    tracker.record('s1', 10, 1000);
-    const snap = tracker.snapshot('s1', 1000);
-    expect(snap.active).toBe(true);
-    expect(snap.tps).toBe(0);
-    expect(snap.elapsedMs).toBe(1000);
+    tracker.record('s1', 100, 0);
+    tracker.record('s1', 300, 2000);
+    const streaming = tracker.snapshot('s1', 2000);
+    expect(round1(streaming.tps)).toBe(100);
+
+    // 工具执行后新一次 LLM 请求：counter 从 1 重新累计（回退）。
+    tracker.record('s1', 1, 8000);
+    const waiting = tracker.snapshot('s1', 8000);
+    // 等待/新流爬升期沿用最近显示，不跳动。
+    expect(round1(waiting.tps)).toBe(100);
+    // 新窗口累计出速度后自然覆盖（219 tokens / 2s）。
+    tracker.record('s1', 220, 10000);
+    const next = tracker.snapshot('s1', 10000);
+    expect(round1(next.tps)).toBe(109.5);
+  });
+
+  it('等待期（无新样本，旧样本滑出窗口）保留最后显示的速度', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 100, 0);
+    tracker.record('s1', 300, 2000);
+    expect(round1(tracker.snapshot('s1', 2000).tps)).toBe(100);
+    // 工具执行 10s：无新样本，速度保留而非归零/消失。
+    expect(round1(tracker.snapshot('s1', 12000).tps)).toBe(100);
+    // 轮次边界 reset 才清空。
+    tracker.reset('s1');
+    expect(tracker.snapshot('s1', 12100).tps).toBe(0);
   });
 
   it('tokens 非法值不计样本，但事件仍驱动跳秒', () => {

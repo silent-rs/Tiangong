@@ -32,24 +32,67 @@ import { useLiveSessionId, useLiveTps } from '@/hooks/useLiveTps';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
 
-/** 输入框底栏的速度小字：当前会话流式期间、且已产生有效速度（后端累计
- *  tokens 差分）时显示在 token 统计左侧；空闲或尚无速度样本时不渲染
- *  （不占位）。会话切换时随当前会话的采样目标自动切换/隐藏。 */
-function InputTpsBadge() {
+/** 输入框底栏的「速度 + token 用量」合并区域：同一行、一块区域。
+ *  速度（轮次执行期间且已产生有效值时，等待期保留最近显示）与 token
+ *  统计（进度条 + 当前 / 总计）以竖分隔线隔开；两者皆无内容时整块不
+ *  渲染。会话切换时随当前会话的采样目标自动切换/隐藏。 */
+function TokenStatsBlock({ compact }: { compact?: boolean }) {
   const sessionId = useLiveSessionId();
-  const streamingMessageId = useStore((s) => s.streamingMessageId);
-  const streaming = streamingMessageId != null;
-  const { tps } = useLiveTps(sessionId, streaming);
-  if (!streaming || tps <= 0) return null;
+  const runStatus = useStore((s) => s.runStatus);
+  const tokenStats = useStore((s) => s.tokenStats);
+  const executing = runStatus === 'executing';
+  const { tps } = useLiveTps(sessionId, executing);
+
+  const displayTokens = tokenStats?.current_tokens ?? 0;
+  const totalTokens = tokenStats?.total_tokens ?? 0;
+  const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
+  const compressionProgress =
+    compressionThreshold > 0 ? Math.min(100, (displayTokens / compressionThreshold) * 100) : 0;
+
+  const showTps = executing && tps > 0;
+  const showTokens = displayTokens > 0 || totalTokens > 0;
+  if (!showTps && !showTokens) return null;
   return (
-    <span
-      className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground/70 tabular-nums"
-      aria-live="polite"
-      aria-label={`当前生成速度 ${formatTps(round1(tps))}`}
+    <div
+      className="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground/70 tabular-nums"
+      title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
     >
-      <Zap className="h-3 w-3 text-foreground/70" aria-hidden="true" />
-      {formatTps(round1(tps))}
-    </span>
+      {showTps && (
+        <span
+          className="flex shrink-0 items-center gap-1"
+          aria-live="polite"
+          aria-label={`当前生成速度 ${formatTps(round1(tps))}`}
+        >
+          <Zap className="h-3 w-3 text-foreground/70" aria-hidden="true" />
+          {formatTps(round1(tps))}
+        </span>
+      )}
+      {showTps && showTokens && <span className="h-3 w-px bg-border/60" aria-hidden="true" />}
+      {showTokens && (
+        <>
+          {compressionThreshold > 0 && (
+            <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  compressionProgress >= 95
+                    ? 'bg-destructive'
+                    : compressionProgress >= 80
+                      ? 'bg-amber-500'
+                      : 'bg-green-500'
+                }`}
+                style={{ width: `${compressionProgress}%` }}
+              />
+            </div>
+          )}
+          {!compact && (
+            <>
+              <span>{formatTokenCount(displayTokens)}</span>
+              <span>总计 {formatTokenCount(totalTokens)}</span>
+            </>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -229,8 +272,6 @@ export function MessageInput({
   ));
   const sessionCwd = useStore((state) => state.sessionCwd);
   const setSessionCwd = useStore((state) => state.setSessionCwd);
-  const lastUsage = useStore((state) => state.lastUsage);
-  const tokenStats = useStore((state) => state.tokenStats);
   const reasoningEffort = useStore((state) => state.reasoningEffort);
   const setReasoningEffort = useStore((state) => state.setReasoningEffort);
   const isComposingRef = useRef(false);
@@ -410,12 +451,6 @@ export function MessageInput({
       setModelSwitching(false);
     }
   };
-  const displayTokens = tokenStats?.current_tokens ?? 0;
-  const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
-  const compressionProgress = compressionThreshold > 0
-    ? Math.min(100, Math.round((displayTokens / compressionThreshold) * 100))
-    : 0;
-  const totalTokens = tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -1510,18 +1545,7 @@ export function MessageInput({
                 </button>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <InputTpsBadge />
-                {(displayTokens > 0 || totalTokens > 0) && (
-                  <div
-                    className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
-                    title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
-                  >
-                    {compressionThreshold > 0 && <TokenRing progress={compressionProgress} />}
-                    {!compact && (
-                      <span>总计 {formatTokenCount(totalTokens)}</span>
-                    )}
-                  </div>
-                )}
+                <TokenStatsBlock compact={compact} />
                 {sandboxState?.status === 'failed' && !isRemoteHost() && (
                   <button
                     onClick={() => setPendingSettingsTab('sandbox')}
