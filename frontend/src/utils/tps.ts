@@ -1,11 +1,13 @@
 /** 实时 TPS 的前端消费工具。
  *
  * 数据源是 stream 的累计计数：`StreamEvent::Delta/ReactText/SummaryText.tokens`
- * 携带该消息截至本批的累计 output tokens（provider 层按正文 delta 事件
- * 计数——DeepSeek Responses / Anthropic 的 delta 事件即服务端 token 粒度）；
- * 官方 usage 到达时经 `calibrate` 对齐窗口基准，不参与产量差分。前端按
- * 相邻事件差分得到实时速度，不做本地分词；字段缺失（旧后端 / 插件反馈）
- * 时不计速度，但跳秒仍由 `startedAt` 独立驱动。
+ * 携带该消息截至本批的累计 output tokens（provider 层按输出 delta 事件计数，
+ * 正文与思考增量各计 1——这是 token 数的**近似**：各 provider 的 delta 粒度
+ * 不一，Anthropic 的 `thinking_delta` 常为整句、`text_delta` 多为单 token 但
+ * 不保证，故流中数字通常低于官方计量）；官方 usage 到达时经 `calibrate`
+ * 对齐窗口基准，不参与产量差分。前端按相邻事件差分得到实时速度，不做本地
+ * 分词；字段缺失（旧后端 / 插件反馈）时不计速度，但跳秒仍由 `startedAt`
+ * 独立驱动。
  *
  * 本模块是纯函数 / 纯数据结构，不依赖 React 与 store（hook 见 hooks/useLiveTps.ts）。
  */
@@ -112,6 +114,10 @@ export class LiveTpsTracker {
     }
     const state = this.stateOf(sessionId);
     if (state.startedAt == null) state.startedAt = now;
+    // 先裁剪再补算：工具执行 / 等待期可能长时间没有任何 record 与
+    // snapshot，上一轮的样本仍原样留在数组里；不裁剪就会把已滑出窗口的
+    // 旧速度当成本轮速度（本轮可能毫无输出）。
+    this.prune(state, now);
     if (state.lastTps === 0) {
       const tps = this.windowTps(state);
       if (tps > 0) state.lastTps = tps;

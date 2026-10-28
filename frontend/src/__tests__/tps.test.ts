@@ -166,6 +166,17 @@ describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
     expect(round1(tracker.snapshot('s1', 200).tps)).toBe(3.3);
   });
 
+  it('校准前的补算只用窗口内样本：已滑出窗口的旧样本不冒充本轮速度', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 1, 0);
+    tracker.record('s1', 2, 100);
+    // 工具执行 / 等待期没有任何新样本，UI 也未采样（切走会话等）。
+    // 此刻到达官方 usage：两个样本已滑出 2s 窗口，补算必须为 0——
+    // 否则上一轮的 3.3 tok/s 会被当成本轮速度，而本轮其实毫无输出。
+    tracker.calibrate('s1', 19, 5000);
+    expect(tracker.snapshot('s1', 5000).tps).toBe(0);
+  });
+
   it('等待期（无新样本，旧样本滑出窗口）保留最后显示的速度', () => {
     const tracker = new LiveTpsTracker();
     tracker.record('s1', 100, 0);
