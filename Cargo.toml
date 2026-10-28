@@ -55,7 +55,7 @@ members = [
     "plugins/tiangong-plugin-mcp/sidecar",
     "plugins/tiangong-plugin-mcp/wasm",
     "plugins/tiangong-plugin-prompt/protocol",
-    "plugins/tiangong-plugin-prompt/wasm",
+    "plugins/tiangong-plugin-prompt/sidecar",
     "crates/plugin/tiangong-plugin-runtime",
     "crates/plugin/tiangong-plugin-sidecar",
     "crates/plugin/tiangong-plugin-update",
@@ -109,7 +109,7 @@ tiangong-plugin-skill-protocol = { path = "plugins/tiangong-plugin-skill/protoco
 tiangong-plugin-skill-sidecar = { path = "plugins/tiangong-plugin-skill/sidecar" }
 tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
-tiangong-plugin-prompt-wasm = { path = "plugins/tiangong-plugin-prompt/wasm" }
+tiangong-plugin-prompt-sidecar = { path = "plugins/tiangong-plugin-prompt/sidecar" }
 tiangong-plugin-runtime = { path = "crates/plugin/tiangong-plugin-runtime" }
 tiangong-plugin-sidecar = { path = "crates/plugin/tiangong-plugin-sidecar" }
 tiangong-plugin-update = { path = "crates/plugin/tiangong-plugin-update" }
