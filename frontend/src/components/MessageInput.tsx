@@ -1,5 +1,5 @@
-import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
-import type { ReactNode, SetStateAction } from 'react';
+import { useState, useId, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
+import type { CSSProperties, ReactNode, SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
@@ -43,6 +43,71 @@ function formatTokenCount(value: number): string {
   if (value < 1000) return String(value);
   const [divisor, unit] = TOKEN_UNITS.find(([d]) => value >= d) ?? [1_000, 'k'];
   return `${Math.floor(value / (divisor / 10)) / 10}${unit}`;
+}
+
+/** token 用量环形进度条（设计稿 deepseek_html_20261028_046501）：
+ *  0–50% 纯绿，50–75% 绿→黄，75–100% 黄→红；临近满格（≥95%，与原线性条
+ *  「≥95% 危险区」同口径）时渐变层画满整圈、末端盖过 12 点方向的绿色起点
+ *  并以红色圆头封口，环完全闭合不再露出缺口；具体数值由外层容器的
+ *  title（hover 提示）完整展示。 */
+function TokenRing({ progress }: { progress: number }) {
+  // useId 含「:」等字符，需清洗后才能安全用于 url(#id) 引用。
+  const maskId = `token-ring-${useId().replace(/[^a-zA-Z0-9-]/g, '')}`;
+  const p = Math.min(100, Math.max(0, progress));
+  // 临近满格时按闭合渲染：渐变层补满剩余缺口，环首尾盖住起点。
+  const closed = p >= 95;
+  // 纯绿层只画 0–50% 这一段；渐变层从 50% 起画到 p%（闭合时画满到 100%）。
+  const greenLen = Math.min(p, 50);
+  const gradLen = closed ? 50 : Math.max(0, p - 50);
+  const maskCircleStyle = (length: number, offset: number, visible: boolean): CSSProperties => ({
+    strokeDasharray: `${length} 100`,
+    strokeDashoffset: offset,
+    opacity: visible ? 1 : 0,
+    transform: 'rotate(-90deg)',
+    transformOrigin: '12.5px 12.5px',
+    transition: 'stroke-dasharray .5s cubic-bezier(.4, 0, .2, 1), opacity .2s ease',
+  });
+  return (
+    <span className="inline-block h-[25px] w-[25px] shrink-0" aria-hidden="true">
+      <svg viewBox="0 0 25 25" className="block h-full w-full overflow-visible">
+        <defs>
+          <mask id={`${maskId}-green`}>
+            <circle
+              cx="12.5" cy="12.5" r="9" pathLength={100}
+              fill="none" stroke="white" strokeWidth={7} strokeLinecap="round"
+              style={maskCircleStyle(greenLen, 0, p > 0)}
+            />
+          </mask>
+          <mask id={`${maskId}-grad`}>
+            <circle
+              cx="12.5" cy="12.5" r="9" pathLength={100}
+              fill="none" stroke="white" strokeWidth={7} strokeLinecap="round"
+              style={maskCircleStyle(gradLen, -50, p > 50)}
+            />
+          </mask>
+        </defs>
+        {/* 背景圈跟随主题（与原线性条轨道 bg-muted 同源），暗色下不发白。 */}
+        <circle cx="12.5" cy="12.5" r="9" fill="none" strokeWidth={7} className="stroke-muted" />
+        <foreignObject x="0" y="0" width="25" height="25" mask={`url(#${maskId}-green)`}>
+          <div style={{ width: 25, height: 25, background: '#22c55e' }} />
+        </foreignObject>
+        <foreignObject x="0" y="0" width="25" height="25" mask={`url(#${maskId}-grad)`}>
+          <div
+            style={{
+              width: 25,
+              height: 25,
+              background: 'conic-gradient(#22c55e 0deg, #22c55e 180deg, #eab308 270deg, #ef4444 360deg)',
+            }}
+          />
+        </foreignObject>
+        {/* 满格红盖：临近满格时盖住 12 点方向的绿色圆头，保证首尾闭合为红色。 */}
+        <circle
+          cx="12.5" cy="3.5" r="3.5" fill="#ef4444"
+          style={{ opacity: closed ? 1 : 0, transition: 'opacity .2s ease' }}
+        />
+      </svg>
+    </span>
+  );
 }
 
 interface MentionCandidate {
@@ -1427,27 +1492,9 @@ export function MessageInput({
                     className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
                     title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
                   >
-                    {compressionThreshold > 0 && (
-                      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
-                        <div
-                          className={`h-full rounded-full transition-all ${
-                            compressionProgress >= 95
-                              ? 'bg-destructive'
-                              : compressionProgress >= 80
-                                ? 'bg-amber-500'
-                                : 'bg-green-500'
-                          }`}
-                          style={{ width: `${compressionProgress}%` }}
-                        />
-                      </div>
-                    )}
+                    {compressionThreshold > 0 && <TokenRing progress={compressionProgress} />}
                     {!compact && (
-                      <>
-                        <span>
-                          {formatTokenCount(displayTokens)}
-                        </span>
-                        <span>总计 {formatTokenCount(totalTokens)}</span>
-                      </>
+                      <span>总计 {formatTokenCount(totalTokens)}</span>
                     )}
                   </div>
                 )}
