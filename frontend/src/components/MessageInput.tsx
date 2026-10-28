@@ -36,7 +36,7 @@ import { InputQueueBar } from './InputQueueBar';
 /** 输入框底栏的「速度 + token 用量」合并区域：同一行、一块区域。
  *  速度在轮次执行期间实时更新，轮次结束后保留最近值；实时样本缺失
  *  （页面重载 / 切换会话后 tracker 归零）时回退到最近一条完成消息持久化
- *  的速度。与 token 统计（进度条 + 当前 / 总计）以竖分隔线隔开；两者皆无
+ *  的速度。与 token 统计（环形进度 + 总计）以竖分隔线隔开；两者皆无
  *  内容时整块不渲染。会话切换时随当前会话的采样目标自动切换。 */
 function TokenStatsBlock({ compact }: { compact?: boolean }) {
   const sessionId = useLiveSessionId();
@@ -75,26 +75,8 @@ function TokenStatsBlock({ compact }: { compact?: boolean }) {
       {showTps && showTokens && <span className="h-3 w-px bg-border/60" aria-hidden="true" />}
       {showTokens && (
         <>
-          {compressionThreshold > 0 && (
-            <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  compressionProgress >= 95
-                    ? 'bg-destructive'
-                    : compressionProgress >= 80
-                      ? 'bg-amber-500'
-                      : 'bg-green-500'
-                }`}
-                style={{ width: `${compressionProgress}%` }}
-              />
-            </div>
-          )}
-          {!compact && (
-            <>
-              <span>{formatTokenCount(displayTokens)}</span>
-              <span>总计 {formatTokenCount(totalTokens)}</span>
-            </>
-          )}
+          {compressionThreshold > 0 && <TokenRing progress={compressionProgress} />}
+          {!compact && <span>总计 {formatTokenCount(totalTokens)}</span>}
         </>
       )}
     </div>
