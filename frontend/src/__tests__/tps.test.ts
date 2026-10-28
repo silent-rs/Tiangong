@@ -66,57 +66,67 @@ describe('messageTpsOf（持久化优先 + 旧数据折算兼容）', () => {
   });
 });
 
-describe('LiveTpsTracker（真实 token 计数入窗）', () => {
-  it('按后端 tokens 字段累计并计算窗口速度', () => {
+describe('LiveTpsTracker（官方累计样本差分）', () => {
+  it('按累计值差分计算窗口速度', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordTokens('s1', 100, 0);
-    tracker.recordTokens('s1', 100, 1000);
+    tracker.recordCumulative('s1', 100, 0);
+    tracker.recordCumulative('s1', 300, 2000);
     const snap = tracker.snapshot('s1', 2000);
     expect(snap.active).toBe(true);
     expect(snap.elapsedMs).toBe(2000);
-    // 窗口内 2 样本共 200 tokens / 2s 跨度 = 100 tok/s
+    // 窗口内累计 100→300 = 200 tokens / 2s = 100 tok/s
     expect(round1(snap.tps)).toBe(100);
   });
 
-  it('同批（≤1ms）事件合并为一个样本，不堆积', () => {
+  it('累计值回退（新消息）时重开窗口，不产生负速度', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordTokens('s1', 10, 1000);
-    tracker.recordTokens('s1', 15, 1000);
+    tracker.recordCumulative('s1', 500, 0);
+    tracker.recordCumulative('s1', 10, 1000);
     const snap = tracker.snapshot('s1', 1000);
+    // 回退样本重开窗口：单样本不足计算速度。
     expect(snap.active).toBe(true);
-    // 单样本不足计算速度：tps 为 0，但 elapsed 已开始。
     expect(snap.tps).toBe(0);
   });
 
-  it('tokens 缺失 / 非法（旧后端、插件反馈）不计样本', () => {
+  it('tokens 缺失 / 非法（DeepSeek 流中、旧后端、插件反馈）不计样本', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordTokens('s1', undefined, 0);
-    tracker.recordTokens('s1', null, 0);
-    tracker.recordTokens('s1', Number.NaN, 0);
-    tracker.recordTokens('s1', 0, 0);
+    tracker.recordCumulative('s1', undefined, 0);
+    tracker.recordCumulative('s1', null, 0);
+    tracker.recordCumulative('s1', Number.NaN, 0);
+    tracker.recordCumulative('s1', -1, 0);
     expect(tracker.snapshot('s1', 1000).active).toBe(false);
   });
 
   it('reset 清空窗口；旧样本随时间滑出窗口', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordTokens('s1', 50, 0);
-    tracker.recordTokens('s1', 50, 500);
+    tracker.recordCumulative('s1', 100, 0);
+    tracker.recordCumulative('s1', 200, 1000);
     tracker.reset('s1');
     expect(tracker.snapshot('s1', 600).active).toBe(false);
 
-    tracker.recordTokens('s2', 100, 0);
-    tracker.recordTokens('s2', 100, 1000);
-    // 3.5s 后：前两个样本已滑出窗口，只剩新样本。
-    tracker.recordTokens('s2', 40, 3500);
+    tracker.recordCumulative('s2', 100, 0);
+    tracker.recordCumulative('s2', 200, 1000);
+    // 3.5s 后：前两个样本已滑出窗口，只剩新样本（无速度）。
+    tracker.recordCumulative('s2', 240, 3500);
     const snap = tracker.snapshot('s2', 3500);
     expect(snap.active).toBe(true);
-    expect(snap.elapsedMs).toBe(3500);
+    expect(snap.tps).toBe(0);
+  });
+
+  it('同批（≤1ms）样本合并，不堆积', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.recordCumulative('s1', 100, 1000);
+    tracker.recordCumulative('s1', 150, 1000);
+    const snap = tracker.snapshot('s1', 1000);
+    expect(snap.active).toBe(true);
+    // 单样本（合并后）不足计算速度。
+    expect(snap.tps).toBe(0);
   });
 
   it('开局分母下限：极短跨度不产生数值尖峰', () => {
     const tracker = new LiveTpsTracker();
-    tracker.recordTokens('s1', 10, 0);
-    tracker.recordTokens('s1', 10, 50);
+    tracker.recordCumulative('s1', 0, 0);
+    tracker.recordCumulative('s1', 20, 50);
     const snap = tracker.snapshot('s1', 50);
     // 分母下限 300ms：20 tokens / 0.3s ≈ 66.7，而不是 20/0.05=400。
     expect(round1(snap.tps)).toBe(66.7);

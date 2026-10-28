@@ -24,8 +24,6 @@ futures-util = { workspace = true }
 jsonschema = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
-# 流式 delta 真实 token 计数（token_count 模块，实时 TPS 数据源）
-tiktoken-rs = { workspace = true }
 # Codex（ChatGPT 账号）OAuth 登录：PKCE 随机数、S256 摘要、回调参数解析、凭据时间戳
 getrandom = { workspace = true }
 sha2 = { workspace = true }

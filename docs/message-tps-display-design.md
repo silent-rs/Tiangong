@@ -88,18 +88,18 @@
 
 ## 4. 实施记录（替代原 mock 策略章节）
 
-原设计稿阶段的 mock 工具（`utils/tpsMock.ts`、`tps-mock.html` 预览页及其测试）已随真实实现完成而移除。实际数据链路与原设计的关键差异：**实时 TPS 不由前端估算，由后端在 llm crate 做真实 tokenizer 计算**（provider 流式 API 不提供逐事件 token 数，DeepSeek/OpenAI 仅在流末给 usage；Anthropic 逐事件带官方累计值，可与 tokenizer 计数并存）。
+原设计稿阶段的 mock 工具（`utils/tpsMock.ts`、`tps-mock.html` 预览页及其测试）已随真实实现完成而移除。实际数据链路与原设计的关键差异：**TPS 全部来自 stream 上的官方 usage 累计，不做任何本地 token 计算**（曾试过在 llm crate 用 BPE tokenizer 逐批计数，因逐事件全量分词 O(n²) 阻塞 SSE 读取把流拖成数秒一批，且引入额外 tokenizer 依赖，已按「统一使用 stream 累计计算」移除）。
 
-### 4.1 后端（真实计算与持久化）
+### 4.1 后端（官方 usage 累计透传与持久化）
 
-- **token 计数**：`tiangong-llm` 新增 `token_count` 模块（tiktoken `o200k_base`，纯 Rust BPE）。`StreamTokenCounter` 处理流式增量的跨批合并：提交点只落在「分隔符 run（空白/标点）起点」（BPE pretoken 天然分界），已定界前缀定期裁剪控内存；各批产出之和恒等于整段一次分词数（单测覆盖任意批边界、逐字符流、跨批合并）。
-- **事件下发**：`ModelStreamChunk.tokens`（本批真实 token 数）→ core 节流层（`stream_throttle`）累计随 flush 附带 → `StreamEvent::Delta/ReactText/SummaryText.tokens`（`Option<u64>`，serde default + skip：旧后端 / 插件文本反馈无此字段，前端按缺失优雅降级）。流末未定界尾部搭 `Usage` 事件补齐（finish 幂等）。
+- **provider 事实**：Anthropic 的 `message_delta` 逐事件携带官方累计 `output_tokens`；DeepSeek Responses / OpenAI 系仅在流末（`response.completed` / 最后 chunk）给出 usage，正文期间无官方计量。
+- **透传**：core 节流层（`stream_throttle`）记录流上最近一次官方 usage 的累计 `completion_tokens`，随下一批正文事件携带：`StreamEvent::{Delta,ReactText,SummaryText}.tokens`（`Option<u64>`，语义 = 该消息截至本批的**累计** output tokens；serde default + skip，旧后端 / 插件文本反馈 / DeepSeek 正文期间无此字段）。累计保存在节流缓冲，不存在「取走累计却无事件可搭」的丢失路径。
 - **持久化复现**：`Message`（assistant）新增 `text_tps: Option<f64>`，`set_usage` 定稿时按 `completion_tokens / text_elapsed_ms` 算好写入（流式快照递增时重算收敛）；序列化 / 旧格式迁移 / 访问器全链路兼容，旧数据无该字段可正常加载。
 
-### 4.2 前端（消费与展示）
+### 4.2 前端（差分消费与展示）
 
-- **实时 TPS**：`useStore.applyStreamEvents` 把文本增量事件的 `tokens` 喂给 `LiveTpsTracker`（`utils/tps.ts`，按会话滑动窗口约 2s，分母下限 300ms 防开局尖峰）；`useLiveTps`（`hooks/useLiveTps.ts`）流式期间 600ms 采样。前端不估算 token。
-- **两处实时展示**：① 消息下方扫光行 `StreamingTpsRow`（`tool-run-row` 扫光 + 跳秒，memo 化不随 16ms 批量重渲）；② 输入框底栏常驻小字 `InputTpsBadge`（空闲灰化 `—` 占位，aria-live）。
+- **实时 TPS**：`LiveTpsTracker`（`utils/tps.ts`）按「(时刻, 官方累计)」样本维护约 2s 滑动窗口，窗口内首尾差分得速度（分母下限 300ms 防尖峰；累计回退即新消息时重开窗口）；`useLiveTps` 流式期间 600ms 采样。前端零估算：字段缺失（DeepSeek 正文期间 / 旧后端 / 插件反馈）时不记样本。
+- **实时展示预期**：Anthropic 全程有实时数字；**DeepSeek / OpenAI 正文期间无官方数据，扫光行只显示「正在生成 · Ns」与输入框进行态，速度数字在结束后由操作行 / 统计呈现**（真实值，非实时估算）。
 - **每条消息 TPS**：`messageTpsOf` 优先读持久化 `text_tps`（历史复现），旧数据按 usage/耗时折算兼容；`MessageActions` 操作行显示 `⚡ 87.3 tok/s`（hover 明细：tokens · 耗时）。
 - **token 统计**：`CallUsageDetails` 表格新增「时间」「速度」两列——时间取消息创建时间，速度读持久化 `text_tps`（无数据行显示 `—`，hover 给出 tokens/耗时明细）。
 
@@ -108,9 +108,9 @@
 原「后续实施」清单已全部落地，按实际实现重述：
 
 1. **每条消息 TPS**：`api/message.ts` 的 `messageTpsOf` / `textTpsOf`（持久化字段优先 + 折算兼容），`MessageActions` 与 `CallUsageDetails` 消费。
-2. **实时 TPS**：后端逐批真实计数经 `StreamEvent.tokens` 下发，`LiveTpsTracker` 滑动窗口 + `useLiveTps` 采样（见 4.1 / 4.2）。
-3. **TTFT**：暂未实施（原设计为可选增强；后端事件时间线已具备承载能力，后续可在 delta 首批附带首字耗时）。
-4. **验证**：`__tests__/tps.test.ts`（前端：messageTpsOf 兼容矩阵、LiveTpsTracker 窗口行为、formatTps）；Rust 侧 `token_count` 单测（批边界一致性）与 `set_usage_persists_text_tps_for_replay`（持久化 / 旧数据往返）。
+2. **实时 TPS**：provider 流官方 usage 累计经节流层透传（`StreamEvent.tokens` 累计语义），`LiveTpsTracker` 窗口差分 + `useLiveTps` 采样（见 4.1 / 4.2）。
+3. **TTFT**：暂未实施（原设计为可选增强）。
+4. **验证**：`__tests__/tps.test.ts`（前端：messageTpsOf 兼容矩阵、LiveTpsTracker 累计差分行为、formatTps）；Rust 侧 `stream_throttle` 单测（usage 累计随正文批透传、无正文不发事件、DeepSeek 无累计时字段缺失）与 `set_usage_persists_text_tps_for_replay`（持久化 / 旧数据往返）。
 
 ## 6. 范围与不做的事
 

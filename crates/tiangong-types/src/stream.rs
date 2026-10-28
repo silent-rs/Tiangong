@@ -26,10 +26,10 @@ pub enum StreamEvent {
         /// 所属消息 ID（前端据此组装到正确的消息）
         message_id: String,
         content: String,
-        /// 本批正文增量的真实 token 数（llm crate tokenizer 计算）。
-        ///
-        /// 供前端实时速度（TPS）展示，不计入 usage；精确计量仍以
-        /// `TokenUsage` / `Done.usage` 为准。旧事件 / 插件文本反馈无此字段。
+        /// 该消息截至本批的**累计** output tokens，来自 provider 流上
+        /// 官方 usage（Anthropic 逐 message_delta 携带；DeepSeek / OpenAI
+        /// 系仅在流末，正文期间字段缺失）。前端按相邻事件差分得到实时
+        /// 速度；不计入 usage，精确计量以 `TokenUsage` / `Done.usage` 为准。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens: Option<u64>,
     },

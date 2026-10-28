@@ -1,9 +1,10 @@
 /** 实时 TPS 的前端消费工具。
  *
- * 数据源是后端真实值：`tiangong-llm` 在流式 delta 处用 BPE tokenizer
- * （tiktoken o200k_base）计数，经 `StreamEvent::Delta/ReactText/SummaryText`
- * 的 `tokens` 字段下发（见 docs/message-tps-display-design.md 第 5 节）。
- * 前端不估算 token；事件缺失该字段（旧后端 / 插件文本反馈）时不记样本。
+ * 数据源是 stream 上的官方 usage 累计：`StreamEvent::Delta/ReactText/
+ * SummaryText.tokens` 携带该消息截至本批的累计 output tokens（provider
+ * 官方口径——Anthropic 逐事件提供，DeepSeek / OpenAI 系仅在流末，正文
+ * 期间字段缺失）。前端按相邻事件差分得到实时速度，不做任何本地估算；
+ * 字段缺失（旧后端 / 插件反馈 / DeepSeek 流中）时不记样本。
  *
  * 本模块是纯函数 / 纯数据结构，不依赖 React 与 store（hook 见 hooks/useLiveTps.ts）。
  */
@@ -20,13 +21,13 @@ export function round1(value: number): number {
 
 /** 滑动窗口时长（毫秒）：窗口越长速度越平滑，越短越跟手。 */
 export const TPS_WINDOW_MS = 2000;
-/** 速度分母下限（毫秒）：开局一两个样本不至于除以极小值出现数值尖峰。 */
+/** 速度分母下限（毫秒）：开局两个样本不至于除以极小值出现数值尖峰。 */
 const MIN_SPAN_MS = 300;
 
 export interface LiveTpsSnapshot {
-  /** 本轮是否已有正文样本（区分「尚未出字」与「速度为 0」）。 */
+  /** 本轮是否已有官方累计样本（区分「无官方数据」与「速度为 0」）。 */
   active: boolean;
-  /** 实时速度（tokens/s，后端真实计数）；样本不足时为 0。 */
+  /** 实时速度（tokens/s，官方累计差分）；样本不足时为 0。 */
   tps: number;
   /** 首个样本距今的毫秒数；无样本为 null。 */
   elapsedMs: number | null;
@@ -34,31 +35,39 @@ export interface LiveTpsSnapshot {
 
 interface TpsSample {
   at: number;
-  tokens: number;
+  /** 该时点的官方累计 output tokens。 */
+  cumulative: number;
 }
 
 interface TpsSessionState {
   samples: TpsSample[];
-  startedAt: number | null;
 }
 
-/** 实时 TPS 滑动窗口（纯数据结构，时间可注入便于测试）。 */
+/** 实时 TPS 滑动窗口：消费官方累计样本，窗口内首尾差分（纯数据结构，时间可注入便于测试）。 */
 export class LiveTpsTracker {
   private sessions = new Map<string, TpsSessionState>();
 
-  /** 记录一批正文增量的真实 token 数（`tokens` 缺失 / 非法时忽略本批）。 */
-  recordTokens(sessionId: string, tokens: number | null | undefined, now: number = Date.now()): void {
+  /** 记录一个官方累计样本（`cumulative` 缺失 / 非法时忽略本事件）。 */
+  recordCumulative(
+    sessionId: string,
+    cumulative: number | null | undefined,
+    now: number = Date.now(),
+  ): void {
     if (!sessionId) return;
-    if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return;
-    const state = this.sessions.get(sessionId) ?? { samples: [], startedAt: null };
-    if (state.startedAt == null) state.startedAt = now;
+    if (typeof cumulative !== 'number' || !Number.isFinite(cumulative) || cumulative < 0) return;
+    const state = this.sessions.get(sessionId) ?? { samples: [] };
     const last = state.samples[state.samples.length - 1];
-    // 同批（≤1ms）事件合并为一个样本，窗口内同刻不堆积。
-    if (last && now - last.at <= 1) {
-      state.samples[state.samples.length - 1] = { at: last.at, tokens: last.tokens + tokens };
-    } else {
-      state.samples.push({ at: now, tokens });
+    // 同批（≤1ms）样本合并；累计值回退（消息切换）时重开窗口。
+    if (last && now - last.at <= 1 && cumulative >= last.cumulative) {
+      state.samples[state.samples.length - 1] = { at: last.at, cumulative };
+      this.prune(state, now);
+      this.sessions.set(sessionId, state);
+      return;
     }
+    if (last && cumulative < last.cumulative) {
+      state.samples = [];
+    }
+    state.samples.push({ at: now, cumulative });
     this.prune(state, now);
     this.sessions.set(sessionId, state);
   }
@@ -71,19 +80,24 @@ export class LiveTpsTracker {
   /** 当前窗口快照。 */
   snapshot(sessionId: string, now: number = Date.now()): LiveTpsSnapshot {
     const state = this.sessions.get(sessionId);
-    if (!state || state.startedAt == null) return { active: false, tps: 0, elapsedMs: null };
+    if (!state || state.samples.length === 0) {
+      return { active: false, tps: 0, elapsedMs: null };
+    }
     this.prune(state, now);
-    const elapsedMs = now - state.startedAt;
-    if (state.samples.length < 2) return { active: true, tps: 0, elapsedMs };
-    const windowTokens = state.samples.reduce((sum, sample) => sum + sample.tokens, 0);
-    if (windowTokens <= 0) return { active: true, tps: 0, elapsedMs };
-    // 分母取窗口内最早样本至今的实际跨度：开局按真实跨度（≥下限），稳态封顶窗口长。
-    const oldestAt = state.samples[0].at;
-    const span = Math.max(MIN_SPAN_MS, Math.min(TPS_WINDOW_MS, now - oldestAt));
-    return { active: true, tps: windowTokens / (span / 1000), elapsedMs };
+    const samples = state.samples;
+    const elapsedMs = now - samples[0].at;
+    if (samples.length < 2) return { active: true, tps: 0, elapsedMs };
+    const produced = samples[samples.length - 1].cumulative - samples[0].cumulative;
+    if (produced <= 0) return { active: true, tps: 0, elapsedMs };
+    // 分母取窗口内首尾样本的实际跨度（≥下限、≤窗口长）。
+    const span = Math.max(
+      MIN_SPAN_MS,
+      Math.min(TPS_WINDOW_MS, samples[samples.length - 1].at - samples[0].at),
+    );
+    return { active: true, tps: produced / (span / 1000), elapsedMs };
   }
 
-  /** 滑出窗口的样本移除；至少保留 1 个用于跨度参考。 */
+  /** 滑出窗口的样本移除；至少保留 1 个。 */
   private prune(state: TpsSessionState, now: number): void {
     if (state.samples.length <= 1) return;
     const cutoff = now - TPS_WINDOW_MS;

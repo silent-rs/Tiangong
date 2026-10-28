@@ -46,7 +46,6 @@ export function formatDuration(ms: number): string {
 export function formatTpsText(tps: number): string {
   return formatTps(tps);
 }
-
 /** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */
 export const TURN_STATUS_META: Record<string, { label: string; className: string; dot: string }> = {
   failed: { label: "失败", className: "text-destructive", dot: "bg-destructive" },

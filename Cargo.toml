@@ -71,8 +71,6 @@ version = "0.17.9"
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
 tiangong-app-state = { path = "crates/tiangong-app-state" }
 tiangong-cli = { path = "crates/tiangong-cli" }
-# 流式 delta 的真实 token 计数（BPE tokenizer，供实时 TPS 展示）
-tiktoken-rs = "0.6"
 tiangong-deepseek = { path = "crates/tiangong-deepseek" }
 tiangong-config = { path = "crates/tiangong-config" }
 tiangong-core = { path = "crates/tiangong-core" }
