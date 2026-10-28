@@ -11755,20 +11755,26 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-prompt-protocol"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "tiangong-plugin-prompt-wasm"
-version = "0.1.0"
+name = "tiangong-plugin-prompt-sidecar"
+version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
+ "tempfile",
  "tiangong-plugin-prompt-protocol",
- "wit-bindgen 0.60.0",
+ "tiangong-plugin-sidecar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

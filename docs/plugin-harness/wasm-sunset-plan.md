@@ -73,7 +73,7 @@
 ### 阶段五：特殊形态
 | 插件 | 说明 |
 | --- | --- |
-| prompt | ⚠️ 无 sidecar，逻辑在 wasm 内：先把提示词注入逻辑下沉（sidecar 或 App 层），再淘汰 wasm |
+| prompt | ✅ 已迁移（v0.2.0；注入逻辑下沉 Rust sidecar：identity/rules/custom 三段经 `prompt: [{type: sidecar}]` 动态提供，设置页读写迁 `app/prompt.html` + `sidecar.get_prompt`/`set_prompt`，保存后经 `runtime.prompt_updated` 通知宿主重取段落；旧数据一次性迁移语义保留，存储根优先 `TIANGONG_STORAGE_ROOT`） |
 
 ### 阶段六：运行时收尾
 - `crates/plugin/tiangong-plugin-runtime` 移除 wasmtime 集成（adapter/bindings/execution/loader 等 10 个文件）
@@ -83,6 +83,6 @@
 ## 4. 风险与注意事项
 
 - **mcp 的动态工具名**：MCP 工具经转发暴露，清单静态 `tools` 无法枚举；迁移时需确认 v2 是否支持动态工具声明（`tool:*` 握手能力 + 清单占位），必要时先在 runtime 侧补能力。
-- **prompt 的提示词注入**：不走工具调用通道，淘汰 wasm 前需确认 v2 的 prompt_sections 等价能力。
+- **prompt 的提示词注入**：~~不走工具调用通道，淘汰 wasm 前需确认 v2 的 prompt_sections 等价能力~~ 已由 `prompt: [{type: sidecar}]` 条目 + 固定操作 `prompt_sections` 解决（skill/prompt 先例）。
 - **UI slot 插件**（screenshot-input 等）：wasm 同时贡献 UI，迁移时需将 UI 贡献改为清单声明（v2 `ui.contributions`）。
 - 每个插件迁移在独立分支 `feature/<插件名>-wasm-sunset` 上进行、独立验证（check/clippy/nextest/fmt）后合入，保持可回滚；插件版本 +0.0.1 或 0.1.0 视破坏性（operation 名变化对宿主透明，属内部重构，minor 即可）。

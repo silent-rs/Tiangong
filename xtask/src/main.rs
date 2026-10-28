@@ -171,10 +171,10 @@ const PROMPT: PluginConfig = PluginConfig {
     name: "Prompt",
     description: "产品文案与自定义指令注入",
     protocol_crate: Some("tiangong-plugin-prompt-protocol"),
-    wasm_crate: Some("tiangong-plugin-prompt-wasm"),
-    wasm_artifact: Some("tiangong_plugin_prompt_wasm.wasm"),
-    sidecar_crate: None,
-    sidecar_artifact: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: Some("tiangong-plugin-prompt-sidecar"),
+    sidecar_artifact: Some("tiangong-prompt-sidecar"),
     plugin_root: "plugins/tiangong-plugin-prompt",
     plugin_manifest: "plugins/tiangong-plugin-prompt/plugin.json",
     protocol_manifest: Some("plugins/tiangong-plugin-prompt/protocol/Cargo.toml"),
@@ -384,6 +384,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         // 手写自包含单文件 UI（无前端构建链）。
         "coding" => &["app/index.html"],
         "skill" => &["app/skill.html"],
+        "prompt" => &["app/prompt.html"],
         "computer-use" => &["app/restore-window.html"],
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
         // 工具视图（session.message-item replace + tools）。

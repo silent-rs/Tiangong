@@ -1,4 +1,85 @@
-// Prompt 设置页脚本（与 skill/scheduler 同构的桥接框架）。
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>自定义指令</title>
+  <style>/* Prompt 设置页样式（与 skill/scheduler 同一套宿主 token 体系）。 */
+:root {
+  color-scheme: light;
+  --bg: hsl(var(--host-background, 210 20% 98%));
+  --surface: hsl(var(--host-card, 0 0% 100%));
+  --text: hsl(var(--host-foreground, 222 47% 11%));
+  --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
+  --border: hsl(var(--host-border, 214 18% 88%));
+  --primary: hsl(var(--host-primary, 222 47% 11%));
+  --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
+}
+
+:root[data-theme="dark"] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.page { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+.header h2 { margin: 0 0 4px; font-size: 18px; }
+.header .desc { margin: 0; color: var(--muted); font-size: 13px; }
+
+.prompt-editor {
+  width: 100%;
+  min-height: 300px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+.prompt-editor:focus { outline: none; border-color: var(--primary); }
+
+.actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+
+.status { color: var(--muted); font-size: 13px; flex: 1; }
+.status.error { color: hsl(0 84% 60%); }
+.status.success { color: hsl(142 71% 35%); }
+
+.btn {
+  padding: 8px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 500;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="header">
+      <h2>自定义指令</h2>
+      <p class="desc">在此编辑的指令会作为系统提示的一部分注入每次对话，优先级低于系统安全规则。</p>
+    </div>
+    <textarea id="prompt-editor" class="prompt-editor" placeholder="输入自定义指令，例如：总是使用简体中文回复..." rows="12"></textarea>
+    <div class="actions">
+      <span id="status" class="status"></span>
+      <button id="save-btn" class="btn btn-primary" type="button">保存</button>
+    </div>
+  </main>
+  <script>// Prompt 设置页脚本（与 skill/scheduler 同构的桥接框架，操作走 sidecar.*）。
 
 const HOST_TIMEOUT_MS = 60000;
 let hostChannel = null;
@@ -65,7 +146,7 @@ function setStatus(message, type) {
 
 async function loadPrompt() {
   try {
-    const raw = await callHost("get_prompt", "{}");
+    const raw = await callHost("sidecar.get_prompt", "{}");
     const data = raw ? JSON.parse(raw) : {};
     editor.value = data.content || "";
   } catch (error) {
@@ -79,7 +160,7 @@ async function savePrompt() {
   saveBtn.disabled = true;
   setStatus("保存中...", "");
   try {
-    await callHost("set_prompt", JSON.stringify({ content: editor.value }));
+    await callHost("sidecar.set_prompt", JSON.stringify({ content: editor.value }));
     setStatus("已保存", "success");
     setTimeout(() => setStatus("", ""), 3000);
   } catch (error) {
@@ -91,3 +172,6 @@ async function savePrompt() {
 
 saveBtn.addEventListener("click", savePrompt);
 loadPrompt();
+  </script>
+</body>
+</html>

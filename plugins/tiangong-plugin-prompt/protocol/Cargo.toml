@@ -1,8 +1,13 @@
 [package]
 name = "tiangong-plugin-prompt-protocol"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "Prompt sidecar 与设置页共用的私有业务协议"
+publish = false
+
+[package.metadata.tiangong]
+business-protocol = 1
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
