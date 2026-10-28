@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { messageTpsOf, textTpsOf } from '@/api/message';
+import { latestTpsOf, messageTpsOf, textTpsOf } from '@/api/message';
 import type { Message } from '@/api/tauri';
 import { formatTps, LiveTpsTracker, round1 } from '@/utils/tps';
 
@@ -63,6 +63,22 @@ describe('messageTpsOf（持久化优先 + 旧数据折算兼容）', () => {
     const notice = { id: 'n', created_at: '', role: 'notice', content: [] } as unknown as Message;
     expect(messageTpsOf(notice)).toBeNull();
     expect(textTpsOf(notice)).toBeNull();
+  });
+});
+
+describe('latestTpsOf（空闲回退最近完成速度）', () => {
+  it('从末尾往前取第一条有效速度，跳过流式中 / 无数据消息', () => {
+    const messages = [
+      assistantMessage({ completionTokens: 100, textElapsedMs: 1000 }),
+      assistantMessage({}),
+      { id: 't1', role: 'tool', content: [] } as unknown as Message,
+    ];
+    expect(latestTpsOf(messages)).toBe(100);
+  });
+
+  it('无任何有效速度时返回 null（不显示、不占位）', () => {
+    expect(latestTpsOf([assistantMessage({})])).toBeNull();
+    expect(latestTpsOf([])).toBeNull();
   });
 });
 

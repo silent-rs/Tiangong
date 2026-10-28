@@ -155,6 +155,21 @@ export function messageTpsOf(message: Message): number | null {
   return Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
 }
 
+/**
+ * 会话内最近一次可展示的正文生成速度：从末尾往前找第一条带有效速度的
+ * assistant 消息。
+ *
+ * 用于前端实时 tracker 归零（页面重载、切换会话后）时的空闲兜底——输入框
+ * 的「最近生成速度」不应因为内存态丢失而消失；实时样本优先，回退值只补空。
+ */
+export function latestTpsOf(messages: Message[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const tps = messageTpsOf(messages[i]);
+    if (tps != null && tps > 0) return tps;
+  }
+  return null;
+}
+
 export function turnStatusOf(message: Message): TurnStatus | undefined {
   return roleAs(message, 'user')?.turn_status ?? undefined;
 }

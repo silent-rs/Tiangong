@@ -9,6 +9,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, type MentionTarget, type RawAttachment } from '@/api/tauri';
 import { isRemoteHost } from '@/api/host';
+import { latestTpsOf } from '@/api/message';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { useMentionGroups } from '@/hooks/useMentionGroups';
 import {
@@ -33,15 +34,19 @@ import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
 
 /** 输入框底栏的「速度 + token 用量」合并区域：同一行、一块区域。
- *  速度在轮次执行期间实时更新，轮次结束后保留最近值（仅 app 重启 /
- *  core 实例销毁才随内存清空）；与 token 统计（进度条 + 当前 / 总计）
- *  以竖分隔线隔开；两者皆无内容时整块不渲染。会话切换时随当前会话的
- *  采样目标自动切换。 */
+ *  速度在轮次执行期间实时更新，轮次结束后保留最近值；实时样本缺失
+ *  （页面重载 / 切换会话后 tracker 归零）时回退到最近一条完成消息持久化
+ *  的速度。与 token 统计（进度条 + 当前 / 总计）以竖分隔线隔开；两者皆无
+ *  内容时整块不渲染。会话切换时随当前会话的采样目标自动切换。 */
 function TokenStatsBlock({ compact }: { compact?: boolean }) {
   const sessionId = useLiveSessionId();
   const tokenStats = useStore((s) => s.tokenStats);
   // 持续采样：轮次结束后无新样本，tracker 返回保留的最近速度。
   const { tps } = useLiveTps(sessionId, true);
+  // 实时样本缺失（页面重载 / 切换会话后 tracker 归零）时回退到最近一条
+  // 完成消息持久化的速度：输入框的「最近生成速度」不应因内存态丢失而消失。
+  const historyTps = useStore((s) => latestTpsOf(s.messages));
+  const displayTps = tps > 0 ? tps : (historyTps ?? 0);
 
   const displayTokens = tokenStats?.current_tokens ?? 0;
   const totalTokens = tokenStats?.total_tokens ?? 0;
@@ -49,7 +54,7 @@ function TokenStatsBlock({ compact }: { compact?: boolean }) {
   const compressionProgress =
     compressionThreshold > 0 ? Math.min(100, (displayTokens / compressionThreshold) * 100) : 0;
 
-  const showTps = tps > 0;
+  const showTps = displayTps > 0;
   const showTokens = displayTokens > 0 || totalTokens > 0;
   if (!showTps && !showTokens) return null;
   return (
@@ -61,11 +66,11 @@ function TokenStatsBlock({ compact }: { compact?: boolean }) {
         <span
           className="flex shrink-0 items-center gap-1"
           aria-live="polite"
-          aria-label={`最近生成速度 ${formatTps(round1(tps))}`}
-          title="最近一次生成的输出速度（轮次结束后保留最近值）"
+          aria-label={`最近生成速度 ${formatTps(round1(displayTps))}`}
+          title="最近一次生成的输出速度（实时样本优先；无实时样本时取最近一条完成消息的持久化速度）"
         >
           <Zap className="h-3 w-3 text-foreground/70" aria-hidden="true" />
-          {formatTps(round1(tps))}
+          {formatTps(round1(displayTps))}
         </span>
       )}
       {showTps && showTokens && <span className="h-3 w-px bg-border/60" aria-hidden="true" />}
