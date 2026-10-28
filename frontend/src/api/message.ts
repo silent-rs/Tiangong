@@ -41,8 +41,8 @@ export type Role =
       /** 输出阶段耗时（毫秒）：首个输出增量（思考或正文）到最后一个。 */
       text_elapsed_ms?: number | null;
       /** 输出速度（tokens/s，completion_tokens / 输出阶段耗时，含思考），
-       *  定稿时后端算好持久化，供历史回看与 token 统计直接复现；旧数据
-       *  缺该字段时按 usage/耗时折算兼容。 */
+       *  定稿时后端算好持久化，供历史回看与 token 统计直接复现；字段
+       *  缺失时按 usage/耗时折算兜底。 */
       text_tps?: number | null;
     }
   | {
@@ -137,8 +137,8 @@ export function textTpsOf(message: Message): number | null {
 /**
  * 单条 assistant 消息的输出速度（tokens/s）。
  *
- * 优先读后端定稿时持久化的 `text_tps`（历史回看直接复现）；旧数据缺该
- * 字段时按 `usage.completion_tokens / (text_elapsed_ms / 1000)` 折算兼容。
+ * 优先读后端定稿时持久化的 `text_tps`（历史回看直接复现）；字段缺失时
+ * 按 `usage.completion_tokens / (text_elapsed_ms / 1000)` 折算兜底。
  * 官方的 completion_tokens 含思考 token，分母（输出阶段耗时）同样覆盖
  * 思考与正文增量，两者同口径；任一字段缺失/非法/耗时非正数时返回
  * `null`，调用方不展示、不占位误导。
