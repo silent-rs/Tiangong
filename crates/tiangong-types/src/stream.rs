@@ -27,10 +27,10 @@ pub enum StreamEvent {
         message_id: String,
         content: String,
         /// 该消息截至本批的**累计** output tokens（实时 TPS 数据源）：
-        /// provider 层按正文 delta 事件计数（DeepSeek Responses / Anthropic
-        /// 的 delta 事件即服务端 token 粒度），官方 usage 到达时校准覆盖。
-        /// 前端按相邻事件差分得实时速度；不计入 usage，精确计量以
-        /// `TokenUsage` / `Done.usage` 为准。
+        /// provider 层按输出 delta 事件计数（正文与思考增量各计 1，是
+        /// token 数的近似——各 provider 的 delta 粒度不一），官方 usage
+        /// 到达时校准覆盖。前端按相邻事件差分得实时速度；不计入 usage，
+        /// 精确计量以 `TokenUsage` / `Done.usage` 为准。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tokens: Option<u64>,
     },

@@ -62,7 +62,7 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
                   <td className="whitespace-nowrap px-2 py-1">{statuses[entry.status]}</td>
                   <td className="px-2 py-1">{number.format(entry.prompt_tokens)}</td>
                   <td className="px-2 py-1">{number.format(entry.completion_tokens)}</td>
-                  <td className="whitespace-nowrap px-2 py-1" title={tps != null && elapsedMs != null ? `正文 ${number.format(entry.completion_tokens)} tokens · 耗时 ${formatDuration(elapsedMs)}` : tps != null ? "正文生成速度" : "无正文耗时数据"}>
+                  <td className="whitespace-nowrap px-2 py-1" title={tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens · 输出阶段 ${formatDuration(elapsedMs)}（含思考）` : tps != null ? "输出速度（含思考）" : "无输出耗时数据"}>
                     {tps != null ? formatTpsText(tps) : "—"}
                   </td>
                   <td className="px-2 py-1">{entry.prompt_cache_hit_tokens == null ? "未知" : number.format(entry.prompt_cache_hit_tokens)}</td>

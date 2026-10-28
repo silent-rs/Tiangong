@@ -145,10 +145,14 @@ pub enum Role {
         /// 思考阶段耗时（毫秒）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_elapsed_ms: Option<u64>,
-        /// 正文生成阶段耗时（毫秒）。
+        /// 输出阶段耗时（毫秒）：从首个输出增量（思考或正文）到最后一个。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
-        /// 正文生成速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
+        /// 输出速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
+        ///
+        /// 官方 completion_tokens 含思考 token，因此分母取整个输出阶段
+        /// （含思考与正文增量），两者同口径；只统计正文会把「长思考 +
+        /// 短正文」的轮次算成异常高的速度。
         ///
         /// 定稿时由后端算好一并持久化，供历史回看与 token 统计复现，
         /// 无需消费方重算（旧数据缺该字段时按公式折算兼容）。
@@ -1143,7 +1147,7 @@ impl Message {
                 text_tps: persisted,
                 ..
             } => {
-                // 定稿时一并持久化正文生成速度：消费方（token 统计 / 历史
+                // 定稿时一并持久化输出速度：消费方（token 统计 / 历史
                 // 回看）直接读字段复现，无需各自折算；旧数据无此字段时
                 // 前端按公式折算兼容。
                 *persisted = text_tps;

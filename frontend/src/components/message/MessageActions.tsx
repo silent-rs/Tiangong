@@ -10,9 +10,9 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
   text: string;
   time?: string;
   durationMs?: number | null;
-  /** 正文生成速度（tokens/s）：来自后端持久化 `text_tps` 或旧数据折算，null 不显示。 */
+  /** 输出速度（tokens/s）：来自后端持久化 `text_tps` 或旧数据折算，null 不显示。 */
   tps?: number | null;
-  /** 速度明细（hover 提示）：输出 tokens 与正文耗时。 */
+  /** 速度明细（hover 提示）：输出 tokens 与输出阶段耗时（含思考）。 */
   tpsDetail?: { tokens: number; elapsedMs: number } | null;
   usageMessages?: MessageItem[];
 }) {
@@ -51,9 +51,9 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
             <span
               className="inline-flex items-center gap-0.5"
               title={tpsDetail
-                ? `正文输出 ${tpsDetail.tokens.toLocaleString()} tokens · 耗时 ${formatDuration(tpsDetail.elapsedMs)}（${formatTpsText(tps)}）`
-                : "正文生成速度"}
-              aria-label={`正文生成速度 ${formatTpsText(tps)}`}
+                ? `输出 ${tpsDetail.tokens.toLocaleString()} tokens · 输出阶段 ${formatDuration(tpsDetail.elapsedMs)}（含思考，${formatTpsText(tps)}）`
+                : "输出速度（含思考）"}
+              aria-label={`输出速度 ${formatTpsText(tps)}`}
             >
               <Zap className="w-3 h-3" />
               {formatTpsText(tps)}
