@@ -140,6 +140,16 @@ describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
     expect(after.tps).toBe(40);
   });
 
+  it('校准早于首次采样时先用已有样本补算速度（短请求结束即校准）', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 1, 0);
+    tracker.record('s1', 2, 100);
+    // 模拟 600ms 采样尚未触发：从未 snapshot，lastTps 仍为 0。
+    tracker.calibrate('s1', 19, 200);
+    // 校准清空窗口前补算：1 token / 300ms ≈ 3.3 tok/s，而不是丢失显示。
+    expect(round1(tracker.snapshot('s1', 200).tps)).toBe(3.3);
+  });
+
   it('等待期（无新样本，旧样本滑出窗口）保留最后显示的速度', () => {
     const tracker = new LiveTpsTracker();
     tracker.record('s1', 100, 0);

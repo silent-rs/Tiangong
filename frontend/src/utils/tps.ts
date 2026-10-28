@@ -96,8 +96,9 @@ export class LiveTpsTracker {
   /** 官方计量校准：把窗口基准对齐到官方累计值（单次 LLM 请求的
    *  completion_tokens），**不**把「delta 事件计数 ↔ token 数」的换算差
    *  当成一次产量差分——否则会瞬间冒出虚高速率，或在校准值偏小时产生
-   *  负差分。校准只重置基准点，不更新 lastTps：校准发生在请求边界，
-   *  显示沿用最近速度（与等待期一致）。
+   *  负差分。校准只重置基准点：重置前若 UI 还没采样过（lastTps 仍为 0），
+   *  先用校准前的样本补算一次速度，避免「短请求结束即校准」把这段已产生
+   *  的速度整体丢掉（下一次请求正文到达前速度行会一直隐藏）。
    *  只允许主对话 ReAct 请求的官方 usage 调用；插件用量、上下文压缩、
    *  取消增量等来源量纲或语义不同，不得混入。 */
   calibrate(
@@ -111,7 +112,25 @@ export class LiveTpsTracker {
     }
     const state = this.stateOf(sessionId);
     if (state.startedAt == null) state.startedAt = now;
+    if (state.lastTps === 0) {
+      const tps = this.windowTps(state);
+      if (tps > 0) state.lastTps = tps;
+    }
     state.samples = [{ at: now, cumulative }];
+  }
+
+  /** 用当前窗口样本差分出速度（纯计算，不修改状态）；样本不足或产量
+   *  非正返回 0。snapshot 与 calibrate 共用同一口径。 */
+  private windowTps(state: TpsSessionState): number {
+    const samples = state.samples;
+    if (samples.length < 2) return 0;
+    const produced = samples[samples.length - 1].cumulative - samples[0].cumulative;
+    if (produced <= 0) return 0;
+    const span = Math.max(
+      MIN_SPAN_MS,
+      Math.min(TPS_WINDOW_MS, samples[samples.length - 1].at - samples[0].at),
+    );
+    return produced / (span / 1000);
   }
 
   /** 会话删除（core 实例销毁）时清空该会话窗口；轮次边界不清空。 */
@@ -127,18 +146,9 @@ export class LiveTpsTracker {
     }
     const elapsedMs = now - state.startedAt;
     this.prune(state, now);
-    const samples = state.samples;
-    if (samples.length < 2) return { active: true, tps: state.lastTps, elapsedMs };
-    const produced = samples[samples.length - 1].cumulative - samples[0].cumulative;
-    if (produced <= 0) return { active: true, tps: state.lastTps, elapsedMs };
-    // 分母取窗口内首尾样本的实际跨度（≥下限、≤窗口长）。
-    const span = Math.max(
-      MIN_SPAN_MS,
-      Math.min(TPS_WINDOW_MS, samples[samples.length - 1].at - samples[0].at),
-    );
-    const tps = produced / (span / 1000);
-    state.lastTps = tps;
-    return { active: true, tps, elapsedMs };
+    const tps = this.windowTps(state);
+    if (tps > 0) state.lastTps = tps;
+    return { active: true, tps: tps > 0 ? tps : state.lastTps, elapsedMs };
   }
 
   /** 滑出窗口的速度样本移除（startedAt 不参与裁剪）；至少保留 1 个。 */
