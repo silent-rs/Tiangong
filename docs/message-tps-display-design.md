@@ -54,12 +54,9 @@
 
 ### 3.2 每条消息 TPS
 
-- 位置：assistant 消息元信息行（与 `CallUsageDetails` 触发按钮同层、同样式的安静小字 `text-[11px]` muted，hover 才出底色）。
-- 形态：`87.3 tok/s`，hover 提示展开细节：
-  - 首字延迟（本期 mock，接入后来自前端首 delta 计时或 core 附带）；
-  - 输出 tokens（真实 `usage.completion_tokens`）、生成耗时（真实 `text_elapsed_ms`）；
-  - 有真实数据时括号内展示「真实 ≈」折算值，便于与 mock 视觉对照。
-- 无 `usage` / `text_elapsed_ms` 的历史消息不显示，不占位误导。
+- 位置：轮次尾部小字行（`TurnTpsRow`，`border-t` 分隔，无复制按钮占位）+ assistant 操作行「生成度量合并块」（与 `CallUsageDetails` 触发按钮同层）。
+- 形态：`⚡ 87.3 tok/s`，只显示数字，不带「正在生成」文案与秒数；hover 提示展开输出 tokens、输出阶段耗时（含思考）与速度。
+- 无 `usage` / `text_elapsed_ms` / `text_tps` 的消息不显示，不占位误导；流式期间由实时 tracker 提供，定稿后由后端 `text_tps` 回灌。
 
 ### 3.4 输入框 current token：环形进度（已废弃，另行设计）
 
@@ -93,19 +90,20 @@
 1. ~~前端对流式 delta 字符估算~~（用户否决：不做前端估算）；
 2. ~~llm crate BPE tokenizer 逐事件分词~~（实测否决：逐事件全量分词 O(n²) 阻塞 SSE 读取，流被拖成数秒一批，且引入额外 tokenizer 依赖）；
 3. ~~仅透传官方 usage 累计~~（实测否决：三家 provider 流中均无逐事件 usage——Anthropic 也只在 `message_start` 与流末 `message_delta` 携带，流中数字恒为 0）；
-4. **定稿：provider 层按正文 delta 事件计数（stream 累计），官方 usage 到达时校准覆盖**。
+4. **定稿：provider 层按输出 delta 事件计数（正文与思考各计 1，是 token 数的近似），官方 usage 到达时校准覆盖**。
 
 ### 4.1 后端（stream 累计计数与持久化）
 
-- **计数**（`tiangong-llm` consume 循环，O(1) 零分词）：每个正文 `TextDelta` 事件计数 +1——DeepSeek Responses / Anthropic 的 delta 事件即服务端 token 粒度，计数即真实值；`Usage` 事件到达时用官方 `completion_tokens` 覆盖计数（校准），流中数字与结束计量收敛一致。思考增量不计（正文口径）。
+- **计数**（`tiangong-llm` consume 循环，O(1) 零分词）：每个 `TextDelta` / `ReasoningDelta` 事件计数 +1，作为 output tokens 的近似——官方接口的 SSE 分块接近逐 token，opencode 等代理会把多个 token 聚合进一个 chunk，事件数会低于 token 数；`Usage` 事件到达时用官方 `completion_tokens` 覆盖计数（校准），流中数字与结束计量收敛一致。
 - **透传**：`ModelStreamChunk.cumulative_tokens` → core 节流层（`stream_throttle`）记录最近累计，随下一批正文事件携带：`StreamEvent::{Delta,ReactText,SummaryText}.tokens`（`Option<u64>`，累计语义；serde default + skip，旧后端 / 插件文本反馈无此字段）。累计保存在节流缓冲，不存在「取走累计却无事件可搭」的丢失路径。
-- **持久化复现**：`Message`（assistant）新增 `text_tps: Option<f64>`，`set_usage` 定稿时按 `completion_tokens / text_elapsed_ms` 算好写入（流式快照递增时重算收敛）；序列化 / 旧格式迁移 / 访问器全链路兼容，旧数据无该字段可正常加载。
+- **持久化复现**：`Message`（assistant）新增 `text_tps: Option<f64>`，`set_usage` 定稿时按 `completion_tokens / text_elapsed_ms` 算好写入（流式快照递增时重算收敛）；`text_elapsed_ms` 取**输出阶段**（首个输出增量——思考或正文——到最后一个），与官方 `completion_tokens`（含思考 token）同口径。序列化 / 旧格式迁移 / 访问器全链路兼容，字段缺失时可正常加载。
 
 ### 4.2 前端（差分消费与展示）
 
 - **实时 TPS**：`LiveTpsTracker`（`utils/tps.ts`）维护「(时刻, 累计)」样本约 2s 滑动窗口，窗口内首尾差分得速度（分母下限 300ms 防尖峰）；**`startedAt` 独立保存**——首个流式正文事件即开始计时，不随速度窗口裁剪回退，累计字段缺失（旧后端 / 插件反馈）时仍跳秒、仅无速度数字。`useLiveTps` 流式期间 600ms 采样。
-- **实时展示**：扫光行「正在生成 XX tok/s · Ns」（Anthropic / DeepSeek Responses 流中即有真实数字；跳秒全程可用）+ 输入框常驻小字。
-- **每条消息 TPS**：`messageTpsOf` 优先读持久化 `text_tps`（历史复现），旧数据按 usage/耗时折算兼容；`MessageActions` 操作行显示 `⚡ 87.3 tok/s`（hover 明细：tokens · 耗时）。
+- **官方值回灌**：消息定稿 upsert 带 `text_tps` 时，`setLastTps` 覆盖流内近似并清空样本窗口，轮末与空闲显示与历史一致；`calibrate` 只对齐累计基准，不把「事件计数 ↔ token 数」的换算差当成产量。
+- **实时展示**：轮次尾部小字行 `TurnTpsRow`（`⚡ XX tok/s`，无文案无秒数，isActive 常驻）+ 输入框底栏带底色合并块（最近生成速度 + token 进度/总计）。
+- **每条消息 TPS**：`messageTpsOf` 优先读持久化 `text_tps`（历史复现），字段缺失时按 usage/耗时折算兜底；`MessageActions` 操作行显示 `⚡ 87.3 tok/s`（hover 明细：tokens · 输出阶段耗时）。
 - **token 统计**：`CallUsageDetails` 表格新增「时间」「速度」两列——时间取消息创建时间，速度读持久化 `text_tps`（无数据行显示 `—`，hover 给出 tokens/耗时明细）。
 
 ## 5. 已实施的接入路径

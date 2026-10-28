@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
-import { isUserInput, latestTurnAnchorIndex, messageKind, messageTpsOf, reasoningOf, toolCallIdOf, turnStatusOf } from '../api/message';
+import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {
   ContentBlock,
@@ -2392,13 +2392,14 @@ export const useStore = create<AppState>((set, get) => ({
       ) {
         liveTpsTracker.record(sessionId, event.tokens);
       } else if (event.type === 'session_message_upsert') {
-        // 官方结算值回灌：消息定稿后 text_tps 是「官方 completion_tokens /
-        // 输出阶段耗时」的权威值，用它覆盖流内近似，轮末与空闲显示一致。
-        // 流式中间快照没有 text_tps（messageTpsOf 返回 null）时不处理。
+        // 官方结算值回灌：只认定稿消息持久化的 `text_tps`（官方
+        // completion_tokens / 输出阶段耗时）。不用 messageTpsOf 的折算兜底
+        // ——流中快照即使带了 usage，也不该把半程平均速度当成最终值清空窗口。
+        // 流式中间快照没有 text_tps（textTpsOf 返回 null）时不处理。
         const message = event.message;
         if (message && typeof message !== 'string' && message.role === 'assistant') {
-          const tps = messageTpsOf(message);
-          if (tps != null) liveTpsTracker.setLastTps(sessionId, tps);
+          const tps = textTpsOf(message);
+          if (tps != null && tps > 0) liveTpsTracker.setLastTps(sessionId, tps);
         }
       } else if (
         event.type === 'token_usage'

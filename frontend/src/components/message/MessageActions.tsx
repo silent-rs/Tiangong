@@ -45,7 +45,7 @@ export function MessageActions({ messageId, text, time, durationMs, tps, tpsDeta
       {/* 生成度量（速度 + token 用量）合并块：内容右侧自然排列，位于
           时间之后、时长之前——流式速度行（复制占位 + 时间 + 速度）完成
           后仅在其右侧追加时长与徽标，速度位置不动。 */}
-      {(showTps || usageMessages) && (
+      {(showTps || (usageMessages?.length ?? 0) > 0) && (
         <span className="inline-flex items-center gap-1.5 ml-1 pl-1.5 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">
           {showTps && (
             <span

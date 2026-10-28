@@ -265,10 +265,11 @@ pub struct ModelStreamChunk {
     pub usage: Option<TokenUsageData>,
     /// 截至本 chunk 的累计 output tokens（实时 TPS 数据源）。
     ///
-    /// 口径：流中按正文 delta 事件计数（DeepSeek Responses / Anthropic 的
-    /// delta 事件即服务端 token 粒度，计数即真实值；无任何分词开销）；
-    /// `Usage` 事件到达时用官方 `completion_tokens` 校准覆盖，结束收敛
-    /// 到官方计量。思考增量不计（正文口径）。
+    /// 口径：流中按输出 delta 事件计数（正文与思考增量各计 1）。这是 token
+    /// 数的**近似**——各 provider / 代理的 SSE 分块粒度不一（DeepSeek 官方
+    /// 接近逐 token，opencode 等代理常把多个 token 聚合进一个 chunk，事件数
+    /// 会低于 token 数）；无任何分词开销。`Usage` 事件到达时用官方
+    /// `completion_tokens` 校准覆盖，结束收敛到官方计量。
     pub cumulative_tokens: Option<u64>,
 }
 
@@ -1809,6 +1810,7 @@ mod tests {
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":19,\"total_tokens\":26}}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"后\"}}]}\n\n",
             "data: [DONE]\n\n",
         );
         Mock::given(method("POST"))
@@ -1856,11 +1858,8 @@ mod tests {
         // 两个思考 delta + 两个正文 delta：统一输出计数 1 → 2 → 3 → 4
         //（官方 completion_tokens 口径含思考 token）。
         assert_eq!(reasoning_cumulatives, vec![Some(1), Some(2)]);
-        assert_eq!(cumulatives, vec![Some(3), Some(4)]);
-
-        // usage（completion=19）校准后的最终累计至少被记录一次：
-        // 校准随 usage chunk（无正文）发出，供节流层随下一批正文透传。
-        // 本流 usage 在末尾，校准值由最终 usage / 持久化 text_tps 呈现。
+        // usage（completion=19）校准后，下一个正文 delta 从官方值继续：20。
+        assert_eq!(cumulatives, vec![Some(3), Some(4), Some(20)]);
     }
 
     #[tokio::test]

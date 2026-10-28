@@ -119,6 +119,54 @@ describe('实时 TPS 全链路（applyStreamEvents → LiveTpsTracker）', () =>
     expect(liveTpsTracker.snapshot('e2e-1').tps).toBe(50);
   });
 
+  it('assistant 无 text_tps 时不用折算值回灌（只认定稿字段）', () => {
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'x', tokens: 10 }]);
+    vi.advanceTimersByTime(100);
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'y', tokens: 20 }]);
+    const before = liveTpsTracker.snapshot('e2e-1').tps;
+    expect(before).toBeGreaterThan(0);
+
+    // 带 usage + 耗时但没有 text_tps：折算值 50 不应覆盖流内速度。
+    feed('e2e-1', [{
+      type: 'session_message_upsert',
+      message: {
+        id: 'm1',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        created_at: '2026-10-28T10:00:00+08:00',
+        usage: {
+          prompt_tokens: 10, completion_tokens: 100, total_tokens: 110,
+          model: 'test-model', agent_id: '', turn_id: 't1', source: 'react', status: 'success',
+        },
+        text_elapsed_ms: 2000,
+      },
+    }]);
+
+    expect(liveTpsTracker.snapshot('e2e-1').tps).toBe(before);
+  });
+
+  it('非 assistant 消息不触发回灌', () => {
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'x', tokens: 10 }]);
+    vi.advanceTimersByTime(100);
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'y', tokens: 20 }]);
+    const before = liveTpsTracker.snapshot('e2e-1').tps;
+
+    feed('e2e-1', [{
+      type: 'session_message_upsert',
+      message: {
+        id: 't1',
+        role: 'tool',
+        content: [{ type: 'text', text: '结果' }],
+        created_at: '2026-10-28T10:00:00+08:00',
+        tool_call_id: 'c1',
+        tool_name: 'demo',
+        is_error: false,
+      },
+    }]);
+
+    expect(liveTpsTracker.snapshot('e2e-1').tps).toBe(before);
+  });
+
   it('非主请求来源的 token_usage 不进入速度窗口（插件 / 压缩 / 取消 / 子代理）', () => {
     feed('e2e-2', [{ type: 'react_text', message_id: 'm1', content: 'a', tokens: 10 }]);
     vi.advanceTimersByTime(100);

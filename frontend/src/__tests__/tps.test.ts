@@ -191,6 +191,20 @@ describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
     expect(round1(tracker.snapshot('s1', 9000).tps)).toBe(87.5);
   });
 
+  it('官方值回灌清空窗口后，新的流式样本重新开窗起速', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 10, 0);
+    tracker.record('s1', 30, 2000);
+    tracker.setLastTps('s1', 87.5);
+    expect(tracker.snapshot('s1', 2000).tps).toBe(87.5);
+
+    // 下一轮首个 delta：窗口为空，重新开窗；单样本仍显示官方值。
+    tracker.record('s1', 1, 3000);
+    expect(tracker.snapshot('s1', 3000).tps).toBe(87.5);
+    tracker.record('s1', 2, 3100);
+    expect(round1(tracker.snapshot('s1', 3100).tps)).toBe(3.3);
+  });
+
   it('等待期（无新样本，旧样本滑出窗口）保留最后显示的速度', () => {
     const tracker = new LiveTpsTracker();
     tracker.record('s1', 100, 0);

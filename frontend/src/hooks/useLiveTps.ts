@@ -13,7 +13,15 @@ export function useLiveTps(sessionId: string | null, streaming: boolean): LiveTp
       setSnapshot(EMPTY_SNAPSHOT);
       return;
     }
-    const update = () => setSnapshot(liveTpsTracker.snapshot(sessionId));
+    const update = () => {
+      const next = liveTpsTracker.snapshot(sessionId);
+      // 快照是纯派生值：字段相同时保留旧引用，避免空闲期每 600ms 无谓重渲。
+      setSnapshot((prev) => (
+        prev.active === next.active && prev.tps === next.tps && prev.elapsedMs === next.elapsedMs
+          ? prev
+          : next
+      ));
+    };
     update();
     const timer = window.setInterval(update, 600);
     return () => window.clearInterval(timer);

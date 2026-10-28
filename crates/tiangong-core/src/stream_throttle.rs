@@ -116,15 +116,7 @@ impl ThrottledStreamSink {
         let Ok(mut buffers) = self.buffers.lock() else {
             return;
         };
-        // 累计值（无论是否伴随正文）都记录，供下一批正文事件携带。
-        if let Some(cumulative) = chunk.cumulative_tokens {
-            buffers.cumulative_tokens = Some(cumulative);
-        }
-        if chunk.content.is_empty() && chunk.reasoning_content.is_empty() {
-            return;
-        }
-        buffers.content.push_str(&chunk.content);
-        buffers.reasoning.push_str(&chunk.reasoning_content);
+        push_chunk_into(&mut buffers, chunk);
     }
 
     pub(crate) fn finish(mut self) {
@@ -145,6 +137,21 @@ impl Drop for ThrottledStreamSink {
     fn drop(&mut self) {
         self.stop_and_join();
     }
+}
+
+/// 把一块 chunk 写入流缓冲（`push_chunk` 与单测共用，避免测试复制逻辑）。
+///
+/// 累计值无论是否伴随正文都记录，供下一批正文事件携带；正文与思考分别
+/// 追加到各自缓冲。
+fn push_chunk_into(buffers: &mut StreamBuffers, chunk: &ModelStreamChunk) {
+    if let Some(cumulative) = chunk.cumulative_tokens {
+        buffers.cumulative_tokens = Some(cumulative);
+    }
+    if chunk.content.is_empty() && chunk.reasoning_content.is_empty() {
+        return;
+    }
+    buffers.content.push_str(&chunk.content);
+    buffers.reasoning.push_str(&chunk.reasoning_content);
 }
 
 fn flush_buffers(
@@ -200,6 +207,7 @@ mod tests {
     use tiangong_llm::usage::TokenUsageData;
 
     /// 按 chunk 序列推入并 flush 一次，收集发出的文本事件（含 tokens）。
+    /// 与 `push_chunk` 共用 `push_chunk_into`，覆盖「空正文也记录累计」等行为。
     fn push_and_flush(
         sink_buffers: &Arc<Mutex<StreamBuffers>>,
         chunks: &[ModelStreamChunk],
@@ -207,11 +215,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         for chunk in chunks {
             let mut buffers = sink_buffers.lock().unwrap();
-            if let Some(cumulative) = chunk.cumulative_tokens {
-                buffers.cumulative_tokens = Some(cumulative);
-            }
-            buffers.content.push_str(&chunk.content);
-            buffers.reasoning.push_str(&chunk.reasoning_content);
+            push_chunk_into(&mut buffers, chunk);
         }
         flush_buffers(sink_buffers, &tx, "msg-1", StreamTextKind::React);
         drop(tx);
