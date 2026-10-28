@@ -428,12 +428,17 @@ pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String
             )
         })
         .unwrap_or_default();
+    // 工具规格快照同样按新能力重取（声明 sidecar 工具条目的插件）。
+    let tool_specs = storage_root.as_deref().and_then(|root| {
+        crate::registry::assemble_dynamic_tool_specs(root, &manifest, Some(capabilities.as_slice()))
+    });
     for adapter in &ts_instances {
         adapter.reconfigure(
             &manifest,
             enabled,
             Some(capabilities.clone()),
             sections.clone(),
+            tool_specs.clone().unwrap_or_default(),
         );
     }
     if let Ok(mut plugins) = loaded_plugins().lock()
@@ -444,6 +449,7 @@ pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String
         } else {
             None
         };
+        loaded.dynamic_tool_specs = tool_specs;
     }
 }
 

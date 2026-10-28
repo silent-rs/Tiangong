@@ -221,12 +221,14 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
         let snapshot = PluginLoadSnapshot::read(storage_root, installed);
         // reconfigure 消费 Vec<String>；None 只在注册表中表示「未声明」。
         let adapter_sections = snapshot.prompt_sections.clone().unwrap_or_default();
+        let adapter_tools = snapshot.tool_specs.clone().unwrap_or_default();
         for adapter in &ts_instances {
             adapter.reconfigure(
                 &installed.manifest,
                 installed.enabled,
                 snapshot.verified_sidecar.clone(),
                 adapter_sections.clone(),
+                adapter_tools.clone(),
             );
         }
         let mut loaded =
@@ -326,6 +328,11 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
     loaded.prompt_sections = assemble_prompt_sections(
         storage_root,
         &installed.directory,
+        &installed.manifest,
+        verified_sidecar.as_deref(),
+    );
+    loaded.dynamic_tool_specs = assemble_dynamic_tool_specs(
+        storage_root,
         &installed.manifest,
         verified_sidecar.as_deref(),
     );
@@ -694,9 +701,15 @@ pub(crate) fn tools_served_by_sidecar(
     if manifest.sidecar.is_none() {
         return false;
     }
-    let tools = manifest.tools.as_deref().unwrap_or_default();
     if manifest.ui_contributions().is_empty() {
         return true;
+    }
+    // 动态工具（`tool:*` 通配）：名单运行时确定、清单不静态枚举，
+    // 通配即全部承接。
+    let tools = manifest.tools.as_deref().unwrap_or_default();
+    if tools.is_empty() {
+        return verified_capabilities
+            .is_some_and(|capabilities| capabilities.iter().any(|c| c == "tool:*"));
     }
     !tools.is_empty()
         && verified_capabilities.is_some_and(|capabilities| {
@@ -709,6 +722,9 @@ pub(crate) fn tools_served_by_sidecar(
 /// 动态 prompt 段落读取预算：装载/通知刷新路径使用，防止故障 sidecar
 /// 长时间拖住装载（与 @提及交互预算同量级）。
 const DYNAMIC_PROMPT_QUERY_BUDGET_MS: u64 = 3_000;
+/// 动态工具规格读取预算：装载/通知刷新路径使用（sidecar 返回的是探测
+/// 缓存快照，不触发实时探测，预算与 prompt 同量级）。
+const DYNAMIC_TOOL_SPECS_QUERY_BUDGET_MS: u64 = 3_000;
 
 /// 单个 prompt 文件的大小上限（64 KiB）。
 const MAX_PROMPT_FILE_BYTES: u64 = 64 * 1024;
@@ -842,6 +858,176 @@ fn fetch_sidecar_prompt_sections(
     }
 }
 
+/// sidecar 动态工具规格快照：验证记录含 `tool:*` 通配（sidecar 声明
+/// 承接任意工具名，名单运行时确定、清单不静态枚举）时经固定操作
+/// [`TOOL_SPECS_OPERATION`] 获取（短预算，见
+/// [`DYNAMIC_TOOL_SPECS_QUERY_BUDGET_MS`]）；失败 fail-honest 返回空
+/// （warn），通知或重载时重试。无通配能力的插件返回 None。
+pub(crate) fn assemble_dynamic_tool_specs(
+    storage_root: &Path,
+    manifest: &PluginManifest,
+    verified_capabilities: Option<&[String]>,
+) -> Option<Vec<crate::manifest::TsToolDecl>> {
+    let wildcard = verified_capabilities
+        .is_some_and(|capabilities| capabilities.iter().any(|capability| capability == "tool:*"));
+    if !wildcard {
+        return None;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let context = crate::protocol::RequestInvocationContext {
+        session_id: String::new(),
+        invocation_id: scru128::new().to_string(),
+        workspace: String::new(),
+        actor_id: String::new(),
+        deadline_ms: Some(now_ms.saturating_add(DYNAMIC_TOOL_SPECS_QUERY_BUDGET_MS)),
+    };
+    let plugin_id = manifest.id.clone();
+    let fetch = move || {
+        invoke_sidecar_op(
+            storage_root,
+            &plugin_id,
+            tiangong_plugin_sidecar::protocol::TOOL_SPECS_OPERATION,
+            serde_json::json!({}),
+            None,
+            Some(&context),
+        )
+    };
+    match crate::execution::run_outside_tokio(fetch).and_then(parse_tool_specs_response) {
+        Ok(specs) => Some(specs),
+        Err(error) => {
+            tracing::warn!(plugin_id = %manifest.id, %error, "动态工具规格获取失败，本次不装配");
+            Some(Vec::new())
+        }
+    }
+}
+
+/// 解析 `tool_specs` 响应为工具规格数组：每项须为对象且 `name` 合法
+///（字母数字与 - _，与清单静态工具同约束），`description` /
+/// `input_schema` 缺省回退；非法项整体失败（fail-honest 空快照）。
+fn parse_tool_specs_response(
+    value: serde_json::Value,
+) -> anyhow::Result<Vec<crate::manifest::TsToolDecl>> {
+    let raw = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tool_specs 响应必须是数组"))?;
+    let mut specs = Vec::with_capacity(raw.len());
+    for item in raw {
+        let name = item
+            .get("name")
+            .and_then(|name| name.as_str())
+            .filter(|name| {
+                !name.trim().is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .ok_or_else(|| anyhow::anyhow!("tool_specs 条目 name 无效: {item}"))?
+            .to_string();
+        let description = item
+            .get("description")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let input_schema = item
+            .get("input_schema")
+            .cloned()
+            .filter(|schema| schema.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let timeout_ms = item
+            .get("timeout_ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(20_000);
+        let non_idempotent = item
+            .get("non_idempotent")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        specs.push(crate::manifest::TsToolDecl {
+            name,
+            description,
+            input_schema,
+            timeout_ms,
+            non_idempotent,
+        });
+    }
+    Ok(specs)
+}
+
+/// sidecar 经 [`TOOLS_UPDATED_CHANNEL`] 通知工具声明变更时重取并更新
+/// 注册表与存活适配器；core 每轮经 `tool_specs()` 读取，快照更新后
+/// 下一轮工具装配自动生效。通知线程调用，阻塞 I/O 无碍。
+pub(crate) fn refresh_tool_specs(plugin_id: &str) {
+    // plugin_install_directory 返回 <root>/plugins/<id>，即插件目录本身；
+    // 存储根再上溯两级。
+    let Some(plugin_dir) = plugin_install_directory(plugin_id) else {
+        return;
+    };
+    let Some(storage_root) = plugin_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+    else {
+        return;
+    };
+    let (manifest, verified, enabled, generation, adapter_sections, ts_instances) = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get(plugin_id).filter(|loaded| loaded.enabled) else {
+            return;
+        };
+        (
+            loaded.manifest.clone(),
+            loaded.verified_sidecar.clone(),
+            loaded.enabled,
+            loaded.generation,
+            loaded.prompt_sections.clone().unwrap_or_default(),
+            loaded
+                .ts_instances
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let specs = assemble_dynamic_tool_specs(&storage_root, &manifest, verified.as_deref());
+    let changed = {
+        let Ok(mut plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get_mut(plugin_id) else {
+            return;
+        };
+        // 重取期间插件可能被升级/重载换代（directory+generation 变化）：
+        // 旧线程的结果不得写进新记录，丢弃等待新代自己的装载/通知。
+        if loaded.directory != plugin_dir || loaded.generation != generation {
+            tracing::warn!(plugin_id, "工具规格重取期间插件已换代，丢弃本次结果");
+            return;
+        }
+        let changed = loaded.dynamic_tool_specs != specs;
+        loaded.dynamic_tool_specs = specs.clone();
+        changed
+    };
+    if !changed {
+        return;
+    }
+    // 存活适配器同步同一份结果（裸写 state 会漏 sidecar_direct 等派生项，
+    // reconfigure 正是干这个的）。
+    let adapter_specs = specs.unwrap_or_default();
+    for adapter in &ts_instances {
+        adapter.reconfigure(
+            &manifest,
+            enabled,
+            verified.clone(),
+            adapter_sections.clone(),
+            adapter_specs.clone(),
+        );
+    }
+    // 工具清单变化即插件能力变化：与升级/启停同一事件通道。
+    crate::events::announce_plugin_change(crate::events::PluginChangeKind::ToolsChanged, plugin_id);
+}
+
 /// sidecar 经 [`PROMPT_UPDATED_CHANNEL`] 通知段落变更时重取并更新注册表；
 /// 内容变化由 [`crate::registry::enabled_plugin_fingerprint`] 计入，触发
 /// 上下文交接（压缩 message）。通知线程调用，阻塞 I/O 无碍。
@@ -900,14 +1086,24 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
         return;
     }
     // 存活适配器同步同一份结果（裸写 state 会漏 sidecar_direct 等派生项，
-    // reconfigure 正是干这个的）。
+    // reconfigure 正是干这个的）。工具快照沿用当前注册表值（本函数只刷新段落）。
     let adapter_sections = sections.unwrap_or_default();
+    let adapter_tools = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        plugins
+            .get(plugin_id)
+            .map(|loaded| loaded.dynamic_tool_specs.clone().unwrap_or_default())
+            .unwrap_or_default()
+    };
     for adapter in &ts_instances {
         adapter.reconfigure(
             &manifest,
             enabled,
             verified.clone(),
             adapter_sections.clone(),
+            adapter_tools.clone(),
         );
     }
     // 内容变化即插件能力变化：与升级/启停同一事件通道，宿主（UI 刷新、
@@ -973,6 +1169,7 @@ pub fn load_core_plugin(
         storage_access,
         verified_sidecar,
         dynamic_prompt_sections,
+        dynamic_tool_specs,
     ) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
@@ -989,17 +1186,20 @@ pub fn load_core_plugin(
             loaded.manifest.storage_access,
             loaded.verified_sidecar.clone(),
             loaded.prompt_sections.clone(),
+            loaded.dynamic_tool_specs.clone(),
         )
     };
 
     if ts_adapter_serves(&manifest, runtime, verified_sidecar.as_deref()) {
         // 段落装载时已组装（内联文本 / 文件 / sidecar 统一快照），此处只读。
         let prompt_sections = dynamic_prompt_sections.unwrap_or_default();
+        let dynamic_tools = dynamic_tool_specs.unwrap_or_default();
         let adapter = Arc::new(TsPluginAdapter::from_manifest(
             &manifest,
             enabled,
             verified_sidecar,
             prompt_sections,
+            dynamic_tools,
         ));
         adapter.set_session_id(session_id);
         if let Ok(mut plugins) = loaded_plugins().lock()
@@ -1237,6 +1437,58 @@ pub(super) fn list_plugin_status_without_preload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_specs_响应解析_形状与回退() {
+        let parsed = parse_tool_specs_response(serde_json::json!([
+            {
+                "name": "mcp__demo__query",
+                "description": "查询",
+                "input_schema": {"type": "object"},
+                "timeout_ms": 60000,
+            },
+            {"name": "mcp__demo__list_all"},
+        ]))
+        .expect("合法响应");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "mcp__demo__query");
+        assert_eq!(parsed[0].description, "查询");
+        assert_eq!(parsed[0].input_schema["type"], "object");
+        assert_eq!(parsed[0].timeout_ms, 60000);
+        // 缺省回退：空描述 / 空 schema / 默认超时。
+        assert_eq!(parsed[1].description, "");
+        assert_eq!(parsed[1].input_schema, serde_json::json!({}));
+        assert_eq!(parsed[1].timeout_ms, 20_000);
+    }
+
+    #[test]
+    fn tool_specs_响应解析_非数组或非法名整体失败() {
+        assert!(parse_tool_specs_response(serde_json::json!({"servers": []})).is_err());
+        assert!(parse_tool_specs_response(serde_json::json!(["ok"])).is_err());
+        assert!(parse_tool_specs_response(serde_json::json!([{"name": "bad name"}])).is_err());
+        assert!(parse_tool_specs_response(serde_json::json!([{"name": ""}])).is_err());
+    }
+
+    #[test]
+    fn 动态工具条目_服务端承接须通配能力() {
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"mcp-demo","version":"1.0.0",
+                "dynamic_tools":true,
+                "sidecar":{"binary":"demo-sidecar"},
+                "ui":{"contributions":[{"slot":"settings.plugin-page","id":"demo","title":"demo","entry":"app/demo.html"}]}}"#,
+        )
+        .unwrap();
+        // 带 UI 的动态工具插件：只有 `tool:*` 通配才视为全部承接（server/cli 可注册）。
+        assert!(tools_served_by_sidecar(
+            &manifest,
+            Some(&["tools".to_string(), "tool:*".to_string()])
+        ));
+        assert!(!tools_served_by_sidecar(
+            &manifest,
+            Some(&["tools".to_string(), "tool:demo".to_string()])
+        ));
+        assert!(!tools_served_by_sidecar(&manifest, None));
+    }
 
     fn candidate(value: &str, label: &str, hint: &str) -> tiangong_types::MentionCandidate {
         tiangong_types::MentionCandidate {

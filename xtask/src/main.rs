@@ -87,8 +87,8 @@ const MCP: PluginConfig = PluginConfig {
     name: "MCP",
     description: "MCP server 管理与工具桥接",
     protocol_crate: Some("tiangong-plugin-mcp-protocol"),
-    wasm_crate: Some("tiangong-plugin-mcp-wasm"),
-    wasm_artifact: Some("tiangong_plugin_mcp_wasm.wasm"),
+    wasm_crate: None,
+    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-mcp-sidecar"),
     sidecar_artifact: Some("tiangong-mcp-sidecar"),
     plugin_root: "plugins/tiangong-plugin-mcp",
@@ -385,6 +385,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "coding" => &["app/index.html"],
         "skill" => &["app/skill.html"],
         "prompt" => &["app/prompt.html"],
+        "mcp" => &["app/mcp.html"],
         "computer-use" => &["app/restore-window.html"],
         "scheduler" => &["app/scheduler.html", "app/scheduled-task.html"],
         // 工具视图（session.message-item replace + tools）。

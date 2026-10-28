@@ -327,6 +327,13 @@ struct LoadedPlugin {
     /// Some(段落)（可为空数组）。sidecar 经 [`PROMPT_UPDATED_CHANNEL`]
     /// 通知变更时重取；内容变化计入能力指纹，触发上下文交接。
     prompt_sections: Option<Vec<String>>,
+    /// **装载时拉取**的 sidecar 动态工具规格快照（清单 `tools` 声明
+    /// `{"type":"sidecar"}` 条目 + 握手 `tools` 能力时经
+    /// [`TOOL_SPECS_OPERATION`] 读取一次）。None=未声明或未获取；
+    /// Some(规格)（可为空数组）。sidecar 经 [`TOOLS_UPDATED_CHANNEL`]
+    /// 通知变更时重取；core 每轮经适配器 `tool_specs()` 读取，快照
+    /// 更新后下一轮工具装配自动生效。
+    dynamic_tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
     /// 数据/制品/逻辑层加载错误（解释器不可发现、WASM 无法编译等）：
     /// 插件不满足安装条件，安装路径据此回滚。
     load_error: Option<String>,

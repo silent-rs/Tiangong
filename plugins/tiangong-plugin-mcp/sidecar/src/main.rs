@@ -36,7 +36,9 @@ async fn main() -> anyhow::Result<()> {
 
     let config = tiangong_plugin_sidecar::SidecarConfig::new("mcp");
     tiangong_plugin_sidecar::run(config, || {
-        Ok(std::sync::Arc::new(service::McpService::new()?))
+        let service = service::McpService::new()?;
+        service.prime();
+        Ok(std::sync::Arc::new(service))
     })
     .await
 }

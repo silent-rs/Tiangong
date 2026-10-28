@@ -72,11 +72,14 @@ impl TsPluginAdapter {
         enabled: bool,
         verified_sidecar: Option<Vec<String>>,
         prompt_sections: Vec<String>,
+        dynamic_tools: Vec<TsToolDecl>,
     ) -> Self {
+        let mut tools = manifest.tools.clone().unwrap_or_default();
+        tools.extend(dynamic_tools);
         Self {
             id: manifest.id.clone(),
             state: RwLock::new(TsPluginState {
-                tools: manifest.tools.clone().unwrap_or_default(),
+                tools,
                 prompts: prompt_sections,
                 legacy_tools_direct: manifest
                     .sidecar
@@ -177,9 +180,12 @@ impl TsPluginAdapter {
         enabled: bool,
         verified_sidecar: Option<Vec<String>>,
         prompt_sections: Vec<String>,
+        dynamic_tools: Vec<TsToolDecl>,
     ) {
+        let mut tools = manifest.tools.clone().unwrap_or_default();
+        tools.extend(dynamic_tools);
         let next = TsPluginState {
-            tools: manifest.tools.clone().unwrap_or_default(),
+            tools,
             prompts: prompt_sections,
             legacy_tools_direct: manifest
                 .sidecar
@@ -271,9 +277,29 @@ impl Plugin for TsPluginAdapter {
         let value = workspace
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        match self.workspace.write() {
-            Ok(mut slot) => *slot = value,
-            Err(poisoned) => *poisoned.into_inner() = value,
+        let changed = match self.workspace.write() {
+            Ok(mut slot) => {
+                let changed = *slot != value;
+                *slot = value;
+                changed
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = value;
+                false
+            }
+        };
+        // 工作目录变化时通知 sidecar（声明 lifecycle 且带 sidecar 的插件，
+        // 如 MCP 需要按新 workspace 重新探测）。未变化不重复发送。
+        if changed {
+            let workspace = self
+                .workspace
+                .read()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            self.forward_lifecycle_payload(
+                "set_workspace",
+                Some(serde_json::json!({ "workspace": workspace })),
+            );
         }
     }
     fn on_session_ready(&self) {
@@ -816,7 +842,7 @@ mod tests {
         manifest.ui = None;
         manifest.sidecar =
             Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new(), Vec::new());
         assert!(
             adapter
                 .sidecar_direct
@@ -827,7 +853,7 @@ mod tests {
         let mut manifest = manifest_without_mention();
         manifest.sidecar =
             Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new(), Vec::new());
         assert!(
             !adapter
                 .sidecar_direct
@@ -837,7 +863,7 @@ mod tests {
         // 无 UI 无 sidecar：也不直连（无接应由 ts_tools 明确报错）
         let mut manifest = manifest_without_mention();
         manifest.ui = None;
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new(), Vec::new());
         assert!(
             !adapter
                 .sidecar_direct
@@ -854,13 +880,19 @@ mod tests {
         let mut manifest = manifest_without_mention();
         manifest.ui = None;
         manifest.sidecar = Some(serde_json::from_value(sidecar_manifest.clone()).unwrap());
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new(), Vec::new());
         assert_eq!(
             adapter_route(&adapter, "demo"),
             crate::invocation::HandlerKind::Sidecar
         );
         // 无 UI + sidecar + 有效记录：直连（能力列表可为空——结构即通道）。
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, Some(Vec::new()), Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(
+            &manifest,
+            true,
+            Some(Vec::new()),
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(
             adapter_route(&adapter, "demo"),
             crate::invocation::HandlerKind::Sidecar
@@ -873,6 +905,7 @@ mod tests {
             true,
             Some(vec!["tool:demo".to_string()]),
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(
             adapter_route(&adapter, "demo"),
@@ -883,7 +916,7 @@ mod tests {
             crate::invocation::HandlerKind::Ui
         );
         // 记录缺失：有 UI 回退 UI。
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None, Vec::new(), Vec::new());
         assert_eq!(
             adapter_route(&adapter, "demo"),
             crate::invocation::HandlerKind::Ui
@@ -891,21 +924,33 @@ mod tests {
         // 旧版有 UI 的直连插件：空能力仍可使用已验证的旧声明；检查缺失
         // 或新版能力明确不支持时返回错误，不能交给纯展示页面无限等待。
         manifest.sidecar.as_mut().unwrap().tools_direct = Some(true);
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, Some(Vec::new()), Vec::new());
+        let adapter = TsPluginAdapter::from_manifest(
+            &manifest,
+            true,
+            Some(Vec::new()),
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(
             adapter_route(&adapter, "demo"),
             crate::invocation::HandlerKind::Sidecar
         );
-        adapter.reconfigure(&manifest, true, None, Vec::new());
+        adapter.reconfigure(&manifest, true, None, Vec::new(), Vec::new());
         assert!(adapter.handler_for_tool("demo").is_err());
-        adapter.reconfigure(&manifest, true, Some(vec!["tool:other".into()]), Vec::new());
+        adapter.reconfigure(
+            &manifest,
+            true,
+            Some(vec!["tool:other".into()]),
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(adapter.handler_for_tool("demo").is_err());
         assert_eq!(
             adapter_route(&adapter, "other"),
             crate::invocation::HandlerKind::Sidecar
         );
         manifest.sidecar.as_mut().unwrap().tools_direct = Some(false);
-        adapter.reconfigure(&manifest, true, Some(Vec::new()), Vec::new());
+        adapter.reconfigure(&manifest, true, Some(Vec::new()), Vec::new(), Vec::new());
         assert_eq!(
             adapter_route(&adapter, "demo"),
             crate::invocation::HandlerKind::Ui

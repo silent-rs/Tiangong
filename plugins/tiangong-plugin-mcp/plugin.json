@@ -1,10 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "mcp",
-  "version": "0.2.6",
-  "wasm": {
-    "binary": "tiangong_plugin_mcp_wasm.wasm"
-  },
+  "name": "MCP",
+  "version": "0.3.0",
   "sidecar": {
     "binary": "tiangong-mcp-sidecar",
     "transport_protocol": "0.1.0",
@@ -14,11 +12,34 @@
   },
   "permissions": [
     "app-storage.read",
-    "sidecar.invoke"
+    "sidecar.invoke",
+    "tool.provide",
+    "bridge.call"
   ],
   "entrypoints": [
     "desktop",
     "cli",
     "server"
-  ]
+  ],
+  "capabilities": {
+    "tools": true,
+    "lifecycle": true
+  },
+  "mention": {
+    "candidates_op": "mcp.mention_candidates"
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "mcp-settings",
+        "title": "MCP 管理",
+        "description": "管理 MCP server 配置",
+        "icon": "plug",
+        "entry": "app/mcp.html",
+        "context": []
+      }
+    ]
+  }
 }

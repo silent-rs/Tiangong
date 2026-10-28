@@ -167,6 +167,7 @@ fn reload_clears_stale_connections_even_without_sidecar_declaration() {
             ),
             verified_sidecar: None,
             prompt_sections: None,
+            dynamic_tool_specs: None,
             load_error: None,
             runtime_error: None,
             enabled: true,
@@ -420,6 +421,7 @@ fn refresh_verified_sidecar_clears_only_runtime_error() {
         sidecar: None,
         verified_sidecar: None,
         prompt_sections: None,
+        dynamic_tool_specs: None,
         load_error: Some("WASM 实例创建失败".into()),
         runtime_error: Some("sidecar 启动失败".into()),
         enabled: true,
@@ -476,6 +478,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
             sidecar: None,
             verified_sidecar: None,
             prompt_sections: None,
+            dynamic_tool_specs: None,
             load_error: None,
             runtime_error: None,
             enabled: true,
@@ -577,6 +580,7 @@ fn mention_sources_are_reachable_without_any_session_core() {
         sidecar: None,
         verified_sidecar: None,
         prompt_sections: None,
+        dynamic_tool_specs: None,
         load_error: None,
         runtime_error: None,
         enabled,
@@ -838,6 +842,7 @@ fn 动态prompt段落变化改变能力指纹() {
     )
     .expect("解析测试清单");
     let record = |prompt_sections: Option<Vec<String>>| LoadedPlugin {
+        dynamic_tool_specs: None,
         directory: std::path::PathBuf::from("/tmp/prompt-digest-demo"),
         manifest: manifest.clone(),
         signed_release: None,
@@ -917,6 +922,7 @@ fn 通知重取用插件目录组装并发布事件() {
                 sidecar: None,
                 verified_sidecar: None,
                 prompt_sections: Some(vec!["旧快照".to_string()]),
+                dynamic_tool_specs: None,
                 load_error: None,
                 runtime_error: None,
                 enabled: true,
@@ -958,6 +964,7 @@ fn 补验证刷新保留段落快照() {
         true,
         None,
         vec!["旧段落".to_string()],
+        Vec::new(),
     ));
     {
         let mut plugins = loaded_plugins().lock().unwrap();
@@ -977,6 +984,7 @@ fn 补验证刷新保留段落快照() {
                 sidecar: None,
                 verified_sidecar: None,
                 prompt_sections: Some(vec!["旧段落".to_string()]),
+                dynamic_tool_specs: None,
                 load_error: None,
                 runtime_error: Some("启动异常".to_string()),
                 enabled: true,
@@ -1026,11 +1034,13 @@ fn 无wasm重载只读取一次装载快照且内容一致() {
         true,
         None,
         Vec::new(),
+        Vec::new(),
     ));
     let adapter_b = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
         &manifest,
         true,
         None,
+        Vec::new(),
         Vec::new(),
     ));
     {
@@ -1054,6 +1064,7 @@ fn 无wasm重载只读取一次装载快照且内容一致() {
                 sidecar: None,
                 verified_sidecar: None,
                 prompt_sections: Some(vec!["旧段落".to_string()]),
+                dynamic_tool_specs: None,
                 load_error: None,
                 runtime_error: None,
                 enabled: true,
@@ -1123,6 +1134,7 @@ fn 无wasm重载保留prompt未声明的none语义() {
         true,
         None,
         Vec::new(),
+        Vec::new(),
     ));
     {
         let mut plugins = loaded_plugins().lock().unwrap();
@@ -1143,6 +1155,7 @@ fn 无wasm重载保留prompt未声明的none语义() {
                 verified_sidecar: None,
                 // 重载前错误地持有 Some：装载快照应回归 None
                 prompt_sections: Some(vec!["遗留".to_string()]),
+                dynamic_tool_specs: None,
                 load_error: None,
                 runtime_error: None,
                 enabled: true,

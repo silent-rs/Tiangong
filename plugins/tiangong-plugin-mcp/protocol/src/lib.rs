@@ -17,6 +17,9 @@ pub mod tool;
 pub const PLUGIN_ID: &str = "mcp";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MCP_PROTOCOL_VERSION: u32 = 1;
+/// @提及候选操作（v2 `mention.candidates_op` 声明）：响应为
+/// `{ entry: { hint, mark? }, candidates: [ { value, label, kind, hint, mark? } ] }`。
+pub const MCP_MENTION_CANDIDATES_OPERATION: &str = "mcp.mention_candidates";
 
 /// 一个类型化 MCP 业务操作。
 ///

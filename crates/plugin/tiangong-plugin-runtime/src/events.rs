@@ -28,6 +28,10 @@ pub enum PluginChangeKind {
     /// 重取后内容有变）：能力指纹随段落摘要变化，订阅者按指纹触发上下文
     /// 交接（压缩 message），与升级/启停同链路。
     PromptSectionsChanged,
+    /// sidecar 动态工具声明变化（`runtime.tools_updated` 通知重取后有变）：
+    /// core 每轮经适配器 `tool_specs()` 读取，快照更新后下一轮工具装配
+    /// 自动生效；工具清单不进能力指纹（与 WASM 时代行为一致）。
+    ToolsChanged,
 }
 
 /// 插件生命周期变化事件：迁移成功后由 runtime 发布。

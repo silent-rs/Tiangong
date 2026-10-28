@@ -20,7 +20,8 @@ use tiangong_plugin_mcp_protocol::management::{
 };
 use tiangong_plugin_mcp_protocol::tool::{ExecuteToolResponse, ListToolsResponse};
 use tiangong_plugin_mcp_protocol::{
-    MCP_PROTOCOL_VERSION, MessageResponse, PLUGIN_ID, PLUGIN_VERSION,
+    MCP_MENTION_CANDIDATES_OPERATION, MCP_PROTOCOL_VERSION, MessageResponse, PLUGIN_ID,
+    PLUGIN_VERSION,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -111,6 +112,12 @@ impl McpService {
         self.rebuild_targets(&config);
     }
 
+    /// 启动即启动探测调度并重建绑定（工具直连形态下 sidecar 首次被访问
+    /// 前就可能需要工具声明；原 WASM 时代由宿主 config_updated 钩子触发）。
+    pub fn prime(&self) {
+        self.reconfigure();
+    }
+
     fn sync_probe_and_rebuild(&self, server_name: &str) {
         let config = self.config_snapshot();
         if let Some(server) = config.servers.iter().find(|s| s.name == server_name)
@@ -140,6 +147,16 @@ impl McpService {
         if let Ok(mut guard) = self.mcp_targets.write() {
             *guard = targets;
         }
+        self.notify_tools_updated();
+    }
+
+    /// 工具声明可能已变化（配置增删、探测结果更新）：通知宿主经
+    /// `tool_specs` 重取快照，下一轮工具装配生效。
+    fn notify_tools_updated(&self) {
+        tiangong_plugin_sidecar::server::emit_notification(
+            tiangong_plugin_sidecar::protocol::TOOLS_UPDATED_CHANNEL,
+            serde_json::json!({ "plugin_id": PLUGIN_ID }).to_string(),
+        );
     }
 
     /// 按 operation 分发运行时请求，返回通用 Response。
@@ -182,7 +199,13 @@ impl McpService {
                 sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 business_protocol: MCP_PROTOCOL_VERSION,
-                capabilities: vec!["mcp".to_string()],
+                capabilities: vec![
+                    "mcp".to_string(),
+                    // 工具承接通配：操作名即工具名（mcp__{server}__{tool}），
+                    // 名单运行时确定；宿主装载时据此经固定操作 tool_specs
+                    // 拉取规格快照。
+                    "tool:*".to_string(),
+                ],
                 instance_id: format!("mcp-sidecar-{}", std::process::id()),
                 status: ServiceStatus::Ready,
             })
@@ -319,6 +342,133 @@ impl McpService {
                 let env: BTreeMap<String, String> = self.collect_runtime_env();
                 Ok(serde_json::to_value(env)?)
             }
+
+            // ── 工具直连形态（原 WASM 桥接职责迁入）──
+
+            // 动态工具规格快照：宿主装载 / runtime.tools_updated 通知重取。
+            tiangong_plugin_sidecar::protocol::TOOL_SPECS_OPERATION => {
+                let config = self.config_snapshot();
+                let active = self.capability.cached_active_tools();
+                let response: ListToolsResponse = list_tools_response(&config, active);
+                let specs: Vec<serde_json::Value> = response
+                    .servers
+                    .iter()
+                    .flat_map(|entry| {
+                        entry
+                            .tools
+                            .iter()
+                            .map(move |tool| (entry.server.clone(), tool))
+                    })
+                    .map(|(server, tool)| {
+                        serde_json::json!({
+                            "name": crate::execution::resolve_mcp_function_name(&server, &tool.name),
+                            "description": format!(
+                                "MCP调用：server={} tool={} description={}",
+                                server, tool.name, tool.description
+                            ),
+                            "input_schema": if tool.input_schema.is_object() {
+                                tool.input_schema.clone()
+                            } else {
+                                serde_json::json!({})
+                            },
+                            "timeout_ms": config.timeout_ms,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::to_value(specs)?)
+            }
+
+            // 工作目录变化（原 WASM set_workspace + on_config_updated →
+            // Reconfigure 语义迁入）：更新工作目录并重新探测。
+            "lifecycle.set_workspace" => {
+                let workspace = payload
+                    .get("workspace")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from);
+                if let Ok(mut guard) = self.workspace.write() {
+                    *guard = workspace;
+                }
+                self.reconfigure();
+                Ok(serde_json::to_value(
+                    tiangong_plugin_mcp_protocol::Empty {},
+                )?)
+            }
+
+            // @提及候选（原 WASM mcp_mention_candidates 迁入，v2 形状）：
+            // 入口 entry + 启用中的 server 动态候选。
+            MCP_MENTION_CANDIDATES_OPERATION => {
+                let config = self.config_snapshot();
+                let tool_counts: std::collections::HashMap<String, usize> =
+                    list_tools_response(&config, self.capability.cached_active_tools())
+                        .servers
+                        .into_iter()
+                        .map(|entry| (entry.server, entry.tools.len()))
+                        .collect();
+                let candidates: Vec<serde_json::Value> = config
+                    .servers
+                    .iter()
+                    .filter(|server| server.enabled)
+                    .map(|server| {
+                        serde_json::json!({
+                            "value": format!("@mcp:{}", server.name),
+                            "label": server.name,
+                            "kind": "mcp",
+                            "hint": format!(
+                                "{} 工具",
+                                tool_counts.get(&server.name).copied().unwrap_or(0)
+                            ),
+                            "mark": "M",
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({
+                    "entry": {
+                        "hint": "调用外部 MCP server 的工具",
+                        "mark": "M",
+                    },
+                    "candidates": candidates,
+                }))
+            }
+
+            // 工具执行直连：operation 即函数名 mcp__{server}__{tool}（原
+            // WASM handle_tool 迁入——解析名转发执行）。
+            name if name.starts_with("mcp__") => {
+                let arguments = payload;
+                let target = self.target_for_function(name);
+                let config = self.config_snapshot();
+                // workspace 优先宿主权威调用上下文，回退 reconfigure 注入值。
+                let workspace = tiangong_plugin_sidecar::invocation_context()
+                    .map(|context| context.workspace)
+                    .filter(|workspace| !workspace.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| self.workspace.read().ok().and_then(|guard| guard.clone()));
+                let result: ExecuteToolResponse = match target.as_ref() {
+                    Some(target) => execute_tool(target, arguments, &config, workspace)
+                        .await
+                        .unwrap_or_else(|err| ExecuteToolResponse {
+                            ok: false,
+                            summary: format!("MCP工具调用失败：{err}"),
+                            stderr: err.to_string(),
+                            exit_code: 1,
+                            ..Default::default()
+                        }),
+                    None => ExecuteToolResponse {
+                        ok: false,
+                        summary: format!("不是 MCP 工具：{name}"),
+                        stderr: format!("不是 MCP 工具：{name}"),
+                        exit_code: 1,
+                        ..Default::default()
+                    },
+                };
+                if result.ok
+                    && let Some(target) = target.as_ref()
+                {
+                    self.capability.record_success(&target.server_name);
+                }
+                Ok(serde_json::to_value(result)?)
+            }
+
             other => bail!("不支持的 MCP 操作: {other}"),
         }
     }
@@ -799,6 +949,90 @@ mod tests {
             .register_server(register_request("first-server"))
             .unwrap();
         assert!(message.contains("first-server"));
+    }
+
+    /// 预写一份「demo server 已探测出两个工具」的 capability 缓存与启用配置。
+    fn service_with_cached_tools() -> McpService {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string(&serde_json::json!({
+                "enabled": true,
+                "servers": [{
+                    "name": "demo", "command": "echo", "enabled": true,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("cache.json"),
+            serde_json::to_string(&serde_json::json!({
+                "servers": {
+                    "demo": {
+                        "healthy": true,
+                        "tools": [
+                            {"name": "query", "description": "查询数据", "input_schema": {"type": "object"}},
+                            {"name": "list-all", "description": "列出全部"},
+                        ],
+                    },
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        McpService::with_paths(config_path, dir.path().join("cache.json")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn tool_specs_平铺缓存工具为直连规格() {
+        let service = service_with_cached_tools();
+        let value = service
+            .dispatch_operation(
+                tiangong_plugin_sidecar::protocol::TOOL_SPECS_OPERATION,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let specs = value.as_array().unwrap();
+        let names: Vec<&str> = specs
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["mcp__demo__query", "mcp__demo__list_all"]);
+        assert_eq!(
+            specs[0]["description"].as_str().unwrap(),
+            "MCP调用：server=demo tool=query description=查询数据"
+        );
+        assert_eq!(specs[0]["input_schema"]["type"], "object");
+        // 缺 schema 的工具回退空对象。
+        assert_eq!(specs[1]["input_schema"], serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn mcp_工具直连未知名返回失败结果() {
+        let service = service_with_cached_tools();
+        let value = service
+            .dispatch_operation("mcp__nope__missing", serde_json::json!({"x": 1}))
+            .await
+            .unwrap();
+        assert_eq!(value["ok"], false);
+        assert!(value["summary"].as_str().unwrap().contains("不是 MCP 工具"));
+    }
+
+    #[tokio::test]
+    async fn mention_候选_入口与启用_server() {
+        let service = service_with_cached_tools();
+        let value = service
+            .dispatch_operation(MCP_MENTION_CANDIDATES_OPERATION, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(value["entry"]["hint"], "调用外部 MCP server 的工具");
+        let candidates = value["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["value"], "@mcp:demo");
+        assert_eq!(candidates[0]["hint"], "2 工具");
     }
 
     #[test]

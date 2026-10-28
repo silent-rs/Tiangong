@@ -1327,6 +1327,13 @@ fn spawn_stdio_reader(
                                 crate::registry::refresh_prompt_sections(&plugin_id);
                             });
                         }
+                        if channel == tiangong_plugin_sidecar::protocol::TOOLS_UPDATED_CHANNEL {
+                            // 工具规格重取同样是阻塞 I/O：只投递，不等待完成。
+                            let plugin_id = plugin_id.clone();
+                            std::thread::spawn(move || {
+                                crate::registry::refresh_tool_specs(&plugin_id);
+                            });
+                        }
                         if let Some(forwarder) = crate::sidecar::sidecar_notification_forwarder() {
                             forwarder(&plugin_id, &channel, &payload);
                         }

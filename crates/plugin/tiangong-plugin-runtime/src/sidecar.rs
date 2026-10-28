@@ -1536,6 +1536,13 @@ async fn run_notification_connection(
                         crate::registry::refresh_prompt_sections(&plugin_id);
                     });
                 }
+                if channel == tiangong_plugin_sidecar::protocol::TOOLS_UPDATED_CHANNEL {
+                    // 工具规格重取同样是阻塞 I/O：只投递，不等待完成。
+                    let plugin_id = plugin_id.to_string();
+                    std::thread::spawn(move || {
+                        crate::registry::refresh_tool_specs(&plugin_id);
+                    });
+                }
                 if let Some(forwarder) = forwarder {
                     forwarder(plugin_id, &channel, &payload);
                 }
