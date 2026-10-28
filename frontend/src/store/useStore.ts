@@ -1473,6 +1473,7 @@ export const useStore = create<AppState>((set, get) => ({
       await api.deleteSession(deletedSessionId);
       sessionViewCaches.delete(deletedSessionId);
       discardInputCacheSyncQueue(deletedSessionId);
+      liveTpsTracker.reset(deletedSessionId);
       // 本地直接移除被删会话，不重新拉列表（避免全量扫描卡顿）。
       set((state) => {
         const inputCaches = { ...state.inputCaches };
@@ -1510,6 +1511,7 @@ export const useStore = create<AppState>((set, get) => ({
       for (const sessionId of succeededIds) {
         sessionViewCaches.delete(sessionId);
         discardInputCacheSyncQueue(sessionId);
+        liveTpsTracker.reset(sessionId);
       }
       // 本地只移除实际删除成功的会话。
       const remainingSessions = before.sessions.filter(
@@ -2389,6 +2391,12 @@ export const useStore = create<AppState>((set, get) => ({
         || event.type === 'reasoning'
       ) {
         liveTpsTracker.record(sessionId, event.tokens);
+      } else if (event.type === 'token_usage' && event.usage) {
+        // 官方 usage 校准传导：节流层的最终校准值可能没有后续正文事件
+        // 可搭（流末 usage 无载体下发），经 token_usage 事件补记——
+        // 单流即消息级累计；ReAct 多流时为该请求计量，计数回退由
+        // tracker 重开窗口，不影响最近显示。
+        liveTpsTracker.record(sessionId, event.usage.completion_tokens);
       }
       // title_changed：直接改对应会话标题，不进入会话视图状态机。
       if (event.type === 'title_changed' && typeof event.title === 'string') {

@@ -61,7 +61,8 @@ function TokenStatsBlock({ compact }: { compact?: boolean }) {
         <span
           className="flex shrink-0 items-center gap-1"
           aria-live="polite"
-          aria-label={`当前生成速度 ${formatTps(round1(tps))}`}
+          aria-label={`最近生成速度 ${formatTps(round1(tps))}`}
+          title="最近一次生成的输出速度（轮次结束后保留最近值）"
         >
           <Zap className="h-3 w-3 text-foreground/70" aria-hidden="true" />
           {formatTps(round1(tps))}

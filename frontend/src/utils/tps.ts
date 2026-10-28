@@ -41,12 +41,14 @@ interface TpsSample {
 }
 
 interface TpsSessionState {
-  /** 首个流式文本事件时刻（跳秒基准，不随窗口裁剪删除）。 */
+  /** 会话内首个流式输出事件时刻（跳秒基准，不随窗口裁剪删除）。
+   *  跨轮保留：仅在会话删除 / 页面重载时随之消失。 */
   startedAt: number | null;
   samples: TpsSample[];
-  /** 最近一次算出的速度：等待期（TTFT / 工具执行，无新样本到达）保留
-   *  显示，避免速度数字消失重来的跳动；轮次边界 reset 时清空。
-   *  新样本重新算出速度后自然覆盖。 */
+  /** 最近一次算出的速度：跨轮保留（轮次结束不清空），等待期（TTFT /
+   *  工具执行 / 轮次空闲）沿用最近值避免数字跳动；轮内新一次 LLM 请求
+   *  （计数回退重开窗口）期间同样保留。仅会话删除（tracker.reset）或
+   *  页面重载清空；新样本重新算出速度后自然覆盖。 */
   lastTps: number;
 }
 
@@ -91,7 +93,7 @@ export class LiveTpsTracker {
     this.prune(state, now);
   }
 
-  /** 轮次结束 / 新轮次开始：清空该会话窗口与计时。 */
+  /** 会话删除（core 实例销毁）时清空该会话窗口；轮次边界不清空。 */
   reset(sessionId: string): void {
     if (sessionId) this.sessions.delete(sessionId);
   }

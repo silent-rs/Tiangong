@@ -74,15 +74,17 @@ describe('模型调用用量', () => {
     expect(html).not.toContain('0.0%');
   });
 
-  it('生成度量合并块位于行最右侧，明细不占用消息区，弹窗支持关闭', async () => {
+  it('生成度量合并块位于时间之后、时长之前（速度位置与流式行对齐），弹窗支持关闭', async () => {
     await act(async () => root.render(<MessageActions text="回复" showTts={false} durationMs={9000} usageMessages={[message('a', usage(100, 80))]} />));
     const duration = container.querySelector('[title="本轮执行总时长"]')!;
     const trigger = container.querySelector('[aria-label="查看调用用量详情"]') as HTMLButtonElement;
-    // 生成度量合并块紧跟内容（时长）右侧自然排列，无 ml-auto。
-    const mergedBlock = duration.nextElementSibling;
+    // 合并块（速度 + 用量徽标）在时长之前：完成后仅在速度右侧追加
+    // 时长，速度位置与流式行一致。
+    const mergedBlock = trigger.closest('span') as HTMLElement | null;
     expect(mergedBlock).not.toBeNull();
     expect(mergedBlock!.contains(trigger)).toBe(true);
     expect((mergedBlock as HTMLElement).className).not.toContain('ml-auto');
+    expect(duration.previousElementSibling).toBe(mergedBlock);
     expect(container.querySelector('[title="回复生成耗时"]')).toBeNull();
     expect(trigger.querySelector('[aria-label="输入 100"] .lucide-arrow-up')).not.toBeNull();
     expect(trigger.querySelector('[aria-label="输出 10"] .lucide-arrow-down')).not.toBeNull();

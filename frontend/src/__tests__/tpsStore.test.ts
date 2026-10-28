@@ -67,4 +67,26 @@ describe('实时 TPS 全链路（applyStreamEvents → LiveTpsTracker）', () =>
     expect(after.active).toBe(true);
     expect(after.tps).toBe(before.tps);
   });
+
+  it('token_usage 事件的官方计量补记为校准样本（流末校准传导）', () => {
+    // 节流层的最终校准可能没有后续正文事件可搭；经 token_usage 事件
+    // 到达的官方 completion_tokens 补记，单流即消息级累计。
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'x', tokens: 2 }]);
+    vi.advanceTimersByTime(100);
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'y', tokens: 4 }]);
+    vi.advanceTimersByTime(100);
+    feed('e2e-1', [{
+      type: 'token_usage',
+      usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 },
+      current_tokens: null,
+      compression_threshold_tokens: null,
+      context_limit_tokens: null,
+      source: 'chat',
+      agent_id: null,
+    }]);
+    const snap = liveTpsTracker.snapshot('e2e-1');
+    expect(snap.active).toBe(true);
+    // 2→6（校准）= 4 tokens / 200ms（分母下限 300ms）≈ 13.3 tok/s。
+    expect(snap.tps).toBeGreaterThan(0);
+  });
 });

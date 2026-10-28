@@ -435,7 +435,10 @@ function AgentTurnView({
                 {isStreaming ? (
                   <>
                     <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
-                    <StreamingTpsRow time={formatMessageTime(msg.created_at)} />
+                    <StreamingTpsRow
+                      time={formatMessageTime(msg.created_at)}
+                      usageMessages={!usageAnchorId ? messages : undefined}
+                    />
                   </>
                 ) : (
                   renderWithHighlight(msg.id, body)
@@ -448,7 +451,10 @@ function AgentTurnView({
               {isStreaming ? (
                 <>
                   <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
-                  <StreamingTpsRow time={formatMessageTime(msg.created_at)} />
+                  <StreamingTpsRow
+                    time={formatMessageTime(msg.created_at)}
+                    usageMessages={!usageAnchorId ? messages : undefined}
+                  />
                 </>
               ) : visibleText || hasMediaBlocks(msg) ? (
                 <div>
@@ -611,7 +617,11 @@ function AgentTurnView({
           {!usageAnchorId && <CallUsageDetails messages={messages} />}
         </div>
       )}
-      {!usageAnchorId && (!turnStatusMeta || isActive) && <CallUsageDetails messages={messages} />}
+      {/* 轮次级用量徽标：流式期间由 StreamingTpsRow 行内承载（与速度同
+          行）；无流式（工具执行 / 非活跃无状态轮次）时在此独立显示。 */}
+      {!usageAnchorId
+        && ((isActive && streamingMessageId == null) || (!isActive && !turnStatusMeta))
+        && <CallUsageDetails messages={messages} />}
     </div>
   );
 }
