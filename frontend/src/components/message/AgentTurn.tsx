@@ -433,13 +433,7 @@ function AgentTurnView({
             return (
               <div key={msg.id} className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
                 {isStreaming ? (
-                  <>
-                    <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
-                    <StreamingTpsRow
-                      time={formatMessageTime(msg.created_at)}
-                      usageMessages={!usageAnchorId ? messages : undefined}
-                    />
-                  </>
+                  <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
                 ) : (
                   renderWithHighlight(msg.id, body)
                 )}
@@ -449,13 +443,7 @@ function AgentTurnView({
           return (
             <div key={msg.id} className="text-foreground">
               {isStreaming ? (
-                <>
-                  <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
-                  <StreamingTpsRow
-                    time={formatMessageTime(msg.created_at)}
-                    usageMessages={!usageAnchorId ? messages : undefined}
-                  />
-                </>
+                <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
               ) : visibleText || hasMediaBlocks(msg) ? (
                 <div>
                   <ContentMedia message={msg} />
@@ -604,6 +592,10 @@ function AgentTurnView({
           runningCalls={runningToolCalls}
         />
       )}
+      {/* 轮次实时速度行：isActive 期间常驻（流式 / 工具执行 / 等待均可见，
+          轮次中出现过有效值后一直显示最近值）；轮次结束卸载。轮次已有
+          用量数据时徽标与速度同行。 */}
+      {isActive && <StreamingTpsRow usageMessages={!usageAnchorId ? messages : undefined} />}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {turnStatusMeta && !isActive && (
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
@@ -617,11 +609,9 @@ function AgentTurnView({
           {!usageAnchorId && <CallUsageDetails messages={messages} />}
         </div>
       )}
-      {/* 轮次级用量徽标：流式期间由 StreamingTpsRow 行内承载（与速度同
-          行）；无流式（工具执行 / 非活跃无状态轮次）时在此独立显示。 */}
-      {!usageAnchorId
-        && ((isActive && streamingMessageId == null) || (!isActive && !turnStatusMeta))
-        && <CallUsageDetails messages={messages} />}
+      {/* 轮次级用量徽标：活跃期间由 StreamingTpsRow 行内承载（与速度同
+          行，含工具执行等无流式阶段）；非活跃且无状态行时在此独立显示。 */}
+      {!usageAnchorId && !isActive && !turnStatusMeta && <CallUsageDetails messages={messages} />}
     </div>
   );
 }

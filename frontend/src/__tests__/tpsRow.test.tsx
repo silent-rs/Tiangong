@@ -4,12 +4,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '@/store/useStore';
 import { liveTpsTracker } from '@/utils/tps';
 import { StreamingTpsRow } from '@/components/message/StreamingTpsRow';
-import type { SessionStreamEvent } from '@/api/tauri';
+import type { MessageUsage, SessionStreamEvent, TokenUsage } from '@/api/tauri';
+import type { MessageItem } from '@/components/message/types';
 
 function feed(sessionId: string, events: Array<Record<string, unknown>>) {
   useStore.getState().applyStreamEvents(
     events.map((event) => ({ session_id: sessionId, event: { ...event } } as SessionStreamEvent)),
   );
+}
+
+function usageMessage(id: string): MessageItem {
+  const tokens: TokenUsage = {
+    prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
+    prompt_cache_hit_tokens: null, prompt_cache_miss_tokens: null,
+  };
+  const usage: MessageUsage = { ...tokens, model: 'test-model', agent_id: 'agent-1', turn_id: 'turn-1', source: 'react', status: 'success' };
+  return { id, role: 'assistant', usage, content: [{ type: 'text', text: '回复' }], created_at: new Date().toISOString() };
 }
 
 describe('StreamingTpsRow（渲染层端到端）', () => {
@@ -30,9 +40,9 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
     liveTpsTracker.reset('render-1');
   });
 
-  function renderRow() {
+  function renderRow(props: { usageMessages?: MessageItem[] } = {}) {
     act(() => {
-      root!.render(<StreamingTpsRow />);
+      root!.render(<StreamingTpsRow {...props} />);
     });
   }
 
@@ -60,7 +70,7 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
     expect(text).not.toMatch(/\d+s/);
   });
 
-  it('无速度样本时行占位、内容为空（不显示文案与秒数）', () => {
+  it('无速度样本且无用量数据时整行不渲染（轮次开始不出现空分隔线）', () => {
     useStore.setState({ streamingMessageId: 'm2' });
     renderRow();
 
@@ -69,9 +79,16 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
       vi.advanceTimersByTime(700);
     });
 
+    expect(container!.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('已有用量数据时即使没有速度样本也渲染徽标（同行不带速度）', () => {
+    useStore.setState({ streamingMessageId: 'm3' });
+    renderRow({ usageMessages: [usageMessage('m3')] });
+
     const status = container!.querySelector('[role="status"]');
     expect(status).not.toBeNull();
-    expect(status!.textContent).toBe('');
-    expect(status!.getAttribute('aria-label')).toContain('正在生成');
+    expect(status!.textContent).not.toContain('tok/s');
+    expect(status!.querySelector('button')?.getAttribute('aria-label')).toBe('查看调用用量详情');
   });
 });
