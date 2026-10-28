@@ -98,7 +98,11 @@ impl StreamElapsed {
     }
 }
 
-/// 一次模型流式输出中思考与正文两个阶段的耗时测量。
+/// 一次模型流式输出中思考阶段与输出阶段（思考 + 正文）的耗时测量。
+///
+/// `text` 覆盖任何输出增量（思考或正文）的首末时刻：官方
+/// `completion_tokens` 含思考 token，tok/s 的分母必须与它同口径；
+/// 只统计正文会把「长思考 + 短正文」的轮次算成异常高的速度。
 #[derive(Default)]
 pub(super) struct StreamTiming {
     pub(super) reasoning: StreamElapsed,

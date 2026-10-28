@@ -8,7 +8,7 @@ import { ThinkingBlock } from "../ThinkingBlock";
 import { AgentReplyCard } from "./AgentReplyCard";
 import { useResolvedTheme } from "@/hooks/useTheme";
 import { hasMediaBlocks, textContent } from "@/api/tauri";
-import { elapsedMsOf, messageKind, reasoningElapsedMsOf, textElapsedMsOf, toolCallIdOf, toolCallsOf, turnStatusOf, usageOf, userSourceOf } from "@/api/message";
+import { elapsedMsOf, messageKind, messageTpsOf, reasoningElapsedMsOf, textElapsedMsOf, toolCallIdOf, toolCallsOf, turnStatusOf, usageOf, userSourceOf } from "@/api/message";
 import {
   formatMessageTime,
   formatDuration,
@@ -29,6 +29,7 @@ import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
 import { LazyMdPreview } from "./LazyMdPreview";
 import { StreamingMessage } from "./StreamingMessage";
+import { TurnTpsRow } from "./TurnTpsRow";
 import { MessageActions } from "./MessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { ToolGroup } from "./ToolGroup";
@@ -311,6 +312,21 @@ function AgentTurnView({
     };
   }, [messages, streamingMessageId, agents, finalReplyId]);
 
+  // 轮次用量列表（稳定引用）：流式期间 messages 每次都是新数组，直接透传
+  // 会让轮末速度行与用量徽标的 memo 失效、随每个流事件批次重渲。按用量
+  // 内容签名缓存（含弹窗展示的持久化速度与耗时），只有展示内容真正变化
+  // 才换引用。
+  const usageSignature = messages
+    .map((msg) => {
+      const usage = usageOf(msg);
+      return usage ? `${JSON.stringify(usage)}:${messageTpsOf(msg)}:${textElapsedMsOf(msg)}` : "";
+    })
+    .join("\u0001");
+  const usageMessages = useMemo(
+    () => messages.filter((msg) => usageOf(msg) != null),
+    [usageSignature],
+  );
+
   const argsOfToolMessage = (msg: MessageItem): unknown =>
     (() => {
       const id = toolCallIdOf(msg);
@@ -458,7 +474,15 @@ function AgentTurnView({
                     text={visibleText}
                     time={formatMessageTime(msg.created_at)}
                     durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? (userFrag ? elapsedMsOf(userFrag.msg) : undefined)) : undefined}
-                    usageMessages={msg.id === usageAnchorId ? messages : undefined}
+                    tps={messageTpsOf(msg)}
+                    tpsDetail={(() => {
+                      const tps = messageTpsOf(msg);
+                      if (tps == null) return null;
+                      const tokens = usageOf(msg)?.completion_tokens;
+                      const elapsedMs = textElapsedMsOf(msg);
+                      return tokens != null && elapsedMs != null ? { tokens, elapsedMs } : null;
+                    })()}
+                    usageMessages={msg.id === usageAnchorId ? usageMessages : undefined}
                   />
                 </div>
               )}
@@ -583,6 +607,10 @@ function AgentTurnView({
           runningCalls={runningToolCalls}
         />
       )}
+      {/* 轮次实时速度行：isActive 期间常驻（流式 / 工具执行 / 等待均可见，
+          轮次中出现过有效值后一直显示最近值）；轮次结束卸载。轮次已有
+          用量数据时徽标与速度同行。 */}
+      {isActive && <TurnTpsRow usageMessages={!usageAnchorId ? usageMessages : undefined} />}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {turnStatusMeta && !isActive && (
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
@@ -593,10 +621,12 @@ function AgentTurnView({
           {turnElapsedMs != null && (
             <span title="本轮执行总时长">⏱ {formatDuration(turnElapsedMs)}</span>
           )}
-          {!usageAnchorId && <CallUsageDetails messages={messages} />}
+          {!usageAnchorId && <CallUsageDetails messages={usageMessages} />}
         </div>
       )}
-      {!usageAnchorId && (!turnStatusMeta || isActive) && <CallUsageDetails messages={messages} />}
+      {/* 轮次级用量徽标：活跃期间由轮末速度行内承载（与速度同
+          行，含工具执行等无流式阶段）；非活跃且无状态行时在此独立显示。 */}
+      {!usageAnchorId && !isActive && !turnStatusMeta && <CallUsageDetails messages={usageMessages} />}
     </div>
   );
 }

@@ -263,6 +263,14 @@ pub struct ModelStreamChunk {
     pub content: String,
     pub reasoning_content: String,
     pub usage: Option<TokenUsageData>,
+    /// 截至本 chunk 的累计 output tokens（实时 TPS 数据源）。
+    ///
+    /// 口径：流中按输出 delta 事件计数（正文与思考增量各计 1）。这是 token
+    /// 数的**近似**——各 provider / 代理的 SSE 分块粒度不一（DeepSeek 官方
+    /// 接近逐 token，opencode 等代理常把多个 token 聚合进一个 chunk，事件数
+    /// 会低于 token 数）；无任何分词开销。`Usage` 事件到达时用官方
+    /// `completion_tokens` 校准覆盖，结束收敛到官方计量。
+    pub cumulative_tokens: Option<u64>,
 }
 
 pub trait ModelClient {
@@ -1061,6 +1069,13 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
     let mut stop_reason = None;
+    // 实时 TPS：流中按输出 delta 事件计数（正文与思考都算——官方
+    // completion_tokens 口径包含思考 token）。这是 token 数的**近似**：
+    // 各 provider 的 delta 粒度不一（Anthropic thinking_delta 常为整句、
+    // text_delta 多为单 token 但不保证；Responses 的 output_text.delta 同
+    // 样是文本片段），故流中数字通常低于官方计量；O(1) 计数零开销、不阻塞
+    // SSE 读取，官方 usage 到达时校准覆盖，结束收敛到官方计量。
+    let mut output_delta_events: u64 = 0;
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
     let mut tool_call_order: Vec<String> = Vec::new();
@@ -1077,10 +1092,12 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             ProviderStreamEvent::ReasoningDelta(delta) => {
                 if !delta.is_empty() {
                     reasoning_content.push_str(&delta);
+                    output_delta_events += 1;
                     on_delta(&ModelStreamChunk {
                         content: String::new(),
                         reasoning_content: delta,
                         usage: None,
+                        cumulative_tokens: Some(output_delta_events),
                     });
                 }
             }
@@ -1092,10 +1109,12 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             ProviderStreamEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text.push_str(&delta);
+                    output_delta_events += 1;
                     on_delta(&ModelStreamChunk {
                         content: delta,
                         reasoning_content: String::new(),
                         usage: None,
+                        cumulative_tokens: Some(output_delta_events),
                     });
                 }
             }
@@ -1126,10 +1145,16 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             }
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage);
+                // 官方计量到达：校准累计值（覆盖 delta 事件计数），流中
+                // 数字与结束时计量收敛一致。
+                if usage.completion_tokens > 0 {
+                    output_delta_events = usage.completion_tokens as u64;
+                }
                 on_delta(&ModelStreamChunk {
                     content: String::new(),
                     reasoning_content: String::new(),
                     usage: Some(usage.clone()),
+                    cumulative_tokens: Some(output_delta_events),
                 });
             }
             ProviderStreamEvent::Error(message) => {
@@ -1771,6 +1796,70 @@ mod tests {
             streamed_text.push_str(&chunk.content);
         }
         assert_eq!(streamed_text, "漏标类型的流式回复");
+    }
+
+    #[tokio::test]
+    async fn stream_chunks_carry_cumulative_tokens_calibrated_by_usage() {
+        // 实时 TPS 数据源端到端：正文 delta 事件逐批携带递增累计，
+        // usage 到达时校准为官方 completion_tokens。
+        let server = MockServer::start().await;
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"思\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"考\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":19,\"total_tokens\":26}}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"后\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = SingleProviderClient::new(ModelEndpoint {
+            headers: Default::default(),
+            base_url: server.uri(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: serde_json::Value::Object(serde_json::Map::new()),
+            context_window: None,
+        });
+        let request = ModelRequest {
+            session_id: None,
+            system: "system".to_string(),
+            messages: vec![ChatMessage::text(LlmMessageRole::User, "hi")],
+            reasoning_effort: ReasoningEffort::None,
+            max_output_tokens: None,
+            ..Default::default()
+        };
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+        client.stream_async(request, chunk_tx).await.unwrap();
+
+        let mut cumulatives = Vec::new();
+        let mut reasoning_cumulatives = Vec::new();
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            if !chunk.content.is_empty() {
+                cumulatives.push(chunk.cumulative_tokens);
+            }
+            if !chunk.reasoning_content.is_empty() {
+                reasoning_cumulatives.push(chunk.cumulative_tokens);
+            }
+        }
+        // 两个思考 delta + 两个正文 delta：统一输出计数 1 → 2 → 3 → 4
+        //（官方 completion_tokens 口径含思考 token）。
+        assert_eq!(reasoning_cumulatives, vec![Some(1), Some(2)]);
+        // usage（completion=19）校准后，下一个正文 delta 从官方值继续：20。
+        assert_eq!(cumulatives, vec![Some(3), Some(4), Some(20)]);
     }
 
     #[tokio::test]

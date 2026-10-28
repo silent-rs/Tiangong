@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
-import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, toolCallIdOf, turnStatusOf } from '../api/message';
+import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
+import { liveTpsTracker } from '../utils/tps';
 import type {
   ContentBlock,
   LoadedSession,
@@ -1472,6 +1473,7 @@ export const useStore = create<AppState>((set, get) => ({
       await api.deleteSession(deletedSessionId);
       sessionViewCaches.delete(deletedSessionId);
       discardInputCacheSyncQueue(deletedSessionId);
+      liveTpsTracker.reset(deletedSessionId);
       // 本地直接移除被删会话，不重新拉列表（避免全量扫描卡顿）。
       set((state) => {
         const inputCaches = { ...state.inputCaches };
@@ -1509,6 +1511,7 @@ export const useStore = create<AppState>((set, get) => ({
       for (const sessionId of succeededIds) {
         sessionViewCaches.delete(sessionId);
         discardInputCacheSyncQueue(sessionId);
+        liveTpsTracker.reset(sessionId);
       }
       // 本地只移除实际删除成功的会话。
       const remainingSessions = before.sessions.filter(
@@ -2376,6 +2379,40 @@ export const useStore = create<AppState>((set, get) => ({
     for (const envelope of events) {
       const sessionId = envelope.session_id;
       const event = envelope.event;
+      // 实时 TPS：输出事件（正文与思考，均携带累计 tokens）驱动跳秒计时
+      // 与速度样本（前端差分）。累计字段缺失（旧后端 / 插件反馈）时仍
+      // 跳秒、不计速。速度跨轮次保留（tracker.lastTps）：轮次结束不清空，
+      // 直到 app 重启或会话（core 实例）销毁才随内存消失；轮内新一次
+      // LLM 请求的计数回退由 tracker 重开样本窗口并保留最近显示。
+      if (
+        event.type === 'delta'
+        || event.type === 'react_text'
+        || event.type === 'summary_text'
+        || event.type === 'reasoning'
+      ) {
+        liveTpsTracker.record(sessionId, event.tokens);
+      } else if (event.type === 'session_message_upsert') {
+        // 官方结算值回灌：只认定稿消息持久化的 `text_tps`（官方
+        // completion_tokens / 输出阶段耗时）。不用 messageTpsOf 的折算兜底
+        // ——流中快照即使带了 usage，也不该把半程平均速度当成最终值清空窗口。
+        // 流式中间快照没有 text_tps（textTpsOf 返回 null）时不处理。
+        const message = event.message;
+        if (message && typeof message !== 'string' && message.role === 'assistant') {
+          const tps = textTpsOf(message);
+          if (tps != null && tps > 0) liveTpsTracker.setLastTps(sessionId, tps);
+        }
+      } else if (
+        event.type === 'token_usage'
+        && event.usage
+        && !event.agent_id
+        && event.source?.startsWith('react-round')
+      ) {
+        // 官方 usage 校准：只认主对话的 ReAct 请求。插件用量、上下文压缩、
+        // 取消增量等来源的 completion_tokens 不是同一条输出流的累计值，
+        // 混入滑动窗口会造成虚假尖峰或窗口重置。校准只对齐窗口基准，
+        // 不当作产量差分（换算差不应计入速度）。
+        liveTpsTracker.calibrate(sessionId, event.usage.completion_tokens);
+      }
       // title_changed：直接改对应会话标题，不进入会话视图状态机。
       if (event.type === 'title_changed' && typeof event.title === 'string') {
         const idx = sessions.findIndex((s) => s.id === sessionId);

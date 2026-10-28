@@ -277,6 +277,7 @@ impl ResponseState {
             StreamEvent::Reasoning {
                 message_id,
                 content,
+                ..
             } => {
                 self.ensure_reasoning_stream(message_id);
                 output::explanation_delta(content);
@@ -285,14 +286,17 @@ impl ResponseState {
             StreamEvent::Delta {
                 message_id,
                 content,
+                ..
             }
             | StreamEvent::ReactText {
                 message_id,
                 content,
+                ..
             }
             | StreamEvent::SummaryText {
                 message_id,
                 content,
+                ..
             } => {
                 self.ensure_assistant_stream(message_id);
                 output::delta(content);

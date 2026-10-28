@@ -3,12 +3,13 @@ import type { CSSProperties, ReactNode, SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu } from 'lucide-react';
+import { Send, Square, FolderOpen, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu, Zap } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, type MentionTarget, type RawAttachment } from '@/api/tauri';
 import { isRemoteHost } from '@/api/host';
+import { latestTpsOf } from '@/api/message';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { useMentionGroups } from '@/hooks/useMentionGroups';
 import {
@@ -27,8 +28,60 @@ import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEdit
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
 import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder, truncateMiddle } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
+import { formatTps, round1 } from '@/utils/tps';
+import { useLiveSessionId, useLiveTps } from '@/hooks/useLiveTps';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
+
+/** 输入框底栏的「速度 + token 用量」合并区域：同一行、一块区域。
+ *  速度在轮次执行期间实时更新，轮次结束后保留最近值；实时样本缺失
+ *  （页面重载 / 切换会话后 tracker 归零）时回退到最近一条完成消息持久化
+ *  的速度。与 token 统计（环形进度 + 总计）以竖分隔线隔开；两者皆无
+ *  内容时整块不渲染。会话切换时随当前会话的采样目标自动切换。 */
+function TokenStatsBlock({ compact }: { compact?: boolean }) {
+  const sessionId = useLiveSessionId();
+  const tokenStats = useStore((s) => s.tokenStats);
+  // 持续采样：轮次结束后无新样本，tracker 返回保留的最近速度。
+  const { tps } = useLiveTps(sessionId, true);
+  // 实时样本缺失（页面重载 / 切换会话后 tracker 归零）时回退到最近一条
+  // 完成消息持久化的速度：输入框的「最近生成速度」不应因内存态丢失而消失。
+  const historyTps = useStore((s) => latestTpsOf(s.messages));
+  const displayTps = tps > 0 ? tps : (historyTps ?? 0);
+
+  const displayTokens = tokenStats?.current_tokens ?? 0;
+  const totalTokens = tokenStats?.total_tokens ?? 0;
+  const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
+  const compressionProgress =
+    compressionThreshold > 0 ? Math.min(100, (displayTokens / compressionThreshold) * 100) : 0;
+
+  const showTps = displayTps > 0;
+  const showTokens = displayTokens > 0 || totalTokens > 0;
+  if (!showTps && !showTokens) return null;
+  return (
+    <div
+      className="flex items-center gap-2 rounded-md bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground/70 tabular-nums"
+      title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
+    >
+      {showTps && (
+        <span
+          className="flex shrink-0 items-center gap-1"
+          aria-label={`最近生成速度 ${formatTps(round1(displayTps))}`}
+          title="最近一次生成的输出速度（实时样本优先；无实时样本时取最近一条完成消息的持久化速度）"
+        >
+          <Zap className="h-3 w-3 text-foreground/70" aria-hidden="true" />
+          {formatTps(round1(displayTps))}
+        </span>
+      )}
+      {showTps && showTokens && <span className="h-3 w-px bg-border/60" aria-hidden="true" />}
+      {showTokens && (
+        <>
+          {compressionThreshold > 0 && <TokenRing progress={compressionProgress} />}
+          {!compact && <span>总计 {formatTokenCount(totalTokens)}</span>}
+        </>
+      )}
+    </div>
+  );
+}
 
 const MOD_KEY_LABEL = navigator.platform.toUpperCase().includes('MAC') ? 'Cmd+Enter' : 'Ctrl+Enter';
 
@@ -206,8 +259,6 @@ export function MessageInput({
   ));
   const sessionCwd = useStore((state) => state.sessionCwd);
   const setSessionCwd = useStore((state) => state.setSessionCwd);
-  const lastUsage = useStore((state) => state.lastUsage);
-  const tokenStats = useStore((state) => state.tokenStats);
   const reasoningEffort = useStore((state) => state.reasoningEffort);
   const setReasoningEffort = useStore((state) => state.setReasoningEffort);
   const isComposingRef = useRef(false);
@@ -387,12 +438,6 @@ export function MessageInput({
       setModelSwitching(false);
     }
   };
-  const displayTokens = tokenStats?.current_tokens ?? 0;
-  const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
-  const compressionProgress = compressionThreshold > 0
-    ? Math.min(100, Math.round((displayTokens / compressionThreshold) * 100))
-    : 0;
-  const totalTokens = tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -1487,17 +1532,7 @@ export function MessageInput({
                 </button>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                {(displayTokens > 0 || totalTokens > 0) && (
-                  <div
-                    className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
-                    title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
-                  >
-                    {compressionThreshold > 0 && <TokenRing progress={compressionProgress} />}
-                    {!compact && (
-                      <span>总计 {formatTokenCount(totalTokens)}</span>
-                    )}
-                  </div>
-                )}
+                <TokenStatsBlock compact={compact} />
                 {sandboxState?.status === 'failed' && !isRemoteHost() && (
                   <button
                     onClick={() => setPendingSettingsTab('sandbox')}

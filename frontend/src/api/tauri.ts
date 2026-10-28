@@ -272,6 +272,10 @@ export interface StreamEvent {
   type: string;
   message_id?: string;
   content?: string;
+  /** 该消息截至本批的累计 output tokens（provider 层按输出 delta 事件
+   *  计数——正文与思考增量各计 1，是 token 数的近似；官方 usage 到达时
+   *  校准）。前端按相邻事件差分得实时 TPS；缺失时仅跳秒。 */
+  tokens?: number | null;
   content_blocks?: ContentBlock[];
   media?: MediaAsset[];
   message?: Message | string;

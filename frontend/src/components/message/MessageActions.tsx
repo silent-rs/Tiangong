@@ -1,11 +1,21 @@
 import { useState } from "react";
-import { Copy, Check, Clock } from "lucide-react";
-import { formatDuration } from "./utils";
+import { Copy, Check, Clock, Zap } from "lucide-react";
+import { formatDuration, formatTpsText } from "./utils";
 import { CallUsageDetails } from "./CallUsageDetails";
 import { MessagePluginHost } from "../MessagePluginHost";
 import type { MessageItem } from "./types";
 
-export function MessageActions({ messageId, text, time, durationMs, usageMessages }: { messageId: string; text: string; time?: string; durationMs?: number | null; usageMessages?: MessageItem[] }) {
+export function MessageActions({ messageId, text, time, durationMs, tps, tpsDetail, usageMessages }: {
+  messageId: string;
+  text: string;
+  time?: string;
+  durationMs?: number | null;
+  /** 输出速度（tokens/s）：来自后端持久化 `text_tps` 或旧数据折算，null 不显示。 */
+  tps?: number | null;
+  /** 速度明细（hover 提示）：输出 tokens 与输出阶段耗时（含思考）。 */
+  tpsDetail?: { tokens: number; elapsedMs: number } | null;
+  usageMessages?: MessageItem[];
+}) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -17,6 +27,7 @@ export function MessageActions({ messageId, text, time, durationMs, usageMessage
   };
 
   const btnClass = "p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors";
+  const showTps = tps != null && tps > 0;
 
   return (
     <div className="flex flex-wrap items-center gap-0.5 mt-1">
@@ -31,13 +42,32 @@ export function MessageActions({ messageId, text, time, durationMs, usageMessage
       {time && (
         <span className="ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">{time}</span>
       )}
+      {/* 生成度量（速度 + token 用量）合并块：内容右侧自然排列，位于
+          时间之后、时长之前——流式速度行（复制占位 + 时间 + 速度）完成
+          后仅在其右侧追加时长与徽标，速度位置不动。 */}
+      {(showTps || (usageMessages?.length ?? 0) > 0) && (
+        <span className="inline-flex items-center gap-1.5 ml-1 pl-1.5 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums">
+          {showTps && (
+            <span
+              className="inline-flex items-center gap-0.5"
+              title={tpsDetail
+                ? `输出 ${tpsDetail.tokens.toLocaleString()} tokens · 输出阶段 ${formatDuration(tpsDetail.elapsedMs)}（含思考，${formatTpsText(tps)}）`
+                : "输出速度（含思考）"}
+              aria-label={`输出速度 ${formatTpsText(tps)}`}
+            >
+              <Zap className="w-3 h-3" />
+              {formatTpsText(tps)}
+            </span>
+          )}
+          {usageMessages && <CallUsageDetails messages={usageMessages} />}
+        </span>
+      )}
       {durationMs != null && durationMs > 0 && (
         <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">
           <Clock className="w-3 h-3" />
           {formatDuration(durationMs)}
         </span>
       )}
-      {usageMessages && <CallUsageDetails messages={usageMessages} />}
     </div>
   );
 }

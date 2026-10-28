@@ -38,8 +38,12 @@ export type Role =
       usage?: MessageUsage | null;
       /** 本次模型输出思考阶段的耗时（毫秒）。 */
       reasoning_elapsed_ms?: number | null;
-      /** 本次模型输出正文生成阶段的耗时（毫秒）。 */
+      /** 输出阶段耗时（毫秒）：首个输出增量（思考或正文）到最后一个。 */
       text_elapsed_ms?: number | null;
+      /** 输出速度（tokens/s，completion_tokens / 输出阶段耗时，含思考），
+       *  定稿时后端算好持久化，供历史回看与 token 统计直接复现；字段
+       *  缺失时按 usage/耗时折算兜底。 */
+      text_tps?: number | null;
     }
   | {
       role: 'tool';
@@ -124,6 +128,48 @@ export function reasoningElapsedMsOf(message: Message): number | null {
 
 export function textElapsedMsOf(message: Message): number | null {
   return roleAs(message, 'assistant')?.text_elapsed_ms ?? null;
+}
+
+export function textTpsOf(message: Message): number | null {
+  return roleAs(message, 'assistant')?.text_tps ?? null;
+}
+
+/**
+ * 单条 assistant 消息的输出速度（tokens/s）。
+ *
+ * 优先读后端定稿时持久化的 `text_tps`（历史回看直接复现）；字段缺失时
+ * 按 `usage.completion_tokens / (text_elapsed_ms / 1000)` 折算兜底。
+ * 官方的 completion_tokens 含思考 token，分母（输出阶段耗时）同样覆盖
+ * 思考与正文增量，两者同口径；任一字段缺失/非法/耗时非正数时返回
+ * `null`，调用方不展示、不占位误导。
+ */
+export function messageTpsOf(message: Message): number | null {
+  const persisted = roleAs(message, 'assistant')?.text_tps;
+  if (typeof persisted === 'number' && Number.isFinite(persisted) && persisted > 0) {
+    return Math.round(persisted * 10) / 10;
+  }
+  if (message.role !== 'assistant') return null;
+  const usage = message.usage;
+  const tokens = usage?.completion_tokens;
+  const elapsedMs = message.text_elapsed_ms;
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return null;
+  if (typeof elapsedMs !== 'number' || !Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+  return Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
+}
+
+/**
+ * 会话内最近一次可展示的输出速度：从末尾往前找第一条带有效速度的
+ * assistant 消息。
+ *
+ * 用于前端实时 tracker 归零（页面重载、切换会话后）时的空闲兜底——输入框
+ * 的「最近生成速度」不应因为内存态丢失而消失；实时样本优先，回退值只补空。
+ */
+export function latestTpsOf(messages: Message[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const tps = messageTpsOf(messages[i]);
+    if (tps != null && tps > 0) return tps;
+  }
+  return null;
 }
 
 export function turnStatusOf(message: Message): TurnStatus | undefined {

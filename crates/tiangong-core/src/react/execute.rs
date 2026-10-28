@@ -767,7 +767,11 @@ pub(super) async fn execute_turn(
                             if !chunk.reasoning_content.is_empty() {
                                 active.timing.reasoning.record();
                             }
-                            if !chunk.content.is_empty() {
+                            // 输出阶段耗时：正文与思考增量都计入。官方
+                            // completion_tokens 含思考 token，分母若只统计正文
+                            // 会把「思考很久、正文瞬间吐完」的轮次算成极高
+                            // tok/s（例如思考 10s + 正文 0.2s → 数值爆炸）。
+                            if !chunk.content.is_empty() || !chunk.reasoning_content.is_empty() {
                                 active.timing.text.record();
                             }
                             active.streamed_text.push_str(&chunk.content);

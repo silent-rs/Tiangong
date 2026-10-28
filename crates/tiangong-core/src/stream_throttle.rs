@@ -2,6 +2,12 @@
 //!
 //! 高速本地或局域网模型可能在极短时间内产生大量 token delta。
 //! 这里将 token 先累积到内存缓冲，再按固定节奏向外发送，避免前端事件队列被打爆。
+//!
+//! 实时 TPS 数据源也在此层透传：`ModelStreamChunk.cumulative_tokens`
+//! （provider 层按输出 delta 事件计数——正文与思考增量各计 1，作为 token
+//! 数的近似；官方 usage 到达时校准的累计 output tokens）被记录，随下一批
+//! 正文事件的 `tokens` 字段下发。前端按相邻事件差分得到实时速度。流读取
+//! 路径不做任何分词计算。
 
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +41,15 @@ pub(crate) enum StreamTextKind {
 struct StreamBuffers {
     content: String,
     reasoning: String,
+    /// 截至当前的累计 output tokens（provider 层 delta 计数 + 官方校准）。
+    /// None = 本流尚未出现正文。
+    cumulative_tokens: Option<u64>,
+}
+
+impl StreamBuffers {
+    fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// 将 LLM token delta 合并为固定节奏的 StreamEvent。
@@ -69,7 +84,7 @@ impl ThrottledStreamSink {
         text_kind: StreamTextKind,
         interval: Duration,
     ) -> Self {
-        let buffers = Arc::new(Mutex::new(StreamBuffers::default()));
+        let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let worker_buffers = buffers.clone();
@@ -98,15 +113,10 @@ impl ThrottledStreamSink {
     }
 
     pub(crate) fn push_chunk(&self, chunk: &ModelStreamChunk) {
-        if chunk.content.is_empty() && chunk.reasoning_content.is_empty() {
-            return;
-        }
-
         let Ok(mut buffers) = self.buffers.lock() else {
             return;
         };
-        buffers.content.push_str(&chunk.content);
-        buffers.reasoning.push_str(&chunk.reasoning_content);
+        push_chunk_into(&mut buffers, chunk);
     }
 
     pub(crate) fn finish(mut self) {
@@ -129,6 +139,21 @@ impl Drop for ThrottledStreamSink {
     }
 }
 
+/// 把一块 chunk 写入流缓冲（`push_chunk` 与单测共用，避免测试复制逻辑）。
+///
+/// 累计值无论是否伴随正文都记录，供下一批正文事件携带；正文与思考分别
+/// 追加到各自缓冲。
+fn push_chunk_into(buffers: &mut StreamBuffers, chunk: &ModelStreamChunk) {
+    if let Some(cumulative) = chunk.cumulative_tokens {
+        buffers.cumulative_tokens = Some(cumulative);
+    }
+    if chunk.content.is_empty() && chunk.reasoning_content.is_empty() {
+        return;
+    }
+    buffers.content.push_str(&chunk.content);
+    buffers.reasoning.push_str(&chunk.reasoning_content);
+}
+
 fn flush_buffers(
     buffers: &Arc<Mutex<StreamBuffers>>,
     tx: &Sender<StreamEvent>,
@@ -143,18 +168,25 @@ fn flush_buffers(
     let reasoning = mem::take(&mut buffers.reasoning);
 
     if !content.is_empty() {
+        // 累计值随正文批透传（快照语义：批内多次 usage 更新取最新）；
+        // 不存在「取走累计却无事件可搭」的丢失路径——累计保存在缓冲，
+        // 一直等到下一批正文（或流结束随最终 usage / 持久化 text_tps 呈现）。
+        let tokens = buffers.cumulative_tokens;
         let event = match text_kind {
             StreamTextKind::Delta => StreamEvent::Delta {
                 message_id: message_id.to_string(),
                 content,
+                tokens,
             },
             StreamTextKind::React => StreamEvent::ReactText {
                 message_id: message_id.to_string(),
                 content,
+                tokens,
             },
             StreamTextKind::Summary => StreamEvent::SummaryText {
                 message_id: message_id.to_string(),
                 content,
+                tokens,
             },
         };
         let _ = tx.send(event);
@@ -163,6 +195,122 @@ fn flush_buffers(
         let _ = tx.send(StreamEvent::Reasoning {
             message_id: message_id.to_string(),
             content: reasoning,
+            tokens: buffers.cumulative_tokens,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use tiangong_llm::usage::TokenUsageData;
+
+    /// 按 chunk 序列推入并 flush 一次，收集发出的文本事件（含 tokens）。
+    /// 与 `push_chunk` 共用 `push_chunk_into`，覆盖「空正文也记录累计」等行为。
+    fn push_and_flush(
+        sink_buffers: &Arc<Mutex<StreamBuffers>>,
+        chunks: &[ModelStreamChunk],
+    ) -> Vec<StreamEvent> {
+        let (tx, rx) = mpsc::channel();
+        for chunk in chunks {
+            let mut buffers = sink_buffers.lock().unwrap();
+            push_chunk_into(&mut buffers, chunk);
+        }
+        flush_buffers(sink_buffers, &tx, "msg-1", StreamTextKind::React);
+        drop(tx);
+        rx.into_iter().collect()
+    }
+
+    /// 正文 delta chunk（携带 delta 事件计数的累计值，provider 层语义）。
+    fn text_delta(text: &str, cumulative: u64) -> ModelStreamChunk {
+        ModelStreamChunk {
+            content: text.to_string(),
+            reasoning_content: String::new(),
+            usage: None,
+            cumulative_tokens: Some(cumulative),
+        }
+    }
+
+    /// usage chunk（官方计量校准后的累计值）。
+    fn usage_chunk(calibrated: u64) -> ModelStreamChunk {
+        ModelStreamChunk {
+            content: String::new(),
+            reasoning_content: String::new(),
+            usage: Some(TokenUsageData::new(10, calibrated as usize)),
+            cumulative_tokens: Some(calibrated),
+        }
+    }
+
+    fn tokens_of(event: &StreamEvent) -> Option<u64> {
+        match event {
+            StreamEvent::Delta { tokens, .. }
+            | StreamEvent::ReactText { tokens, .. }
+            | StreamEvent::SummaryText { tokens, .. } => *tokens,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn anthropic_realistic_sequence_streams_cumulative() {
+        // 真实协议时序：message_start（usage=1）→ 正文 delta（逐事件计数）→
+        // content_block_stop 后 message_delta（官方终值校准）。正文期间每批
+        // 事件携带递增累计，前端差分即得实时速度。
+        let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
+        // message_start：无正文，仅初始累计，不发文本事件。
+        let start = push_and_flush(&buffers, &[usage_chunk(1)]);
+        assert!(start.is_empty());
+
+        // 正文阶段：delta 事件计数递增（批内可能聚合多个事件）。
+        let b1 = push_and_flush(&buffers, &[text_delta("你", 2), text_delta("好", 3)]);
+        assert_eq!(tokens_of(&b1[0]), Some(3));
+        let b2 = push_and_flush(&buffers, &[text_delta("，世界", 8)]);
+        assert_eq!(tokens_of(&b2[0]), Some(8));
+
+        // 块结束后的 message_delta：官方终值校准。常规流此批已无正文，
+        // 校准由最终 usage / 持久化 text_tps 呈现；若仍有正文则携带校准值。
+        let b3 = push_and_flush(&buffers, &[usage_chunk(15)]);
+        assert!(b3.is_empty());
+        let b4 = push_and_flush(&buffers, &[text_delta("！", 15)]);
+        assert_eq!(tokens_of(&b4[0]), Some(15), "校准后新正文沿用官方累计");
+    }
+
+    #[test]
+    fn deepseek_sequence_counts_from_first_delta() {
+        // DeepSeek：正文 delta 即 token 粒度，从首批起就有累计可差分。
+        let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
+        let b1 = push_and_flush(
+            &buffers,
+            &[text_delta("a", 1), text_delta("b", 2), text_delta("c", 3)],
+        );
+        assert_eq!(tokens_of(&b1[0]), Some(3));
+        let b2 = push_and_flush(&buffers, &[text_delta("d", 4)]);
+        assert_eq!(tokens_of(&b2[0]), Some(4));
+    }
+
+    #[test]
+    fn empty_flush_emits_no_event() {
+        let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
+        let events = push_and_flush(&buffers, &[]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn reasoning_flush_carries_cumulative_tokens() {
+        // 思考增量事件同样携带累计（思考阶段即有实时速度）。
+        let buffers = Arc::new(Mutex::new(StreamBuffers::new()));
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut b = buffers.lock().unwrap();
+            b.cumulative_tokens = Some(42);
+            b.reasoning.push_str("思考片段");
+        }
+        flush_buffers(&buffers, &tx, "msg-1", StreamTextKind::React);
+        drop(tx);
+        let events: Vec<StreamEvent> = rx.into_iter().collect();
+        match events.as_slice() {
+            [StreamEvent::Reasoning { tokens, .. }] => assert_eq!(*tokens, Some(42)),
+            other => panic!("应为 Reasoning 事件：{other:?}"),
+        }
     }
 }

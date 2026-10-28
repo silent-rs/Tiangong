@@ -324,11 +324,21 @@ fn stream_event_serde() {
     let event = StreamEvent::Delta {
         message_id: "msg-1".into(),
         content: "你好".into(),
+        tokens: Some(2),
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains(r#""type":"delta""#));
     assert!(json.contains(r#""content":"你好""#));
     assert!(json.contains(r#""message_id":"msg-1""#));
+    assert!(json.contains(r#""tokens":2"#));
+
+    // 旧事件（无 tokens 字段）向后兼容：反序列化为 None。
+    let legacy = r#"{"type":"delta","message_id":"msg-1","content":"你好"}"#;
+    let parsed: StreamEvent = serde_json::from_str(legacy).unwrap();
+    match parsed {
+        StreamEvent::Delta { tokens, .. } => assert_eq!(tokens, None),
+        other => panic!("应反序列化为 Delta：{other:?}"),
+    }
 
     let done = StreamEvent::Done { usage: None };
     let json = serde_json::to_string(&done).unwrap();
@@ -400,6 +410,7 @@ fn stream_event_phase_variants_serde() {
     let react = StreamEvent::ReactText {
         message_id: "m1".into(),
         content: "正在处理".into(),
+        tokens: None,
     };
     let json = serde_json::to_string(&react).unwrap();
     assert!(
@@ -413,6 +424,7 @@ fn stream_event_phase_variants_serde() {
     let summary = StreamEvent::SummaryText {
         message_id: "m2".into(),
         content: "已完成".into(),
+        tokens: None,
     };
     let json = serde_json::to_string(&summary).unwrap();
     assert!(
@@ -898,4 +910,75 @@ fn message_annotations_normalize_and_append_instruction() {
         ..Default::default()
     };
     assert!(relative.normalized().is_err());
+}
+
+#[test]
+fn set_usage_persists_text_tps_for_replay() {
+    // 定稿消息（耗时已知）写入 usage 时一并持久化正文速度。
+    let mut message = Message::new(MessageRole::Assistant, "回复正文");
+    if let Role::Assistant {
+        text_elapsed_ms, ..
+    } = &mut message.role
+    {
+        *text_elapsed_ms = Some(2000);
+    }
+    message.set_usage(crate::token::MessageUsage {
+        tokens: TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 175,
+            total_tokens: 275,
+            ..Default::default()
+        },
+        model: "deepseek-chat".into(),
+        agent_id: String::new(),
+        turn_id: None,
+        source: "chat".into(),
+        status: TurnStatus::Success,
+    });
+    assert_eq!(message.text_tps(), Some(87.5));
+
+    // 流式快照递增：后到的大 usage 覆盖前值，收敛到最终速度。
+    message.set_usage(crate::token::MessageUsage {
+        tokens: TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 350,
+            total_tokens: 450,
+            ..Default::default()
+        },
+        model: "deepseek-chat".into(),
+        agent_id: String::new(),
+        turn_id: None,
+        source: "chat".into(),
+        status: TurnStatus::Success,
+    });
+    assert_eq!(message.text_tps(), Some(175.0));
+
+    // 序列化往返：text_tps 持久化，历史回看直接读字段复现。
+    let json = serde_json::to_string(&message).unwrap();
+    assert!(json.contains(r#""text_tps":175.0"#), "json: {json}");
+    let reloaded: Message = serde_json::from_str(&json).unwrap();
+    assert_eq!(reloaded.text_tps(), Some(175.0));
+
+    // 向后兼容：旧数据无 text_tps 字段可正常加载（None，消费方按公式折算）。
+    let legacy = json.replace(r#","text_tps":175.0"#, "");
+    let legacy_message: Message = serde_json::from_str(&legacy).unwrap();
+    assert_eq!(legacy_message.text_tps(), None);
+    assert_eq!(legacy_message.text_elapsed_ms(), Some(2000));
+
+    // 耗时缺失 / 为 0 时不写速度（无法定义）。
+    let mut no_elapsed = Message::new(MessageRole::Assistant, "x");
+    no_elapsed.set_usage(crate::token::MessageUsage {
+        tokens: TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: 10,
+            total_tokens: 11,
+            ..Default::default()
+        },
+        model: "m".into(),
+        agent_id: String::new(),
+        turn_id: None,
+        source: "chat".into(),
+        status: TurnStatus::Success,
+    });
+    assert_eq!(no_elapsed.text_tps(), None);
 }

@@ -26,11 +26,30 @@ pub enum StreamEvent {
         /// 所属消息 ID（前端据此组装到正确的消息）
         message_id: String,
         content: String,
+        /// 该消息截至本批的**累计** output tokens（实时 TPS 数据源）：
+        /// provider 层按输出 delta 事件计数（正文与思考增量各计 1，是
+        /// token 数的近似——各 provider 的 delta 粒度不一），官方 usage
+        /// 到达时校准覆盖。前端按相邻事件差分得实时速度；不计入 usage，
+        /// 精确计量以 `TokenUsage` / `Done.usage` 为准。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
     },
     /// ReAct 工具执行阶段的过程性文本增量（前端紧凑展示，不提供复制按钮）
-    ReactText { message_id: String, content: String },
+    ReactText {
+        message_id: String,
+        content: String,
+        /// 同 [`StreamEvent::Delta::tokens`]。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+    },
     /// 总结阶段的最终回复文本增量（前端作为主消息展示，提供复制按钮）
-    SummaryText { message_id: String, content: String },
+    SummaryText {
+        message_id: String,
+        content: String,
+        /// 同 [`StreamEvent::Delta::tokens`]。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+    },
     /// 单个 turn 的执行阶段切换通知
     PhaseChanged {
         /// 阶段名："tool_execution" / "summary"
@@ -45,6 +64,10 @@ pub enum StreamEvent {
         /// 所属消息 ID
         message_id: String,
         content: String,
+        /// 同 [`StreamEvent::Delta::tokens`]（含思考增量的累计口径——
+        /// DeepSeek / Anthropic 的官方 completion_tokens 均包含思考 token）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
     },
     /// 工具开始执行
     ToolStart { name: String, args_summary: String },
