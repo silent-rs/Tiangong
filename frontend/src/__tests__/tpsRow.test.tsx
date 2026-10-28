@@ -40,7 +40,7 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
     return container!.querySelector('[role="status"]')?.textContent ?? null;
   }
 
-  it('累计样本充足时渲染速度文本与跳秒', () => {
+  it('累计样本充足时渲染速度文本（与操作行同构的小字行）', () => {
     useStore.setState({ streamingMessageId: 'm1' });
     renderRow();
 
@@ -55,12 +55,12 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
     });
 
     const text = statusText();
-    expect(text).toContain('正在生成');
     expect(text).toContain('tok/s');
-    expect(text).toMatch(/\d+s/);
+    expect(text).not.toContain('正在生成');
+    expect(text).not.toMatch(/\d+s/);
   });
 
-  it('无速度样本时仅显示进行态与跳秒（无速度数字）', () => {
+  it('无速度样本时行占位、内容为空（不显示文案与秒数）', () => {
     useStore.setState({ streamingMessageId: 'm2' });
     renderRow();
 
@@ -69,8 +69,9 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
       vi.advanceTimersByTime(700);
     });
 
-    const text = statusText();
-    expect(text).toContain('正在生成');
-    expect(text).not.toContain('tok/s');
+    const status = container!.querySelector('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(status!.textContent).toBe('');
+    expect(status!.getAttribute('aria-label')).toContain('正在生成');
   });
 });

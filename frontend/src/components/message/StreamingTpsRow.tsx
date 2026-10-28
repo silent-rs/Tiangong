@@ -1,37 +1,31 @@
 import { memo } from "react";
-import { Activity } from "lucide-react";
+import { Zap } from "lucide-react";
 import { useLiveSessionId, useLiveTps } from "@/hooks/useLiveTps";
 import { formatTps, round1 } from "@/utils/tps";
 
-/** 流式生成行：展示「正在生成 + 实时速度 + 跳秒」（安静样式，无扫光
- *  动画——避免视觉反复跳动）。速度为 stream 累计计数的滑动窗口差分值
- *  （含思考增量），等待期由 tracker 保留最近显示；样本不足时只显示
- *  「正在生成 · Ns」。挂在正在流式的消息正文下方，轮次结束由父级卸载。
+/** 流式生成速度行：与完成后的操作行（MessageActions）同构——正文下方
+ *  border-t 小字行，流式期间在此先行显示实时速度，完成后被操作行
+ *  （速度 + token 用量合并块）原位替换，位置与样式保持连续。
+ *  只显示速度数字（无「正在生成」文案与秒数）；等待期由 tracker 保留
+ *  最近值；尚无样本（TTFT）时行占位、内容为空，避免出现时高度跳动。
+ *  读屏语义（正在生成）保留在 aria-label。
  *
  *  内部自订阅 store 与采样定时器：memo 化后不随父级 16ms 批量重渲而刷新，
  *  仅当 600ms 采样到的快照变化时重渲。 */
 export const StreamingTpsRow = memo(function StreamingTpsRow() {
   const sessionId = useLiveSessionId();
-  const { tps, elapsedMs } = useLiveTps(sessionId, true);
-  const seconds = elapsedMs != null ? Math.floor(elapsedMs / 1000) : null;
+  const { tps } = useLiveTps(sessionId, true);
   const showTps = tps > 0;
   return (
     <div
-      className="mt-1 flex w-full items-center gap-2 rounded px-2 py-1 text-xs text-muted-foreground"
+      className="mt-1 flex items-center gap-1 border-t border-border/50 pt-1 text-[11px] text-muted-foreground/70 tabular-nums"
       role="status"
-      aria-label={
-        showTps
-          ? `正在生成，速度 ${formatTps(round1(tps))}${seconds != null ? `，已进行 ${seconds} 秒` : ''}`
-          : '正在生成'
-      }
+      aria-label={showTps ? `正在生成，速度 ${formatTps(round1(tps))}` : '正在生成'}
     >
-      <Activity className="h-3 w-3 shrink-0" aria-hidden="true" />
-      <span className="shrink-0 font-medium text-foreground/70">正在生成</span>
-      {(showTps || seconds != null) && (
-        <span className="truncate tabular-nums">
-          {showTps && formatTps(round1(tps))}
-          {showTps && seconds != null && ' · '}
-          {seconds != null && `${seconds}s`}
+      {showTps && (
+        <span className="inline-flex items-center gap-0.5">
+          <Zap className="w-3 h-3" aria-hidden="true" />
+          {formatTps(round1(tps))}
         </span>
       )}
     </div>
