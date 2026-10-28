@@ -46,16 +46,19 @@ function formatTokenCount(value: number): string {
 }
 
 /** token 用量环形进度条（设计稿 deepseek_html_20261028_046501）：
- *  0–50% 纯绿，50–75% 绿→黄，75–100% 黄→红，100% 时红色圆头封住 12 点方向。
- *  两层 foreignObject 分别铺纯绿与 conic 渐变底色，用白色描边圆做 SVG mask
- *  按进度裁剪出环形；具体数值由外层容器的 title（hover 提示）完整展示。 */
+ *  0–50% 纯绿，50–75% 绿→黄，75–100% 黄→红；临近满格（≥95%，与原线性条
+ *  「≥95% 危险区」同口径）时渐变层画满整圈、末端盖过 12 点方向的绿色起点
+ *  并以红色圆头封口，环完全闭合不再露出缺口；具体数值由外层容器的
+ *  title（hover 提示）完整展示。 */
 function TokenRing({ progress }: { progress: number }) {
   // useId 含「:」等字符，需清洗后才能安全用于 url(#id) 引用。
   const maskId = `token-ring-${useId().replace(/[^a-zA-Z0-9-]/g, '')}`;
   const p = Math.min(100, Math.max(0, progress));
-  // 纯绿层只画 0–50% 这一段；渐变层从 50% 起画到 p%。
+  // 临近满格时按闭合渲染：渐变层补满剩余缺口，环首尾盖住起点。
+  const closed = p >= 95;
+  // 纯绿层只画 0–50% 这一段；渐变层从 50% 起画到 p%（闭合时画满到 100%）。
   const greenLen = Math.min(p, 50);
-  const gradLen = Math.max(0, p - 50);
+  const gradLen = closed ? 50 : Math.max(0, p - 50);
   const maskCircleStyle = (length: number, offset: number, visible: boolean): CSSProperties => ({
     strokeDasharray: `${length} 100`,
     strokeDashoffset: offset,
@@ -96,10 +99,10 @@ function TokenRing({ progress }: { progress: number }) {
             }}
           />
         </foreignObject>
-        {/* 满格红盖：100% 时盖住 12 点方向的绿色圆头，保证首尾闭合为红色。 */}
+        {/* 满格红盖：临近满格时盖住 12 点方向的绿色圆头，保证首尾闭合为红色。 */}
         <circle
           cx="12.5" cy="3.5" r="3.5" fill="#ef4444"
-          style={{ opacity: p > 99 ? 1 : 0, transition: 'opacity .2s ease' }}
+          style={{ opacity: closed ? 1 : 0, transition: 'opacity .2s ease' }}
         />
       </svg>
     </span>
