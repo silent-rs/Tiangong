@@ -1,11 +1,21 @@
 import { useState } from "react";
-import { Copy, Check, Clock } from "lucide-react";
-import { formatDuration } from "./utils";
+import { Copy, Check, Clock, Zap } from "lucide-react";
+import { formatDuration, formatTpsText } from "./utils";
 import { CallUsageDetails } from "./CallUsageDetails";
 import { MessagePluginHost } from "../MessagePluginHost";
 import type { MessageItem } from "./types";
 
-export function MessageActions({ messageId, text, time, durationMs, usageMessages }: { messageId: string; text: string; time?: string; durationMs?: number | null; usageMessages?: MessageItem[] }) {
+export function MessageActions({ messageId, text, time, durationMs, tps, tpsDetail, usageMessages }: {
+  messageId: string;
+  text: string;
+  time?: string;
+  durationMs?: number | null;
+  /** 正文生成速度（tokens/s）：来自后端持久化 `text_tps` 或旧数据折算，null 不显示。 */
+  tps?: number | null;
+  /** 速度明细（hover 提示）：输出 tokens 与正文耗时。 */
+  tpsDetail?: { tokens: number; elapsedMs: number } | null;
+  usageMessages?: MessageItem[];
+}) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -35,6 +45,18 @@ export function MessageActions({ messageId, text, time, durationMs, usageMessage
         <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">
           <Clock className="w-3 h-3" />
           {formatDuration(durationMs)}
+        </span>
+      )}
+      {tps != null && tps > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums"
+          title={tpsDetail
+            ? `正文输出 ${tpsDetail.tokens.toLocaleString()} tokens · 耗时 ${formatDuration(tpsDetail.elapsedMs)}（${formatTpsText(tps)}）`
+            : "正文生成速度"}
+          aria-label={`正文生成速度 ${formatTpsText(tps)}`}
+        >
+          <Zap className="w-3 h-3" />
+          {formatTpsText(tps)}
         </span>
       )}
       {usageMessages && <CallUsageDetails messages={usageMessages} />}

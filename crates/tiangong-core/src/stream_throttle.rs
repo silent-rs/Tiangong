@@ -35,6 +35,8 @@ pub(crate) enum StreamTextKind {
 struct StreamBuffers {
     content: String,
     reasoning: String,
+    /// 本窗口待 flush 的正文真实 token 数（来自 `ModelStreamChunk.tokens`）。
+    text_tokens: u64,
 }
 
 /// 将 LLM token delta 合并为固定节奏的 StreamEvent。
@@ -99,6 +101,12 @@ impl ThrottledStreamSink {
 
     pub(crate) fn push_chunk(&self, chunk: &ModelStreamChunk) {
         if chunk.content.is_empty() && chunk.reasoning_content.is_empty() {
+            // 无文本但有计数补齐（usage 尾批）时仍累计 token。
+            if let Some(tokens) = chunk.tokens.filter(|tokens| *tokens > 0)
+                && let Ok(mut buffers) = self.buffers.lock()
+            {
+                buffers.text_tokens += tokens;
+            }
             return;
         }
 
@@ -107,6 +115,9 @@ impl ThrottledStreamSink {
         };
         buffers.content.push_str(&chunk.content);
         buffers.reasoning.push_str(&chunk.reasoning_content);
+        if let Some(tokens) = chunk.tokens {
+            buffers.text_tokens += tokens;
+        }
     }
 
     pub(crate) fn finish(mut self) {
@@ -141,24 +152,31 @@ fn flush_buffers(
     };
     let content = mem::take(&mut buffers.content);
     let reasoning = mem::take(&mut buffers.reasoning);
+    let tokens = mem::take(&mut buffers.text_tokens);
 
     if !content.is_empty() {
         let event = match text_kind {
             StreamTextKind::Delta => StreamEvent::Delta {
                 message_id: message_id.to_string(),
                 content,
+                tokens: Some(tokens),
             },
             StreamTextKind::React => StreamEvent::ReactText {
                 message_id: message_id.to_string(),
                 content,
+                tokens: Some(tokens),
             },
             StreamTextKind::Summary => StreamEvent::SummaryText {
                 message_id: message_id.to_string(),
                 content,
+                tokens: Some(tokens),
             },
         };
         let _ = tx.send(event);
     }
+    // 无正文、仅计数补齐（usage 尾批先于下批文本 flush 到达）时没有可发事件：
+    // token 计数无法脱离文本事件单独成流——但计数已累计在缓冲，随下批正文
+    // 一起 flush，不丢失。
     if !reasoning.is_empty() {
         let _ = tx.send(StreamEvent::Reasoning {
             message_id: message_id.to_string(),

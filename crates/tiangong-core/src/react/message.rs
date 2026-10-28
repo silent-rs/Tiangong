@@ -91,6 +91,7 @@ pub(crate) fn append_assistant_tool_call_message(
             usage: None,
             reasoning_elapsed_ms,
             text_elapsed_ms,
+            text_tps: None,
         },
         vec![ContentBlock::text(text.trim())],
     );
@@ -123,6 +124,7 @@ pub(crate) fn upsert_assistant_text_message(
             usage: None,
             reasoning_elapsed_ms,
             text_elapsed_ms,
+            text_tps: None,
         },
         vec![ContentBlock::text(text)],
     );

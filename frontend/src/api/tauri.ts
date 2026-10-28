@@ -272,6 +272,9 @@ export interface StreamEvent {
   type: string;
   message_id?: string;
   content?: string;
+  /** 本批正文增量的真实 token 数（后端 llm crate tokenizer 计算）。
+   *  旧后端 / 插件文本反馈不携带：缺失时不计实时速度。 */
+  tokens?: number | null;
   content_blocks?: ContentBlock[];
   media?: MediaAsset[];
   message?: Message | string;

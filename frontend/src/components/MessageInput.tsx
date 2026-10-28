@@ -3,7 +3,7 @@ import type { CSSProperties, ReactNode, SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu } from 'lucide-react';
+import { Send, Square, FolderOpen, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu, Zap } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -27,8 +27,30 @@ import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEdit
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
 import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder, truncateMiddle } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
+import { formatTps, round1 } from '@/utils/tps';
+import { useLiveSessionId, useLiveTps } from '@/hooks/useLiveTps';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
+
+/** 输入框底栏的常驻速度小字：流式期间显示实时 TPS（后端真实 token 计数），
+ *  空闲灰化占位「—」（宽度稳定不跳动）；速度未出样本时也显示占位。 */
+function InputTpsBadge() {
+  const sessionId = useLiveSessionId();
+  const streamingMessageId = useStore((s) => s.streamingMessageId);
+  const streaming = streamingMessageId != null;
+  const { tps } = useLiveTps(sessionId, streaming);
+  const showTps = streaming && tps > 0;
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground/70 tabular-nums"
+      aria-live="polite"
+      aria-label={showTps ? `当前生成速度 ${formatTps(round1(tps))}` : '当前无进行中的生成'}
+    >
+      <Zap className={`h-3 w-3 ${showTps ? 'text-foreground/70' : 'opacity-40'}`} aria-hidden="true" />
+      {showTps ? formatTps(round1(tps)) : '—'}
+    </span>
+  );
+}
 
 const MOD_KEY_LABEL = navigator.platform.toUpperCase().includes('MAC') ? 'Cmd+Enter' : 'Ctrl+Enter';
 
@@ -1487,6 +1509,7 @@ export function MessageInput({
                 </button>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                <InputTpsBadge />
                 {(displayTokens > 0 || totalTokens > 0) && (
                   <div
                     className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"

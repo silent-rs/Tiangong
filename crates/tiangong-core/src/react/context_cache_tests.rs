@@ -623,6 +623,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
                 prompt_cache_hit_tokens: Some(hit),
                 prompt_cache_miss_tokens: Some(100 - hit),
             }),
+            tokens: None,
         })
         .unwrap();
     }

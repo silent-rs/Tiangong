@@ -40,6 +40,9 @@ export type Role =
       reasoning_elapsed_ms?: number | null;
       /** 本次模型输出正文生成阶段的耗时（毫秒）。 */
       text_elapsed_ms?: number | null;
+      /** 正文生成速度（tokens/s），定稿时后端算好持久化，供历史回看与
+       *  token 统计直接复现；旧数据缺该字段时按 usage/耗时折算兼容。 */
+      text_tps?: number | null;
     }
   | {
       role: 'tool';
@@ -124,6 +127,32 @@ export function reasoningElapsedMsOf(message: Message): number | null {
 
 export function textElapsedMsOf(message: Message): number | null {
   return roleAs(message, 'assistant')?.text_elapsed_ms ?? null;
+}
+
+export function textTpsOf(message: Message): number | null {
+  return roleAs(message, 'assistant')?.text_tps ?? null;
+}
+
+/**
+ * 单条 assistant 消息的正文生成速度（tokens/s）。
+ *
+ * 优先读后端定稿时持久化的 `text_tps`（历史回看直接复现）；
+ * 旧数据缺该字段时按 `usage.completion_tokens / (text_elapsed_ms / 1000)`
+ * 折算兼容（仅正文阶段，不含思考）。任一字段缺失/非法/耗时非正数时
+ * 返回 `null`，调用方不展示、不占位误导。
+ */
+export function messageTpsOf(message: Message): number | null {
+  const persisted = roleAs(message, 'assistant')?.text_tps;
+  if (typeof persisted === 'number' && Number.isFinite(persisted) && persisted > 0) {
+    return Math.round(persisted * 10) / 10;
+  }
+  if (message.role !== 'assistant') return null;
+  const usage = message.usage;
+  const tokens = usage?.completion_tokens;
+  const elapsedMs = message.text_elapsed_ms;
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return null;
+  if (typeof elapsedMs !== 'number' || !Number.isFinite(elapsedMs) || elapsedMs <= 0) return null;
+  return Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
 }
 
 export function turnStatusOf(message: Message): TurnStatus | undefined {

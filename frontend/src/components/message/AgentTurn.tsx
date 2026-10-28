@@ -8,7 +8,7 @@ import { ThinkingBlock } from "../ThinkingBlock";
 import { AgentReplyCard } from "./AgentReplyCard";
 import { useResolvedTheme } from "@/hooks/useTheme";
 import { hasMediaBlocks, textContent } from "@/api/tauri";
-import { elapsedMsOf, messageKind, reasoningElapsedMsOf, textElapsedMsOf, toolCallIdOf, toolCallsOf, turnStatusOf, usageOf, userSourceOf } from "@/api/message";
+import { elapsedMsOf, messageKind, messageTpsOf, reasoningElapsedMsOf, textElapsedMsOf, toolCallIdOf, toolCallsOf, turnStatusOf, usageOf, userSourceOf } from "@/api/message";
 import {
   formatMessageTime,
   formatDuration,
@@ -29,6 +29,7 @@ import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
 import { LazyMdPreview } from "./LazyMdPreview";
 import { StreamingMessage } from "./StreamingMessage";
+import { StreamingTpsRow } from "./StreamingTpsRow";
 import { MessageActions } from "./MessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { ToolGroup } from "./ToolGroup";
@@ -432,7 +433,10 @@ function AgentTurnView({
             return (
               <div key={msg.id} className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
                 {isStreaming ? (
-                  <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
+                  <>
+                    <StreamingMessage content={body} reasoningContent={streamingReasoningContent} />
+                    <StreamingTpsRow />
+                  </>
                 ) : (
                   renderWithHighlight(msg.id, body)
                 )}
@@ -442,7 +446,10 @@ function AgentTurnView({
           return (
             <div key={msg.id} className="text-foreground">
               {isStreaming ? (
-                <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
+                <>
+                  <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
+                  <StreamingTpsRow />
+                </>
               ) : visibleText || hasMediaBlocks(msg) ? (
                 <div>
                   <ContentMedia message={msg} />
@@ -458,6 +465,14 @@ function AgentTurnView({
                     text={visibleText}
                     time={formatMessageTime(msg.created_at)}
                     durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? (userFrag ? elapsedMsOf(userFrag.msg) : undefined)) : undefined}
+                    tps={messageTpsOf(msg)}
+                    tpsDetail={(() => {
+                      const tps = messageTpsOf(msg);
+                      if (tps == null) return null;
+                      const tokens = usageOf(msg)?.completion_tokens;
+                      const elapsedMs = textElapsedMsOf(msg);
+                      return tokens != null && elapsedMs != null ? { tokens, elapsedMs } : null;
+                    })()}
                     usageMessages={msg.id === usageAnchorId ? messages : undefined}
                   />
                 </div>

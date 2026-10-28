@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowUp, ArrowDown, Database, X } from "lucide-react";
-import { usageOf } from "@/api/message";
+import { messageTpsOf, textElapsedMsOf, usageOf } from "@/api/message";
+import { formatDuration, formatMessageTime, formatTpsText } from "./utils";
 import type { MessageItem } from "./types";
 import { cacheHitRate, sumUsage } from "./usage";
 
@@ -45,17 +46,25 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
             <span>缓存命中 {rateText(cacheHitRate(usage))}</span>
           </div>
           <div className="min-h-0 overflow-auto text-xs text-muted-foreground tabular-nums">
-            <table className="w-full min-w-[520px] text-left">
+            <table className="w-full min-w-[680px] text-left">
               <thead><tr className="border-b border-border/60">
-                {["模型 / 调用", "状态", "输入", "输出", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
+                {["时间", "模型 / 调用", "状态", "输入", "输出", "速度", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
               </tr></thead>
               <tbody>{calls.map((message) => {
                 const entry = usageOf(message)!;
+                // 速度优先读消息持久化的 text_tps（历史回看直接复现），
+                // 旧数据由 messageTpsOf 按 usage/耗时折算兼容；耗时一并展示。
+                const tps = messageTpsOf(message);
+                const elapsedMs = textElapsedMsOf(message);
                 return <tr key={message.id} className="border-b border-border/30">
+                  <td className="whitespace-nowrap px-2 py-1 text-muted-foreground/80" title={message.created_at}>{formatMessageTime(message.created_at) || "—"}</td>
                   <td className="max-w-48 break-all px-2 py-1" title={message.created_at}>{entry.model}<span className="block whitespace-nowrap opacity-70">{entry.source === "context_summary" ? "压缩" : "对话"}</span></td>
                   <td className="whitespace-nowrap px-2 py-1">{statuses[entry.status]}</td>
                   <td className="px-2 py-1">{number.format(entry.prompt_tokens)}</td>
                   <td className="px-2 py-1">{number.format(entry.completion_tokens)}</td>
+                  <td className="whitespace-nowrap px-2 py-1" title={tps != null && elapsedMs != null ? `正文 ${number.format(entry.completion_tokens)} tokens · 耗时 ${formatDuration(elapsedMs)}` : tps != null ? "正文生成速度" : "无正文耗时数据"}>
+                    {tps != null ? formatTpsText(tps) : "—"}
+                  </td>
                   <td className="px-2 py-1">{entry.prompt_cache_hit_tokens == null ? "未知" : number.format(entry.prompt_cache_hit_tokens)}</td>
                   <td className="px-2 py-1">{rateText(cacheHitRate(entry))}</td>
                 </tr>;

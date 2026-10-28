@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, toolCallIdOf, turnStatusOf } from '../api/message';
+import { liveTpsTracker } from '../utils/tps';
 import type {
   ContentBlock,
   LoadedSession,
@@ -2376,6 +2377,12 @@ export const useStore = create<AppState>((set, get) => ({
     for (const envelope of events) {
       const sessionId = envelope.session_id;
       const event = envelope.event;
+      // 实时 TPS：正文增量附带的后端真实 token 数入窗；轮次边界清零。
+      if (event.type === 'delta' || event.type === 'react_text' || event.type === 'summary_text') {
+        liveTpsTracker.recordTokens(sessionId, event.tokens);
+      } else if (event.type === 'user_message' || event.type === 'done' || event.type === 'error') {
+        liveTpsTracker.reset(sessionId);
+      }
       // title_changed：直接改对应会话标题，不进入会话视图状态机。
       if (event.type === 'title_changed' && typeof event.title === 'string') {
         const idx = sessions.findIndex((s) => s.id === sessionId);

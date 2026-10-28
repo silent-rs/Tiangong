@@ -148,6 +148,12 @@ pub enum Role {
         /// 正文生成阶段耗时（毫秒）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
+        /// 正文生成速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
+        ///
+        /// 定稿时由后端算好一并持久化，供历史回看与 token 统计复现，
+        /// 无需消费方重算（旧数据缺该字段时按公式折算兼容）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_tps: Option<f64>,
     },
     /// 工具结果。`tool_call_id` 为空只出现在旧版本会话（曾把运行时轨迹写成
     /// Tool 消息），这类消息不进入模型请求。
@@ -204,6 +210,7 @@ impl Role {
             usage: None,
             reasoning_elapsed_ms: None,
             text_elapsed_ms: None,
+            text_tps: None,
         }
     }
 
@@ -748,6 +755,7 @@ pub struct MessageRaw {
     turn_status: Option<TurnStatus>,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    text_tps: Option<f64>,
     duration_ms: Option<u64>,
     // ── 当前格式独有 ──
     source: Option<UserSource>,
@@ -854,6 +862,7 @@ impl MessageRaw {
                     usage: self.usage,
                     reasoning_elapsed_ms: self.reasoning_elapsed_ms,
                     text_elapsed_ms: self.text_elapsed_ms,
+                    text_tps: self.text_tps,
                 }
             }
             MessageRole::Tool => Role::Tool {
@@ -1116,8 +1125,31 @@ impl Message {
 
     /// 记录模型调用用量（Assistant / Notice 生效）。
     pub fn set_usage(&mut self, record: crate::token::MessageUsage) {
+        // 先取耗时与 token 数（避免与 role 的可变借用冲突）；流式 usage 快照
+        // 递增，每次重算收敛到最终值——比「只算一次」更能覆盖 usage 先于
+        // 耗时到达的时序。
+        let elapsed_ms = self.text_elapsed_ms().filter(|ms| *ms > 0);
+        let completion_tokens = record.tokens.completion_tokens;
+        let text_tps = (|| {
+            let elapsed = elapsed_ms?;
+            if completion_tokens == 0 {
+                return None;
+            }
+            Some((completion_tokens as f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0)
+        })();
         match &mut self.role {
-            Role::Assistant { usage, .. } | Role::Notice { usage } => {
+            Role::Assistant {
+                usage,
+                text_tps: persisted,
+                ..
+            } => {
+                // 定稿时一并持久化正文生成速度：消费方（token 统计 / 历史
+                // 回看）直接读字段复现，无需各自折算；旧数据无此字段时
+                // 前端按公式折算兼容。
+                *persisted = text_tps;
+                *usage = Some(Box::new(record));
+            }
+            Role::Notice { usage } => {
                 *usage = Some(Box::new(record));
             }
             _ => {}
@@ -1204,6 +1236,13 @@ impl Message {
             Role::Assistant {
                 text_elapsed_ms, ..
             } => *text_elapsed_ms,
+            _ => None,
+        }
+    }
+
+    pub fn text_tps(&self) -> Option<f64> {
+        match &self.role {
+            Role::Assistant { text_tps, .. } => *text_tps,
             _ => None,
         }
     }
@@ -1378,6 +1417,7 @@ impl Message {
                 usage,
                 reasoning_elapsed_ms,
                 text_elapsed_ms,
+                text_tps,
             } => {
                 put("reasoning_content", Value::from(reasoning_content.as_str()));
                 put(
@@ -1398,6 +1438,10 @@ impl Message {
                 put(
                     "text_elapsed_ms",
                     serde_json::to_value(text_elapsed_ms).unwrap_or_default(),
+                );
+                put(
+                    "text_tps",
+                    serde_json::to_value(text_tps).unwrap_or_default(),
                 );
             }
             Role::Tool {

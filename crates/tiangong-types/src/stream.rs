@@ -26,11 +26,29 @@ pub enum StreamEvent {
         /// 所属消息 ID（前端据此组装到正确的消息）
         message_id: String,
         content: String,
+        /// 本批正文增量的真实 token 数（llm crate tokenizer 计算）。
+        ///
+        /// 供前端实时速度（TPS）展示，不计入 usage；精确计量仍以
+        /// `TokenUsage` / `Done.usage` 为准。旧事件 / 插件文本反馈无此字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
     },
     /// ReAct 工具执行阶段的过程性文本增量（前端紧凑展示，不提供复制按钮）
-    ReactText { message_id: String, content: String },
+    ReactText {
+        message_id: String,
+        content: String,
+        /// 同 [`StreamEvent::Delta::tokens`]。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+    },
     /// 总结阶段的最终回复文本增量（前端作为主消息展示，提供复制按钮）
-    SummaryText { message_id: String, content: String },
+    SummaryText {
+        message_id: String,
+        content: String,
+        /// 同 [`StreamEvent::Delta::tokens`]。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+    },
     /// 单个 turn 的执行阶段切换通知
     PhaseChanged {
         /// 阶段名："tool_execution" / "summary"

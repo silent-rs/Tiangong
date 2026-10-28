@@ -263,6 +263,11 @@ pub struct ModelStreamChunk {
     pub content: String,
     pub reasoning_content: String,
     pub usage: Option<TokenUsageData>,
+    /// 本批正文增量经真实 tokenizer 计数的 token 数（`token_count` 模块）。
+    ///
+    /// 供上层做流式实时速度（TPS）展示；跨批合并的未定界尾部由计数器
+    /// 内部缓冲，流末 `finish` 补齐。思考增量不计入（正文口径）。
+    pub tokens: Option<u64>,
 }
 
 pub trait ModelClient {
@@ -1061,6 +1066,8 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
     let mut stop_reason = None;
+    // 正文增量的真实 token 计数器（跨批合并由计数器内部缓冲定界）。
+    let mut token_counter = crate::token_count::StreamTokenCounter::new();
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
     let mut tool_call_order: Vec<String> = Vec::new();
@@ -1081,6 +1088,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                         content: String::new(),
                         reasoning_content: delta,
                         usage: None,
+                        tokens: None,
                     });
                 }
             }
@@ -1092,10 +1100,12 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             ProviderStreamEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text.push_str(&delta);
+                    let tokens = token_counter.push(&delta);
                     on_delta(&ModelStreamChunk {
                         content: delta,
                         reasoning_content: String::new(),
                         usage: None,
+                        tokens: Some(tokens),
                     });
                 }
             }
@@ -1126,10 +1136,14 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             }
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage);
+                // usage 事件通常出现在流末（completed）：把计数器未定界尾部
+                // 一并补齐送出，实时 TPS 不丢最后几个 token（finish 幂等）。
+                let tail_tokens = token_counter.finish();
                 on_delta(&ModelStreamChunk {
                     content: String::new(),
                     reasoning_content: String::new(),
                     usage: Some(usage.clone()),
+                    tokens: Some(tail_tokens),
                 });
             }
             ProviderStreamEvent::Error(message) => {

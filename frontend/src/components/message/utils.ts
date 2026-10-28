@@ -1,6 +1,7 @@
 import { textContent } from "@/api/tauri";
 import { reasoningOf, toolIsError, toolNameOf, turnStatusOf, userSourceOf } from "@/api/message";
 import { resolveAttachmentUrl } from "@/utils/attachments";
+import { formatTps } from "@/utils/tps";
 import type { MessageGroup, MessageItem } from "./types";
 
 
@@ -39,6 +40,11 @@ export function formatDuration(ms: number): string {
     return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
   }
   return `${seconds}秒`;
+}
+
+/** 速度文本：≥100 tok/s 显示整数，否则保留一位小数（口径统一在 utils/tps）。 */
+export function formatTpsText(tps: number): string {
+  return formatTps(tps);
 }
 
 /** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */

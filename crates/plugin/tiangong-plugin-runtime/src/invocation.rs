@@ -107,6 +107,7 @@ impl RuntimeInvocation {
             Err(_) => feedback.send_stream_event(StreamEvent::ReactText {
                 message_id: self.call().id.clone(),
                 content: message,
+                tokens: None,
             }),
         }
     }

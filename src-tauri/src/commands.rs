@@ -902,10 +902,12 @@ fn forward_session_event_to_plugins(session_id: &str, event: &tiangong_types::St
         StreamEvent::Delta {
             message_id,
             content,
+            ..
         }
         | StreamEvent::SummaryText {
             message_id,
             content,
+            ..
         } => (
             "session.stream.text",
             serde_json::json!({
