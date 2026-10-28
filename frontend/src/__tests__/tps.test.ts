@@ -177,6 +177,20 @@ describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
     expect(tracker.snapshot('s1', 5000).tps).toBe(0);
   });
 
+  it('官方结算值覆盖最近速度（消息定稿回灌），非法值忽略', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 10, 0);
+    tracker.record('s1', 30, 2000);
+    expect(round1(tracker.snapshot('s1', 2000).tps)).toBe(10);
+
+    tracker.setLastTps('s1', 87.5);
+    expect(round1(tracker.snapshot('s1', 9000).tps)).toBe(87.5);
+
+    tracker.setLastTps('s1', 0);
+    tracker.setLastTps('s1', Number.NaN);
+    expect(round1(tracker.snapshot('s1', 9000).tps)).toBe(87.5);
+  });
+
   it('等待期（无新样本，旧样本滑出窗口）保留最后显示的速度', () => {
     const tracker = new LiveTpsTracker();
     tracker.record('s1', 100, 0);

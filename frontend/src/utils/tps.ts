@@ -95,6 +95,19 @@ export class LiveTpsTracker {
     this.prune(state, now);
   }
 
+  /** 官方结算值回灌：消息定稿时后端按「官方 completion_tokens / 输出阶段
+   *  耗时」算好 `text_tps`，用它覆盖流内近似的最近值（`lastTps`），轮末与
+   *  空闲显示与历史回看一致。同时清空流内样本窗口——官方值是本轮最终
+   *  结论，过时的差分不应在下一次 snapshot 覆盖它（下一轮首个 delta 会按
+   *  累计回退语义重新开窗）。非法值（≤0 / 非有限）忽略。 */
+  setLastTps(sessionId: string, tps: number | null | undefined): void {
+    if (!sessionId) return;
+    if (typeof tps !== 'number' || !Number.isFinite(tps) || tps <= 0) return;
+    const state = this.stateOf(sessionId);
+    state.lastTps = tps;
+    state.samples = [];
+  }
+
   /** 官方计量校准：把窗口基准对齐到官方累计值（单次 LLM 请求的
    *  completion_tokens），**不**把「delta 事件计数 ↔ token 数」的换算差
    *  当成一次产量差分——否则会瞬间冒出虚高速率，或在校准值偏小时产生
