@@ -65,7 +65,6 @@ function TokenStatsBlock({ compact }: { compact?: boolean }) {
       {showTps && (
         <span
           className="flex shrink-0 items-center gap-1"
-          aria-live="polite"
           aria-label={`最近生成速度 ${formatTps(round1(displayTps))}`}
           title="最近一次生成的输出速度（实时样本优先；无实时样本时取最近一条完成消息的持久化速度）"
         >
