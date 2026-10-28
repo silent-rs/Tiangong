@@ -120,6 +120,26 @@ describe('LiveTpsTracker（累计样本差分 + 独立跳秒计时）', () => {
     expect(round1(next.tps)).toBe(109.5);
   });
 
+  it('官方计量校准只对齐基准：上升不产生尖峰，下降不出现负差分', () => {
+    const tracker = new LiveTpsTracker();
+    tracker.record('s1', 10, 0);
+    tracker.record('s1', 30, 2000);
+    expect(round1(tracker.snapshot('s1', 2000).tps)).toBe(10);
+
+    // 官方 usage 高于 delta 计数（粗粒度 delta）：差值不计入产量。
+    tracker.calibrate('s1', 200, 2500);
+    expect(round1(tracker.snapshot('s1', 2500).tps)).toBe(10);
+
+    // 校准后正文从官方基准继续累计：差分从校准点算起。
+    tracker.record('s1', 220, 3000);
+    expect(round1(tracker.snapshot('s1', 3000).tps)).toBe(40);
+
+    // 官方 usage 低于当前累计（估算偏高）：只重置基准，不产生负差分。
+    tracker.calibrate('s1', 15, 4000);
+    const after = tracker.snapshot('s1', 4000);
+    expect(after.tps).toBe(40);
+  });
+
   it('等待期（无新样本，旧样本滑出窗口）保留最后显示的速度', () => {
     const tracker = new LiveTpsTracker();
     tracker.record('s1', 100, 0);

@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useStore } from '@/store/useStore';
 import { liveTpsTracker } from '@/utils/tps';
-import { StreamingTpsRow } from '@/components/message/StreamingTpsRow';
+import { TurnTpsRow } from '@/components/message/TurnTpsRow';
 import type { MessageUsage, SessionStreamEvent, TokenUsage } from '@/api/tauri';
 import type { MessageItem } from '@/components/message/types';
 
@@ -22,7 +22,7 @@ function usageMessage(id: string): MessageItem {
   return { id, role: 'assistant', usage, content: [{ type: 'text', text: '回复' }], created_at: new Date().toISOString() };
 }
 
-describe('StreamingTpsRow（渲染层端到端）', () => {
+describe('TurnTpsRow（渲染层端到端）', () => {
   let container: HTMLDivElement | null = null;
   let root: Root | null = null;
 
@@ -42,7 +42,7 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
 
   function renderRow(props: { usageMessages?: MessageItem[] } = {}) {
     act(() => {
-      root!.render(<StreamingTpsRow {...props} />);
+      root!.render(<TurnTpsRow {...props} />);
     });
   }
 
@@ -50,7 +50,7 @@ describe('StreamingTpsRow（渲染层端到端）', () => {
     return container!.querySelector('[role="status"]')?.textContent ?? null;
   }
 
-  it('累计样本充足时渲染速度文本（与操作行同构的小字行）', () => {
+  it('累计样本充足时渲染速度文本（轮末小字行）', () => {
     useStore.setState({ streamingMessageId: 'm1' });
     renderRow();
 

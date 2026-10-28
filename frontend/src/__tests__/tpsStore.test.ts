@@ -68,25 +68,56 @@ describe('实时 TPS 全链路（applyStreamEvents → LiveTpsTracker）', () =>
     expect(after.tps).toBe(before.tps);
   });
 
-  it('token_usage 事件的官方计量补记为校准样本（流末校准传导）', () => {
-    // 节流层的最终校准可能没有后续正文事件可搭；经 token_usage 事件
-    // 到达的官方 completion_tokens 补记，单流即消息级累计。
+  it('token_usage 的官方计量用于校准基准，不当作产量差分', () => {
+    // 节流层最终校准可能没有后续正文事件可搭；经 token_usage 到达的官方
+    // completion_tokens 对齐窗口基准——delta 计数与 token 数的换算差不
+    // 计入速度，避免流末冒出一次虚高尖峰。
     feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'x', tokens: 2 }]);
     vi.advanceTimersByTime(100);
     feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'y', tokens: 4 }]);
     vi.advanceTimersByTime(100);
+    const before = liveTpsTracker.snapshot('e2e-1');
+    expect(before.tps).toBeGreaterThan(0);
+
     feed('e2e-1', [{
       type: 'token_usage',
       usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 },
-      current_tokens: null,
-      compression_threshold_tokens: null,
-      context_limit_tokens: null,
-      source: 'chat',
+      source: 'react-round-1',
       agent_id: null,
     }]);
-    const snap = liveTpsTracker.snapshot('e2e-1');
-    expect(snap.active).toBe(true);
-    // 2→6（校准）= 4 tokens / 200ms（分母下限 300ms）≈ 13.3 tok/s。
-    expect(snap.tps).toBeGreaterThan(0);
+    const after = liveTpsTracker.snapshot('e2e-1');
+    expect(after.tps).toBe(before.tps);
+
+    // 校准后正文从官方基准继续累计，速度按新差值恢复。
+    vi.advanceTimersByTime(500);
+    feed('e2e-1', [{ type: 'react_text', message_id: 'm1', content: 'z', tokens: 16 }]);
+    expect(liveTpsTracker.snapshot('e2e-1').tps).toBeGreaterThan(0);
+  });
+
+  it('非主请求来源的 token_usage 不进入速度窗口（插件 / 压缩 / 取消 / 子代理）', () => {
+    feed('e2e-2', [{ type: 'react_text', message_id: 'm1', content: 'a', tokens: 10 }]);
+    vi.advanceTimersByTime(100);
+    feed('e2e-2', [{ type: 'react_text', message_id: 'm1', content: 'b', tokens: 20 }]);
+    const before = liveTpsTracker.snapshot('e2e-2');
+    expect(before.tps).toBeGreaterThan(0);
+
+    for (const source of ['plugin', 'context-compress', 'cancelled-incremental', 'react-failed']) {
+      feed('e2e-2', [{
+        type: 'token_usage',
+        usage: { prompt_tokens: 1, completion_tokens: 500, total_tokens: 501 },
+        source,
+        agent_id: null,
+      }]);
+    }
+    expect(liveTpsTracker.snapshot('e2e-2').tps).toBe(before.tps);
+
+    // 子代理请求不属于主对话输出流，同样不校准。
+    feed('e2e-2', [{
+      type: 'token_usage',
+      usage: { prompt_tokens: 1, completion_tokens: 500, total_tokens: 501 },
+      source: 'react-round-1',
+      agent_id: 'agent-1',
+    }]);
+    expect(liveTpsTracker.snapshot('e2e-2').tps).toBe(before.tps);
   });
 });

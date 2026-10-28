@@ -9,15 +9,18 @@ import type { MessageItem } from "./types";
 /** 轮次实时速度行：挂在轮次尾部（isActive 期间常驻——含流式输出、
  *  工具执行、TTFT 等待），轮次结束由父级卸载。速度取 stream 累计计数
  *  的滑动窗口差分（tracker.lastTps 跨等待期保留最近有效值：轮次中出
- *  现过就一直显示）；轮次已有用量数据时徽标同行跟随，不跨行。
- *  与完成后的操作行同构：border-t 小字行 + 复制按钮同宽占位；只显示
- *  速度数字（无文案与秒数）。读屏语义（正在生成）保留在 aria-label。
- *  尚未拿到速度样本、也没有用量数据时整体不渲染（轮次刚开始不出现空
- *  分隔线），首个样本到达后才出现。
+ *  现过就一直显示，新一轮开始沿用上一轮最近值）；轮次已有用量数据时
+ *  徽标同行跟随，不跨行。
+ *  小字行 + border-t，与完成后的操作行视觉同族，但不再模拟操作行的
+ *  复制按钮前缀——速度行独立挂在轮次尾部，不需要与消息内按钮对齐。
+ *  只显示速度数字（无文案与秒数）。读屏语义（正在生成）保留在
+ *  aria-label。尚未拿到速度样本、也没有用量数据时整体不渲染（轮次
+ *  刚开始不出现空分隔线），首个样本到达后才出现。
  *
  *  内部自订阅 store 与采样定时器：memo 化后不随父级 16ms 批量重渲而刷新，
- *  仅当 600ms 采样到的快照变化时重渲。 */
-export const StreamingTpsRow = memo(function StreamingTpsRow({ usageMessages }: {
+ *  仅当 600ms 采样到的快照变化时重渲（父级已按用量内容签名缓存
+ *  usageMessages，引用稳定）。 */
+export const TurnTpsRow = memo(function TurnTpsRow({ usageMessages }: {
   usageMessages?: MessageItem[];
 }) {
   const sessionId = useLiveSessionId();
@@ -29,21 +32,17 @@ export const StreamingTpsRow = memo(function StreamingTpsRow({ usageMessages }: 
   if (!showTps && !hasUsage) return null;
   return (
     <div
-      className="mt-1 flex items-center gap-0.5 border-t border-border/50 pt-1 text-[11px] text-muted-foreground/70 tabular-nums"
+      className="mt-1 flex items-center gap-1.5 border-t border-border/50 pt-1 text-[11px] text-muted-foreground/70 tabular-nums"
       role="status"
       aria-label={showTps ? `正在生成，速度 ${formatTps(round1(tps))}` : '正在生成'}
     >
-      {/* 与操作行复制按钮（p-1 + w-3.5 图标）同宽的占位。 */}
-      <span className="inline-block h-3.5 w-3.5 p-1" aria-hidden="true" />
-      <span className="inline-flex items-center gap-1.5 ml-1 pl-1.5 border-l border-border/60">
-        {showTps && (
-          <span className="inline-flex items-center gap-0.5">
-            <Zap className="w-3 h-3" aria-hidden="true" />
-            {formatTps(round1(tps))}
-          </span>
-        )}
-        {hasUsage && <CallUsageDetails messages={usageList} />}
-      </span>
+      {showTps && (
+        <span className="inline-flex items-center gap-0.5">
+          <Zap className="w-3 h-3" aria-hidden="true" />
+          {formatTps(round1(tps))}
+        </span>
+      )}
+      {hasUsage && <CallUsageDetails messages={usageList} />}
     </div>
   );
 });

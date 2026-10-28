@@ -2391,12 +2391,17 @@ export const useStore = create<AppState>((set, get) => ({
         || event.type === 'reasoning'
       ) {
         liveTpsTracker.record(sessionId, event.tokens);
-      } else if (event.type === 'token_usage' && event.usage) {
-        // 官方 usage 校准传导：节流层的最终校准值可能没有后续正文事件
-        // 可搭（流末 usage 无载体下发），经 token_usage 事件补记——
-        // 单流即消息级累计；ReAct 多流时为该请求计量，计数回退由
-        // tracker 重开窗口，不影响最近显示。
-        liveTpsTracker.record(sessionId, event.usage.completion_tokens);
+      } else if (
+        event.type === 'token_usage'
+        && event.usage
+        && !event.agent_id
+        && event.source?.startsWith('react-round')
+      ) {
+        // 官方 usage 校准：只认主对话的 ReAct 请求。插件用量、上下文压缩、
+        // 取消增量等来源的 completion_tokens 不是同一条输出流的累计值，
+        // 混入滑动窗口会造成虚假尖峰或窗口重置。校准只对齐窗口基准，
+        // 不当作产量差分（换算差不应计入速度）。
+        liveTpsTracker.calibrate(sessionId, event.usage.completion_tokens);
       }
       // title_changed：直接改对应会话标题，不进入会话视图状态机。
       if (event.type === 'title_changed' && typeof event.title === 'string') {

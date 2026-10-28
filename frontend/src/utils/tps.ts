@@ -2,10 +2,10 @@
  *
  * 数据源是 stream 的累计计数：`StreamEvent::Delta/ReactText/SummaryText.tokens`
  * 携带该消息截至本批的累计 output tokens（provider 层按正文 delta 事件
- * 计数——DeepSeek Responses / Anthropic 的 delta 事件即服务端 token 粒度；
- * 官方 usage 到达时校准覆盖）。前端按相邻事件差分得到实时速度，不做
- * 本地分词；字段缺失（旧后端 / 插件反馈）时不计速度，但跳秒仍由
- * `startedAt` 独立驱动。
+ * 计数——DeepSeek Responses / Anthropic 的 delta 事件即服务端 token 粒度）；
+ * 官方 usage 到达时经 `calibrate` 对齐窗口基准，不参与产量差分。前端按
+ * 相邻事件差分得到实时速度，不做本地分词；字段缺失（旧后端 / 插件反馈）
+ * 时不计速度，但跳秒仍由 `startedAt` 独立驱动。
  *
  * 本模块是纯函数 / 纯数据结构，不依赖 React 与 store（hook 见 hooks/useLiveTps.ts）。
  */
@@ -91,6 +91,27 @@ export class LiveTpsTracker {
       state.samples.push({ at: now, cumulative });
     }
     this.prune(state, now);
+  }
+
+  /** 官方计量校准：把窗口基准对齐到官方累计值（单次 LLM 请求的
+   *  completion_tokens），**不**把「delta 事件计数 ↔ token 数」的换算差
+   *  当成一次产量差分——否则会瞬间冒出虚高速率，或在校准值偏小时产生
+   *  负差分。校准只重置基准点，不更新 lastTps：校准发生在请求边界，
+   *  显示沿用最近速度（与等待期一致）。
+   *  只允许主对话 ReAct 请求的官方 usage 调用；插件用量、上下文压缩、
+   *  取消增量等来源量纲或语义不同，不得混入。 */
+  calibrate(
+    sessionId: string,
+    cumulative: number | null | undefined,
+    now: number = Date.now(),
+  ): void {
+    if (!sessionId) return;
+    if (typeof cumulative !== 'number' || !Number.isFinite(cumulative) || cumulative < 0) {
+      return;
+    }
+    const state = this.stateOf(sessionId);
+    if (state.startedAt == null) state.startedAt = now;
+    state.samples = [{ at: now, cumulative }];
   }
 
   /** 会话删除（core 实例销毁）时清空该会话窗口；轮次边界不清空。 */
