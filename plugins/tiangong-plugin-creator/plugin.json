@@ -145,5 +145,10 @@
   },
   "tool_icons": {
     "*": "assets/tool-package.svg"
+  },
+  "tool_titles": {
+    "plugin_init": "初始化插件",
+    "plugin_devkit": "构建插件",
+    "plugin_install": "安装插件"
   }
 }

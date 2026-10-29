@@ -47,5 +47,8 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "*": "MCP 工具调用"
+  }
 }

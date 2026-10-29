@@ -271,6 +271,7 @@
     "web_click": "点击页面元素",
     "web_form_extract": "提取表单",
     "web_form_fill": "填写表单",
-    "web_locate_element": "定位页面元素"
+    "web_locate_element": "定位页面元素",
+    "*": "浏览器操作"
   }
 }

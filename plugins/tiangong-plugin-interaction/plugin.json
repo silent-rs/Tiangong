@@ -129,5 +129,8 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "request_user": "用户确认"
+  }
 }
