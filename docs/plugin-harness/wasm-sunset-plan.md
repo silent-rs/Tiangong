@@ -58,7 +58,7 @@
 | 插件 | wasm 行数 | 状态 |
 | --- | --- | --- |
 | index | 782 | ✅ 已迁移（#724，v0.3.x） |
-| mcp | 448 | 待迁移（工具名动态，见风险） |
+| mcp | 448 | ✅ 已迁移（v0.3.0；`tool:*` 握手通配即动态形态：装载期经固定操作 `tool_specs` 拉快照、执行直连 operation=工具名、`runtime.tools_updated` 通知重取；`mcp__<server>__<tool>` 原名由 core 既有前缀跳过规则保留；管理页迁 app/mcp.html；mention 候选迁 sidecar 操作） |
 | scheduler | 511 | ✅ 已迁移（9c7c31d2） |
 | coding | 484 | ✅ 已迁移（f15886fe） |
 | screenshot-input | 151 | ✅ 已迁移（00468cc5，UI slot 保留） |
@@ -76,13 +76,13 @@
 | prompt | ✅ 已迁移（v0.2.0；注入逻辑下沉 Rust sidecar：identity/rules/custom 三段经 `prompt: [{type: sidecar}]` 动态提供，设置页读写迁 `app/prompt.html` + `sidecar.get_prompt`/`set_prompt`，保存后经 `runtime.prompt_updated` 通知宿主重取段落；旧数据一次性迁移语义保留，存储根优先 `TIANGONG_STORAGE_ROOT`） |
 
 ### 阶段六：运行时收尾
-- `crates/plugin/tiangong-plugin-runtime` 移除 wasmtime 集成（adapter/bindings/execution/loader 等 10 个文件）
+- **全部插件已无 wasm**（mcp 完成后仅剩本阶段）：`crates/plugin/tiangong-plugin-runtime` 移除 wasmtime 集成（adapter/bindings/execution/loader 等 10 个文件）
 - `docs/plugin-development.md` 删除 WASM 插件开发指南章节
 - CI/xtask 移除 wasm 构建目标
 
 ## 4. 风险与注意事项
 
-- **mcp 的动态工具名**：MCP 工具经转发暴露，清单静态 `tools` 无法枚举；迁移时需确认 v2 是否支持动态工具声明（`tool:*` 握手能力 + 清单占位），必要时先在 runtime 侧补能力。
+- **mcp 的动态工具名**：~~清单静态 `tools` 无法枚举~~ 已解决：sidecar 握手声明 `tool:*` 通配即动态形态（零新清单字段），宿主装载时经固定操作 `tool_specs` 拉取规格快照，执行直连（operation 即工具名），变更经 `runtime.tools_updated` 通知重取；`mcp__` 前缀工具名由 core 既有的前缀跳过规则保持原样。
 - **prompt 的提示词注入**：~~不走工具调用通道，淘汰 wasm 前需确认 v2 的 prompt_sections 等价能力~~ 已由 `prompt: [{type: sidecar}]` 条目 + 固定操作 `prompt_sections` 解决（skill/prompt 先例）。
 - **UI slot 插件**（screenshot-input 等）：wasm 同时贡献 UI，迁移时需将 UI 贡献改为清单声明（v2 `ui.contributions`）。
 - 每个插件迁移在独立分支 `feature/<插件名>-wasm-sunset` 上进行、独立验证（check/clippy/nextest/fmt）后合入，保持可回滚；插件版本 +0.0.1 或 0.1.0 视破坏性（operation 名变化对宿主透明，属内部重构，minor 即可）。

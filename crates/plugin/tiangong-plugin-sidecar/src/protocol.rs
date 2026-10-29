@@ -40,6 +40,19 @@ pub const PROMPT_CAPABILITY: &str = "prompt";
 /// （压缩 message），与插件升级/启停走同一条链路。
 pub const PROMPT_UPDATED_CHANNEL: &str = "runtime.prompt_updated";
 
+/// 动态工具声明的固定操作名：sidecar 握手声明 `tool:*` 通配（承接任意
+/// 工具名、名单运行时确定）时，宿主在**插件装载时**经此操作读取工具规格
+/// 快照。响应为工具规格数组 JSON（对象字段 `name` / `description` /
+/// `input_schema` / 可选 `timeout_ms` / 可选 `non_idempotent`，与清单静态
+/// `tools` 条目同构），数组本身可为空。工具执行按 `tool:<name>` /
+/// `tool:*` 能力路由，操作名即工具名。
+pub const TOOL_SPECS_OPERATION: &str = "tool_specs";
+
+/// sidecar → 宿主的动态工具声明变更通知通道：工具列表增删（如 MCP
+/// server 配置变化）时推送，宿主重取快照并更新注册表与存活适配器——
+/// 下一轮工具装配自动生效（core 每轮经 `tool_specs()` 读取）。
+pub const TOOLS_UPDATED_CHANNEL: &str = "runtime.tools_updated";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsRecovered {
     pub tools: Vec<String>,

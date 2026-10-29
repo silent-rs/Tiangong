@@ -216,6 +216,7 @@ pub(super) fn remove_invalid_plugin_if_registered(
 pub(crate) struct PluginLoadSnapshot {
     pub(crate) verified_sidecar: Option<Vec<String>>,
     pub(crate) prompt_sections: Option<Vec<String>>,
+    pub(crate) tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
 }
 
 impl PluginLoadSnapshot {
@@ -233,9 +234,17 @@ impl PluginLoadSnapshot {
             &installed.manifest,
             verified_sidecar.as_deref(),
         );
+        // 装载时拉取 sidecar 动态工具规格快照：验证记录含 `tool:*`
+        // 通配时读取一次；变更走 runtime.tools_updated 通知重取。
+        let tool_specs = assemble_dynamic_tool_specs(
+            storage_root,
+            &installed.manifest,
+            verified_sidecar.as_deref(),
+        );
         Self {
             verified_sidecar,
             prompt_sections,
+            tool_specs,
         }
     }
 }
@@ -270,6 +279,7 @@ fn load_plugin_record_from_snapshot(
     let PluginLoadSnapshot {
         verified_sidecar,
         prompt_sections,
+        tool_specs,
     } = snapshot;
     // 连接构造失败（解释器不可发现、签名/信任/权限不合法）属于安装
     // 前提类错误：写入 load_error，安装路径据此回滚。
@@ -327,6 +337,7 @@ fn load_plugin_record_from_snapshot(
                 sidecar,
                 verified_sidecar,
                 prompt_sections,
+                dynamic_tool_specs: tool_specs,
                 load_error,
                 runtime_error,
                 enabled: installed.enabled,
@@ -348,6 +359,7 @@ fn load_plugin_record_from_snapshot(
                 sidecar,
                 verified_sidecar,
                 prompt_sections,
+                dynamic_tool_specs: tool_specs,
                 load_error: load_error.or_else(|| Some(error.to_string())),
                 runtime_error,
                 enabled: installed.enabled,

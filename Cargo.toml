@@ -53,7 +53,6 @@ members = [
     "plugins/tiangong-plugin-skill/sidecar",
     "plugins/tiangong-plugin-mcp/protocol",
     "plugins/tiangong-plugin-mcp/sidecar",
-    "plugins/tiangong-plugin-mcp/wasm",
     "plugins/tiangong-plugin-prompt/protocol",
     "plugins/tiangong-plugin-prompt/sidecar",
     "crates/plugin/tiangong-plugin-runtime",

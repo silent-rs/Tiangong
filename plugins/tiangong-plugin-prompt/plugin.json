@@ -26,7 +26,7 @@
     }
   ],
   "ui": {
-    "sandbox": "shadow",
+    "sandbox": "iframe",
     "contributions": [
       {
         "slot": "settings.plugin-page",

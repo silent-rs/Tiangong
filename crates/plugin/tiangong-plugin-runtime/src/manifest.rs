@@ -56,7 +56,10 @@ pub struct PluginManifest {
     /// UI 贡献声明（schema v2 新增）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiManifest>,
-    /// Desktop 纯 TypeScript 插件声明的工具规格。
+    /// Desktop 纯 TypeScript 插件声明的工具规格（静态直书）。动态工具
+    ///（工具名运行时确定，如 MCP 转发工具）不在此枚举：sidecar 握手
+    /// 声明 `tool:*` 通配即动态形态，装载时经固定操作 `tool_specs`
+    /// 拉取快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<TsToolDecl>>,
     /// 系统提示注入条目（见 [`PromptSectionDecl`]）：内联文本、随包文件
@@ -206,7 +209,7 @@ fn default_ts_tool_timeout_ms() -> u64 {
 }
 
 /// Desktop 纯 TypeScript 插件工具声明。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TsToolDecl {
     pub name: String,
