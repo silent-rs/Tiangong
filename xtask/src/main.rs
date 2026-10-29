@@ -1195,7 +1195,7 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let ui = ui_entries
+    let mut ui = ui_entries
         .iter()
         .map(|entry| {
             Ok(serde_json::json!({
@@ -1204,6 +1204,24 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
             }))
         })
         .collect::<io::Result<Vec<_>>>()?;
+    // 工具图标 SVG（tool_icons 引用的 assets 路径）与 UI 入口同为签名
+    // 制品——verify 按 plugin.json 声明逐一校验，缺失即「签名制品校验失败」。
+    if let Some(icons) = manifest.get("tool_icons").and_then(|v| v.as_object()) {
+        for icon in icons.values() {
+            if let Some(path) = icon.as_str()
+                && path.starts_with("assets/")
+                && !ui_entries.iter().any(|entry| *entry == path)
+            {
+                let icon_path = directory.join(path);
+                if icon_path.is_file() {
+                    ui.push(serde_json::json!({
+                        "path": path,
+                        "sha256": sha256(&icon_path)?,
+                    }));
+                }
+            }
+        }
+    }
     if !ui.is_empty() {
         release["ui"] = serde_json::Value::Array(ui);
     }
