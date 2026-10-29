@@ -811,7 +811,9 @@ textarea:focus {
         type: 'plugin_call',
         channel,
         id,
-        method: `sidecar.${method}`,
+        // 页面 method（如 server.list）对应 sidecar 操作 mcp.server.list
+        //（原 WASM handle_view_message 的映射：页面短名 → mcp.* 操作）。
+        method: `sidecar.mcp.${method}`,
         payload: JSON.stringify(payload),
       }, '*');
     });
