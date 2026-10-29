@@ -1133,7 +1133,11 @@ fn ts_adapter_serves(
         .prompt
         .as_ref()
         .is_some_and(|entries| !entries.is_empty());
-    if tools.is_empty() && !prompt_declared {
+    // 动态工具（`tool:*` 通配）：清单不静态枚举工具，通配即 TS 贡献——
+    // 装载快照提供的规格经适配器进 core 工具列表。
+    let wildcard_tools = verified_capabilities
+        .is_some_and(|capabilities| capabilities.iter().any(|c| c == "tool:*"));
+    if tools.is_empty() && !prompt_declared && !wildcard_tools {
         return false;
     }
     if runtime == RuntimeKind::Desktop {
@@ -1469,6 +1473,32 @@ mod tests {
         assert!(parse_tool_specs_response(serde_json::json!([{"name": ""}])).is_err());
     }
 
+    #[test]
+    fn 动态工具_无静态声明也承接适配器() {
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"mcp-demo","version":"1.0.0",
+                "sidecar":{"binary":"demo-sidecar"}}"#,
+        )
+        .unwrap();
+        // 无静态 tools/prompt：仅 `tool:*` 通配时适配器承接（动态形态），
+        // 否则不是 TS 贡献插件。
+        assert!(ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Desktop,
+            Some(&["tool:*".to_string()])
+        ));
+        assert!(ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Server,
+            Some(&["tool:*".to_string()])
+        ));
+        assert!(!ts_adapter_serves(&manifest, RuntimeKind::Desktop, None));
+        assert!(!ts_adapter_serves(
+            &manifest,
+            RuntimeKind::Desktop,
+            Some(&["tool:demo".to_string()])
+        ));
+    }
     #[test]
     fn 动态工具条目_服务端承接须通配能力() {
         let manifest: PluginManifest = serde_json::from_str(

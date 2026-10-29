@@ -29,7 +29,7 @@
     "candidates_op": "mcp.mention_candidates"
   },
   "ui": {
-    "sandbox": "shadow",
+    "sandbox": "iframe",
     "contributions": [
       {
         "slot": "settings.plugin-page",
