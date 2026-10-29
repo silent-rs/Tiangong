@@ -368,13 +368,13 @@ pub struct ExtensionApp {
 /// 声明优先，其次 runtime 内置表，查不到的工具不在表中（前端用默认图标）。
 pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons::ToolIcon> {
     let entries = tool_declaring_plugins();
-    crate::tool_icons::build_tool_icon_table(entries.iter().map(|(id, manifest, tools)| {
-        crate::tool_icons::PluginToolIcons {
+    crate::tool_icons::build_tool_icon_table(entries.iter().map(
+        |(id, manifest, tools, _dynamic)| crate::tool_icons::PluginToolIcons {
             plugin_id: id,
             declared: manifest.tool_icons.as_ref(),
             tools: tools.clone(),
-        }
-    }))
+        },
+    ))
 }
 
 /// 工具行标题查询表（见 [`crate::tool_titles`]）：已启用插件在 `tool_titles`
@@ -382,24 +382,34 @@ pub fn list_tool_icons() -> std::collections::BTreeMap<String, crate::tool_icons
 /// 通用标题「工具调用」）。
 pub fn list_tool_titles() -> std::collections::BTreeMap<String, crate::tool_titles::ToolTitle> {
     let entries = tool_declaring_plugins();
-    crate::tool_titles::build_tool_title_table(entries.iter().map(|(id, manifest, tools)| {
-        crate::tool_titles::PluginToolTitles {
+    crate::tool_titles::build_tool_title_table(entries.iter().map(
+        |(id, manifest, tools, dynamic)| crate::tool_titles::PluginToolTitles {
             plugin_id: id,
             declared: manifest.tool_titles.as_ref(),
+            dynamic: dynamic.clone(),
             tools: tools.clone(),
-        }
-    }))
+        },
+    ))
 }
 
 /// 收集已启用插件与各自声明的工具原名（清单 `tools`、TS/WASM 适配器规格，
 /// 以及 `tool_icons` / `tool_titles` 特指键归并出的工具名），供展示表建表。
 ///
 /// 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
-fn tool_declaring_plugins() -> Vec<(String, PluginManifest, Vec<String>)> {
-    /// 注册表快照：插件 id、清单与仍存活的 WASM / TS 适配器。
+/// 工具声明快照：插件 id、清单、工具原名集与 sidecar 动态标题。
+type ToolDeclaringPlugin = (
+    String,
+    PluginManifest,
+    Vec<String>,
+    std::collections::BTreeMap<String, String>,
+);
+
+fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
+    /// 注册表快照：插件 id、清单、动态工具标题与仍存活的 WASM / TS 适配器。
     type PluginSnapshot = (
         String,
         PluginManifest,
+        std::collections::BTreeMap<String, String>,
         Vec<Arc<WasmPluginAdapter>>,
         Vec<Arc<TsPluginAdapter>>,
     );
@@ -411,9 +421,23 @@ fn tool_declaring_plugins() -> Vec<(String, PluginManifest, Vec<String>)> {
             .iter()
             .filter(|(_, loaded)| loaded.enabled)
             .map(|(id, loaded)| {
+                // sidecar 动态工具规格中的标题（`tool_specs` 快照 `title` 字段）。
+                let dynamic_titles = loaded
+                    .dynamic_tool_specs
+                    .as_ref()
+                    .map(|specs| {
+                        specs
+                            .iter()
+                            .filter_map(|spec| {
+                                spec.title.as_ref().map(|t| (spec.name.clone(), t.clone()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 (
                     id.clone(),
                     loaded.manifest.clone(),
+                    dynamic_titles,
                     loaded.instances.iter().filter_map(Weak::upgrade).collect(),
                     loaded
                         .ts_instances
@@ -427,7 +451,7 @@ fn tool_declaring_plugins() -> Vec<(String, PluginManifest, Vec<String>)> {
     // 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
     snapshot
         .into_iter()
-        .map(|(id, manifest, wasm, ts)| {
+        .map(|(id, manifest, dynamic_titles, wasm, ts)| {
             let mut tools: Vec<String> = manifest
                 .tools
                 .iter()
@@ -457,7 +481,7 @@ fn tool_declaring_plugins() -> Vec<(String, PluginManifest, Vec<String>)> {
                     }
                 }
             }
-            (id, manifest, tools)
+            (id, manifest, tools, dynamic_titles)
         })
         .collect()
 }

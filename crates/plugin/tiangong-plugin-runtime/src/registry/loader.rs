@@ -944,10 +944,15 @@ fn parse_tool_specs_response(
             .get("non_idempotent")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let title = item
+            .get("title")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
         specs.push(crate::manifest::TsToolDecl {
             name,
             description,
             input_schema,
+            title,
             timeout_ms,
             non_idempotent,
         });
