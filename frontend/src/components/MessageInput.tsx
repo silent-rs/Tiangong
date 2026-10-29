@@ -121,26 +121,28 @@ function TokenRing({ progress }: { progress: number }) {
     transition: 'stroke-dasharray .5s cubic-bezier(.4, 0, .2, 1), opacity .2s ease',
   });
   return (
-    <span className="inline-block h-[25px] w-[25px] shrink-0" aria-hidden="true">
+    // 16px 与 text-xs 行高一致：环完全落在统计块行内，不撑高底栏；
+    // 内部 viewBox 仍为 25 设计坐标系，整体等比缩放渲染。
+    <span className="inline-block h-4 w-4 shrink-0" aria-hidden="true">
       <svg viewBox="0 0 25 25" className="block h-full w-full overflow-visible">
         <defs>
           <mask id={`${maskId}-green`}>
             <circle
               cx="12.5" cy="12.5" r="9" pathLength={100}
-              fill="none" stroke="white" strokeWidth={7} strokeLinecap="round"
+              fill="none" stroke="white" strokeWidth={5} strokeLinecap="round"
               style={maskCircleStyle(greenLen, 0, p > 0)}
             />
           </mask>
           <mask id={`${maskId}-grad`}>
             <circle
               cx="12.5" cy="12.5" r="9" pathLength={100}
-              fill="none" stroke="white" strokeWidth={7} strokeLinecap="round"
+              fill="none" stroke="white" strokeWidth={5} strokeLinecap="round"
               style={maskCircleStyle(gradLen, -50, p > 50)}
             />
           </mask>
         </defs>
         {/* 背景圈跟随主题（与原线性条轨道 bg-muted 同源），暗色下不发白。 */}
-        <circle cx="12.5" cy="12.5" r="9" fill="none" strokeWidth={7} className="stroke-muted" />
+        <circle cx="12.5" cy="12.5" r="9" fill="none" strokeWidth={5} className="stroke-muted" />
         <foreignObject x="0" y="0" width="25" height="25" mask={`url(#${maskId}-green)`}>
           <div style={{ width: 25, height: 25, background: '#22c55e' }} />
         </foreignObject>
@@ -155,7 +157,7 @@ function TokenRing({ progress }: { progress: number }) {
         </foreignObject>
         {/* 满格红盖：临近满格时盖住 12 点方向的绿色圆头，保证首尾闭合为红色。 */}
         <circle
-          cx="12.5" cy="3.5" r="3.5" fill="#ef4444"
+          cx="12.5" cy="3.5" r="2.5" fill="#ef4444"
           style={{ opacity: closed ? 1 : 0, transition: 'opacity .2s ease' }}
         />
       </svg>
@@ -1136,7 +1138,7 @@ export function MessageInput({
   }, [onHeightChange]);
 
   return (
-    <div ref={containerRef} className="relative isolate border-t bg-background p-4">
+    <div ref={containerRef} className="relative isolate border-t bg-background px-4 py-2.5">
       <div
         ref={interactionContentRef}
         aria-hidden={interactionVisible}
