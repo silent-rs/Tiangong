@@ -159,6 +159,25 @@ pub(crate) async fn dispatch(ctx: &WebConfigContext, command: &str, args: Value)
             tiangong_config::registry::update(config)?;
             Ok(Value::Null)
         }
+        "get_default_reasoning_effort" => {
+            let config = tiangong_config::load_tiangong_config_from_dir(&dir);
+            Ok(Value::String(
+                config.default_reasoning_effort.as_str().to_string(),
+            ))
+        }
+        "set_default_reasoning_effort" => {
+            #[derive(Deserialize)]
+            struct Args {
+                effort: String,
+            }
+            let Args { effort } = parse(args)?;
+            // parse_flexible 对未知值回退 Medium，与桌面命令口径一致。
+            let mut config = tiangong_config::load_tiangong_config_from_dir(&dir);
+            config.default_reasoning_effort =
+                tiangong_llm::request::ReasoningEffort::parse_flexible(&effort);
+            tiangong_config::registry::update(config)?;
+            Ok(Value::Null)
+        }
         // ── 沙箱 ──
         "get_sandbox_disabled" => Ok(Value::Bool(
             tiangong_config::load_tiangong_config_from_dir(&dir).sandbox_disabled,
@@ -669,6 +688,27 @@ mod tests {
         assert_eq!(
             run(&ctx, "get_default_trust_mode", json!({})).unwrap(),
             "supervised"
+        );
+        // 默认思考强度读写回环：未知档位回退 Medium。
+        run(
+            &ctx,
+            "set_default_reasoning_effort",
+            json!({"effort":"max"}),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&ctx, "get_default_reasoning_effort", json!({})).unwrap(),
+            "max"
+        );
+        run(
+            &ctx,
+            "set_default_reasoning_effort",
+            json!({"effort":"bogus"}),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&ctx, "get_default_reasoning_effort", json!({})).unwrap(),
+            "medium"
         );
         let workspace = dir.path().to_string_lossy().to_string();
         run(

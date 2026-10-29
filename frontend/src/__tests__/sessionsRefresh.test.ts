@@ -7,6 +7,7 @@ vi.mock('@/api/tauri', () => {
   const api = {
     getSessions: vi.fn(),
     getReasoningEffort: vi.fn(),
+    getDefaultReasoningEffort: vi.fn(),
     newSessionId: vi.fn(),
     loadSession: vi.fn(),
     getInputCache: vi.fn(),
@@ -21,6 +22,7 @@ const { useStore } = await import('@/store/useStore');
 const { api } = await import('@/api/tauri');
 const getSessionsMock = vi.mocked(api.getSessions);
 const getReasoningEffortMock = vi.mocked(api.getReasoningEffort);
+const getDefaultReasoningEffortMock = vi.mocked(api.getDefaultReasoningEffort);
 const newSessionIdMock = vi.mocked(api.newSessionId);
 const loadSessionMock = vi.mocked(api.loadSession);
 const getInputCacheMock = vi.mocked(api.getInputCache);
@@ -104,6 +106,7 @@ describe('loadSessions refresh contract', () => {
   beforeEach(() => {
     getSessionsMock.mockReset();
     getReasoningEffortMock.mockReset();
+    getDefaultReasoningEffortMock.mockReset();
     newSessionIdMock.mockReset();
     loadSessionMock.mockReset();
     getInputCacheMock.mockReset();
@@ -111,6 +114,7 @@ describe('loadSessions refresh contract', () => {
     setInputCacheMock.mockReset();
     removeInputCacheMock.mockReset();
     getReasoningEffortMock.mockResolvedValue('medium');
+    getDefaultReasoningEffortMock.mockResolvedValue('medium');
     newSessionIdMock.mockResolvedValue('new-session');
     getInputCacheMock.mockResolvedValue({
       text: '',

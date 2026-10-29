@@ -1633,6 +1633,44 @@ pub async fn set_default_trust_mode(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn get_default_reasoning_effort(state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .agent_config
+                .reasoning_effort
+                .as_str()
+                .to_string())
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn set_default_reasoning_effort(
+    effort: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    // parse_flexible 对未知值回退 Medium，与 app.json 读取口径一致。
+    let effort = tiangong_llm::request::ReasoningEffort::parse_flexible(&effort);
+
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    config.default_reasoning_effort = effort;
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config = config;
+            core_state.agent_config.reasoning_effort = effort;
+            Ok(())
+        })
+        .await?;
+    // 同步 CoreConfig 模板：未单独覆盖思考强度的既有会话与新会话都按新默认执行。
+    state.sync_core_config_from_state().await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxPolicyView {
     pub directory_allowlist: Vec<String>,

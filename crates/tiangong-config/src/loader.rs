@@ -26,6 +26,8 @@ struct AppConfigFile {
     #[serde(default)]
     default_trust_mode: Option<TrustMode>,
     #[serde(default)]
+    default_reasoning_effort: Option<String>,
+    #[serde(default)]
     sandbox_disabled: bool,
     #[serde(default)]
     sandbox_policy: crate::config::SandboxUserPolicy,
@@ -44,6 +46,8 @@ struct LegacyAgentConfig {
     trust_mode: Option<TrustMode>,
     #[serde(default)]
     default_trust_mode: Option<TrustMode>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 /// 自动更新默认开启：旧 `app.json` 无该字段时按 true 加载。
@@ -64,6 +68,19 @@ impl AppConfigFile {
                     .as_ref()
                     .and_then(|config| config.trust_mode)
             })
+            .unwrap_or_default()
+    }
+
+    /// 空串与未知值经 `parse_flexible` 回退 Medium，保证旧数据可加载。
+    fn resolved_default_reasoning_effort(&self) -> tiangong_llm::request::ReasoningEffort {
+        self.default_reasoning_effort
+            .as_deref()
+            .or_else(|| {
+                self.agent_config
+                    .as_ref()
+                    .and_then(|config| config.reasoning_effort.as_deref())
+            })
+            .map(tiangong_llm::request::ReasoningEffort::parse_flexible)
             .unwrap_or_default()
     }
 }
@@ -121,6 +138,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         storage_root: dir.to_path_buf(),
         models,
         default_trust_mode: app.resolved_default_trust_mode(),
+        default_reasoning_effort: app.resolved_default_reasoning_effort(),
         workspace_dir,
         sandbox_disabled: app.sandbox_disabled,
         sandbox_policy,
