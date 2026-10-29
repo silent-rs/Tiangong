@@ -1,5 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#2563EB" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M3 1.5 9.5 6.2 6.4 6.7 7.9 10 6.3 10.7 4.8 7.4 3 9.2z" fill="#2563EB" fill-opacity="0.18"/>
-  <path d="M8.2 2.2a3 3 0 0 1 1.6 1.6"/>
-  <path d="M9.3 1a4 4 0 0 1 1.7 1.7"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="body" x1="14" y1="6" x2="34" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E0E7FF"/>
+      <stop offset="0.5" stop-color="#A5B4FC"/>
+      <stop offset="1" stop-color="#818CF8"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="18" cy="12" r="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ring" cx="24" cy="24" r="6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </radialGradient>
+  </defs>
+  <!-- 鼠标主体 -->
+  <path d="M24 5.5c7.7 0 12.5 5.6 12.5 14v9c0 8.4-4.8 14-12.5 14s-12.5-5.6-12.5-14v-9c0-8.4 4.8-14 12.5-14z" fill="url(#body)"/>
+  <path d="M24 5.5c7.7 0 12.5 5.6 12.5 14v3h-25v-3c0-8.4 4.8-14 12.5-14z" fill="url(#sheen)"/>
+  <!-- 中缝与滚轮 -->
+  <path d="M24 5.5v13" stroke="#6366F1" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.5"/>
+  <rect x="22.2" y="10" width="3.6" height="6.4" rx="1.8" fill="#4338CA"/>
+  <!-- 点击涟漪（左键） -->
+  <circle cx="18" cy="14" r="6.5" stroke="url(#ring)" stroke-width="1.8" fill="none" stroke-opacity="0.85"/>
+  <circle cx="18" cy="14" r="3.4" stroke="#FDE68A" stroke-width="1.4" fill="none" stroke-opacity="0.6"/>
+  <circle cx="18" cy="14" r="1.5" fill="#F59E0B"/>
 </svg>

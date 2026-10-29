@@ -1,4 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#D97706" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M1.5 3.5a1 1 0 0 1 1-1h2.3l1 1h3.7a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1z" fill="#D97706" fill-opacity="0.18"/>
-  <path d="M1.5 5.5h9"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="folder" x1="6" y1="10" x2="42" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7DD3FC"/>
+      <stop offset="0.5" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#0284C7"/>
+    </linearGradient>
+    <linearGradient id="tab" x1="8" y1="8" x2="24" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#BAE6FD"/>
+      <stop offset="1" stop-color="#7DD3FC"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="14" cy="14" r="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 文件夹后板（打开的立体层） -->
+  <path d="M6 13.5a3 3 0 0 1 3-3h10.2a3 3 0 0 1 2.2 1l2.8 3H39a3 3 0 0 1 3 3v2H6v-6z" fill="url(#tab)"/>
+  <!-- 文件夹主体 -->
+  <path d="M6 19h36v17.5a3.5 3.5 0 0 1-3.5 3.5h-29A3.5 3.5 0 0 1 6 36.5V19z" fill="url(#folder)"/>
+  <path d="M6 19h36v3.5H6V19z" fill="#FFFFFF" fill-opacity="0.18"/>
+  <!-- 内含文件露出 -->
+  <rect x="16" y="12" width="16" height="9" rx="1.6" fill="#F0F9FF" transform="rotate(-6 24 16)"/>
+  <rect x="18.5" y="14.5" width="11" height="1.6" rx="0.8" fill="#7DD3FC" transform="rotate(-6 24 15)"/>
+  <!-- 主体高光 -->
+  <path d="M9 25.5h12" stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="2.2" stroke-linecap="round"/>
+  <ellipse cx="15" cy="21" rx="7" ry="1.6" fill="url(#sheen)"/>
 </svg>

@@ -1,5 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#3B82F6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M2.5 2.5a1 1 0 0 1 1-1H7l2.5 2.5v5.5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1z" fill="#3B82F6" fill-opacity="0.18"/>
-  <path d="M7 1.5V4h2.5"/>
-  <path d="M4.5 6.5h3M4.5 8.5h3"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="doc" x1="10" y1="6" x2="36" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F0F9FF"/>
+      <stop offset="1" stop-color="#E0F2FE"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="26" y1="22" x2="40" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.55" stop-color="#0284C7"/>
+      <stop offset="1" stop-color="#075985"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="16" cy="12" r="9" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 文档卡 -->
+  <path d="M11 9.5A2.5 2.5 0 0 1 13.5 7h11L33 15.5v23A2.5 2.5 0 0 1 30.5 41h-17A2.5 2.5 0 0 1 11 38.5v-29z" fill="url(#doc)"/>
+  <path d="M24.5 7L33 15.5h-6a2.5 2.5 0 0 1-2.5-2.5V7z" fill="#BAE6FD"/>
+  <path d="M11 9.5A2.5 2.5 0 0 1 13.5 7h11v8H11V9.5z" fill="url(#sheen)"/>
+  <!-- 内容行 -->
+  <path d="M16 21h11M16 25.5h11M16 30h7" stroke="#7DD3FC" stroke-width="1.9" stroke-linecap="round"/>
+  <!-- 读取放大镜 -->
+  <circle cx="27" cy="27" r="9" stroke="url(#lens)" stroke-width="3.6" fill="#FFFFFF" fill-opacity="0.12"/>
+  <path d="M33.5 33.5L41 41" stroke="url(#lens)" stroke-width="4.2" stroke-linecap="round"/>
+  <ellipse cx="23.5" cy="23.5" rx="3.2" ry="1.9" fill="#FFFFFF" fill-opacity="0.7" transform="rotate(-32 23.5 23.5)"/>
 </svg>

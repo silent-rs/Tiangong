@@ -1,5 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#2563EB" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <rect x="1.5" y="3" width="7" height="7" rx="1.2" fill="#2563EB" fill-opacity="0.18"/>
-  <path d="M6.5 6 10.5 2.5"/>
-  <path d="M8.5 2.5h2v2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="frame" x1="6" y1="7" x2="42" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#818CF8"/>
+      <stop offset="0.5" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="9" y1="11" x2="39" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#312E81"/>
+      <stop offset="1" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <radialGradient id="cathode" cx="14" cy="14" r="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A5B4FC" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#A5B4FC" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="34" cy="36" r="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A5B4FC" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#A5B4FC" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 显示器 -->
+  <rect x="6" y="7" width="36" height="26" rx="4" fill="url(#frame)"/>
+  <rect x="9" y="10" width="30" height="20" rx="2.4" fill="url(#screen)"/>
+  <rect x="9" y="10" width="30" height="20" rx="2.4" fill="url(#cathode)"/>
+  <rect x="20" y="33" width="8" height="4" fill="#4338CA"/>
+  <rect x="15" y="37" width="18" height="3" rx="1.5" fill="#4338CA"/>
+  <!-- 窗内应用行（列表） -->
+  <rect x="13" y="13.5" width="14" height="4.6" rx="1.4" fill="#A5B4FC" fill-opacity="0.55"/>
+  <rect x="13" y="20" width="14" height="4.6" rx="1.4" fill="#A5B4FC" fill-opacity="0.35"/>
+  <rect x="13" y="26.5" width="9" height="2.6" rx="1" fill="#818CF8" fill-opacity="0.35"/>
+  <!-- 右下唤起光环 + 箭头 -->
+  <circle cx="34" cy="36" r="10" fill="url(#halo)"/>
+  <circle cx="34" cy="36" r="7.5" fill="#4338CA"/>
+  <path d="M34 32.5v7M34 32.5l-2.8 2.8M34 32.5l2.8 2.8" stroke="#E0E7FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

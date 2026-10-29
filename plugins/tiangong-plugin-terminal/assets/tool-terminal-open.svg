@@ -1,5 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#64748B" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M10.5 6V3a1 1 0 0 0-1-1h-7a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1H6" fill="#64748B" fill-opacity="0.18"/>
-  <path d="M3.5 4.5 5 5.75 3.5 7"/>
-  <path d="M9 7.5v3M7.5 9h3"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="win" x1="8" y1="10" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="0.5" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="10.5" y1="15" x2="37.5" y2="37" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111C2E"/>
+    </linearGradient>
+    <radialGradient id="plus" cx="35" cy="35" r="9" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EE7B7"/>
+      <stop offset="0.55" stop-color="#10B981"/>
+      <stop offset="1" stop-color="#047857"/>
+    </radialGradient>
+    <radialGradient id="cathode" cx="13" cy="17" r="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 迷你终端窗 -->
+  <rect x="8" y="9" width="26" height="21" rx="4.5" fill="url(#win)"/>
+  <rect x="10.5" y="14" width="21" height="13.5" rx="2.8" fill="url(#screen)"/>
+  <rect x="10.5" y="14" width="21" height="13.5" rx="2.8" fill="url(#cathode)"/>
+  <circle cx="13.6" cy="11.5" r="1.1" fill="#FCA5A5"/>
+  <circle cx="17" cy="11.5" r="1.1" fill="#FDE68A"/>
+  <!-- 窗内提示符 -->
+  <path d="M14 18.5l3.4 2.8-3.4 2.8" stroke="#34D399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M20 24.2h6.5" stroke="#34D399" stroke-width="2" stroke-linecap="round"/>
+  <!-- 新开加号徽章 -->
+  <circle cx="35" cy="35" r="9.5" fill="#047857" fill-opacity="0.2"/>
+  <circle cx="35" cy="35" r="7.5" fill="url(#plus)"/>
+  <path d="M35 31v8M31 35h8" stroke="#ECFDF5" stroke-width="2.6" stroke-linecap="round"/>
+  <!-- 徽章高光 -->
+  <ellipse cx="32.4" cy="32.2" rx="2.6" ry="1.5" fill="#FFFFFF" fill-opacity="0.6" transform="rotate(-32 32.4 32.2)"/>
 </svg>

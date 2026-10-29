@@ -1,6 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#2563EB" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <rect x="1.5" y="3" width="9" height="6" rx="1" fill="#2563EB" fill-opacity="0.18"/>
-  <path d="M3.2 4.7h.01M4.8 4.7h.01M6.4 4.7h.01M8 4.7h.01"/>
-  <path d="M3.2 6h.01M4.8 6h.01M6.4 6h.01M8 6h.01"/>
-  <path d="M4 7.3h4"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="board" x1="5" y1="14" x2="43" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#818CF8"/>
+      <stop offset="0.5" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="14" cy="18" r="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="31" cy="26" r="6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FBBF24" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FBBF24" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 键盘主体 -->
+  <rect x="5" y="14" width="38" height="22" rx="5" fill="url(#board)"/>
+  <rect x="5" y="14" width="38" height="22" rx="5" fill="url(#sheen)"/>
+  <!-- 键帽第一行 -->
+  <rect x="8.5" y="17.5" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.85"/>
+  <rect x="15" y="17.5" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.7"/>
+  <rect x="21.5" y="17.5" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.85"/>
+  <rect x="28" y="17.5" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.7"/>
+  <rect x="34.5" y="17.5" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.85"/>
+  <!-- 键帽第二行 -->
+  <rect x="8.5" y="23.4" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.7"/>
+  <rect x="15" y="23.4" width="11" height="4.4" rx="1.2" fill="#FDE68A" fill-opacity="0.9"/>
+  <rect x="28" y="23.4" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.7"/>
+  <rect x="34.5" y="23.4" width="5" height="4.4" rx="1.2" fill="#C7D2FE" fill-opacity="0.85"/>
+  <!-- 空格键 -->
+  <rect x="11" y="29.3" width="20" height="3.6" rx="1.8" fill="#A5B4FC" fill-opacity="0.75"/>
+  <rect x="32.5" y="29.3" width="7" height="3.6" rx="1.8" fill="#C7D2FE" fill-opacity="0.6"/>
+  <!-- 按下发光键 -->
+  <circle cx="31" cy="26" r="6" fill="url(#glow)"/>
 </svg>
