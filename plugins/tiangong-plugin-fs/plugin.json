@@ -188,5 +188,13 @@
         }
       }
     ]
+  },
+  "tool_titles": {
+    "file_read": "读取文件",
+    "file_read:action=list": "列出目录",
+    "file_read:action=tree": "目录树",
+    "file_read:action=image": "查看图片",
+    "file_write": "写入文件",
+    "current_time": "当前时间"
   }
 }

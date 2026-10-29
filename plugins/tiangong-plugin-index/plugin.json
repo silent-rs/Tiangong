@@ -104,5 +104,9 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "index_search": "搜索索引",
+    "search_code": "搜索代码"
+  }
 }

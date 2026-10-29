@@ -86,5 +86,8 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "web_fetch": "抓取网页"
+  }
 }

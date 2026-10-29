@@ -206,7 +206,8 @@
     "scheduler_update_job": "更新定时任务",
     "scheduler_delete_job": "删除定时任务",
     "scheduler_trigger_job": "手动触发任务",
-    "scheduler_get_job_runs": "查询执行历史"
+    "scheduler_get_job_runs": "查询执行历史",
+    "*": "定时任务操作"
   },
   "resources": [
     "assets"

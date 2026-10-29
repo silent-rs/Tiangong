@@ -74,5 +74,8 @@
   ],
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "generate_image": "生成图片"
+  }
 }

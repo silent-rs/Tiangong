@@ -241,5 +241,11 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "coding_project_context": "项目上下文",
+    "coding_preflight": "任务预检",
+    "coding_checkpoint": "记录进度",
+    "coding_review": "交付审查"
+  }
 }

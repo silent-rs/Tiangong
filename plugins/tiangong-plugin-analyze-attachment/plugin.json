@@ -62,5 +62,8 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "analyze_attachment": "分析图片"
+  }
 }

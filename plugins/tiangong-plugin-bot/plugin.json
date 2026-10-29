@@ -169,5 +169,11 @@
   },
   "resources": [
     "assets"
-  ]
+  ],
+  "tool_titles": {
+    "list_push_targets": "推送目标列表",
+    "send_text_message": "发送文本消息",
+    "send_image_message": "发送图片消息",
+    "send_file_message": "发送文件消息"
+  }
 }
