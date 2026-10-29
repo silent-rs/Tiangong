@@ -58,6 +58,9 @@
     "server"
   ],
   "tool_icons": {
-    "analyze_attachment": "scan-eye"
-  }
+    "analyze_attachment": "assets/tool-analyze-attachment.svg"
+  },
+  "resources": [
+    "assets"
+  ]
 }

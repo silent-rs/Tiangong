@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="window" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.55" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="globe" x1="15" y1="14" x2="34" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E0F2FE"/>
+      <stop offset="0.5" stop-color="#7DD3FC"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="14" cy="11" r="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="meridian" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#BAE6FD" stop-opacity="0.6"/>
+    </linearGradient>
+  </defs>
+  <!-- 浏览器窗口 -->
+  <rect x="6" y="7" width="36" height="34" rx="6" fill="url(#window)"/>
+  <rect x="6" y="7" width="36" height="34" rx="6" fill="url(#shine)"/>
+  <path d="M6 16h36" stroke="#1E40AF" stroke-opacity="0.55" stroke-width="2"/>
+  <!-- 窗口控制点 -->
+  <circle cx="12.5" cy="11.5" r="1.6" fill="#FCA5A5"/>
+  <circle cx="17.5" cy="11.5" r="1.6" fill="#FDE68A"/>
+  <circle cx="22.5" cy="11.5" r="1.6" fill="#A7F3D0"/>
+  <!-- 地球 -->
+  <circle cx="24" cy="28" r="10.5" fill="url(#globe)"/>
+  <ellipse cx="24" cy="28" rx="4.6" ry="10.5" stroke="url(#meridian)" stroke-width="1.6"/>
+  <path d="M14 24.5h20M14 31.5h20" stroke="url(#meridian)" stroke-width="1.4"/>
+  <path d="M24 17.5c2.6 2.4 4 6.4 4 10.5S26.6 36.1 24 38.5c-2.6-2.4-4-6.4-4-10.5s1.4-8.1 4-10.5z" stroke="url(#meridian)" stroke-width="1.4"/>
+  <!-- 高光 -->
+  <ellipse cx="19.5" cy="22.5" rx="3.4" ry="2.1" fill="#FFFFFF" fill-opacity="0.5" transform="rotate(-30 19.5 22.5)"/>
+</svg>

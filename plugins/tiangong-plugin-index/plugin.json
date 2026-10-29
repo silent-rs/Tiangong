@@ -100,6 +100,9 @@
     ]
   },
   "tool_icons": {
-    "*": "search"
-  }
+    "*": "assets/tool-index-search.svg"
+  },
+  "resources": [
+    "assets"
+  ]
 }

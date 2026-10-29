@@ -258,7 +258,7 @@
     ]
   },
   "tool_icons": {
-    "*": "globe"
+    "*": "assets/tool-globe.svg"
   },
   "tool_titles": {
     "browser_open": "打开浏览器",

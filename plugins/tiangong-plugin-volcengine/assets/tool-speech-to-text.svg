@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="mic" x1="17" y1="6" x2="31" y2="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDBA74"/>
+      <stop offset="0.5" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#DC2626"/>
+    </linearGradient>
+    <radialGradient id="capsule" cx="20" cy="12" r="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FB923C"/>
+      <stop offset="1" stop-color="#EA580C"/>
+    </linearGradient>
+  </defs>
+  <!-- 麦克风头 -->
+  <rect x="17.5" y="6" width="13" height="21" rx="6.5" fill="url(#mic)"/>
+  <rect x="17.5" y="6" width="13" height="21" rx="6.5" fill="url(#capsule)"/>
+  <path d="M21 11v9M24 10.5v11M27 11v9" stroke="#FFEDD5" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.8"/>
+  <!-- 支架 U 型 -->
+  <path d="M12.5 19v3.5a11.5 11.5 0 0 0 23 0V19" stroke="url(#arc)" stroke-width="3.2" stroke-linecap="round" fill="none"/>
+  <!-- 底座立柱 -->
+  <path d="M24 34v6.5" stroke="#EA580C" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M16.5 41h15" stroke="#C2410C" stroke-width="3.2" stroke-linecap="round"/>
+  <!-- 左侧声波入（识别中） -->
+  <path d="M8.5 18a6 6 0 0 0 0 12" stroke="#FDBA74" stroke-width="2.4" stroke-linecap="round" stroke-opacity="0.85" fill="none"/>
+  <path d="M4 14.5a11 11 0 0 0 0 19" stroke="#FDBA74" stroke-width="2" stroke-linecap="round" stroke-opacity="0.5" fill="none"/>
+  <!-- 右侧文本行出（转写结果） -->
+  <path d="M38 18.5h5.5M36.5 24h7M38 29.5h4.5" stroke="#F97316" stroke-width="2.2" stroke-linecap="round" stroke-opacity="0.75"/>
+</svg>

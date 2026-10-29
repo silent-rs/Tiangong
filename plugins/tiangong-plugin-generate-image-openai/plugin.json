@@ -50,7 +50,7 @@
     }
   ],
   "tool_icons": {
-    "generate_image": "image"
+    "generate_image": "assets/tool-generate-image.svg"
   },
   "ui": {
     "sandbox": "shadow",
@@ -71,5 +71,8 @@
       "kind": "chat",
       "required": false
     }
+  ],
+  "resources": [
+    "assets"
   ]
 }

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="scope" x1="12" y1="8" x2="38" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67E8F9"/>
+      <stop offset="0.5" stop-color="#0891B2"/>
+      <stop offset="1" stop-color="#155E75"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="16" y1="12" x2="32" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ECFEFF"/>
+      <stop offset="1" stop-color="#A5F3FC"/>
+    </linearGradient>
+    <radialGradient id="photo" cx="24" cy="25" r="6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </radialGradient>
+    <linearGradient id="handle" x1="32" y1="32" x2="41" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0891B2"/>
+      <stop offset="1" stop-color="#164E63"/>
+    </linearGradient>
+  </defs>
+  <!-- 照片卡（待分析的图片） -->
+  <rect x="6" y="8" width="24" height="20" rx="3.4" fill="#F8FAFC"/>
+  <path d="M8.5 25l5.5-6.5 4 4.6 3.2-3.8 4.8 5.7a1.5 1.5 0 0 1-1.15 2.5H9.6A1.5 1.5 0 0 1 8.5 25z" fill="#94A3B8"/>
+  <circle cx="13.5" cy="14" r="2.4" fill="#FCD34D"/>
+  <!-- 放大镜 -->
+  <circle cx="27.5" cy="25.5" r="11" stroke="url(#scope)" stroke-width="4" fill="url(#lens)" fill-opacity="0.28"/>
+  <path d="M35.5 33.5l6 6" stroke="url(#handle)" stroke-width="4.6" stroke-linecap="round"/>
+  <!-- 镜片高光 -->
+  <ellipse cx="23" cy="21" rx="4.2" ry="2.5" fill="#FFFFFF" fill-opacity="0.55" transform="rotate(-32 23 21)"/>
+  <!-- 镜内像素分析格 -->
+  <rect x="24.5" y="22.5" width="3" height="3" rx="0.6" fill="url(#photo)"/>
+  <rect x="28.2" y="22.5" width="3" height="3" rx="0.6" fill="#FBBF24" fill-opacity="0.6"/>
+  <rect x="24.5" y="26.2" width="3" height="3" rx="0.6" fill="#FBBF24" fill-opacity="0.6"/>
+  <rect x="28.2" y="26.2" width="3" height="3" rx="0.6" fill="#F59E0B" fill-opacity="0.45"/>
+</svg>

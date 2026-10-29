@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="frame" x1="6" y1="7" x2="42" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="0.5" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="9" y1="14" x2="39" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111C2E"/>
+    </linearGradient>
+    <linearGradient id="prompt" x1="14" y1="22" x2="22" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EE7B7"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+    <radialGradient id="cathode" cx="12" cy="15" r="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="corner" cx="10" cy="10" r="6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 终端窗体 -->
+  <rect x="6" y="7" width="36" height="34" rx="6.5" fill="url(#frame)"/>
+  <rect x="6" y="7" width="36" height="34" rx="6.5" fill="url(#corner)"/>
+  <rect x="9" y="13" width="30" height="25" rx="3.4" fill="url(#screen)"/>
+  <rect x="9" y="13" width="30" height="25" rx="3.4" fill="url(#cathode)"/>
+  <!-- 标题栏控制点 -->
+  <circle cx="13" cy="10" r="1.4" fill="#FCA5A5"/>
+  <circle cx="17.4" cy="10" r="1.4" fill="#FDE68A"/>
+  <circle cx="21.8" cy="10" r="1.4" fill="#A7F3D0"/>
+  <!-- 提示符 > -->
+  <path d="M14 22.5l5 4-5 4" stroke="url(#prompt)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 光标 _ 与输出行 -->
+  <path d="M22.5 30.5h8.5" stroke="#6EE7B7" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="M14 35h17" stroke="#475569" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M14 18.5h10" stroke="#334155" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="cal" x1="7" y1="7" x2="41" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FCD34D"/>
+      <stop offset="0.55" stop-color="#F59E0B"/>
+      <stop offset="1" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="clock" x1="26" y1="24" x2="42" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <radialGradient id="face" cx="32" cy="30" r="7.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FEF3C7"/>
+      <stop offset="1" stop-color="#FDE68A"/>
+    </radialGradient>
+    <radialGradient id="sheen" cx="14" cy="11" r="9" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 日历主体 -->
+  <rect x="6" y="8" width="30" height="30" rx="5.5" fill="url(#cal)"/>
+  <rect x="6" y="8" width="30" height="30" rx="5.5" fill="url(#sheen)"/>
+  <!-- 日历头部 -->
+  <path d="M6 13.5A5.5 5.5 0 0 1 11.5 8h19a5.5 5.5 0 0 1 5.5 5.5v2.5H6v-2.5z" fill="#B45309" fill-opacity="0.35"/>
+  <!-- 挂环 -->
+  <rect x="12.5" y="5" width="3.4" height="7" rx="1.7" fill="#92400E"/>
+  <rect x="26" y="5" width="3.4" height="7" rx="1.7" fill="#92400E"/>
+  <!-- 日期格点 -->
+  <circle cx="13" cy="22" r="2" fill="#FFFBEB" fill-opacity="0.85"/>
+  <circle cx="20.5" cy="22" r="2" fill="#FFFBEB" fill-opacity="0.85"/>
+  <circle cx="13" cy="29" r="2" fill="#FFFBEB" fill-opacity="0.85"/>
+  <circle cx="20.5" cy="29" r="2" fill="#FEF3C7" fill-opacity="0.5"/>
+  <!-- 叠加时钟 -->
+  <circle cx="32" cy="30" r="9" fill="url(#clock)"/>
+  <circle cx="32" cy="30" r="9" stroke="#FCD34D" stroke-width="1.6"/>
+  <circle cx="32" cy="30" r="6.2" fill="url(#face)"/>
+  <!-- 指针 10:10 -->
+  <path d="M32 30V25.4M32 30l3.6 2.2" stroke="#78350F" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="32" cy="30" r="1.1" fill="#78350F"/>
+  <circle cx="32" cy="21" r="0.9" fill="#FDE68A"/>
+  <circle cx="32" cy="39" r="0.9" fill="#FDE68A"/>
+  <circle cx="23" cy="30" r="0.9" fill="#FDE68A"/>
+  <circle cx="41" cy="30" r="0.9" fill="#FDE68A"/>
+</svg>
