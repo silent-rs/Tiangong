@@ -3010,6 +3010,42 @@ pub async fn set_session_cwd(
     Ok(())
 }
 
+/// 在系统文件管理器中打开本地目录（桌面端专属；远程策略白名单不含此命令）
+#[tauri::command]
+pub async fn open_dir(path: String) -> Result<(), String> {
+    let dir = std::path::PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(format!("路径不存在或不是目录：{path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || open_dir_in_file_manager(&dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn open_dir_in_file_manager(dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    let status = command
+        .arg(dir)
+        .status()
+        .map_err(|error| format!("启动文件管理器失败：{error}"))?;
+    // Windows 资源管理器打开成功时也可能返回非零退出码，仅在 Unix 上校验。
+    #[cfg(unix)]
+    if !status.success() {
+        return Err(format!(
+            "打开目录失败，退出码：{}",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    #[cfg(not(unix))]
+    let _ = status;
+    Ok(())
+}
+
 // ============================================================================
 // Skill 管理
 //

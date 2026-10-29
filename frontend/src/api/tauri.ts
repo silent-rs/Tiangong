@@ -876,6 +876,10 @@ export const api = {
   setSessionCwd: (sessionId: string, cwd: string): Promise<void> =>
     invoke('set_session_cwd', { sessionId, cwd }),
 
+  /** 在系统文件管理器中打开本地目录（桌面端专属） */
+  openDir: (path: string): Promise<void> =>
+    invoke('open_dir', { path }),
+
   getWorkspaceDir: (): Promise<string> =>
     invoke('get_workspace_dir'),
 
