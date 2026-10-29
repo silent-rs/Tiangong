@@ -849,6 +849,7 @@ fn run_gui() {
             tiangong_app::commands::remove_input_cache,
             tiangong_app::commands::get_workspace_dir,
             tiangong_app::commands::set_session_cwd,
+            tiangong_app::commands::open_dir,
             tiangong_app::commands::set_workspace_dir,
             tiangong_app::commands::get_server_config,
             tiangong_app::commands::set_server_config,

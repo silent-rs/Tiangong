@@ -1104,9 +1104,22 @@ export function MessageInput({
     setAttachments(prev => prev.filter(item => item.source !== source));
   };
 
+  // 已有对话：点击在系统文件管理器中打开当前对话目录。成熟会话不再提供切换目录能力，
+  // 目录仅在新对话（草稿）阶段可选。
+  const hasConversation = !isNewConversation && !!activeSessionId;
+  const openableCwd = hasConversation ? sessionCwd : '';
+
   const handleChangeCwd = async () => {
-    // 远程模式不开放选择桌面端目录。
+    // 远程模式不开放桌面端目录。
     if (isRemoteHost()) return;
+    // 已有对话：仅打开当前目录；未设置目录的成熟会话按钮禁用，无操作。
+    if (hasConversation) {
+      if (!openableCwd) return;
+      try {
+        await api.openDir(openableCwd);
+      } catch (error) { console.error('打开对话目录失败:', error); }
+      return;
+    }
     try {
       const selected = await open({ directory: true, multiple: false, defaultPath: sessionCwd || undefined, title: '选择对话目录' });
       if (selected && typeof selected === 'string') { await setSessionCwd(selected); }
@@ -1525,9 +1538,9 @@ export function MessageInput({
               <div className="flex items-center gap-3 min-w-0">
                 <button
                   onClick={handleChangeCwd}
-                  disabled={!isIdle || isRemoteHost()}
+                  disabled={!isIdle || isRemoteHost() || (!!hasConversation && !sessionCwd)}
                   className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
-                  title={sessionCwd || '点击设置对话目录'}
+                  title={openableCwd ? `点击打开目录：${openableCwd}` : hasConversation ? '当前对话未设置目录' : sessionCwd || '点击设置对话目录'}
                 >
                   <FolderOpen className="w-3 h-3 shrink-0" />
                   {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
