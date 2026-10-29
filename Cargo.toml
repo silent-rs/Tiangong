@@ -206,10 +206,9 @@ wasmtime = { version = "48", default-features = false, features = [
 ] }
 wasmtime-wasi = { version = "48", default-features = false }
 wit-bindgen = "0.60"
-zip = { version = "8", default-features = false }
 
 [patch.crates-io]
-wry = { git = "https://github.com/silent-rs/wry.git", rev = "4fb16fa0ca6b4b8fa65edc5d3875d9726429285b" }
+wry = { git = "https://github.com/silent-rs/wry.git", rev = "d3def78053803670c8d04d66157a45232aa532cf" }
 
 [package]
 name = "tiangong"
