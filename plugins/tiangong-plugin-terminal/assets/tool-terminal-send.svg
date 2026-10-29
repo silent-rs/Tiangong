@@ -1,5 +1,41 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#3B82F6" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
-  <rect x="1.5" y="3" width="9" height="6" rx="1" fill="#3B82F6" fill-opacity="0.18"/>
-  <path d="M3.5 5h.01M5.25 5h.01M7 5h.01M8.5 5h.01"/>
-  <path d="M4 7h4"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="win" x1="8" y1="10" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="0.5" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="10.5" y1="15" x2="37.5" y2="37" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111C2E"/>
+    </linearGradient>
+    <linearGradient id="key" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#A7F3D0"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <radialGradient id="badge" cx="35" cy="35" r="9" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EE7B7"/>
+      <stop offset="0.55" stop-color="#10B981"/>
+      <stop offset="1" stop-color="#047857"/>
+    </radialGradient>
+    <radialGradient id="cathode" cx="13" cy="17" r="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 迷你终端窗 -->
+  <rect x="8" y="9" width="26" height="21" rx="4.5" fill="url(#win)"/>
+  <rect x="10.5" y="14" width="21" height="13.5" rx="2.8" fill="url(#screen)"/>
+  <rect x="10.5" y="14" width="21" height="13.5" rx="2.8" fill="url(#cathode)"/>
+  <circle cx="13.6" cy="11.5" r="1.1" fill="#FCA5A5"/>
+  <circle cx="17" cy="11.5" r="1.1" fill="#FDE68A"/>
+  <!-- 窗内光标行 -->
+  <path d="M14 21h5M21.5 21h4" stroke="#475569" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M14 24.8h7" stroke="#34D399" stroke-width="1.8" stroke-linecap="round" stroke-opacity="0.7"/>
+  <!-- 发送键帽徽章（Enter 键） -->
+  <circle cx="35" cy="35" r="9.5" fill="#047857" fill-opacity="0.2"/>
+  <circle cx="35" cy="35" r="7.5" fill="url(#badge)"/>
+  <!-- Enter 符号（回车箭头） -->
+  <path d="M38.8 31.2v4.2a1.6 1.6 0 0 1-1.6 1.6h-5.4" stroke="#ECFDF5" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M33.6 34.2l-2.6 2.8 2.6 2.8" stroke="url(#key)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
