@@ -198,7 +198,7 @@
     "candidates_op": "scheduler.mention_candidates"
   },
   "tool_icons": {
-    "*": "calendar-clock"
+    "*": "assets/tool-scheduler.svg"
   },
   "tool_titles": {
     "scheduler_create_job": "创建定时任务",
@@ -207,5 +207,8 @@
     "scheduler_delete_job": "删除定时任务",
     "scheduler_trigger_job": "手动触发任务",
     "scheduler_get_job_runs": "查询执行历史"
-  }
+  },
+  "resources": [
+    "assets"
+  ]
 }

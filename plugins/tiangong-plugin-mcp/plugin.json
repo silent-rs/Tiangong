@@ -41,5 +41,11 @@
         "context": []
       }
     ]
-  }
+  },
+  "tool_icons": {
+    "*": "assets/tool-mcp-default.svg"
+  },
+  "resources": [
+    "assets"
+  ]
 }

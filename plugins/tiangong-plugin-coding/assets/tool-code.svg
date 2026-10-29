@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="chevronL" x1="8" y1="24" x2="20" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#93C5FD"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="chevronR" x1="28" y1="24" x2="40" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#93C5FD"/>
+    </linearGradient>
+    <linearGradient id="slash" x1="20" y1="12" x2="28" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="24" cy="24" r="19" gradientUnits="userSpaceOnUse">
+      <stop offset="0.55" stop-color="#3B82F6" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="24" cy="24" r="19" fill="url(#glow)"/>
+  <!-- 左括号 < -->
+  <path d="M19 15L9.5 24 19 33" stroke="url(#chevronL)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 右括号 > -->
+  <path d="M29 15l9.5 9L29 33" stroke="url(#chevronR)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 中央斜杠（代码行） -->
+  <path d="M26.5 12.5L21.5 35.5" stroke="url(#slash)" stroke-width="3.4" stroke-linecap="round"/>
+  <!-- 斜杠高光 -->
+  <path d="M25.8 14.8L22.2 33.2" stroke="#FEF3C7" stroke-opacity="0.7" stroke-width="1" stroke-linecap="round"/>
+  <!-- 括号端点光 -->
+  <circle cx="9.5" cy="24" r="1.7" fill="#BFDBFE"/>
+  <circle cx="38.5" cy="24" r="1.7" fill="#BFDBFE"/>
+</svg>

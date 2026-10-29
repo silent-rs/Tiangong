@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="lens" x1="17" y1="13" x2="31" y2="31" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A5B4FC"/>
+      <stop offset="0.55" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+    <linearGradient id="handle" x1="30" y1="30" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#312E81"/>
+    </linearGradient>
+    <linearGradient id="card" x1="8" y1="6" x2="26" y2="26" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EEF2FF"/>
+      <stop offset="1" stop-color="#C7D2FE"/>
+    </linearGradient>
+    <radialGradient id="glint" cx="19" cy="18" r="7" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.65"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 背景索引卡 -->
+  <rect x="8" y="6" width="18" height="24" rx="3.5" fill="url(#card)"/>
+  <path d="M12 12h10M12 16.5h10M12 21h6" stroke="#818CF8" stroke-width="1.7" stroke-linecap="round" stroke-opacity="0.75"/>
+  <!-- 放大镜 -->
+  <circle cx="27" cy="25" r="11" stroke="url(#lens)" stroke-width="4" fill="#FFFFFF" fill-opacity="0.12"/>
+  <circle cx="27" cy="25" r="11" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="1" fill="none"/>
+  <path d="M35 33l6.5 6.5" stroke="url(#handle)" stroke-width="4.6" stroke-linecap="round"/>
+  <!-- 镜内高光 -->
+  <ellipse cx="22.5" cy="20.5" rx="4" ry="2.4" fill="url(#glint)" transform="rotate(-32 22.5 20.5)"/>
+  <!-- 镜内索引点 -->
+  <circle cx="27" cy="25" r="3" fill="#6366F1" fill-opacity="0.4"/>
+  <circle cx="27" cy="25" r="1.4" fill="#4338CA"/>
+</svg>

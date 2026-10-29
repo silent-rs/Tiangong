@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="bubble" x1="8" y1="8" x2="40" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EE7B7"/>
+      <stop offset="0.5" stop-color="#10B981"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="15" cy="12" r="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="text" x1="24" y1="14" x2="24" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D1FAE5"/>
+    </linearGradient>
+  </defs>
+  <!-- 气泡主体 -->
+  <path d="M11 13A5 5 0 0 1 16 8h16a5 5 0 0 1 5 5v11a5 5 0 0 1-5 5H23.4l-7.9 6.9a1.3 1.3 0 0 1-2.2-1V29h-.3a5 5 0 0 1-5-5V13z" fill="url(#bubble)"/>
+  <path d="M11 13A5 5 0 0 1 16 8h16a5 5 0 0 1 5 5v4H11v-4z" fill="url(#sheen)"/>
+  <!-- 文本行 -->
+  <path d="M17 16.5h14M17 21.5h14M17 26.5h9" stroke="url(#text)" stroke-width="2.6" stroke-linecap="round"/>
+  <!-- 已送达双勾 -->
+  <path d="M36 38l3.4 3.4L46 34.5" stroke="#34D399" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M29 38l3.4 3.4" stroke="#6EE7B7" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

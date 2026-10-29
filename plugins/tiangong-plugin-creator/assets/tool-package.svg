@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="box" x1="8" y1="10" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDBA74"/>
+      <stop offset="0.5" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#EA580C"/>
+    </linearGradient>
+    <linearGradient id="flap" x1="24" y1="8" x2="24" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFEDD5"/>
+      <stop offset="1" stop-color="#FDBA74"/>
+    </linearGradient>
+    <radialGradient id="spark" cx="35" cy="12" r="6.5" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.4" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="14" cy="14" r="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 包裹盒身 -->
+  <path d="M10 16.5h28v22a3.5 3.5 0 0 1-3.5 3.5h-21a3.5 3.5 0 0 1-3.5-3.5v-22z" fill="url(#box)"/>
+  <!-- 盒盖翻页 -->
+  <path d="M8.5 10.5A3 3 0 0 1 11.5 7.5h25a3 3 0 0 1 3 3v4a1.5 1.5 0 0 1-1.5 1.5H10a1.5 1.5 0 0 1-1.5-1.5v-5z" fill="url(#flap)"/>
+  <!-- 封箱胶带 -->
+  <path d="M22 7.5h4V42h-4z" fill="#FFF7ED" fill-opacity="0.55"/>
+  <path d="M22 7.5h4v3.5h-4z" fill="#FFFFFF" fill-opacity="0.75"/>
+  <rect x="8.5" y="13" width="31" height="3" fill="#C2410C" fill-opacity="0.28"/>
+  <!-- 创造火花（四角星） -->
+  <path d="M36.5 5.5c.5 3.4 1.6 4.5 5 5-3.4.5-4.5 1.6-5 5-.5-3.4-1.6-4.5-5-5 3.4-.5 4.5-1.6 5-5z" fill="url(#spark)"/>
+  <path d="M30.2 15.6c.3 1.9.9 2.5 2.8 2.8-1.9.3-2.5.9-2.8 2.8-.3-1.9-.9-2.5-2.8-2.8 1.9-.3 2.5-.9 2.8-2.8z" fill="#FDE68A" fill-opacity="0.9"/>
+  <!-- 盒身高光 -->
+  <path d="M13 19.5h8" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="2" stroke-linecap="round"/>
+  <rect x="8.5" y="10.5" width="31" height="0" fill="url(#shine)"/>
+  <path d="M10 16.5h28v3H10z" fill="url(#shine)"/>
+</svg>

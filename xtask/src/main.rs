@@ -413,7 +413,9 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
 /// 暂存、签名清单与 OSS 制品；须位于 plugin.json `resources` 声明的目录内。
 fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "workspace-files" | "browser" | "plugin-creator" => &["assets/icon.svg"],
+        "workspace-files" => &["assets/icon.svg"],
+        "browser" => &["assets/icon.svg", "assets/tool-globe.svg"],
+        "plugin-creator" => &["assets/icon.svg", "assets/tool-package.svg"],
         // App 图标与 plugin.json tool_icons 引用的工具图标（通用 + action 特指）。
         "subagent" => &[
             "assets/icon.svg",
@@ -463,6 +465,28 @@ fn plugin_ui_assets(config: &PluginConfig) -> &'static [&'static str] {
         "memory" => &["assets/tool-recall-memory.svg"],
         // plugin.json tool_icons 引用的工具图标（翻开的书 + 星芒）。
         "skill" => &["assets/tool-get-skill-detail.svg"],
+        // plugin.json tool_icons 引用的工具图标（mcp__ 动态工具默认）。
+        "mcp" => &["assets/tool-mcp-default.svg"],
+        "analyze-attachment" => &["assets/tool-analyze-attachment.svg"],
+        "bot" => &[
+            "assets/tool-list-push-targets.svg",
+            "assets/tool-send-text-message.svg",
+            "assets/tool-send-image-message.svg",
+            "assets/tool-send-file-message.svg",
+        ],
+        "coding" => &["assets/tool-code.svg"],
+        "command" => &["assets/tool-command.svg"],
+        "fetch" => &["assets/tool-web-fetch.svg"],
+        "generate-image-openai" => &["assets/tool-generate-image.svg"],
+        "index" => &["assets/tool-index-search.svg"],
+        "interaction" => &["assets/tool-request-user.svg"],
+        "scheduler" => &["assets/tool-scheduler.svg"],
+        "volcengine" => &[
+            "assets/tool-generate-image.svg",
+            "assets/tool-generate-video.svg",
+            "assets/tool-text-to-speech.svg",
+            "assets/tool-speech-to-text.svg",
+        ],
         "computer-use" => &[
             "assets/tool-desktop-app.svg",
             "assets/tool-desktop-open.svg",

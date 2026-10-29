@@ -144,6 +144,6 @@
     "candidates_op": "plugin-creator.mention_candidates"
   },
   "tool_icons": {
-    "*": "package"
+    "*": "assets/tool-package.svg"
   }
 }

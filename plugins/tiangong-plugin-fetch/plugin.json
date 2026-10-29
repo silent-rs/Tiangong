@@ -82,6 +82,9 @@
     "server"
   ],
   "tool_icons": {
-    "web_fetch": "globe"
-  }
+    "web_fetch": "assets/tool-web-fetch.svg"
+  },
+  "resources": [
+    "assets"
+  ]
 }

@@ -142,7 +142,10 @@
         "description": "飞书 / QQ / 微信入站消息的渠道卡片",
         "entry": "app/im-message.html",
         "sandbox": "shadow",
-        "context": ["session", "message"],
+        "context": [
+          "session",
+          "message"
+        ],
         "render": "replace"
       }
     ]
@@ -159,9 +162,12 @@
     "lifecycle": "resident"
   },
   "tool_icons": {
-    "list_push_targets": "list",
-    "send_text_message": "message-square",
-    "send_image_message": "image",
-    "send_file_message": "file"
-  }
+    "list_push_targets": "assets/tool-list-push-targets.svg",
+    "send_text_message": "assets/tool-send-text-message.svg",
+    "send_image_message": "assets/tool-send-image-message.svg",
+    "send_file_message": "assets/tool-send-file-message.svg"
+  },
+  "resources": [
+    "assets"
+  ]
 }
