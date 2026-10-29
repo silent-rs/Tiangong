@@ -26,14 +26,15 @@ pub struct ToolTitle {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub variants: BTreeMap<String, BTreeMap<String, String>>,
 }
-
 /// 参与建表的插件信息：插件 id、`tool_titles` 声明与插件声明的工具原名。
 pub struct PluginToolTitles<'a> {
     pub plugin_id: &'a str,
     pub declared: Option<&'a BTreeMap<String, String>>,
+    /// sidecar 动态工具的标题（来自 `tool_specs` 快照的 `title` 字段），
+    /// 仅当清单 `tool_titles` 未覆盖该工具时参与建表。
+    pub dynamic: std::collections::BTreeMap<String, String>,
     pub tools: Vec<String>,
 }
-
 /// 取插件声明的合法标题；空值或超长视为未声明并告警。
 fn declared_title(
     plugin_id: &str,
@@ -47,7 +48,6 @@ fn declared_title(
     }
     Some(title.to_string())
 }
-
 /// 插件为该工具声明的合法特指标题：参数名 → 取值 → 标题。
 fn declared_variants(
     plugin_id: &str,
@@ -71,7 +71,6 @@ fn declared_variants(
     }
     variants
 }
-
 /// 解析单个插件工具的标题；插件未声明通用标题时为 None（仅特指、无通用
 /// 标题的工具由建表函数以空通用标题 + 特指条目收录）。
 pub fn resolve_plugin_tool_title(
@@ -85,27 +84,38 @@ pub fn resolve_plugin_tool_title(
         variants: declared_variants(plugin_id, declared, tool),
     })
 }
-
 /// 建立工具标题查询表：键为工具对外名 `{插件id}__{工具名}` 与原名（旧会话
 /// 历史）。无内置表；查不到的工具不在表中，由前端显示通用标题。
+///
+/// 优先取清单 `tool_titles` 声明；清单未覆盖时回落 sidecar 动态工具的
+/// `title`（来自 `tool_specs` 快照，如 MCP 转发工具的 server 元数据）。
 pub fn build_tool_title_table<'a>(
     plugins: impl IntoIterator<Item = PluginToolTitles<'a>>,
 ) -> BTreeMap<String, ToolTitle> {
     let mut table: BTreeMap<String, ToolTitle> = BTreeMap::new();
     for plugin in plugins {
         for tool in &plugin.tools {
-            // 只为声明过标题的工具建条目；仅特指、无通用标题时以空通用标题
-            // 收录（前端特指未命中时回落通用标题）。
-            let title = match resolve_plugin_tool_title(plugin.plugin_id, plugin.declared, tool) {
+            let declared_hit = resolve_plugin_tool_title(plugin.plugin_id, plugin.declared, tool);
+            let title = match declared_hit {
                 Some(title) => title,
                 None => {
-                    let variants = declared_variants(plugin.plugin_id, plugin.declared, tool);
-                    if variants.is_empty() {
-                        continue;
-                    }
-                    ToolTitle {
-                        title: String::new(),
-                        variants,
+                    // 清单未声明通用标题：优先取动态标题，再检查特指条目。
+                    if let Some(dynamic) = plugin.dynamic.get(tool.as_str()).filter(|t| {
+                        !t.trim().is_empty() && t.chars().count() <= MAX_TOOL_TITLE_CHARS
+                    }) {
+                        ToolTitle {
+                            title: dynamic.clone(),
+                            variants: declared_variants(plugin.plugin_id, plugin.declared, tool),
+                        }
+                    } else {
+                        let variants = declared_variants(plugin.plugin_id, plugin.declared, tool);
+                        if variants.is_empty() {
+                            continue;
+                        }
+                        ToolTitle {
+                            title: String::new(),
+                            variants,
+                        }
                     }
                 }
             };
@@ -117,7 +127,6 @@ pub fn build_tool_title_table<'a>(
     }
     table
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,7 +137,6 @@ mod tests {
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect()
     }
-
     #[test]
     fn 通用与特指标题都进入条目() {
         let titles = declared(&[
@@ -139,7 +147,6 @@ mod tests {
         assert_eq!(entry.title, "生成图片");
         assert_eq!(entry.variants["mode"]["edit"], "编辑图片");
     }
-
     #[test]
     fn 仅特指无通用时保留特指条目() {
         let titles = declared(&[("run_command:cwd=/tmp", "临时目录命令")]);
@@ -149,6 +156,7 @@ mod tests {
         );
         let table = build_tool_title_table([PluginToolTitles {
             plugin_id: "p",
+            dynamic: Default::default(),
             declared: Some(&titles),
             tools: vec!["run_command".to_string()],
         }]);
@@ -156,7 +164,6 @@ mod tests {
         assert_eq!(entry.title, "");
         assert_eq!(entry.variants["cwd"]["/tmp"], "临时目录命令");
     }
-
     #[test]
     fn 空标题与超长标题被忽略() {
         let long = "长".repeat(MAX_TOOL_TITLE_CHARS + 1);
@@ -164,26 +171,60 @@ mod tests {
         assert_eq!(resolve_plugin_tool_title("p", Some(&titles), "a"), None);
         assert_eq!(resolve_plugin_tool_title("p", Some(&titles), "b"), None);
     }
-
     #[test]
     fn 未声明标题的工具不建条目() {
         let table = build_tool_title_table([PluginToolTitles {
             plugin_id: "p",
+            dynamic: Default::default(),
             declared: None,
             tools: vec!["x".to_string(), "y".to_string()],
         }]);
         assert!(table.is_empty());
     }
-
     #[test]
     fn 建表键含对外名与原名() {
         let titles = declared(&[("x", "工具X")]);
         let table = build_tool_title_table([PluginToolTitles {
             plugin_id: "p",
+            dynamic: Default::default(),
             declared: Some(&titles),
             tools: vec!["x".to_string()],
         }]);
         assert_eq!(table["x"].title, "工具X");
         assert_eq!(table["p__x"].title, "工具X");
+    }
+    #[test]
+    fn 动态标题_清单未声明时回落_sidecar标题() {
+        let mut dynamic = BTreeMap::new();
+        dynamic.insert(
+            "mcp__dbx__list_tables".to_string(),
+            "dbx_list_tables · dbx".to_string(),
+        );
+        let table = build_tool_title_table([PluginToolTitles {
+            plugin_id: "mcp",
+            declared: None,
+            dynamic,
+            tools: vec!["mcp__dbx__list_tables".to_string()],
+        }]);
+        assert_eq!(
+            table["mcp__dbx__list_tables"].title,
+            "dbx_list_tables · dbx"
+        );
+    }
+    #[test]
+    fn 动态标题_清单声明优先于_sidecar() {
+        let declared = declared(&[("mcp__dbx__list_tables", "查库表")]);
+        let mut dynamic = BTreeMap::new();
+        dynamic.insert(
+            "mcp__dbx__list_tables".to_string(),
+            "dbx_list_tables · dbx".to_string(),
+        );
+        let table = build_tool_title_table([PluginToolTitles {
+            plugin_id: "mcp",
+            declared: Some(&declared),
+            dynamic,
+            tools: vec!["mcp__dbx__list_tables".to_string()],
+        }]);
+        assert_eq!(table["mcp__dbx__list_tables"].title, "查库表");
     }
 }

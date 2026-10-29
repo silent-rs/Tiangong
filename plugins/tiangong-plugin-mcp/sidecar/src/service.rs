@@ -362,6 +362,7 @@ impl McpService {
                     .map(|(server, tool)| {
                         serde_json::json!({
                             "name": crate::execution::resolve_mcp_function_name(&server, &tool.name),
+                            "title": format!("{} · {}", tool.name, server),
                             "description": format!(
                                 "MCP调用：server={} tool={} description={}",
                                 server, tool.name, tool.description
@@ -1005,6 +1006,7 @@ mod tests {
             specs[0]["description"].as_str().unwrap(),
             "MCP调用：server=demo tool=query description=查询数据"
         );
+        assert_eq!(specs[0]["title"].as_str().unwrap(), "query · demo");
         assert_eq!(specs[0]["input_schema"]["type"], "object");
         // 缺 schema 的工具回退空对象。
         assert_eq!(specs[1]["input_schema"], serde_json::json!({}));

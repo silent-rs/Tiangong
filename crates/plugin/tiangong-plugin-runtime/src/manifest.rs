@@ -215,6 +215,9 @@ pub struct TsToolDecl {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// 折叠行标题（sidecar 动态工具可携带；静态工具用清单 `tool_titles`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// 前端插件崩溃或未响应时的宿主兜底上限。
     #[serde(default = "default_ts_tool_timeout_ms")]
     pub timeout_ms: u64,
