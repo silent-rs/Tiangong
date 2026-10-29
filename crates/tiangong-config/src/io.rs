@@ -57,6 +57,9 @@ pub fn storage_root() -> PathBuf {
 #[derive(serde::Serialize)]
 struct AppConfigFile<'a> {
     default_trust_mode: TrustMode,
+    /// 默认 Medium；仅非 Medium 档位落盘（旧文件升级无 diff）。
+    #[serde(skip_serializing_if = "reasoning_effort_is_default")]
+    default_reasoning_effort: tiangong_llm::request::ReasoningEffort,
     workspace_dir: &'a str,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     sandbox_disabled: bool,
@@ -75,13 +78,18 @@ fn sandbox_policy_is_default(value: &&crate::config::SandboxUserPolicy) -> bool 
 fn is_true(value: &bool) -> bool {
     *value
 }
+fn reasoning_effort_is_default(value: &tiangong_llm::request::ReasoningEffort) -> bool {
+    *value == tiangong_llm::request::ReasoningEffort::default()
+}
 
 /// 保存应用长期配置到 `app.json`。
 ///
 /// 旧 `app.json` 中的运行状态字段（含已由 Prompt 插件接管的自定义指令）不再写回。
+#[allow(clippy::too_many_arguments)]
 pub fn save_app_config_at(
     dir: &Path,
     default_trust_mode: TrustMode,
+    default_reasoning_effort: tiangong_llm::request::ReasoningEffort,
     workspace_dir: &str,
     sandbox_disabled: bool,
     auto_update: bool,
@@ -95,6 +103,7 @@ pub fn save_app_config_at(
     }
     let content = serde_json::to_string_pretty(&AppConfigFile {
         default_trust_mode,
+        default_reasoning_effort,
         workspace_dir,
         sandbox_disabled,
         auto_update,
@@ -633,6 +642,7 @@ mod tests {
         save_app_config_at(
             dir.path(),
             TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::default(),
             dir.path().to_str().unwrap(),
             true,
             true,
@@ -649,6 +659,7 @@ mod tests {
         save_app_config_at(
             dir.path(),
             TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::default(),
             dir.path().to_str().unwrap(),
             false,
             true,
@@ -671,6 +682,7 @@ mod tests {
         save_app_config_at(
             dir.path(),
             TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::default(),
             dir.path().to_str().unwrap(),
             false,
             false,
@@ -688,6 +700,7 @@ mod tests {
         save_app_config_at(
             dir.path(),
             TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::default(),
             dir.path().to_str().unwrap(),
             false,
             true,
@@ -703,6 +716,59 @@ mod tests {
         assert!(crate::loader::load_tiangong_config_from_dir(dir.path()).auto_update);
     }
 
+    /// 默认思考强度持久化：非默认档位写入 app.json 并能读回；默认 Medium 时
+    /// 序列化省略该字段（旧文件升级无 diff），缺失按 Medium 加载。
+    #[test]
+    fn app_config_roundtrips_default_reasoning_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::High,
+            dir.path().to_str().unwrap(),
+            false,
+            true,
+            &crate::config::SandboxUserPolicy::default(),
+            &Vec::new(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("app.json")).unwrap();
+        assert!(
+            raw.contains("\"default_reasoning_effort\": \"high\""),
+            "非默认档位应写入字段: {raw}"
+        );
+        assert_eq!(
+            crate::loader::load_tiangong_config_from_dir(dir.path())
+                .default_reasoning_effort
+                .as_str(),
+            "high"
+        );
+
+        // 默认 Medium：字段省略，读取按 Medium。
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::default(),
+            dir.path().to_str().unwrap(),
+            false,
+            true,
+            &crate::config::SandboxUserPolicy::default(),
+            &Vec::new(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("app.json")).unwrap();
+        assert!(
+            !raw.contains("default_reasoning_effort"),
+            "默认档位不应写入字段: {raw}"
+        );
+        assert_eq!(
+            crate::loader::load_tiangong_config_from_dir(dir.path())
+                .default_reasoning_effort
+                .as_str(),
+            "medium"
+        );
+    }
+
     #[test]
     fn app_config_roundtrips_user_sandbox_policy_without_restricting_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -713,6 +779,7 @@ mod tests {
         save_app_config_at(
             dir.path(),
             TrustMode::default(),
+            tiangong_llm::request::ReasoningEffort::default(),
             dir.path().to_str().unwrap(),
             false,
             true,

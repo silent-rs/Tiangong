@@ -137,6 +137,8 @@ pub struct TiangongConfig {
     pub models: ModelsConfig,
     /// 新对话默认权限信任模式
     pub default_trust_mode: TrustMode,
+    /// 新对话默认思考强度（None 关闭思考；会话内可单独覆盖）
+    pub default_reasoning_effort: tiangong_llm::request::ReasoningEffort,
 
     // ===== 应用层配置 =====
     /// 默认工作目录
@@ -160,6 +162,7 @@ impl Default for TiangongConfig {
             storage_root: crate::loader::default_tiangong_dir(),
             models: ModelsConfig::default(),
             default_trust_mode: TrustMode::default(),
+            default_reasoning_effort: tiangong_llm::request::ReasoningEffort::default(),
             workspace_dir: crate::loader::default_workspace_dir(),
             sandbox_disabled: false,
             sandbox_policy: SandboxUserPolicy::default(),
@@ -181,7 +184,7 @@ impl TiangongConfig {
         CoreConfig {
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
-            reasoning_effort: tiangong_llm::request::ReasoningEffort::Medium,
+            reasoning_effort: self.default_reasoning_effort,
         }
     }
 

@@ -47,6 +47,7 @@ const ALLOWED: &[&str] = &[
     "get_trust_mode",
     "set_trust_mode",
     "get_default_trust_mode",
+    "get_default_reasoning_effort",
     "get_reasoning_effort",
     "set_reasoning_effort",
     "get_mention_candidates",

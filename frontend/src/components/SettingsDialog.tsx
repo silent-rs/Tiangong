@@ -254,6 +254,7 @@ export function SettingsDialog() {
 
 export function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
+  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState('medium');
   const { showError } = useToast();
   const { workspaceDir, setWorkspaceDir } = useStore();
   const [editWorkspaceDir, setEditWorkspaceDir] = useState(workspaceDir);
@@ -274,6 +275,17 @@ export function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (sta
       });
   }, [showError]);
 
+  useEffect(() => {
+    api.getDefaultReasoningEffort()
+      .then((effort) => {
+        setDefaultReasoningEffort(effort);
+      })
+      .catch((error) => {
+        console.error('加载默认思考强度失败:', error);
+        showError('加载失败', '无法加载默认思考强度');
+      });
+  }, [showError]);
+
   const handleTrustModeChange = async (mode: string) => {
     setDefaultTrustMode(mode);
     onSaveStatusChange('saving');
@@ -285,6 +297,31 @@ export function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (sta
       console.error('保存默认审核模式失败:', error);
       onSaveStatusChange('error');
       showError('保存失败', '无法保存默认审核模式');
+    }
+  };
+
+  const handleDefaultReasoningEffortChange = async (effort: string) => {
+    setDefaultReasoningEffort(effort);
+    onSaveStatusChange('saving');
+    try {
+      await api.setDefaultReasoningEffort(effort);
+      // 新对话回退档位即时生效：清掉未发送新对话的临时覆盖，让后续
+      // 新建对话（含当前未发送的新对话）都使用新默认值。
+      useStore.setState((state) => {
+        const reasoningEffortPerSession = { ...state.reasoningEffortPerSession };
+        delete reasoningEffortPerSession['__new_conversation__'];
+        return {
+          defaultReasoningEffort: effort,
+          reasoningEffortPerSession,
+          ...(state.isNewConversation ? { reasoningEffort: effort } : {}),
+        };
+      });
+      onSaveStatusChange('saved');
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('保存默认思考强度失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存默认思考强度');
     }
   };
 
@@ -338,6 +375,23 @@ export function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (sta
               <SelectItem value="supervised">监督审核</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+
+        <div className="space-y-2">
+          <Label>新对话默认思考强度</Label>
+          <Select value={defaultReasoningEffort} onValueChange={handleDefaultReasoningEffortChange}>
+            <SelectTrigger className="w-56">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">不思考</SelectItem>
+              <SelectItem value="low">低强度</SelectItem>
+              <SelectItem value="medium">中强度</SelectItem>
+              <SelectItem value="high">高强度</SelectItem>
+              <SelectItem value="max">最大强度</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">新建对话的初始思考强度；会话内仍可随时单独调整。</p>
         </div>
 
         <div className="space-y-2">

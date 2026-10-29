@@ -954,6 +954,8 @@ export interface AppState {
   reasoningEffort: string;
   reasoningEffortPerSession: Record<string, string>;
   setReasoningEffort: (effort: string) => void;
+  /** 应用级默认思考强度（设置页可改，新对话回退值）；null=尚未从后端加载。 */
+  defaultReasoningEffort: string | null;
 
   // 工作目录
   workspaceDir: string;
@@ -1139,6 +1141,7 @@ export const useStore = create<AppState>((set, get) => ({
   commandEnvBlocklist: null,
   reasoningEffort: 'medium',
   reasoningEffortPerSession: {},
+  defaultReasoningEffort: null,
   setReasoningEffort: (effort: string) => {
     const { activeSessionId, reasoningEffortPerSession } = get();
     const key = activeSessionId || '__new_conversation__';
@@ -1280,8 +1283,13 @@ export const useStore = create<AppState>((set, get) => ({
     if (get().switchingSessionId) set({ switchingSessionId: null });
     const workspaceDir = get().workspaceDir;
     const newConversationCwd = targetCwd || workspaceDir;
-    const { reasoningEffortPerSession } = get();
-    const newConversationEffort = reasoningEffortPerSession['__new_conversation__'] || 'medium';
+    // 新对话回退档位取应用级默认思考强度（设置页可改）；尚未从后端加载时
+    // 先取一次，保证首条消息不会用 'medium' 兜底覆盖用户设置的默认值。
+    let fallbackEffort = get().defaultReasoningEffort;
+    if (fallbackEffort === null) {
+      fallbackEffort = await api.getDefaultReasoningEffort().catch(() => 'medium');
+      set({ defaultReasoningEffort: fallbackEffort });
+    }
     try {
       const newConversationId = await api.newSessionId();
       if (requestVersion !== newConversationRequestVersion) return;
@@ -1296,6 +1304,10 @@ export const useStore = create<AppState>((set, get) => ({
         );
       }
       const initialCache = emptyInputCache();
+      // 用户在新对话界面手动调过强度（__new_conversation__ 键）时优先沿用，
+      // 否则跟随应用级默认。
+      const newConversationEffort =
+        get().reasoningEffortPerSession['__new_conversation__'] || fallbackEffort;
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         if (previousCacheId && !previousCacheIsSending) delete inputCaches[previousCacheId];

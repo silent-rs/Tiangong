@@ -140,6 +140,7 @@ impl TiangongConfig {
         crate::io::save_app_config_at(
             dir,
             self.default_trust_mode,
+            self.default_reasoning_effort,
             &self.workspace_dir,
             self.sandbox_disabled,
             self.auto_update,
