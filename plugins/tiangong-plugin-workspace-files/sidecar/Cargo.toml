@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-workspace-files-sidecar"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Workspace Files 按需 sidecar（工作区内文件浏览、预览与编辑）"
