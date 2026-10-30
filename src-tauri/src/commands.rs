@@ -225,7 +225,9 @@ pub async fn switch_session(
         return Err(format!("会话不存在：{session_id}"));
     }
 
-    if !state.core_manager.has_live_core(&session_id) {
+    // 原子的「确认存活并刷新活动」：true 表示已刷新（查看也是交互，切走的
+    // 会话从切换时刻起算空闲保留）；false 表示实例已被回收，走下方重建。
+    if !state.core_manager.touch_if_live(&session_id) {
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, None, None, None, None, stream_tx)
@@ -233,10 +235,6 @@ pub async fn switch_session(
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
         }
-    } else {
-        // 复用快速路径不经 ensure_core：显式刷新活动时刻（查看也是交互，
-        // 切走的会话从切换时刻起算空闲保留）。
-        state.core_manager.touch_activity(&session_id);
     }
 
     state

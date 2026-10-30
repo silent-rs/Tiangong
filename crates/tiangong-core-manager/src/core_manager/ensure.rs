@@ -58,8 +58,8 @@ impl CoreManager {
                 let _ = core.replace_config(session_config.clone());
                 core.set_trust_mode(session_config.trust_mode);
                 core.set_reasoning_effort(session_config.reasoning_effort);
-                drop(registry);
-                // 发送前的准备也是交互：刷新空闲计时，避免刚要使用的实例被回收。
+                // registry 锁内刷新活动：与空闲回收的原子摘除互斥，
+                // 「复用成功」返回时实例不可能已被并发回收。
                 self.touch_activity(session_id);
                 return Ok(EnsuredCore {
                     session_id: session_id.to_string(),
@@ -393,13 +393,14 @@ impl CoreManager {
         let delivered = registry
             .get(session_id)
             .is_some_and(|core| core.deliver(input).is_ok());
-        drop(registry);
         if delivered {
-            // 成功投递即为交互：刷新空闲计时。
+            // registry 锁内刷新活动（投递成功即交互）：与空闲回收的原子
+            // 摘除互斥，投递成功的实例不会在刷新完成前被摘除。
             self.touch_activity(session_id);
-            if let Some(text) = user_text {
-                self.spawn_title_generation_if_needed(session_id, &text);
-            }
+        }
+        drop(registry);
+        if delivered && let Some(text) = user_text {
+            self.spawn_title_generation_if_needed(session_id, &text);
         }
         delivered
     }

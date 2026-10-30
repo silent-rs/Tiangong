@@ -71,10 +71,28 @@ impl CoreManager {
             == Some(session_id)
     }
 
+    /// 原子地确认存活并刷新活动时刻。
+    ///
+    /// 检查与刷新在同一把 registry 锁内完成，与空闲回收的原子摘除互斥：
+    /// 返回 `true` 时活动已刷新（该实例至少在保留时长内不会被回收，
+    /// 后续投递安全）；返回 `false` 表示实例已被回收或不存在，且**不会**
+    /// 写入孤儿活动记录，调用方应走 `ensure_core` 重建。
+    ///
+    /// 供 host 的复用快速路径使用，取代分别调用 `has_live_core` +
+    /// `touch_activity` 的两步组合（两步之间实例可能被回收）。
+    pub fn touch_if_live(&self, session_id: &str) -> bool {
+        let registry = self.registry();
+        if !registry.contains_key(session_id) {
+            return false;
+        }
+        self.touch_activity(session_id);
+        true
+    }
+
     /// 记录会话的交互时刻（ensure / 成功投递 / turn 运行时刷新）。
     ///
-    /// host 在「即将使用该会话」的复用检查点（如 Server 的 `has_live_core`
-    /// 快速路径、桌面切换会话）也应调用，使回收计时与实际使用一致。
+    /// host 在「即将使用该会话」的复用检查点应改用 [`Self::touch_if_live`]；
+    /// 本方法直接写入，仅供已知实例存活的内部路径调用。
     pub fn touch_activity(&self, session_id: &str) {
         self.last_activity
             .lock()
@@ -161,15 +179,22 @@ impl CoreManager {
 
         let mut retired = Vec::new();
         for session_id in candidates {
-            // 候选收集后可能被设为激活会话，跳过。
+            // 持 creation_lock 覆盖「原子摘除 → 旧 Core 关闭完成」整个区间：
+            // `ensure_core` 的重建在同一把锁上等待，旧 Core 的
+            // `shutdown_join → cancel_and_join` 按 session_id 操作全局 turn
+            // 注册表（无代际校验），若允许重建抢先插入，新 Core 的 turn 会
+            // 被旧实例的关闭路径误杀。
+            let creation_lock = self.creation_lock(&session_id);
+            let _creation_guard = creation_lock.lock_owned().await;
+            // 锁内复核：候选收集后可能被设为激活会话，跳过。
             if self.is_exempt_session(&session_id) {
                 continue;
             }
             let Some(core) = self.take_idle_core(&session_id) else {
                 continue;
             };
-            // Core 已摘出 registry：新 turn 无法再经投递路径落到它身上，
-            // 此刻 `shutdown_join` 的 `cancel_and_join` 没有可误杀的 turn。
+            // Core 已摘出 registry：新 turn 无法再经投递路径落到它身上；
+            // creation_lock 同时阻止本会话重建，直到关闭完成。
             let sid = session_id.clone();
             match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
                 Ok(Ok(())) => {
@@ -494,5 +519,108 @@ mod tests {
             "重建后投递应成功"
         );
         assert!(manager.has_live_core("race-retired"));
+    }
+
+    /// P1 回归：旧实例「摘除 → 关闭完成」全程持有 creation_lock，
+    /// 期间发起的重建必须等到关闭完成后才能创建新实例并启动 turn，
+    /// 旧实例的 `cancel_and_join` 不得取消新 turn。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 旧实例关闭期间重建的轮次不受影响() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager_with_core(&dir, "race-close").await;
+        rewind_activity(&manager, "race-close", Duration::from_secs(7200));
+
+        // 模拟 reaper 的完整锁区间：creation_lock 覆盖「摘除 → 关闭」。
+        let reaper_manager = manager.clone();
+        let (detached_tx, detached_rx) = tokio::sync::oneshot::channel::<()>();
+        let reaper = tokio::spawn(async move {
+            let creation_lock = reaper_manager.creation_lock("race-close");
+            let _guard = creation_lock.lock_owned().await;
+            let Some(core) = reaper_manager.take_idle_core("race-close") else {
+                panic!("空闲超期实例应可摘除");
+            };
+            detached_tx.send(()).expect("通知主线程失败");
+            tokio::task::spawn_blocking(move || core.shutdown_join())
+                .await
+                .expect("join 任务异常")
+                .expect("关闭旧实例失败");
+        });
+
+        // 旧实例已摘除、关闭进行中：重建在 creation_lock 上等待。
+        detached_rx.await.unwrap();
+        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+        manager
+            .ensure_core(
+                "race-close",
+                CoreConfig::builder()
+                    .with_trust_mode(TrustMode::FullTrust)
+                    .build(),
+                "/tmp".to_string(),
+                None,
+                stream_tx,
+                Vec::<Arc<dyn Plugin>>::new,
+            )
+            .await
+            .expect("重建失败");
+        assert!(
+            manager.deliver_to_core_if_live(
+                "race-close",
+                tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                    "msg-after-rebuild".to_string(),
+                    vec![tiangong_types::ContentBlock::text("重建后的消息")],
+                ),
+            ),
+            "重建后投递应成功"
+        );
+        reaper.await.unwrap();
+
+        // 旧实例关闭已完成的瞬间新 turn 仍在运行 ⟹ 未被其取消：
+        // `cancel_and_join` 按 session_id 取任务并等待其结束，若它取消过
+        // 新 turn，reaper 返回时 is_busy 必然已是 false。
+        if !manager.is_core_busy("race-close") {
+            // turn 已自行收敛（端点不可达 → 正常失败）：终态必须是失败，
+            // 而不是被旧实例关闭路径取消。
+            let session = manager.load_session("race-close").expect("会话应存在");
+            let last_status = session.messages.last().and_then(|m| m.turn_status());
+            assert_ne!(
+                last_status,
+                Some(tiangong_types::TurnStatus::Cancelled),
+                "新 turn 不得被旧实例的关闭路径取消"
+            );
+        }
+
+        // 收尾：主动取消可能仍在运行的 turn（nextest 每测试独立进程，
+        // 此处尽力收敛只为日志干净，不影响断言）。
+        let _ = manager.cancel_core("race-close");
+        for _ in 0..200 {
+            if !manager.is_core_busy("race-close") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(manager.has_live_core("race-close"), "新实例应存活");
+    }
+
+    /// P2 回归：确认存活与刷新活动是原子操作，回收后不写入孤儿记录。
+    #[tokio::test]
+    async fn 确认存活并刷新活动是原子操作() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager_with_core(&dir, "touch-live").await;
+
+        // 存活时确认并刷新（保留时长内 sweep 不回收）。
+        assert!(manager.touch_if_live("touch-live"));
+        rewind_activity(&manager, "touch-live", Duration::from_secs(7200));
+
+        // 摘除后确认失败，且不为已回收会话写入活动记录。
+        assert_eq!(manager.sweep_idle_cores().await, vec!["touch-live"]);
+        assert!(!manager.touch_if_live("touch-live"));
+        assert!(
+            !manager
+                .last_activity
+                .lock()
+                .unwrap()
+                .contains_key("touch-live"),
+            "不应为已回收会话写入孤儿活动记录"
+        );
     }
 }
