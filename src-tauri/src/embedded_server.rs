@@ -279,6 +279,8 @@ async fn resolve_connector_session(
             )?;
             if resolved.1 && core_state.active_session_id.trim().is_empty() {
                 core_state.active_session_id = resolved.0.clone();
+                // 成为激活会话（此前无激活）：占用空闲回收豁免槽位。
+                core_state.core_manager.set_exempt_session(&resolved.0);
             }
             Ok(resolved)
         })
@@ -482,6 +484,8 @@ async fn send_message_and_wait(
             .with_state(|core_state| {
                 if core_state.active_session_id.trim().is_empty() {
                     core_state.active_session_id = session_id.clone();
+                    // 成为激活会话（此前无激活）：占用空闲回收豁免槽位。
+                    core_state.core_manager.set_exempt_session(&session_id);
                 }
                 Ok(())
             })

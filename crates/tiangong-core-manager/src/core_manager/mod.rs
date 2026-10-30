@@ -5,12 +5,15 @@
 //!   加载与管理」职责
 //! - **不执行 turn**（turn 仍由 Core 内部驱动）
 //! - session 真相源是磁盘，CoreManager 只做按需加载与缓存
+//! - 空闲回收（[`idle`] 模块）：turn 结束后无交互超过保留时长（暂定 1 小时）
+//!   自动销毁实例，当前激活会话占用豁免槽位不受影响，下次交互按需重建
 //!
 //! CoreManager 针对 `TiangongCore`，不抽象「其他 Core 类型」。Core 的实际构造
 //! 内置在 `ensure_core`：host 在调用前构造好 plugin 集合并作为参数传入
 //! （不同 host 的 plugin 构造差异大，不能在共享层硬编码）。
 
 pub mod ensure;
+mod idle;
 pub mod mentions;
 pub mod registry;
 mod title;
@@ -81,6 +84,11 @@ pub struct CoreManager {
     creation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     /// 会话元数据缓存：id → ((修改时间, 文件大小), 元数据)。
     metadata_cache: Arc<Mutex<MetadataCache>>,
+    /// 每会话最后交互时刻：ensure / 成功投递 / turn 运行都会刷新，
+    /// 是空闲回收的计时依据（见 `idle` 模块）。
+    last_activity: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// 空闲回收豁免的激活会话槽位（始终至多一个，见 `idle` 模块）。
+    exempt_session: Arc<Mutex<Option<String>>>,
     config: tiangong_core::config::core::CoreConfigProvider,
     storage_root: PathBuf,
 }
@@ -95,14 +103,19 @@ impl CoreManager {
         config: tiangong_core::config::core::CoreConfigProvider,
         storage_root: impl Into<PathBuf>,
     ) -> Self {
-        Self {
+        let manager = Self {
             cores: Arc::new(Mutex::new(HashMap::new())),
             mention_sources: Arc::new(Mutex::new(Vec::new())),
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
+            last_activity: Arc::new(Mutex::new(HashMap::new())),
+            exempt_session: Arc::new(Mutex::new(None)),
             config,
             storage_root: storage_root.into(),
-        }
+        };
+        // 空闲回收：turn 结束后无交互达到保留时长即销毁实例（暂定 1 小时）。
+        manager.spawn_idle_reaper();
+        manager
     }
 
     /// 全局配置 provider（host 用它取 base 快照构建 per-session 配置）。

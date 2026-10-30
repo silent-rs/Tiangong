@@ -237,10 +237,12 @@ pub async fn switch_session(
 
     state
         .with_state(|core_state| {
-            core_state.active_session_id = session_id;
+            core_state.active_session_id = session_id.clone();
             Ok(())
         })
         .await?;
+    // 激活会话豁免空闲回收：单值槽位直接替换，原激活会话自动落回常规回收。
+    state.core_manager.set_exempt_session(&session_id);
 
     Ok(())
 }
