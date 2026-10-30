@@ -24,6 +24,8 @@
 
 use std::time::{Duration, Instant};
 
+use tiangong_core::core::TiangongCore;
+
 use crate::CoreManager;
 
 /// 空闲保留时长：turn 结束 / 最后交互后 Core 实例至少保留这么久，
@@ -70,7 +72,10 @@ impl CoreManager {
     }
 
     /// 记录会话的交互时刻（ensure / 成功投递 / turn 运行时刷新）。
-    pub(crate) fn touch_activity(&self, session_id: &str) {
+    ///
+    /// host 在「即将使用该会话」的复用检查点（如 Server 的 `has_live_core`
+    /// 快速路径、桌面切换会话）也应调用，使回收计时与实际使用一致。
+    pub fn touch_activity(&self, session_id: &str) {
         self.last_activity
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -85,34 +90,40 @@ impl CoreManager {
             .remove(session_id);
     }
 
-    /// 会话是否空闲超过保留时长。
+    /// 原子地复核并摘除空闲超期的 Core。
     ///
-    /// 调用方（reaper）须先持有该会话的 creation_lock 再判定：与
-    /// `ensure_core` 的创建区间互斥后，锁内看到的「刚交互」必然已刷新
-    /// 活动时刻，不会出现用户刚发起会话就被回收的竞态。
-    fn idle_past_retention(&self, session_id: &str) -> bool {
-        if self
-            .registry()
-            .get(session_id)
-            .is_some_and(|core| core.is_busy())
-        {
-            return false;
+    /// busy 复核与 remove 在同一把 registry 锁内完成：投递路径（持同一把
+    /// 锁调用 `TiangongCore::deliver`，turn task 在其返回前已注册）只能
+    /// 在本操作**之前**完成——此时 busy 复核失败、放弃摘除——或在本操作
+    /// **之后**进行——此时 registry 已无该 Core、投递失败并由投递方重建。
+    /// 因此不存在「复核通过后、移除前新 turn 启动，随后被 `shutdown_join`
+    /// 的 `cancel_and_join` 取消」的窗口。
+    fn take_idle_core(&self, session_id: &str) -> Option<TiangongCore> {
+        let mut registry = self.registry();
+        if !registry.get(session_id).is_some_and(|core| !core.is_busy()) {
+            return None;
         }
-        self.last_activity
+        let expired = self
+            .last_activity
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(session_id)
-            .is_some_and(|last| last.elapsed() >= IDLE_RETENTION)
+            .is_some_and(|last| last.elapsed() >= IDLE_RETENTION);
+        if !expired {
+            return None;
+        }
+        registry.remove(session_id)
     }
 
     /// 扫描并销毁空闲超时的 Core，返回本轮销毁的 session_id。
     ///
-    /// 每个候选都经 creation_lock 复核后再销毁；复核不通过的（期间发生
-    /// 交互、turn 开始、被标记豁免）留待下轮。销毁失败只告警，下轮重试。
+    /// 候选仅作粗筛；销毁经 [`Self::take_idle_core`] 原子复核摘除（期间
+    /// 发生交互、turn 开始、被设为激活的实例都不会被移除）。销毁失败只
+    /// 告警，下轮重试。
     pub(crate) async fn sweep_idle_cores(&self) -> Vec<String> {
         let now = Instant::now();
         // 候选收集：registry 与 activity 两把锁内完成，随后立即释放，
-        // 不与 retire 的锁序（creation_lock → registry）交叉。
+        // 不与销毁阶段的锁序（registry → activity）交叉。
         let candidates: Vec<String> = {
             let registry = self.registry();
             let mut activity = self
@@ -150,24 +161,34 @@ impl CoreManager {
 
         let mut retired = Vec::new();
         for session_id in candidates {
-            let creation_lock = self.creation_lock(&session_id);
-            let _creation_guard = creation_lock.lock_owned().await;
-            // 锁内复核：候选收集后可能被设为激活或发生交互，均不销毁。
-            if self.is_exempt_session(&session_id) || !self.idle_past_retention(&session_id) {
+            // 候选收集后可能被设为激活会话，跳过。
+            if self.is_exempt_session(&session_id) {
                 continue;
             }
-            // 空闲路径传 false：无在途 turn，无需投递 Cancel。
-            match self.retire_core_locked(&session_id, false).await {
-                Ok(()) => {
+            let Some(core) = self.take_idle_core(&session_id) else {
+                continue;
+            };
+            // Core 已摘出 registry：新 turn 无法再经投递路径落到它身上，
+            // 此刻 `shutdown_join` 的 `cancel_and_join` 没有可误杀的 turn。
+            let sid = session_id.clone();
+            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+                Ok(Ok(())) => {
                     self.clear_activity(&session_id);
-                    tracing::info!(session_id = %session_id, "会话空闲超时，已销毁 Core 实例");
+                    tracing::info!(session_id = %sid, "会话空闲超时，已销毁 Core 实例");
                     retired.push(session_id);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        session_id = %sid,
+                        %error,
+                        "销毁空闲 Core 实例失败，待下轮扫描重试"
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(
-                        session_id = %session_id,
+                        session_id = %sid,
                         %error,
-                        "销毁空闲 Core 实例失败，待下轮扫描重试"
+                        "等待空闲 Core 关闭失败，待下轮扫描重试"
                     );
                 }
             }
@@ -392,5 +413,86 @@ mod tests {
         assert!(!manager.is_exempt_session("exempt-clear"));
         assert_eq!(manager.sweep_idle_cores().await, vec!["exempt-clear"]);
         assert!(!manager.has_live_core("exempt-clear"));
+    }
+
+    // ===== 回收与首条消息并发的回归测试 =====
+
+    /// 投递先完成（turn 已注册）：原子摘除必须跳过该实例。
+    ///
+    /// `deliver_to_core_if_live` 在 registry 锁内同步执行投递（turn task
+    /// 注册先于返回）并刷新活动时刻；随后 sweep 的 `take_idle_core` 无论
+    /// 先命中 busy 复核还是活动复核，都不会移除实例，刚接受的轮次不会被
+    /// 回收关闭。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 投递启动轮次后的实例不被回收() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager_with_core(&dir, "race-delivered").await;
+
+        // 空闲已超期（模拟空闲边缘时刻），随后用户消息投递成功。
+        rewind_activity(&manager, "race-delivered", Duration::from_secs(7200));
+        assert!(
+            manager.deliver_to_core_if_live(
+                "race-delivered",
+                tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                    "msg-race".to_string(),
+                    vec![tiangong_types::ContentBlock::text("你好")],
+                ),
+            ),
+            "投递应成功（turn 已启动）"
+        );
+
+        let retired = manager.sweep_idle_cores().await;
+        assert!(retired.is_empty(), "刚接受轮次的实例不得回收：{retired:?}");
+        assert!(manager.has_live_core("race-delivered"));
+    }
+
+    /// 回收先移除：投递失败但经 ensure_core 重建后可恢复，不丢消息路径。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 回收先移除时投递失败但可重建() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager_with_core(&dir, "race-retired").await;
+
+        rewind_activity(&manager, "race-retired", Duration::from_secs(7200));
+        assert_eq!(manager.sweep_idle_cores().await, vec!["race-retired"]);
+        assert!(!manager.has_live_core("race-retired"));
+
+        // 回收后的首条消息：投递找不到实例，host 收到明确失败。
+        assert!(
+            !manager.deliver_to_core_if_live(
+                "race-retired",
+                tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                    "msg-after-retire".to_string(),
+                    vec![tiangong_types::ContentBlock::text("回收后的消息")],
+                ),
+            ),
+            "Core 已被回收，投递应失败"
+        );
+
+        // host 经既有 ensure_core 语义重建后，同一条消息投递成功。
+        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+        manager
+            .ensure_core(
+                "race-retired",
+                CoreConfig::builder()
+                    .with_trust_mode(TrustMode::FullTrust)
+                    .build(),
+                "/tmp".to_string(),
+                None,
+                stream_tx,
+                Vec::<Arc<dyn Plugin>>::new,
+            )
+            .await
+            .expect("重建 Core 失败");
+        assert!(
+            manager.deliver_to_core_if_live(
+                "race-retired",
+                tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                    "msg-after-retire".to_string(),
+                    vec![tiangong_types::ContentBlock::text("回收后的消息")],
+                ),
+            ),
+            "重建后投递应成功"
+        );
+        assert!(manager.has_live_core("race-retired"));
     }
 }

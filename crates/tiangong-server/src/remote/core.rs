@@ -309,6 +309,9 @@ impl ServerCoreManager {
         let session_id = normalize_session_id(requested_session_id)?;
 
         if self.core_manager.has_live_core(&session_id) {
+            // 复用快速路径不经 ensure_core：显式刷新活动时刻，避免即将
+            // 投递的会话被空闲回收在投递前摘除实例。
+            self.core_manager.touch_activity(&session_id);
             return Ok(session_id);
         }
 
@@ -319,6 +322,7 @@ impl ServerCoreManager {
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
         // 这里同时防御未来新增的未加锁入口。
         if self.core_manager.has_live_core(&session_id) {
+            self.core_manager.touch_activity(&session_id);
             return Ok(session_id);
         }
 

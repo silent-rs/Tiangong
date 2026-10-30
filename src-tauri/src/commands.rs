@@ -233,6 +233,10 @@ pub async fn switch_session(
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
         }
+    } else {
+        // 复用快速路径不经 ensure_core：显式刷新活动时刻（查看也是交互，
+        // 切走的会话从切换时刻起算空闲保留）。
+        state.core_manager.touch_activity(&session_id);
     }
 
     state
