@@ -8,7 +8,8 @@
     "transport_protocol": "0.1.0",
     "business_protocol": 1,
     "startup_timeout_ms": 15000,
-    "request_timeout_ms": 60000
+    "request_timeout_ms": 60000,
+    "lifecycle": "on_demand"
   },
   "permissions": [
     "app-storage.read",
