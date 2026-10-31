@@ -16,15 +16,12 @@ cargo run -p xtask -- build-plugin command
 
 ## 入口分工
 
-> **已弃用（issue #697）**：CLI / Server 的命令执行默认由 terminal 插件
-> 承担（PTY 复用、交互程序、画面快照）。本插件仅在 `app.json` 的
-> `agent_config.command_backend = "legacy-command"` 显式回退时于 CLI /
-> Server 注册；计划在两个正式版本后移除。回退开启时 terminal 在
-> CLI / Server 不注册，两个插件的 `run_command` / `run_shell` 不会同时
-> 进入工具表。
+> **已弃用，进入淘汰流程（issue #697）**：CLI / Server 的命令执行已由
+> terminal 插件承担（PTY 复用、交互程序、画面快照）。本插件的
+> `entrypoints` 已清空——所有入口均不再注册，升级后自然淘汰，随后按
+> 卸载流程归档移除。存量安装目录保留至卸载阶段，期间不提供回退开关。
 
-- CLI / Server：默认不加载；仅显式回退开关开启时由 runtime 注册。
-- GUI：不加载本插件（entrypoints 不含 desktop），`run_command` / `run_shell` 由 terminal 插件（PTY 执行 + 命令回显）提供。
+- 全部入口：不注册（`entrypoints: []`），`run_command` / `run_shell` 由 terminal 插件（PTY 执行 + 命令回显）提供。
 
 ## 沙箱职责
 

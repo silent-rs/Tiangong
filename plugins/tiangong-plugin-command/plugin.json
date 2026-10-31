@@ -86,10 +86,7 @@
     "sidecar.invoke",
     "tool.provide"
   ],
-  "entrypoints": [
-    "cli",
-    "server"
-  ],
+  "entrypoints": [],
   "tool_icons": {
     "*": "assets/tool-command.svg"
   },

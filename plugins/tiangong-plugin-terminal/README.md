@@ -24,10 +24,9 @@ release_session_plugin_resources（listInstances + instanceClosed）回收
 会话终端；无主终端由空闲 PTY 超时回收兜底（默认 30 分钟，环境变量
 TIANGONG_TERMINAL_IDLE_PTY_SECS 可调，0 关闭）。
 
-CLI / Server 默认由本插件承担命令执行；旧 command 插件已弃用，仅在
-app.json 的 agent_config.command_backend = "legacy-command" 显式回退
-时注册（此时本插件在 CLI / Server 不注册，避免 run_command /
-run_shell 同名冲突）。桌面端不受该开关影响。
+CLI / Server 默认由本插件承担命令执行；旧 command 插件已弃用
+（entrypoints 已清空，所有入口不再注册，升级后自然淘汰并按卸载流程
+移除）。
 
 每个会话的终端编排（选终端、新建、开标签、执行、收结果）由 sidecar 内
 对应会话作用域唯一完成；页面实例（`src/main.ts` + `terminal-view.ts`）
