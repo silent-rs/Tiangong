@@ -12,6 +12,11 @@
 //!
 //! 真相源仍是磁盘：CoreManager 只做按需加载与缓存，session 真正的写入仍由 Core
 //! 的 turn worker 实时落盘（`PERSISTENCE_WRITE_LOCK` 保证原子写）。
+//!
+//! 实例生命周期：Core 在 turn 结束后留在 registry 中等待复用；空闲（无交互、
+//! 无运行中 turn）超过保留时长（暂定 1 小时，见 `idle` 模块常量）后由后台
+//! 回收任务销毁；当前激活会话占用单值豁免槽位、不受回收影响。下一次交互
+//! 经 `ensure_core` 从磁盘按需重建。
 
 pub mod core_manager;
 mod metadata;

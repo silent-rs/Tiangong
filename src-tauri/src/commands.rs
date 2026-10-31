@@ -225,7 +225,9 @@ pub async fn switch_session(
         return Err(format!("会话不存在：{session_id}"));
     }
 
-    if !state.core_manager.has_live_core(&session_id) {
+    // 原子的「确认存活并刷新活动」：true 表示已刷新（查看也是交互，切走的
+    // 会话从切换时刻起算空闲保留）；false 表示实例已被回收，走下方重建。
+    if !state.core_manager.touch_if_live(&session_id) {
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, None, None, None, None, stream_tx)
@@ -237,10 +239,12 @@ pub async fn switch_session(
 
     state
         .with_state(|core_state| {
-            core_state.active_session_id = session_id;
+            core_state.active_session_id = session_id.clone();
             Ok(())
         })
         .await?;
+    // 激活会话豁免空闲回收：单值槽位直接替换，原激活会话自动落回常规回收。
+    state.core_manager.set_exempt_session(&session_id);
 
     Ok(())
 }

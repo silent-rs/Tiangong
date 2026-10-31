@@ -58,6 +58,9 @@ impl CoreManager {
                 let _ = core.replace_config(session_config.clone());
                 core.set_trust_mode(session_config.trust_mode);
                 core.set_reasoning_effort(session_config.reasoning_effort);
+                // registry 锁内刷新活动：与空闲回收的原子摘除互斥，
+                // 「复用成功」返回时实例不可能已被并发回收。
+                self.touch_activity(session_id);
                 return Ok(EnsuredCore {
                     session_id: session_id.to_string(),
                     is_new: false,
@@ -88,6 +91,8 @@ impl CoreManager {
             .build();
         let id = core.session_id().to_string();
         self.registry().insert(id.clone(), core);
+        // 新实例从创建时刻起算空闲计时。
+        self.touch_activity(&id);
         Ok(EnsuredCore {
             session_id: id,
             is_new: true,
@@ -364,7 +369,12 @@ impl CoreManager {
 
     /// 取回会话 Core（消费，用于持久化或显式切换）。
     pub fn take_core(&self, session_id: &str) -> Option<TiangongCore> {
-        self.registry().remove(session_id)
+        let core = self.registry().remove(session_id);
+        if core.is_some() {
+            // 实例已移出 registry，空闲计时记录随之清理，防表无限增长。
+            self.clear_activity(session_id);
+        }
+        core
     }
 
     /// 仅当指定会话存在 Core 时投递输入。
@@ -383,6 +393,12 @@ impl CoreManager {
         let delivered = registry
             .get(session_id)
             .is_some_and(|core| core.deliver(input).is_ok());
+        if delivered {
+            // registry 锁内刷新活动（投递成功即交互）：与空闲回收的原子
+            // 摘除互斥，投递成功的实例不会在刷新完成前被摘除。
+            self.touch_activity(session_id);
+        }
+        drop(registry);
         if delivered && let Some(text) = user_text {
             self.spawn_title_generation_if_needed(session_id, &text);
         }

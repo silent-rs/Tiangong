@@ -10,13 +10,20 @@ pub(crate) fn remove_session_state(
 ) {
     state.input_caches.remove(session_id);
     state.pending_turns.remove(session_id);
+    // 被删除的会话若正占用豁免槽位则解除。
+    manager.clear_exempt_session(session_id);
     if state.active_session_id == session_id {
-        state.active_session_id = manager
+        let next_active = manager
             .list_session_metadata()
             .into_iter()
             .find(|metadata| metadata.id != session_id)
             .map(|metadata| metadata.id)
             .unwrap_or_default();
+        // 切换后的激活会话（如有）占用豁免槽位。
+        if !next_active.is_empty() {
+            manager.set_exempt_session(&next_active);
+        }
+        state.active_session_id = next_active;
     }
 }
 

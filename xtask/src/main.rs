@@ -1210,7 +1210,7 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
         for icon in icons.values() {
             if let Some(path) = icon.as_str()
                 && path.starts_with("assets/")
-                && !ui_entries.iter().any(|entry| *entry == path)
+                && !ui_entries.contains(&path)
             {
                 let icon_path = directory.join(path);
                 if icon_path.is_file() {

@@ -308,7 +308,9 @@ impl ServerCoreManager {
     ) -> Result<String> {
         let session_id = normalize_session_id(requested_session_id)?;
 
-        if self.core_manager.has_live_core(&session_id) {
+        // 原子的「确认存活并刷新活动」：返回 true 即保证实例在保留时长
+        // 内不被回收、后续投递安全；false 走下方重建。
+        if self.core_manager.touch_if_live(&session_id) {
             return Ok(session_id);
         }
 
@@ -318,7 +320,7 @@ impl ServerCoreManager {
 
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
         // 这里同时防御未来新增的未加锁入口。
-        if self.core_manager.has_live_core(&session_id) {
+        if self.core_manager.touch_if_live(&session_id) {
             return Ok(session_id);
         }
 
