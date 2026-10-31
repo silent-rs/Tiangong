@@ -202,6 +202,9 @@ fn phase_label_cn(label: &str) -> &'static str {
 }
 
 /// 经进度帧请求宿主执行 App 原语（建立/收起本插件标签）。
+///
+/// sidecar 不感知宿主形态：无前端入口（CLI / Server）的宿主未注入 App
+/// 处理器，反馈在宿主侧静默降级（见 `handle_runtime_feedback`）。
 async fn request_host_app_open(scope_id: &str, instance_id: &str, focus: bool) {
     let mut payload = serde_json::json!({
         "session_id": scope_id,
@@ -314,13 +317,6 @@ impl TerminalService {
             // 登记对象虽随 future 销毁，映射仍保留给随后到达的 cancel() 使用。
             let active = self.track_active_tool(&scope.request_id, &session_id, interactive);
             request_host_app_open(&scope.session_id, &session_id, false).await;
-            if !self.wait_for_frontend_attach(&session_id).await {
-                tracing::debug!(
-                    terminal_id = session_id,
-                    scope_id = scope.session_id,
-                    "未等待到前端终端附着，按无前台页面的后台会话继续执行"
-                );
-            }
             let executed = self
                 .exec_in_session(ExecRequest {
                     session_id: session_id.clone(),
@@ -480,17 +476,6 @@ impl TerminalService {
             return ToolOutcome::fail(format!("终端面板操作失败：{error:#}"));
         }
         request_host_app_open(&scope.session_id, &instance_id, true).await;
-        // 打开面板后等待页面完成事件订阅与 PTY 附着再返回：调用方拿到
-        // 编号往往紧接着 terminal_send，附着未完成时输入会写在页面订阅
-        // 之前，用户在标签里看不到这段交互。等待有上限，前端未接应
-        //（后台会话等）不阻塞返回。
-        if !self.wait_for_frontend_attach(&instance_id).await {
-            tracing::debug!(
-                terminal_id = instance_id,
-                scope_id = scope.session_id,
-                "terminal(action=open) 未等到前端附着，按无前台页面继续"
-            );
-        }
         ToolOutcome::ok(format!("已打开终端 {instance_id}"))
     }
 

@@ -288,6 +288,25 @@ fn check_plugin_availability(
     if !manifest.available_at(runtime.key()) {
         return Some(format!("当前入口 {} 不在插件声明的入口列表", runtime.key()));
     }
+    // 命令执行后端互斥（issue #697）：CLI / Server 默认使用 terminal；
+    // 仅当用户显式回退 `agent_config.command_backend = "legacy-command"`
+    // 时注册 command，且此时 terminal 不注册——两个插件的
+    // run_command / run_shell 同名，不能同时进入工具表。桌面端不受影响。
+    if runtime != RuntimeKind::Desktop {
+        let legacy = tiangong_config::registry::try_command_backend() == "legacy-command";
+        match manifest.id.as_str() {
+            "command" if !legacy => {
+                return Some("CLI / Server 默认使用 terminal 插件执行命令（command 已弃用，agent_config.command_backend = \"legacy-command\" 可回退）".to_string());
+            }
+            "terminal" if legacy => {
+                return Some(
+                    "已配置 legacy-command 回退：CLI / Server 命令执行由 command 插件承担"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
     // 必需模型能力过滤
     let configured_strs: Vec<&str> = configured.iter().map(String::as_str).collect();
     let missing = manifest.missing_capabilities(&configured_strs);

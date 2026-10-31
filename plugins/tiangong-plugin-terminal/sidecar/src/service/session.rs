@@ -10,8 +10,8 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tiangong_plugin_sidecar::server::emit_notification;
 
 use super::output::{
-    ExitNotification, OUTPUT_FLUSH_INTERVAL_MS, RawOutputFilter, publish_display_output,
-    record_display_output, record_raw_output,
+    ExitNotification, OUTPUT_FLUSH_INTERVAL_MS, RawOutputFilter, ingest_screen_update,
+    publish_display_output, record_display_output, record_raw_output,
 };
 use super::readiness::{Foreground, foreground_of};
 use super::shell::{
@@ -23,6 +23,53 @@ use super::types::{
 };
 use super::{CHANNEL_EXIT, PtySession, SessionEndState, SessionPhase, TerminalService};
 use crate::persist;
+
+/// 宿主下发的受控环境变量（`EXEC_ENV_JSON_ENV` 信封，issue #697 自 command
+/// 迁移）：PTY 登录 shell 及其全部子命令可用。危险 key 过滤与 command
+/// 插件一致（解释器启动注入类、动态加载器类、PATH 劫持等）。
+fn exec_env_overrides() -> &'static std::collections::BTreeMap<String, String> {
+    static CACHE: std::sync::OnceLock<std::collections::BTreeMap<String, String>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let Ok(raw) = std::env::var(tiangong_plugin_sidecar::env::EXEC_ENV_JSON_ENV) else {
+            return std::collections::BTreeMap::new();
+        };
+        let Ok(env) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&raw)
+        else {
+            return std::collections::BTreeMap::new();
+        };
+        env.into_iter()
+            .filter(|(key, _)| is_safe_env_key(key))
+            .collect()
+    })
+}
+
+/// exec_env 的安全 key 判定（与 command 插件 exec.rs 保持一致）。
+fn is_safe_env_key(key: &str) -> bool {
+    const DENIED_EXACT: &[&str] = &[
+        "BASH_ENV",
+        "ENV",
+        "PATH",
+        "PS4",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "NODE_OPTIONS",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "PERL5OPT",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "ZDOTDIR",
+    ];
+    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+    let upper = key.to_ascii_uppercase();
+    !DENIED_EXACT.contains(&upper.as_str())
+        && !DENIED_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
 
 impl TerminalService {
     pub(super) fn spawn_session(&self, mut request: SpawnRequest) -> Result<SpawnResponse> {
@@ -123,6 +170,10 @@ impl TerminalService {
         for arg in &request.args {
             command.arg(arg);
         }
+        // 宿主下发的受控环境变量（#697 自 command 迁移）：覆盖进 PTY 环境。
+        for (key, value) in exec_env_overrides() {
+            command.env(key, value);
+        }
         // cwd 失效（目录被删等）不阻断会话创建：回退到继承进程工作目录
         if let Some(cwd) = request
             .cwd
@@ -147,6 +198,12 @@ impl TerminalService {
         // 命令回显登记表：执行侧写入、输出过滤线程消费。
         let pending_echo: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        // 屏幕模拟（headless 快照来源）：与输出过滤线程共享，窗口尺寸变化
+        // 时同步 resize。
+        let screen = Arc::new(Mutex::new(crate::screen::ScreenGrid::new(
+            request.cols,
+            request.rows,
+        )));
         // 输出持久化（按 scope 分文件）：仅供运行诊断和关闭时清理
         let logger = request
             .scope_id
@@ -184,6 +241,8 @@ impl TerminalService {
                 raw_bytes_total: 0,
                 last_output_at: Instant::now(),
                 display_history: Vec::new(),
+                frontend_attached_once: false,
+                screen: Arc::clone(&screen),
                 screen_snapshot: String::new(),
                 screen_updates: 0,
                 exited_code: None,
@@ -226,6 +285,7 @@ impl TerminalService {
             Ok(first) => {
                 record_raw_output(&boot_sessions, &output_session, &first);
                 let filtered = output_filter.filter(&String::from_utf8_lossy(&first));
+                ingest_screen_update(&boot_sessions, &output_session, &filtered);
                 record_display_output(&boot_sessions, &output_session, filtered.as_bytes());
                 (!filtered.is_empty()).then_some(filtered)
             }
@@ -259,6 +319,7 @@ impl TerminalService {
         std::thread::spawn(move || {
             let status = child.wait();
             let exit_code = status.as_ref().ok().map(|status| status.exit_code());
+            // 通知按订阅广播：无订阅方由传输层丢弃，不按形态分支。
             let payload = serde_json::to_string(&ExitNotification {
                 session_id: &exit_session,
                 exit_code,

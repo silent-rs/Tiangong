@@ -87,10 +87,41 @@ pub(super) fn publish_display_output(
     session_id: &str,
     data: &str,
 ) {
+    ingest_screen_update(sessions, session_id, data);
     record_display_output(sessions, session_id, data.as_bytes());
+    // 通知推送按订阅广播：无订阅方（CLI / Server）由传输层直接丢弃，
+    // sidecar 不按形态分支。
     let payload =
         serde_json::to_string(&OutputNotification { session_id, data }).unwrap_or_default();
     emit_notification(CHANNEL_OUTPUT, payload);
+}
+
+/// 把一段用户可见输出喂给会话的屏幕模拟器（issue #697）。
+///
+/// 不感知宿主形态，只看本终端的事实：**从未有前端附着的终端**由模拟器
+/// 生成 `screen_snapshot`（CLI / Server 下 `terminal_send` 由此拿到 vi /
+/// top 等全屏程序的正确画面）；有前端附着的终端快照以 xterm 回传
+/// （`terminalScreenUpdate`）为权威，本调用只维护模拟器，不写快照。
+pub(super) fn ingest_screen_update(
+    sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
+    session_id: &str,
+    visible: &str,
+) {
+    if visible.is_empty() {
+        return;
+    }
+    let mut sessions = sessions.lock().expect("会话表锁损坏");
+    let Some(session) = sessions.get_mut(session_id) else {
+        return;
+    };
+    let Ok(mut grid) = session.screen.lock() else {
+        return;
+    };
+    grid.feed(visible);
+    if !session.frontend_attached_once {
+        session.screen_snapshot = grid.visible_text();
+        session.screen_updates = session.screen_updates.saturating_add(1);
+    }
 }
 
 pub(super) fn contains_marker(text: &str) -> bool {

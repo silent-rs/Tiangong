@@ -6,6 +6,7 @@
 //!   插件 UI（xterm.js）订阅 sidecar 事件渲染。
 
 mod persist;
+mod screen;
 mod service;
 
 #[tokio::main]
