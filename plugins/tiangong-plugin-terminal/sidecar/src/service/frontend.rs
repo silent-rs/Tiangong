@@ -1,14 +1,15 @@
 //! 前端标签协作：附着确认、按会话查找/列出终端与存活集合回收。
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 
-use super::TerminalService;
 use super::types::{
     FindRequest, FindResponse, ListByScopeRequest, ListByScopeResponse, OkResponse,
     ScopeTerminalEntry, TerminalBindingRequest, TerminalGcRequest,
 };
+use super::{FRONTEND_ATTACH_WAIT_MS, TerminalService};
 use crate::persist;
 
 impl TerminalService {
@@ -25,15 +26,13 @@ impl TerminalService {
         if session_id.is_empty() || scope_id.is_empty() {
             bail!("终端附着状态需要有效的 scope_id 与 session_id");
         }
-        let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
         let session = sessions
-            .get_mut(session_id)
+            .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
         if session.scope_id.as_deref() != Some(scope_id) {
             bail!("终端 {session_id} 不属于当前会话");
         }
-        // 前端真实存在：自此快照以 xterm 回传为权威，模拟器不再代写。
-        session.frontend_attached_once = true;
         drop(sessions);
 
         self.mark_frontend_attached(session_id);
@@ -44,6 +43,24 @@ impl TerminalService {
             .or_default()
             .insert(session_id.to_string());
         Ok(OkResponse { ok: true })
+    }
+
+    pub(super) async fn wait_for_frontend_attach(&self, session_id: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(FRONTEND_ATTACH_WAIT_MS);
+        loop {
+            if self
+                .frontend_attached
+                .lock()
+                .expect("前端附着表锁损坏")
+                .contains(session_id)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// 前端在标签新建或关闭后提交当前会话的存活集合。页面并行挂载期间

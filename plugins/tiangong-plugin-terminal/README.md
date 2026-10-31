@@ -6,27 +6,13 @@ TsPluginAdapter 注入 Core。
 工具执行策略在 sidecar（`sidecar/src/service/`，Rust 进程，按职责分模块，见 `mod.rs` 模块说明）：plugin.json
 sidecar 握手通过 `tool:<name>` capabilities 注册五个工具 Handler，宿主把工具调用直连 sidecar，并随请求注入
 宿主权威会话上下文（`session_id` 与会话工作目录，来自 Session 真相源）。
-## 运行形态（issue #697）
+## 入口分工（issue #697）
 
-宿主在 spawn sidecar 时经 TIANGONG_HOST_UI 注入运行形态：
-
-- desktop：有前端界面。工具执行建立/收起插件标签、等待前端附着、
-  输出经 terminal.output 推送给 xterm 渲染，交互画面快照由前端
-  terminalScreenUpdate 回传。
-- headless（CLI / Server）：没有 App 层。不发出 app.open / app.close
-  反馈、不等待前端附着（每条命令省 1 秒窗口）、不推送输出通知；画面
-  快照由 sidecar 内的屏幕解析器（sidecar/src/screen.rs，vte 状态机 +
-  网格模型）生成，terminal_send 对 vi / top / less 等全屏程序同样能
-  返回正确画面。
-
-生命周期：CLI 退出与 Server 会话删除时，宿主调
-release_session_plugin_resources（listInstances + instanceClosed）回收
-会话终端；无主终端由空闲 PTY 超时回收兜底（默认 30 分钟，环境变量
-TIANGONG_TERMINAL_IDLE_PTY_SECS 可调，0 关闭）。
-
-CLI / Server 默认由本插件承担命令执行；旧 command 插件已弃用
-（entrypoints 已清空，所有入口不再注册，升级后自然淘汰并按卸载流程
-移除）。
+- 桌面 / CLI / Server 全部入口：`run_command` / `run_shell` 与
+  `terminal`（action 模式）由本插件提供（PTY 执行、终端复用、交互
+  程序支持）。
+- 旧 command 插件已弃用：entrypoints 已清空，所有入口不再注册，升级
+  后自然淘汰并按卸载流程移除。
 
 每个会话的终端编排（选终端、新建、开标签、执行、收结果）由 sidecar 内
 对应会话作用域唯一完成；页面实例（`src/main.ts` + `terminal-view.ts`）

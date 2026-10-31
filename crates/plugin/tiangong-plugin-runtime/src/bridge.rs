@@ -293,76 +293,6 @@ pub fn invoke_plugin_sidecar(
     )
 }
 
-/// 会话结束时回收插件按会话持有的实例资源（issue #697）。
-///
-/// CLI / Server 没有桌面端的插件标签关闭路径，terminal 之类声明
-/// `instance_resources` 的 sidecar 插件在会话删除或入口退出后，其 PTY
-/// 会一直挂着（sidecar 空闲退出条件是「没有任何活会话」）。宿主在
-/// 会话删除 / REPL 退出时调用本函数：对 terminal 共享 sidecar 先
-/// `listInstances(session_id)`，再逐个 `instanceClosed` 终止 PTY。
-///
-/// 幂等、尽力而为：插件未安装、sidecar 未运行或调用失败只记日志，
-/// 不阻塞会话删除（残留终端由空闲 PTY 超时回收兜底）。
-pub fn release_session_plugin_resources(session_id: &str) {
-    if session_id.trim().is_empty() {
-        return;
-    }
-    let listed = invoke_plugin_sidecar(
-        "terminal",
-        "listInstances",
-        serde_json::json!({ "session_id": session_id }),
-        None,
-    );
-    let instances = match listed {
-        Ok(value) => value
-            .get("instances")
-            .and_then(|instances| instances.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| {
-                        entry
-                            .get("instance_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_default(),
-        Err(error) => {
-            tracing::debug!(
-                session_id,
-                %error,
-                "会话资源回收：terminal sidecar 不可用（未安装或未运行），跳过"
-            );
-            return;
-        }
-    };
-    if instances.is_empty() {
-        return;
-    }
-    for instance_id in instances {
-        let closed = invoke_plugin_sidecar(
-            "terminal",
-            "instanceClosed",
-            serde_json::json!({
-                "session_id": session_id,
-                "instance_id": instance_id,
-            }),
-            None,
-        );
-        if let Err(error) = closed {
-            tracing::warn!(
-                session_id,
-                instance_id,
-                %error,
-                "会话资源回收：terminal 实例关闭失败"
-            );
-        }
-    }
-    tracing::info!(session_id, "会话资源回收：已请求释放 terminal 实例");
-}
-
 /// 宿主请求打开插件 App 实例（宿主可信调用，路由到注入的 app.open 处理器）。
 /// 用于宿主侧为已预留编号的实例资源建立前端标签。
 pub fn request_app_open(plugin_id: &str, payload: &str) -> Result<String> {
@@ -478,16 +408,6 @@ pub(crate) fn handle_runtime_feedback(plugin_id: &str, message: &str) -> bool {
     let Ok(payload) = serde_json::to_string(&payload) else {
         return true;
     };
-    // 无前端入口（CLI / Server）不注入 App 处理器：开/收标签请求无处受理
-    // 是合法状态，静默降级而不是每条命令刷 warn（issue #697）。
-    if APP_HANDLER.get().is_none() {
-        tracing::debug!(
-            plugin_id,
-            method,
-            "宿主未注入 App 处理器（无前端入口），忽略插件标签请求"
-        );
-        return true;
-    }
     if let Err(error) = app_primitive_for_plugin(plugin_id, method, &payload) {
         tracing::warn!(plugin_id, method, %error, "插件 App 反馈执行失败");
     }

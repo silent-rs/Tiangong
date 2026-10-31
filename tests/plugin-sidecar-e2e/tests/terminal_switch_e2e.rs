@@ -1,21 +1,20 @@
-//! terminal 插件 headless 端到端（issue #697）：经真实宿主 stdio 直连
-//! 链路启动 `tiangong-terminal-sidecar`，验证无前端形态（CLI / Server）
-//! 下的命令执行能力——sidecar 不感知宿主形态，前端相关协作全部自然
-//! 降级（标签反馈宿主侧忽略、通知无订阅即弃、画面快照由 sidecar 屏幕
-//! 模拟器生成）：
+//! terminal 插件非桌面轮换端到端（issue #697）：经真实宿主 stdio 直连
+//! 链路启动 `tiangong-terminal-sidecar`（与 CLI / Server 调用方式一致），
+//! 验证 terminal 接替 command 后的命令执行能力——PTY 天然无 UI，无需
+//! 任何 headless 适应：
 //!
-//! - 单条命令不再等待前端附着（无 1 秒 FRONTEND_ATTACH_WAIT_MS 开销）；
-//! - 终端复用：cwd 与 `export` 的环境变量跨调用保留；
-//! - `terminal`（action 模式）开终端、跑 python3 REPL：画面快照由 sidecar
-//!   内的屏幕解析器生成（headless 没有前端回传）；
+//! - 终端复用：cwd 与 `export` 的环境变量跨调用保留（command 无会话
+//!   状态，terminal 复用空闲终端）；
+//! - `terminal`（action 模式）开终端、跑 python3 REPL 并读取输出；
 //! - `\x03` 中断运行中的命令；
 //! - 会话资源释放（listInstances / instanceClosed）回收终端。
 //!
 //! 依赖已构建的 `tiangong-terminal-sidecar` debug 二进制，未构建时跳过。
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use tiangong_plugin_runtime::manifest::SidecarLifecycle;
 use tiangong_plugin_runtime::sidecar::{
     SidecarConfig, SidecarConnection, SidecarInvocationContext, StdioSidecarConnection,
 };
@@ -30,27 +29,7 @@ fn terminal_sidecar_binary() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-fn headless_connection(root: &std::path::Path, binary: PathBuf) -> StdioSidecarConnection {
-    let config = SidecarConfig::new(
-        "terminal",
-        "0.4.1",
-        binary,
-        root.join("endpoint.json"),
-        root.join("sidecar.log"),
-        root.join("data"),
-        root.join("storage"),
-    )
-    .with_lifecycle(tiangong_plugin_runtime::manifest::SidecarLifecycle::Resident)
-    .with_timeouts(Duration::from_secs(20), Duration::from_secs(60));
-    StdioSidecarConnection::new(config)
-}
-
-/// 工具调用返回 JSON 文本 → 解析为 Value（解析失败 panic，测试专用）。
-fn parse(raw: &str) -> serde_json::Value {
-    serde_json::from_str(raw).unwrap_or_else(|error| panic!("工具结果不是 JSON：{error}\n{raw}"))
-}
-
-/// 结果 JSON 的 stdout 字段（命令输出承载）。
+/// 解析工具调用的 JSON 结果（stdout 字段承载命令输出）。
 fn stdout_of(result: &serde_json::Value) -> String {
     result
         .get("stdout")
@@ -61,18 +40,28 @@ fn stdout_of(result: &serde_json::Value) -> String {
 
 #[test]
 #[serial_test::serial]
-fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与回收() {
+fn terminal_非桌面轮换_复用终端_交互与资源释放() {
     let Some(binary) = terminal_sidecar_binary() else {
         eprintln!("跳过：target/debug/tiangong-terminal-sidecar 尚未构建");
         return;
     };
-    let can_terminate = tiangong_plugin_runtime::test_support::can_terminate_child_processes();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let connection = headless_connection(root.path(), binary);
+    let config = SidecarConfig::new(
+        "terminal",
+        "0.4.1",
+        binary,
+        root.path().join("endpoint.json"),
+        root.path().join("sidecar.log"),
+        root.path().join("data"),
+        root.path().join("storage"),
+    )
+    .with_lifecycle(SidecarLifecycle::Resident)
+    .with_timeouts(Duration::from_secs(20), Duration::from_secs(60));
+    let connection = StdioSidecarConnection::new(config);
     let context = SidecarInvocationContext::new(
-        "session-headless-e2e",
+        "session-switch-e2e",
         "call-e2e",
         workspace.to_str().unwrap(),
     );
@@ -90,27 +79,17 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
         )
     };
 
-    // 1. 单条命令没有 1 秒前端附着等待：headless 下首条命令应在 1 秒
-    //    等待窗口内完成（desktop 形态会先耗尽 FRONTEND_ATTACH_WAIT_MS）。
-    let started = Instant::now();
+    // 1. 基本命令执行。
     let echo = call(
         "run_command",
-        serde_json::json!({ "cmd": "echo", "args": ["headless-ok"] }),
+        serde_json::json!({ "cmd": "echo", "args": ["switch-ok"] }),
     );
-    let echo_elapsed = started.elapsed();
     assert!(
-        stdout_of(&echo).contains("headless-ok"),
+        stdout_of(&echo).contains("switch-ok"),
         "echo 输出应包含标记：{}",
         stdout_of(&echo)
     );
-    assert!(
-        echo_elapsed < Duration::from_secs(3),
-        "headless 首条命令不应含 1 秒附着等待：{echo_elapsed:?}"
-    );
 
-    // 诊断：首条命令后的终端状态。
-    let status_after_echo = call("terminal", serde_json::json!({ "action": "status" }));
-    eprintln!("status after echo: {status_after_echo}");
     // 2. 终端复用：export 的环境变量跨调用保留（同一空闲终端）。
     let export = call(
         "run_shell",
@@ -120,29 +99,15 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
         export.get("ok").and_then(serde_json::Value::as_bool) == Some(true),
         "export 应成功：{export}"
     );
-    eprintln!(
-        "echo summary: {:?}",
-        echo.get("summary").and_then(serde_json::Value::as_str)
-    );
-    eprintln!(
-        "export summary: {:?}",
-        export.get("summary").and_then(serde_json::Value::as_str)
-    );
     let verify = call(
         "run_shell",
         serde_json::json!({ "script": "echo E2E=$E2E_MARKER" }),
     );
-    eprintln!(
-        "verify summary: {:?}",
-        verify.get("summary").and_then(serde_json::Value::as_str)
-    );
-    eprintln!("verify stdout: {:?}", stdout_of(&verify));
     assert!(
         stdout_of(&verify).contains("E2E=42"),
         "环境变量应跨调用保留：{}",
         stdout_of(&verify)
     );
-    // 复用同一终端：后续调用的摘要应声明「复用空闲终端」。
     assert!(
         verify
             .get("summary")
@@ -152,7 +117,7 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
         verify.get("summary")
     );
 
-    // 3. terminal(action=open) + python3 REPL：画面快照来自 sidecar 屏幕解析。
+    // 3. terminal(action=open) + python3 REPL 交互。
     let opened = call("terminal", serde_json::json!({ "action": "open" }));
     let terminal_id = opened
         .get("summary")
@@ -179,11 +144,7 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
     send("python3", true, 15);
     let repl = send("print(6*7)", true, 15);
     let repl_text = stdout_of(&repl);
-    assert!(
-        repl_text.contains("42"),
-        "REPL 输出应出现在画面快照：{repl_text}"
-    );
-    // 退出 REPL 回到 shell。
+    assert!(repl_text.contains("42"), "REPL 输出应可读取：{repl_text}");
     send("exit()", true, 10);
 
     // 4. \x03 中断运行中的命令。
@@ -198,14 +159,14 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
     // 5. 会话资源释放：listInstances 应列出该终端，instanceClosed 后清空。
     let listed = call(
         "listInstances",
-        serde_json::json!({ "session_id": "session-headless-e2e" }),
+        serde_json::json!({ "session_id": "session-switch-e2e" }),
     );
     let count_before = listed
         .get("instances")
         .and_then(serde_json::Value::as_array)
         .map(|entries| entries.len())
         .unwrap_or_default();
-    assert!(count_before >= 1, "删除前应至少有 1 个终端实例：{listed}");
+    assert!(count_before >= 1, "关闭前应至少有 1 个终端实例：{listed}");
     if let Some(entries) = listed
         .get("instances")
         .and_then(serde_json::Value::as_array)
@@ -218,7 +179,7 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
             let _ = call(
                 "instanceClosed",
                 serde_json::json!({
-                    "session_id": "session-headless-e2e",
+                    "session_id": "session-switch-e2e",
                     "instance_id": instance_id,
                 }),
             );
@@ -226,7 +187,7 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
     }
     let listed_after = call(
         "listInstances",
-        serde_json::json!({ "session_id": "session-headless-e2e" }),
+        serde_json::json!({ "session_id": "session-switch-e2e" }),
     );
     let count_after = listed_after
         .get("instances")
@@ -238,10 +199,10 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
         "instanceClosed 后实例应清空：{listed_after}"
     );
 
-    drop(call);
     let _ = connection.stop();
-    if can_terminate {
-        // sidecar 进程应随连接停止退出；短暂等待后确认资源回收完成。
-        std::thread::sleep(Duration::from_millis(500));
-    }
+}
+
+/// 工具调用返回 JSON 文本 → 解析为 Value（解析失败 panic，测试专用）。
+fn parse(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|error| panic!("工具结果不是 JSON：{error}\n{raw}"))
 }

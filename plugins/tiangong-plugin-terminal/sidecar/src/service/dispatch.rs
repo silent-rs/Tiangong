@@ -266,12 +266,7 @@ async fn dispatch_operation(
                         pixel_width: 0,
                         pixel_height: 0,
                     })
-                    .context("调整 PTY 尺寸失败")?;
-                // 屏幕模拟器同步尺寸（headless 快照的 viewport 依据）。
-                if let Ok(mut grid) = session.screen.lock() {
-                    grid.resize(request.cols, request.rows);
-                }
-                Ok(())
+                    .context("调整 PTY 尺寸失败")
             })?;
             Ok(serde_json::to_value(OkResponse { ok: true })?)
         }

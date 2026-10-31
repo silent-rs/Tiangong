@@ -69,23 +69,9 @@ const SIDECAR_IDLE_EXIT_SECS: u64 = 5;
 /// 空闲时检查遗留后台作业的间隔：枚举进程有成本，不必每轮都做。
 const BACKGROUND_JOB_CHECK_INTERVAL_SECS: u64 = 2;
 
-/// 空闲 PTY 回收检查间隔：全表扫描 + 作业枚举有成本，粗粒度即可。
-const IDLE_PTY_CHECK_INTERVAL_SECS: u64 = 60;
-
-/// 空闲 PTY 回收阈值（秒，issue #697）：无运行命令、无等待输入、无后台
-/// 作业且输出静默超过此时长的存活终端被终止，防止 CLI / Server 长会话与
-/// 常驻 Server 下终端越积越多。环境变量
-/// `TIANGONG_TERMINAL_IDLE_PTY_SECS` 可覆盖（0 = 关闭回收）。
-const IDLE_PTY_RECYCLE_SECS: u64 = 1800;
-
-/// 启动时解析空闲 PTY 回收阈值（环境变量覆盖）。
-fn idle_pty_recycle_after() -> Option<Duration> {
-    let secs = std::env::var("TIANGONG_TERMINAL_IDLE_PTY_SECS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(IDLE_PTY_RECYCLE_SECS);
-    (secs > 0).then(|| Duration::from_secs(secs))
-}
+/// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间
+/// （宿主统一的实例资源后台挂载上限）。
+const FRONTEND_ATTACH_WAIT_MS: u64 = tiangong_plugin_sidecar::protocol::FRONTEND_ATTACH_WAIT_MS;
 
 pub struct TerminalService {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
@@ -163,13 +149,6 @@ struct PtySession {
     last_output_at: Instant,
     /// 用户可见输出：过滤内部标记后供 UI 重放。
     display_history: Vec<u8>,
-    /// 本终端是否曾有前端页面附着过（会话级事实，非宿主形态）：没有
-    /// 前端的终端由 sidecar 屏幕模拟器生成快照（issue #697）。
-    frontend_attached_once: bool,
-    /// sidecar 内的终端屏幕模拟（headless 画面快照来源，issue #697）。
-    /// 桌面模式同样维护（供终端恢复与后续统一解析评估），快照仍由前端
-    /// 回传为准；headless 模式由它生成 `screen_snapshot`。
-    screen: Arc<Mutex<crate::screen::ScreenGrid>>,
     /// xterm 回传的当前可见画面，供 terminal_send 返回交互结果。
     screen_snapshot: String,
     screen_updates: u64,
@@ -263,33 +242,13 @@ impl TerminalService {
         let sessions = Arc::clone(&self.sessions);
         let last_activity = Arc::clone(&self.last_activity);
         let jobs = Arc::clone(&self.jobs);
-        let recycle_after = idle_pty_recycle_after();
-        if recycle_after.is_some() {
-            tracing::info!(
-                after_secs = recycle_after
-                    .map(|duration| duration.as_secs())
-                    .unwrap_or_default(),
-                "空闲 PTY 回收已启用（环境变量 TIANGONG_TERMINAL_IDLE_PTY_SECS 可调整）"
-            );
-        }
         if let Err(error) = std::thread::Builder::new()
             .name("terminal-idle-exit".to_string())
             .spawn(move || {
                 let mut last_job_check: Option<Instant> = None;
                 let mut reported_jobs = false;
-                let mut last_recycle_check: Option<Instant> = None;
                 loop {
                     std::thread::sleep(Duration::from_millis(250));
-                    // 空闲 PTY 回收（issue #697）：Server 长期运行时无主终端
-                    // 不会自己退出，靠本检查兜底；无候选时为纯表扫描。
-                    if recycle_after.is_some()
-                        && last_recycle_check.is_none_or(|at| {
-                            at.elapsed() >= Duration::from_secs(IDLE_PTY_CHECK_INTERVAL_SECS)
-                        })
-                    {
-                        last_recycle_check = Some(Instant::now());
-                        recycle_idle_ptys(&sessions, &jobs, recycle_after);
-                    }
                     // 已死亡未回收的会话不算活跃：否则 shell 退出后 sidecar
                     // 永远等不到空闲退出。
                     let has_sessions = sessions
@@ -370,66 +329,5 @@ impl TerminalService {
                 .min(session.raw_history.len() as u64) as usize;
             Ok(session.raw_history[index..].to_vec())
         })
-    }
-}
-
-/// 空闲 PTY 回收（issue #697）：CLI / Server 下没有前端标签关闭路径，
-/// 交互 shell 挂着就会让 sidecar 永不空闲退出，长期运行终端越积越多。
-///
-/// 回收条件（全部满足）：
-/// - shell 存活且处于空闲/不可复用状态（执行中、交互中、已预留不碰）；
-/// - 没有 `terminal_send` 待确认命令，也没有进行中的等待；
-/// - 输出静默超过阈值（`last_output_at`）；
-/// - 该终端没有登记存活的后台作业（`&` / `nohup`，#672 语义优先）。
-fn recycle_idle_ptys(
-    sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
-    jobs: &Arc<jobs::JobTracker>,
-    recycle_after: Option<Duration>,
-) {
-    let Some(recycle_after) = recycle_after else {
-        return;
-    };
-    // 候选收集与作业核查分离：jobs 枚举较重，只对候选做。
-    let candidates: Vec<String> = {
-        let Ok(table) = sessions.lock() else {
-            return;
-        };
-        table
-            .iter()
-            .filter(|(_, session)| {
-                session.exited_code.is_none()
-                    && matches!(
-                        session.phase,
-                        SessionPhase::Idle | SessionPhase::Unresponsive
-                    )
-                    && session.pending_send.is_none()
-                    && session.send_in_flight == 0
-                    && session.running_command.is_none()
-                    && session.last_output_at.elapsed() >= recycle_after
-            })
-            .map(|(id, _)| id.clone())
-            .collect()
-    };
-    if candidates.is_empty() {
-        return;
-    }
-    // 有存活后台作业的终端不回收：回收后沙箱换代，作业再也收不掉（#672）。
-    let live_jobs = jobs.live_jobs(None, |_| true);
-    let removed: Vec<(String, PtySession)> = {
-        let Ok(mut table) = sessions.lock() else {
-            return;
-        };
-        candidates
-            .into_iter()
-            .filter(|id| !live_jobs.iter().any(|job| &job.terminal_id == id))
-            .filter_map(|id| table.remove(&id).map(|session| (id, session)))
-            .collect()
-    };
-    if removed.is_empty() {
-        return;
-    }
-    for (id, mut session) in removed {
-        let _ = session.killer.kill();
-        tracing::info!(terminal_id = %id, "空闲 PTY 回收：终端超时无活动，已终止");
     }
 }

@@ -1027,8 +1027,7 @@ impl ProcessSidecarConnection {
             command.env(SERVER_TOKEN_ENV, token);
         }
         // 通过单独的 JSON 信封传递 exec_env，避免把贡献值直接暴露给所有 sidecar。
-        // command 与 terminal 同为命令执行插件（terminal 于 #697 接管 CLI/Server）。
-        if matches!(self.config.plugin_id.as_str(), "command" | "terminal")
+        if self.config.plugin_id == "command"
             && let Ok(env) = self.exec_env.lock()
             && !env.is_empty()
             && let Ok(json) = serde_json::to_string(&*env)
