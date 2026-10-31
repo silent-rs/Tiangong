@@ -14,6 +14,23 @@ sidecar 握手通过 `tool:<name>` capabilities 注册五个工具 Handler，宿
 - 旧 command 插件已弃用：entrypoints 已清空，所有入口不再注册，升级
   后自然淘汰并按卸载流程移除。
 
+## 运行形态（issue #697）
+
+宿主在 spawn sidecar 时经 TIANGONG_HOST_UI 注入运行形态：
+
+- desktop：有前端界面。工具执行建立/收起插件标签，输出经
+  terminal.output 推送给 xterm 渲染，交互画面快照由前端
+  terminalScreenUpdate 回传。
+- headless（CLI / Server）：没有 App 层。不发出 app.open / app.close
+  反馈、不等待前端附着、不推送输出通知；画面快照由 sidecar 内的屏幕
+  解析器（sidecar/src/screen.rs，vte 状态机 + 网格模型）生成，
+  terminal_send 对 vi / top / less 等全屏程序同样能返回正确画面。
+
+生命周期：CLI 退出与 Server 会话删除时，宿主调
+release_session_plugin_resources（listInstances + instanceClosed）回收
+会话终端；无主终端由空闲 PTY 超时回收兜底（默认 30 分钟，环境变量
+TIANGONG_TERMINAL_IDLE_PTY_SECS 可调，0 关闭）。
+
 每个会话的终端编排（选终端、新建、开标签、执行、收结果）由 sidecar 内
 对应会话作用域唯一完成；页面实例（`src/main.ts` + `terminal-view.ts`）
 只承担显示与输入，不参与工具调度，也无 `tool.requested` 竞争接应。

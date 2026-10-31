@@ -97,6 +97,17 @@ pub fn try_command_env_blocklist() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// CLI / Server 命令执行后端（issue #697）：空 = terminal（默认），
+/// `legacy-command` = 回退 command；尚未初始化配置时按默认处理。
+pub fn try_command_backend() -> String {
+    config_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|config| config.command_backend)
+        .unwrap_or_default()
+}
+
 /// 可靠更新模型配置：先写盘成功，再更新兼容副本并返回新的完整配置。
 ///
 /// 处理顺序：

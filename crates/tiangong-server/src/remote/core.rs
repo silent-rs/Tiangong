@@ -247,6 +247,11 @@ impl ServerCoreManager {
             .await
             .map_err(anyhow::Error::msg)?;
 
+        // 回收会话持有的插件实例资源（issue #697）：terminal 的 PTY 由
+        // sidecar 持有，Server 常驻运行时不会随会话文件删除而释放。
+        // 尽力而为，失败不阻塞删除（空闲超时回收兜底）。
+        tiangong_plugin_runtime::release_session_plugin_resources(&session_id);
+
         self.trackers
             .lock()
             .map_err(|error| anyhow!("执行跟踪锁已损坏：{error}"))?

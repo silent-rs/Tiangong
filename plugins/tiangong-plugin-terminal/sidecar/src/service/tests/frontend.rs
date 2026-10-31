@@ -83,7 +83,7 @@ async fn instance_closed_兜底回收幂等且校验归属() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_command_等待前端精确附着后才执行() {
+async fn run_command_不等前端附着即执行_历史重放兜底() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = Arc::new(TerminalService::new());
@@ -98,49 +98,35 @@ async fn run_command_等待前端精确附着后才执行() {
             .await
     });
 
-    let terminal_id = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(terminal_id) = service
-                .sessions
-                .lock()
-                .expect("会话表锁损坏")
-                .keys()
-                .next()
-                .cloned()
-            {
-                break terminal_id;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("等待 Agent 终端创建超时");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!running.is_finished(), "前端尚未附着时命令不应开始并完成");
-
+    // PTY 执行不等观看者（issue #697）：无前端附着时命令照常执行完成，
+    // 页面随后附着时经 display_history 重放看到全部输出。
+    let response = tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("命令应不等前端附着即执行完成")
+        .expect("命令任务异常");
+    let outcome = outcome_of(response);
+    assert_eq!(outcome["stdout"], "attached");
+    let terminal_id = service
+        .sessions
+        .lock()
+        .expect("会话表锁损坏")
+        .keys()
+        .next()
+        .cloned()
+        .expect("应已创建终端");
     let found = service.find_by_scope(&FindRequest {
         scope_id: "session-attached".to_string(),
         session_id: Some(terminal_id.clone()),
     });
     assert_eq!(found.session_id.as_deref(), Some(terminal_id.as_str()));
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(
-        !running.is_finished(),
-        "仅查到 PTY 不能代替前端完成订阅与附着"
-    );
+    // 迟到附着（页面加载完成后）：历史重放包含命令输出。
+    assert!(found.history.contains("attached"), "重放历史应含命令输出");
     service
         .attach_frontend(TerminalBindingRequest {
             scope_id: "session-attached".to_string(),
             session_id: terminal_id.clone(),
         })
         .expect("确认前端附着失败");
-
-    let response = tokio::time::timeout(Duration::from_secs(10), running)
-        .await
-        .expect("前端附着后命令未完成")
-        .expect("命令任务异常");
-    let outcome = outcome_of(response);
-    assert_eq!(outcome["stdout"], "attached");
     service
         .kill_session(SessionIdRequest {
             session_id: terminal_id,
