@@ -48,10 +48,6 @@ struct LegacyAgentConfig {
     default_trust_mode: Option<TrustMode>,
     #[serde(default)]
     reasoning_effort: Option<String>,
-    /// CLI / Server 命令执行后端（issue #697）：空 = terminal（默认），
-    /// `legacy-command` = 回退到已弃用的 command 插件。
-    #[serde(default)]
-    command_backend: Option<String>,
 }
 
 /// 自动更新默认开启：旧 `app.json` 无该字段时按 true 加载。
@@ -148,11 +144,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         sandbox_policy,
         auto_update: app.auto_update,
         command_env_blocklist: app.command_env_blocklist,
-        command_backend: app
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.command_backend.clone())
-            .unwrap_or_default(),
         server,
     }
 }

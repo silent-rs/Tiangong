@@ -152,10 +152,6 @@ pub struct TiangongConfig {
     pub auto_update: bool,
     /// 旧版命令环境变量黑名单兼容字段；加载后合并进 sandbox_policy.environment_blocklist。
     pub command_env_blocklist: Vec<String>,
-    /// CLI / Server 的命令执行后端（issue #697）：空 = 默认使用 terminal
-    /// 插件；`legacy-command` = 显式回退到已弃用的 command 插件。
-    /// 桌面端不受影响（terminal 一直可用）。
-    pub command_backend: String,
     /// Server 配置
     pub server: ServerConfig,
 }
@@ -172,7 +168,6 @@ impl Default for TiangongConfig {
             sandbox_policy: SandboxUserPolicy::default(),
             auto_update: true,
             command_env_blocklist: Vec::new(),
-            command_backend: String::new(),
             server: ServerConfig::default(),
         }
     }
