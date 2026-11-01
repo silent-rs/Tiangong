@@ -31,7 +31,6 @@ const mocks = vi.hoisted(() => {
     resetContribution: () => { contribution = defaultContribution(); },
     listSlotContributions: vi.fn(() => Promise.resolve(contribution ? [contribution] : [])),
     pluginOpenEntry: vi.fn((pluginId: string) => Promise.resolve(`<div>${pluginId}</div>`)),
-    pluginOpenView: vi.fn(() => Promise.resolve('<div>wasm</div>')),
     bridgeSubscribe: vi.fn(() => Promise.resolve()),
     bridgeUnsubscribe: vi.fn(() => Promise.resolve()),
     onBridgeEvent: vi.fn((handler: (event: {
@@ -53,7 +52,6 @@ vi.mock('@/api/tauri', async (importOriginal) => {
       ...actual.api,
       listSlotContributions: mocks.listSlotContributions,
       pluginOpenEntry: mocks.pluginOpenEntry,
-      pluginOpenView: mocks.pluginOpenView,
       bridgeSubscribe: mocks.bridgeSubscribe,
       bridgeUnsubscribe: mocks.bridgeUnsubscribe,
       onBridgeEvent: mocks.onBridgeEvent,

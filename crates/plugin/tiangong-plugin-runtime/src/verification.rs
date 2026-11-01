@@ -391,12 +391,10 @@ mod tests {
 
     fn manifest(id: &str, version: &str) -> PluginManifest {
         PluginManifest {
-            schema_version: 2,
             name: None,
             description: None,
             id: id.into(),
             version: version.into(),
-            wasm: None,
             sidecar: None,
             permissions: vec![],
             entrypoints: None,

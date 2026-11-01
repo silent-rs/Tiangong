@@ -68,7 +68,7 @@ export function InteractionPluginHost({
         }
         const view = selected.source === 'manifest'
           ? await api.pluginOpenEntry(selected.plugin_id, selected.contribution_id)
-          : await api.pluginOpenView(selected.plugin_id, selected.contribution_id);
+          : await api.pluginOpenEntry(selected.plugin_id, selected.contribution_id);
         if (disposed || version !== loadVersion) return;
         setLoadedHandler((current) => {
           const contribution = current && sameHandler(current.contribution, selected!)

@@ -3,7 +3,7 @@
 
 use super::connections::{
     kill_sidecar_orphans, remove_sidecar_connection, sidecar_binary_path,
-    stop_connection_for_directory, stop_loaded_sidecar, unload_plugin_wasm,
+    stop_connection_for_directory, stop_loaded_sidecar, unload_plugin_adapters,
 };
 use super::*;
 
@@ -290,8 +290,8 @@ fn set_plugin_enabled_inner(
 
     let marker = installed.directory.join(DISABLED_MARKER);
 
-    // 无 WASM/sidecar 插件的启停只需更新标记、注册表与存活 TS 适配器。
-    if installed.manifest.wasm_binary().is_none() && installed.manifest.sidecar.is_none() {
+    // 无 sidecar 插件的启停只需更新标记、注册表与存活 TS 适配器。
+    if installed.manifest.sidecar.is_none() {
         if enabled {
             remove_file_if_exists(&marker)?;
         } else {
@@ -332,7 +332,7 @@ fn set_plugin_enabled_inner(
         }
     } else {
         create_disabled_marker(&marker)?;
-        let (instances, ts_instances) = {
+        let ts_instances = {
             let mut plugins = loaded_plugins()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
@@ -342,30 +342,18 @@ fn set_plugin_enabled_inner(
             loaded.enabled = false;
             loaded.load_error = None;
             loaded.runtime_error = None;
-            let instances = loaded
-                .instances
-                .iter()
-                .filter_map(Weak::upgrade)
-                .collect::<Vec<_>>();
-            let ts_instances = loaded
+            loaded
                 .ts_instances
                 .iter()
                 .filter_map(Weak::upgrade)
-                .collect::<Vec<_>>();
-            (instances, ts_instances)
+                .collect::<Vec<_>>()
         };
-        for adapter in &instances {
-            adapter.set_enabled(false);
-        }
         for adapter in &ts_instances {
             adapter.set_enabled(false);
         }
         crate::ts_tools::cancel_plugin_calls(plugin_id);
         crate::bridge::clear_plugin_subscriptions(plugin_id);
         if let Err(error) = stop_connection_for_directory(&installed.directory) {
-            for adapter in &instances {
-                adapter.set_enabled(true);
-            }
             for adapter in &ts_instances {
                 adapter.set_enabled(true);
             }
@@ -558,7 +546,7 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
     kill_sidecar_orphans(&installed);
-    unload_plugin_wasm(plugin_id);
+    unload_plugin_adapters(plugin_id);
 
     let removed = transaction_directory(storage_root, "uninstall")?;
     rename_with_retry(&installed.directory, &removed)?;
@@ -591,13 +579,6 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
         && let Some(loaded) = plugins.remove(plugin_id)
     {
         for adapter in loaded
-            .instances
-            .into_iter()
-            .filter_map(|item| item.upgrade())
-        {
-            adapter.set_enabled(false);
-        }
-        for adapter in loaded
             .ts_instances
             .into_iter()
             .filter_map(|item| item.upgrade())
@@ -624,10 +605,6 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
         signed_release,
     };
     let result = (|| {
-        let wasm_bytes = match installed.manifest.wasm_binary() {
-            Some(_) => Some(Arc::new(read_wasm_bytes(&installed)?)),
-            None => None,
-        };
         let sidecar = resolve_sidecar(storage_root, &installed, true)?;
         if let Some(sidecar_manifest) = &installed.manifest.sidecar {
             match sidecar_manifest.runtime {
@@ -657,17 +634,11 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
                 }
             }
         }
-        compile_plugin(
-            wasm_bytes.clone().unwrap_or_else(|| Arc::new(Vec::new())),
-            &installed.manifest,
-            sidecar,
-            PluginRuntimeConfig::default(),
-        )?;
-        let _ = wasm_bytes;
-        Ok(())
+        Ok(sidecar)
     })();
     remove_sidecar_connection(staged_path);
-    result?;
+    let sidecar = result?;
+    drop(sidecar);
     Ok(installed)
 }
 
@@ -737,12 +708,10 @@ fn install_new_plugin(
     // 回滚只针对安装前提类失败：逻辑制品无法加载、解释器不可发现、
     // 签名/信任构造失败（load_error）。常驻 sidecar 启动失败属于运行
     // 异常（runtime_error）——保留安装，插件管理显示启动异常。
-    if (loaded.ui_plugin.is_none() && manifest.wasm_binary().is_some())
-        || loaded.load_error.is_some()
-    {
+    if loaded.load_error.is_some() {
         let error = loaded
             .load_error
-            .unwrap_or_else(|| "WASM 插件加载失败".to_string());
+            .unwrap_or_else(|| "插件加载失败".to_string());
         let _ = stop_connection_for_directory(&destination);
         std::fs::rename(&destination, staged_path)?;
         if let Some(retained) = &retained {
@@ -778,7 +747,7 @@ fn replace_installed_plugin(
     stop_connection_for_directory(&current.directory)?;
     kill_sidecar_orphans(current);
     crate::ts_tools::cancel_plugin_calls(&current.manifest.id);
-    unload_plugin_wasm(&current.manifest.id);
+    unload_plugin_adapters(&current.manifest.id);
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {
         std::fs::create_dir_all(parent)?;

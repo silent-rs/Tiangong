@@ -1027,8 +1027,6 @@ export const api = {
   // ── 插件 UI 桥接（WASM 插件动态 UI）──
   // 天工只提供通用桥接，不处理具体插件业务。
 
-  listPluginContributions: (): Promise<PluginContributionEntry[]> =>
-    invoke('list_plugin_contributions'),
 
   listPlugins: (): Promise<PluginStatus[]> => invoke('list_plugins'),
 
@@ -1073,14 +1071,6 @@ export const api = {
 
   reloadPlugin: (pluginId: string): Promise<PluginStatus> =>
     invoke('reload_plugin', { pluginId }),
-
-  /// 按需获取插件页面 HTML（用户点击进入时才调用）。
-  pluginOpenView: (pluginId: string, contributionId: string): Promise<string> =>
-    invoke('plugin_open_view', { pluginId, contributionId }),
-
-  /// 通用桥接：转发到 WASM 的 handle-view-message。
-  pluginCall: (pluginId: string, method: string, payload: string): Promise<string> =>
-    invoke('plugin_call', { pluginId, method, payload }),
 
   /// 按挂载点列出 UI 贡献（v1 WASM 设置页 + v2 manifest 声明合并）。
   listSlotContributions: (slot: string): Promise<SlotContributionEntry[]> =>
@@ -1233,18 +1223,6 @@ export interface RemotePairing {
 }
 
 /// 插件设置页贡献项。
-export interface PluginContributionEntry {
-  plugin_id: string;
-  generation: number;
-  contribution_id: string;
-  title: string;
-  description: string;
-  icon: string;
-  group: string;
-  /// 是否有可渲染的配置页面。
-  has_view: boolean;
-}
-
 export interface PluginStatus {
   id: string;
   name: string;

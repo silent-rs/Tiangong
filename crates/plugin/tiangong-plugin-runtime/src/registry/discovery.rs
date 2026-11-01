@@ -302,69 +302,20 @@ fn load_plugin_record_from_snapshot(
         tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
         runtime_error = Some(error.to_string());
     }
-    // 纯 UI 插件（wasm 省略）：无逻辑层，直接构造已加载记录
-    let load_result = if installed.manifest.wasm_binary().is_some() {
-        read_wasm_bytes(&installed)
-            .map(|bytes| {
-                let bytes = Arc::new(bytes);
-                compile_plugin(
-                    bytes.clone(),
-                    &installed.manifest,
-                    sidecar.clone(),
-                    PluginRuntimeConfig::default(),
-                )
-                .map(|(component, plugin, descriptor)| (Some(bytes), component, plugin, descriptor))
-            })
-            .and_then(|result| result)
-    } else {
-        Ok((None, None, None, None))
-    };
-
-    match load_result {
-        Ok((bytes, component, plugin, descriptor)) => {
-            tracing::info!(plugin_id = %installed.manifest.id, "WASM 插件已预加载");
-            LoadedPlugin {
-                directory: installed.directory,
-                manifest: installed.manifest,
-                signed_release,
-                wasm_bytes: bytes,
-                component,
-                ui_plugin: plugin.map(|plugin| Arc::new(Mutex::new(plugin))),
-                descriptor,
-                generation: 1,
-                instances: Vec::new(),
-                ts_instances: Vec::new(),
-                sidecar,
-                verified_sidecar,
-                prompt_sections,
-                dynamic_tool_specs: tool_specs,
-                load_error,
-                runtime_error,
-                enabled: installed.enabled,
-            }
-        }
-        Err(error) => {
-            tracing::warn!(plugin_id = %installed.manifest.id, %error, "加载 WASM 插件失败");
-            LoadedPlugin {
-                directory: installed.directory,
-                manifest: installed.manifest,
-                signed_release,
-                wasm_bytes: None,
-                component: None,
-                ui_plugin: None,
-                descriptor: None,
-                generation: 0,
-                instances: Vec::new(),
-                ts_instances: Vec::new(),
-                sidecar,
-                verified_sidecar,
-                prompt_sections,
-                dynamic_tool_specs: tool_specs,
-                load_error: load_error.or_else(|| Some(error.to_string())),
-                runtime_error,
-                enabled: installed.enabled,
-            }
-        }
+    tracing::info!(plugin_id = %installed.manifest.id, "插件已预加载");
+    LoadedPlugin {
+        directory: installed.directory,
+        manifest: installed.manifest,
+        signed_release,
+        generation: 1,
+        ts_instances: Vec::new(),
+        sidecar,
+        verified_sidecar,
+        prompt_sections,
+        dynamic_tool_specs: tool_specs,
+        load_error,
+        runtime_error,
+        enabled: installed.enabled,
     }
 }
 

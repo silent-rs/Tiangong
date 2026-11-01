@@ -1800,7 +1800,7 @@ export function PluginView({ contribution }: { contribution: SlotContributionEnt
     setHtml('');
     const load = contribution.source === 'manifest'
       ? api.pluginOpenEntry(contribution.plugin_id, contribution.contribution_id)
-      : api.pluginOpenView(contribution.plugin_id, contribution.contribution_id);
+      : api.pluginOpenEntry(contribution.plugin_id, contribution.contribution_id);
     load
       .then((page) => {
         if (active) setHtml(page);

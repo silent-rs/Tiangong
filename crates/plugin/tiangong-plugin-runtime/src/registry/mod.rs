@@ -1,4 +1,4 @@
-//! 已安装 WASM 插件的发现、加载、状态查询和动态热加载。
+//! 已安装插件的发现、加载、状态查询和动态热加载。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,14 +11,8 @@ use serde::Serialize;
 use sha2::Digest;
 use tiangong_core::core::Plugin;
 
-use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
-use crate::config::PluginRuntimeConfig;
 use crate::events::PluginChangeKind;
 use crate::interpreter_env::{self, InterpreterKind};
-use crate::loader::{
-    Contribution, Descriptor, WasmPlugin, WasmPluginLoader, compile_component,
-    instantiate_component,
-};
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::{
     CONTENT_MANIFEST_FILE, EphemeralCommandConnection, InterpreterLaunch, ProcessSidecarConnection,
@@ -36,7 +30,7 @@ use crate::ts_plugin::TsPluginAdapter;
 // - `inventory`：自制插件判据、对话内清单与能力指纹
 // - `legacy`：旧插件 ID 迁移（合并保留目录、归档旧目录）
 // - `discovery`：磁盘发现、预加载与插件记录构建
-// - `loader`：查询视图、WASM 编译装载与 Core 适配器创建
+// - `loader`：查询视图与 Core 适配器创建
 // - `views`：slots/贡献/扩展页等 manifest 级视图
 // - `migrations`：安装/启停/回滚/卸载与文件系统事务
 // - `connections`：sidecar 连接池（复用/换代/临时连接）与停机清理
@@ -52,9 +46,8 @@ mod views;
 
 use connections::stop_loaded_sidecar;
 pub(crate) use connections::{
-    ephemeral_sidecar_connection, ephemeral_sidecar_connection_with_workspace,
-    refresh_stale_sidecar, sidecar_connection, sidecar_connection_with_workspace,
-    stop_connection_for_directory,
+    ephemeral_sidecar_connection, ephemeral_sidecar_connection_with_workspace, sidecar_connection,
+    sidecar_connection_with_workspace, stop_connection_for_directory,
 };
 pub use discovery::*;
 pub use inventory::*;
@@ -312,12 +305,7 @@ struct LoadedPlugin {
     /// `publisher == local` 是自制插件动态调用通道的分流判据，
     /// 安装时确定、终身不变。
     signed_release: Option<SignedPluginRelease>,
-    wasm_bytes: Option<Arc<Vec<u8>>>,
-    component: Option<Arc<wasmtime::component::Component>>,
-    ui_plugin: Option<Arc<Mutex<WasmPlugin>>>,
-    descriptor: Option<Descriptor>,
     generation: u64,
-    instances: Vec<Weak<WasmPluginAdapter>>,
     ts_instances: Vec<Weak<TsPluginAdapter>>,
     sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
@@ -334,7 +322,7 @@ struct LoadedPlugin {
     /// 通知变更时重取；core 每轮经适配器 `tool_specs()` 读取，快照
     /// 更新后下一轮工具装配自动生效。
     dynamic_tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
-    /// 数据/制品/逻辑层加载错误（解释器不可发现、WASM 无法编译等）：
+    /// 数据/制品/逻辑层加载错误（解释器不可发现等）：
     /// 插件不满足安装条件，安装路径据此回滚。
     load_error: Option<String>,
     /// 启动/握手/运行检查错误（常驻 sidecar 起不来、验证失败、记录保存

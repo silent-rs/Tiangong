@@ -25,7 +25,7 @@ export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
       ...item,
       html: item.source === 'manifest'
         ? await api.pluginOpenEntry(item.plugin_id, item.contribution_id)
-        : await api.pluginOpenView(item.plugin_id, item.contribution_id),
+        : await api.pluginOpenEntry(item.plugin_id, item.contribution_id),
     })));
     setItems(loaded);
   }, [slot]);
@@ -46,7 +46,7 @@ export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
           ...item,
           html: item.source === 'manifest'
             ? await api.pluginOpenEntry(item.plugin_id, item.contribution_id)
-            : await api.pluginOpenView(item.plugin_id, item.contribution_id),
+            : await api.pluginOpenEntry(item.plugin_id, item.contribution_id),
         })));
         if (!disposed) {
           setItems((current) => [

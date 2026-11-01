@@ -39,7 +39,7 @@ export function PluginSettingsPanel() {
     try {
       const pageHtml = entry.source === 'manifest'
         ? await api.pluginOpenEntry(entry.plugin_id, entry.contribution_id)
-        : await api.pluginOpenView(entry.plugin_id, entry.contribution_id);
+        : await api.pluginOpenEntry(entry.plugin_id, entry.contribution_id);
       setHtml(pageHtml);
     } catch {
       setHtml('<p style="padding:16px;color:#888">页面加载失败</p>');
