@@ -187,6 +187,8 @@ impl ToolOverrideHandler for EchoTool {
                 stdout: "done".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })
@@ -240,6 +242,8 @@ impl ToolOverrideHandler for PausedTool {
                 stdout: "done".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })
@@ -262,6 +266,8 @@ impl ToolOverrideHandler for FailingTool {
                 stdout: String::new(),
                 stderr: "test failure".to_string(),
                 exit_code: 1,
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })
@@ -2709,6 +2715,8 @@ async fn failed_tool_call_does_not_inject_images() {
         stdout: stdout.clone(),
         stderr: String::new(),
         exit_code: 1,
+        error_kind: None,
+        retryable: None,
         execution: None,
     };
     let mut pending = Vec::new();
@@ -2724,6 +2732,47 @@ async fn failed_tool_call_does_not_inject_images() {
     );
     assert!(pending.is_empty(), "失败的工具不得注入图片");
 
+    // 声明 retryable=true（覆盖默认）：[tool_failure] 渲染采纳插件声明（#710）。
+    let declared_retryable = ToolResult {
+        ok: false,
+        summary: "file_write(replace) 失败：未找到待替换内容".to_string(),
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 1,
+        error_kind: Some("argument_error".to_string()),
+        retryable: Some(true),
+        execution: None,
+    };
+    record_completed_tool_call(
+        &mut ctx,
+        CompletedToolCall {
+            call: &call,
+            args_summary: "old=…",
+            result: &declared_retryable,
+            duration_ms: 5,
+        },
+        &mut pending,
+    );
+    let failure_text = ctx
+        .session
+        .messages
+        .iter()
+        .filter(|message| message.role == crate::session::MessageRole::Tool)
+        .map(|message| message.text_content())
+        .rev()
+        .find(|content| content.contains("[tool_failure]"))
+        .expect("应渲染 [tool_failure]");
+    assert!(
+        failure_text.contains("error_kind: argument_error"),
+        "{failure_text}"
+    );
+    assert!(failure_text.contains("retryable: true"), "{failure_text}");
+    assert!(
+        failure_text.contains("修正参数后再调用"),
+        "argument 对应的建议应指向参数修正: {failure_text}"
+    );
+    assert!(pending.is_empty(), "失败的工具不得注入图片");
+
     // 同一份 stdout、成功结果：正常注入。
     let ok_result = ToolResult {
         ok: true,
@@ -2731,6 +2780,8 @@ async fn failed_tool_call_does_not_inject_images() {
         stdout,
         stderr: String::new(),
         exit_code: 0,
+        error_kind: None,
+        retryable: None,
         execution: None,
     };
     record_completed_tool_call(

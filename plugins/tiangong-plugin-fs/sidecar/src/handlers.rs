@@ -14,9 +14,10 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tiangong_plugin_fs_protocol::FsAccessContext;
 use tiangong_plugin_fs_protocol::tools::{
-    APPLY_PATCH_LABEL, ApplyPatchRequest, FsToolResponse, LIST_DIR_LABEL, ListDirRequest,
-    READ_FILE_LABEL, REPLACE_IN_FILE_LABEL, ReadFileRequest, ReplaceInFileRequest, TREE_DIR_LABEL,
-    TreeDirRequest, WRITE_FILE_LABEL, WriteFileRequest,
+    APPLY_PATCH_LABEL, ApplyPatchRequest, FS_ERROR_KIND_ARGUMENT,
+    FS_ERROR_KIND_ENVIRONMENT_MISSING, FS_ERROR_KIND_TOOL_INTERNAL, FsToolResponse, LIST_DIR_LABEL,
+    ListDirRequest, READ_FILE_LABEL, REPLACE_IN_FILE_LABEL, ReadFileRequest, ReplaceInFileRequest,
+    TREE_DIR_LABEL, TreeDirRequest, WRITE_FILE_LABEL, WriteFileRequest,
 };
 use tiangong_toolkit as shared;
 
@@ -156,12 +157,23 @@ pub fn handle_read_file(req: ReadFileRequest) -> FsToolResponse {
         // 否则文件缺失会被误报成"目标不是文件"，误导调用方反复重试。
         match fs::metadata(&full_path) {
             Ok(meta) if meta.is_file() => {}
-            Ok(_) => return Err(anyhow!("目标不是文件：{}", full_path.display())),
+            Ok(_) => {
+                return Err(invalid_argument(format!(
+                    "目标不是文件：{}",
+                    full_path.display()
+                )));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(anyhow!("文件不存在：{}", full_path.display()));
+                return Err(io_error(
+                    std::io::ErrorKind::NotFound,
+                    format!("文件不存在：{}", full_path.display()),
+                ));
             }
             Err(e) => {
-                return Err(anyhow!("无法访问目标文件：{}（{e}）", full_path.display()));
+                return Err(io_error(
+                    std::io::ErrorKind::Other,
+                    format!("无法访问目标文件：{}（{e}）", full_path.display()),
+                ));
             }
         }
         let content = fs::read_to_string(&full_path)
@@ -243,11 +255,14 @@ pub fn handle_replace_in_file(req: ReplaceInFileRequest) -> FsToolResponse {
     let (locked, unlocked, result) =
         with_write_lock(&req.access, std::slice::from_ref(&req.path), |base| {
             if req.old.is_empty() {
-                return Err(anyhow!("replace_in_file old 参数不能为空"));
+                return Err(invalid_argument("replace_in_file old 参数不能为空"));
             }
             let full_path = shared::resolve_write_path_from_base(&req.path, base)?;
             if !full_path.is_file() {
-                return Err(anyhow!("目标不是文件：{}", full_path.display()));
+                return Err(invalid_argument(format!(
+                    "目标不是文件：{}",
+                    full_path.display()
+                )));
             }
             let content = fs::read_to_string(&full_path)
                 .with_context(|| format!("读取文件失败：{}", full_path.display()))?;
@@ -263,23 +278,23 @@ pub fn handle_replace_in_file(req: ReplaceInFileRequest) -> FsToolResponse {
                 count = content.matches(&old).count();
             }
             if count == 0 {
-                return Err(anyhow!("未找到待替换内容"));
+                return Err(invalid_argument("未找到待替换内容"));
             }
             if let Some(expected) = req.expected_count
                 && count != expected
             {
-                return Err(anyhow!(
+                return Err(invalid_argument(format!(
                     "命中数量不符合预期：expected={expected}, actual={count}"
-                ));
+                )));
             }
             let (replaced, replaced_count) = if req.replace_all {
                 (content.replace(&old, &new), count)
             } else {
                 if count != 1 {
-                    return Err(anyhow!(
+                    return Err(invalid_argument(format!(
                         "默认仅允许单点替换，当前命中 {} 处；如需全量替换请设置 replace_all=true",
                         count
-                    ));
+                    )));
                 }
                 (content.replacen(&old, &new, 1), 1)
             };
@@ -313,7 +328,7 @@ pub fn handle_apply_patch(req: ApplyPatchRequest) -> FsToolResponse {
         let workdir_raw = req.workdir.as_deref();
         let effective_cwd = shared::resolve_effective_cwd_with(workdir_raw, &base)?;
         if req.patch.trim().is_empty() {
-            return Err(anyhow!("apply_patch patch 内容不能为空"));
+            return Err(invalid_argument("apply_patch patch 内容不能为空"));
         }
         enumerate_patch_targets(&req.patch, &effective_cwd)
     })();
@@ -447,11 +462,17 @@ fn finalize_write(
 fn ensure_dir_target(full_path: &Path) -> Result<()> {
     match fs::metadata(full_path) {
         Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(anyhow!("目标不是目录：{}", full_path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(anyhow!("目录不存在：{}", full_path.display()))
+        Ok(_) => Err(invalid_argument(format!(
+            "目标不是目录：{}",
+            full_path.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(io_error(
+            std::io::ErrorKind::NotFound,
+            format!("目录不存在：{}", full_path.display()),
+        )),
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("无法访问目标目录：{}", full_path.display())))
         }
-        Err(e) => Err(anyhow!("无法访问目标目录：{}（{e}）", full_path.display())),
     }
 }
 
@@ -461,11 +482,61 @@ fn error_response(tool: &str, e: anyhow::Error) -> FsToolResponse {
     let summary = format!("{tool} 失败：{e:#}");
     FsToolResponse {
         ok: false,
+        error_kind: Some(classify_error(&e).to_string()),
         summary: summary.clone(),
         stderr: summary,
         exit_code: 1,
         ..Default::default()
     }
+}
+
+/// 失败类型分类（#710）：
+/// - 参数/匹配类失败（未找到待替换内容、命中数不符、补丁不匹配、非法
+///   参数）= `argument_error`——模型应修正参数后重试；
+/// - IO 根因 NotFound / PermissionDenied / NotADirectory =
+///   `environment_missing`；
+/// - 其余 = `tool_internal_error`。
+pub(crate) fn classify_error(e: &anyhow::Error) -> &'static str {
+    // 沿错误链查找：InvalidArgument 可能被外层 with_context/anyhow! 重包。
+    for cause in e.chain() {
+        if cause.downcast_ref::<InvalidArgument>().is_some() {
+            return FS_ERROR_KIND_ARGUMENT;
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::NotADirectory
+            )
+        {
+            return FS_ERROR_KIND_ENVIRONMENT_MISSING;
+        }
+    }
+    FS_ERROR_KIND_TOOL_INTERNAL
+}
+
+/// 参数/匹配类失败（调用方修参数后可重试）。与 IO 类错误区分开，
+/// 供 [`classify_error`] 结构化声明为 `argument_error`。
+#[derive(Debug)]
+pub(crate) struct InvalidArgument(pub String);
+
+impl std::fmt::Display for InvalidArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidArgument {}
+
+/// 构造参数/匹配类错误。
+pub(crate) fn invalid_argument(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(InvalidArgument(message.into()))
+}
+
+/// 构造带 IO 语义的错误（保留 `ErrorKind` 供失败类型分类）。
+fn io_error(kind: std::io::ErrorKind, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(std::io::Error::new(kind, message.into()))
 }
 
 fn atomic_write_file(path: &Path, content: &[u8]) -> Result<()> {
@@ -578,8 +649,8 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
     let mut stats = PatchStats::default();
 
     for section in &sections {
-        let parsed =
-            Patch::from_str(section).map_err(|err| anyhow!("解析 unified diff 失败：{err}"))?;
+        let parsed = Patch::from_str(section)
+            .map_err(|err| invalid_argument(format!("解析 unified diff 失败：{err}")))?;
         let original = normalize_diff_filename(parsed.original().unwrap_or_default())?;
         let modified = normalize_diff_filename(parsed.modified().unwrap_or_default())?;
 
@@ -589,10 +660,13 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
         if is_add {
             let target = shared::resolve_write_path_from_base(&modified, effective_cwd)?;
             if target.exists() {
-                return Err(anyhow!("新增文件已存在：{}", target.display()));
+                return Err(invalid_argument(format!(
+                    "新增文件已存在：{}",
+                    target.display()
+                )));
             }
-            let content =
-                diffy_apply("", &parsed).map_err(|err| anyhow!("新增文件补丁应用失败：{err}"))?;
+            let content = diffy_apply("", &parsed)
+                .map_err(|err| invalid_argument(format!("新增文件补丁应用失败：{err}")))?;
             if !verify {
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)
@@ -612,16 +686,19 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
         if is_delete {
             let source = shared::resolve_write_path_from_base(&original, effective_cwd)?;
             if !source.is_file() {
-                return Err(anyhow!("删除目标不是文件：{}", source.display()));
+                return Err(invalid_argument(format!(
+                    "删除目标不是文件：{}",
+                    source.display()
+                )));
             }
             let base_content = fs::read_to_string(&source)
                 .map_err(|err| anyhow!("读取删除目标失败：{}，{err}", source.display()))?;
             let content = apply_text_patch(&base_content, &parsed, "删除补丁应用失败")?;
             if !content.is_empty() {
-                return Err(anyhow!(
+                return Err(invalid_argument(format!(
                     "删除补丁校验失败：应用后内容非空：{}",
                     source.display()
-                ));
+                )));
             }
             if !verify {
                 fs::remove_file(&source)
@@ -638,7 +715,10 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
         let source = shared::resolve_write_path_from_base(&original, effective_cwd)?;
         let target = shared::resolve_write_path_from_base(&modified, effective_cwd)?;
         if !source.is_file() {
-            return Err(anyhow!("修改目标不是文件：{}", source.display()));
+            return Err(invalid_argument(format!(
+                "修改目标不是文件：{}",
+                source.display()
+            )));
         }
         let base_content = fs::read_to_string(&source)
             .map_err(|err| anyhow!("读取文件失败：{}，{err}", source.display()))?;
@@ -684,7 +764,8 @@ fn apply_text_patch(
     } else {
         base_content
     };
-    let content = diffy::apply(base, patch).map_err(|err| anyhow!("{error_context}：{err}"))?;
+    let content = diffy::apply(base, patch)
+        .map_err(|err| invalid_argument(format!("{error_context}：{err}")))?;
     Ok(if crlf {
         content.replace('\n', "\r\n")
     } else {
@@ -728,7 +809,7 @@ fn uses_crlf_line_endings(value: &str) -> bool {
 fn split_unified_diff_sections(patch: &str) -> Result<Vec<String>> {
     let lines = patch.lines().collect::<Vec<_>>();
     if lines.len() < 3 {
-        return Err(anyhow!("unified diff 内容过短，无法解析"));
+        return Err(invalid_argument("unified diff 内容过短，无法解析"));
     }
 
     let mut section_starts = Vec::new();
@@ -738,7 +819,7 @@ fn split_unified_diff_sections(patch: &str) -> Result<Vec<String>> {
         }
     }
     if section_starts.is_empty() {
-        return Err(anyhow!("unified diff 缺少文件头（--- / +++）"));
+        return Err(invalid_argument("unified diff 缺少文件头（--- / +++）"));
     }
 
     let mut sections = Vec::new();
@@ -767,8 +848,8 @@ fn enumerate_patch_targets(patch: &str, effective_cwd: &Path) -> Result<Vec<Path
     let sections = split_unified_diff_sections(patch)?;
     let mut targets = Vec::new();
     for section in &sections {
-        let parsed =
-            Patch::from_str(section).map_err(|err| anyhow!("解析 unified diff 失败：{err}"))?;
+        let parsed = Patch::from_str(section)
+            .map_err(|err| invalid_argument(format!("解析 unified diff 失败：{err}")))?;
         let original = normalize_diff_filename(parsed.original().unwrap_or_default())?;
         let modified = normalize_diff_filename(parsed.modified().unwrap_or_default())?;
 
@@ -804,7 +885,7 @@ fn enumerate_patch_targets(patch: &str, effective_cwd: &Path) -> Result<Vec<Path
 fn normalize_diff_filename(raw: &str) -> Result<String> {
     let path = raw.trim();
     if path.is_empty() {
-        return Err(anyhow!("unified diff 文件路径为空"));
+        return Err(invalid_argument("unified diff 文件路径为空"));
     }
     if path == "/dev/null" {
         return Ok(path.to_string());
@@ -815,7 +896,7 @@ fn normalize_diff_filename(raw: &str) -> Result<String> {
         .unwrap_or(path)
         .trim();
     if path.is_empty() {
-        return Err(anyhow!("unified diff 文件路径非法"));
+        return Err(invalid_argument("unified diff 文件路径非法"));
     }
     Ok(path.to_string())
 }
@@ -855,6 +936,9 @@ mod tests {
             "{}",
             failed.summary
         );
+        // 参数/匹配类失败声明为 argument_error（#710）：core 据此给出
+        // 「修正参数」而非「检查环境」的建议。
+        assert_eq!(failed.error_kind.as_deref(), Some("argument_error"));
         assert!(!failed.summary.contains("工作目录："), "{}", failed.summary);
         let ok = replace("hello");
         assert!(ok.ok);
@@ -869,6 +953,8 @@ mod tests {
             "{}",
             missing.stderr
         );
+        // 路径不存在：IO NotFound 归类 environment_missing。
+        assert_eq!(missing.error_kind.as_deref(), Some("environment_missing"));
     }
 
     #[test]

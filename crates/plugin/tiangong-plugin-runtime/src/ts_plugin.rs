@@ -557,6 +557,11 @@ async fn invoke_sidecar_tool(
                         0
                     },
                 ) as i32,
+            error_kind: value
+                .get("error_kind")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            retryable: value.get("retryable").and_then(serde_json::Value::as_bool),
             execution: None,
         },
         Err(error) => sidecar_tool_failure(plugin_id, format!("{error:#}")),
@@ -618,6 +623,8 @@ fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> Too
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 1,
+        error_kind: None,
+        retryable: None,
         execution: None,
     }
 }

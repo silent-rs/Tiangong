@@ -435,6 +435,21 @@ impl ToolFailureKind {
             Self::ToolInternal => "tool_internal_error",
         }
     }
+
+    /// 解析插件声明的失败类型（对齐 [`Self::as_str`] 取值）；非法值返回
+    /// None，由调用方回落关键词推断。
+    fn from_declared(value: &str) -> Option<Self> {
+        match value.trim() {
+            "argument_error" => Some(Self::Argument),
+            "user_rejected" => Some(Self::UserRejected),
+            "command_failed" => Some(Self::CommandFailed),
+            "timeout" => Some(Self::Timeout),
+            "environment_missing" => Some(Self::EnvironmentMissing),
+            "network_failure" => Some(Self::Network),
+            "tool_internal_error" => Some(Self::ToolInternal),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -508,6 +523,13 @@ recommended_next_action: {recommended_next_action}",
 pub(crate) fn classify_tool_result_failure(
     result: &crate::tools::result::ToolResult,
 ) -> ToolFailureKind {
+    // 插件结构化声明优先：插件最清楚失败原因（#710），声明值对齐
+    // ToolFailureKind 取值；非法或未声明时回落关键词推断（兼容旧插件）。
+    if let Some(declared) = result.error_kind.as_deref()
+        && let Some(kind) = ToolFailureKind::from_declared(declared)
+    {
+        return kind;
+    }
     let combined = format!("{}\n{}", result.summary, result.stderr).to_lowercase();
     if combined.contains("timed out") || combined.contains("timeout") || combined.contains("超时")
     {
@@ -1283,6 +1305,8 @@ mod tests {
             stdout: String::new(),
             stderr: "exit status 2".to_string(),
             exit_code: 2,
+            error_kind: None,
+            retryable: None,
             execution: None,
         };
         assert_eq!(
@@ -1296,10 +1320,51 @@ mod tests {
             stdout: String::new(),
             stderr: "command not found: rg".to_string(),
             exit_code: 127,
+            error_kind: None,
+            retryable: None,
             execution: None,
         };
         assert_eq!(
             classify_tool_result_failure(&missing_environment),
+            ToolFailureKind::EnvironmentMissing
+        );
+    }
+
+    #[test]
+    fn declared_error_kind_takes_priority_over_keywords() {
+        // 插件声明 argument_error：即使错误文本含「未找到」（关键词推断会
+        // 误判 environment_missing），也以声明为准（#710 的动机场景）。
+        let declared = crate::tools::result::ToolResult {
+            ok: false,
+            summary: "file_write(replace) 失败：未找到待替换内容".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+            error_kind: Some("argument_error".to_string()),
+            retryable: None,
+            execution: None,
+        };
+        assert_eq!(
+            classify_tool_result_failure(&declared),
+            ToolFailureKind::Argument
+        );
+    }
+
+    #[test]
+    fn invalid_declared_error_kind_falls_back_to_inference() {
+        // 声明值未对齐取值集合：按未声明处理，回落关键词推断。
+        let invalid = crate::tools::result::ToolResult {
+            ok: false,
+            summary: "读取文件失败".to_string(),
+            stdout: String::new(),
+            stderr: "路径不存在：/tmp/x".to_string(),
+            exit_code: 1,
+            error_kind: Some("file_missing".to_string()),
+            retryable: None,
+            execution: None,
+        };
+        assert_eq!(
+            classify_tool_result_failure(&invalid),
             ToolFailureKind::EnvironmentMissing
         );
     }
