@@ -221,9 +221,6 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
         &staged.path.join(MANIFEST_FILE),
         "插件清单",
     )?;
-    if let Some(wasm_binary) = manifest.wasm_binary() {
-        copy_local_artifact(source, wasm_binary, &staged.path, "WASM 制品")?;
-    }
 
     if let Some(sidecar) = &manifest.sidecar {
         match sidecar.runtime {
@@ -269,6 +266,18 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
             ensure_regular_file(&source_file, "插件签名制品")?;
             copy_regular_file(&source_file, &staged.path.join(file), "插件签名制品")?;
         }
+    }
+    // 存量签名清单的 wasm 条目：制品随安装复制（签名验证要求在位），
+    // 宿主不再装载但完整性校验保持中立。
+    if let Ok(release_raw) = std::fs::read_to_string(staged.path.join("release.json"))
+        && let Ok(release) = serde_json::from_str::<serde_json::Value>(&release_raw)
+        && let Some(wasm_path) = release
+            .get("wasm")
+            .and_then(|wasm| wasm.get("path"))
+            .and_then(serde_json::Value::as_str)
+        && !wasm_path.is_empty()
+    {
+        copy_local_artifact(source, Path::new(wasm_path), &staged.path, "WASM 制品")?;
     }
 
     // 内容清单（devkit 构建生成的路径 + sha256 树）：随插件进入安装目录，
@@ -489,14 +498,13 @@ impl PluginRepository {
 
         // 统计需要下载的制品文件，用于把进度按文件均分到 [0, 100]。
         let platform = current_platform_key();
-        let has_wasm = manifest.wasm_binary().is_some();
+        if release.wasm.is_some() {
+            bail!("插件 {} 的发布目录包含已淘汰的 WASM 制品", release.id);
+        }
         let has_sidecar = manifest.sidecar.is_some();
         let has_signed = manifest.sidecar.is_some() || !release.signed_releases.is_empty();
-        let total_steps = ((has_wasm as usize)
-            + (has_sidecar as usize)
-            + (has_signed as usize)
-            + ui_entries.len())
-        .max(1);
+        let total_steps =
+            ((has_sidecar as usize) + (has_signed as usize) + ui_entries.len()).max(1);
         // 复用闭包：把单文件内的字节进度映射到全局百分比区间。
         let make_file_progress = |index: usize| -> Option<ProgressFn> {
             let progress = progress.clone()?;
@@ -514,24 +522,6 @@ impl PluginRepository {
         };
 
         let mut step_index = 0;
-        if let Some(wasm_binary) = manifest.wasm_binary() {
-            let wasm_artifact = release
-                .wasm
-                .as_ref()
-                .ok_or_else(|| anyhow!("插件 {} 声明了 WASM，但目录缺少 WASM 制品", release.id))?;
-            let wasm_path = staged.path.join(wasm_binary);
-            let wasm_name = wasm_binary
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
-            validate_artifact_file_name(&wasm_artifact.url, wasm_name)?;
-            self.download_file(wasm_artifact, &wasm_path, make_file_progress(step_index))
-                .await?;
-            step_index += 1;
-        } else if release.wasm.is_some() {
-            bail!("插件 {} 未声明 WASM，但 OSS 目录包含 WASM 制品", release.id);
-        }
-
         if has_sidecar {
             let sidecar_binary = manifest.sidecar.as_ref().expect("已确认存在 sidecar");
             if sidecar_binary.runtime != crate::manifest::SidecarRuntime::Native {
@@ -902,9 +892,8 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
             .with_context(|| format!("插件 {} 版本不是有效语义版本", plugin.id))?;
         validate_download_url(&plugin.manifest.url, "插件清单")?;
         parse_checksum(&plugin.manifest.checksum)?;
-        if let Some(wasm) = &plugin.wasm {
-            validate_download_url(&wasm.url, "WASM 制品")?;
-            parse_checksum(&wasm.checksum)?;
+        if plugin.wasm.is_some() {
+            bail!("插件 {} 的目录条目包含已淘汰的 WASM 制品", plugin.id);
         }
         for (entry, artifact) in &plugin.ui {
             validate_relative_artifact_path(Path::new(entry), "UI 制品")?;
@@ -929,7 +918,7 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
                 plugin.id
             );
         }
-        // 纯 WASM 插件（如 prompt）没有 sidecar 但同样需要官方签名建立信任，
+        // 纯清单插件（如 prompt）没有 sidecar 但同样需要官方签名建立信任，
         // 因此签名清单不强制要求对应 sidecar，这里只校验签名 URL 合法性。
         for signed in plugin.signed_releases.values() {
             validate_download_url(&signed.url, "插件签名清单")?;

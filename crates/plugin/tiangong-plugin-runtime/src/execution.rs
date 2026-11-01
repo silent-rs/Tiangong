@@ -7,9 +7,9 @@ use anyhow::{Result, anyhow};
 
 /// 在 Tokio runtime 外执行同步插件调用。
 ///
-/// wasmtime-wasi 的同步适配器内部会调用 `Handle::block_on`，sidecar 声明读取
-/// 也会执行阻塞 I/O。若调用方正处于 Tokio runtime 中，必须先切到普通 OS
-/// 线程；同时在边界处接住 host panic，避免单个插件把宿主进程带崩。
+/// sidecar 声明读取等同步路径会执行阻塞 I/O；若调用方正处于 Tokio runtime
+/// 中，必须先切到普通 OS 线程，同时在边界处接住 host panic，避免单个插件
+/// 把宿主进程带崩。
 pub(crate) fn run_outside_tokio<R>(call: impl FnOnce() -> Result<R> + Send) -> Result<R>
 where
     R: Send,

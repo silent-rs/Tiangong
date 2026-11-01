@@ -1,4 +1,4 @@
-//! 已安装 WASM 插件的制品清单。
+//! 已安装插件的制品清单。
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -12,14 +12,12 @@ use crate::slots::{
 };
 
 pub const MANIFEST_FILE: &str = "plugin.json";
-/// schema v1：现有清单，无 `ui`/`capabilities`，设置页贡献由 WASM 运行时声明。
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
-/// schema v2：新增 `capabilities` 与 `ui.contributions`（Slot/沙箱/打开模式）。
-pub const MANIFEST_SCHEMA_VERSION_V2: u32 = 2;
 
+/// 插件清单：宽松解析——宿主只提取需要的字段，未知字段（如历史版本的
+/// `schema_version`、`wasm`）一律忽略；必填字段（id/version）缺失或解析
+/// 失败时插件判为无效。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
-    pub schema_version: u32,
     pub id: String,
     /// 展示名。缺省时前端以 id 兜底显示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,10 +27,6 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub version: String,
-    /// 逻辑层 WASM 制品。schema v2 可省略——纯 UI 插件（无工具/生命周期等
-    /// 逻辑能力）经宿主桥接（storage.* 等）即可工作，见设计文档 9.1。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wasm: Option<WasmManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SidecarManifest>,
     #[serde(default)]
@@ -50,10 +44,10 @@ pub struct PluginManifest {
     /// 插件是否需要访问天工存储根目录（~/.tiangong）。
     #[serde(default)]
     pub storage_access: bool,
-    /// 能力声明（schema v2 新增）。
+    /// 能力声明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<CapabilitiesManifest>,
-    /// UI 贡献声明（schema v2 新增）。
+    /// UI 贡献声明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiManifest>,
     /// Desktop 纯 TypeScript 插件声明的工具规格（静态直书）。动态工具
@@ -313,13 +307,6 @@ const fn default_required() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum WasmManifest {
-    Detailed { binary: PathBuf },
-    Legacy(PathBuf),
-}
-
 /// sidecar 的运行时形态：原生二进制或解释器（宿主白名单分派）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -416,16 +403,6 @@ impl PluginManifest {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !matches!(
-            self.schema_version,
-            MANIFEST_SCHEMA_VERSION | MANIFEST_SCHEMA_VERSION_V2
-        ) {
-            bail!(
-                "插件 {} 清单版本不支持: expected={MANIFEST_SCHEMA_VERSION}|{MANIFEST_SCHEMA_VERSION_V2}, actual={}",
-                self.id,
-                self.schema_version
-            );
-        }
         if self.id.is_empty()
             || !self
                 .id
@@ -437,30 +414,23 @@ impl PluginManifest {
         if self.version.trim().is_empty() {
             bail!("插件 {} 清单版本为空", self.id);
         }
-        match self.wasm_binary() {
-            Some(binary) => validate_relative_path(binary, "wasm.binary")?,
-            None => {
-                // 无逻辑层（纯清单插件）：界面只是一种可选贡献——ui / tools /
-                // prompt / mention 任一非空即可，全空视为空壳拒绝。仅 v2 支持。
-                if self.schema_version != MANIFEST_SCHEMA_VERSION_V2 {
-                    bail!(
-                        "插件 {} 未声明 wasm（仅 schema_version 2 支持纯清单插件）",
-                        self.id
-                    );
-                }
-                let has_contribution = !self.ui_contributions().is_empty()
-                    || self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
-                    || self
-                        .prompt
-                        .as_ref()
-                        .is_some_and(|entries| !entries.is_empty())
-                    || self.mention.is_some();
-                if !has_contribution {
-                    bail!(
-                        "插件 {} 未声明任何贡献（ui.contributions / tools / prompt / mention 至少其一）",
-                        self.id
-                    );
-                }
+        {
+            // 清单插件：界面只是一种可选贡献——ui / tools / prompt / mention
+            // 任一非空，或声明 sidecar（逻辑层，可纯动态承载工具/prompt）即可；
+            // 全空视为空壳拒绝。
+            let has_contribution = !self.ui_contributions().is_empty()
+                || self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+                || self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|entries| !entries.is_empty())
+                || self.mention.is_some()
+                || self.sidecar.is_some();
+            if !has_contribution {
+                bail!(
+                    "插件 {} 未声明任何贡献（ui.contributions / tools / prompt / mention 至少其一）",
+                    self.id
+                );
             }
         }
         if let Some(sidecar) = &self.sidecar {
@@ -657,46 +627,13 @@ impl PluginManifest {
                 }
             }
         }
-        // v1 清单不允许 v2 字段；v2 清单校验新增字段
-        if self.schema_version == MANIFEST_SCHEMA_VERSION {
-            if self.capabilities.is_some() {
-                bail!(
-                    "插件 {} 使用 schema_version 1 但声明了 capabilities 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
-                    self.id
-                );
-            }
-            if self.ui.is_some() {
-                bail!(
-                    "插件 {} 使用 schema_version 1 但声明了 ui 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
-                    self.id
-                );
-            }
-            if self.tools.is_some() || self.prompt.is_some() {
-                bail!(
-                    "插件 {} 使用 schema_version 1 但声明了 tools/prompt 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
-                    self.id
-                );
-            }
-            if self.resources.is_some() {
-                bail!(
-                    "插件 {} 使用 schema_version 1 但声明了 resources 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
-                    self.id
-                );
-            }
-            if self.mention.is_some() {
-                bail!(
-                    "插件 {} 使用 schema_version 1 但声明了 mention 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
-                    self.id
-                );
-            }
-        } else {
-            self.validate_v2()?;
-            self.validate_ts_tools()?;
-        }
+        // v2 字段校验（capabilities 事件命名空间与 ui.contributions）。
+        self.validate_v2()?;
+        self.validate_ts_tools()?;
         Ok(())
     }
 
-    /// schema v2 新增字段校验：capabilities 事件命名空间与 ui.contributions。
+    /// 字段校验：capabilities 事件命名空间与 ui.contributions。
     fn validate_v2(&self) -> Result<()> {
         if let Some(capabilities) = &self.capabilities {
             for namespace in &capabilities.events {
@@ -837,12 +774,6 @@ impl PluginManifest {
         let tools = self.tools.as_deref().unwrap_or_default();
         let prompts = self.prompt.as_deref().unwrap_or_default();
         if !tools.is_empty() || !prompts.is_empty() {
-            if self.wasm_binary().is_some() {
-                bail!(
-                    "插件 {} 不能同时声明 WASM 与纯 TypeScript tools/prompt",
-                    self.id
-                );
-            }
             // 无 sidecar 的清单工具只能由桌面前端页面执行；声明 sidecar 时
             // 工具可由 sidecar 承接，server/cli 入口是否注册由加载时按验证能力判定。
             if self.sidecar.is_none()
@@ -1029,15 +960,6 @@ impl PluginManifest {
         Ok(())
     }
 
-    pub fn wasm_binary(&self) -> Option<&Path> {
-        match &self.wasm {
-            Some(WasmManifest::Detailed { binary }) | Some(WasmManifest::Legacy(binary)) => {
-                Some(binary)
-            }
-            None => None,
-        }
-    }
-
     pub fn has_permission(&self, permission: &str) -> bool {
         self.permissions.iter().any(|item| item == permission)
     }
@@ -1105,25 +1027,11 @@ fn validate_relative_path(path: &Path, field: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// v1 基线清单（无 ui/capabilities），等价旧规则。
-    fn v1_json() -> String {
+    /// 完整清单：capabilities + ui.contributions（extension.tab 多实例）。
+    fn full_json() -> String {
         r#"{
-            "schema_version": 1,
-            "id": "com.example.legacy",
-            "version": "1.0.0",
-            "wasm": { "binary": "plugin.wasm" },
-            "permissions": []
-        }"#
-        .to_string()
-    }
-
-    /// v2 完整清单：capabilities + ui.contributions（extension.tab 多实例）。
-    fn v2_json() -> String {
-        r#"{
-            "schema_version": 2,
             "id": "com.example.board",
             "version": "1.0.0",
-            "wasm": { "binary": "plugin.wasm" },
             "permissions": ["bridge.call"],
             "capabilities": {
                 "tools": true,
@@ -1163,7 +1071,7 @@ mod tests {
 
     #[test]
     fn ui_artifacts_require_entries_and_declared_resource_roots() {
-        let mut manifest = parse(&v2_json()).unwrap();
+        let mut manifest = parse(&full_json()).unwrap();
         manifest.resources = Some(vec!["ui".into()]);
         let entries = BTreeSet::from([PathBuf::from("index.html"), PathBuf::from("settings.html")]);
         manifest.validate_ui_artifacts(&entries).unwrap();
@@ -1322,10 +1230,6 @@ mod tests {
             serde_json::from_str::<PluginManifest>(&typo).is_err(),
             "拼错字段应报错"
         );
-        // v1 清单拒绝
-        let legacy = json.replace("\"schema_version\":2", "\"schema_version\":1");
-        let manifest: PluginManifest = serde_json::from_str(&legacy).unwrap();
-        assert!(manifest.validate().is_err());
     }
 
     /// 测试辅助：静态 hint 形态应通过完整校验（含无 sidecar 场景）。
@@ -1346,34 +1250,12 @@ mod tests {
     }
 
     #[test]
-    fn v1_清单按旧规则解析() {
-        let manifest = parse(&v1_json()).expect("v1 应兼容解析");
-        assert!(manifest.capabilities.is_none());
-        assert!(manifest.ui.is_none());
-        assert!(manifest.ui_contributions().is_empty());
-    }
-
-    #[test]
-    fn v1_清单携带_v2_字段被拒绝() {
-        for field in ["capabilities", "ui"] {
-            let json = v1_json().replace(
-                "\"permissions\": []",
-                &format!("\"permissions\": [], \"{field}\": {{}}"),
-            );
-            let error = parse(&json).unwrap_err();
-            let message = format!("{error:#}");
-            assert!(message.contains(field), "应指出非法字段 {field}: {message}");
-            assert!(message.contains("schema_version 为 2"));
-        }
-    }
-
-    #[test]
-    fn v2_清单解析出完整贡献() {
-        let manifest = parse(&v2_json().replace(
+    fn 清单解析出完整贡献() {
+        let manifest = parse(&full_json().replace(
             "\"id\": \"com.example.board\",",
             "\"id\": \"com.example.board\",\n            \"name\": \"看板助手\",\n            \"description\": \"轻量任务看板。\",",
         ))
-        .expect("v2 应解析通过");
+        .expect("清单应解析通过");
         assert_eq!(manifest.name.as_deref(), Some("看板助手"));
         assert_eq!(manifest.description.as_deref(), Some("轻量任务看板。"));
         let capabilities = manifest.capabilities.as_ref().unwrap();
@@ -1401,7 +1283,7 @@ mod tests {
 
     #[test]
     fn v2_非法_slot_被拒绝() {
-        let json = v2_json().replace("\"extension.tab\"", "\"extension.unknown\"");
+        let json = full_json().replace("\"extension.tab\"", "\"extension.unknown\"");
         let error = parse(&json).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("未知挂载点"));
@@ -1411,7 +1293,7 @@ mod tests {
 
     #[test]
     fn v2_instance_resources_仅对_extension_tab_生效() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"entry\": \"settings.html\"",
             "\"entry\": \"settings.html\",\n                        \"instance_resources\": true",
         );
@@ -1422,7 +1304,7 @@ mod tests {
 
     #[test]
     fn v2_instance_resources_需要资源方() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"open_mode\": \"multi\",",
             "\"open_mode\": \"multi\",\n                        \"instance_resources\": true,",
         );
@@ -1443,7 +1325,7 @@ mod tests {
 
     #[test]
     fn v2_render_仅对_message_item_生效() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"entry\": \"settings.html\"",
             "\"entry\": \"settings.html\",\n                        \"render\": \"replace\"",
         );
@@ -1463,7 +1345,7 @@ mod tests {
     #[test]
     fn v2_工具视图_tools_仅对_replace_message_item_生效() {
         let item = |extra: &str| {
-            v2_json().replace(
+            full_json().replace(
                 r#""slot": "settings.plugin-page","#,
                 &format!(r#""slot": "session.message-item"{extra},"#),
             )
@@ -1493,7 +1375,7 @@ mod tests {
     #[test]
     fn v2_工具视图_titles_须对应_tools_且为短标题() {
         let item = |extra: &str| {
-            v2_json().replace(
+            full_json().replace(
                 r#""slot": "settings.plugin-page","#,
                 &format!(
                     r#""slot": "session.message-item", "render": "replace", "tools": ["board_list", "board_edit"]{extra},"#
@@ -1529,7 +1411,7 @@ mod tests {
 
     #[test]
     fn v2_未声明_instance_resources_缺省为假() {
-        let manifest = parse(&v2_json()).unwrap();
+        let manifest = parse(&full_json()).unwrap();
         assert!(
             manifest
                 .ui_contributions()
@@ -1540,7 +1422,7 @@ mod tests {
 
     #[test]
     fn v2_open_mode_仅对_extension_tab_生效() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"slot\": \"settings.plugin-page\",\n                        \"id\": \"board-settings\",\n                        \"entry\": \"settings.html\"",
             "\"slot\": \"settings.plugin-page\",\n                        \"id\": \"board-settings\",\n                        \"entry\": \"settings.html\",\n                        \"open_mode\": \"multi\"",
         );
@@ -1551,14 +1433,14 @@ mod tests {
 
     #[test]
     fn v2_非法_open_mode_取值被拒绝() {
-        let json = v2_json().replace("\"open_mode\": \"multi\"", "\"open_mode\": \"always\"");
+        let json = full_json().replace("\"open_mode\": \"multi\"", "\"open_mode\": \"always\"");
         let error = serde_json::from_str::<PluginManifest>(&json).unwrap_err();
         assert!(error.to_string().contains("always"));
     }
 
     #[test]
     fn v2_贡献级_sandbox_覆盖_默认级() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"slot\": \"settings.plugin-page\"",
             "\"slot\": \"settings.plugin-page\",\n                        \"sandbox\": \"iframe\"",
         );
@@ -1570,7 +1452,7 @@ mod tests {
 
     #[test]
     fn v2_ui_sandbox_默认级生效() {
-        let json = v2_json().replace("\"sandbox\": \"shadow\"", "\"sandbox\": \"iframe\"");
+        let json = full_json().replace("\"sandbox\": \"shadow\"", "\"sandbox\": \"iframe\"");
         let manifest = parse(&json).unwrap();
         assert!(
             manifest
@@ -1582,9 +1464,9 @@ mod tests {
 
     #[test]
     fn v2_native_沙箱需官方签名() {
-        let manifest = parse(&v2_json()).unwrap();
+        let manifest = parse(&full_json()).unwrap();
         // 未签名：native 被拒
-        let unsigned = v2_json().replace(
+        let unsigned = full_json().replace(
             "\"slot\": \"settings.plugin-page\"",
             "\"slot\": \"settings.plugin-page\",\n                        \"sandbox\": \"native\"",
         );
@@ -1602,7 +1484,7 @@ mod tests {
 
     #[test]
     fn v2_不支持的目标_slot_上下文被拒绝() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"context\": [\"session\", \"workspace\"]",
             "\"context\": [\"session\", \"message\"]",
         );
@@ -1613,7 +1495,7 @@ mod tests {
 
     #[test]
     fn v2_未知字段被拒绝() {
-        let json = v2_json().replace(
+        let json = full_json().replace(
             "\"entry\": \"index.html\"",
             "\"entry\": \"index.html\", \"panel\": true",
         );
@@ -1622,16 +1504,16 @@ mod tests {
     }
 
     #[test]
-    fn v2_贡献_id_重复被拒绝() {
-        let json = v2_json().replace("\"id\": \"board-settings\"", "\"id\": \"board-tab\"");
+    fn 清单_贡献_id_重复被拒绝() {
+        let json = full_json().replace("\"id\": \"board-settings\"", "\"id\": \"board-tab\"");
         let error = parse(&json).unwrap_err();
         assert!(error.to_string().contains("重复"));
     }
 
     #[test]
-    fn v2_entry_必须是安全相对路径() {
+    fn 清单_entry_必须是安全相对路径() {
         for entry in ["../escape.html", "/abs.html"] {
-            let json = v2_json().replace(
+            let json = full_json().replace(
                 "\"entry\": \"index.html\"",
                 &format!("\"entry\": \"{entry}\""),
             );
@@ -1641,74 +1523,80 @@ mod tests {
     }
 
     #[test]
-    fn 不支持的_schema_版本被拒绝() {
-        let json = v1_json().replace("\"schema_version\": 1", "\"schema_version\": 3");
-        let error = parse(&json).unwrap_err();
-        assert!(error.to_string().contains("清单版本不支持"));
-    }
-
-    #[test]
     fn 纯清单插件_须有任一贡献() {
-        // v2 + ui 贡献：wasm 可省略
+        // 仅 ui 贡献即可（无逻辑层）
         let manifest: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"com.example.board","version":"1.0.0","permissions":["bridge.call"],"ui":{"contributions":[{"slot":"extension.tab","id":"board","entry":"index.html"}]}}"#,
+            r#"{"id":"com.example.board","version":"1.0.0","permissions":["bridge.call"],"ui":{"contributions":[{"slot":"extension.tab","id":"board","entry":"index.html"}]}}"#,
         )
         .unwrap();
         manifest.validate().expect("纯 UI 插件应通过校验");
-        assert!(manifest.wasm_binary().is_none());
         assert_eq!(manifest.ui_contributions().len(), 1);
 
-        // v2 + 无 UI 纯工具（有 sidecar 承载执行）：界面不是必要贡献
+        // 无 UI 纯工具（有 sidecar 承载执行）：界面不是必要贡献
         let tool_only: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"com.example.counter","version":"1.0.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"count","description":"字数统计","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
+            r#"{"id":"com.example.counter","version":"1.0.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"count","description":"字数统计","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
         )
         .unwrap();
         tool_only.validate().expect("无 UI 纯工具插件应通过校验");
 
         // sidecar 承接的清单工具可声明 server 入口（如 bot 插件）；无 sidecar 时仍只允许 desktop。
-        let served = r#"{"schema_version":2,"id":"com.example.im","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}],"sidecar":{"binary":"im-sidecar","transport_protocol":"0.1.0","business_protocol":1}}"#;
+        let served = r#"{"id":"com.example.im","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}],"sidecar":{"binary":"im-sidecar","transport_protocol":"0.1.0","business_protocol":1}}"#;
         serde_json::from_str::<PluginManifest>(served)
             .unwrap()
             .validate()
             .expect("sidecar 承接的工具插件可声明 server 入口");
-        let page_only = r#"{"schema_version":2,"id":"com.example.page","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}]}"#;
+        let page_only = r#"{"id":"com.example.page","version":"1.0.0","entrypoints":["desktop","server"],"permissions":["tool.provide"],"capabilities":{"tools":true},"tools":[{"name":"send","description":"发送","input_schema":{"type":"object"}}]}"#;
         let error = serde_json::from_str::<PluginManifest>(page_only)
             .unwrap()
             .validate()
             .unwrap_err();
         assert!(error.to_string().contains("只能声明 desktop 入口"));
 
-        // v2 + 无 UI 纯 prompt + mention：mention 内容只能来自 sidecar 的
+        // 无 UI 纯 prompt + mention：mention 内容只能来自 sidecar 的
         // candidates_op，无 sidecar 的 prompt 插件声明即拒收
         let prompt_only: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"com.example.hint","version":"1.0.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"candidates_op":"hint.mention_candidates"}}"#,
+            r#"{"id":"com.example.hint","version":"1.0.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"candidates_op":"hint.mention_candidates"}}"#,
         )
         .unwrap();
         let error = prompt_only.validate().unwrap_err();
         assert!(error.to_string().contains("必须同时声明 sidecar"));
 
-        // v2 + 无 wasm + 无任何贡献：空壳拒绝
-        let bare: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"com.example.bare","version":"1.0.0"}"#,
-        )
-        .unwrap();
+        // 无任何贡献：空壳拒绝
+        let bare: PluginManifest =
+            serde_json::from_str(r#"{"id":"com.example.bare","version":"1.0.0"}"#).unwrap();
         let error = bare.validate().unwrap_err();
         assert!(format!("{error:#}").contains("未声明任何贡献"));
-
-        // v1 + 无 wasm：拒绝（纯 UI 仅 v2 支持）
-        let v1_bare: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":1,"id":"a","version":"1.0.0","ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","entry":"i.html"}]}}"#,
-        )
-        .unwrap();
-        let error = v1_bare.validate().unwrap_err();
-        // v1 携带 ui 字段先被 v2 字段校验拒绝（提示升级 schema_version）
-        assert!(format!("{error:#}").contains("schema_version"));
     }
 
     #[test]
-    fn v2_缺省_ui_等价无_ui_贡献() {
-        let json = v1_json().replace("\"schema_version\": 1", "\"schema_version\": 2");
-        let manifest = parse(&json).unwrap();
+    fn 未知顶层字段被忽略() {
+        // 宽松解析：未知字段（含历史版本的 schema_version / wasm）不构成失败。
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.legacy","version":"1.0.0","wasm":{"binary":"plugin.wasm"},"legacy_field":123,"ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","entry":"i.html"}]}}"#,
+        )
+        .unwrap();
+        manifest.validate().expect("未知字段应被忽略");
+        assert_eq!(manifest.ui_contributions().len(), 1);
+    }
+
+    #[test]
+    fn 必填字段缺失时解析失败() {
+        for bad in [
+            r#"{"version":"1.0.0"}"#,
+            r#"{"id":"com.example.no-version"}"#,
+            r#"not-json"#,
+        ] {
+            assert!(serde_json::from_str::<PluginManifest>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn 缺省_ui_等价无_ui_贡献() {
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"id":"com.example.plain","version":"1.0.0","entrypoints":["desktop"],"prompt":["静态段落"]}"#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
         assert!(manifest.ui_contributions().is_empty());
     }
 

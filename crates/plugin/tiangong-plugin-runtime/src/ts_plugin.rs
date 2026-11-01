@@ -717,12 +717,10 @@ mod tests {
         )
         .unwrap();
         PluginManifest {
-            schema_version: 2,
             name: None,
             description: None,
             id: "demo".into(),
             version: "0.1.0".into(),
-            wasm: None,
             sidecar: None,
             permissions: vec![],
             entrypoints: None,

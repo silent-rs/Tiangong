@@ -208,7 +208,7 @@ mod tests {
             "install_plugin",
             "set_server_config",
             "start_server",
-            "plugin_open_view",
+            "plugin_open_entry",
             "list_extension_apps",
             "read_attachment_as_data_url",
             "set_session_cwd",

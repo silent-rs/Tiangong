@@ -17,8 +17,6 @@ tiangong-core-manager = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }
-wasmtime = { workspace = true }
-wasmtime-wasi = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

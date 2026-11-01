@@ -16,7 +16,7 @@ async function loadEntries(
     ...item,
     html: item.source === 'manifest'
       ? await api.pluginOpenEntry(item.plugin_id, item.contribution_id)
-      : await api.pluginOpenView(item.plugin_id, item.contribution_id),
+      : await api.pluginOpenEntry(item.plugin_id, item.contribution_id),
   })));
 }
 

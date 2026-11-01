@@ -10,19 +10,20 @@ const pluginCallQueues = new Map<string, Promise<void>>();
  * 插件 iframe 容器 + postMessage 桥接（sandbox: "iframe" 强隔离模式）。
  *
  * iframe 内的 JS 经 window.parent.postMessage({ type: 'plugin_call', ... }) 发消息：
- * - 完整命名空间方法（plugin./storage./session./…）：直接透传宿主桥接；
- * - 裸方法名（旧版插件页面协议）：补 plugin. 前缀转发到本插件 WASM。
+ * - 完整命名空间方法（storage./session./sidecar.…）：直接透传宿主桥接；
+ * - 裸方法名（旧版 v1 页面协议，转发 WASM 逻辑层）已随 WASM 形态淘汰，
+ *   按未知命名空间拒绝。
  * 订阅消息（plugin_subscribe/plugin_unsubscribe）对应宿主事件通道，
  * 宿主 bridge_event 经 onBridgeEvent 回推本 iframe。天工不解析业务负载。
  */
-const BRIDGE_METHOD_NAMESPACES = ['plugin.', 'storage.', 'session.', 'tool.', 'sidecar.'];
+const BRIDGE_METHOD_NAMESPACES = ['storage.', 'session.', 'tool.', 'sidecar.'];
 
-/** 旧协议裸方法名补 plugin. 前缀；SDK 的完整命名空间方法透传。 */
+/** 命名空间方法透传；裸方法名原样返回（由宿主按未知命名空间拒绝）。 */
 export function normalizeBridgeMethod(method: string): string {
   if (BRIDGE_METHOD_NAMESPACES.some((prefix) => method.startsWith(prefix))) {
     return method;
   }
-  return `plugin.${method}`;
+  return method;
 }
 export function PluginIframe({
   pluginId,

@@ -490,30 +490,28 @@ fn 指纹只计入进入模型前缀的插件() {
         "纯 UI 插件不得触发上下文交接"
     );
 
-    // WASM 形态插件：manifest 的 tools/prompt 恒为空（工具声明在组件内），
-    // 判据不得只看 manifest 声明字段——否则官方 WASM 插件升级漏出交接。
-    // （预加载会因二进制非真实 WASM 而编译失败，但记录仍按安装态登记，
-    // 指纹读的是声明态，正好验证「计入与否与加载成败无关」。）
-    let wasm_dir = root.path().join("plugins").join("unsigned-wasm-fp");
-    std::fs::create_dir_all(&wasm_dir).unwrap();
+    // sidecar 形态插件：即便 manifest 无静态 tools/prompt（工具名单运行时
+    // 经握手提供），声明 sidecar 即逻辑层，必须计入指纹。
+    let sidecar_dir = root.path().join("plugins").join("sidecar-fp");
+    std::fs::create_dir_all(&sidecar_dir).unwrap();
     std::fs::write(
-        wasm_dir.join("plugin.json"),
-        r#"{"schema_version":1,"id":"unsigned-wasm-fp","version":"0.1.0","wasm":{"binary":"fixture.wasm"}}"#,
+        sidecar_dir.join("plugin.json"),
+        r#"{"id":"sidecar-fp","version":"0.1.0","permissions":["sidecar.invoke"],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
     )
     .unwrap();
-    std::fs::write(wasm_dir.join("fixture.wasm"), b"not-a-real-wasm").unwrap();
+    std::fs::create_dir_all(sidecar_dir.join("sidecar")).unwrap();
+    std::fs::write(sidecar_dir.join("sidecar/main.mjs"), "// empty").unwrap();
     preload_installed_plugins(root.path());
     assert_ne!(
         enabled_plugin_fingerprint(),
         base,
-        "WASM 插件（manifest 声明 wasm 制品）必须计入指纹"
+        "sidecar 插件（逻辑层声明）必须计入指纹"
     );
-    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "unsigned-wasm-fp", false)
-        .unwrap();
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "sidecar-fp", false).unwrap();
     assert_eq!(
         enabled_plugin_fingerprint(),
         base,
-        "卸载 WASM 插件后指纹复原"
+        "卸载 sidecar 插件后指纹复原"
     );
 
     // 对照：未签名工具插件的装卸仍如实改变指纹。

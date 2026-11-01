@@ -155,12 +155,7 @@ fn reload_clears_stale_connections_even_without_sidecar_declaration() {
             directory: directory.clone(),
             manifest: parse_manifest(),
             signed_release: None,
-            wasm_bytes: None,
-            component: None,
-            ui_plugin: None,
-            descriptor: None,
             generation: 0,
-            instances: Vec::new(),
             ts_instances: Vec::new(),
             sidecar: Some(
                 std::sync::Arc::clone(&loaded_stub) as std::sync::Arc<dyn SidecarConnection>
@@ -208,11 +203,8 @@ fn startup_preparation_retries_failed_load_and_skips_disabled_plugins() {
     let directory = root.path().join("plugins").join(&id);
     std::fs::create_dir_all(directory.join("app")).unwrap();
     std::fs::write(directory.join("app/index.html"), "ready").unwrap();
-    let mut manifest = serde_json::json!({"schema_version":2,"id":id,"version":"0.1.0",
-            "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]},
-            "wasm":{"binary":"broken.wasm"}});
-    std::fs::write(directory.join("broken.wasm"), "invalid wasm").unwrap();
-    std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+    // 失败场景：清单损坏（无法解析）→ 无效插件计入启动失败。
+    std::fs::write(directory.join(MANIFEST_FILE), "{ not valid json").unwrap();
     let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
     assert!(
         readiness
@@ -228,15 +220,18 @@ fn startup_preparation_retries_failed_load_and_skips_disabled_plugins() {
         "已禁用的失败插件不计入失败：{readiness:?}"
     );
     std::fs::remove_file(directory.join(DISABLED_MARKER)).unwrap();
-    manifest["entrypoints"] = serde_json::json!(["cli"]);
+    let manifest = serde_json::json!({"schema_version":2,"id":id,"version":"0.1.0",
+            "entrypoints":["cli"],
+            "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}});
     std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
     let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
     assert!(
         readiness.failures.is_empty(),
         "非 desktop 插件不计入失败：{readiness:?}"
     );
-    manifest.as_object_mut().unwrap().remove("wasm");
-    manifest["entrypoints"] = serde_json::json!(["desktop"]);
+    let manifest = serde_json::json!({"schema_version":2,"id":id,"version":"0.1.0",
+            "entrypoints":["desktop"],
+            "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}});
     std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
     assert_eq!(
         prepare_desktop_startup_plugins(root.path()).unwrap().loaded,
@@ -387,12 +382,10 @@ fn 插件发现忽略内部事务目录并拒绝目录名与清单id不一致() 
 #[test]
 fn refresh_verified_sidecar_clears_only_runtime_error() {
     let manifest = PluginManifest {
-        schema_version: 2,
         name: None,
         description: None,
         id: "load-error-demo".into(),
         version: "0.1.0".into(),
-        wasm: None,
         sidecar: None,
         permissions: vec![],
         entrypoints: None,
@@ -411,12 +404,7 @@ fn refresh_verified_sidecar_clears_only_runtime_error() {
         directory: PathBuf::from("/tmp/load-error-demo"),
         manifest,
         signed_release: None,
-        wasm_bytes: None,
-        component: None,
-        ui_plugin: None,
-        descriptor: None,
         generation: 1,
-        instances: Vec::new(),
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
@@ -468,12 +456,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
             directory: directory.clone(),
             manifest,
             signed_release: None,
-            wasm_bytes: None,
-            component: None,
-            ui_plugin: None,
-            descriptor: None,
             generation: 1,
-            instances: Vec::new(),
             ts_instances: Vec::new(),
             sidecar: None,
             verified_sidecar: None,
@@ -570,12 +553,7 @@ fn mention_sources_are_reachable_without_any_session_core() {
         directory: std::path::PathBuf::from(format!("/tmp/{id}")),
         manifest: manifest(id),
         signed_release: None,
-        wasm_bytes: None,
-        component: None,
-        ui_plugin: None,
-        descriptor: None,
         generation: 1,
-        instances: Vec::new(),
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
@@ -846,12 +824,7 @@ fn 动态prompt段落变化改变能力指纹() {
         directory: std::path::PathBuf::from("/tmp/prompt-digest-demo"),
         manifest: manifest.clone(),
         signed_release: None,
-        wasm_bytes: None,
-        component: None,
-        ui_plugin: None,
-        descriptor: None,
         generation: 1,
-        instances: Vec::new(),
         ts_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
@@ -912,12 +885,7 @@ fn 通知重取用插件目录组装并发布事件() {
                 directory: plugin_dir.clone(),
                 manifest,
                 signed_release: None,
-                wasm_bytes: None,
-                component: None,
-                ui_plugin: None,
-                descriptor: None,
                 generation: 1,
-                instances: Vec::new(),
                 ts_instances: Vec::new(),
                 sidecar: None,
                 verified_sidecar: None,
@@ -974,12 +942,7 @@ fn 补验证刷新保留段落快照() {
                 directory: plugin_dir.clone(),
                 manifest,
                 signed_release: None,
-                wasm_bytes: None,
-                component: None,
-                ui_plugin: None,
-                descriptor: None,
                 generation: 1,
-                instances: Vec::new(),
                 ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
                 sidecar: None,
                 verified_sidecar: None,
@@ -1051,12 +1014,7 @@ fn 无wasm重载只读取一次装载快照且内容一致() {
                 directory: plugin_dir.clone(),
                 manifest: manifest.clone(),
                 signed_release: None,
-                wasm_bytes: None,
-                component: None,
-                ui_plugin: None,
-                descriptor: None,
                 generation: 1,
-                instances: Vec::new(),
                 ts_instances: vec![
                     std::sync::Arc::downgrade(&adapter_a),
                     std::sync::Arc::downgrade(&adapter_b),
@@ -1144,12 +1102,7 @@ fn 无wasm重载保留prompt未声明的none语义() {
                 directory: plugin_dir.clone(),
                 manifest: manifest.clone(),
                 signed_release: None,
-                wasm_bytes: None,
-                component: None,
-                ui_plugin: None,
-                descriptor: None,
                 generation: 1,
-                instances: Vec::new(),
                 ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
                 sidecar: None,
                 verified_sidecar: None,

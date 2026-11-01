@@ -1,9 +1,8 @@
-//! v2 manifest UI 贡献后端链路验证（T002 解析 + T004 列出 + T006 资源读取）。
+//! manifest UI 贡献后端链路验证（解析 + 列出 + 资源读取）。
 //!
-//! 用运行时测试插件 runtime-probe 构造 schema v2 插件：manifest 声明
-//! `settings.plugin-page` 的 shadow/iframe 两条贡献，验证贡献按 source=manifest
-//! 列出、entry HTML 读取、相对资源读取与 `../` 逃逸拒绝；以及 extension.tab
-//! 贡献聚合为 App 元数据。
+//! 构造纯清单插件：manifest 声明 `settings.plugin-page` 的 shadow/iframe
+//! 两条贡献，验证贡献按 source=manifest 列出、entry HTML 读取、相对资源
+//! 读取与 `../` 逃逸拒绝；以及 extension.tab 贡献聚合为 App 元数据。
 
 use std::path::{Path, PathBuf};
 
@@ -11,18 +10,16 @@ use tiangong_plugin_runtime::registry::{
     ContributionSource, list_extension_apps, list_slot_contributions, open_manifest_view,
     preload_installed_plugins, read_manifest_resource,
 };
-use tiangong_plugin_runtime::test_support::runtime_probe_wasm;
 
 const PLUGIN_ID: &str = "runtime-probe";
 
 /// 全局插件注册表是进程级单例，本文件用例经此锁串行执行。
 static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 把测试插件制品放入 `<root>/plugins/runtime-probe/` 并写入清单。
+/// 把清单写入 `<root>/plugins/runtime-probe/`（纯清单插件，无逻辑层制品）。
 fn stage_probe(root: &Path, manifest: &str) -> PathBuf {
     let dir = root.join("plugins").join(PLUGIN_ID);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(runtime_probe_wasm(), dir.join("runtime_probe.wasm")).unwrap();
     std::fs::write(dir.join("plugin.json"), manifest).unwrap();
     dir
 }
@@ -32,10 +29,9 @@ fn stage_v2_plugin(root: &Path) {
     let dir = stage_probe(
         root,
         r#"{
-            "schema_version": 2,
             "id": "runtime-probe",
             "version": "1.0.0",
-            "wasm": { "binary": "runtime_probe.wasm" },
+            "name": "Runtime Probe",
             "permissions": ["bridge.call"],
             "ui": {
                 "contributions": [
@@ -140,10 +136,9 @@ fn extension_tab_贡献聚合为_app_元数据() {
     let dir = stage_probe(
         root.path(),
         r#"{
-            "schema_version": 2,
             "id": "runtime-probe",
             "version": "1.0.0",
-            "wasm": { "binary": "runtime_probe.wasm" },
+            "name": "Runtime Probe",
             "permissions": ["bridge.call"],
             "ui": {
                 "contributions": [
@@ -191,10 +186,7 @@ fn extension_tab_贡献聚合为_app_元数据() {
         .iter()
         .find(|app| app.contribution_id == "board")
         .unwrap();
-    assert_eq!(
-        board.name, "Runtime Probe",
-        "插件 descriptor 名称作为 App 名"
-    );
+    assert_eq!(board.name, "Runtime Probe", "插件清单名称作为 App 名");
     assert_eq!(board.title, "看板");
     assert_eq!(board.description, "任务看板面板");
     assert_eq!(board.open_mode, tiangong_plugin_runtime::OpenMode::Multi);

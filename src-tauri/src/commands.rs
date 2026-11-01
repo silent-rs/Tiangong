@@ -3762,40 +3762,12 @@ pub async fn resolve_model_context_window(
     Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
 }
 
-// ── 插件 UI 桥接（WASM 插件动态 UI）──
+// ── 插件 UI 桥接（manifest 声明贡献）──
 //
 // 天工只提供通用桥接，不处理具体插件业务：
-// - list_plugin_contributions：列出插件声明（含是否有页面）
-// - plugin_open_view：按需获取插件页面 HTML（天工只当容器，不处理内容）
-// - plugin_call：通用桥接，转发到 WASM 的 handle-view-message
+// - plugin_open_entry：按需获取 manifest 贡献的入口 HTML（天工只当容器，不处理内容）
 
-/// 列出所有已加载 WASM 插件的设置页贡献。
-#[tauri::command]
-pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>, String> {
-    let entries = tiangong_plugin_runtime::registry::list_contributions();
-    Ok(entries
-        .into_iter()
-        .flat_map(|(plugin_id, generation, contributions)| {
-            contributions
-                .into_iter()
-                .map(move |c| PluginContributionEntry {
-                    plugin_id: plugin_id.clone(),
-                    generation,
-                    contribution_id: c.id,
-                    title: c.title,
-                    description: c.description,
-                    icon: c.icon,
-                    group: c.group,
-                    has_view: c.has_view,
-                })
-        })
-        .collect())
-}
-
-/// 按挂载点列出 UI 贡献（UI 接缝统一入口）。
-///
-/// v1 插件的 WASM 设置页贡献映射到 `settings.plugin-page`（零改动兼容）；
-/// v2 插件取 manifest `ui.contributions` 中 slot 匹配的项。
+/// 按挂载点列出 UI 贡献（UI 接缝统一入口，manifest `ui.contributions` 声明）。
 #[tauri::command]
 pub async fn list_slot_contributions(
     slot: String,
@@ -4437,36 +4409,13 @@ pub async fn reload_plugin(
     Ok(status)
 }
 
-/// 按需获取插件页面 HTML（用户点击进入时才调用）。
-#[tauri::command]
-pub async fn plugin_open_view(
-    plugin_id: String,
-    contribution_id: String,
-) -> Result<String, String> {
-    tiangong_plugin_runtime::registry::open_view(&plugin_id, &contribution_id)
-        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无页面"))
-}
-
-/// 通用桥接：转发到 WASM 的 handle-view-message。
-/// iframe 内的 JS 经 postMessage → 前端 → 本命令 → WASM。
-/// 天工不关心 method/payload 含义，只做透传。
-#[tauri::command]
-pub async fn plugin_call(
-    plugin_id: String,
-    method: String,
-    payload: String,
-) -> Result<String, String> {
-    tiangong_plugin_runtime::registry::handle_view_message(&plugin_id, &method, &payload)
-        .ok_or_else(|| format!("插件 {plugin_id} 未加载或处理消息失败"))
-}
-
 // ── 宿主桥接（Host Bridge）──
 //
 // 统一插件 UI ↔ 宿主通信管道：命名空间白名单 + 权限校验 + 负载透传。
-// - bridge_call：调用宿主能力（plugin.* 转发到 WASM，其余命名空间按接缝任务接入）
+// - bridge_call：调用宿主能力（命名空间按接缝任务接入）
 // - bridge_subscribe / bridge_unsubscribe：事件订阅骨架（事件源在事件接缝接入）
 
-/// 桥接调用：`method` 按命名空间路由（如 `plugin.getConfig` → WASM）。
+/// 桥接调用：`method` 按命名空间路由。
 ///
 /// `plugin-dev.*` 含构建（可长达数分钟）与安装原生确认（等待用户点击），
 /// 经 spawn_blocking 执行，避免阻塞 tokio worker。
@@ -4548,19 +4497,6 @@ pub async fn bridge_subscribe(plugin_id: String, channel: String) -> Result<(), 
 pub async fn bridge_unsubscribe(plugin_id: String, channel: String) -> Result<(), String> {
     tiangong_plugin_runtime::bridge_unsubscribe(&plugin_id, &channel)
         .map_err(|error| error.to_string())
-}
-
-/// 插件设置页贡献项（传给前端）。
-#[derive(serde::Serialize)]
-pub struct PluginContributionEntry {
-    pub plugin_id: String,
-    pub generation: u64,
-    pub contribution_id: String,
-    pub title: String,
-    pub description: String,
-    pub icon: String,
-    pub group: String,
-    pub has_view: bool,
 }
 
 // ---------------------------------------------------------------------------

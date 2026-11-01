@@ -8,7 +8,6 @@ use std::process::Command;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const WASM_TARGET: &str = "wasm32-wasip2";
 const RUNTIME_MANIFEST: &str = "crates/plugin/tiangong-plugin-runtime/Cargo.toml";
 const PLUGIN_DIST: &str = "target/plugin-dist";
 const DEFAULT_OSS_BASE_URL: &str = "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com";
@@ -29,7 +28,7 @@ struct PublishedPluginRelease {
     #[serde(default, rename = "description")]
     _description: String,
     manifest: PublishedRemoteArtifact,
-    /// 纯 UI 插件无 WASM 制品，目录条目省略 wasm。
+    /// WASM 制品形态已淘汰；字段保留解析，出现即拒绝。
     #[serde(default)]
     wasm: Option<PublishedRemoteArtifact>,
     #[serde(default)]
@@ -52,15 +51,13 @@ struct PublishedRemoteArtifact {
     checksum: String,
 }
 
-/// 单个插件的构建配置。纯 UI 插件（无 WASM）省略 protocol/wasm 字段，
+/// 单个插件的构建配置。无 protocol 的插件省略 protocol 字段，
 /// 声明 sidecar 的插件（如 terminal）仍要求官方签名发布。
 struct PluginConfig {
     id: &'static str,
     name: &'static str,
     description: &'static str,
     protocol_crate: Option<&'static str>,
-    wasm_crate: Option<&'static str>,
-    wasm_artifact: Option<&'static str>,
     sidecar_crate: Option<&'static str>,
     sidecar_artifact: Option<&'static str>,
     plugin_root: &'static str,
@@ -73,8 +70,6 @@ const MEMORY: PluginConfig = PluginConfig {
     name: "Memory",
     description: "对话记忆、召回与数据管理",
     protocol_crate: Some("tiangong-plugin-memory-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-memory-sidecar"),
     sidecar_artifact: Some("tiangong-memory-sidecar"),
     plugin_root: "plugins/tiangong-plugin-memory",
@@ -87,8 +82,6 @@ const MCP: PluginConfig = PluginConfig {
     name: "MCP",
     description: "MCP server 管理与工具桥接",
     protocol_crate: Some("tiangong-plugin-mcp-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-mcp-sidecar"),
     sidecar_artifact: Some("tiangong-mcp-sidecar"),
     plugin_root: "plugins/tiangong-plugin-mcp",
@@ -101,8 +94,6 @@ const FETCH: PluginConfig = PluginConfig {
     name: "Fetch",
     description: "URL 获取（text 提取正文 / download 落盘），含 SSRF 防护",
     protocol_crate: Some("tiangong-plugin-fetch-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-fetch-sidecar"),
     sidecar_artifact: Some("tiangong-fetch-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fetch",
@@ -115,8 +106,6 @@ const INDEX: PluginConfig = PluginConfig {
     name: "Index",
     description: "工作区文件索引、对话历史索引与代码检索",
     protocol_crate: Some("tiangong-plugin-index-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-index-sidecar"),
     sidecar_artifact: Some("tiangong-index-sidecar"),
     plugin_root: "plugins/tiangong-plugin-index",
@@ -129,8 +118,6 @@ const SCHEDULER: PluginConfig = PluginConfig {
     name: "Scheduler",
     description: "定时任务调度与执行",
     protocol_crate: Some("tiangong-plugin-scheduler-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-scheduler-sidecar"),
     sidecar_artifact: Some("tiangong-scheduler-sidecar"),
     plugin_root: "plugins/tiangong-plugin-scheduler",
@@ -143,8 +130,6 @@ const SKILL: PluginConfig = PluginConfig {
     name: "Skill",
     description: "Skill 注册表管理、详情查询与 prompt 段落注入",
     protocol_crate: Some("tiangong-plugin-skill-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-skill-sidecar"),
     sidecar_artifact: Some("tiangong-skill-sidecar"),
     plugin_root: "plugins/tiangong-plugin-skill",
@@ -157,8 +142,6 @@ const CODING: PluginConfig = PluginConfig {
     name: "Coding",
     description: "通用开发工作流、项目上下文与交付审查",
     protocol_crate: Some("tiangong-plugin-coding-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-coding-sidecar"),
     sidecar_artifact: Some("tiangong-coding-sidecar"),
     plugin_root: "plugins/tiangong-plugin-coding",
@@ -171,8 +154,6 @@ const PROMPT: PluginConfig = PluginConfig {
     name: "Prompt",
     description: "产品文案与自定义指令注入",
     protocol_crate: Some("tiangong-plugin-prompt-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-prompt-sidecar"),
     sidecar_artifact: Some("tiangong-prompt-sidecar"),
     plugin_root: "plugins/tiangong-plugin-prompt",
@@ -185,8 +166,6 @@ const FS: PluginConfig = PluginConfig {
     name: "Fs",
     description: "基础文件工具（读写/补丁/目录树）+ 进程级文件锁表",
     protocol_crate: Some("tiangong-plugin-fs-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-fs-sidecar"),
     sidecar_artifact: Some("tiangong-fs-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fs",
@@ -199,8 +178,6 @@ const COMMAND: PluginConfig = PluginConfig {
     name: "Command",
     description: "基础命令执行（run_command/run_shell）+ 命令校验策略",
     protocol_crate: Some("tiangong-plugin-command-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-command-sidecar"),
     sidecar_artifact: Some("tiangong-command-sidecar"),
     plugin_root: "plugins/tiangong-plugin-command",
@@ -213,8 +190,6 @@ const COMPUTER_USE: PluginConfig = PluginConfig {
     name: "Computer Use",
     description: "跨平台桌面应用控制（Windows UI Automation / macOS AXUIElement / Linux AT-SPI2）",
     protocol_crate: Some("tiangong-plugin-computer-use-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-computer-use-sidecar"),
     sidecar_artifact: Some("tiangong-computer-use-sidecar"),
     plugin_root: "plugins/tiangong-plugin-computer-use",
@@ -227,8 +202,6 @@ const VOLCENGINE: PluginConfig = PluginConfig {
     name: "Volcengine",
     description: "火山引擎：图片/视频生成、语音合成与语音识别",
     protocol_crate: Some("tiangong-plugin-volcengine-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-volcengine-sidecar"),
     sidecar_artifact: Some("tiangong-volcengine-sidecar"),
     plugin_root: "plugins/tiangong-plugin-volcengine",
@@ -241,8 +214,6 @@ const GENERATE_IMAGE_OPENAI: PluginConfig = PluginConfig {
     name: "Generate Image OpenAI",
     description: "Generate Image OpenAI",
     protocol_crate: Some("tiangong-plugin-generate-image-openai-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-generate-image-openai-sidecar"),
     sidecar_artifact: Some("tiangong-generate-image-openai-sidecar"),
     plugin_root: "plugins/tiangong-plugin-generate-image-openai",
@@ -255,8 +226,6 @@ const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
     name: "Analyze Attachment",
     description: "Analyze Attachment",
     protocol_crate: Some("tiangong-plugin-analyze-attachment-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-analyze-attachment-sidecar"),
     sidecar_artifact: Some("tiangong-analyze-attachment-sidecar"),
     plugin_root: "plugins/tiangong-plugin-analyze-attachment",
@@ -269,8 +238,6 @@ const SCREENSHOT_INPUT: PluginConfig = PluginConfig {
     name: "Screenshot Input",
     description: "跨平台区域截图并加入当前输入草稿",
     protocol_crate: Some("tiangong-plugin-screenshot-input-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-screenshot-input-sidecar"),
     sidecar_artifact: Some("tiangong-screenshot-input-sidecar"),
     plugin_root: "plugins/screenshot-input",
@@ -283,8 +250,6 @@ const INTERACTION: PluginConfig = PluginConfig {
     name: "Interaction",
     description: "审批征询交互处理器：审批、确认、选择、输入与表单",
     protocol_crate: None,
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: None,
     sidecar_artifact: None,
     plugin_root: "plugins/tiangong-plugin-interaction",
@@ -297,8 +262,6 @@ const PLUGIN_CREATOR: PluginConfig = PluginConfig {
     name: "Plugin Creator",
     description: "插件创作：经 Agent 与 devkit 生成、构建与安装自建插件",
     protocol_crate: None,
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: None,
     sidecar_artifact: None,
     plugin_root: "plugins/tiangong-plugin-creator",
@@ -311,8 +274,6 @@ const BROWSER: PluginConfig = PluginConfig {
     name: "Browser",
     description: "嵌入式浏览器：页面、标签与浏览工具（webview 引擎由宿主提供）",
     protocol_crate: None,
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: None,
     sidecar_artifact: None,
     plugin_root: "plugins/tiangong-plugin-browser",
@@ -325,8 +286,6 @@ const TERMINAL: PluginConfig = PluginConfig {
     name: "Terminal",
     description: "嵌入式终端：多标签、会话隔离与命令执行",
     protocol_crate: None,
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-terminal-sidecar"),
     sidecar_artifact: Some("tiangong-terminal-sidecar"),
     plugin_root: "plugins/tiangong-plugin-terminal",
@@ -339,8 +298,6 @@ const WORKSPACE_FILES: PluginConfig = PluginConfig {
     name: "Workspace Files",
     description: "工作区文件管理：浏览、预览与编辑会话工作区内的文件",
     protocol_crate: None,
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-workspace-files-sidecar"),
     sidecar_artifact: Some("tiangong-workspace-files-sidecar"),
     plugin_root: "plugins/tiangong-plugin-workspace-files",
@@ -352,8 +309,6 @@ const SUBAGENT: PluginConfig = PluginConfig {
     name: "Subagent",
     description: "持久 Subagent 统一管理：身份、激活、任务运行与 Hook 反馈",
     protocol_crate: Some("tiangong-plugin-subagent-protocol"),
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-subagent-sidecar"),
     sidecar_artifact: Some("tiangong-subagent-sidecar"),
     plugin_root: "plugins/tiangong-plugin-subagent",
@@ -366,8 +321,6 @@ const BOT: PluginConfig = PluginConfig {
     name: "Bot",
     description: "飞书 / QQ / 微信机器人：接收消息转发到天工，并提供主动推送工具",
     protocol_crate: None,
-    wasm_crate: None,
-    wasm_artifact: None,
     sidecar_crate: Some("tiangong-plugin-bot-sidecar"),
     sidecar_artifact: Some("tiangong-bot-sidecar"),
     plugin_root: "plugins/tiangong-plugin-bot",
@@ -568,12 +521,6 @@ fn main() {
             Ok(config) => build_plugin(config),
             Err(error) => Err(error),
         },
-        [command, plugin, output] if command == "build-plugin-wasm" => {
-            match plugin_config(plugin) {
-                Ok(config) => build_plugin_wasm(config, output),
-                Err(error) => Err(error),
-            }
-        }
         [command, plugin] if command == "validate-plugin" => match plugin_config(plugin) {
             Ok(config) => validate_plugin(config),
             Err(error) => Err(error),
@@ -611,10 +558,6 @@ fn main() {
         [command, artifact, signature] if command == "verify-sandbox-artifact" => {
             verify_sandbox_artifact(artifact, signature)
         }
-        [command] if command == "build-wasm" || command == "build-sidecar" => {
-            eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
-            Err(invalid_input("请使用 build-plugin <id>"))
-        }
         [command] if command == "help" || command == "--help" || command == "-h" => {
             print_help();
             Ok(())
@@ -639,7 +582,6 @@ fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
     eprintln!("用法:");
     eprintln!("  cargo run -p xtask -- validate-plugin <id>");
-    eprintln!("  cargo run -p xtask -- build-plugin-wasm <id> <输出WASM>");
     eprintln!("  cargo run -p xtask -- build-plugin <id>");
     eprintln!("  cargo run -p xtask -- sign-plugin <插件包目录>");
     eprintln!("  cargo run -p xtask -- generate-plugin-test-key <私钥路径>");
@@ -661,102 +603,15 @@ fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
     Ok(())
 }
 
-fn build_plugin_wasm(config: &PluginConfig, output: &str) -> io::Result<()> {
-    let Some(wasm_crate) = config.wasm_crate else {
-        return Err(invalid_input(format!("插件 {} 无 WASM 制品", config.id)));
-    };
-    let protocol_crate = config.protocol_crate.expect("无 WASM 的插件必有 protocol");
-    let workspace_root = workspace_root();
-    validate_versions(&workspace_root, config)?;
-    eprintln!("[xtask] CI build-plugin-wasm");
-    run_cargo(&workspace_root, &["check", "-p", protocol_crate])?;
-    run_cargo(
-        &workspace_root,
-        &["check", "-p", protocol_crate, "--target", WASM_TARGET],
-    )?;
-    run_cargo(
-        &workspace_root,
-        &[
-            "build",
-            "-p",
-            wasm_crate,
-            "--target",
-            WASM_TARGET,
-            "--release",
-        ],
-    )?;
-    eprintln!("[xtask] WASM check ok");
-    let wasm_artifact = config
-        .wasm_artifact
-        .expect("wasm_crate 存在时必有 artifact");
-    let wasm = workspace_root
-        .join("target")
-        .join(WASM_TARGET)
-        .join("release")
-        .join(wasm_artifact);
-    require_file(&wasm)?;
-    let dest = Path::new(output);
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(&wasm, dest)?;
-    eprintln!("[xtask] WASM copied to: {}", dest.display());
-    Ok(())
-}
-
 fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     let workspace_root = workspace_root();
     validate_versions(&workspace_root, config)?;
 
     let plugin_name = config.name;
     if let Some(protocol_crate) = config.protocol_crate {
-        eprintln!("[xtask] 检查 {plugin_name} 私有协议（native）...");
+        eprintln!("[xtask] 检查 {plugin_name} 私有协议...");
         run_cargo(&workspace_root, &["check", "-p", protocol_crate])?;
-        eprintln!("[xtask] 检查 {plugin_name} 私有协议（{WASM_TARGET}）...");
-        run_cargo(
-            &workspace_root,
-            &["check", "-p", protocol_crate, "--target", WASM_TARGET],
-        )?;
     }
-    let wasm: Option<PathBuf> = match config.wasm_artifact {
-        Some(wasm_artifact) => {
-            let wasm = match non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_WASM").map(PathBuf::from) {
-                Some(path) => {
-                    eprintln!("[xtask] using prebuilt wasm");
-                    require_file(&path)?;
-                    path
-                }
-                None => {
-                    eprintln!("[xtask] build wasm...");
-                    let wasm_crate = config.wasm_crate.expect("wasm_artifact 存在时必有 crate");
-                    run_cargo(
-                        &workspace_root,
-                        &[
-                            "build",
-                            "-p",
-                            wasm_crate,
-                            "--target",
-                            WASM_TARGET,
-                            "--release",
-                        ],
-                    )?;
-                    let p = workspace_root
-                        .join("target")
-                        .join(WASM_TARGET)
-                        .join("release")
-                        .join(wasm_artifact);
-                    require_file(&p)?;
-                    p
-                }
-            };
-            Some(wasm)
-        }
-        None => {
-            eprintln!("[xtask] {plugin_name} 无 WASM 制品，跳过 WASM 构建");
-            None
-        }
-    };
-
     let plugins_dir = storage_root().join("plugins");
     std::fs::create_dir_all(&plugins_dir)?;
     let staging = plugins_dir.join(format!(".{}-staging-{}", config.id, std::process::id()));
@@ -775,10 +630,6 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         }
     }
     std::fs::create_dir_all(&staging)?;
-
-    if let (Some(wasm), Some(wasm_artifact)) = (&wasm, config.wasm_artifact) {
-        std::fs::copy(wasm, staging.join(wasm_artifact))?;
-    }
 
     // sidecar 构建和复制（无 sidecar 的插件跳过）。
     if let (Some(sidecar_crate), Some(sidecar_artifact)) =
@@ -827,12 +678,6 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         std::fs::create_dir_all(staging.join(directory))?;
     }
 
-    if let Some(wasm_artifact) = config.wasm_artifact {
-        eprintln!(
-            "[xtask] WASM sha256: {}",
-            sha256(&staging.join(wasm_artifact))?
-        );
-    }
     if let Some(sidecar_artifact) = config.sidecar_artifact {
         let staged_sidecar = staging.join(format!(
             "{sidecar_artifact}{}",
@@ -931,7 +776,7 @@ fn stage_plugin_assets(
 /// 生成插件签名发布清单（release.json）并对它做 minisign 数字签名。
 ///
 /// 清单结构与运行时 `signature.rs::SignedPluginRelease` 对齐，覆盖
-/// schema、id、version、publisher、permissions 以及 plugin.json、WASM
+/// schema、id、version、publisher、permissions 以及 plugin.json
 /// UI 入口和（若有）sidecar 的 sha256。签名失败直接报错，绝不写空签名文件。
 fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> {
     let manifest_path = plugin.join("plugin.json");
@@ -957,15 +802,6 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
             "sha256": sha256(&manifest_path)?,
         },
     });
-
-    // WASM 条目（纯 UI/sidecar 插件无 wasm 制品，签名清单省略，
-    // 与运行时 SignedPluginRelease 的可选 wasm 字段对齐）。
-    if let Some(wasm_artifact) = config.wasm_artifact {
-        release["wasm"] = serde_json::json!({
-            "path": wasm_artifact,
-            "sha256": sha256(&plugin.join(wasm_artifact))?,
-        });
-    }
 
     // sidecar 声明（无 sidecar 的插件跳过，保持清单与 plugin.json 一致）。
     // 解释器形态：签名锚定完整内容清单（覆盖全树），不签单个二进制。
@@ -1154,19 +990,6 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
             "sha256": sha256(&manifest_path)?,
         },
     });
-    if let Some(wasm_binary) = manifest
-        .get("wasm")
-        .and_then(|wasm| wasm.get("binary"))
-        .and_then(serde_json::Value::as_str)
-    {
-        let wasm_path = directory.join(wasm_binary);
-        if wasm_path.is_file() {
-            release["wasm"] = serde_json::json!({
-                "path": wasm_binary,
-                "sha256": sha256(&wasm_path)?,
-            });
-        }
-    }
     if let Some(binary) = manifest
         .get("sidecar")
         .and_then(|sidecar| sidecar.get("binary"))
@@ -1398,9 +1221,9 @@ fn generate_oss_distribution(
     plugin: &Path,
     config: &PluginConfig,
 ) -> io::Result<()> {
-    // 官方构建的全部插件一律生成签名发布清单：不按形态（sidecar/UI/wasm）
+    // 官方构建的全部插件一律生成签名发布清单：不按形态（sidecar/UI）
     // 设置免签通道——任何免签形态都会成为风险插件的藏身处。签名覆盖
-    // plugin.json 与全部携带制品（sidecar 二进制 / UI 制品 / wasm）的
+    // plugin.json 与全部携带制品（sidecar 二进制 / UI 制品）的
     // sha256；运行时发现路径对已签名插件强制校验，签名无效即拒绝加载。
     write_signed_release(plugin, config)?;
 
@@ -1442,9 +1265,6 @@ fn generate_oss_distribution(
 
     let dist_manifest = release_root.join("plugin.json");
     std::fs::copy(&manifest_path, &dist_manifest)?;
-    if let Some(wasm_artifact) = config.wasm_artifact {
-        std::fs::copy(plugin.join(wasm_artifact), release_root.join(wasm_artifact))?;
-    }
     let mut ui_artifacts = serde_json::Map::new();
     for entry in plugin_ui_artifacts(config) {
         let destination = release_root.join(&entry);
@@ -1516,15 +1336,6 @@ fn generate_oss_distribution(
         "sidecars": sidecar_entry.unwrap_or_else(|| serde_json::json!({})),
         "ui": ui_artifacts,
     });
-    // WASM 条目（纯 UI 插件无 wasm 制品，目录条目省略；
-    // 客户端按 plugin.json 是否声明 wasm 决定下载）。
-    if let Some(wasm_artifact) = config.wasm_artifact {
-        let dist_wasm = release_root.join(wasm_artifact);
-        release["wasm"] = serde_json::json!({
-            "url": format!("{release_url}/{}", wasm_artifact),
-            "checksum": format!("sha256:{}", sha256(&dist_wasm)?),
-        });
-    }
     // 全部插件一律携带签名发布清单（无免签通道，防风险插件）。
     release["signed_releases"] = serde_json::json!({
         platform.clone(): {
@@ -1544,13 +1355,6 @@ fn generate_oss_distribution(
     )?;
 
     let mut checksums = format!("{}  plugin.json\n", sha256(&dist_manifest)?);
-    if let Some(wasm_artifact) = config.wasm_artifact {
-        checksums.push_str(&format!(
-            "{}  {}\n",
-            sha256(&release_root.join(wasm_artifact))?,
-            wasm_artifact,
-        ));
-    }
     if let Some(sidecar_artifact) = config.sidecar_artifact {
         let dist_sidecar = platform_root.join(format!(
             "{sidecar_artifact}{}",
@@ -1813,18 +1617,10 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
         }
     }
 
-    let wasm_binary = manifest
-        .get("wasm")
-        .and_then(|value| value.get("binary"))
-        .and_then(serde_json::Value::as_str);
     let sidecar_binary = manifest
         .get("sidecar")
         .and_then(|value| value.get("binary"))
         .and_then(serde_json::Value::as_str);
-    // 纯 UI 插件清单不声明 wasm；声明与配置必须两侧同时存在且一致。
-    if wasm_binary != config.wasm_artifact {
-        return Err(invalid_data("plugin.json wasm.binary 与构建产物不一致"));
-    }
     if let Some(expected) = config.sidecar_artifact
         && sidecar_binary != Some(expected)
     {
@@ -1869,9 +1665,6 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     }
     if config.protocol_crate.is_some() {
         require_file(&plugin_root.join("protocol/Cargo.toml"))?;
-    }
-    if config.wasm_crate.is_some() {
-        require_file(&plugin_root.join("wasm/Cargo.toml"))?;
     }
     if config.sidecar_crate.is_some() {
         require_file(&plugin_root.join("sidecar/Cargo.toml"))?;

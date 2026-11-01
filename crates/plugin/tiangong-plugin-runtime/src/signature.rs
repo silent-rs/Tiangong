@@ -88,11 +88,12 @@ impl ValidateSignedRelease for SignedPluginRelease {
             bail!("插件签名清单与 plugin.json 的权限声明不一致");
         }
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
-        // wasm 条目与 plugin.json 声明一致才校验；纯 TS/sidecar 插件两边都缺省。
-        match (&self.wasm, plugin_manifest.wasm_binary()) {
-            (Some(signed_wasm), Some(wasm_binary)) => signed_wasm.verify(directory, wasm_binary)?,
-            (None, None) => {}
-            _ => bail!("插件签名清单与 plugin.json 的 wasm 声明不一致"),
+        // WASM 制品形态已淘汰（plugin.json 忽略该字段，宿主不装载）；
+        // 存量签名清单的 wasm 条目仍按制品完整性校验（防篡改），不作为
+        // 与清单声明的一致性判据。
+        if let Some(signed_wasm) = &self.wasm {
+            let expected = signed_wasm.path.clone();
+            signed_wasm.verify(directory, &expected)?;
         }
         let signed_ui = self
             .ui

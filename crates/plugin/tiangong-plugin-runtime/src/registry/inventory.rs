@@ -98,11 +98,8 @@ const LIST_NOTE: &str =
 ///   `call_local_plugin` + 对话内清单提供（见 `local_plugin_inventory`），
 ///   装卸迭代不改变 tools 声明与 system prompt 段落，不该触发上下文交接；
 /// - **纯 UI 插件不计入**：判据是「确定无逻辑层」的充分条件——manifest
-///   无 wasm 制品、无 sidecar、无 TS tools/prompt 声明（四者皆空才排除）。
-///   注意 WASM 插件的工具声明在组件内（`tool-specs` 接缝），manifest 的
-///   tools/prompt 恒为空，**不能**以 manifest 声明判其无能力——否则官方
-///   WASM 插件（coding/fs/memory 等）升级将漏出交接。宁可多计（纯 UI
-///   之外的形态一律计入）也不漏报，与下方锁中毒策略一致。
+///   无 sidecar、无 TS tools/prompt 声明（三者皆空才排除）。宁可多计
+///   （纯 UI 之外的形态一律计入）也不漏报，与下方锁中毒策略一致。
 ///
 /// 键排序去重后参与摘要——加载顺序与运行期抖动（如 sidecar 临时掉线）
 /// 不构成能力变化；反之插件升级即使工具名不变也会改变指纹，因为历史里
@@ -123,8 +120,7 @@ pub fn enabled_plugin_fingerprint() -> String {
                     .signed_release
                     .as_ref()
                     .is_some_and(|release| release.publisher == crate::trust::LOCAL_PUBLISHER)
-                && (loaded.manifest.wasm.is_some()
-                    || loaded.manifest.sidecar.is_some()
+                && (loaded.manifest.sidecar.is_some()
                     || loaded
                         .manifest
                         .tools
@@ -140,11 +136,7 @@ pub fn enabled_plugin_fingerprint() -> String {
                     || loaded.prompt_sections.is_some())
         })
         .map(|(id, loaded)| {
-            let version = loaded
-                .descriptor
-                .as_ref()
-                .map(|value| value.version.clone())
-                .unwrap_or_else(|| loaded.manifest.version.clone());
+            let version = loaded.manifest.version.clone();
             // 动态 prompt 段落内容计入键：装载时组装、通知重取更新——内容
             // 变化即能力变化，触发上下文交接（与版本升级同链路）。
             let prompt_digest = loaded
