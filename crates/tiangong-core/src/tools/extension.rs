@@ -265,6 +265,8 @@ mod tests {
                     stdout: name,
                     stderr: String::new(),
                     exit_code: 0,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             })

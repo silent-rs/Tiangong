@@ -89,6 +89,12 @@ pub struct TsToolResult {
     #[serde(default)]
     pub stderr: String,
     pub exit_code: i32,
+    /// 插件声明的结构化失败类型（对齐 core `ToolFailureKind` 取值）。
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    /// 插件声明的可重试性（覆盖 core 默认判定）。
+    #[serde(default)]
+    pub retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
@@ -396,6 +402,8 @@ fn failure_result(message: impl Into<String>) -> ToolResult {
         stdout: String::new(),
         stderr: message,
         exit_code: 1,
+        error_kind: None,
+        retryable: None,
         execution: None,
     }
 }
@@ -412,6 +420,8 @@ impl TsToolResult {
             stdout: self.stdout,
             stderr: self.stderr,
             exit_code: self.exit_code,
+            error_kind: self.error_kind,
+            retryable: self.retryable,
             execution: None,
         }
     }

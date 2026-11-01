@@ -29,6 +29,17 @@ pub const READ_IMAGE_INJECTION_SOURCE: &str = "read_image";
 
 // ── 通用响应（对齐 core ToolResult 字段，便于 sidecar 直接构造）─────
 
+/// 工具失败类型的结构化声明（#710）：与 core `ToolFailureKind` 取值对齐。
+///
+/// fs 侧约定：
+/// - `argument_error`：参数/匹配类失败（未找到待替换内容、命中数不符、
+///   补丁不匹配、非法参数）——模型应修正参数后重试；
+/// - `environment_missing`：路径/权限类 IO 失败（NotFound、权限拒绝）；
+/// - `tool_internal_error`：其余内部错误。
+pub const FS_ERROR_KIND_ARGUMENT: &str = "argument_error";
+pub const FS_ERROR_KIND_ENVIRONMENT_MISSING: &str = "environment_missing";
+pub const FS_ERROR_KIND_TOOL_INTERNAL: &str = "tool_internal_error";
+
 /// Fs 工具响应：保留与 core `ToolResult` 同构字段，便于 sidecar 直接构造。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FsToolResponse {
@@ -37,6 +48,10 @@ pub struct FsToolResponse {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// 结构化失败类型（`ok=false` 时声明，见 `FS_ERROR_KIND_*` 常量）；
+    /// core 优先采用该声明，未声明时回落关键词推断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
     /// 写工具返回：本次操作实际加锁的路径（供 sidecar 上报 locked 事件）。
     #[serde(default)]
     pub locked_paths: Vec<String>,

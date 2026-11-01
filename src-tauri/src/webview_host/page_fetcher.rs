@@ -468,6 +468,8 @@ impl BrowserToolOverride {
                         stdout: String::new(),
                         stderr: "浏览器无法获取页面内容".to_string(),
                         exit_code: 1,
+                        error_kind: None,
+                        retryable: None,
                         execution: None,
                     });
                 }
@@ -482,6 +484,8 @@ impl BrowserToolOverride {
                     stdout: String::new(),
                     stderr: result.error.unwrap_or_default(),
                     exit_code: 1,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 });
             }
@@ -513,6 +517,8 @@ impl BrowserToolOverride {
                 stdout,
                 stderr: String::new(),
                 exit_code: 0,
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })
@@ -537,6 +543,8 @@ impl BrowserToolOverride {
                         stdout: String::new(),
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
+                        error_kind: None,
+                        retryable: None,
                         execution: None,
                     });
                 }
@@ -607,6 +615,8 @@ impl BrowserToolOverride {
                 stdout: format!("{human_summary}\n\n--- JSON ---\n{json_output}"),
                 stderr: String::new(),
                 exit_code: 0,
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })
@@ -658,6 +668,8 @@ impl BrowserToolOverride {
                         stdout: String::new(),
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
+                        error_kind: None,
+                        retryable: None,
                         execution: None,
                     });
                 }
@@ -683,6 +695,8 @@ impl BrowserToolOverride {
                     ),
                     stderr: String::new(),
                     exit_code: 0,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             } else {
@@ -692,6 +706,8 @@ impl BrowserToolOverride {
                     stdout: String::new(),
                     stderr: result.error.unwrap_or_default(),
                     exit_code: 1,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             }
@@ -729,6 +745,8 @@ impl BrowserToolOverride {
                         stdout: String::new(),
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
+                        error_kind: None,
+                        retryable: None,
                         execution: None,
                     });
                 }
@@ -751,6 +769,8 @@ impl BrowserToolOverride {
                     stdout: diff_info,
                     stderr: String::new(),
                     exit_code: 0,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             } else {
@@ -770,6 +790,8 @@ impl BrowserToolOverride {
                     stdout: String::new(),
                     stderr: format!("{}{candidates_info}", result.error.unwrap_or_default()),
                     exit_code: 1,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             }
@@ -807,6 +829,8 @@ impl BrowserToolOverride {
                         stdout: String::new(),
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
+                        error_kind: None,
+                        retryable: None,
                         execution: None,
                     });
                 }
@@ -818,6 +842,8 @@ impl BrowserToolOverride {
                     stdout: format!("选择器 \"{}\" 未匹配到任何元素", result.selector),
                     stderr: String::new(),
                     exit_code: 0,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 });
             }
@@ -856,6 +882,8 @@ impl BrowserToolOverride {
                 stdout: format!("{human_output}\n\n--- JSON ---\n{json_output}"),
                 stderr: String::new(),
                 exit_code: 0,
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })
@@ -887,6 +915,8 @@ impl BrowserToolOverride {
                         stdout: String::new(),
                         stderr: "请先使用 web_fetch 打开页面".to_string(),
                         exit_code: 1,
+                        error_kind: None,
+                        retryable: None,
                         execution: None,
                     });
                 }
@@ -909,6 +939,8 @@ impl BrowserToolOverride {
                     stdout,
                     stderr: String::new(),
                     exit_code: 0,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             } else {
@@ -925,6 +957,8 @@ impl BrowserToolOverride {
                     stdout,
                     stderr: error,
                     exit_code: 0,
+                    error_kind: None,
+                    retryable: None,
                     execution: None,
                 })
             }

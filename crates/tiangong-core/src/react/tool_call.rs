@@ -36,6 +36,8 @@ fn unregistered_tool_result(tool_name: String) -> ToolResult {
         stdout: String::new(),
         stderr: format!("tool {tool_name} not handled by any plugin"),
         exit_code: 1,
+        error_kind: Some("environment_missing".to_string()),
+        retryable: None,
         execution: None,
     }
 }

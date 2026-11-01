@@ -131,9 +131,32 @@ fn fs_sidecar_经宿主直连执行工具() {
         .collect();
     assert_eq!(actions, ["locked", "unlocked"]);
 
-    // 参数错误：返回失败的工具结果（不是传输错误）。
+    // 参数错误：返回失败的工具结果（不是传输错误），并结构化声明
+    // argument_error（#710：core 据此给出「修正参数」建议）。
     let invalid = call("file_read", serde_json::json!({}), &mut Vec::new());
     assert_eq!(invalid["ok"], false);
+    assert_eq!(invalid["error_kind"], "argument_error", "{invalid}");
+
+    // replace 未命中：匹配类失败同样声明 argument_error（#710 动机场景）。
+    let replace_missed = call(
+        "file_write",
+        serde_json::json!({"action":"replace","path":"a.txt","old":"不存在的旧文本","new":"新文本"}),
+        &mut Vec::new(),
+    );
+    assert_eq!(replace_missed["ok"], false, "{replace_missed}");
+    assert_eq!(
+        replace_missed["error_kind"], "argument_error",
+        "{replace_missed}"
+    );
+
+    // 路径不存在：IO NotFound 声明 environment_missing。
+    let missing = call(
+        "file_read",
+        serde_json::json!({"action":"read","path":"不存在的文件.txt"}),
+        &mut Vec::new(),
+    );
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert_eq!(missing["error_kind"], "environment_missing", "{missing}");
 
     let time = call("current_time", serde_json::json!({}), &mut Vec::new());
     assert_eq!(time["ok"], true);

@@ -261,6 +261,8 @@ impl ToolOverrideHandler for CacheProbeTool {
                     String::new()
                 },
                 exit_code: i32::from(failed),
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })

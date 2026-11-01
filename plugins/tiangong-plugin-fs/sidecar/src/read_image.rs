@@ -181,6 +181,7 @@ pub(crate) fn handle_read_image_in(req: ReadImageRequest, storage_root: &Path) -
             let summary = format!("{READ_IMAGE_LABEL} 失败：{error:#}");
             FsToolResponse {
                 ok: false,
+                error_kind: Some(crate::handlers::classify_error(&error).to_string()),
                 summary: summary.clone(),
                 stderr: summary,
                 exit_code: 1,
