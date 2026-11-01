@@ -124,10 +124,9 @@ export function PluginIframe({
       const queue = pluginCallQueues.get(pluginId) ?? Promise.resolve();
       pluginCallQueues.set(pluginId, queue.then(async () => {
         try {
-          const bridgeMethod = normalizeBridgeMethod(method);
           const result = sessionId
-            ? await api.bridgeCall(pluginId, bridgeMethod, payload, sessionId)
-            : await api.bridgeCall(pluginId, bridgeMethod, payload);
+            ? await api.bridgeCall(pluginId, method, payload, sessionId)
+            : await api.bridgeCall(pluginId, method, payload);
           source.postMessage({ id, channel, result }, '*');
         } catch (e) {
           source.postMessage(

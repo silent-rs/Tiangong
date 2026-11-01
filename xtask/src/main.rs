@@ -1436,6 +1436,8 @@ fn validate_plugin_catalog_value(value: &serde_json::Value, path: &Path) -> io::
             ))
         })?;
         validate_catalog_artifact(&plugin.manifest, "插件清单")?;
+        // 目录可携带任意制品（含历史 wasm 文件）：按普通制品校验引用格式，
+        // 宿主随包下载、不加载执行；装载与否只由插件清单声明决定。
         if let Some(wasm) = &plugin.wasm {
             validate_catalog_artifact(wasm, "WASM 制品")?;
         }

@@ -148,10 +148,9 @@ tiangong-plugin-runtime ──────┴──> 以上两者
 
 ## 开发环境
 
-当前仓库使用 Rust 2024 edition，WASM 目标为 `wasm32-wasip2`：
+当前仓库使用 Rust 2024 edition：
 
 ```bash
-rustup target add wasm32-wasip2
 cargo check -p tiangong-plugin-runtime
 ```
 
@@ -266,76 +265,24 @@ example-plugin/
 - 声明不合法的条目只跳过并告警，不影响插件装载。
 
 
-## 实现 WASM Component
+## 逻辑层：sidecar（WASM 形态已淘汰）
 
-插件必须实现 [`tiangong-plugin` world](../crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，包括 `plugin` 与 `plugin-ui` 两组导出。即使插件没有页面，也需要实现 `plugin-ui` 并返回空贡献列表。
+WASM Component 形态（WIT 契约、`wit-bindgen`、`wasm32-wasip2` 构建）已随
+运行时整体移除：插件逻辑层统一为 sidecar（原生二进制或 Node/Python 解释器）
++ manifest 清单声明（tools / prompt / ui / mention），详见下文「接入
+sidecar」与官方插件源码（如 `plugins/tiangong-plugin-fs`）。
 
-最小 crate 配置：
+工具与提示词声明按插件顺序保存到会话，并由 Core 的 `PreparedPlugins`
+使用。普通 turn 和 Core 重建恢复这份声明，不按工具的临时健康状态重新
+增删；压缩成功或清理上下文时重新采集。读取失败沿用该插件的旧声明，
+不能把错误伪装成空列表。执行权限和可用性仍在调用入口检查。
 
-```toml
-[package]
-name = "tiangong-plugin-example-wasm"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-wit-bindgen = "0.46"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-```
-
-在本仓库开发时直接引用权威 WIT：
-
-```rust
-wit_bindgen::generate!({
-    path: "../../../tiangong-plugin-runtime/wit/tiangong/plugin.wit",
-});
-```
-
-实现时需要关注这些导出：
-
-- `describe`：返回稳定的插件 ID、显示名称和版本。
-- `tool-specs`、`handle-tool`：声明并执行工具。
-- `prompt-sections`：向当前会话提示词添加插件内容。
-- `set-workspace` 和会话、轮次生命周期：接收宿主只读状态。
-- `contributions`：声明设置页入口。
-- `open-view`、`get-view-resource`、`handle-view-message`：提供页面和双向消息。
-- `shutdown`：释放 WASM 内部状态。
-
-`tool-specs` 与 `prompt-sections` 首次采集后按插件顺序保存到会话，并由 Core 的 `PreparedPlugins` 使用。普通 turn 和 Core 重建恢复这份声明，不按工具的临时健康状态重新增删。压缩成功或清理上下文时重新采集，与摘要和系统提示一起保存；读取失败沿用该插件的旧声明，不能把错误伪装成空列表。执行权限和可用性仍在调用入口检查。
-
-工具不可用时，`handle-tool` 返回明确的失败结果。sidecar 检测到恢复后，可用现有 Notification 帧发送 `runtime.tools_recovered`，payload 为 `{"tools":["模型可见的工具名"]}`。宿主通过插件反馈通道向相关的活动 Agent 追加 `plugin_availability` 信息，不修改 system prompt/tools，也不唤醒已结束 turn。后台恢复事件应只在不可用到可用的转换时发送，避免重复通知。
-
-宿主导入目前包括：
-
-- `clock.now-millis`：读取真实时间。
-- `sidecar.invoke`：向当前插件绑定的 sidecar 转发操作名和 JSON。
-- `feedback.emit-stream-event`：向当前 turn 发送通用 `StreamEvent` JSON；Runtime 只验证公共事件结构，不理解具体插件业务。
-
-### WASM 文件访问
-
-WASM 插件经 WASI preopen 访问文件，宿主只挂载下列目录（存储根遵循 `TIANGONG_STORAGE_ROOT`，测试可指向临时目录）：
-
-| WASM 内路径 | 宿主目录 | 说明 |
-| --- | --- | --- |
-| `/data` | `~/.tiangong/data/<插件 id>/` | 插件自有持久数据，**新数据一律写这里**；宿主加载前创建 |
-| `.`（当前目录） | `~/.tiangong/plugins/<插件 id>/` | 插件安装目录；卸载时可能被清理，不要存用户数据 |
-| `/storage` | `~/.tiangong/` | 仅清单声明 `"storage_access": true` 时挂载，只用于读取并迁移旧数据 |
-
-旧版写在存储根的数据由插件在首次访问时复制到 `/data` 并写完成标记，旧文件保留不删；宿主不提供 `/data`（旧宿主）时沿用旧位置。参考 [Prompt 迁移实现](../plugins/tiangong-plugin-prompt/wasm/src/lib.rs)。
-
-完整实现可参考 [Memory WASM](../plugins/tiangong-plugin-memory/wasm/src/lib.rs) 和它的 [绑定入口](../plugins/tiangong-plugin-memory/wasm/src/bindings.rs)。
-
-构建命令：
-
-```bash
-cargo build -p tiangong-plugin-example-wasm --target wasm32-wasip2 --release
-```
-
-将 `target/wasm32-wasip2/release/` 下生成的 `.wasm` 文件复制到完整插件目录，并确保名称与清单一致。
+工具不可用时 sidecar 返回明确的失败结果；检测到恢复后，可发送
+Notification 帧 `runtime.tools_recovered`，payload 为
+`{"tools":["模型可见的工具名"]}`。宿主通过插件反馈通道向相关的活动
+Agent 追加 `plugin_availability` 信息，不修改 system prompt/tools，也不
+唤醒已结束 turn。后台恢复事件应只在不可用到可用的转换时发送，避免
+重复通知。
 
 ## 接入 sidecar
 
@@ -769,7 +716,7 @@ sidecar、`release.json` 与官方签名；具体脚本参考
 
 ## 交互处理器插件（审批与用户征询）
 
-Desktop 可安装纯 TypeScript 工具插件，不需要 WASM，也不修改 `plugin.wit`。
+Desktop 可安装纯 TypeScript 工具插件，无需 sidecar。
 插件在 manifest 的 `tools` 与 `prompt` 中声明工具规格和提示词，使用
 `tool.provide` 权限接收 `tool.requested`，再通过 `tool.resolve` 提交完整工具结果。
 

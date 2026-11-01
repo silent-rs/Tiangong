@@ -484,8 +484,8 @@ export interface SlotContributionEntry {
   has_view: boolean;
   open_mode: OpenMode;
   sandbox: SandboxKind;
-  /** 贡献来源：wasm（v1 运行时声明）或 manifest（v2 清单声明）。 */
-  source: 'wasm' | 'manifest';
+  /** 贡献来源（清单声明）。保留字段以兼容历史载荷。 */
+  source: 'manifest';
   /** session.message-item 的渲染方式：缺省附加区；replace 按消息渲染声明替换默认显示。 */
   render?: 'append' | 'replace';
   /**
@@ -1024,7 +1024,7 @@ export const api = {
   webhookListRuns: (id: string, limit?: number): Promise<WebhookRun[]> =>
     invoke('webhook_list_runs', { id, limit }),
 
-  // ── 插件 UI 桥接（WASM 插件动态 UI）──
+  // ── 插件 UI 桥接（manifest 声明贡献）──
   // 天工只提供通用桥接，不处理具体插件业务。
 
 
@@ -1072,7 +1072,7 @@ export const api = {
   reloadPlugin: (pluginId: string): Promise<PluginStatus> =>
     invoke('reload_plugin', { pluginId }),
 
-  /// 按挂载点列出 UI 贡献（v1 WASM 设置页 + v2 manifest 声明合并）。
+  /// 按挂载点列出 UI 贡献（manifest 清单声明）。
   listSlotContributions: (slot: string): Promise<SlotContributionEntry[]> =>
     invoke('list_slot_contributions', { slot }),
 
@@ -1144,7 +1144,7 @@ export const api = {
     invoke('plugin_read_entry_resource', { pluginId, contributionId, path }),
 
   // ── 宿主桥接（Host Bridge）：插件 UI ↔ 宿主统一通道 ──
-  // method 按命名空间路由：plugin.* 转发到本插件 WASM，其余命名空间按接缝任务接入。
+  // method 按命名空间白名单路由到宿主能力。
 
   bridgeCall: (
     pluginId: string,

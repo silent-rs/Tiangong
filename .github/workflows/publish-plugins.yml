@@ -25,7 +25,6 @@ jobs:
     outputs:
       plugin_id: ${{ steps.plugin.outputs.plugin_id }}
       plugin_root: ${{ steps.plugin.outputs.plugin_root }}
-      has_wasm: ${{ steps.plugin.outputs.has_wasm }}
       has_ui: ${{ steps.plugin.outputs.has_ui }}
       release_kind: ${{ steps.plugin.outputs.release_kind }}
     steps:
@@ -47,9 +46,9 @@ jobs:
             exit 1
           fi
           echo "plugin_id=$plugin_id" >> "$GITHUB_OUTPUT"
-          # 从 plugin.json 解析插件形态：纯 UI 插件（如 interaction/browser）
-          # 无 wasm；带 UI 贡献的插件需要预构建单文件页面；解释器 sidecar
-          # 插件（node/python）为平台无关发布（单一 any 归档，独立构建任务）。
+          # 从 plugin.json 解析插件形态：带 UI 贡献的插件需要预构建单文件
+          # 页面；解释器 sidecar 插件（node/python）为平台无关发布
+          # （单一 any 归档，独立构建任务）。WASM 逻辑层已不在构建链内。
           python3 - "$plugin_id" >> "$GITHUB_OUTPUT" <<'PY'
           import json, os, sys
           plugin_id = sys.argv[1]
@@ -60,7 +59,6 @@ jobs:
           ):
               if os.path.isfile(f"{root}/plugin.json"):
                   manifest = json.load(open(f"{root}/plugin.json"))
-                  has_wasm = "true" if manifest.get("wasm") else "false"
                   # has_ui 只表示「需要前端构建链的 UI」：手写自包含单文件
                   # UI（无 package.json，如 coding/computer-use）由 xtask 直接
                   # 从源码复制，不走共享 UI 构建。
@@ -77,37 +75,12 @@ jobs:
                       else "standard"
                   )
                   print(f"plugin_root={root}")
-                  print(f"has_wasm={has_wasm}")
                   print(f"has_ui={has_ui}")
                   print(f"release_kind={release_kind}")
                   break
           else:
               raise SystemExit(f"plugin.json not found for {plugin_id}")
           PY
-
-  build-wasm:
-    name: Build shared WASM
-    needs: resolve-plugin
-    if: needs.resolve-plugin.outputs.has_wasm == 'true'
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
-      - name: Build deterministic shared WASM
-        env:
-          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
-        run: cargo run -p xtask -- build-plugin-wasm "$PLUGIN_ID" "target/shared-wasm/${PLUGIN_ID}.wasm"
-      - name: Upload shared WASM
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
-          path: target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
-          if-no-files-found: error
-          retention-days: 7
 
   build-ui:
     name: Build shared UI
@@ -142,10 +115,10 @@ jobs:
           retention-days: 7
   build-plugin:
     name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
-    needs: [resolve-plugin, build-wasm, build-ui]
-    # 纯 UI 插件会跳过 build-wasm；显式判定 needs 结果，避免
+    needs: [resolve-plugin, build-ui]
+    # 纯 UI 插件会跳过 build-ui；显式判定 needs 结果，避免
     # skipped 状态传播导致整条发布链被跳过。解释器插件走 build-interpreter。
-    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.release_kind != 'interpreter-sidecar' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.release_kind != 'interpreter-sidecar' && needs.build-ui.result != 'failure' }}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -167,8 +140,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
 
       - name: Install Tauri signer
         uses: taiki-e/install-action@v2
@@ -229,12 +200,6 @@ jobs:
       # Locale::Maketext::Simple 等模块，OpenSSL Configure 启动即失败）。$GITHUB_PATH 在 Git Bash
       # 下无法可靠地让 Strawberry 优先，因此必须在执行构建的同一 shell 内前置——见下方
       # Build and sign plugin 步骤。
-      - name: Download shared WASM
-        if: needs.resolve-plugin.outputs.has_wasm == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
-          path: target/shared-wasm
       - name: Download shared UI
         if: needs.resolve-plugin.outputs.has_ui == 'true'
         uses: actions/download-artifact@v4
@@ -270,7 +235,6 @@ jobs:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
-          TIANGONG_PLUGIN_PREBUILT_WASM: ${{ needs.resolve-plugin.outputs.has_wasm == 'true' && format('{0}/target/shared-wasm/{1}.wasm', github.workspace, needs.resolve-plugin.outputs.plugin_id) || '' }}
           TIANGONG_PLUGIN_PREBUILT_UI: ${{ needs.resolve-plugin.outputs.has_ui == 'true' && format('{0}/target/shared-ui/dist/index.html', github.workspace) || '' }}
         run: |
           if [[ "$(uname -s)" == MINGW* ]]; then
@@ -301,7 +265,7 @@ jobs:
           fragment="target/plugin-dist/plugins-index/fragments/${PLUGIN_ID}-${EXPECTED_PLATFORM}.json"
           test -f "$fragment"
           # release.json / release.json.sig 仅对 sidecar 插件生成；
-          # 纯 WASM 插件不产出签名清单，只要求 fragment 存在。
+          # 无 sidecar 的纯清单插件不产出签名清单，只要求 fragment 存在。
           if compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}/*/${EXPECTED_PLATFORM}/release.json" > /dev/null; then
             test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json.sig"
           fi
@@ -324,10 +288,10 @@ jobs:
 
   build-interpreter:
     name: Build interpreter plugin (${{ needs.resolve-plugin.outputs.plugin_id }})
-    needs: [resolve-plugin, build-wasm, build-ui]
+    needs: [resolve-plugin, build-ui]
     # 解释器 sidecar 插件：平台无关（any）发布形态，单一 ubuntu 任务完整
     # 构建（UI + sidecar bundle + 归档 + 签名），不启动三平台矩阵。
-    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.release_kind == 'interpreter-sidecar' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.release_kind == 'interpreter-sidecar' && needs.build-ui.result != 'failure' }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -464,7 +428,7 @@ jobs:
             expected_signatures=3
           fi
           cargo run -p xtask -- merge-plugin-dist "$PLUGIN_ID" target/plugin-platforms target/plugin-release
-          # 纯 WASM 插件不生成 release.json/sig，只在有签名清单时验证数量。
+          # 无 sidecar 的纯清单插件不生成 release.json/sig，只在有签名清单时验证数量。
           release_count=$(find target/plugin-release/plugins -name release.json | wc -l | tr -d ' ')
           if [ "$release_count" -gt 0 ]; then
             test "$release_count" = "$expected_signatures"

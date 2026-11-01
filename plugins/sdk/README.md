@@ -23,8 +23,8 @@ const bridge = await createTiangongBridge();
 await pluginStorage.set(bridge, 'title', '我的看板');
 const title = await pluginStorage.get(bridge, 'title');
 
-// 带逻辑层的插件可调用自身 WASM 方法（plugin.* 转发）
-const config = await bridge.call('plugin.getConfig', '{}');
+// 带逻辑层的插件可调用自身 sidecar（sidecar.*，需声明 sidecar.invoke 权限）
+const status = await bridge.call('sidecar.probe', '{}');
 
 // 事件订阅（Shadow 容器；需在 manifest capabilities.events 声明命名空间）
 const off = bridge.on('session.updated', (payload) => console.log(payload));

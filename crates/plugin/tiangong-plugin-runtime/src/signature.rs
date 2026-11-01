@@ -93,7 +93,12 @@ impl ValidateSignedRelease for SignedPluginRelease {
         // 与清单声明的一致性判据。
         if let Some(signed_wasm) = &self.wasm {
             let expected = signed_wasm.path.clone();
-            signed_wasm.verify(directory, &expected)?;
+            signed_wasm.verify(directory, &expected).with_context(|| {
+                format!(
+                    "签名清单声明的 WASM 制品校验失败（{}）：制品缺失或被篡改",
+                    expected.display()
+                )
+            })?;
         }
         let signed_ui = self
             .ui

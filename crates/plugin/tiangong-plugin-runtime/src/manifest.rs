@@ -428,7 +428,7 @@ impl PluginManifest {
                 || self.sidecar.is_some();
             if !has_contribution {
                 bail!(
-                    "插件 {} 未声明任何贡献（ui.contributions / tools / prompt / mention 至少其一）",
+                    "插件 {} 未声明任何贡献（ui.contributions / tools / prompt / mention / sidecar 至少其一）",
                     self.id
                 );
             }
