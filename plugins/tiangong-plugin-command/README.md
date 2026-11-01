@@ -16,8 +16,12 @@ cargo run -p xtask -- build-plugin command
 
 ## 入口分工
 
-- CLI / Server：由 runtime 按 `plugin.json` 的 `entrypoints: ["cli", "server"]` 自动加载。
-- GUI：不加载本插件（entrypoints 不含 desktop），`run_command` / `run_shell` 由 terminal 插件（PTY 执行 + 命令回显）提供。
+> **已弃用，进入淘汰流程（issue #697）**：CLI / Server 的命令执行已由
+> terminal 插件承担（PTY 复用、交互程序、画面快照）。本插件的
+> `entrypoints` 已清空——所有入口均不再注册，升级后自然淘汰，随后按
+> 卸载流程归档移除。存量安装目录保留至卸载阶段，期间不提供回退开关。
+
+- 全部入口：不注册（`entrypoints: []`），`run_command` / `run_shell` 由 terminal 插件（PTY 执行 + 命令回显）提供。
 
 ## 沙箱职责
 
