@@ -1,9 +1,13 @@
 # 天工插件开发指南
 
-本文说明当前插件化试开发阶段如何创建、构建和本地导入 UI、TypeScript 与
-WASM 插件。WASM 宿主接口位于
-[`plugin.wit`](../crates/plugin/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，UI 运行时
-类型位于 [`plugins/sdk`](../plugins/sdk)。
+> **WASM 组件形态已淘汰**：宿主不再装载任何 WASM 组件（v0.17.12 起），
+> WIT 契约与 wasmtime 运行时已整体移除。插件逻辑层统一为 **sidecar**
+>（原生二进制或 Node/Python 解释器）+ **manifest 清单声明**（tools /
+> prompt / ui / mention）；清单为宽松解析，未知字段忽略。本文中涉及
+> WASM 的章节仅作历史形态参考，新插件请勿采用。
+
+本文说明当前插件化开发阶段如何创建、构建和本地导入 UI、TypeScript 与
+清单声明插件。UI 运行时类型位于 [`plugins/sdk`](../plugins/sdk)。
 
 ## 开发流程总览
 
@@ -18,10 +22,10 @@ WASM 插件。WASM 宿主接口位于
 
 | 形态 | 适用 | 参考工程 |
 | --- | --- | --- |
-| 纯 UI 插件（无 WASM） | 面板、工具页、输入区动作，仅需宿主桥接 | `plugins/templates/ui-app` |
+| 纯 UI 插件 | 面板、工具页、输入区动作，仅需宿主桥接 | `plugins/templates/ui-app` |
 | Desktop TypeScript 工具插件 | 带 UI 的工具提供器、审批与用户征询 | `plugins/tiangong-plugin-interaction`（Vue 3 + Vite） |
-| WASM 逻辑层插件（v1/v2） | 工具、提示词、生命周期、sidecar | `plugins/tiangong-plugin-prompt` 等 |
-| v2 混合（逻辑层 + UI 挂载） | UI 需要 WASM 或原生 sidecar 能力 | `plugins/screenshot-input` |
+| sidecar 逻辑层插件 | 工具、提示词、生命周期、动态能力 | `plugins/tiangong-plugin-fs` 等 |
+| 混合（sidecar 逻辑层 + UI 挂载） | UI 需要 sidecar 或原生能力 | `plugins/screenshot-input` |
 
 脚手架：`cargo run -p xtask -- new-plugin <id>` 生成纯 UI 最小骨架
 （不含交互权限，按需在 manifest 声明）。
