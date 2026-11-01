@@ -113,6 +113,8 @@ impl ToolOverrideHandler for MockPlugin {
                 stdout: if ok { "OK" } else { "" }.into(),
                 stderr: if ok { "" } else { "工具暂时不可用" }.into(),
                 exit_code: if ok { 0 } else { 1 },
+                error_kind: None,
+                retryable: None,
                 execution: None,
             })
         })

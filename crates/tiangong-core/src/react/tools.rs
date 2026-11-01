@@ -163,6 +163,8 @@ pub(super) async fn execute_tool_batch(
                             stdout: String::new(),
                             stderr: message,
                             exit_code: 1,
+                            error_kind: Some("tool_internal_error".to_string()),
+                            retryable: None,
                             execution: None,
                         },
                         duration_ms: running_record.started_at.elapsed().as_millis() as u64,

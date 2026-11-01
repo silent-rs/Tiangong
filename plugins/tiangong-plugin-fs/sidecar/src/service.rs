@@ -7,7 +7,7 @@
 //! 范围由 OS 沙箱裁决。无跨请求状态（按需进程随调用销毁）。
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
-use tiangong_plugin_fs_protocol::tools::FsToolResponse;
+use tiangong_plugin_fs_protocol::tools::{FS_ERROR_KIND_ARGUMENT, FsToolResponse};
 use tiangong_plugin_fs_protocol::{
     FS_PROTOCOL_VERSION, FsAccessContext, PLUGIN_ID, PLUGIN_VERSION, TOOL_CURRENT_TIME,
     TOOL_FILE_READ, TOOL_FILE_WRITE,
@@ -162,13 +162,15 @@ fn outcome(response: FsToolResponse) -> Result<Value> {
         "stdout": response.stdout,
         "stderr": response.stderr,
         "exit_code": response.exit_code,
+        "error_kind": response.error_kind,
     }))
 }
 
-/// 参数校验失败：失败的工具结果（不执行操作）。
+/// 参数校验失败：失败的工具结果（不执行操作），标为参数错误。
 fn invalid_argument(message: &str) -> FsToolResponse {
     FsToolResponse {
         ok: false,
+        error_kind: Some(FS_ERROR_KIND_ARGUMENT.to_string()),
         summary: message.to_string(),
         stderr: message.to_string(),
         exit_code: 1,

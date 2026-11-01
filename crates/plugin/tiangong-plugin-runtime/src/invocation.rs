@@ -261,6 +261,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
+            error_kind: None,
+            retryable: None,
             execution: None,
         };
         let result = dispatch(invocation.clone(), async { Some(expected) }).await;

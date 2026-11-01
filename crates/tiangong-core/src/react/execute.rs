@@ -327,14 +327,18 @@ pub(super) fn record_completed_tool_call(
     let body = if result.ok {
         tool_result_full_output(result)
     } else {
-        ToolFailureRecord::new(
+        let mut failure = ToolFailureRecord::new(
             &call.name,
             &call.id,
             args_summary.to_string(),
             classify_tool_result_failure(result),
             tool_result_full_output(result),
-        )
-        .render_for_model()
+        );
+        // 插件声明的可重试性覆盖默认判定（与 error_kind 同一契约，#710）。
+        if let Some(retryable) = result.retryable {
+            failure.retryable = retryable;
+        }
+        failure.render_for_model()
     };
     append_tool_result_message_with_duration(
         &mut ctx.session,
