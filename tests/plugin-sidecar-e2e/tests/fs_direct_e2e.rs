@@ -10,9 +10,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tiangong_plugin_runtime::manifest::{PluginManifest, SidecarLifecycle};
-use tiangong_plugin_runtime::sidecar::{
-    SidecarConfig, SidecarConnection, SidecarInvocationContext, StdioSidecarConnection,
-};
+use tiangong_plugin_runtime::protocol::RequestInvocationContext;
+use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -90,13 +89,21 @@ fn fs_sidecar_经宿主直连执行工具() {
         );
     }
 
-    let context =
-        SidecarInvocationContext::new("session-e2e", "call-1", workspace.to_str().unwrap());
+    let context = RequestInvocationContext {
+        session_id: "session-e2e".to_string(),
+        invocation_id: "call-1".to_string(),
+        workspace: workspace.display().to_string(),
+        actor_id: String::new(),
+        deadline_ms: None,
+    };
     let call = |tool: &str, args: serde_json::Value, progress: &mut Vec<String>| {
         let raw = connection
-            .invoke_with_context_and_progress(tool, &args.to_string(), &context, &mut |message| {
-                progress.push(message)
-            })
+            .invoke_with_invocation_context_and_progress(
+                tool,
+                &args.to_string(),
+                &context,
+                &mut |message| progress.push(message),
+            )
             .expect("工具调用");
         serde_json::from_str::<serde_json::Value>(&raw).unwrap()
     };

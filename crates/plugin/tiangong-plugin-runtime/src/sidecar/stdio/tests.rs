@@ -19,46 +19,20 @@ mod invocation_workspace_tests {
         }
     }
 
-    fn legacy_context(workspace: &Path) -> crate::sidecar::SidecarInvocationContext {
-        crate::sidecar::SidecarInvocationContext::new("session-a", "call-a", workspace)
-    }
-
     #[test]
-    fn runtime_context_workspace_wins_when_present() {
+    fn runtime_context_workspace_extraction() {
         let root = tempfile::tempdir().unwrap();
-        let legacy_ws = root.path().join("legacy");
         let runtime_ws = root.path().join("runtime");
-        std::fs::create_dir(&legacy_ws).unwrap();
         std::fs::create_dir(&runtime_ws).unwrap();
-
-        // 仅新版上下文。
+        // 统一上下文存在：提取其工作区。
         assert_eq!(
-            invocation_workspace(None, Some(&runtime_context(runtime_ws.to_str().unwrap()))),
+            invocation_workspace(Some(&runtime_context(runtime_ws.to_str().unwrap()))),
             Some(runtime_ws.as_path())
         );
-        // 仅旧版上下文。
-        assert_eq!(
-            invocation_workspace(Some(&legacy_context(&legacy_ws)), None),
-            Some(legacy_ws.as_path())
-        );
-        // 新旧同时存在时新版优先。
-        assert_eq!(
-            invocation_workspace(
-                Some(&legacy_context(&legacy_ws)),
-                Some(&runtime_context(runtime_ws.to_str().unwrap()))
-            ),
-            Some(runtime_ws.as_path())
-        );
-        // 新版工作区为空（含空白）时回退旧版。
-        assert_eq!(
-            invocation_workspace(
-                Some(&legacy_context(&legacy_ws)),
-                Some(&runtime_context("  "))
-            ),
-            Some(legacy_ws.as_path())
-        );
-        // 两者均不存在。
-        assert_eq!(invocation_workspace(None, None), None);
+        // 工作区为空白：视为未提供（由调用方回退连接默认工作区）。
+        assert_eq!(invocation_workspace(Some(&runtime_context("  "))), None);
+        // 无上下文。
+        assert_eq!(invocation_workspace(None), None);
     }
 
     #[test]
@@ -66,10 +40,9 @@ mod invocation_workspace_tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("file");
         std::fs::write(&file, "not a directory").unwrap();
-
         // 提取层不做校验，交由 validate_invocation_workspace 拒绝。
         let context = runtime_context(file.to_str().unwrap());
-        let extracted = invocation_workspace(None, Some(&context)).expect("提取层只负责选择");
+        let extracted = invocation_workspace(Some(&context)).expect("提取层只负责选择");
         assert!(
             validate_invocation_workspace(extracted)
                 .unwrap_err()
@@ -85,31 +58,21 @@ mod invocation_workspace_tests {
     }
 
     #[test]
-    fn pending_waiter_session_membership_spans_both_contexts() {
+    fn pending_waiter_session_membership() {
         let (response_tx, _response_rx) = sync_channel(1);
         let (progress_tx, _progress_rx) = sync_channel(1);
-        let mk = |invocation, invocation_context| PendingWaiter {
+        let mk = |invocation_context| PendingWaiter {
             response: response_tx.clone(),
             progress: progress_tx.clone(),
-            invocation,
             invocation_context,
         };
-        let legacy = legacy_context(Path::new("/legacy"));
         let runtime = runtime_context("/runtime");
-
-        // 仅新版上下文：按新版会话命中。
-        let waiter = mk(None, Some(runtime.clone()));
+        // 携带上下文：按其会话命中/不命中。
+        let waiter = mk(Some(runtime));
         assert!(waiter.belongs_to_session("session-a"));
         assert!(!waiter.belongs_to_session("session-b"));
-        // 仅旧版上下文：仍可取消（兼容已发布插件）。
-        let waiter = mk(Some(legacy.clone()), None);
-        assert!(waiter.belongs_to_session("session-a"));
-        assert!(!waiter.belongs_to_session("session-b"));
-        // 两者都有：任一命中即归属。
-        let waiter = mk(Some(legacy), Some(runtime));
-        assert!(waiter.belongs_to_session("session-a"));
-        // 两者皆无：不属于任何会话。
-        let waiter = mk(None, None);
+        // 无上下文：不属于任何会话。
+        let waiter = mk(None);
         assert!(!waiter.belongs_to_session("session-a"));
     }
 
@@ -244,7 +207,6 @@ mod cancel_order_tests {
             Some(PendingWaiter {
                 response: response_tx,
                 progress: progress_tx,
-                invocation: None,
                 invocation_context: None,
             }),
             "request-cancel",

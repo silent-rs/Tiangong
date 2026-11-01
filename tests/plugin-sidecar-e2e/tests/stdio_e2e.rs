@@ -8,9 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tiangong_plugin_runtime::manifest::SidecarLifecycle;
-use tiangong_plugin_runtime::sidecar::{
-    SidecarConfig, SidecarConnection, SidecarInvocationContext, StdioSidecarConnection,
-};
+use tiangong_plugin_runtime::protocol::RequestInvocationContext;
+use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 use tiangong_plugin_sidecar::protocol::PROTOCOL_VERSION;
 
 fn echo_sidecar_binary() -> PathBuf {
@@ -181,14 +180,17 @@ fn resident_request_cancel_returns_immediately_and_keeps_sidecar_running() {
     let connection = Arc::new(StdioSidecarConnection::new(config));
     let invoking = Arc::clone(&connection);
     let request = std::thread::spawn(move || {
-        invoking.invoke_with_context(
+        invoking.invoke_with_invocation_context_and_progress(
             "delay",
             r#"{"millis":5000}"#,
-            &SidecarInvocationContext {
+            &RequestInvocationContext {
                 session_id: "cancel-target".to_string(),
                 invocation_id: "tool-delay".to_string(),
-                authoritative_workspace: std::env::temp_dir(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                actor_id: String::new(),
+                deadline_ms: None,
             },
+            &mut |_| {},
         )
     });
 
@@ -221,7 +223,7 @@ fn resident_request_cancel_returns_immediately_and_keeps_sidecar_running() {
 /// 继续服务后续调用。
 #[test]
 #[serial_test::serial]
-fn session_cancel_cascades_within_session_across_context_forms() {
+fn session_cancel_cascades_within_session() {
     let (endpoint, log, data_dir) = temp_paths("session-cascade");
     let config = SidecarConfig::new(
         "test-stdio",
@@ -236,27 +238,30 @@ fn session_cancel_cascades_within_session_across_context_forms() {
     .with_timeouts(Duration::from_secs(10), Duration::from_secs(10));
     let connection = Arc::new(StdioSidecarConnection::new(config));
 
-    // 会话 A：旧版上下文 + 新版上下文各一个慢请求；会话 B：一个慢请求。
-    let legacy = Arc::clone(&connection);
-    let legacy_request = std::thread::spawn(move || {
-        legacy.invoke_with_context(
+    // 会话 A：两个慢请求（统一调用上下文）；会话 B：一个慢请求。
+    let first = Arc::clone(&connection);
+    let first_request = std::thread::spawn(move || {
+        first.invoke_with_invocation_context_and_progress(
             "delay",
             r#"{"millis":8000}"#,
-            &SidecarInvocationContext {
+            &RequestInvocationContext {
                 session_id: "session-a".to_string(),
-                invocation_id: "legacy-delay".to_string(),
-                authoritative_workspace: std::env::temp_dir(),
+                invocation_id: "first-delay".to_string(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                actor_id: String::new(),
+                deadline_ms: None,
             },
+            &mut |_| {},
         )
     });
-    let runtime = Arc::clone(&connection);
-    let runtime_request = std::thread::spawn(move || {
-        runtime.invoke_with_invocation_context_and_progress(
+    let second = Arc::clone(&connection);
+    let second_request = std::thread::spawn(move || {
+        second.invoke_with_invocation_context_and_progress(
             "delay",
             r#"{"millis":8000}"#,
-            &tiangong_plugin_runtime::protocol::RequestInvocationContext {
+            &RequestInvocationContext {
                 session_id: "session-a".to_string(),
-                invocation_id: "runtime-delay".to_string(),
+                invocation_id: "second-delay".to_string(),
                 workspace: std::env::temp_dir().to_string_lossy().into_owned(),
                 actor_id: "agent".to_string(),
                 deadline_ms: None,
@@ -266,14 +271,17 @@ fn session_cancel_cascades_within_session_across_context_forms() {
     });
     let other = Arc::clone(&connection);
     let other_request = std::thread::spawn(move || {
-        other.invoke_with_context(
+        other.invoke_with_invocation_context_and_progress(
             "delay",
             r#"{"millis":1500}"#,
-            &SidecarInvocationContext {
+            &RequestInvocationContext {
                 session_id: "session-b".to_string(),
                 invocation_id: "other-delay".to_string(),
-                authoritative_workspace: std::env::temp_dir(),
+                workspace: std::env::temp_dir().to_string_lossy().into_owned(),
+                actor_id: String::new(),
+                deadline_ms: None,
             },
+            &mut |_| {},
         )
     });
 
@@ -289,21 +297,18 @@ fn session_cancel_cascades_within_session_across_context_forms() {
     );
     connection.cancel_session("session-a").unwrap();
 
-    let legacy_result = legacy_request.join().unwrap();
+    let first_result = first_request.join().unwrap();
     assert!(
-        legacy_result
-            .unwrap_err()
-            .to_string()
-            .contains("请求已取消"),
-        "旧版上下文请求应随会话取消"
+        first_result.unwrap_err().to_string().contains("请求已取消"),
+        "同会话第一个请求应随会话取消"
     );
-    let runtime_result = runtime_request.join().unwrap();
+    let second_result = second_request.join().unwrap();
     assert!(
-        runtime_result
+        second_result
             .unwrap_err()
             .to_string()
             .contains("请求已取消"),
-        "新版统一调用上下文请求应随会话取消"
+        "同会话第二个请求应随会话取消"
     );
     let other_result = other_request.join().unwrap();
     assert!(other_result.is_ok(), "其他会话的请求不受级联取消影响");

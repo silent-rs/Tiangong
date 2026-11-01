@@ -15,7 +15,7 @@ use tiangong_plugin_command_protocol::{COMMAND_PROTOCOL_VERSION, PLUGIN_VERSION}
 use tiangong_plugin_runtime::manifest::SidecarLifecycle;
 use tiangong_plugin_runtime::protocol::PROTOCOL_VERSION;
 #[cfg(any(unix, windows))]
-use tiangong_plugin_runtime::sidecar::SidecarInvocationContext;
+use tiangong_plugin_runtime::protocol::RequestInvocationContext;
 use tiangong_plugin_runtime::sidecar::{
     EphemeralCommandConnection, SidecarConfig, SidecarConnection, StdioSidecarConnection,
 };
@@ -283,11 +283,13 @@ fn sandbox_fixture_configured(
 }
 
 #[cfg(any(unix, windows))]
-fn invocation_context(workspace: &Path, invocation_id: &str) -> SidecarInvocationContext {
-    SidecarInvocationContext {
+fn invocation_context(workspace: &Path, invocation_id: &str) -> RequestInvocationContext {
+    RequestInvocationContext {
         session_id: "session-a".to_string(),
         invocation_id: invocation_id.to_string(),
-        authoritative_workspace: workspace.to_path_buf(),
+        workspace: workspace.display().to_string(),
+        actor_id: String::new(),
+        deadline_ms: None,
     }
 }
 
@@ -450,10 +452,11 @@ fn sandbox_disabled_runs_command_without_launcher() {
     unsafe { std::env::set_var("NODE_OPTIONS", "should-be-cleared") };
     let raw = fixture
         .connection
-        .invoke_with_context(
+        .invoke_with_invocation_context_and_progress(
             RUN_SHELL_OPERATION,
             &shell_request(probe, &fixture.workspace),
             &invocation_context(&fixture.workspace, "sandbox-disabled"),
+            &mut |_| {},
         )
         .expect("Command Sidecar 命令失败");
     unsafe { std::env::remove_var("NODE_OPTIONS") };
@@ -483,10 +486,11 @@ fn sandbox_disabled_runs_command_without_launcher() {
     );
     let raw = fixture
         .connection
-        .invoke_with_context(
+        .invoke_with_invocation_context_and_progress(
             RUN_SHELL_OPERATION,
             &shell_request_with_timeout(sleeper, &fixture.workspace, 1),
             &invocation_context(&fixture.workspace, "sandbox-disabled-timeout"),
+            &mut |_| {},
         )
         .expect("超时路径应返回响应而非错误");
     let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -594,7 +598,12 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
         let context = invocation_context(&fixture.workspace, &format!("concurrent-{index}"));
         let finished_tx = finished_tx.clone();
         workers.push(std::thread::spawn(move || {
-            let result = connection.invoke_with_context(operation, &request, &context);
+            let result = connection.invoke_with_invocation_context_and_progress(
+                operation,
+                &request,
+                &context,
+                &mut |_| {},
+            );
             let _ = finished_tx.send((index, result));
         }));
     }
@@ -681,6 +690,84 @@ fn execution_without_invocation_context_is_rejected() {
 
 #[cfg(any(unix, windows))]
 #[test]
+fn blank_workspace_in_invocation_context_is_rejected() {
+    // 统一上下文的空白工作区 fail-closed：启动任何进程前拒绝（不依赖
+    // sidecar 二进制存在），与「无上下文拒绝」同属调用前置校验。
+    let root = tempfile::tempdir().unwrap();
+    let config = SidecarConfig::new(
+        "command",
+        "0.0.0",
+        root.path().join("missing-sidecar"),
+        root.path().join("endpoint.json"),
+        root.path().join("sidecar.log"),
+        root.path().join("data"),
+        root.path(),
+    );
+    let connection = EphemeralCommandConnection::new(config);
+    let error = connection
+        .invoke_with_invocation_context_and_progress(
+            RUN_SHELL_OPERATION,
+            r#"{"script":"echo x"}"#,
+            &RequestInvocationContext {
+                session_id: "session-a".to_string(),
+                invocation_id: "blank-workspace".to_string(),
+                workspace: "   ".to_string(),
+                actor_id: String::new(),
+                deadline_ms: None,
+            },
+            &mut |_| {},
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("缺少宿主权威工作区"),
+        "空白工作区应 fail-closed: {error:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn invocation_deadline_limits_wait_before_request_timeout() {
+    // 迁移回归护栏：统一上下文的 deadline_ms 经 command 封套透传到 stdio
+    // 等待层——超预算请求按超时提前返回，而不是等满清单 request_timeout_ms
+    //（兼容层时代该字段经「新→旧」垫片被丢弃，见 #479）。
+    let Some(fixture) = sandbox_fixture_configured(false, None) else {
+        restore_default_config();
+        return;
+    };
+    let sleeper = format!(
+        "/bin/sleep 60 & echo $! > {ws}/deadline.pid; wait",
+        ws = fixture.workspace.display(),
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut context = invocation_context(&fixture.workspace, "deadline-early");
+    context.deadline_ms = Some(now + 2_500);
+    let started = Instant::now();
+    let error = fixture
+        .connection
+        .invoke_with_invocation_context_and_progress(
+            RUN_SHELL_OPERATION,
+            &shell_request(sleeper, &fixture.workspace),
+            &context,
+            &mut |_| {},
+        )
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        format!("{error:#}").contains("超时"),
+        "超预算请求应按超时返回: {error:#}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "deadline 2.5s 应提前于 shell 自身 timeout 生效，实际耗时 {elapsed:?}"
+    );
+    restore_default_config();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
 fn stdio_stop_kills_background_process_tree() {
     // 断言依赖真实终止进程树：不能终止子进程的环境（外层受限沙箱拒
     // 信号）无法验证清理语义，整体跳过。
@@ -733,7 +820,12 @@ fn stdio_stop_kills_background_process_tree() {
     let context = invocation_context(&workspace, "stop-tree");
     let (finished_tx, finished_rx) = sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let result = worker_connection.invoke_with_context(operation, &request, &context);
+        let result = worker_connection.invoke_with_invocation_context_and_progress(
+            operation,
+            &request,
+            &context,
+            &mut |_| {},
+        );
         let _ = finished_tx.send(result);
     });
 

@@ -14,10 +14,7 @@ use std::time::Instant;
 use crate::launch_policy::canonicalize_path;
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::{
-    SidecarConfig, SidecarConnection, SidecarInvocationContext, SidecarInvokeError,
-    StdioSidecarConnection,
-};
+use super::{SidecarConfig, SidecarConnection, SidecarInvokeError, StdioSidecarConnection};
 
 struct ActiveInvocation {
     session_id: String,
@@ -26,7 +23,7 @@ struct ActiveInvocation {
 }
 
 /// command 工具的宿主执行封套。该结构可被多个会话共享，但不保存工作区；
-/// 工作区必须随每次 [`SidecarInvocationContext`] 传入。
+/// 工作区必须随每次统一调用上下文（[`crate::protocol::RequestInvocationContext`]）传入。
 pub struct EphemeralCommandConnection {
     template: SidecarConfig,
     exec_env: Mutex<BTreeMap<String, String>>,
@@ -50,7 +47,7 @@ impl EphemeralCommandConnection {
         &self,
         operation: &str,
         payload: &str,
-        context: &SidecarInvocationContext,
+        context: &crate::protocol::RequestInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
         let started = Instant::now();
@@ -61,12 +58,13 @@ impl EphemeralCommandConnection {
         // 二是在启动进程前给出 command 专属错误。安全边界不依赖此处——
         // stdio 启动层会对同一调用上下文独立校验（validate_invocation_
         // workspace），Launcher 策略也由该层按插件身份与用户配置组装。
-        let workspace = canonicalize_path(&context.authoritative_workspace).with_context(|| {
-            format!(
-                "本次工具调用的工作区无效: {}",
-                context.authoritative_workspace.display()
-            )
-        })?;
+        let workspace_value = context.workspace.trim();
+        if workspace_value.is_empty() {
+            bail!("本次 command 调用缺少宿主权威工作区");
+        }
+        let workspace_path = PathBuf::from(workspace_value);
+        let workspace = canonicalize_path(&workspace_path)
+            .with_context(|| format!("本次工具调用的工作区无效: {}", workspace_path.display()))?;
         if !workspace.is_dir() {
             bail!("本次工具调用的工作区不是目录: {}", workspace.display());
         }
@@ -175,7 +173,7 @@ impl EphemeralCommandConnection {
             if cancelled.load(Ordering::Acquire) {
                 bail!("command 调用已取消");
             }
-            let invoke_result = connection.invoke_with_context_and_progress(
+            let invoke_result = connection.invoke_with_invocation_context_and_progress(
                 operation,
                 &request.to_string(),
                 context,
@@ -260,23 +258,14 @@ impl SidecarConnection for EphemeralCommandConnection {
         Err(SidecarInvokeError::PermissionDenied).context("command 执行缺少宿主工具调用上下文")
     }
 
-    fn invoke_with_context(
-        &self,
-        operation: &str,
-        payload: &str,
-        context: &SidecarInvocationContext,
-    ) -> Result<String> {
-        self.invoke_with_context_and_progress(operation, payload, context, &mut |_| {})
-    }
-
     /// 操作名直接交给 sidecar：dispatch 是操作命名的权威，未知操作由
     /// sidecar 报错并经 runtime 回给 Agent——宿主不再维护第二份命名空间
     /// （否则 sidecar 新增工具会被宿主旧名单误拒）。
-    fn invoke_with_context_and_progress(
+    fn invoke_with_invocation_context_and_progress(
         &self,
         operation: &str,
         payload: &str,
-        context: &SidecarInvocationContext,
+        context: &crate::protocol::RequestInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
         self.invoke_ephemeral(operation, payload, context, on_progress)

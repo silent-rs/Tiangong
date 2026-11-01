@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tiangong_plugin_command_protocol::{COMMAND_PROTOCOL_VERSION, PLUGIN_VERSION};
-use tiangong_plugin_runtime::sidecar::{EphemeralCommandConnection, SidecarInvocationContext};
+use tiangong_plugin_runtime::protocol::RequestInvocationContext;
+use tiangong_plugin_runtime::sidecar::EphemeralCommandConnection;
 use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
 /// command 沙箱模式的传输协议版本。
@@ -162,12 +163,19 @@ fn run_command_sandbox(sidecar: PathBuf, state_dir: PathBuf) -> Result<()> {
     };
     #[cfg(windows)]
     let operation = "command.run_command";
-    let context = SidecarInvocationContext {
+    let context = RequestInvocationContext {
         session_id: "host-crash".to_string(),
         invocation_id: "host-crash".to_string(),
-        authoritative_workspace: workspace,
+        workspace: workspace.display().to_string(),
+        actor_id: String::new(),
+        deadline_ms: None,
     };
-    connection.invoke_with_context(operation, &request.to_string(), &context)?;
+    connection.invoke_with_invocation_context_and_progress(
+        operation,
+        &request.to_string(),
+        &context,
+        &mut |_| {},
+    )?;
     bail!("command 长请求意外结束")
 }
 

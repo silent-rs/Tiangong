@@ -63,53 +63,11 @@ pub use tiangong_plugin_sidecar::env::{
 };
 pub use tiangong_plugin_update::CONTENT_MANIFEST_FILE;
 
-/// 宿主在单次工具调用边界确定的权威上下文。
-///
-/// 该上下文不经过插件协议，也不从工具参数推导；command 沙箱只使用这里的
-/// 工作区构造策略。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SidecarInvocationContext {
-    pub session_id: String,
-    pub invocation_id: String,
-    pub authoritative_workspace: PathBuf,
-}
-
-impl SidecarInvocationContext {
-    pub fn new(
-        session_id: impl Into<String>,
-        invocation_id: impl Into<String>,
-        authoritative_workspace: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            invocation_id: invocation_id.into(),
-            authoritative_workspace: authoritative_workspace.into(),
-        }
-    }
-}
-
-/// 将宿主权威上下文转换为通用请求信封。TCP 与 stdio 共用此入口，避免
-/// 传输方式改变会话归属语义。
 fn handshake_handles_tool(handshake: &HandshakeResponse, tool_name: &str) -> bool {
     handshake
         .capabilities
         .iter()
         .any(|capability| capability == &format!("tool:{tool_name}") || capability == "tool:*")
-}
-
-fn request_invocation_context(
-    context: &SidecarInvocationContext,
-) -> crate::protocol::RequestInvocationContext {
-    crate::protocol::RequestInvocationContext {
-        session_id: context.session_id.clone(),
-        invocation_id: context.invocation_id.clone(),
-        workspace: context
-            .authoritative_workspace
-            .to_string_lossy()
-            .into_owned(),
-        actor_id: String::new(),
-        deadline_ms: None,
-    }
 }
 
 #[derive(Debug)]
@@ -157,32 +115,9 @@ pub trait SidecarConnection: Send + Sync {
         self.invoke(operation, payload)
     }
 
-    /// 带宿主权威调用上下文的请求。Runtime 的 stdio 按需连接会在启动沙箱时
-    /// 使用其中的工作区；command 的一次性连接还会据此构造完整执行封套。
-    /// 其他普通连接默认忽略上下文。
-    fn invoke_with_context(
-        &self,
-        operation: &str,
-        payload: &str,
-        context: &SidecarInvocationContext,
-    ) -> Result<String> {
-        let _ = context;
-        self.invoke(operation, payload)
-    }
-
-    fn invoke_with_context_and_progress(
-        &self,
-        operation: &str,
-        payload: &str,
-        context: &SidecarInvocationContext,
-        on_progress: &mut dyn FnMut(String),
-    ) -> Result<String> {
-        let _ = context;
-        self.invoke_with_progress(operation, payload, on_progress)
-    }
-
-    /// 带完整统一调用元数据的入口。旧连接实现无需调整，默认退化为原有
-    /// SidecarInvocationContext；Runtime 自带连接覆写后透传 actor/deadline。
+    /// 带完整统一调用元数据的唯一上下文入口。Runtime 的 stdio 按需连接
+    /// 会在启动沙箱时使用其中的工作区；command 的一次性连接还会据此构造
+    /// 完整执行封套。普通连接默认忽略上下文，退化为无上下文调用。
     fn invoke_with_invocation_context_and_progress(
         &self,
         operation: &str,
@@ -190,16 +125,8 @@ pub trait SidecarConnection: Send + Sync {
         context: &crate::protocol::RequestInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
-        self.invoke_with_context_and_progress(
-            operation,
-            payload,
-            &SidecarInvocationContext::new(
-                &context.session_id,
-                &context.invocation_id,
-                &context.workspace,
-            ),
-            on_progress,
-        )
+        let _ = context;
+        self.invoke_with_progress(operation, payload, on_progress)
     }
 
     /// sidecar 握手声明的工具 Handler。能力名使用 `tool:<name>`；旧 sidecar
@@ -1269,17 +1196,6 @@ impl SidecarConnection for ProcessSidecarConnection {
             .invoke_protocol_once_with_progress(operation, payload, on_progress)
             .map_err(classify_transport_error)?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
-    }
-
-    fn invoke_with_context_and_progress(
-        &self,
-        operation: &str,
-        payload: &str,
-        context: &SidecarInvocationContext,
-        on_progress: &mut dyn FnMut(String),
-    ) -> Result<String> {
-        let context = request_invocation_context(context);
-        self.invoke_with_invocation_context_and_progress(operation, payload, &context, on_progress)
     }
 
     fn invoke_with_invocation_context_and_progress(
