@@ -1,4 +1,4 @@
-//! 查询视图（列表/状态/清单）、WASM 编译装载与 Core 适配器创建。
+//! 查询视图（列表/状态/清单）与 Core 适配器创建。
 
 use serde_json::Value;
 
@@ -47,8 +47,7 @@ pub fn core_plugin_ids(_storage_root: &Path, runtime: RuntimeKind) -> Vec<String
 /// 为一个会话直接创建全部已安装插件的独立适配器（不经聚合桥）。
 ///
 /// 各入口构造 Core 时统一经 [`crate::RuntimeCorePlugin`] 接入插件；本函数
-/// 保留给需要直接拿到单个适配器的测试与工具场景。实例使用注册表已接受的
-/// 同一份 WASM 字节快照。
+/// 保留给需要直接拿到单个适配器的测试与工具场景。
 ///
 /// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
 /// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
@@ -85,9 +84,7 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 .as_ref()
                 .is_some_and(|connection| connection.has_runtime_endpoint());
             let state = plugin_state(
-                manifest,
                 loaded.enabled,
-                loaded.ui_plugin.is_some(),
                 loaded
                     .load_error
                     .as_deref()
@@ -100,18 +97,11 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                     None
                 },
                 id: manifest.id.clone(),
-                // 展示名优先级：清单 name（静态声明）→ WASM descriptor → id 兜底。
-                name: manifest
-                    .name
-                    .clone()
-                    .or_else(|| loaded.descriptor.as_ref().map(|value| value.name.clone()))
-                    .unwrap_or_else(|| manifest.id.clone()),
+                // 展示名优先级：清单 name（静态声明）→ id 兜底。
+                name: manifest.name.clone().unwrap_or_else(|| manifest.id.clone()),
                 description: manifest.description.clone(),
                 manifest_version: manifest.version.clone(),
-                loaded_version: loaded
-                    .descriptor
-                    .as_ref()
-                    .map(|value| value.version.clone()),
+                loaded_version: None,
                 state: state.to_string(),
                 generation: loaded.generation,
                 enabled: loaded.enabled,
@@ -178,9 +168,9 @@ fn reload_plugin_entry(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
 }
 
 pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
-    // 无 WASM 插件可能仅提供 UI，也可能通过 Desktop TS 工具适配器接入 Core。
+    // 清单插件可能仅提供 UI，也可能通过 Desktop TS 工具适配器接入 Core。
     // UI 记录直接替换；存活 Core 中的 TS 适配器原位更新，下一轮立即使用新清单。
-    if installed.manifest.wasm_binary().is_none() {
+    {
         crate::ts_tools::cancel_plugin_calls(&installed.manifest.id);
         // 停掉旧 sidecar（进程 + 该安装目录的连接缓存）：热加载的前提是
         // 插件目录可能已被整体替换，残留会让工具继续打到旧二进制；新清
@@ -238,114 +228,9 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
             .lock()
             .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
             .insert(installed.manifest.id.clone(), loaded);
-        tracing::info!(plugin_id = %installed.manifest.id, "无 WASM 插件已重新加载");
-        return Ok(());
+        tracing::info!(plugin_id = %installed.manifest.id, "插件已重新加载");
+        Ok(())
     }
-
-    let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
-    let sidecar = resolve_sidecar(storage_root, installed, true)?;
-    let verified_sidecar =
-        crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
-    // 仅预热原生常驻 sidecar。解释器即使脚本声明常驻，也等首次实际
-    // 使用时才启动；command 继续由每次调用的独立连接承载。
-    // 启动失败是运行异常：不阻断重载/升级（安装前提类失败已在上方
-    // read_wasm_bytes/resolve_sidecar 以 Err 返回），登记后由插件管理
-    // 显示启动异常。
-    let mut preload_error = None;
-    if installed.enabled
-        && installed.manifest.should_preload_sidecar()
-        && verified_sidecar.is_some()
-        && let Some(connection) = &sidecar
-        && let Err(error) = connection.ensure_running()
-    {
-        tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
-        preload_error = Some(error.to_string());
-    }
-    let (instances, next_generation) = {
-        let plugins = loaded_plugins()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
-        let loaded = plugins
-            .get(&installed.manifest.id)
-            .ok_or_else(|| anyhow::anyhow!("插件 {} 尚未预加载", installed.manifest.id))?;
-        (
-            loaded
-                .instances
-                .iter()
-                .filter_map(Weak::upgrade)
-                .collect::<Vec<_>>(),
-            loaded.generation.saturating_add(1).max(1),
-        )
-    };
-
-    let runtime_config = PluginRuntimeConfig::default();
-    let (component, ui_plugin, descriptor) = compile_plugin(
-        wasm_bytes.clone(),
-        &installed.manifest,
-        sidecar.clone(),
-        runtime_config,
-    )?;
-
-    let mut replacements = Vec::with_capacity(instances.len());
-    for adapter in &instances {
-        let component = component.clone().expect("热加载替换仅适用于带逻辑层的插件");
-        let plugin = instantiate_from_compiled(
-            component,
-            sidecar.clone(),
-            adapter.runtime_config(),
-            installed.manifest.id.clone(),
-            installed.manifest.storage_access,
-        )?;
-        let adapter = adapter.clone();
-        let activate = installed.enabled;
-        let replacement = crate::execution::run_outside_tokio(move || {
-            adapter.prepare_replacement(plugin, activate)
-        })?;
-        replacements.push(replacement);
-    }
-
-    for (adapter, replacement) in instances.iter().zip(replacements) {
-        adapter.replace_inner(replacement);
-        adapter.set_enabled(installed.enabled);
-    }
-
-    let mut plugins = loaded_plugins()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
-    let loaded = plugins
-        .get_mut(&installed.manifest.id)
-        .ok_or_else(|| anyhow::anyhow!("插件 {} 在切换前被移除", installed.manifest.id))?;
-    loaded.directory = installed.directory.clone();
-    loaded.manifest = installed.manifest.clone();
-    loaded.wasm_bytes = Some(wasm_bytes);
-    loaded.component = component;
-    loaded.ui_plugin = ui_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
-    loaded.descriptor = descriptor;
-    loaded.generation = next_generation;
-    loaded.instances = instances.iter().map(Arc::downgrade).collect();
-    loaded.sidecar = sidecar;
-    loaded.verified_sidecar = verified_sidecar.clone();
-    loaded.prompt_sections = assemble_prompt_sections(
-        storage_root,
-        &installed.directory,
-        &installed.manifest,
-        verified_sidecar.as_deref(),
-    );
-    loaded.dynamic_tool_specs = assemble_dynamic_tool_specs(
-        storage_root,
-        &installed.manifest,
-        verified_sidecar.as_deref(),
-    );
-    loaded.load_error = None;
-    loaded.runtime_error = preload_error;
-    loaded.enabled = installed.enabled;
-    tracing::info!(
-        plugin_id = %installed.manifest.id,
-        generation = next_generation,
-        instances = instances.len(),
-        "WASM 插件热加载完成"
-    );
-    Ok(())
 }
 
 /// 通过插件 ID 调用其 sidecar，入口不需要了解制品位置或传输协议。
@@ -443,18 +328,14 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
         &self,
         query: &tiangong_types::MentionQuery,
     ) -> Result<Vec<tiangong_types::MentionCandidate>, String> {
-        let snapshot = {
+        let Some((manifest, generation)) = ({
             let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
-            plugins.get(&self.id).filter(|p| p.enabled).map(|p| {
-                (
-                    p.ui_plugin.clone(),
-                    p.manifest.clone(),
-                    p.descriptor.as_ref().map(|d| d.name.clone()),
-                    p.generation,
-                )
-            })
-        };
-        let Some((instance, manifest, descriptor_name, generation)) = snapshot else {
+            plugins
+                .get(&self.id)
+                .filter(|p| p.enabled)
+                .map(|p| (p.manifest.clone(), p.generation))
+        }) else {
+            // 插件不可用（未安装/停用）：无法提供候选即不出现。
             return Ok(Vec::new());
         };
         let mut candidates = Vec::new();
@@ -509,11 +390,7 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             });
             match result {
                 Some(Ok(value)) => candidates.extend(parse_mention_op_response(
-                    &value,
-                    &manifest,
-                    descriptor_name.as_deref(),
-                    &self.id,
-                    op,
+                    &value, &manifest, None, &self.id, op,
                 )),
                 Some(Err(error)) => {
                     tracing::warn!(plugin_id = %self.id, %error, op, "sidecar 动态提及查询失败或超预算")
@@ -527,45 +404,18 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
             // 合成路径，完备性（hint 非空）由 mention_entry_candidate 兜底。
             if let Some(candidate) = crate::ts_plugin::mention_entry_candidate(
                 &manifest,
-                descriptor_name.as_deref(),
+                None,
                 &static_mention_entry(mention),
             ) {
                 candidates.push(candidate);
             }
         }
-        if let Some(instance) = &instance {
-            let result = crate::execution::run_outside_tokio(|| {
-                let Ok(mut plugin) = instance.try_lock() else {
-                    return Ok(Vec::new());
-                };
-                plugin.query_mentions(query)
-            });
-            match result {
-                Ok(values) => candidates.extend(
-                    values
-                        .into_iter()
-                        .map(|c| tiangong_types::MentionCandidate {
-                            value: c.value,
-                            label: c.label,
-                            kind: c.kind,
-                            hint: c.hint,
-                            mark: c.mark,
-                        })
-                        .filter(mention_candidate_is_complete),
-                ),
-                Err(error) => tracing::warn!(plugin_id = %self.id, %error, "mention 查询失败"),
-            }
-        }
         let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
-        let current = plugins.get(&self.id).filter(|p| {
-            p.enabled && p.generation == generation && p.manifest.version == manifest.version
-        });
-        let valid = current.is_some_and(|p| match (&instance, &p.ui_plugin) {
-            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
-            (None, None) => {
-                serde_json::to_value(&p.manifest).ok() == serde_json::to_value(&manifest).ok()
-            }
-            _ => false,
+        let valid = plugins.get(&self.id).is_some_and(|p| {
+            p.enabled
+                && p.generation == generation
+                && p.manifest.version == manifest.version
+                && serde_json::to_value(&p.manifest).ok() == serde_json::to_value(&manifest).ok()
         });
         Ok(if valid { candidates } else { Vec::new() })
     }
@@ -664,32 +514,6 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     loaded.enabled.then(|| loaded.directory.clone())
 }
 
-/// 从指定路径为会话 `session_id` 加载 WASM 插件，供运行时集成测试使用。
-pub fn load_wasm_plugin_at(
-    wasm_path: &Path,
-    sidecar: Option<Arc<dyn SidecarConnection>>,
-    session_id: &str,
-) -> Option<Arc<dyn Plugin>> {
-    let plugin_id = wasm_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("plugin")
-        .to_string();
-    let bytes = Arc::new(std::fs::read(wasm_path).ok()?);
-    let config = PluginRuntimeConfig::default();
-    let plugin_id_for_load = plugin_id.clone();
-    let plugin = crate::execution::run_outside_tokio(move || {
-        let loader = WasmPluginLoader::with_sidecar(&config, sidecar)?;
-        loader.load_bytes_for_plugin(&bytes, &config, &plugin_id_for_load, false)
-    })
-    .ok()?;
-    Some(Arc::new(WasmPluginAdapter::new(
-        plugin,
-        PluginRuntimeConfig::default(),
-        session_id,
-    )))
-}
-/// 适配器。创建失败（纯 UI 插件、WASM 实例化失败）返回 `None`。
 /// 清单声明的工具是否全部由 sidecar 承接（无需桌面前端页面执行）。
 ///
 /// Server/CLI 没有插件前端，只有满足该条件的清单工具插件才能在这些入口
@@ -1122,7 +946,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
 /// TS 适配器（清单直连形态）是否承接该插件——两个条件同时成立：
 ///
 /// 1. **清单带 TS 贡献**：工具、静态 prompt 段落，或动态 prompt 声明
-///    （prompt 条目声明）；都没有则交给 WASM 组件或跳过。
+///    （prompt 条目声明）；都没有则无逻辑层，跳过（纯 UI 插件）。
 /// 2. **当前运行形态提供得了这些贡献**：Desktop 恒可（页面可深度参与）；
 ///    CLI/Server 无页面，贡献必须由**经过安装验证的 sidecar** 承接——
 ///    工具全部覆盖，或无工具的纯动态 prompt 插件由握手声明 `prompt`
@@ -1169,30 +993,12 @@ pub fn load_core_plugin(
     runtime: RuntimeKind,
     session_id: &str,
 ) -> Option<Arc<dyn Plugin>> {
-    let (
-        manifest,
-        component,
-        descriptor_id,
-        sidecar,
-        enabled,
-        storage_access,
-        verified_sidecar,
-        dynamic_prompt_sections,
-        dynamic_tool_specs,
-    ) = {
+    let (manifest, enabled, verified_sidecar, dynamic_prompt_sections, dynamic_tool_specs) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
             loaded.manifest.clone(),
-            loaded.component.clone(),
-            loaded
-                .descriptor
-                .as_ref()
-                .map(|descriptor| descriptor.id.clone())
-                .unwrap_or_else(|| plugin_id.to_string()),
-            loaded.sidecar.clone(),
             loaded.enabled,
-            loaded.manifest.storage_access,
             loaded.verified_sidecar.clone(),
             loaded.prompt_sections.clone(),
             loaded.dynamic_tool_specs.clone(),
@@ -1221,143 +1027,34 @@ pub fn load_core_plugin(
         }
         return Some(adapter);
     }
-
-    let component = component?;
-    let plugin = match instantiate_from_compiled(
-        component,
-        sidecar.clone(),
-        PluginRuntimeConfig::default(),
-        plugin_id.to_string(),
-        storage_access,
-    ) {
-        Ok(plugin) => plugin,
-        Err(error) => {
-            set_load_error(plugin_id, error.to_string());
-            tracing::warn!(plugin_id, %error, "创建 Core WASM 插件实例失败");
-            return None;
-        }
-    };
-    let adapter = Arc::new(WasmPluginAdapter::new_with_id(
-        plugin,
-        PluginRuntimeConfig::default(),
-        enabled,
-        descriptor_id,
-        sidecar.map(|s| s as Arc<dyn SidecarConnection>),
-        session_id,
-    ));
-    if let Ok(mut plugins) = loaded_plugins().lock()
-        && let Some(loaded) = plugins.get_mut(plugin_id)
-    {
-        loaded
-            .instances
-            .retain(|instance| instance.strong_count() > 0);
-        loaded.instances.push(Arc::downgrade(&adapter));
-    }
-    Some(adapter)
+    // 纯 UI 插件（无工具/prompt 贡献）：不进 Core。
+    None
 }
 
 pub(crate) fn dispatch_tools_recovered(plugin_id: &str, payload: &str) {
     let Ok(event) = serde_json::from_str::<crate::protocol::ToolsRecovered>(payload) else {
         return;
     };
-    let (wasm, ts) = {
+    let ts = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return;
         };
         let Some(loaded) = plugins.get(plugin_id).filter(|plugin| plugin.enabled) else {
             return;
         };
-        (
-            loaded
-                .instances
-                .iter()
-                .filter_map(Weak::upgrade)
-                .collect::<Vec<_>>(),
-            loaded
-                .ts_instances
-                .iter()
-                .filter_map(Weak::upgrade)
-                .collect::<Vec<_>>(),
-        )
+        loaded
+            .ts_instances
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>()
     };
-    for adapter in wasm {
-        adapter.notify_tools_recovered(&event.tools);
-    }
     for adapter in ts {
         adapter.notify_tools_recovered(&event.tools);
     }
 }
 
-/// 编译产物：纯 UI 插件（无 wasm）三项均为 None。
-type CompiledPlugin = (
-    Option<Arc<wasmtime::component::Component>>,
-    Option<WasmPlugin>,
-    Option<Descriptor>,
-);
-
-pub(super) fn compile_plugin(
-    bytes: Arc<Vec<u8>>,
-    manifest: &PluginManifest,
-    sidecar: Option<Arc<dyn SidecarConnection>>,
-    config: PluginRuntimeConfig,
-) -> Result<CompiledPlugin> {
-    // 纯 UI 插件（wasm 省略）：无逻辑层，返回空三元组
-    if manifest.wasm_binary().is_none() {
-        return Ok((None, None, None));
-    }
-    let plugin_id = manifest.id.clone();
-    let expected_version = manifest.version.clone();
-    crate::execution::run_outside_tokio(move || {
-        let component = Arc::new(compile_component(&bytes)?);
-        let mut plugin = instantiate_component(
-            &component,
-            &config,
-            sidecar,
-            &plugin_id,
-            manifest.storage_access,
-        )?;
-        let descriptor = plugin.describe()?;
-        if descriptor.id != plugin_id {
-            bail!(
-                "插件清单 ID 与组件描述不一致: manifest={plugin_id}, component={}",
-                descriptor.id
-            );
-        }
-        if descriptor.version != expected_version {
-            bail!(
-                "插件清单版本与组件描述不一致: manifest={expected_version}, component={}",
-                descriptor.version
-            );
-        }
-        Ok((Some(component), Some(plugin), Some(descriptor)))
-    })
-}
-
-fn instantiate_from_compiled(
-    component: Arc<wasmtime::component::Component>,
-    sidecar: Option<Arc<dyn SidecarConnection>>,
-    config: PluginRuntimeConfig,
-    plugin_id: String,
-    storage_access: bool,
-) -> Result<WasmPlugin> {
-    crate::execution::run_outside_tokio(move || {
-        instantiate_component(&component, &config, sidecar, &plugin_id, storage_access)
-    })
-}
-
-pub(super) fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
-    let wasm_binary = installed.manifest.wasm_binary().ok_or_else(|| {
-        anyhow::anyhow!(
-            "插件 {} 是纯 UI 插件，没有 WASM 制品",
-            installed.manifest.id
-        )
-    })?;
-    let path = installed.directory.join(wasm_binary);
-    std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
-}
-
-/// 登记插件加载错误（WASM 读取/编译/实例化、解释器不可发现、连接构造
-/// 失败、重载逻辑层失败）：插件不满足可用条件，插件管理显示加载异常；
+/// 登记插件加载错误（解释器不可发现、连接构造失败、重载逻辑层失败）：
+/// 插件不满足可用条件，插件管理显示加载异常；
 /// 只能由重新加载成功清除，sidecar 运行检查成功不影响它。
 pub(crate) fn set_load_error(plugin_id: &str, error: String) {
     if let Ok(mut plugins) = loaded_plugins().lock()
@@ -1378,37 +1075,27 @@ pub(crate) fn set_runtime_error(plugin_id: &str, error: String) {
     }
 }
 
-fn plugin_state(
-    manifest: &PluginManifest,
-    enabled: bool,
-    has_wasm_ui: bool,
-    error: Option<&str>,
-) -> &'static str {
+fn plugin_state(enabled: bool, error: Option<&str>) -> &'static str {
     // 未运行的 sidecar 可能仍在等待首次调用，只有已记录的错误才影响插件状态。
     if !enabled {
         "disabled"
-    } else if !has_wasm_ui && manifest.wasm_binary().is_some() {
-        "error"
     } else if error.is_some() {
         "degraded"
     } else {
         "loaded"
     }
 }
-
 pub(super) fn list_plugin_status_without_preload(
     manifest: &PluginManifest,
 ) -> Option<PluginStatus> {
-    let (descriptor, generation, sidecar, load_error, runtime_error, has_ui, enabled, directory) = {
+    let (generation, sidecar, load_error, runtime_error, enabled, directory) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(&manifest.id)?;
         (
-            loaded.descriptor.clone(),
             loaded.generation,
             loaded.sidecar.clone(),
             loaded.load_error.clone(),
             loaded.runtime_error.clone(),
-            loaded.ui_plugin.is_some(),
             loaded.enabled,
             loaded.directory.clone(),
         )
@@ -1417,7 +1104,7 @@ pub(super) fn list_plugin_status_without_preload(
         .as_ref()
         .is_some_and(|connection| connection.has_runtime_endpoint());
     let last_error = load_error.or(runtime_error);
-    let state = plugin_state(manifest, enabled, has_ui, last_error.as_deref());
+    let state = plugin_state(enabled, last_error.as_deref());
     let configured = configured_model_capabilities();
     Some(PluginStatus {
         unavailable_reason: if enabled {
@@ -1426,13 +1113,10 @@ pub(super) fn list_plugin_status_without_preload(
             None
         },
         id: manifest.id.clone(),
-        name: descriptor
-            .as_ref()
-            .map(|value| value.name.clone())
-            .unwrap_or_else(|| manifest.id.clone()),
+        name: manifest.name.clone().unwrap_or_else(|| manifest.id.clone()),
         description: manifest.description.clone(),
         manifest_version: manifest.version.clone(),
-        loaded_version: descriptor.map(|value| value.version),
+        loaded_version: None,
         state: state.to_string(),
         generation,
         enabled,

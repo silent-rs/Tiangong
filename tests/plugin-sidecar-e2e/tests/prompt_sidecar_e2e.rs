@@ -42,7 +42,6 @@ const WASM_RULES_SUFFIX: &str = "7. 工具调用失败时必须如实告知用�
 #[test]
 fn prompt_清单无_wasm_且声明_sidecar_prompt条目() {
     let manifest = prompt_manifest();
-    assert!(manifest.wasm.is_none(), "prompt 不再有 WASM 层");
     assert!(manifest.tools.is_none(), "prompt 不提供工具");
     let entries = manifest.prompt.as_deref().expect("声明 prompt 条目");
     assert_eq!(

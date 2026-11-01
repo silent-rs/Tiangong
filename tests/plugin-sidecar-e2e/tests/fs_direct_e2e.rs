@@ -37,7 +37,6 @@ fn fs_manifest() -> PluginManifest {
 #[test]
 fn fs_清单无_wasm_且工具全部由_sidecar_声明() {
     let manifest = fs_manifest();
-    assert!(manifest.wasm.is_none(), "fs 不再有 WASM 层");
     let names: Vec<_> = manifest
         .tools
         .as_deref()

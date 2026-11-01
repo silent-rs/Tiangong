@@ -125,11 +125,9 @@ fn 纯_ui_插件免_wasm_加载并经_storage_桥接读写() {
         .join("bridge-storage.json");
     assert!(storage_file.exists(), "桥接存储应落盘在插件私有数据目录");
 
-    // plugin.*（逻辑层转发）对无逻辑层插件不可用
+    // plugin.*（已淘汰的 WASM 逻辑层转发命名空间）不可用：按未知 method 拒绝
     let error = bridge_call("com.example.board", "plugin.anything", "{}").unwrap_err();
-    assert!(
-        format!("{error:#}").contains("处理消息失败") || format!("{error:#}").contains("未加载")
-    );
+    assert!(format!("{error:#}").contains("拒绝未知 method"));
 }
 
 #[test]

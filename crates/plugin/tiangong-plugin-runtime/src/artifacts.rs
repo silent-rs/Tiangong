@@ -221,9 +221,6 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
         &staged.path.join(MANIFEST_FILE),
         "插件清单",
     )?;
-    if let Some(wasm_binary) = manifest.wasm_binary() {
-        copy_local_artifact(source, wasm_binary, &staged.path, "WASM 制品")?;
-    }
 
     if let Some(sidecar) = &manifest.sidecar {
         match sidecar.runtime {
@@ -269,6 +266,18 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
             ensure_regular_file(&source_file, "插件签名制品")?;
             copy_regular_file(&source_file, &staged.path.join(file), "插件签名制品")?;
         }
+    }
+    // 存量签名清单的 wasm 条目：制品随安装复制（签名验证要求在位），
+    // 宿主不再装载但完整性校验保持中立。
+    if let Ok(release_raw) = std::fs::read_to_string(staged.path.join("release.json"))
+        && let Ok(release) = serde_json::from_str::<serde_json::Value>(&release_raw)
+        && let Some(wasm_path) = release
+            .get("wasm")
+            .and_then(|wasm| wasm.get("path"))
+            .and_then(serde_json::Value::as_str)
+        && !wasm_path.is_empty()
+    {
+        copy_local_artifact(source, Path::new(wasm_path), &staged.path, "WASM 制品")?;
     }
 
     // 内容清单（devkit 构建生成的路径 + sha256 树）：随插件进入安装目录，
@@ -488,8 +497,11 @@ impl PluginRepository {
         };
 
         // 统计需要下载的制品文件，用于把进度按文件均分到 [0, 100]。
+        // 宿主不关心插件怎么产生：目录条目可携带任意制品（含历史 wasm
+        // 文件）——一律下载并交由签名一致性校验，装载与否只由清单声明
+        // 决定（wasm 声明字段被忽略）。
         let platform = current_platform_key();
-        let has_wasm = manifest.wasm_binary().is_some();
+        let has_wasm = release.wasm.is_some();
         let has_sidecar = manifest.sidecar.is_some();
         let has_signed = manifest.sidecar.is_some() || !release.signed_releases.is_empty();
         let total_steps = ((has_wasm as usize)
@@ -514,24 +526,18 @@ impl PluginRepository {
         };
 
         let mut step_index = 0;
-        if let Some(wasm_binary) = manifest.wasm_binary() {
-            let wasm_artifact = release
-                .wasm
-                .as_ref()
-                .ok_or_else(|| anyhow!("插件 {} 声明了 WASM，但目录缺少 WASM 制品", release.id))?;
-            let wasm_path = staged.path.join(wasm_binary);
-            let wasm_name = wasm_binary
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
-            validate_artifact_file_name(&wasm_artifact.url, wasm_name)?;
+        if let Some(wasm_artifact) = &release.wasm {
+            // 通用制品下载（历史 wasm 文件等）：落盘文件名取 URL 尾段，
+            // 随包进入安装目录并交由签名清单校验完整性；宿主不加载执行，
+            // 装载与否只由清单声明决定。
+            let url_path = url_file_name(&wasm_artifact.url)?;
+            ensure_safe_relative_path(Path::new(&url_path), "WASM 制品")?;
+            validate_artifact_file_name(&wasm_artifact.url, &url_path)?;
+            let wasm_path = staged.path.join(&url_path);
             self.download_file(wasm_artifact, &wasm_path, make_file_progress(step_index))
                 .await?;
             step_index += 1;
-        } else if release.wasm.is_some() {
-            bail!("插件 {} 未声明 WASM，但 OSS 目录包含 WASM 制品", release.id);
         }
-
         if has_sidecar {
             let sidecar_binary = manifest.sidecar.as_ref().expect("已确认存在 sidecar");
             if sidecar_binary.runtime != crate::manifest::SidecarRuntime::Native {
@@ -809,12 +815,40 @@ fn create_staged_plugin(storage_root: &Path) -> Result<StagedPlugin> {
     Ok(StagedPlugin { path })
 }
 
+/// 校验制品相对路径安全（拒绝绝对路径、`..`、根前缀等可越出插件目录的
+/// 形态）。所有「按声明路径复制本地制品」的入口都必须先过此校验，
+/// 防止恶意清单/签名清单把写入目标定位到插件事务目录之外。
+fn ensure_safe_relative_path(relative_path: &Path, label: &str) -> Result<()> {
+    if relative_path.is_absolute() {
+        bail!("{label}路径必须是相对路径: {}", relative_path.display());
+    }
+    for component in relative_path.components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                bail!(
+                    "{label}路径包含不安全组件（`..`/根/盘符）: {}",
+                    relative_path.display()
+                );
+            }
+        }
+    }
+    if relative_path.components().next().is_none() {
+        bail!("{label}路径为空");
+    }
+    Ok(())
+}
+
 fn copy_local_artifact(
     source_root: &Path,
     relative_path: &Path,
     destination_root: &Path,
     label: &str,
 ) -> Result<PathBuf> {
+    ensure_safe_relative_path(relative_path, label)?;
     let source = resolve_local_artifact(source_root, relative_path, label)?;
     let destination = destination_root.join(relative_path);
     if let Some(parent) = destination.parent() {
@@ -902,6 +936,8 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
             .with_context(|| format!("插件 {} 版本不是有效语义版本", plugin.id))?;
         validate_download_url(&plugin.manifest.url, "插件清单")?;
         parse_checksum(&plugin.manifest.checksum)?;
+        // 目录可携带任意制品（含历史 wasm 文件）：宿主不关心插件怎么产生，
+        // 按普通制品校验引用格式后随包下载；装载与否只由清单声明决定。
         if let Some(wasm) = &plugin.wasm {
             validate_download_url(&wasm.url, "WASM 制品")?;
             parse_checksum(&wasm.checksum)?;
@@ -929,7 +965,7 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
                 plugin.id
             );
         }
-        // 纯 WASM 插件（如 prompt）没有 sidecar 但同样需要官方签名建立信任，
+        // 纯清单插件（如 prompt）没有 sidecar 但同样需要官方签名建立信任，
         // 因此签名清单不强制要求对应 sidecar，这里只校验签名 URL 合法性。
         for signed in plugin.signed_releases.values() {
             validate_download_url(&signed.url, "插件签名清单")?;
@@ -1050,12 +1086,18 @@ fn parse_checksum(checksum: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn validate_artifact_file_name(url: &str, expected: &str) -> Result<()> {
-    let url = reqwest::Url::parse(url).with_context(|| format!("插件制品 URL 无效: {url}"))?;
-    let actual = url
+/// 从制品 URL 取尾段文件名（下载落盘名）。
+fn url_file_name(url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("插件制品 URL 无效: {url}"))?;
+    parsed
         .path_segments()
         .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
-        .ok_or_else(|| anyhow!("插件制品 URL 缺少文件名: {url}"))?;
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("插件制品 URL 缺少文件名: {url}"))
+}
+
+fn validate_artifact_file_name(url: &str, expected: &str) -> Result<()> {
+    let actual = url_file_name(url)?;
     if actual != expected {
         bail!("插件制品名称不一致: expected={expected}, actual={actual}");
     }
@@ -1197,6 +1239,96 @@ mod tests {
             states.get("demo").expect("正式插件应被识别").version,
             "0.3.2"
         );
+    }
+
+    /// 回归：本地导入按 release.json 的 wasm 条目复制制品时，声明路径
+    /// 不得逃出插件事务目录（`..`/绝对路径一律拒绝），且失败发生在任何
+    /// 文件被复制之前——恶意签名清单不能借暂存阶段在目录外写入文件。
+    #[test]
+    fn stage_local_plugin_拒绝wasm制品路径穿越() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let source = root.path().join("source");
+        std::fs::create_dir_all(source.join("app")).expect("入口目录");
+        std::fs::write(
+            source.join("plugin.json"),
+            r#"{"schema_version":2,"id":"evil-demo","version":"0.1.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#,
+        )
+        .expect("清单");
+        std::fs::write(source.join("app/index.html"), "<html></html>").expect("入口");
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&victim, "original").expect("目录外目标文件");
+
+        for malicious_path in ["../victim.wasm", "../../escape.wasm", "/tmp/absolute.wasm"] {
+            let release = serde_json::json!({
+                "schema_version": 1,
+                "id": "evil-demo",
+                "version": "0.1.0",
+                "publisher": "tiangong-official",
+                "permissions": [],
+                "manifest": {"path": "plugin.json", "sha256": "0".repeat(64)},
+                "wasm": {"path": malicious_path, "sha256": "0".repeat(64)},
+            });
+            std::fs::write(
+                source.join("release.json"),
+                serde_json::to_string(&release).unwrap(),
+            )
+            .expect("恶意签名清单");
+            std::fs::write(source.join("fixture.wasm"), "payload").expect("同目录制品");
+
+            let error = match stage_local_plugin(root.path(), &source) {
+                Ok(_staged) => panic!("穿越路径 {malicious_path} 必须被拒绝"),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:#}").contains("不安全组件")
+                    || format!("{error:#}").contains("相对路径"),
+                "应指出路径不安全: {error:#}"
+            );
+            // 事务目录外不得出现写入（victim 保持原内容，无新逃逸文件）。
+            assert_eq!(
+                std::fs::read_to_string(&victim).unwrap(),
+                "original",
+                "不得覆盖事务目录外文件"
+            );
+            assert!(!root.path().join("escape.wasm").exists());
+        }
+    }
+
+    /// 回归：合法相对路径的 wasm 制品仍随导入复制（存量签名插件完整性
+    /// 校验依赖制品在位）。
+    #[test]
+    fn stage_local_plugin_合法wasm制品路径随导入复制() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let source = root.path().join("source");
+        std::fs::create_dir_all(source.join("app")).expect("入口目录");
+        std::fs::write(
+            source.join("plugin.json"),
+            r#"{"schema_version":2,"id":"legacy-demo","version":"0.1.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#,
+        )
+        .expect("清单");
+        std::fs::write(source.join("app/index.html"), "<html></html>").expect("入口");
+        std::fs::write(source.join("legacy.wasm"), "bytes").expect("制品");
+        let release = serde_json::json!({
+            "schema_version": 1,
+            "id": "legacy-demo",
+            "version": "0.1.0",
+            "publisher": "tiangong-official",
+            "permissions": [],
+            "manifest": {"path": "plugin.json", "sha256": "0".repeat(64)},
+            "wasm": {"path": "legacy.wasm", "sha256": "0".repeat(64)},
+        });
+        std::fs::write(
+            source.join("release.json"),
+            serde_json::to_string(&release).unwrap(),
+        )
+        .expect("签名清单");
+
+        let staged = stage_local_plugin(root.path(), &source).expect("暂存");
+        assert!(
+            staged.path().join("legacy.wasm").is_file(),
+            "制品应进入暂存目录"
+        );
+        drop(staged);
     }
 }
 

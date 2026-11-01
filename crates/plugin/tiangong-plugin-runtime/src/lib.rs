@@ -1,32 +1,26 @@
 //! 天工插件运行时。
 //!
-//! 提供单文件 WASM Component 的加载与资源限制、Desktop TypeScript 工具桥接，
-//! 以及配套 sidecar 的通用协议和运行管理。
+//! 提供清单声明插件的装载与 sidecar 直连/桌面 TS 工具桥接，以及配套
+//! sidecar 的通用协议和运行管理。
 //!
 //! # 公共中立约束
 //!
 //! 本 crate 必须始终保持插件无关，不得包含任何具体插件的 ID、操作名、协议类型、
-//! 数据路径、业务事件或条件分支。单个插件需要的行为必须放在该插件的 WASM、私有
-//! 协议或 sidecar 中。只有能被任意插件复用、且无需理解业务负载的机制，才能进入
-//! 运行时。完整约束见 `docs/plugin-development.md` 的“WASM Runtime 公共中立约束”。
+//! 数据路径、业务事件或条件分支。单个插件需要的行为必须放在该插件的私有协议
+//! 或 sidecar 中。只有能被任意插件复用、且无需理解业务负载的机制，才能进入
+//! 运行时。完整约束见 `docs/plugin-development.md` 的“公共中立约束”。
 //! 唯一的过渡期例外是 [`builtin_tables`]：宿主展示用的工具名映射纯数据集中
 //! 于此，插件自行声明后逐条删除。
 
-pub mod adapter;
 pub mod artifacts;
-pub mod bindings;
 pub mod bridge;
 pub mod builtin_tables;
-pub mod config;
 pub mod core_bridge;
 pub mod events;
-mod execution;
-pub mod host_state;
 pub mod interpreter_env;
 mod invocation;
 pub mod launch_policy;
 pub mod launcher_update;
-pub mod loader;
 pub mod manifest;
 pub mod platform;
 pub mod plugin_dev;
@@ -39,6 +33,7 @@ pub mod sidecar;
 #[doc(hidden)]
 pub mod test_support;
 
+mod execution;
 pub mod host_policy;
 
 pub mod signature;
@@ -50,7 +45,6 @@ mod ts_plugin;
 mod ts_tools;
 pub mod verification;
 
-pub use adapter::WasmPluginAdapter;
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call,
     bridge_call_with_workspace, bridge_emit, bridge_subscribe, bridge_unsubscribe,
@@ -59,7 +53,6 @@ pub use bridge::{
     set_terminal_handler, set_webview_handler,
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
-pub use config::PluginRuntimeConfig;
 pub use core_bridge::{
     CALL_LOCAL_PLUGIN_TOOL, LIST_LOCAL_PLUGINS_TOOL, LOCAL_PLUGIN_LIST_INJECTION, RuntimeCorePlugin,
 };
@@ -67,10 +60,6 @@ pub use events::{
     PluginChangeEvent, PluginChangeKind, PluginsChangedListener, set_plugins_changed_listener,
 };
 pub use interpreter_env::ensure_interpreter_env;
-pub use loader::{
-    Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
-    WasmPluginLoader,
-};
 pub use plugin_dev::{
     InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint, note_trusted_build,
     set_plugin_dev_trusted_installer, trusted_build_fingerprint,

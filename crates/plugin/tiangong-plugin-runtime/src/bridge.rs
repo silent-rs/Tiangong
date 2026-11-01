@@ -30,11 +30,6 @@ pub struct BridgeNamespace {
 /// 首版桥接命名空间白名单（设计文档 6.3）。
 pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
     BridgeNamespace {
-        prefix: "plugin.",
-        permission: "bridge.call",
-        description: "转发到本插件 WASM 逻辑层",
-    },
-    BridgeNamespace {
         prefix: "session.",
         permission: "session.read",
         description: "读取/操作当前会话",
@@ -133,14 +128,7 @@ fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'st
 ///   对 v1 一律放行，保证现有 WASM 插件零改动；v2 按声明校验。
 /// - 其余宿主能力命名空间：仅 v2 声明对应权限后可达；v1 插件先于该体系，
 ///   一律拒绝，避免未来宿主服务接入时 v1 插件意外获得越权能力。
-fn has_bridge_permission(
-    manifest: &PluginManifest,
-    namespace: &BridgeNamespace,
-    permission: &str,
-) -> bool {
-    if manifest.schema_version == 1 {
-        return namespace.prefix == "plugin.";
-    }
+fn has_bridge_permission(manifest: &PluginManifest, permission: &str) -> bool {
     manifest.has_permission(permission)
 }
 
@@ -191,14 +179,8 @@ pub fn bridge_call_with_workspace(
     let manifest = crate::registry::plugin_manifest(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 未加载"))?;
     let permission = required_bridge_permission(method, namespace);
-    if !has_bridge_permission(&manifest, namespace, permission) {
+    if !has_bridge_permission(&manifest, permission) {
         tracing::warn!(plugin_id, method, permission, "bridge.call 权限不足");
-        if manifest.schema_version == 1 {
-            bail!(
-                "bridge.call 插件 {plugin_id} 为 schema_version 1，宿主能力命名空间 {} 需要升级清单为 schema_version 2 后使用",
-                namespace.prefix
-            );
-        }
         bail!(
             "bridge.call 插件 {plugin_id} 未声明权限 {permission}，无法调用 {}",
             namespace.prefix
@@ -206,15 +188,6 @@ pub fn bridge_call_with_workspace(
     }
 
     match namespace.prefix {
-        // 转发到本插件 WASM 逻辑层：剥掉 `plugin.` 前缀，剩余部分即 WASM 方法名，
-        // 负载透传（等价旧 plugin_call 通道）。
-        "plugin." => {
-            let wasm_method = &method[namespace.prefix.len()..];
-            if wasm_method.is_empty() {
-                bail!("bridge.call method {method} 缺少插件方法名");
-            }
-            crate::registry::handle_view_message_result(plugin_id, wasm_method, payload)
-        }
         // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
         "storage." => storage_call(plugin_id, method, payload),
         // tool.resolve：Desktop TS 工具插件提交自己声明的工具结果。
@@ -634,12 +607,12 @@ mod tests {
 
     #[test]
     fn 命名空间识别正确() {
-        assert_eq!(namespace_of("plugin.getConfig").unwrap().prefix, "plugin.");
         assert_eq!(
             namespace_of("session.getMessages").unwrap().prefix,
             "session."
         );
         assert_eq!(namespace_of("storage.read").unwrap().prefix, "storage.");
+        assert!(namespace_of("plugin.getConfig").is_none());
         assert!(namespace_of("rag.query").is_none());
         assert!(namespace_of("unknown").is_none());
     }
@@ -650,7 +623,7 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("拒绝未知 method"));
         assert!(message.contains("rag.query"));
-        assert!(message.contains("plugin."));
+        assert!(message.contains("session."));
     }
 
     #[test]
@@ -719,64 +692,26 @@ mod tests {
     }
 
     #[test]
-    fn 权限校验规则覆盖_v1_v2() {
+    fn 权限校验按声明判定() {
         use crate::manifest::PluginManifest;
 
-        let plugin_ns = namespace_of("plugin.x").unwrap();
         let session_ns = namespace_of("session.x").unwrap();
 
-        // v1 + 空 permissions：plugin.* 放行（等价旧 plugin_call 通道）
-        let v1_empty: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
+        // 未声明权限：任何命名空间都拒绝。
+        let empty: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"a","version":"1.0.0","permissions":[]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(&v1_empty, plugin_ns, "bridge.call"));
-        assert!(!has_bridge_permission(
-            &v1_empty,
-            session_ns,
-            "session.read"
-        ));
+        assert!(!has_bridge_permission(&empty, "session.read"));
 
-        // v1 + 声明了其他权限（如 model-config.read）：plugin.* 同样放行。
-        // v1 清单早于 bridge 权限体系，不能因声明过其他权限就要求 bridge.call，
-        // 否则 generate-image-openai 等现有插件的设置页会被误拒。
-        let v1_other_permissions: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["model-config.read","sidecar.invoke"]}"#,
+        // 声明对应权限：放行；未声明的能力：拒绝。
+        let declared: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"a","version":"1.0.0","permissions":["session.read"]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(
-            &v1_other_permissions,
-            plugin_ns,
-            "bridge.call"
-        ));
-        assert!(!has_bridge_permission(
-            &v1_other_permissions,
-            session_ns,
-            "session.read"
-        ));
-
-        // v2：一律按声明校验
-        let v2: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
-        )
-        .unwrap();
-        assert!(!has_bridge_permission(&v2, plugin_ns, "bridge.call"));
-        assert!(!has_bridge_permission(&v2, session_ns, "session.read"));
-
-        let v2_declared: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["bridge.call"]}"#,
-        )
-        .unwrap();
-        assert!(has_bridge_permission(
-            &v2_declared,
-            plugin_ns,
-            "bridge.call"
-        ));
-        assert!(!has_bridge_permission(
-            &v2_declared,
-            session_ns,
-            "session.read"
-        ));
+        assert!(has_bridge_permission(&declared, "session.read"));
+        assert!(!has_bridge_permission(&declared, "storage.private"));
+        let _ = session_ns;
     }
 }
 

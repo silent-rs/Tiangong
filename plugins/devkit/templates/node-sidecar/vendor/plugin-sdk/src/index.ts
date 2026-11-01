@@ -6,7 +6,7 @@
  * - iframe 容器：经 `postMessage` 协议与宿主通信（`tiangong_host_context` 提供频道）。
  *
  * 桥接方法命名空间（白名单控制）：
- * - `plugin.*`   转发到本插件 WASM 逻辑层（带逻辑层的插件）
+ * - `sidecar.*`  调用本插件 sidecar（带逻辑层的插件，需 sidecar.invoke 权限）
  * - `storage.*`  插件私有数据读写：get/set/delete/list
  * - 其余命名空间（session/tool）按宿主版本渐进开放。
  *

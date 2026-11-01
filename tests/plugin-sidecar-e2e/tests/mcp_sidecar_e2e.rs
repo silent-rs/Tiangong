@@ -34,7 +34,6 @@ fn mcp_manifest() -> PluginManifest {
 #[test]
 fn mcp_清单无_wasm_且声明动态工具() {
     let manifest = mcp_manifest();
-    assert!(manifest.wasm.is_none(), "mcp 不再有 WASM 层");
     assert!(
         manifest.tools.is_none(),
         "MCP 工具名单运行时确定，不静态枚举: {:?}",

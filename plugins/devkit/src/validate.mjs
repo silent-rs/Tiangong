@@ -24,7 +24,6 @@ export async function validate(argv, ctx) {
   } catch (error) {
     return { ok: false, errors: [`plugin.json 不是有效 JSON：${error.message}`], warnings };
   }
-  if (manifest.schema_version !== 2) errors.push(`schema_version 应为 2（收到 ${manifest.schema_version}）`);
   if (!validIdField(manifest.id)) errors.push(`id 非法：${manifest.id}（字母数字与 - _ .）`);
   if (!manifest.version) errors.push('version 为空');
   if (manifest.id && manifest.id !== id) {
@@ -57,8 +56,8 @@ export async function validate(argv, ctx) {
       errors.push(error.message);
     }
   }
-  if (contributions.length === 0 && !manifest.tools?.length && !manifest.wasm) {
-    warnings.push('清单未声明任何 UI 贡献、工具或逻辑层，安装后不会有可见效果');
+  if (contributions.length === 0 && !manifest.tools?.length && !manifest.prompt?.length && !manifest.mention && !manifest.sidecar) {
+    warnings.push('清单未声明任何 UI 贡献、工具、prompt、mention 或 sidecar，安装后不会有可见效果');
   }
   const mention = manifest.mention;
   if (mention && !mention.candidates_op && mention.hint) {

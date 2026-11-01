@@ -7,11 +7,11 @@ import { PluginSandbox } from './PluginSandbox';
  * 插件设置面板：settings.plugin-page 挂载点的通用容器。
  *
  * 天工不处理插件页面内容，只提供容器和桥接：
- * - 经 listSlotContributions 按 Slot 读取贡献（v1 WASM 声明 + v2 manifest 声明）
+ * - 经 listSlotContributions 按 Slot 读取贡献（manifest 清单声明）
  * - 用户点击进入时按贡献来源取页面 HTML → 渲染到 iframe（srcdoc）
- * - iframe 内 JS 经 postMessage → 本组件 → bridgeCall("plugin.*") → WASM
+ * - iframe 内 JS 经 postMessage → 本组件 → bridgeCall（宿主命名空间白名单）
  *
- * 所有业务逻辑在 WASM 插件内部处理，天工完全通用。
+ * 插件业务逻辑在自己的 sidecar / 页面脚本内，天工完全通用。
  */
 export function PluginSettingsPanel() {
   const [contributions, setContributions] = useState<SlotContributionEntry[]>([]);
@@ -29,7 +29,7 @@ export function PluginSettingsPanel() {
   }, []);
 
   // 用户选中某个插件时，按贡献来源获取页面 HTML：
-  // wasm 来源走插件自身 open-view，manifest 来源读清单声明的 entry 文件。
+  // 入口 HTML 读清单声明的 entry 文件。
   const selectContribution = useCallback(async (entry: SlotContributionEntry) => {
     setSelected(entry);
     if (!entry.has_view) {
@@ -39,7 +39,7 @@ export function PluginSettingsPanel() {
     try {
       const pageHtml = entry.source === 'manifest'
         ? await api.pluginOpenEntry(entry.plugin_id, entry.contribution_id)
-        : await api.pluginOpenView(entry.plugin_id, entry.contribution_id);
+        : await api.pluginOpenEntry(entry.plugin_id, entry.contribution_id);
       setHtml(pageHtml);
     } catch {
       setHtml('<p style="padding:16px;color:#888">页面加载失败</p>');
@@ -53,7 +53,7 @@ export function PluginSettingsPanel() {
   if (contributions.length === 0) {
     return (
       <div className="p-4 text-sm text-muted-foreground">
-        暂无已加载的 WASM 插件。
+        暂无可用的插件页面。
       </div>
     );
   }

@@ -196,16 +196,6 @@ tracing-subscriber = "0.3"
 typed-builder = "0.23"
 url = "2"
 wiremock = "0.6"
-wasmtime = { version = "48", default-features = false, features = [
-    "cranelift",
-    "runtime",
-    "component-model",
-    "parallel-compilation",
-    "pooling-allocator",
-    "cache",
-] }
-wasmtime-wasi = { version = "48", default-features = false }
-wit-bindgen = "0.60"
 
 [patch.crates-io]
 wry = { git = "https://github.com/silent-rs/wry.git", rev = "d3def78053803670c8d04d66157a45232aa532cf" }

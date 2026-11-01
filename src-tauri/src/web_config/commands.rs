@@ -586,14 +586,6 @@ pub(crate) async fn dispatch(ctx: &WebConfigContext, command: &str, args: Value)
             let Args { slot } = parse(args)?;
             to_json(registry::list_slot_contributions(&slot))
         }
-        "plugin_open_view" => {
-            let req: ContributionArgs = parse(args)?;
-            to_json(
-                registry::open_view(&req.plugin_id, &req.contribution_id).ok_or_else(|| {
-                    CommandError::bad(format!("插件 {} 未加载或无页面", req.plugin_id))
-                })?,
-            )
-        }
         "plugin_open_entry" => {
             let req: ContributionArgs = parse(args)?;
             to_json(registry::open_manifest_view(

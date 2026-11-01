@@ -9,40 +9,9 @@ pub fn plugin_manifest(plugin_id: &str) -> Option<PluginManifest> {
     loaded.enabled.then(|| loaded.manifest.clone())
 }
 
-/// 收集所有已加载 WASM 插件的设置页贡献及其加载代次。
-pub fn list_contributions() -> Vec<(String, u64, Vec<Contribution>)> {
-    let entries = {
-        let Ok(plugins) = loaded_plugins().lock() else {
-            return Vec::new();
-        };
-        plugins
-            .iter()
-            .filter_map(|(id, loaded)| {
-                if !loaded.enabled {
-                    return None;
-                }
-                loaded
-                    .ui_plugin
-                    .as_ref()
-                    .map(|plugin| (id.clone(), loaded.generation, plugin.clone()))
-            })
-            .collect::<Vec<_>>()
-    };
-    entries
-        .into_iter()
-        .filter_map(|(id, generation, plugin)| {
-            call_wasm_off_runtime(plugin, WasmPlugin::contributions)
-                .ok()
-                .map(|contributions| (id, generation, contributions))
-        })
-        .collect()
-}
-
 /// 按 Slot 列出 UI 贡献（宿主 UI 接缝的统一查询入口）。
 ///
-/// - v1 插件：WASM 运行时声明的设置页贡献整体映射到 `settings.plugin-page`，
-///   零改动兼容（设计文档 11）。
-/// - v2 插件：manifest `ui.contributions` 中 slot 匹配的项。
+/// manifest `ui.contributions` 中 slot 匹配的项。
 pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
     let mut result = Vec::new();
     let Ok(plugins) = loaded_plugins().lock() else {
@@ -52,7 +21,7 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
         if !loaded.enabled {
             continue;
         }
-        // v2：manifest 声明的贡献
+        // manifest 声明的贡献
         for contribution in loaded.manifest.ui_contributions() {
             if contribution.slot == slot {
                 result.push(SlotContribution {
@@ -70,32 +39,6 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     render: contribution.render,
                     tools: exposed_tool_keys(plugin_id, &contribution.tools),
                     titles: exposed_tool_titles(plugin_id, &contribution.titles),
-                });
-            }
-        }
-        // v1：WASM 设置页贡献映射到 settings.plugin-page
-        if loaded.manifest.schema_version == 1
-            && slot == "settings.plugin-page"
-            && let Some(ui_plugin) = &loaded.ui_plugin
-            && let Ok(contributions) =
-                call_wasm_off_runtime(ui_plugin.clone(), WasmPlugin::contributions)
-        {
-            for contribution in contributions {
-                result.push(SlotContribution {
-                    plugin_id: plugin_id.clone(),
-                    contribution_id: contribution.id.clone(),
-                    slot: slot.to_string(),
-                    title: contribution.title.clone(),
-                    description: contribution.description.clone(),
-                    icon: contribution.icon.clone(),
-                    group: contribution.group.clone(),
-                    has_view: contribution.has_view,
-                    open_mode: crate::slots::OpenMode::Singleton,
-                    sandbox: crate::slots::SandboxKind::Iframe,
-                    source: ContributionSource::Wasm,
-                    render: crate::slots::MessageItemRender::Append,
-                    tools: Vec::new(),
-                    titles: Default::default(),
                 });
             }
         }
@@ -140,10 +83,7 @@ fn exposed_tool_titles(
         .collect()
 }
 
-/// 读取 v2 manifest UI 贡献声明的入口 HTML 文件。
-///
-/// v1 贡献的页面由 WASM `open-view` 提供（见 [`open_view`]），本函数只服务
-/// manifest 声明的 `entry`。
+/// 读取 manifest UI 贡献声明的入口 HTML 文件。
 pub fn open_manifest_view(plugin_id: &str, contribution_id: &str) -> Result<String> {
     let (directory, entry) = {
         let plugins = loaded_plugins()
@@ -166,7 +106,7 @@ pub fn open_manifest_view(plugin_id: &str, contribution_id: &str) -> Result<Stri
     std::fs::read_to_string(&path).with_context(|| format!("读取插件页面失败: {}", path.display()))
 }
 
-/// 读取 v2 manifest UI 贡献的相对资源文件（以 entry 所在目录为根）。
+/// 读取 manifest UI 贡献的相对资源文件（以 entry 所在目录为根）。
 ///
 /// 供 Shadow/iframe 容器加载入口 HTML 引用的脚本与样式：路径按 Web 相对语义
 /// 解析（`./`、子目录），规范化后不得逃出插件安装目录。MIME 按扩展名推断。
@@ -336,9 +276,7 @@ pub struct SlotContribution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContributionSource {
-    /// v1：WASM `contributions()` 运行时声明。
-    Wasm,
-    /// v2：manifest `ui.contributions` 声明。
+    /// manifest `ui.contributions` 声明。
     Manifest,
 }
 
@@ -392,10 +330,9 @@ pub fn list_tool_titles() -> std::collections::BTreeMap<String, crate::tool_titl
     ))
 }
 
-/// 收集已启用插件与各自声明的工具原名（清单 `tools`、TS/WASM 适配器规格，
+/// 收集已启用插件与各自声明的工具原名（清单 `tools`、TS 适配器规格，
 /// 以及 `tool_icons` / `tool_titles` 特指键归并出的工具名），供展示表建表。
 ///
-/// 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
 /// 工具声明快照：插件 id、清单、工具原名集与 sidecar 动态标题。
 type ToolDeclaringPlugin = (
     String,
@@ -405,12 +342,11 @@ type ToolDeclaringPlugin = (
 );
 
 fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
-    /// 注册表快照：插件 id、清单、动态工具标题与仍存活的 WASM / TS 适配器。
+    /// 注册表快照：插件 id、清单、动态工具标题与仍存活的 TS 适配器。
     type PluginSnapshot = (
         String,
         PluginManifest,
         std::collections::BTreeMap<String, String>,
-        Vec<Arc<WasmPluginAdapter>>,
         Vec<Arc<TsPluginAdapter>>,
     );
     let snapshot: Vec<PluginSnapshot> = {
@@ -438,7 +374,6 @@ fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
                     id.clone(),
                     loaded.manifest.clone(),
                     dynamic_titles,
-                    loaded.instances.iter().filter_map(Weak::upgrade).collect(),
                     loaded
                         .ts_instances
                         .iter()
@@ -448,21 +383,16 @@ fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
             })
             .collect()
     };
-    // 读取工具规格不持注册表锁（WASM 适配器首次读取会调用插件）。
     snapshot
         .into_iter()
-        .map(|(id, manifest, dynamic_titles, wasm, ts)| {
+        .map(|(id, manifest, dynamic_titles, ts)| {
             let mut tools: Vec<String> = manifest
                 .tools
                 .iter()
                 .flatten()
                 .map(|tool| tool.name.clone())
                 .collect();
-            for spec in wasm
-                .iter()
-                .flat_map(|adapter| adapter.tool_specs())
-                .chain(ts.iter().flat_map(|adapter| adapter.tool_specs()))
-            {
+            for spec in ts.iter().flat_map(|adapter| adapter.tool_specs()) {
                 if !tools.contains(&spec.name) {
                     tools.push(spec.name);
                 }
@@ -505,8 +435,7 @@ pub fn read_plugin_tool_icon(plugin_id: &str, icon: &str) -> Result<(Vec<u8>, St
 }
 
 /// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
-/// `extension.tab` 的贡献与插件 descriptor 名称。v1 插件无 manifest UI
-/// 贡献，不进入 App 列表。
+/// `extension.tab` 的贡献与插件清单名称。
 pub fn list_extension_apps() -> Vec<ExtensionApp> {
     let mut apps = Vec::new();
     let Ok(plugins) = loaded_plugins().lock() else {
@@ -517,9 +446,9 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
             continue;
         }
         let plugin_name = loaded
-            .descriptor
-            .as_ref()
-            .map(|descriptor| descriptor.name.clone())
+            .manifest
+            .name
+            .clone()
             .unwrap_or_else(|| plugin_id.clone());
         for contribution in loaded.manifest.ui_contributions() {
             if contribution.slot != "extension.tab" {
@@ -544,40 +473,4 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
             .then(left.contribution_id.cmp(&right.contribution_id))
     });
     apps
-}
-
-/// 打开插件页面，返回入口 HTML。
-pub fn open_view(plugin_id: &str, contribution_id: &str) -> Option<String> {
-    let plugin = ui_plugin(plugin_id)?;
-    let contribution_id = contribution_id.to_string();
-    call_wasm_off_runtime(plugin, move |plugin| plugin.open_view(contribution_id)).ok()
-}
-
-/// 获取插件页面资源（字节 + MIME）。
-pub fn get_view_resource(plugin_id: &str, path: &str) -> Option<(Vec<u8>, String)> {
-    let plugin = ui_plugin(plugin_id)?;
-    let path = path.to_string();
-    call_wasm_off_runtime(plugin, move |plugin| plugin.get_view_resource(path)).ok()
-}
-
-/// 处理插件页面消息（iframe 与插件双向通信）。
-pub fn handle_view_message(plugin_id: &str, method: &str, payload: &str) -> Option<String> {
-    handle_view_message_result(plugin_id, method, payload).ok()
-}
-
-/// 处理插件页面消息并保留 WASM/sidecar 返回的具体错误。
-pub fn handle_view_message_result(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
-    let plugin = ui_plugin(plugin_id)
-        .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载、未启用或没有逻辑层"))?;
-    let method = method.to_string();
-    let payload = payload.to_string();
-    call_wasm_off_runtime(plugin, move |plugin| {
-        plugin.handle_view_message(method, payload)
-    })
-}
-
-fn ui_plugin(plugin_id: &str) -> Option<Arc<Mutex<WasmPlugin>>> {
-    let plugins = loaded_plugins().lock().ok()?;
-    let loaded = plugins.get(plugin_id)?;
-    loaded.enabled.then(|| loaded.ui_plugin.clone()).flatten()
 }
