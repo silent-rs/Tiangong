@@ -186,11 +186,16 @@ async fn 取消执行中的调用(
 async fn 取消收尾缓慢的命令后下一条命令仍能正常执行() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
-    // SIGINT 后还要占用前台 8 秒（远大于就绪握手的约 3.6 秒预算，留足
-    // 并发负载下的调度余量），模拟 cargo nextest 之类带子进程树的长任务收尾。
+    // SIGINT 后仍占用前台约 8 秒（远大于就绪握手的约 3.6 秒预算），模拟
+    // cargo nextest 之类带子进程树的长任务收尾。占位必须用**忽略 INT 的
+    // 子进程**：cancel 的就绪握手会发第二次 \x03 清残留输入，任何
+    // trap 'sleep N' INT 式占位都会被第二次 INT 打穿（bash 5.3 起 source
+    // 内 trap 更是直接不接管，断言退化为时序碰运气）；trap '' INT 是
+    // 进程级稳定语义，也正是原始场景的形态——收尾慢的子进程不响应
+    // Ctrl+C。8 秒占位期间探针超时（Unresponsive），下一条命令换新终端。
     let (service, terminal, request) = 取消执行中的调用(
         serde_json::json!({
-            "cmd": "trap 'sleep 8; exit 130' INT; echo READY_TO_CANCEL; sleep 60",
+            "cmd": "bash -c \"trap '' INT; echo READY_TO_CANCEL; sleep 8\"",
         }),
         "run_command",
         &workspace,
@@ -336,12 +341,14 @@ async fn 取消不得杀死终端或其后台作业() {
 async fn 收尾完成的终端重新回到复用池() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
-    // SIGINT 后占用前台 5 秒（超过就绪预算）。trap 内不得 exit——那会
-    // 退出登录 shell 本身，shell 死后无人执行排队的探针，恢复检测
-    // 永不命中；只睡眠，收尾后 shell 回提示符执行遗留探针。
+    // 前台任务收尾后（约 5 秒，超过就绪预算），终端应自行回到复用池。
+    // 占位用**忽略 INT 的子进程**（见上例注释：cancel 的第二次 \x03 会打穿
+    // trap 'sleep N' 式占位，bash 5.3 下 source 内 trap 更不接管）；
+    // 5 秒后子进程自行退出，登录 shell 回提示符执行遗留探针，恢复检测
+    // 命中、终端回池。
     let (service, terminal, request) = 取消执行中的调用(
         serde_json::json!({
-            "cmd": "trap 'sleep 5' INT; echo READY_TO_CANCEL; sleep 60",
+            "cmd": "bash -c \"trap '' INT; echo READY_TO_CANCEL; sleep 5\"",
         }),
         "run_command",
         &workspace,
