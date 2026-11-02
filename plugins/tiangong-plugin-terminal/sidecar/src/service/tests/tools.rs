@@ -30,7 +30,7 @@ async fn run_command_建立会话终端_复用空闲终端() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "ls", "args": []}),
+                serde_json::json!({"cmd": "ls"}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -78,7 +78,7 @@ async fn run_command_建立会话终端_复用空闲终端() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["again"], "timeout": 10}),
+                serde_json::json!({"cmd": "echo again", "timeout": 10}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -135,7 +135,7 @@ async fn run_command_windows_首次执行并复用同一终端() {
             service
                 .dispatch_test(tool_request(
                     "run_command",
-                    serde_json::json!({"cmd": "dir", "args": [], "timeout": 10}),
+                    serde_json::json!({"cmd": "dir", "timeout": 10}),
                     Some(("windows-session", workspace.as_str())),
                 ))
                 .await,
@@ -174,7 +174,7 @@ async fn run_command_windows_首次执行并复用同一终端() {
             service
                 .dispatch_test(tool_request(
                     "run_command",
-                    serde_json::json!({"cmd": "echo", "args": ["again"], "timeout": 10}),
+                    serde_json::json!({"cmd": "echo again", "timeout": 10}),
                     Some(("windows-session", workspace.as_str())),
                 ))
                 .await,
@@ -214,8 +214,8 @@ async fn run_command_windows_首次执行并复用同一终端() {
             let native_error = outcome_of(
                 service
                     .dispatch_test(tool_request(
-                        "run_shell",
-                        serde_json::json!({"script": "Write-Error 'bad'", "timeout": 5}),
+                        "run_command",
+                        serde_json::json!({"cmd": "Write-Error 'bad'", "timeout": 5}),
                         Some(("windows-session", workspace.as_str())),
                     ))
                     .await,
@@ -233,8 +233,8 @@ async fn run_command_windows_首次执行并复用同一终端() {
                 let result = outcome_of(
                     service
                         .dispatch_test(tool_request(
-                            "run_shell",
-                            serde_json::json!({"script": script, "timeout": 10}),
+                            "run_command",
+                            serde_json::json!({"cmd": script, "timeout": 10}),
                             Some(("windows-session", workspace.as_str())),
                         ))
                         .await,
@@ -247,8 +247,8 @@ async fn run_command_windows_首次执行并复用同一终端() {
             let invalid = outcome_of(
                 service
                     .dispatch_test(tool_request(
-                        "run_shell",
-                        serde_json::json!({"script": "if (", "timeout": 5}),
+                        "run_command",
+                        serde_json::json!({"cmd": "if (", "timeout": 5}),
                         Some(("windows-session", workspace.as_str())),
                     ))
                     .await,
@@ -264,8 +264,8 @@ async fn run_command_windows_首次执行并复用同一终端() {
         let roundtrip = outcome_of(
             service
                 .dispatch_test(tool_request(
-                    "run_shell",
-                    serde_json::json!({"script": script, "timeout": 10}),
+                    "run_command",
+                    serde_json::json!({"cmd": script, "timeout": 10}),
                     Some(("windows-session", workspace.as_str())),
                 ))
                 .await,
@@ -309,7 +309,7 @@ async fn terminal_send_同会话输入送达并返回画面() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["ready"]}),
+                serde_json::json!({"cmd": "echo ready"}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -372,7 +372,7 @@ async fn terminal_send_自动回车执行且缺省保持纯文本() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["ready"]}),
+                serde_json::json!({"cmd": "echo ready"}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -466,29 +466,52 @@ async fn terminal_send_自动回车执行且缺省保持纯文本() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_open后的唯一编号可继续交互() {
+async fn run_command指定terminal_id复用既有终端并支持交互() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = TerminalService::new();
 
-    let opened = outcome_of(
+    // 建立终端：缺省 terminal_id 自动选择（无空闲则新建）。
+    let first = outcome_of(
         service
             .dispatch_test(tool_request(
-                "terminal",
-                serde_json::json!({"action": "open",}),
+                "run_command",
+                serde_json::json!({"cmd": "echo seeded"}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
     );
-    assert_eq!(opened["ok"], true, "terminal_open 结果: {opened}");
-    let terminal = opened["summary"]
+    assert_eq!(first["ok"], true, "首条命令: {first}");
+    let terminal = first["summary"]
         .as_str()
-        .unwrap_or_default()
-        .trim_start_matches("已打开终端 ")
+        .and_then(|summary| {
+            summary
+                .split("终端 ")
+                .nth(1)
+                .and_then(|rest| rest.split('（').next())
+        })
+        .expect("summary 应含终端编号")
         .to_string();
+
+    // 指定该终端执行：复用既有终端（同一 PTY，cwd/环境延续）。
+    let named = outcome_of(
+        service
+            .dispatch_test(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "echo named", "terminal_id": terminal}),
+                Some(("session-a", workspace.as_str())),
+            ))
+            .await,
+    );
+    assert_eq!(named["ok"], true, "指定终端执行: {named}");
+    assert_eq!(named["stdout"], "named");
     assert!(
-        terminal.starts_with("terminal-"),
-        "terminal_open 应返回独立编号: {terminal}"
+        named["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&terminal),
+        "摘要应标明所用终端: {}",
+        named["summary"]
     );
 
     // 空闲终端建立后即可按编号发送输入（用户面板的等价路径）。
@@ -533,7 +556,7 @@ async fn 跨会话操作被明确拒绝() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "sleep", "args": ["30"], "timeout": 60}),
+                serde_json::json!({"cmd": "sleep 30", "timeout": 60}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -649,7 +672,7 @@ async fn 多会话各自持有独立终端() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["still"]}),
+                serde_json::json!({"cmd": "echo still"}),
                 Some(("session-b", workspace.as_str())),
             ))
             .await,
@@ -673,7 +696,7 @@ async fn 多会话各自持有独立终端() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_open_返回独立编号终端() {
+async fn open_action已删除并给出引导() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = TerminalService::new();
@@ -686,21 +709,20 @@ async fn terminal_open_返回独立编号终端() {
             ))
             .await,
     );
-    assert_eq!(opened["ok"], true, "terminal_open 结果: {opened}");
-    let terminal = opened["summary"]
-        .as_str()
-        .unwrap_or_default()
-        .trim_start_matches("已打开终端 ")
-        .to_string();
+    // v7（issue #697）：终端创建统一并入 run_command（terminal_id 可选），
+    // open 不再是合法 action；拒绝信息须指明替代路径。
+    assert_eq!(opened["ok"], false, "open 应被拒绝: {opened}");
     assert!(
-        terminal.starts_with("terminal-"),
-        "terminal_open 应返回独立编号: {terminal}"
+        opened["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("run_command"),
+        "拒绝信息应引导 run_command: {opened}"
     );
-    service
-        .kill_session(SessionIdRequest {
-            session_id: terminal,
-        })
-        .expect("清理测试终端失败");
+    let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+    for session_id in session_ids {
+        let _ = service.kill_session(SessionIdRequest { session_id });
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -766,10 +788,10 @@ async fn terminal_status_概要详情与跨会话拒绝() {
     service
         .spawn_session(spawn("status-dead", "session-a"))
         .unwrap();
-    // 覆盖状态映射：交互中（带命令）与已退出（待回收）。
+    // 覆盖状态映射：执行中（带命令）与已退出（待回收）。
     service
         .with_session("status-busy", |session| {
-            session.phase = SessionPhase::Interactive;
+            session.phase = SessionPhase::Running;
             session.running_command = Some("vi notes.txt".to_string());
             Ok(())
         })
@@ -812,7 +834,7 @@ async fn terminal_status_概要详情与跨会话拒绝() {
             .unwrap_or_default()
     };
     assert_eq!(status_of("status-idle"), "idle");
-    assert_eq!(status_of("status-busy"), "interactive");
+    assert_eq!(status_of("status-busy"), "running");
     assert_eq!(status_of("status-dead"), "exited");
     let command_of = |id: &str| {
         terminals

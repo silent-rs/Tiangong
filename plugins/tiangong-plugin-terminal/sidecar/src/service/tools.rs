@@ -133,24 +133,19 @@ fn send_round_label(input: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 struct RunCommandArgs {
+    /// shell 命令文本：管道、重定向、`&&` 等 shell 语法直接写入。
     pub(super) cmd: String,
+    /// 可选：指定执行终端。忙（执行中/有续等登记/前台被程序占据）则
+    /// 拒绝并告知当前状态；缺省由插件选择——复用最早空闲终端，无空闲
+    /// 则新建。
     #[serde(default)]
-    pub(super) args: Vec<String>,
-    #[serde(default)]
-    pub(super) cwd: Option<String>,
-    #[serde(default)]
-    pub(super) timeout: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RunShellArgs {
-    pub(super) script: String,
+    pub(super) terminal_id: Option<String>,
     #[serde(default)]
     pub(super) cwd: Option<String>,
+    /// 单次等待命令反馈的时长（秒）：未完成时不中断、返回仍在执行；
+    /// 缺省 5，上限 110。
     #[serde(default)]
     pub(super) timeout: Option<u64>,
-    #[serde(default)]
-    pub(super) interactive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,7 +179,6 @@ fn phase_label(phase: SessionPhase, exited_code: Option<i32>) -> &'static str {
         SessionPhase::Idle => "idle",
         SessionPhase::Reserved => "reserved",
         SessionPhase::Running => "running",
-        SessionPhase::Interactive => "interactive",
         SessionPhase::Unresponsive => "unresponsive",
     }
 }
@@ -195,82 +189,31 @@ fn phase_label_cn(label: &str) -> &'static str {
         "idle" => "空闲",
         "reserved" => "已预留",
         "running" => "执行中",
-        "interactive" => "交互中",
         "unresponsive" => "未就绪（暂不自动复用）",
         _ => "已退出",
     }
 }
 
-/// 经进度帧请求宿主执行 App 原语（建立/收起本插件标签）。
-///
-/// sidecar 不感知宿主形态：无前端入口（CLI / Server）的宿主未注入 App
-/// 处理器，反馈在宿主侧静默降级（见 `handle_runtime_feedback`）。
-async fn request_host_app_open(scope_id: &str, instance_id: &str, focus: bool) {
-    let mut payload = serde_json::json!({
-        "session_id": scope_id,
-        "instance_id": instance_id,
-    });
-    if !focus {
-        // 静默建标签（不弹面板）与 shell 时代 showPanel:false 对齐；
-        // 用户明确请求展示的 terminal_open 才展开面板。
-        payload["mode"] = serde_json::json!("background");
-    }
-    let message = serde_json::json!({
-        "host_action": {
-            "method": "app.open",
-            "payload": payload,
-        }
-    });
-    tiangong_plugin_sidecar::emit_progress(message.to_string()).await;
-}
-
-async fn request_host_app_close(scope_id: &str, instance_id: &str) {
-    let message = serde_json::json!({
-        "host_action": {
-            "method": "app.close",
-            "payload": {
-                "session_id": scope_id,
-                "instance_id": instance_id,
-            },
-        }
-    });
-    tiangong_plugin_sidecar::emit_progress(message.to_string()).await;
-}
-
 impl TerminalService {
-    /// run_command / run_shell：优先复用当前会话的空闲长期终端，没有则
-    /// 新建；终端对用户可见可关，实例编号与 PTY 一致，幂等聚焦同一标签。
+    /// run_command：唯一的命令执行入口。cmd 为 shell 命令文本（管道、
+    /// 重定向、`&&` 直接写入）；terminal_id 可选（指定终端忙则拒绝并告知
+    /// 状态，缺省复用最早空闲终端、无空闲新建）；timeout 为单次等待
+    /// 反馈窗口（默认 5 秒，到点软交还、不中断命令）。
     pub(super) async fn tool_run_command(
         &self,
         scope: &ToolScope,
-        is_shell: bool,
         payload: serde_json::Value,
     ) -> ToolOutcome {
-        // run_command 与 run_shell 共用执行链，仅命令形态不同：前者是
-        // cmd + args，后者是 script + interactive。
-        let (command, args, cwd_arg, timeout, interactive) = if is_shell {
-            match serde_json::from_value::<RunShellArgs>(payload) {
-                Ok(parsed) => (
-                    parsed.script,
-                    Vec::new(),
-                    parsed.cwd,
-                    parsed.timeout,
-                    parsed.interactive,
-                ),
-                Err(error) => return ToolOutcome::fail(format!("run_shell 参数无效：{error}")),
-            }
-        } else {
-            match serde_json::from_value::<RunCommandArgs>(payload) {
-                Ok(parsed) => (parsed.cmd, parsed.args, parsed.cwd, parsed.timeout, false),
-                Err(error) => return ToolOutcome::fail(format!("run_command 参数无效：{error}")),
-            }
+        let parsed = match serde_json::from_value::<RunCommandArgs>(payload) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolOutcome::fail(format!("run_command 参数无效：{error}")),
         };
-
-        let acquired = self.acquire_session(AcquireRequest {
-            scope_id: scope.session_id.clone(),
-        });
-        let mut session_id = acquired.session_id;
-        let mut created_new = session_id.is_none();
+        let command = parsed.cmd.trim().to_string();
+        if command.is_empty() {
+            return ToolOutcome::fail("run_command 缺少 cmd（shell 命令文本）".to_string());
+        }
+        let cwd_arg = parsed.cwd;
+        let timeout = parsed.timeout;
         // cwd 优先级：Agent 显式指定 > 宿主权威会话工作目录。
         let workspace = cwd_arg
             .as_deref()
@@ -281,58 +224,62 @@ impl TerminalService {
                 let workspace = scope.workspace.trim();
                 (!workspace.is_empty()).then(|| workspace.to_string())
             });
-        if session_id.is_none() {
-            let spawned = self.spawn_session(SpawnRequest {
-                session_id: None,
-                cmd: String::new(),
-                args: Vec::new(),
-                script: None,
-                cwd: workspace.clone(),
-                scope_id: Some(scope.session_id.clone()),
-                reserve: true,
-                cols: default_cols(),
-                rows: default_rows(),
-            });
-            match spawned {
-                Ok(spawned) => session_id = Some(spawned.session_id),
-                Err(error) => return ToolOutcome::fail(format!("终端会话创建失败：{error:#}")),
+
+        // 终端选择：指定编号则校验归属与可用性后预留；缺省走自动选择
+        //（复用最早空闲终端，无空闲新建）。created_new 可能在复用握手
+        // 失败的重试中被置为 true。
+        let (session_id, mut created_new) = match parsed.terminal_id.as_deref().map(str::trim) {
+            Some(target) if !target.is_empty() => {
+                match self.reserve_named_session(&scope.session_id, target) {
+                    Ok(reserved) => (reserved, false),
+                    Err(reason) => return ToolOutcome::fail(reason),
+                }
             }
-        }
-        let mut session_id = match session_id {
-            Some(session_id) => session_id,
-            None => return ToolOutcome::fail("终端会话创建失败".to_string()),
+            _ => {
+                let acquired = self.acquire_session(AcquireRequest {
+                    scope_id: scope.session_id.clone(),
+                });
+                match acquired.session_id {
+                    Some(reused) => (reused, false),
+                    None => {
+                        let spawned = self.spawn_session(SpawnRequest {
+                            session_id: None,
+                            cmd: String::new(),
+                            args: Vec::new(),
+                            script: None,
+                            cwd: workspace.clone(),
+                            scope_id: Some(scope.session_id.clone()),
+                            reserve: true,
+                            cols: default_cols(),
+                            rows: default_rows(),
+                        });
+                        match spawned {
+                            Ok(spawned) => (spawned.session_id, true),
+                            Err(error) => {
+                                return ToolOutcome::fail(format!("终端会话创建失败：{error:#}"));
+                            }
+                        }
+                    }
+                }
+            }
         };
 
-        // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
-        // 重复调用幂等聚焦同一标签。精确页面通过 terminalFind 完成事件
-        // 订阅和附着后才开始输出；后台会话没有前台标签时有限等待后继续。
         // 复用终端的就绪握手失败时自动新建终端重试一次：新终端走不发
         // Ctrl+C 的干净握手路径，对上层透明。旧终端不被关闭，只是标记为
         // 不可自动复用（里面可能有 `&` / `nohup` 起的长期作业），用户仍
-        // 可在标签里继续查看和操作。
+        // 可继续查看和操作。
+        let mut session_id = session_id;
         let mut retried_after_handshake = false;
         let mut handed_off_terminal = None;
         let executed = loop {
             // 从首次异步等待开始登记取消目标。执行 future 若先被丢弃，
             // 登记对象虽随 future 销毁，映射仍保留给随后到达的 cancel() 使用。
-            let active = self.track_active_tool(&scope.request_id, &session_id, interactive);
-            request_host_app_open(&scope.session_id, &session_id, false).await;
+            let active = self.track_active_tool(&scope.request_id, &session_id);
             let executed = self
                 .exec_in_session(ExecRequest {
                     session_id: session_id.clone(),
-                    cmd: if is_shell {
-                        String::new()
-                    } else {
-                        command.clone()
-                    },
-                    args: if is_shell { Vec::new() } else { args.clone() },
-                    script: if is_shell {
-                        Some(command.clone())
-                    } else {
-                        None
-                    },
+                    cmd: command.clone(),
                     timeout,
-                    interactive,
                     cwd: workspace.clone().filter(|value| !value.is_empty()),
                 })
                 .await;
@@ -391,24 +338,15 @@ impl TerminalService {
         } else {
             format!("，cwd: {}", executed.cwd_after)
         };
-        let reason = if acquired.reason == "all_busy" {
-            "当前会话已有终端都在忙"
-        } else {
-            "当前会话没有可用终端"
-        };
         let selection = if let Some(previous) = handed_off_terminal.as_deref() {
             format!(
                 "新终端 {session_id}（终端 {previous} 未在预算内回到提示符，已保留其内容与后台作业，改用新终端）"
             )
         } else if created_new {
-            format!("新终端 {session_id}（{reason}，没有写入旧终端）")
+            format!("新终端 {session_id}（没有可用空闲终端，未写入其他终端）")
         } else {
             format!("终端 {session_id}（复用空闲终端）")
         };
-        // 失败/超时场景把退出码等失败事实放在摘要最前：调度解释（都在
-        // 忙、没有写入旧终端）对定位错误没有帮助，只保留终端编号与是否
-        // 新开供回溯输出位置；超时的中断语义（会话保留、可继续输入）
-        // 也不与 stderr 的「命令执行超时」重复表述。
         let terminal_note = if created_new {
             format!("新终端 {session_id}")
         } else {
@@ -420,19 +358,14 @@ impl TerminalService {
         } else {
             ""
         };
-        let summary = if executed.interactive_mode {
-            format!("命令已在{selection}进入交互状态{ended_note}")
-        } else if executed.timed_out {
-            // 超时与 shell 退出同时命中时终端已不可输入，两种说法不能并存。
-            if executed.session_ended {
-                format!(
-                    "命令超时已中断（{terminal_note} 已随命令退出，输出见 stdout/stderr）{cwd_note}，下次调用将新建终端"
-                )
-            } else {
-                format!(
-                    "命令超时已中断（{terminal_note} 仍可继续输入，此前输出见 stdout/stderr）{cwd_note}"
-                )
-            }
+        let summary = if executed.still_running {
+            format!(
+                "命令 `{}` 未在等待窗口内完成（{terminal_note} 未中断），stdout 为截至目前的输出，从输出内容可判断当前状况（等待输入、交互程序或仍在执行）；\
+                继续等待并收割完整输出与退出码用 terminal（action=send，terminal_id={session_id}，input 留空），\
+                查看画面与进程用 terminal（action=status，terminal_id={session_id}），\
+                预期耗时更长的命令可显式设置更长的 timeout（秒，上限 110）；需要中断则向该终端发送 \\x03{cwd_note}",
+                command.trim()
+            )
         } else if exit_code == 0 {
             format!("命令已在{selection}执行完成{cwd_note}{ended_note}")
         } else {
@@ -442,14 +375,14 @@ impl TerminalService {
         };
         // 用法提示附在摘要末尾（只提示不拦截）：现写多行脚本、nohup / &
         // 后台启动会让终端逐步执行与多终端并行的能力失效。
-        let hints = advice::command_hints(&command, is_shell);
+        let hints = advice::command_hints(&command);
         let summary = if hints.is_empty() {
             summary
         } else {
             format!("{summary}。提示：{}", hints.join("；"))
         };
         ToolOutcome {
-            ok: !executed.timed_out && (executed.interactive_mode || exit_code == 0),
+            ok: executed.still_running || exit_code == 0,
             summary,
             stdout: Some(executed.stdout),
             stderr: Some(executed.stderr),
@@ -457,29 +390,7 @@ impl TerminalService {
         }
     }
 
-    /// terminal_open：创建独立编号的终端并展开面板聚焦（用户明确请求
-    /// 展示时使用）。
-    pub(super) async fn tool_terminal_open(&self, scope: &ToolScope) -> ToolOutcome {
-        let instance_id = format!("terminal-{}", scru128::new());
-        let spawned = self.spawn_session(SpawnRequest {
-            session_id: Some(instance_id.clone()),
-            cmd: String::new(),
-            args: Vec::new(),
-            script: None,
-            cwd: (!scope.workspace.trim().is_empty()).then(|| scope.workspace.trim().to_string()),
-            scope_id: Some(scope.session_id.clone()),
-            reserve: false,
-            cols: default_cols(),
-            rows: default_rows(),
-        });
-        if let Err(error) = spawned {
-            return ToolOutcome::fail(format!("终端面板操作失败：{error:#}"));
-        }
-        request_host_app_open(&scope.session_id, &instance_id, true).await;
-        ToolOutcome::ok(format!("已打开终端 {instance_id}"))
-    }
-
-    /// terminal：终端管理统一入口（action 模式：open/send/close/status）。
+    /// terminal：终端管理统一入口（action 模式：send/close/status）。
     ///
     /// 参数结构体不使用 deny_unknown_fields，`action` 字段可随负载透传给
     /// 各子处理（与 fs 插件的 file_read action 模式一致）。
@@ -494,12 +405,13 @@ impl TerminalService {
             .unwrap_or_default()
             .trim();
         match action {
-            "open" => self.tool_terminal_open(scope).await,
             "send" => self.tool_terminal_send(scope, payload).await,
             "close" => self.tool_terminal_close(scope, payload).await,
             "status" => self.tool_terminal_status(scope, payload),
             other => ToolOutcome::fail(format!(
-                "terminal 缺少或未知 action（{other:?}）：应为 open / send / close / status"
+                "terminal 缺少或未知 action（{other:?}）：应为 send / close / status；\
+                新开终端不需要专用 action——run_command 缺省 terminal_id 时无空闲终端会自动新建，\
+                也可用 run_command 的 terminal_id 指定已有空闲终端"
             )),
         }
     }
@@ -624,8 +536,8 @@ impl TerminalService {
                 "terminal(action=close) 缺少 terminal_id，未关闭任何终端".to_string(),
             );
         }
-        // App 标签可能先于 PTY 退出被用户关闭，关闭操作幂等；但归属
-        // 校验失败（终端属于其他会话）必须明确拒绝，不回退当前可见会话。
+        // 归属校验失败（终端属于其他会话）必须明确拒绝，不回退当前可见
+        // 会话；关闭幂等（App 标签可能先于 PTY 退出被用户关闭）。
         match self.close_session(CloseRequest {
             session_id: Some(target.clone()),
             scope_id: scope.session_id.clone(),
@@ -633,8 +545,6 @@ impl TerminalService {
             Ok(_) => {}
             Err(error) => return ToolOutcome::fail(format!("终端面板操作失败：{error:#}")),
         }
-        // 标签已不在前台时仍保证收起；操作幂等。
-        request_host_app_close(&scope.session_id, &target).await;
         ToolOutcome::ok(format!("已关闭终端 {target}"))
     }
 
@@ -748,6 +658,10 @@ impl TerminalService {
         let visible = String::from_utf8_lossy(&session.display_history).to_string();
         let reversed_tail = visible.chars().rev().take(2000).collect::<String>();
         let recent_output = reversed_tail.chars().rev().collect::<String>();
+        // 画面快照（sidecar 屏幕模拟器生成，前端回传如有则覆盖）：全屏
+        // 程序（vi/top/less）的输出是控制序列，recent_output 不可读，快照
+        // 才是它们的「当前画面」；headless 与桌面一致，不依赖前端在观看。
+        let screen_snapshot = session.screen_snapshot.clone();
         let running_command = session.running_command.clone();
         let exited_code = session.exited_code;
         let shell_pid = session.shell_pid.filter(|_| exited_code.is_none());
@@ -773,6 +687,7 @@ impl TerminalService {
                     "command": running_command,
                     "exited_code": exited_code,
                     "recent_output": recent_output,
+                    "screen_snapshot": screen_snapshot,
                     "processes": processes,
                 }))
                 .unwrap_or_default(),

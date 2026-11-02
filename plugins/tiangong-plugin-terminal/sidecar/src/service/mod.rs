@@ -109,10 +109,6 @@ pub struct TerminalService {
 #[derive(Debug, Clone)]
 struct ActiveTool {
     terminal_id: String,
-    /// 本次调用请求了交互模式（vi/ssh 等）。执行期间 phase 仍是 Running，
-    /// 只有返回结果后才置 Interactive，因此取消时不能只看 phase：调用自己
-    /// 拉起的交互程序必须靠本标志识别，否则会被中断确认流误杀。
-    interactive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +116,6 @@ enum SessionPhase {
     Idle,
     Reserved,
     Running,
-    Interactive,
     /// 就绪确认失败：Ctrl+C 之后 shell 没在预算内回到提示符（前台进程树
     /// 仍在收尾、前台程序吃掉了探针等）。终端**保持存活**——用户用 `&`
     /// 或 `nohup` 起的后台作业、可见输出和可继续输入的会话都不受影响，
@@ -190,6 +185,10 @@ struct PtySession {
     send_in_flight: u32,
     /// terminal_send 增量读取游标：重复等待时只返回上次之后的新输出。
     send_read_offset: Option<u64>,
+    /// 续等收割的命令退出码中转：`run_command` 按 marker 协议判定完成时
+    /// 由 [`input::refresh_pending`] 写入，`send_response` 构造结果时取走。
+    /// 普通交互输入路径不使用（保持 None）。
+    pub(super) pending_exit_code: Option<i32>,
     /// 最近确认回到提示符时的提示符行：只补发回车（input 为空）时，
     /// 输入行里混着先前键入的文本，以它作为完成判定的提示符基线。
     prompt_hint: Option<String>,
@@ -197,9 +196,6 @@ struct PtySession {
     /// 回到空闲时清空；交互中与未就绪（收尾中）保留——查询时能看到
     /// 终端里跑的是什么程序对排查有直接价值。
     running_command: Option<String>,
-    /// 本次执行为交互模式且命令已写入 PTY（程序真正启动）。取消据此
-    /// 区分「程序已在前台须保留转交互」与「尚未启动只须释放预留」。
-    interactive_started: bool,
     /// 登录 shell 自身的进程号：前台进程组与其不同即说明 PTY 前台被
     /// 子程序占据（交互程序在跑），用于识别「非交互命令实际拉起了
     /// 交互程序并停在等待输入」的静默挂起。
@@ -234,17 +230,11 @@ impl TerminalService {
 
     /// 登记一次执行中的工具调用。正常完成时显式清除；future 被丢弃时
     /// 保留映射，供随后到达的正式取消处理定位 PTY。
-    fn track_active_tool(
-        &self,
-        request_id: &str,
-        terminal_id: &str,
-        interactive: bool,
-    ) -> ActiveToolRegistration {
+    fn track_active_tool(&self, request_id: &str, terminal_id: &str) -> ActiveToolRegistration {
         self.active_tools.lock().expect("活动工具表锁损坏").insert(
             request_id.to_string(),
             ActiveTool {
                 terminal_id: terminal_id.to_string(),
-                interactive,
             },
         );
         ActiveToolRegistration {
@@ -370,6 +360,42 @@ impl TerminalService {
                 .min(session.raw_history.len() as u64) as usize;
             Ok(session.raw_history[index..].to_vec())
         })
+    }
+}
+
+impl PtySession {
+    /// 交还（Running + 带 marker 的续等登记）的命令若已输出 end marker，
+    /// 就地收割：清登记、置回空闲（结果不再返回——Agent 未续等收割，
+    /// 输出仍可在持久化日志与 display_history 中追溯）。返回是否收割。
+    ///
+    /// 覆盖两种触发：选终端（acquire / reserve_named）时的接触检测，
+    /// 以及续等调用中 refresh_pending 的正常收割。没有它，Agent 交还后
+    /// 不再触碰的终端会永远停在 Running、退出复用池（issue #697）。
+    pub(super) fn settle_handed_over(&mut self) -> bool {
+        if self.phase != SessionPhase::Running {
+            return false;
+        }
+        let Some(pending) = self.pending_send.clone() else {
+            return false;
+        };
+        let Some(markers) = pending.markers else {
+            return false;
+        };
+        let available_start = pending.start_offset.max(self.raw_history_start);
+        let index = available_start
+            .saturating_sub(self.raw_history_start)
+            .min(self.raw_history.len() as u64) as usize;
+        let parsed = protocol::parse_command_output(&self.raw_history[index..], &markers);
+        if !parsed.completed {
+            return false;
+        }
+        tracing::debug!("交还命令已自行完成，就地收割并放回复用池");
+        self.pending_send = None;
+        self.send_read_offset = None;
+        self.pending_exit_code = None;
+        self.phase = SessionPhase::Idle;
+        self.running_command = None;
+        true
     }
 }
 

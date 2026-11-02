@@ -83,7 +83,7 @@ fn terminal_非桌面轮换_复用终端_交互与资源释放() {
     // 1. 基本命令执行。
     let echo = call(
         "run_command",
-        serde_json::json!({ "cmd": "echo", "args": ["switch-ok"] }),
+        serde_json::json!({ "cmd": "echo switch-ok" }),
     );
     assert!(
         stdout_of(&echo).contains("switch-ok"),
@@ -93,16 +93,16 @@ fn terminal_非桌面轮换_复用终端_交互与资源释放() {
 
     // 2. 终端复用：export 的环境变量跨调用保留（同一空闲终端）。
     let export = call(
-        "run_shell",
-        serde_json::json!({ "script": "export E2E_MARKER=42" }),
+        "run_command",
+        serde_json::json!({ "cmd": "export E2E_MARKER=42" }),
     );
     assert!(
         export.get("ok").and_then(serde_json::Value::as_bool) == Some(true),
         "export 应成功：{export}"
     );
     let verify = call(
-        "run_shell",
-        serde_json::json!({ "script": "echo E2E=$E2E_MARKER" }),
+        "run_command",
+        serde_json::json!({ "cmd": "echo E2E=$E2E_MARKER" }),
     );
     assert!(
         stdout_of(&verify).contains("E2E=42"),
@@ -118,17 +118,24 @@ fn terminal_非桌面轮换_复用终端_交互与资源释放() {
         verify.get("summary")
     );
 
-    // 3. terminal(action=open) + python3 REPL 交互。
-    let opened = call("terminal", serde_json::json!({ "action": "open" }));
-    let terminal_id = opened
+    // 3. run_command 拉起 python3 REPL：等待窗口耗尽软交还（issue #697），
+    //    Agent 从输出识别后用 terminal(action=send) 接管交互。
+    let repl_run = call("run_command", serde_json::json!({ "cmd": "python3 -q" }));
+    assert!(
+        repl_run.get("ok").and_then(serde_json::Value::as_bool) == Some(true),
+        "交还结果应为 ok：{repl_run}"
+    );
+    let terminal_id = repl_run
         .get("summary")
         .and_then(serde_json::Value::as_str)
-        .and_then(|summary| summary.split_whitespace().last())
+        .and_then(|summary| summary.split("终端 ").nth(1))
+        .and_then(|rest| rest.split(['（', ' ']).next())
         .map(str::to_string)
         .unwrap_or_default();
     assert!(
-        !terminal_id.is_empty(),
-        "terminal open 应返回编号：{opened}"
+        terminal_id.starts_with("tty-"),
+        "摘要应含交还终端编号：{:?}",
+        repl_run.get("summary")
     );
     let mut send = |input: &str, enter: bool, wait: u64| {
         call(
@@ -142,11 +149,13 @@ fn terminal_非桌面轮换_复用终端_交互与资源释放() {
             }),
         )
     };
-    send("python3", true, 15);
-    let repl = send("print(6*7)", true, 15);
+    // REPL 内交互：不设 enter、input 末尾带 \r 原样写入（marker 登记期间
+    // enter=true 会被拒绝——那是「向 shell 排队新命令」的语义）。
+    let repl = send("print(6*7)\\r", false, 15);
     let repl_text = stdout_of(&repl);
     assert!(repl_text.contains("42"), "REPL 输出应可读取：{repl_text}");
-    send("exit()", true, 10);
+    // 退出 REPL 回到 shell（退出后 wrapper 收尾，marker 闭合、终端回池）。
+    send("exit()\\r", false, 15);
 
     // 4. \x03 中断运行中的命令。
     send("sleep 60", true, 3);

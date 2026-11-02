@@ -110,28 +110,6 @@ impl TerminalService {
         }
     }
 
-    /// 超时未确认收尾：终端保持存活但移出自动复用池，并往输入缓冲写入
-    /// 一条就绪探针——前台命令收尾后 shell 会执行它并回显 marker，
-    /// 下次选终端时据此把终端恢复回池（复用就绪确认超时的自愈机制）。
-    pub(super) fn mark_unresponsive_with_probe(&self, session_id: &str) {
-        let marker = format!("__TIANGONG_READY_{}__", scru128::new());
-        let marked = self.with_session(session_id, |session| {
-            let probe = shell_ready_probe(session.shell, &marker);
-            session.writer.write_all(probe.as_bytes()).ok();
-            session.writer.flush().ok();
-            session.phase = SessionPhase::Unresponsive;
-            session.shell_ready = false;
-            session.pending_ready_marker = Some(marker);
-            Ok(())
-        });
-        match marked {
-            Ok(()) => tracing::warn!(session_id, "命令超时未确认收尾，终端暂不自动复用"),
-            Err(error) => {
-                tracing::debug!(session_id, %error, "标记未收尾终端时会话已不可用")
-            }
-        }
-    }
-
     /// PTY 前台进程组归属：登录 shell 自身，还是被子程序占据。
     ///
     /// 「前台是 shell」是命令已结束、shell 已回到提示符的必要条件——命令
@@ -152,16 +130,6 @@ impl TerminalService {
     #[cfg(not(unix))]
     pub(super) fn foreground(&self, _session_id: &str) -> Option<Foreground> {
         None
-    }
-
-    /// PTY 前台是否是一个正在等待按键的交互程序（见 [`Self::foreground`]）。
-    ///
-    /// 前台被占据单独不足以判定：任何前台命令都会占据前台进程组。tty
-    /// 非规范模式才是区分「交互程序在等输入」与「普通命令在安静地跑」
-    /// 的依据，因此长时间编译、测试不会被误判。
-    pub(super) fn foreground_is_interactive(&self, session_id: &str) -> Option<bool> {
-        self.foreground(session_id)
-            .map(|foreground| matches!(foreground, Foreground::Program { interactive: true }))
     }
 }
 

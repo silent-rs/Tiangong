@@ -32,7 +32,9 @@ impl TerminalService {
         if session.scope_id.as_deref() != Some(scope_id) {
             bail!("终端 {session_id} 不属于当前会话");
         }
-        // 前端真实存在：自此快照以 xterm 回传为权威，模拟器不再代写。
+        // 前端真实存在：此后同一输出的 xterm 回传（terminalScreenUpdate）
+        // 会晚于模拟器写入到达并覆盖快照，桌面形态仍以渲染画面为权威；
+        // 模拟器照常维护，前端未附着期间（面板收起等）保底供画面。
         session.frontend_attached_once = true;
         drop(sessions);
 

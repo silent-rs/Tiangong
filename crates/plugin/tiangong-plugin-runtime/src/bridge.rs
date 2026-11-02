@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 
 use crate::manifest::PluginManifest;
 
@@ -402,6 +403,43 @@ pub fn set_webview_handler(handler: NativeServiceHandler) {
 /// [`open_app_for_plugin`] 使用同一处理器）。
 pub fn set_app_handler(handler: NativeServiceHandler) {
     let _ = APP_HANDLER.set(handler);
+}
+
+/// 实例资源变化处理器：`instance_resources` 插件的 sidecar 经
+/// `instances.changed` 通知上报新实例（payload `{session_id, instance_id}`），
+/// 由宿主决定 UI 呈现——desktop 建立标签，CLI / Server 不注入即自然降级。
+pub type InstanceChangeHandler = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+static INSTANCE_CHANGE_HANDLER: OnceLock<InstanceChangeHandler> = OnceLock::new();
+
+/// 注入实例资源变化处理器（桌面入口启动时调用）。
+pub fn set_instance_change_handler(handler: InstanceChangeHandler) {
+    let _ = INSTANCE_CHANGE_HANDLER.set(handler);
+}
+
+/// 分发一次实例资源变化（sidecar 通知通道 `instances.changed`）。
+pub(crate) fn dispatch_instance_change(plugin_id: &str, payload: &str) {
+    let Some(handler) = INSTANCE_CHANGE_HANDLER.get() else {
+        // 无前端入口（CLI / Server）不注入：实例通知无处受理是合法状态。
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        tracing::debug!(plugin_id, "instances.changed 负载不是 JSON");
+        return;
+    };
+    let session_id = value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let instance_id = value
+        .get("instance_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if session_id.is_empty() || instance_id.is_empty() {
+        tracing::debug!(plugin_id, "instances.changed 缺少 session_id/instance_id");
+        return;
+    }
+    handler(plugin_id, session_id, instance_id);
 }
 
 /// 宿主内部请求打开插件 App（工具调用无 UI 接应等场景）。

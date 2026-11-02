@@ -11,21 +11,21 @@ async fn instance_closed_兜底回收幂等且校验归属() {
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = TerminalService::new();
 
-    // 模拟手动新建标签：终端编号由调用方指定（tab 编号）。
-    let opened = outcome_of(
-        service
-            .dispatch_test(tool_request(
-                "terminal",
-                serde_json::json!({"action": "open",}),
-                Some(("session-a", workspace.as_str())),
-            ))
-            .await,
-    );
-    let terminal = opened["summary"]
-        .as_str()
-        .unwrap_or_default()
-        .trim_start_matches("已打开终端 ")
-        .to_string();
+    // 模拟宿主标签：终端编号由调用方指定（tab 编号，v7 经 spawn 建立）。
+    let terminal = service
+        .spawn_session(SpawnRequest {
+            session_id: Some("terminal-inst-1".to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(workspace.clone()),
+            scope_id: Some("session-a".to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        })
+        .expect("建立终端失败")
+        .session_id;
 
     // 实例通知不携带工具上下文（宿主生命周期操作）：
     // session_id=宿主会话，instance_id=标签（终端）编号。
@@ -92,7 +92,7 @@ async fn run_command_不等前端附着即执行_历史重放兜底() {
         running_service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "printf", "args": ["attached"]}),
+                serde_json::json!({"cmd": "printf attached"}),
                 Some(("session-attached", workspace.as_str())),
             ))
             .await
@@ -198,7 +198,6 @@ async fn terminal_gc_按前端存活集合回收且不跨会话() {
         "request-a".to_string(),
         ActiveTool {
             terminal_id: "terminal-closed".to_string(),
-            interactive: false,
         },
     );
 

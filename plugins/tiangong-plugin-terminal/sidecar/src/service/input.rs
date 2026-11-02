@@ -71,7 +71,7 @@ pub(super) struct PendingSend {
     pub(super) command: String,
     pub(super) started_at: Instant,
     /// 回车写入前的原始输出偏移：完成判定只看此后的输出。
-    start_offset: u64,
+    pub(super) start_offset: u64,
     /// 发送时前台是否为本地登录 shell（可按前台进程组精确判定完成）。
     from_shell: bool,
     /// 发送时 shell 停在行编辑器里（tty 为非规范模式，zsh ZLE / bash
@@ -81,6 +81,33 @@ pub(super) struct PendingSend {
     line_editor: bool,
     /// 发送前的提示符行（交互程序内以其重新出现判定完成）。
     prompt: Option<String>,
+    /// `run_command` / `run_shell` 按单次等待预算交还控制权时登记的
+    /// 包装命令边界标记（issue #697 续等协议）：完成判定优先走 marker
+    /// 协议——比提示符/前台启发精确，且能取到命令退出码。普通
+    /// terminal_send 交互输入为 None，走原有启发式。
+    pub(super) markers: Option<super::protocol::CommandMarkers>,
+}
+
+impl PendingSend {
+    /// `run_command` / `run_shell` 按单次等待预算交还控制权时的登记
+    /// （issue #697 续等协议）：完成判定只走 marker 协议，不经提示符/
+    /// 前台启发式（from_shell=false 且无提示符基线）。
+    pub(super) fn for_exec_handover(
+        command: String,
+        started_at: Instant,
+        start_offset: u64,
+        markers: super::protocol::CommandMarkers,
+    ) -> Self {
+        Self {
+            command,
+            started_at,
+            start_offset,
+            from_shell: false,
+            line_editor: false,
+            prompt: None,
+            markers: Some(markers),
+        }
+    }
 }
 
 /// 所发命令的判定结果。
@@ -286,7 +313,7 @@ impl TerminalService {
 
         // 写入前先确认上一条命令的状态：仍在执行时拒绝新命令，避免它被
         // 排进 tty 输入缓冲、在不可预期的时机执行。
-        let (read_offset, baseline_updates, rejected, initial) = {
+        let (read_offset, rejected, initial) = {
             let mut sessions = self.sessions.lock().expect("会话表锁损坏");
             let session = sessions
                 .get_mut(&request.session_id)
@@ -307,9 +334,8 @@ impl TerminalService {
             } else {
                 read_offset
             };
-            let baseline_updates = session.screen_updates;
             if request.enter && session.pending_send.is_some() {
-                (read_offset, baseline_updates, true, initial)
+                (read_offset, true, initial)
             } else {
                 if request.enter {
                     let from_shell = matches!(foreground_of(session), Some(Foreground::Shell));
@@ -332,6 +358,7 @@ impl TerminalService {
                         from_shell,
                         line_editor,
                         prompt,
+                        markers: None,
                     });
                 }
                 session
@@ -345,7 +372,7 @@ impl TerminalService {
                 } else {
                     read_offset
                 };
-                (offset, baseline_updates, false, initial)
+                (offset, false, initial)
             }
         };
         if rejected {
@@ -369,9 +396,13 @@ impl TerminalService {
         let status = self
             .wait_for_send(&request.session_id, wait, initial)
             .await?;
-        self.send_response(&request.session_id, read_offset, baseline_updates, status)
+        self.send_response(&request.session_id, read_offset, status)
     }
+}
 
+// 只发送按键（无待确认命令）时观察回显的窗口下限见
+// SEND_KEYS_QUIET_MS；带待确认命令时等待上限为 `wait` 参数。
+impl TerminalService {
     /// 等待所发命令完成或交出控制权；没有待确认命令时按输出静默返回。
     async fn wait_for_send(
         &self,
@@ -379,8 +410,8 @@ impl TerminalService {
         wait: Duration,
         initial: Option<SendStatus>,
     ) -> Result<Option<SendStatus>> {
-        let deadline = Instant::now() + wait;
         let started = Instant::now();
+        let deadline = started + wait;
         // 完成判定会清除登记：一旦判为完成就锁定结果，后续轮询只等提示符
         // 绘制完整，不能因登记已清除退回「没有待确认命令」的语义。
         let mut tracked = initial.is_some()
@@ -436,42 +467,36 @@ impl TerminalService {
         &self,
         session_id: &str,
         read_offset: u64,
-        baseline_updates: u64,
         status: Option<SendStatus>,
     ) -> Result<SendResponse> {
         let raw = self.raw_output_since(session_id, read_offset)?;
         self.with_session(session_id, |session| {
-            // 命令已把终端交给交互程序（ssh 登录、vi、REPL）：命令本身视为
-            // 已交接，清除登记，后续在程序内发送的命令重新登记、按提示符判定。
+            // 命令已把终端交给交互程序（ssh 登录、vi、REPL——纯
+            // terminal_send 路径；续等收割的包装命令只判 marker 完成，
+            // 不会到达此分支）：视为已交接，清除登记，后续在程序内发送
+            // 的命令重新登记、按提示符判定。
             if status == Some(SendStatus::Interactive) {
                 session.pending_send = None;
             }
             let pending = session.pending_send.clone();
             // 还在执行时记下读取位置，下次空输入等待只返回新增部分。
             session.send_read_offset = pending.as_ref().map(|_| session.raw_bytes_total);
-            let raw_output = visible_text_from_raw(&raw);
-            // 有待确认命令时只返回增量输出：画面快照会混入已返回过的内容。
-            let stdout = if status.is_some() {
-                raw_output
-            } else if session.screen_updates > baseline_updates
-                && !session.screen_snapshot.trim().is_empty()
-            {
-                session.screen_snapshot.clone()
-            } else if !raw_output.trim().is_empty() {
-                raw_output
-            } else {
-                session.screen_snapshot.clone()
-            };
+            // 返回纯增量输出（终端仿真还原后的可见文本）：send 不携带画面
+            // 快照，全屏程序的当前画面经 terminal(action=status) 的
+            // screen_snapshot 查询（issue #697 拉模型）。
+            let stdout = visible_text_from_raw(&raw);
             let command = pending
                 .as_ref()
                 .map(|pending| pending.command.clone())
                 .or_else(|| status.map(|_| session.running_command.clone().unwrap_or_default()));
+            // 续等收割完成：取走 marker 协议解析出的退出码（普通交互路径
+            // 无中转值，保持 0）。
+            let exit_code = session.pending_exit_code.take().unwrap_or(0);
             Ok(SendResponse {
                 session_id: session_id.to_string(),
                 stdout: tail_chars(stdout, SEND_OUTPUT_LIMIT_CHARS),
-                exit_code: 0,
-                interactive_mode: session.phase == SessionPhase::Interactive
-                    || status == Some(SendStatus::Interactive),
+                exit_code,
+                interactive_mode: status == Some(SendStatus::Interactive),
                 status: status.map(SendStatus::label),
                 command: command.filter(|command| !command.is_empty()),
                 elapsed_secs: pending.map(|pending| pending.started_at.elapsed().as_secs()),
@@ -483,7 +508,7 @@ impl TerminalService {
     /// 上一条命令仍在执行：不写入本次输入，返回新增输出与运行态。
     fn busy_response(&self, session_id: &str, read_offset: u64) -> Result<SendResponse> {
         let mut response =
-            self.send_response(session_id, read_offset, u64::MAX, Some(SendStatus::Running))?;
+            self.send_response(session_id, read_offset, Some(SendStatus::Running))?;
         response.rejected = true;
         Ok(response)
     }
@@ -500,6 +525,29 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
     let Some(pending) = session.pending_send.as_ref() else {
         return SendStatus::Completed;
     };
+    // 续等收割的包装命令只走 marker 协议（issue #697 终稿：不做理解性
+    // 判定）：end marker 闭合即完成，退出码精确可取；未闭合一律仍在
+    // 执行——是不是交互程序、在不在等输入由 Agent 从返回输出自行识别。
+    if let Some(markers) = pending.markers.as_ref() {
+        let raw = output_since(session, pending.start_offset);
+        let parsed = super::protocol::parse_command_output(raw, markers);
+        if parsed.completed {
+            let tail = tail_bytes(session);
+            if let Some(prompt) = prompt_candidate(&tail) {
+                session.prompt_hint = Some(prompt);
+            }
+            session.pending_exit_code = Some(parsed.exit_code.unwrap_or(0));
+            session.pending_send = None;
+            session.send_read_offset = None;
+            // 收割完成即空闲：交还时保持的 Running 在此放回复用池。
+            if session.phase == SessionPhase::Running {
+                session.phase = SessionPhase::Idle;
+                session.running_command = None;
+            }
+            return SendStatus::Completed;
+        }
+        return SendStatus::Running;
+    }
     let foreground = foreground_of(session);
     let since = output_since(session, pending.start_offset);
     let completed = if pending.from_shell {
@@ -570,7 +618,7 @@ fn refresh_pending(session: &mut PtySession) -> SendStatus {
 
 /// 命令行已换行结束、光标停在一行非空的未完成文本上（提示符或提示语）。
 /// 控制键回显（`\x03` 回显的 `^C` 等）不算提示语：程序仍可能在跑。
-fn waiting_at_prompt(since: &[u8]) -> bool {
+pub(super) fn waiting_at_prompt(since: &[u8]) -> bool {
     let (completed_lines, current) = screen_tail(since);
     completed_lines > 0 && !strip_control_echo(&current).is_empty()
 }
@@ -579,7 +627,7 @@ fn waiting_at_prompt(since: &[u8]) -> bool {
 /// 呈提示符形态。程序内写入的按键会被 tty 回显到光标行——`\x03` 回显
 /// 成 `^C`、不带回车键入的文本原样出现——而程序仍在跑，不能据此交还
 /// 控制权，否则下一条命令会被排进输入缓冲、等程序结束才执行。
-fn waiting_at_program_prompt(since: &[u8]) -> bool {
+pub(super) fn waiting_at_program_prompt(since: &[u8]) -> bool {
     let (completed_lines, current) = screen_tail(since);
     completed_lines > 0 && looks_like_prompt(&current)
 }

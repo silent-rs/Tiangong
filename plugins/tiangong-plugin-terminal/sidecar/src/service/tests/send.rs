@@ -13,7 +13,7 @@ async fn ready_terminal(service: &TerminalService) -> (String, tempfile::TempDir
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["ready"]}),
+                serde_json::json!({"cmd": "echo ready"}),
                 Some((SCOPE, workspace.as_str())),
             ))
             .await,
@@ -618,8 +618,8 @@ async fn 后台启动与多行脚本附带用法提示且照常执行() {
     let workspace = cwd.path().to_string_lossy().to_string();
     let run_shell = |script: &str| {
         tool_request(
-            "run_shell",
-            serde_json::json!({ "script": script }),
+            "run_command",
+            serde_json::json!({ "cmd": script }),
             Some((SCOPE, workspace.as_str())),
         )
     };
@@ -632,8 +632,8 @@ async fn 后台启动与多行脚本附带用法提示且照常执行() {
     assert_eq!(background["ok"], true, "{background}");
     assert!(stdout(&background).contains("started"), "命令照常执行");
     assert!(
-        summary(&background).contains("terminal(action=open)"),
-        "后台启动应提示改用独立终端: {background}"
+        summary(&background).contains("nohup / & 后台启动"),
+        "后台启动应提示替代做法: {background}"
     );
 
     let script = outcome_of(
@@ -652,7 +652,7 @@ async fn 后台启动与多行脚本附带用法提示且照常执行() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["plain"]}),
+                serde_json::json!({"cmd": "echo plain"}),
                 Some((SCOPE, workspace.as_str())),
             ))
             .await,

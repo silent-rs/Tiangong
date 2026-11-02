@@ -558,6 +558,41 @@ fn run_gui() {
                 ));
             }
 
+            // 实例资源变化（issue #697）：`instance_resources` 插件的 sidecar
+            // 上报新实例时由宿主决定 UI 呈现——静默建立标签（不弹面板），
+            // 用户想看随时点开；插件不再经 app.open 操控拓展区。同一实例
+            // 只处理一次（PTY 编号全局唯一不回卷），重复通知直接跳过。
+            {
+                let app_handle = app.handle().clone();
+                let seen: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+                    Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+                tiangong_plugin_runtime::set_instance_change_handler(Arc::new(
+                    move |plugin_id: &str, session_id: &str, instance_id: &str| {
+                        let key = format!("{plugin_id}\0{session_id}\0{instance_id}");
+                        let fresh = seen
+                            .lock()
+                            .map(|mut seen| seen.insert(key))
+                            .unwrap_or(false);
+                        if !fresh {
+                            return;
+                        }
+                        tracing::info!(
+                            plugin_id,
+                            session_id,
+                            instance_id,
+                            "实例资源变化：静默建立标签"
+                        );
+                        tiangong_app::plugin_instances::request_open(
+                            plugin_id,
+                            session_id,
+                            instance_id,
+                            false,
+                        );
+                        let _ = app_handle;
+                    },
+                ));
+            }
+
             // 统一签名信任的授权注入（runtime 保持插件中立，策略在宿主层）：
             //
             // 1) 受信安装方 = 官方签名的固定 Plugin Creator。自动签名安装

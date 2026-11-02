@@ -96,7 +96,7 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
     let started = Instant::now();
     let echo = call(
         "run_command",
-        serde_json::json!({ "cmd": "echo", "args": ["headless-ok"] }),
+        serde_json::json!({ "cmd": "echo headless-ok" }),
     );
     let echo_elapsed = started.elapsed();
     assert!(
@@ -114,8 +114,8 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
     eprintln!("status after echo: {status_after_echo}");
     // 2. 终端复用：export 的环境变量跨调用保留（同一空闲终端）。
     let export = call(
-        "run_shell",
-        serde_json::json!({ "script": "export E2E_MARKER=42" }),
+        "run_command",
+        serde_json::json!({ "cmd": "export E2E_MARKER=42" }),
     );
     assert!(
         export.get("ok").and_then(serde_json::Value::as_bool) == Some(true),
@@ -130,8 +130,8 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
         export.get("summary").and_then(serde_json::Value::as_str)
     );
     let verify = call(
-        "run_shell",
-        serde_json::json!({ "script": "echo E2E=$E2E_MARKER" }),
+        "run_command",
+        serde_json::json!({ "cmd": "echo E2E=$E2E_MARKER" }),
     );
     eprintln!(
         "verify summary: {:?}",
@@ -153,17 +153,30 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
         verify.get("summary")
     );
 
-    // 3. terminal(action=open) + python3 REPL：画面快照来自 sidecar 屏幕解析。
-    let opened = call("terminal", serde_json::json!({ "action": "open" }));
-    let terminal_id = opened
+    // 3. run_command 拉起 python3 REPL：默认等待窗口（5 秒）耗尽后软交还
+    //    （issue #697 续等协议）——sidecar 不判交互，Agent 从交还输出的
+    //    REPL 提示符自行识别，用 terminal(action=send) 接管。
+    let repl_run = call("run_command", serde_json::json!({ "cmd": "python3 -q" }));
+    assert!(
+        repl_run.get("ok").and_then(serde_json::Value::as_bool) == Some(true),
+        "交还结果应为 ok：{repl_run}"
+    );
+    assert!(
+        stdout_of(&repl_run).contains(">>>"),
+        "交还输出应含 REPL 提示符（Agent 据此识别交互程序）：{}",
+        stdout_of(&repl_run)
+    );
+    let terminal_id = repl_run
         .get("summary")
         .and_then(serde_json::Value::as_str)
-        .and_then(|summary| summary.split_whitespace().last())
+        .and_then(|summary| summary.split("终端 ").nth(1))
+        .and_then(|rest| rest.split(['（', ' ']).next())
         .map(str::to_string)
         .unwrap_or_default();
     assert!(
-        !terminal_id.is_empty(),
-        "terminal open 应返回编号：{opened}"
+        terminal_id.starts_with("tty-"),
+        "摘要应含交还终端编号：{:?}",
+        repl_run.get("summary")
     );
     let mut send = |input: &str, enter: bool, wait: u64| {
         call(
@@ -177,15 +190,16 @@ fn terminal_headless_命令复用终端_无前端等待_画面快照_中断与�
             }),
         )
     };
-    send("python3", true, 15);
-    let repl = send("print(6*7)", true, 15);
+    // REPL 内交互：不设 enter、input 末尾带 \r 原样写入（marker 登记期间
+    // enter=true 会被拒绝——那是「向 shell 排队新命令」的语义）。
+    let repl = send("print(6*7)\\r", false, 15);
     let repl_text = stdout_of(&repl);
     assert!(
         repl_text.contains("42"),
-        "REPL 输出应出现在画面快照：{repl_text}"
+        "REPL 输出应出现在返回文本：{repl_text}"
     );
-    // 退出 REPL 回到 shell。
-    send("exit()", true, 10);
+    // 退出 REPL 回到 shell（退出后 wrapper 收尾，marker 闭合、终端回池）。
+    send("exit()\\r", false, 15);
 
     // 4. \x03 中断运行中的命令。
     send("sleep 60", true, 3);

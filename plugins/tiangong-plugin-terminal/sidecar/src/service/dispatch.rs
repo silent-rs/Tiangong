@@ -61,20 +61,17 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 }
             };
         let _guard = exec_lock.lock().await;
-        // 按取消时刻的执行进度收尾，不能只凭请求的 interactive 参数：
+        // 按取消时刻的执行进度收尾：
         //
-        // - Reserved：命令尚未写入 PTY（前端附着等待等阶段），终端干净，
+        // - Reserved：命令尚未写入 PTY（就绪握手等阶段），终端干净，
         //   直接放回空闲池，无需中断确认——否则预留永远挂着不被复用；
-        // - 交互程序已写入（interactive_started）：程序在前台且对用户
-        //   可见，保留终端并转交互状态（探针进不了交互程序，确认流只会
-        //   误杀）；由用户在标签内自行收尾；
-        // - 更早进入的 Interactive：同上保持不动；
-        // - 其余（命令执行中、交互调用的握手阶段）：走中断确认流。
-        let state = self.with_session(&terminal_id, |session| {
-            Ok((session.phase, session.interactive_started))
-        });
-        let (phase, interactive_started) = match state {
-            Ok(state) => state,
+        // - 交互程序已在前台（自动判定转交互态）：程序对用户可见可输入，
+        //   保留终端（探针进不了交互程序，确认流只会误杀）；由用户在
+        //   标签内自行收尾；
+        // - 其余（命令执行中、握手阶段）：走中断确认流。
+        let state = self.with_session(&terminal_id, |session| Ok(session.phase));
+        let phase = match state {
+            Ok(phase) => phase,
             Err(error) => {
                 // 拿到 exec_lock 后终端才被回收：无需中断，登记已清除。
                 tracing::debug!(
@@ -86,41 +83,18 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 return Ok(());
             }
         };
-        match phase {
-            SessionPhase::Reserved => {
-                let _ = self.with_session(&terminal_id, |session| {
-                    session.phase = SessionPhase::Idle;
-                    session.running_command = None;
-                    Ok(())
-                });
-                tracing::info!(
-                    request_id,
-                    terminal = %terminal_id,
-                    "取消发生在命令启动前，终端直接回到空闲"
-                );
-                return Ok(());
-            }
-            SessionPhase::Interactive => {
-                tracing::info!(
-                    request_id,
-                    terminal = %terminal_id,
-                    "取消交互调用：保留交互终端，不做中断确认"
-                );
-                return Ok(());
-            }
-            _ if active.interactive && interactive_started => {
-                let _ = self.with_session(&terminal_id, |session| {
-                    session.phase = SessionPhase::Interactive;
-                    Ok(())
-                });
-                tracing::info!(
-                    request_id,
-                    terminal = %terminal_id,
-                    "取消交互调用：程序保留在前台，终端转入交互状态"
-                );
-                return Ok(());
-            }
-            _ => {}
+        if phase == SessionPhase::Reserved {
+            let _ = self.with_session(&terminal_id, |session| {
+                session.phase = SessionPhase::Idle;
+                session.running_command = None;
+                Ok(())
+            });
+            tracing::info!(
+                request_id,
+                terminal = %terminal_id,
+                "取消发生在命令启动前，终端直接回到空闲"
+            );
+            return Ok(());
         }
         let interrupted = self.with_session(&terminal_id, |session| {
             session
@@ -148,6 +122,17 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 let _ = self.with_session(&terminal_id, |session| {
                     session.phase = SessionPhase::Idle;
                     session.running_command = None;
+                    // 中断确认成功：续等登记一并清除（命令已被打断，
+                    // marker 收割不再有意义；wrapper 被中断时 end marker
+                    // 可能仍会输出，但登记留着只会让续等误判仍在执行）。
+                    if session
+                        .pending_send
+                        .as_ref()
+                        .is_some_and(|pending| pending.markers.is_some())
+                    {
+                        session.pending_send = None;
+                        session.send_read_offset = None;
+                    }
                     Ok(())
                 });
                 tracing::info!(
@@ -178,12 +163,11 @@ async fn dispatch_operation(
 ) -> Result<serde_json::Value> {
     // Agent 工具入口（宿主直连）：会话归属来自宿主注入的请求上下文，
     // 缺失即拒绝——不允许脱离会话真相源执行终端操作。
-    if matches!(operation, "run_command" | "run_shell" | "terminal") {
+    if matches!(operation, "run_command" | "terminal") {
         let scope = tool_scope(request_id, context)?;
         let outcome = match operation {
-            "run_command" => service.tool_run_command(&scope, false, payload).await,
-            "run_shell" => service.tool_run_command(&scope, true, payload).await,
-            // 终端管理统一入口（action 模式）：open / send / close / status。
+            "run_command" => service.tool_run_command(&scope, payload).await,
+            // 终端管理统一入口（action 模式）：send / close / status。
             _ => service.tool_terminal(&scope, payload).await,
         };
         return Ok(serde_json::to_value(outcome)?);

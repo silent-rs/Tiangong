@@ -17,7 +17,7 @@ async fn 取消中断执行中的命令并复位终端() {
     let service_for_task = std::sync::Arc::new(service);
     let request = tool_request(
         "run_command",
-        serde_json::json!({"cmd": "sleep", "args": ["60"]}),
+        serde_json::json!({"cmd": "sleep 60"}),
         Some(("session-a", workspace.as_str())),
     );
     let task_service = std::sync::Arc::clone(&service_for_task);
@@ -94,7 +94,7 @@ async fn 取消中断执行中的命令并复位终端() {
         service_for_task
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["recovered"], "timeout": 5}),
+                serde_json::json!({"cmd": "echo recovered", "timeout": 5}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -190,9 +190,9 @@ async fn 取消收尾缓慢的命令后下一条命令仍能正常执行() {
     // 并发负载下的调度余量），模拟 cargo nextest 之类带子进程树的长任务收尾。
     let (service, terminal, request) = 取消执行中的调用(
         serde_json::json!({
-            "script": "trap 'sleep 8; exit 130' INT; echo READY_TO_CANCEL; sleep 60",
+            "cmd": "trap 'sleep 8; exit 130' INT; echo READY_TO_CANCEL; sleep 60",
         }),
-        "run_shell",
+        "run_command",
         &workspace,
     )
     .await;
@@ -217,7 +217,7 @@ async fn 取消收尾缓慢的命令后下一条命令仍能正常执行() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["recovered"], "timeout": 10}),
+                serde_json::json!({"cmd": "echo recovered", "timeout": 10}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -255,8 +255,8 @@ async fn 取消不得杀死终端或其后台作业() {
          sleep 60\n"
     );
     let (service, terminal, request) = 取消执行中的调用(
-        serde_json::json!({ "script": script }),
-        "run_shell",
+        serde_json::json!({ "cmd": script }),
+        "run_command",
         &workspace,
     )
     .await;
@@ -303,7 +303,7 @@ async fn 取消不得杀死终端或其后台作业() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["fresh"], "timeout": 10}),
+                serde_json::json!({"cmd": "echo fresh", "timeout": 10}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -341,9 +341,9 @@ async fn 收尾完成的终端重新回到复用池() {
     // 永不命中；只睡眠，收尾后 shell 回提示符执行遗留探针。
     let (service, terminal, request) = 取消执行中的调用(
         serde_json::json!({
-            "script": "trap 'sleep 5' INT; echo READY_TO_CANCEL; sleep 60",
+            "cmd": "trap 'sleep 5' INT; echo READY_TO_CANCEL; sleep 60",
         }),
-        "run_shell",
+        "run_command",
         &workspace,
     )
     .await;
@@ -386,7 +386,7 @@ async fn 收尾完成的终端重新回到复用池() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["reusable"], "timeout": 10}),
+                serde_json::json!({"cmd": "echo reusable", "timeout": 10}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -402,76 +402,12 @@ async fn 收尾完成的终端重新回到复用池() {
     }
 }
 
-/// 取消交互调用（vi/ssh）不得动用户的终端。
+/// 显式交互调用（run_shell interactive=true）已随 v7 删除（issue #697）：
+/// 交互判定不再由插件执行，「取消交互调用保留终端」的保护随之消失——
+/// 等待窗口内取消一律 `\x03` + 就绪确认（用户主动取消属于合理打断）；
+/// 窗口交还后 active_tools 已清除，取消为 no-op，命令不受影响。
 ///
-/// 执行期间 phase 还是 Running（只有返回结果后才置 Interactive），
-/// 所以取消判据必须带上本次调用的 interactive 入参，否则调用自己
-/// 拉起的交互程序会走中断确认流：探针进不了 vi，超时后整个终端被
-/// 处置，用户正在编辑的内容随之丢失。
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn 取消交互调用保留用户终端且不发中断() {
-    let cwd = tempfile::tempdir().expect("创建测试目录失败");
-    let workspace = cwd.path().to_string_lossy().to_string();
-    let (service, terminal, request) = 取消执行中的调用(
-        serde_json::json!({
-            "script": "echo READY_TO_CANCEL; cat",
-            "interactive": true,
-        }),
-        "run_shell",
-        &workspace,
-    )
-    .await;
-
-    let before = service
-        .with_session(&terminal, |session| Ok(session.raw_bytes_total))
-        .expect("终端应存活");
-    service
-        .cancel(&request.request)
-        .await
-        .expect("取消钩子不应失败");
-
-    assert!(
-        service.with_session(&terminal, |_| Ok(())).is_ok(),
-        "交互终端必须保留给用户继续使用"
-    );
-    // 程序已启动（cat 在前台）：取消后状态必须收尾为交互中且命令
-    // 保留，不得滞留 Running（收尾 future 已丢弃，不会再有人置态）。
-    let (phase, command) = service
-        .with_session(&terminal, |session| {
-            Ok((session.phase, session.running_command.clone()))
-        })
-        .expect("终端应存活");
-    assert_eq!(phase, SessionPhase::Interactive, "取消后应转交互状态");
-    assert!(
-        command
-            .as_deref()
-            .is_some_and(|command| command.contains("cat")),
-        "交互中的终端应保留命令供 terminal_status 查询: {command:?}"
-    );
-    // 不发 Ctrl+C、不发探针：取消后终端不应因中断确认流产生新输出。
-    let after = service
-        .with_session(&terminal, |session| Ok(session.raw_bytes_total))
-        .expect("终端应存活");
-    assert_eq!(
-        before,
-        after,
-        "取消交互调用不应向终端写入中断或探针（新增输出 {} 字节）",
-        after.saturating_sub(before)
-    );
-    // before == after 已覆盖「不发 Ctrl+C、不发探针」：任一写入都会
-    // 产生新回显字节。不再检查整段历史——首次命令前的就绪握手
-    // 合法地发过一次探针，其回显留在历史里属预期。
-
-    // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束，
-    // 循环体内的 kill_session 将重入同一把非重入锁，自死锁。
-    let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
-    for session_id in session_ids {
-        let _ = service.kill_session(SessionIdRequest { session_id });
-    }
-}
-
-/// 取消发生在命令启动前（前端附着等待阶段）：终端尚未收到任何输入，
+/// 取消发生在命令启动前（就绪握手阶段）：终端尚未收到任何输入，
 /// 取消必须直接释放预留回到空闲——否则预留永远挂着，终端不再被复用。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -480,8 +416,8 @@ async fn 取消发生在命令启动前时终端回到空闲() {
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = std::sync::Arc::new(TerminalService::new());
     let request = tool_request(
-        "run_shell",
-        serde_json::json!({ "script": "echo never-runs", "interactive": true }),
+        "run_command",
+        serde_json::json!({ "cmd": "echo never-runs" }),
         Some(("session-a", workspace.as_str())),
     );
     let task_service = std::sync::Arc::clone(&service);
@@ -537,7 +473,7 @@ async fn 取消发生在命令启动前时终端回到空闲() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["reused"], "timeout": 10}),
+                serde_json::json!({"cmd": "echo reused", "timeout": 10}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
@@ -575,17 +511,17 @@ async fn 超时未收尾的终端不得错报空闲() {
             .dispatch_test(tool_request(
                 "run_command",
                 serde_json::json!({
-                    "cmd": "bash",
-                    "args": ["-c", "trap '' INT; echo RUNNING; sleep 6"],
+                    "cmd": "bash -c 'trap \"\" INT; echo RUNNING; sleep 6'",
                     "timeout": 2,
                 }),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,
     );
-    assert_eq!(timed["ok"], false, "超时命令应返回失败: {timed}");
+    // v7（issue #697）：窗口耗尽是软交还（ok=true、未中断），不是失败。
+    assert_eq!(timed["ok"], true, "交还不是失败: {timed}");
 
-    // 超时返回时命令仍在跑：状态必须是不可复用且命令可见。
+    // 交还返回时命令仍在跑：状态必须是执行中且命令可见，不得错报空闲。
     let status = outcome_of(
         service
             .dispatch_test(tool_request(
@@ -602,15 +538,15 @@ async fn 超时未收尾的终端不得错报空闲() {
         .as_array()
         .expect("概要应为数组")
         .iter()
-        .find(|terminal| terminal["status"] == "unresponsive")
-        .expect("未收尾终端应标记为不可复用")
+        .find(|terminal| terminal["status"] == "running")
+        .expect("交还终端应保持执行态（未错报空闲）")
         .clone();
     let stale_id = stale["terminal_id"].as_str().expect("应有编号").to_string();
     assert!(
         stale["command"]
             .as_str()
             .is_some_and(|command| command.contains("sleep 6")),
-        "未收尾终端应保留命令: {stale}"
+        "交还终端应保留命令: {stale}"
     );
 
     // 下一条命令换新终端正常执行，不撞仍在跑的前台命令。
@@ -618,7 +554,7 @@ async fn 超时未收尾的终端不得错报空闲() {
         service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "echo", "args": ["fresh"], "timeout": 10}),
+                serde_json::json!({"cmd": "echo fresh", "timeout": 10}),
                 Some(("session-a", workspace.as_str())),
             ))
             .await,

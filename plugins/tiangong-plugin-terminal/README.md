@@ -31,65 +31,71 @@ release_session_plugin_resources（listInstances + instanceClosed）回收
 会话终端；无主终端由空闲 PTY 超时回收兜底（默认 30 分钟，环境变量
 TIANGONG_TERMINAL_IDLE_PTY_SECS 可调，0 关闭）。
 
-每个会话的终端编排（选终端、新建、开标签、执行、收结果）由 sidecar 内
-对应会话作用域唯一完成；页面实例（`src/main.ts` + `terminal-view.ts`）
-只承担显示与输入，不参与工具调度，也无 `tool.requested` 竞争接应。
+每个会话的终端编排（选终端、新建、执行、收结果）由 sidecar 内对应会话
+作用域唯一完成；页面实例（`src/main.ts` + `terminal-view.ts`）只承担显示
+与输入，不参与工具调度，也无 `tool.requested` 竞争接应。
 
-`run_command` / `run_shell` 不接收终端编号：优先复用当前会话的第一个
-空闲终端，没有可用终端时自动新建并静默建立标签（不展开拓展区）。
-工具结果会返回实际终端编号；`terminal`（action=send/close）必须用
-该编号精确操作，且目标终端必须属于当前会话——跨会话操作明确拒绝，
-不回退当前可见会话。
+## 执行模型（issue #697 v7：拉模型）
 
-`terminal`（action=send）默认原样写入 `input`（支持 `\r`、`\n`、`\e`、`\xHH` 等转义），
-适合向 vi 等编辑器写入纯文本或发送控制按键。设 `enter: true` 时先去掉
-`input` 末尾的一个换行，正文写入后间隔片刻再单独写入回车（`\r`），用于
-执行命令——SSH 等远端行编辑器在正文与回车同包到达时偶发吞掉回车，分开
-写入可稳定触发执行。
+`run_command` 是唯一的命令执行入口：`cmd` 为 shell 命令文本（管道、重定向、
+`&&` 直接写入）；`terminal_id` 可选——指定终端忙则拒绝并告知当前状态，缺省
+由插件复用最早空闲终端、无空闲自动新建。`timeout` 是**单次等待命令反馈的
+窗口**（默认 5 秒、上限 110 秒）：窗口内完成返回完整输出与退出码（marker
+协议）；未完成**不中断命令**，登记为可续等命令并返回 still_running 与已产
+生的输出——是不是交互程序、在不在等输入由 Agent 从输出内容自行识别
+（sidecar 不做理解性判定），再用 `terminal`（action=send，input 留空）续等
+收割完整输出与退出码、action=status 查询画面与进程，或发送 `\x03` 打断。
+预期耗时较长的命令应显式设置更长的 `timeout`。工具层没有任何自动打断路径
+（宿主会话取消除外，用户主动取消属于合理打断）。
 
-`enter: true` 发出的命令会等到真正结束才返回 `completed`，`wait`（默认
-10 秒，最大 110 秒）只是上限：本地 shell 按前台进程组回到 shell 判定，
-SSH 等交互程序内读不到对端进程，按发送前的提示符重新停在光标行判定；
-程序退出、前台回到登录 shell 也判为完成。提示符变了（远端 `cd` 改了带
-路径的提示符、REPL 续行 `...`、`[sudo] password:`）时，输出静默 1.5 秒
-且光标停在一行未完成文本上即返回 `interactive` 交还控制权，终端不会被
-永久锁住。发送 `\x03` 只是把中断键交给程序（只含控制键的输入即使带了
-`enter: true` 也按按键直接写入，不会被当作新命令拒绝）：程序真被中断
-后提示符重绘即完成；忽略中断的程序仍在跑时新命令继续被拒绝，避免排进
-输入缓冲、等程序结束才执行。
-超过上限仍未结束返回 `still_running` 与截至目前的新增输出；此时再以
-`enter: true` 发送新命令会被拒绝且不写入（否则会被排进 tty 输入缓冲延后
-执行，输出整体错位），`input` 留空且不设 `enter` 即继续等待并增量读取。
-`run_command` / `run_shell` 不复用前台被程序占据的终端（如已 SSH 登录）。
+交还的终端保持执行态不被复用；命令自行完成后由选终端时的接触检测**就地
+收割**放回池（`settle_handed_over`），或经续等调用正常收割。
+
+`terminal`（action=send/close/status；open 已删除，新终端由 run_command
+自动或经 terminal_id 指定）：
+- `send`：`terminal_id` 必填。空 input 且不设 enter 为续等——marker 闭合
+  即返回 `completed` 与退出码，未闭合等满 `wait`（默认 10、上限 110 秒）
+  返回 `still_running` 与该期间增量输出。`enter: true` 用于在 shell 里
+  执行命令（正文写入后单独补发回车，等命令真正结束）；向 vi/REPL 等交互
+  程序写入用不设 enter 的原样输入（支持 `\r`、`\n`、`\xHH`、`\e` 转义）。
+  上一条命令未完成时 `enter=true` 的新命令被拒绝且不写入（防止排进 tty
+  输入缓冲导致输出错位）；只含控制键的输入（如 `\x03`）即使带 enter 也
+  按按键直接写入。终端不复用前台被程序占据的终端（如已 SSH 登录）。
+- `status`：概要（忙闲、后台遗留进程）或详情（运行命令、输出尾部、
+  **画面快照**（sidecar 屏幕模拟器生成，vi/top 等全屏程序的当前画面，
+  不依赖前端是否在观看）、会话内进程树）。拉模型的信息中枢：等待中想
+  了解进展就查它。
+- `close`：杀 PTY 释放资源；不触碰 App 标签（UI 归宿主）。
+
+`run_command` / `terminal send` 的 `enter=true` 命令完成判定：本地 shell 按
+前台进程组回到 shell 判定，SSH 等交互程序内按发送前的提示符重新停在光标行
+判定；提示符变化（cd、REPL 续行、密码提示）时静默后返回 `interactive`
+交还控制权，终端不会被永久锁住。
 
 终端里 `&` / `nohup` 启动的后台进程留在登录 shell 的会话里，sidecar 会
 登记这些会话：仍有存活的后台进程时不做空闲退出（退出后新 sidecar 在另一
 个沙箱实例中，无权向其发信号），`terminal(action=status)` 概要以
 `background_jobs` 列出其 pid、进程名与所属终端，供 Agent 用 `kill` 结束。
 
-sidecar 执行中经进度帧请求宿主 App 原语（`host_action`，白名单
-`app.open` / `app.close`）：长任务执行期间终端标签即时建立，用户可
-实时查看输出。Agent 新建终端时，隐藏标签先完成输出订阅和精确 PTY
-附着，sidecar 随后才开始命令；历史只用于重新附着同一存活 PTY，不会
-填充到新建终端。
-
-顶部标签切换或拓展区暂时隐藏时保留当前终端；新建或明确关闭终端 App
-标签时，页面按天工会话提交当前仍存活的终端编号全集，sidecar 只回收该
-会话中已不在列表内的终端。前端关闭不等待回收结果，再次打开会创建全新
-终端。Sub Agent / Bot 等后台会话无需任何页面实例即可独立执行终端工具。
+UI 展示全归宿主（App 层）：sidecar 不再发送 `app.open` / `app.close`
+host_action，App 由终端输出通知驱动建立标签；标签关闭时页面按天工会话
+提交当前仍存活的终端编号全集（terminalGc），sidecar 只回收该会话中已不在
+列表内的终端。Sub Agent / Bot 等后台会话无需任何页面实例即可独立执行终端
+工具。
 
 ## 使用引导
 
 prompt 与工具说明引导 Agent 以 PTY 终端的方式工作：
 
-- 执行命令优先用 `run_command`，多步操作拆成多次调用逐步执行；终端自动
-  复用并保持工作目录与环境，无需把多步拼成一段脚本。`run_shell` 只用于
-  执行已有脚本，或需要管道、重定向等 shell 语法的单条命令。
-- 不用 `nohup` / `&` 后台启动。插件支持多终端并行：长期运行的服务用
-  `terminal`（action=open）新开终端、action=send 在前台运行，用完 `\x03` 停止。
+- 执行命令一律用 `run_command`（shell 命令文本），多步操作拆成多次调用
+  逐步执行；终端自动复用并保持工作目录与环境。
+- 长命令显式设置更长的 `timeout`；返回 still_running 时按输出内容判断
+  状况，空 input 续等收割、status 查询或 `\x03` 打断。
+- 不用 `nohup` / `&` 后台启动：长期服务直接 `run_command` 前台跑（占住
+  一个终端，其他命令自动用别的终端），用完 `\x03` 停止并 close。
 
-sidecar 在 `run_command` / `run_shell` 结果摘要末尾对这两类写法给出替代
-做法（`service/advice.rs`，只提示不拦截，命令照常执行）。
+sidecar 在 `run_command` 结果摘要末尾对这两类写法给出替代做法
+（`service/advice.rs`，只提示不拦截，命令照常执行）。
 
 ## 开发循环
 

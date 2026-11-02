@@ -98,10 +98,12 @@ pub(super) fn publish_display_output(
 
 /// 把一段用户可见输出喂给会话的屏幕模拟器（issue #697）。
 ///
-/// 不感知宿主形态，只看本终端的事实：**从未有前端附着的终端**由模拟器
-/// 生成 `screen_snapshot`（CLI / Server 下 `terminal_send` 由此拿到 vi /
-/// top 等全屏程序的正确画面）；有前端附着的终端快照以 xterm 回传
-/// （`terminalScreenUpdate`）为权威，本调用只维护模拟器，不写快照。
+/// 不感知宿主形态、不看前端是否附着：模拟器**始终**维护并写入
+/// `screen_snapshot`。前端真实存在时，同一输出经通知送往前端渲染后由
+/// `terminalScreenUpdate` 回传覆盖（回传必然晚于本写入，后写者胜出，
+/// xterm 渲染画面仍是最终权威）；前端未附着（面板收起、后台会话、
+/// CLI / Server）时模拟器快照即为 `terminal_send` 可用的最新画面。
+/// 由此 terminal_send 的画面不再依赖前端是否在观看。
 pub(super) fn ingest_screen_update(
     sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
     session_id: &str,
@@ -118,10 +120,8 @@ pub(super) fn ingest_screen_update(
         return;
     };
     grid.feed(visible);
-    if !session.frontend_attached_once {
-        session.screen_snapshot = grid.visible_text();
-        session.screen_updates = session.screen_updates.saturating_add(1);
-    }
+    session.screen_snapshot = grid.visible_text();
+    session.screen_updates = session.screen_updates.saturating_add(1);
 }
 
 pub(super) fn contains_marker(text: &str) -> bool {

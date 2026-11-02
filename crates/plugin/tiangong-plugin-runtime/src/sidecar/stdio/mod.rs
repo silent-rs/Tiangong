@@ -1304,6 +1304,10 @@ fn spawn_stdio_reader(
                                 crate::registry::refresh_tool_specs(&plugin_id);
                             });
                         }
+                        if channel == tiangong_plugin_sidecar::protocol::INSTANCES_CHANGED_CHANNEL {
+                            // 实例资源变化：宿主决定 UI 呈现（desktop 建标签）。
+                            crate::bridge::dispatch_instance_change(&plugin_id, &payload);
+                        }
                         if let Some(forwarder) = crate::sidecar::sidecar_notification_forwarder() {
                             forwarder(&plugin_id, &channel, &payload);
                         }

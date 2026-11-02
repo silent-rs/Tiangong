@@ -220,6 +220,7 @@ impl TerminalService {
 
         // 必须先登记会话再启动输出搬运；否则启动提示符可能先于登记到达，
         // 原始输出和重放历史都会永久丢失。
+        self.announce_instance_change(request.scope_id.as_deref(), &session_id);
         self.sessions.lock().expect("会话表锁损坏").insert(
             session_id.clone(),
             PtySession {
@@ -250,9 +251,9 @@ impl TerminalService {
                 pending_send: None,
                 send_in_flight: 0,
                 send_read_offset: None,
+                pending_exit_code: None,
                 prompt_hint: None,
                 running_command: None,
-                interactive_started: false,
                 shell_pid,
                 logger,
                 pending_echo: Arc::clone(&pending_echo),
@@ -342,6 +343,23 @@ impl TerminalService {
         })
     }
 
+    /// 新终端登记后向宿主上报实例变化（issue #697）：宿主据此决定 UI
+    /// 呈现（desktop 建标签），sidecar 不携带任何展示指令；无订阅方
+    ///（CLI / Server）由传输层丢弃。
+    fn announce_instance_change(&self, scope_id: Option<&str>, session_id: &str) {
+        let Some(scope_id) = scope_id.filter(|scope| !scope.is_empty()) else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "session_id": scope_id,
+            "instance_id": session_id,
+        });
+        tiangong_plugin_sidecar::server::emit_notification(
+            tiangong_plugin_sidecar::protocol::INSTANCES_CHANGED_CHANNEL,
+            payload.to_string(),
+        );
+    }
+
     /// 回收已死亡的会话（出表并清前端附着标记）。命令收尾时调用，
     /// 防御性保留给选终端等路径复用。
     pub(super) fn reap_ended_session(&self, session_id: &str) {
@@ -428,6 +446,12 @@ impl TerminalService {
 
     pub(super) fn acquire_session(&self, request: AcquireRequest) -> AcquireResponse {
         let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+        // 交还后自行完成的命令就地收割放回池（Agent 未续等触碰的场景）。
+        for session in sessions.values_mut() {
+            if session.scope_id.as_deref() == Some(request.scope_id.as_str()) {
+                session.settle_handed_over();
+            }
+        }
         let had_live_terminal = sessions.values().any(|session| {
             session.scope_id.as_deref() == Some(request.scope_id.as_str())
                 && session.exited_code.is_none()
@@ -531,6 +555,63 @@ impl TerminalService {
             }
             Ok(OkResponse { ok: true })
         })
+    }
+
+    /// 预留 Agent 指定编号的终端（run_command 的 terminal_id 路径）：
+    /// 校验归属与可用性，可用则置 Reserved 并返回编号；不可用返回带
+    /// 当前状态的说明（Agent 可据此查询、续等收割或改用其他终端）。
+    /// 可用性口径与自动选择一致：空闲、无续等登记、无进行中的 send、
+    /// 前台未被程序占据（防止包装脚本被当成正在运行的程序的输入）。
+    pub(super) fn reserve_named_session(
+        &self,
+        scope_id: &str,
+        session_id: &str,
+    ) -> Result<String, String> {
+        let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Err(format!("终端 {session_id} 不存在"));
+        };
+        if session.scope_id.as_deref() != Some(scope_id) {
+            return Err(format!("终端 {session_id} 不属于当前会话"));
+        }
+        if session.exited_code.is_some() {
+            return Err(format!(
+                "终端 {session_id} 已随命令退出，不可再用；不指定 terminal_id 将自动新建终端"
+            ));
+        }
+        // 交还后自行完成的命令就地收割，之后按空闲继续。
+        session.settle_handed_over();
+        let busy_reason = if session.pending_send.is_some() {
+            Some("有未收割的命令（先用 terminal(action=send) 空 input 续等收割或 \\x03 中断）")
+        } else if session.send_in_flight > 0 {
+            Some("正在进行 terminal(action=send) 交互")
+        } else if session.phase != SessionPhase::Idle {
+            Some(match session.phase {
+                SessionPhase::Running => "命令执行中",
+                SessionPhase::Reserved => "已被并发的命令预留",
+                SessionPhase::Unresponsive => "就绪确认失败，暂不自动复用",
+                SessionPhase::Idle => unreachable!(),
+            })
+        } else if matches!(foreground_of(session), Some(Foreground::Program { .. })) {
+            Some("前台被程序占据（如 ssh / vi / REPL），包装脚本会被当作它的输入")
+        } else {
+            None
+        };
+        if let Some(reason) = busy_reason {
+            let running = session.running_command.clone().unwrap_or_default();
+            return Err(format!(
+                "终端 {session_id} 当前不可用：{reason}{}；\
+                可用 terminal（action=status，terminal_id={session_id}）查看详情，\
+                或不指定 terminal_id 由插件选择其他终端",
+                if running.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("（正在运行 `{running}`）")
+                }
+            ));
+        }
+        session.phase = SessionPhase::Reserved;
+        Ok(session_id.to_string())
     }
 
     pub(super) fn update_screen(&self, request: ScreenUpdateRequest) -> Result<OkResponse> {

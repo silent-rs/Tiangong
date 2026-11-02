@@ -32,16 +32,14 @@ pub(super) struct SpawnRequest {
 #[serde(deny_unknown_fields)]
 pub(super) struct ExecRequest {
     pub(super) session_id: String,
+    /// shell 命令文本（v7 单一入口，按所在 shell 语义整体解释）。
     #[serde(default)]
     pub(super) cmd: String,
-    #[serde(default)]
-    pub(super) args: Vec<String>,
-    #[serde(default)]
-    pub(super) script: Option<String>,
+    /// 单次等待命令反馈的时长（秒，issue #697）：命令未完成时**不中断**、
+    /// 登记续等并返回 still_running，需要打断由 Agent 显式发送 `\x03`。
+    /// 缺省 5，上限 [`super::exec::EXEC_MAX_WAIT_SECS`]。
     #[serde(default)]
     pub(super) timeout: Option<u64>,
-    #[serde(default)]
-    pub(super) interactive: bool,
     #[serde(default)]
     pub(super) cwd: Option<String>,
 }
@@ -70,9 +68,11 @@ pub(super) struct ExecResponse {
     pub(super) stdout: String,
     pub(super) stderr: String,
     pub(super) exit_code: i32,
-    pub(super) timed_out: bool,
+    /// 命令仍在执行：本次按单次等待预算返回，命令未被中断，可经
+    /// terminal(action=send, input="") 续等收割完整输出与退出码
+    ///（issue #697）。
+    pub(super) still_running: bool,
     pub(super) cwd_after: String,
-    pub(super) interactive_mode: bool,
     /// 命令使 shell 本身退出（如 exit/登出）：终端已不可复用，
     /// 下次调用将自动新建终端。
     pub(super) session_ended: bool,
