@@ -15,9 +15,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tiangong_plugin_runtime::manifest::SidecarLifecycle;
-use tiangong_plugin_runtime::sidecar::{
-    SidecarConfig, SidecarConnection, SidecarInvocationContext, StdioSidecarConnection,
-};
+use tiangong_plugin_runtime::protocol::RequestInvocationContext;
+use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
 fn terminal_sidecar_binary() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
@@ -60,16 +59,18 @@ fn terminal_非桌面轮换_复用终端_交互与资源释放() {
     .with_lifecycle(SidecarLifecycle::Resident)
     .with_timeouts(Duration::from_secs(20), Duration::from_secs(60));
     let connection = StdioSidecarConnection::new(config);
-    let context = SidecarInvocationContext::new(
-        "session-switch-e2e",
-        "call-e2e",
-        workspace.to_str().unwrap(),
-    );
+    let context = RequestInvocationContext {
+        session_id: "session-switch-e2e".to_string(),
+        invocation_id: "call-e2e".to_string(),
+        workspace: workspace.display().to_string(),
+        actor_id: String::new(),
+        deadline_ms: None,
+    };
     let no_progress = &mut |_message: String| {};
     let mut call = |operation: &str, payload: serde_json::Value| {
         parse(
             &connection
-                .invoke_with_context_and_progress(
+                .invoke_with_invocation_context_and_progress(
                     operation,
                     &payload.to_string(),
                     &context,

@@ -90,42 +90,31 @@ struct StdioProcess {
 struct PendingWaiter {
     response: SyncSender<Result<Value, String>>,
     progress: SyncSender<String>,
-    invocation: Option<crate::sidecar::SidecarInvocationContext>,
     invocation_context: Option<crate::protocol::RequestInvocationContext>,
 }
 
 impl PendingWaiter {
-    /// 请求是否属于目标会话。新版统一调用上下文与旧版 sidecar 上下文都
-    /// 参与判断；同一会话在两种上下文形态下发起的请求都会被会话级
-    /// 联取消命中。
+    /// 请求是否属于目标会话（统一调用上下文携带会话归属，
+    /// 会话级联取消据此命中）。
     fn belongs_to_session(&self, session_id: &str) -> bool {
         self.invocation_context
             .as_ref()
             .is_some_and(|context| context.session_id == session_id)
-            || self
-                .invocation
-                .as_ref()
-                .is_some_and(|context| context.session_id == session_id)
     }
 }
 
-/// 提取本次调用的宿主权威工作区。
+/// 提取本次调用的宿主权威工作区（统一调用上下文的 `workspace`，
+/// 空白视为未提供）。不存在时由调用方回退到连接配置中的默认工作区。
 ///
-/// 新版 Runtime 调用优先使用 RequestInvocationContext；旧版 sidecar
-/// 调用继续兼容 SidecarInvocationContext。两者都不存在时，由调用方
-/// 回退到连接配置中的默认工作区。
-///
-/// SidecarInvocationContext 将在现有插件全部迁移到统一调用上下文后
-/// 再评估淘汰，当前不得删除（兼容层约定见 issue #479）。
-fn invocation_workspace<'a>(
-    legacy_context: Option<&'a crate::sidecar::SidecarInvocationContext>,
-    runtime_context: Option<&'a crate::protocol::RequestInvocationContext>,
-) -> Option<&'a Path> {
+/// 选出的路径必须经 `validate_invocation_workspace` 校验（绝对路径、
+/// 存在性与目录类型）。
+fn invocation_workspace(
+    runtime_context: Option<&crate::protocol::RequestInvocationContext>,
+) -> Option<&Path> {
     runtime_context
         .map(|context| context.workspace.trim())
         .filter(|workspace| !workspace.is_empty())
         .map(Path::new)
-        .or_else(|| legacy_context.map(|context| context.authoritative_workspace.as_path()))
 }
 
 impl StdioSidecarConnection {
@@ -296,14 +285,12 @@ impl StdioSidecarConnection {
         &self,
         operation: &str,
         payload: Value,
-        invocation: Option<crate::sidecar::SidecarInvocationContext>,
         invocation_context: Option<crate::protocol::RequestInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
-        let sandbox_workspace =
-            invocation_workspace(invocation.as_ref(), invocation_context.as_ref())
-                .map(validate_invocation_workspace)
-                .transpose()?;
+        let sandbox_workspace = invocation_workspace(invocation_context.as_ref())
+            .map(validate_invocation_workspace)
+            .transpose()?;
         if self.stopped.load(Ordering::Acquire) {
             bail!("stdio sidecar 已停止");
         }
@@ -317,7 +304,6 @@ impl StdioSidecarConnection {
             &process,
             operation,
             payload,
-            invocation,
             invocation_context,
             ResponseWait::UntilCancelled,
             on_progress,
@@ -936,7 +922,6 @@ impl StdioSidecarConnection {
                 HANDSHAKE_OPERATION,
                 serde_json::Value::Null,
                 None,
-                None,
                 ResponseWait::Bounded(self.config.start_timeout),
                 &mut |_| {},
             )
@@ -986,7 +971,6 @@ impl StdioSidecarConnection {
         process: &Arc<StdioProcess>,
         operation: &str,
         payload: Value,
-        invocation: Option<crate::sidecar::SidecarInvocationContext>,
         invocation_context: Option<crate::protocol::RequestInvocationContext>,
         wait: ResponseWait,
         on_progress: &mut dyn FnMut(String),
@@ -1025,21 +1009,7 @@ impl StdioSidecarConnection {
                 PendingWaiter {
                     response: response_tx,
                     progress: progress_tx,
-                    invocation_context: invocation_context.or_else(|| {
-                        invocation.as_ref().map(|context| {
-                            crate::protocol::RequestInvocationContext {
-                                session_id: context.session_id.clone(),
-                                invocation_id: context.invocation_id.clone(),
-                                workspace: context
-                                    .authoritative_workspace
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                actor_id: String::new(),
-                                deadline_ms: None,
-                            }
-                        })
-                    }),
-                    invocation,
+                    invocation_context,
                 },
             );
 
@@ -1415,7 +1385,7 @@ impl SidecarConnection for StdioSidecarConnection {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = match self.config.lifecycle {
             crate::manifest::SidecarLifecycle::OnDemand => self
-                .invoke_on_demand(operation, payload, None, None, on_progress)
+                .invoke_on_demand(operation, payload, None, on_progress)
                 .map_err(|error| {
                     if error.downcast_ref::<SidecarInvokeError>().is_some() {
                         error
@@ -1443,7 +1413,6 @@ impl SidecarConnection for StdioSidecarConnection {
                     operation,
                     payload,
                     None,
-                    None,
                     ResponseWait::UntilCancelled,
                     on_progress,
                 )
@@ -1459,49 +1428,6 @@ impl SidecarConnection for StdioSidecarConnection {
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
     }
 
-    fn invoke_with_context(
-        &self,
-        operation: &str,
-        payload: &str,
-        context: &crate::sidecar::SidecarInvocationContext,
-    ) -> Result<String> {
-        self.invoke_with_context_and_progress(operation, payload, context, &mut |_| {})
-    }
-
-    fn invoke_with_context_and_progress(
-        &self,
-        operation: &str,
-        payload: &str,
-        context: &crate::sidecar::SidecarInvocationContext,
-        on_progress: &mut dyn FnMut(String),
-    ) -> Result<String> {
-        let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
-        let response = match self.config.lifecycle {
-            crate::manifest::SidecarLifecycle::OnDemand => {
-                self.invoke_on_demand(operation, payload, Some(context.clone()), None, on_progress)?
-            }
-            crate::manifest::SidecarLifecycle::Resident => {
-                let process = {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-                    self.ensure_running(&mut state)?
-                };
-                self.round_trip(
-                    &process,
-                    operation,
-                    payload,
-                    Some(context.clone()),
-                    None,
-                    ResponseWait::UntilCancelled,
-                    on_progress,
-                )?
-            }
-        };
-        serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
-    }
-
     fn invoke_with_invocation_context_and_progress(
         &self,
         operation: &str,
@@ -1512,7 +1438,7 @@ impl SidecarConnection for StdioSidecarConnection {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = match self.config.lifecycle {
             crate::manifest::SidecarLifecycle::OnDemand => {
-                self.invoke_on_demand(operation, payload, None, Some(context.clone()), on_progress)?
+                self.invoke_on_demand(operation, payload, Some(context.clone()), on_progress)?
             }
             crate::manifest::SidecarLifecycle::Resident => {
                 let process = {
@@ -1526,7 +1452,6 @@ impl SidecarConnection for StdioSidecarConnection {
                     &process,
                     operation,
                     payload,
-                    None,
                     Some(context.clone()),
                     ResponseWait::UntilCancelled,
                     on_progress,
