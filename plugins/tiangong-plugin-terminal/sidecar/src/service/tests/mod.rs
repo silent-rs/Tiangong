@@ -12,10 +12,10 @@ pub(super) use tiangong_plugin_sidecar::protocol::{
     PROTOCOL_VERSION, Request, RequestInvocationContext, Response,
 };
 
-pub(super) use super::output::contains_marker;
+pub(super) use super::output::{contains_marker, ingest_screen_update};
 pub(super) use super::types::{
-    AcquireRequest, FindRequest, SessionIdRequest, SpawnRequest, TerminalBindingRequest,
-    default_cols, default_rows,
+    AcquireRequest, FindRequest, ScreenUpdateRequest, SessionIdRequest, SpawnRequest,
+    TerminalBindingRequest, default_cols, default_rows,
 };
 pub(super) use super::{ActiveTool, SessionPhase, TerminalService};
 

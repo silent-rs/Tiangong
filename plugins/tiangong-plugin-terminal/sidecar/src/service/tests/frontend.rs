@@ -1,4 +1,5 @@
-//! 前端协作生命周期：实例关闭回收、精确附着等待与存活集合 GC。
+//! 前端协作生命周期：实例关闭回收、精确附着等待与存活集合 GC，
+//! 以及 xterm 画面回传对模拟器快照的覆盖（后写者胜出）。
 
 use super::*;
 
@@ -130,6 +131,95 @@ async fn run_command_不等前端附着即执行_历史重放兜底() {
     service
         .kill_session(SessionIdRequest {
             session_id: terminal_id,
+        })
+        .expect("清理测试终端失败");
+}
+
+/// 桌面端画面权威链路（issue #697）：模拟器与前端回传按「后写者胜出」
+/// 滚动覆盖——同一 PTY 输出一份数据三用（模拟器快照、display_history、
+/// 通知），前端 xterm 渲染后的画面回传必然晚于模拟器写入，覆盖后以
+/// xterm 为权威；回传之后的新输出再次经模拟器写入，成为最新画面，
+/// 直到下一次回传。zsh/omz 的重绘流同理，无需按形态分支。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 前端画面回传与模拟器快照后写胜出() {
+    let cwd = tempfile::tempdir().expect("创建测试目录失败");
+    let workspace = cwd.path().to_string_lossy().to_string();
+    let service = TerminalService::new();
+    let terminal = service
+        .spawn_session(SpawnRequest {
+            session_id: Some("terminal-screen".to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(workspace.clone()),
+            scope_id: Some("session-screen".to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        })
+        .expect("建立终端失败")
+        .session_id;
+
+    // 1. 输出到达（headless 与桌面同路径）：模拟器无条件先写入快照。
+    //    样本为 zsh 风格重绘流：\r + prompt + buffer + EL 清尾。
+    ingest_screen_update(
+        &service.sessions,
+        &terminal,
+        "\x1b[32m❯\x1b[0m echo ping\r❯ echo ping\x1b[K",
+    );
+    service
+        .with_session(&terminal, |session| {
+            assert!(
+                session.screen_snapshot.contains("echo ping"),
+                "模拟器快照应先写入：{}",
+                session.screen_snapshot
+            );
+            Ok(())
+        })
+        .expect("读取会话失败");
+
+    // 2. 前端 xterm 回传（terminalScreenUpdate，节流 50ms 后）：晚于
+    //    模拟器写入，后写者胜出——xterm 渲染画面成为权威。
+    service
+        .update_screen(ScreenUpdateRequest {
+            session_id: terminal.clone(),
+            screen: "❯ echo ping\nping\n❯ xterm-authoritative".to_string(),
+        })
+        .expect("画面回传失败");
+    service
+        .with_session(&terminal, |session| {
+            assert_eq!(
+                session.screen_snapshot, "❯ echo ping\nping\n❯ xterm-authoritative",
+                "前端回传应覆盖模拟器快照（后写者胜出）"
+            );
+            assert!(session.screen_updates >= 2, "回传应推进画面版本");
+            Ok(())
+        })
+        .expect("读取会话失败");
+
+    // 3. 回传之后的新输出：模拟器再次写入成为最新画面（滚动权威，
+    //    直到下一次回传）——快照服务（terminal status / send）始终
+    //    读到最新可用画面。
+    ingest_screen_update(
+        &service.sessions,
+        &terminal,
+        "\r❯ echo pong\r❯ echo pong\x1b[K",
+    );
+    service
+        .with_session(&terminal, |session| {
+            assert!(
+                session.screen_snapshot.ends_with("echo pong"),
+                "新输出后模拟器再次胜出：{}",
+                session.screen_snapshot
+            );
+            Ok(())
+        })
+        .expect("读取会话失败");
+
+    service
+        .kill_session(SessionIdRequest {
+            session_id: terminal,
         })
         .expect("清理测试终端失败");
 }
