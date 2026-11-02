@@ -25,6 +25,19 @@ const ZSH_EQUALS_DISABLE_SNIPPET: &str = "__tiangong_equals_restore=''\nif [ -n 
 /// 用户主动 `unsetopt equals` 的偏好不会被打开。
 const ZSH_EQUALS_RESTORE_SNIPPET: &str = "if [ -n \"$__tiangong_equals_restore\" ]; then eval 'setopt equals'; fi\nunset __tiangong_equals_restore\n";
 
+/// wrapper 的中断韧性（issue #697）：`\x03` 的 SIGINT 发给整个前台进程组，
+/// wrapper 脚本经登录 shell `source` 执行——默认语义下脚本随中断终止，
+/// cwd/rc/end marker 全部丢失，命令登记挂死（实测 pending 66 秒+、终端
+/// 不回池、续等等满窗口）。脚本开头捕获 INT：内层命令按 130（128+SIGINT）
+/// 中断后**脚本继续走完 marker 收尾**，退出码如实携带 130；尾部恢复默认
+/// 行为（不改变交互 shell 的 Ctrl-C 手感，窗口只有命令执行期间）。
+///
+/// 写法约束：POSIX 通用（bash/dash/zsh 的 `trap` 与恢复语法一致）；若用户
+/// 命令内部自行 `trap`（覆盖本捕获），尾部 `trap - INT` 统一恢复默认。
+const WRAPPER_INT_TRAP_SNIPPET: &str = "__tiangong_int_trapped=1\ntrap '__tiangong_rc=130' INT\n";
+const WRAPPER_INT_TRAP_RESTORE_SNIPPET: &str =
+    "if [ -n \"$__tiangong_int_trapped\" ]; then trap - INT; fi\nunset __tiangong_int_trapped\n";
+
 #[derive(Debug, Clone)]
 pub(super) struct CommandMarkers {
     pub(super) start: String,
@@ -159,15 +172,17 @@ fn prepare_posix_command(
 /// 独立成函数便于测试直接对脚本文本断言。
 fn posix_wrapper_script(inner_path: &str, cwd: Option<&str>, markers: &CommandMarkers) -> String {
     format!(
-        "echo '{}'\n{}{}__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n. {}\n__tiangong_rc=$?\n{}if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n",
+        "echo '{}'\n{}{}{}__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n. {}\n__tiangong_rc=$?\n{}if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n{}\n",
         markers.start,
         cwd_prelude(cwd, ShellKind::Posix),
         ZSH_EQUALS_DISABLE_SNIPPET,
+        WRAPPER_INT_TRAP_SNIPPET,
         inner_path,
         ZSH_EQUALS_RESTORE_SNIPPET,
         markers.cwd,
         markers.exit_code,
         markers.end,
+        WRAPPER_INT_TRAP_RESTORE_SNIPPET,
     )
 }
 
@@ -326,6 +341,32 @@ mod tests {
         let cd_at = wrapper.find(&format!("cd {quoted}")).expect("缺少 cd");
         let source_at = wrapper.find(". '/tmp/inner.sh'").expect("缺少 source");
         assert!(cd_at < source_at, "必须先切目录再执行命令");
+    }
+
+    /// issue #697：wrapper 必须捕获 SIGINT——`\x03` 打到整个前台进程组，
+    /// 不捕获则脚本随中断终止、end marker 丢失，命令登记挂死。捕获在
+    /// source 之前、恢复在 PAGER 收尾之后（保证 marker 打印前 trap 仍生效）。
+    #[test]
+    fn wrapper捕获中断保证marker收尾() {
+        let markers = CommandMarkers::new("x");
+        let wrapper = posix_wrapper_script("'/tmp/inner.sh'", None, &markers);
+        let trap_at = wrapper
+            .find("trap '__tiangong_rc=130' INT")
+            .expect("缺少 INT 捕获");
+        let source_at = wrapper.find(". '/tmp/inner.sh'").expect("缺少 source");
+        assert!(trap_at < source_at, "捕获必须在执行内层命令之前");
+        let restore_at = wrapper.find("trap - INT").expect("缺少 INT 恢复");
+        let marker_at = wrapper.find("__TIANGONG_CWD_x__").expect("缺少 cwd marker");
+        assert!(
+            restore_at > marker_at,
+            "恢复默认行为放在 marker 收尾之后，避免中断竞态"
+        );
+        // 恢复须由标记变量守护：用户命令内部自行 trap 时统一回默认，
+        // 且不改变交互 shell 的 Ctrl-C 手感。
+        assert!(
+            wrapper.contains("if [ -n \"$__tiangong_int_trapped\" ]; then trap - INT; fi"),
+            "恢复须有条件守护: {wrapper}"
+        );
     }
 
     #[test]

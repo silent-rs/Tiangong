@@ -118,6 +118,72 @@ async fn 交互输入响应静默后提前返回不等满窗口() {
     });
 }
 
+/// issue #697 实测复现（用户功能测试）：`\x03` 中断软交还的命令后，wrapper
+/// 随 SIGINT 终止、end marker 永不输出——空输入续等等满窗口、终端不回池、
+/// status 长期显示执行中（实测 pending 66 秒+）。修复后 wrapper 捕获 INT：
+/// 中断只结束内层命令（退出码 130），脚本走完 marker 收尾——续等应很快
+/// 返回 completed 且退出码 130，终端回池可复用。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 中断后wrapper收尾marker闭合且终端回池() {
+    let service = TerminalService::new();
+    let (terminal, _cwd) = ready_terminal(&service).await;
+
+    // 软交还：sleep 30 在 2 秒窗口内不可能完成。
+    let handed_over = outcome_of(
+        service
+            .dispatch_test(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "sleep 30", "timeout": 2}),
+                Some((SCOPE, "")),
+            ))
+            .await,
+    );
+    assert_eq!(handed_over["ok"], true, "sleep 30 应软交还：{handed_over}");
+
+    // \x03 中断（控制键 enter=false 直写）。wrapper 捕获 INT 后几百毫秒内
+    // 打印 marker 闭合——本 send 的等待窗口内即应收割完成：状态
+    // completed、退出码 130（128+SIGINT），不等满 8 秒窗口。
+    let started = Instant::now();
+    let interrupted = send(&service, &terminal, "\\x03", false, 8).await;
+    let interrupted_text = stdout(&interrupted);
+    let elapsed = started.elapsed();
+    assert_eq!(interrupted["ok"], true, "中断发送应成功：{interrupted}");
+    assert!(
+        interrupted_text.contains("\"status\":\"completed\"")
+            || summary(&interrupted).contains("已执行完成"),
+        "中断后应收割完成（wrapper 收尾 marker 闭合）：{} / {}",
+        summary(&interrupted),
+        interrupted_text
+    );
+    assert_eq!(interrupted["exit_code"], 130, "SIGINT 中断的退出码应为 130");
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "marker 闭合应在窗口内收割，不得等满 8 秒：{elapsed:?}"
+    );
+
+    // 终端已回池：后续命令复用同一终端（不因 marker 挂死被占）。
+    let next = outcome_of(
+        service
+            .dispatch_test(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "echo after-interrupt"}),
+                Some((SCOPE, "")),
+            ))
+            .await,
+    );
+    assert_eq!(next["ok"], true, "中断后的命令应正常执行：{next}");
+    assert!(
+        summary(&next).contains(&terminal),
+        "新命令应复用被中断终端 {terminal}：{}",
+        summary(&next)
+    );
+
+    let _ = service.kill_session(SessionIdRequest {
+        session_id: terminal,
+    });
+}
+
 /// issue #673 的核心复现：`sleep` 回显后长时间静默，旧实现 300ms 即返回
 /// 「成功」。现在必须如实返回 still_running，拒绝紧随其后的新命令（不写入），
 /// 并在命令结束后以 completed 收尾，后续命令输出不再错位。
