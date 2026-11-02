@@ -77,11 +77,11 @@ TIANGONG_TERMINAL_IDLE_PTY_SECS 可调，0 关闭）。
 个沙箱实例中，无权向其发信号），`terminal(action=status)` 概要以
 `background_jobs` 列出其 pid、进程名与所属终端，供 Agent 用 `kill` 结束。
 
-UI 展示全归宿主（App 层）：sidecar 不再发送 `app.open` / `app.close`
-host_action，App 由终端输出通知驱动建立标签；标签关闭时页面按天工会话
-提交当前仍存活的终端编号全集（terminalGc），sidecar 只回收该会话中已不在
-列表内的终端。Sub Agent / Bot 等后台会话无需任何页面实例即可独立执行终端
-工具。
+UI 展示全归宿主（App 层）：sidecar 不发送 `app.open` / `app.close`
+host_action；前端在会话挂载/切换时经 `listInstances` 以同一编号恢复该
+会话全部终端标签（按需拉取）。标签关闭时页面按天工会话提交当前仍存活
+的终端编号全集（terminalGc），sidecar 只回收该会话中已不在列表内的终端。
+Sub Agent / Bot 等后台会话无需任何页面实例即可独立执行终端工具。
 
 ## 使用引导
 

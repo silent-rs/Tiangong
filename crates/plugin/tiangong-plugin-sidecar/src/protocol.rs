@@ -53,12 +53,6 @@ pub const TOOL_SPECS_OPERATION: &str = "tool_specs";
 /// 下一轮工具装配自动生效（core 每轮经 `tool_specs()` 读取）。
 pub const TOOLS_UPDATED_CHANNEL: &str = "runtime.tools_updated";
 
-/// sidecar → 宿主的实例资源变化通知通道（声明 `instance_resources` 的
-/// 插件使用）：新实例建立时推送 `{session_id, instance_id}`——宿主据此
-/// 自行决定 UI 呈现（desktop 建立标签；CLI / Server 无 UI 自然忽略）。
-/// 实例的 UI 归宿主，插件只上报事实，不携带任何展示指令（issue #697）。
-pub const INSTANCES_CHANGED_CHANNEL: &str = "runtime.instances_changed";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsRecovered {
     pub tools: Vec<String>,

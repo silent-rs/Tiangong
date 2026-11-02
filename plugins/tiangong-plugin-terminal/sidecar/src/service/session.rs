@@ -220,7 +220,6 @@ impl TerminalService {
 
         // 必须先登记会话再启动输出搬运；否则启动提示符可能先于登记到达，
         // 原始输出和重放历史都会永久丢失。
-        self.announce_instance_change(request.scope_id.as_deref(), &session_id);
         self.sessions.lock().expect("会话表锁损坏").insert(
             session_id.clone(),
             PtySession {
@@ -341,23 +340,6 @@ impl TerminalService {
             session_id,
             boot_output,
         })
-    }
-
-    /// 新终端登记后向宿主上报实例变化（issue #697）：宿主据此决定 UI
-    /// 呈现（desktop 建标签），sidecar 不携带任何展示指令；无订阅方
-    ///（CLI / Server）由传输层丢弃。
-    fn announce_instance_change(&self, scope_id: Option<&str>, session_id: &str) {
-        let Some(scope_id) = scope_id.filter(|scope| !scope.is_empty()) else {
-            return;
-        };
-        let payload = serde_json::json!({
-            "session_id": scope_id,
-            "instance_id": session_id,
-        });
-        tiangong_plugin_sidecar::server::emit_notification(
-            tiangong_plugin_sidecar::protocol::INSTANCES_CHANGED_CHANNEL,
-            payload.to_string(),
-        );
     }
 
     /// 回收已死亡的会话（出表并清前端附着标记）。命令收尾时调用，
