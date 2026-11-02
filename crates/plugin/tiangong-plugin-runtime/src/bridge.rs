@@ -451,16 +451,6 @@ pub(crate) fn handle_runtime_feedback(plugin_id: &str, message: &str) -> bool {
     let Ok(payload) = serde_json::to_string(&payload) else {
         return true;
     };
-    // 无前端入口（CLI / Server）不注入 App 处理器：开/收标签请求无处受理
-    // 是合法状态，静默降级而不是每条命令刷 warn（issue #697）。
-    if APP_HANDLER.get().is_none() {
-        tracing::debug!(
-            plugin_id,
-            method,
-            "宿主未注入 App 处理器（无前端入口），忽略插件标签请求"
-        );
-        return true;
-    }
     if let Err(error) = app_primitive_for_plugin(plugin_id, method, &payload) {
         tracing::warn!(plugin_id, method, %error, "插件 App 反馈执行失败");
     }
