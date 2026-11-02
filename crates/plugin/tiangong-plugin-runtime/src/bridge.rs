@@ -266,74 +266,84 @@ pub fn invoke_plugin_sidecar(
     )
 }
 
-/// 会话结束时回收插件按会话持有的实例资源（issue #697）。
+/// 会话结束时释放插件按会话持有的实例资源（issue #697）。
 ///
-/// CLI / Server 没有桌面端的插件标签关闭路径，terminal 之类声明
-/// `instance_resources` 的 sidecar 插件在会话删除或入口退出后，其 PTY
-/// 会一直挂着（sidecar 空闲退出条件是「没有任何活会话」）。宿主在
-/// 会话删除 / REPL 退出时调用本函数：对 terminal 共享 sidecar 先
-/// `listInstances(session_id)`，再逐个 `instanceClosed` 终止 PTY。
+/// 与桌面端 `plugin_instances::release_session` 语义一致，供无前端入口
+/// 的宿主在删除会话时调用：遍历全部声明 `instance_resources` 的拓展区
+/// App，对其 sidecar 先 `listInstances(session_id)` 再逐个
+/// `instanceClosed`。webview 沙箱插件的页面由宿主持有，无前端入口的
+/// 宿主不涉及，跳过。
+///
+/// `workspace` 为该会话的权威工作区（需在删除会话前解析，删除后不可
+/// 再加载），用于路由按工作区隔离的按需 sidecar 连接。
 ///
 /// 幂等、尽力而为：插件未安装、sidecar 未运行或调用失败只记日志，
-/// 不阻塞会话删除（残留终端由空闲 PTY 超时回收兜底）。
-pub fn release_session_plugin_resources(session_id: &str) {
+/// 不阻塞会话删除（残留资源由各插件空闲回收兜底）。
+pub fn release_session_plugin_resources(session_id: &str, workspace: Option<&Path>) {
     if session_id.trim().is_empty() {
         return;
     }
-    let listed = invoke_plugin_sidecar(
-        "terminal",
-        "listInstances",
-        serde_json::json!({ "session_id": session_id }),
-        None,
-    );
-    let instances = match listed {
-        Ok(value) => value
-            .get("instances")
-            .and_then(|instances| instances.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| {
-                        entry
-                            .get("instance_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_default(),
-        Err(error) => {
-            tracing::debug!(
-                session_id,
-                %error,
-                "会话资源回收：terminal sidecar 不可用（未安装或未运行），跳过"
-            );
-            return;
+    for app in crate::registry::list_extension_apps() {
+        if app.sandbox == crate::slots::SandboxKind::Webview || !app.instance_resources {
+            continue;
         }
-    };
-    if instances.is_empty() {
-        return;
-    }
-    for instance_id in instances {
-        let closed = invoke_plugin_sidecar(
-            "terminal",
-            "instanceClosed",
-            serde_json::json!({
-                "session_id": session_id,
-                "instance_id": instance_id,
-            }),
-            None,
+        let listed = invoke_plugin_sidecar(
+            &app.plugin_id,
+            crate::protocol::LIST_INSTANCES_OPERATION,
+            serde_json::json!({ "session_id": session_id }),
+            workspace,
         );
-        if let Err(error) = closed {
-            tracing::warn!(
-                session_id,
-                instance_id,
-                %error,
-                "会话资源回收：terminal 实例关闭失败"
-            );
+        let instances = match listed {
+            Ok(value) => value
+                .get("instances")
+                .and_then(|instances| instances.as_array())
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| {
+                            entry
+                                .get("instance_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::debug!(
+                    plugin_id = %app.plugin_id,
+                    session_id,
+                    %error,
+                    "会话资源回收：sidecar 不可用（未安装或未运行），跳过"
+                );
+                continue;
+            }
+        };
+        if instances.is_empty() {
+            continue;
         }
+        for instance_id in instances {
+            let closed = invoke_plugin_sidecar(
+                &app.plugin_id,
+                crate::protocol::INSTANCE_CLOSED_OPERATION,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "instance_id": instance_id,
+                }),
+                workspace,
+            );
+            if let Err(error) = closed {
+                tracing::warn!(
+                    plugin_id = %app.plugin_id,
+                    session_id,
+                    instance_id,
+                    %error,
+                    "会话资源回收：实例关闭失败"
+                );
+            }
+        }
+        tracing::info!(plugin_id = %app.plugin_id, session_id, "会话资源回收：已请求释放实例");
     }
-    tracing::info!(session_id, "会话资源回收：已请求释放 terminal 实例");
 }
 
 /// 宿主请求打开插件 App 实例（宿主可信调用，路由到注入的 app.open 处理器）。

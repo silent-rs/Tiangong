@@ -159,9 +159,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         {
             tracing::warn!(%session_id, %error, "终止 Core 失败");
         }
-        // 释放会话持有的插件实例资源（issue #697）：terminal 的 PTY 由
-        // sidecar 持有，先于 sidecar 停止显式关闭，避免依赖空闲超时兜底。
-        tiangong_plugin_runtime::release_session_plugin_resources(&session_id);
     }
     // CLI 进程拉起的插件 sidecar 随进程退出一并停止。
     tiangong_plugin_runtime::registry::shutdown_all_sidecars();
