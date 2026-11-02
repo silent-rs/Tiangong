@@ -63,6 +63,61 @@ fn stdout(outcome: &serde_json::Value) -> &str {
     outcome["stdout"].as_str().unwrap_or_default()
 }
 
+/// issue #697 拉模型实测反馈：交互程序（REPL，run_command 软交还后
+/// marker pending 挂着）内 enter=false 原样写入的表达式，响应（结果 +
+/// 提示符重绘）在数百毫秒内稳定——旧实现卡在「marker 只判完成」等满
+/// 整个 wait 窗口（实测 10 秒）。现在程序对本次输入已有新增输出且静默
+/// 后即提前交还：耗时远小于 wait，状态仍如实 still_running，stdout 含
+/// 响应结果。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 交互输入响应静默后提前返回不等满窗口() {
+    let service = TerminalService::new();
+    let (terminal, _cwd) = ready_terminal(&service).await;
+
+    // 拉起 python REPL：默认等待窗口耗尽软交还（marker pending 登记在案）。
+    let repl = outcome_of(
+        service
+            .dispatch_test(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "python3 -q", "timeout": 2}),
+                Some((SCOPE, "")),
+            ))
+            .await,
+    );
+    assert_eq!(repl["ok"], true, "REPL 软交还应为 ok：{repl}");
+
+    // REPL 内计算（marker pending 期间 enter=true 会被拒绝，Agent 用
+    // enter=false + 末尾 \r 原样写入——与实测一致的路径）。
+    let started = Instant::now();
+    let answer = send(&service, &terminal, "print(6*7)\\r", false, 8).await;
+    let elapsed = started.elapsed();
+    let answer_status = answer["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("\"status\":\"running\"");
+    assert!(
+        answer["stdout"].as_str().unwrap_or_default().contains("42"),
+        "响应输出应包含计算结果：{}",
+        stdout(&answer)
+    );
+    assert!(
+        answer_status,
+        "REPL 未退出，状态应如实 still_running：{}",
+        stdout(&answer)
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "响应稳定后应提前交还，不得等满 8 秒窗口：{elapsed:?}"
+    );
+
+    // 收尾：退出 REPL 并等待 marker 闭合（终端回池）。
+    send(&service, &terminal, "exit()\\r", false, 10).await;
+    let _ = service.kill_session(SessionIdRequest {
+        session_id: terminal,
+    });
+}
+
 /// issue #673 的核心复现：`sleep` 回显后长时间静默，旧实现 300ms 即返回
 /// 「成功」。现在必须如实返回 still_running，拒绝紧随其后的新命令（不写入），
 /// 并在命令结束后以 completed 收尾，后续命令输出不再错位。

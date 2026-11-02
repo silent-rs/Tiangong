@@ -49,6 +49,21 @@ const SEND_MAX_WAIT_SECS: u64 = 110;
 /// 判定完成后再等这么久的输出静默，让提示符绘制完整。
 const SEND_SETTLE_MS: u64 = 300;
 
+/// 命令仍在执行（marker 未闭合、完成启发式未命中）时，**原样写入的交互
+/// 输入**（enter=false：REPL 回答、全屏程序按键、控制键）在输出静默达
+/// 本时长且程序对本次写入已有新增输出（回显或响应）后提前交还
+/// （issue #697）：这类输入的响应在远短于等待窗口内已稳定，等满 wait
+/// 只会拖慢 Agent；返回仍如实标注「仍在执行」。
+/// enter=true 登记的命令与空输入续等**不走**本分支——它们有完整的
+/// 完成判定链（marker / 提示符 / 前台），静默提前返回会把「sleep 中段」
+/// 误判为可交还、拆碎完成判定（历史坑，见模块头注释）。
+/// 与 SEND_INTERACTIVE_QUIET_MS 同取 500ms。
+const SEND_EXEC_QUIET_MS: u64 = 500;
+
+/// 交互输入写入后至少观察这么久才允许静默提前返回：给回显与程序
+/// 响应留出到达时间。
+const SEND_EXEC_MIN_OBSERVE_MS: u64 = 500;
+
 /// 命令拉起交互程序（ssh 登录、vi、REPL）后，输出静默达本时长即返回。
 const SEND_INTERACTIVE_QUIET_MS: u64 = 500;
 
@@ -313,7 +328,7 @@ impl TerminalService {
 
         // 写入前先确认上一条命令的状态：仍在执行时拒绝新命令，避免它被
         // 排进 tty 输入缓冲、在不可预期的时机执行。
-        let (read_offset, rejected, initial) = {
+        let (read_offset, rejected, initial, write_snapshot) = {
             let mut sessions = self.sessions.lock().expect("会话表锁损坏");
             let session = sessions
                 .get_mut(&request.session_id)
@@ -335,7 +350,7 @@ impl TerminalService {
                 read_offset
             };
             if request.enter && session.pending_send.is_some() {
-                (read_offset, true, initial)
+                (read_offset, true, initial, None)
             } else {
                 if request.enter {
                     let from_shell = matches!(foreground_of(session), Some(Foreground::Shell));
@@ -366,13 +381,16 @@ impl TerminalService {
                     .write_all(data.as_bytes())
                     .context("写入交互输入失败")?;
                 session.writer.flush().context("刷新交互输入失败")?;
+                // 交互输入写入点：此刻之后的 raw 增量即程序对本次输入的
+                // 回显/响应（enter=false 场景供等待循环判定响应静默）。
+                let write_snapshot = session.raw_bytes_total;
                 // 新命令从此刻起读；继续等待（不写新命令）沿用旧命令的读取位置。
                 let offset = if request.enter || initial.is_none() {
                     session.raw_bytes_total
                 } else {
                     read_offset
                 };
-                (offset, false, initial)
+                (offset, false, initial, Some(write_snapshot))
             }
         };
         if rejected {
@@ -393,8 +411,13 @@ impl TerminalService {
 
         // 预检时已完成的命令（继续等待场景）：只需等提示符绘制完整。
         let initial = if request.enter { None } else { initial };
+        // 交互输入写入点（enter=false 原样写入且确有输入）：等待循环据此
+        // 在「程序对本次输入已有新增输出后的静默」时提前交还。
+        let interactive_write = (!request.enter && !data.is_empty())
+            .then_some(write_snapshot)
+            .flatten();
         let status = self
-            .wait_for_send(&request.session_id, wait, initial)
+            .wait_for_send(&request.session_id, wait, initial, interactive_write)
             .await?;
         self.send_response(&request.session_id, read_offset, status)
     }
@@ -404,11 +427,16 @@ impl TerminalService {
 // SEND_KEYS_QUIET_MS；带待确认命令时等待上限为 `wait` 参数。
 impl TerminalService {
     /// 等待所发命令完成或交出控制权；没有待确认命令时按输出静默返回。
+    ///
+    /// `interactive_write` 为原样写入（enter=false）且本次确有输入时的
+    /// 写入后输出偏移：交互输入（REPL 回答、按键、控制键）的响应稳定
+    /// （静默 + 已有新增输出）即提前交还，详见 [`SEND_EXEC_QUIET_MS`]。
     async fn wait_for_send(
         &self,
         session_id: &str,
         wait: Duration,
         initial: Option<SendStatus>,
+        interactive_write: Option<u64>,
     ) -> Result<Option<SendStatus>> {
         let started = Instant::now();
         let deadline = started + wait;
@@ -418,17 +446,23 @@ impl TerminalService {
             || self.with_session(session_id, |session| Ok(session.pending_send.is_some()))?;
         let mut completed = initial == Some(SendStatus::Completed);
         loop {
-            let (status, quiet_for, ended) = self.with_session(session_id, |session| {
-                let quiet_for = session.last_output_at.elapsed();
-                let status = if completed {
-                    Some(SendStatus::Completed)
-                } else if session.pending_send.is_some() {
-                    Some(refresh_pending(session))
-                } else {
-                    None
-                };
-                Ok((status, quiet_for, session.exited_code.is_some()))
-            })?;
+            let (status, quiet_for, ended, total_bytes) =
+                self.with_session(session_id, |session| {
+                    let quiet_for = session.last_output_at.elapsed();
+                    let status = if completed {
+                        Some(SendStatus::Completed)
+                    } else if session.pending_send.is_some() {
+                        Some(refresh_pending(session))
+                    } else {
+                        None
+                    };
+                    Ok((
+                        status,
+                        quiet_for,
+                        session.exited_code.is_some(),
+                        session.raw_bytes_total,
+                    ))
+                })?;
             if status == Some(SendStatus::Completed) {
                 completed = true;
             }
@@ -443,6 +477,18 @@ impl TerminalService {
                 }
                 Some(SendStatus::Interactive) if quiet(SEND_INTERACTIVE_QUIET_MS) => {
                     return Ok(Some(SendStatus::Interactive));
+                }
+                // 交互输入（enter=false 原样写入）且程序已有新增输出（回显
+                // 或响应）后静默：响应大概率已稳定（REPL 回答、翻页、中断
+                // 回显），提前交还当前输出与执行中状态；调用方需要时空输入
+                // 续等。登记命令（enter=true）与空输入续等不走本分支，保持
+                // 完整完成判定链（见 SEND_EXEC_QUIET_MS）。
+                Some(SendStatus::Running)
+                    if interactive_write.is_some_and(|offset| total_bytes > offset)
+                        && started.elapsed() >= Duration::from_millis(SEND_EXEC_MIN_OBSERVE_MS)
+                        && quiet(SEND_EXEC_QUIET_MS) =>
+                {
+                    return Ok(Some(SendStatus::Running));
                 }
                 // 只发送按键（没有待确认命令）：沿用「输出静默」语义，但至少
                 // 观察一个窗口，让回显与程序响应有机会到达。
