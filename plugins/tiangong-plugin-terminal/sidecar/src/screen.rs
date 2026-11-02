@@ -728,4 +728,111 @@ mod tests {
         // 可见区保留最后三行内容（倒数第二行 line-9、空行由 tail 占据）。
         assert_eq!(g.visible_text(), "line-8\nline-9\ntail");
     }
+
+    // ---- zsh + oh-my-zsh 场景（issue #697）----
+    // 样本取自真实 zsh（omz + 语法高亮 + autosuggestions）PTY 输出流的
+    // 序列特征：OSC 标题（0/1/2/7，BEL 与 ST 两种结束符）、启动 padding
+    // hack、多段 SGR（含 256 色）、ZLE 批量回显（单字符 + 退格 + 全量
+    // 重绘）、逐字符语法高亮重绘（CUB 回退 + 逐字 SGR + CUF 前进）、
+    // keypad / bracketed paste 模式开关。
+
+    #[test]
+    fn zsh_omz_prompt_with_colors_osc_and_zle_redraw() {
+        let mut g = ScreenGrid::new(120, 24);
+        // 标题 OSC 2（BEL 结束）与 OSC 7 文件 URL（ST 结束）。
+        g.feed("\x1b]2;user@host:~/tiangong\x07");
+        g.feed("\x1b]7;file://MacBook-Pro.local/home/tiangong\x1b\\");
+        // omz 启动 padding：反显 %、长串空格、\r 空格 \r 抹除。
+        g.feed("\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m");
+        for _ in 0..60 {
+            g.feed(" ");
+        }
+        g.feed("\r \r");
+        // ZLE 行首重置（清属性、清到尾）与 prompt 渲染（powerline 段）。
+        g.feed("\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\r\n");
+        g.feed("\x1b[1;36mtiangong\x1b[0m [\x1b[1;35m\x1b[0m");
+        g.feed(" terminal-headless-hardening]\r\n");
+        // prompt 符号 + 行尾清理 + keypad（?1h、ESC =）+ bracketed paste。
+        g.feed("\x1b[1;32m➜\x1b[0m \x1b[K\x1b[?1h\x1b=\x1b[?2004h");
+        // ZLE 批量输入路径：首字符回显、退格、全量重绘（含末尾多出的
+        // 单字符——真实流中存在，后续 CUB 的列计算依赖它）。
+        g.feed("e\x08echo zsh-okr");
+        // zsh-syntax-highlighting：左移回到 buffer 首、逐字符 SGR 重绘。
+        g.feed("\x1b[12D\x1b[32me\x1b[32mc\x1b[32mh\x1b[32mo\x1b[32m ");
+        g.feed("\x1b[32mz\x1b[32ms\x1b[32mh\x1b[32m-\x1b[32mo\x1b[32mk\x1b[39m");
+        // autosuggestions 光标前移（CUF）与提交：\r + 清到尾 + 换行，
+        // 随后 zsh 重打命令行（accept-line 重绘）、输出与新 prompt。
+        g.feed("\x1b[8C\r\x1b[J\x1b[0m\r\n");
+        g.feed("➜ echo zsh-ok\r\nzsh-ok\r\n\x1b[1;32m➜\x1b[0m \x1b[K");
+        let text = g.visible_text();
+        assert!(text.contains("➜ echo zsh-ok"), "命令行应完整渲染：{text}");
+        assert!(
+            text.contains("terminal-headless-hardening"),
+            "prompt 段应渲染：{text}"
+        );
+        assert!(
+            text.split('\n')
+                .filter(|line| line.contains("zsh-ok"))
+                .count()
+                >= 2,
+            "命令行与输出行都应含 zsh-ok：{text}"
+        );
+        assert!(!text.contains("user@host"), "OSC 标题不应进入画面：{text}");
+        assert!(!text.contains("file://"), "OSC 7 不应进入画面：{text}");
+        assert!(!text.contains('%'), "padding 行的 % 应被抹除：{text}");
+    }
+
+    #[test]
+    fn zsh_cjk_prompt_and_output_content_preserved() {
+        // 宽字符按单列计（模块文档声明的取舍）：中文目录/分支/输出不丢字。
+        let mut g = ScreenGrid::new(60, 10);
+        g.feed("\x1b[32m➜\x1b[0m  中文目录 \x1b[36mgit:(\x1b[31m分支\x1b[36m)\x1b[0m ");
+        g.feed("echo 中文输出\r\n中文输出\r\n\x1b[32m➜\x1b[0m ");
+        let text = g.visible_text();
+        assert!(text.contains("中文目录"), "中文目录应保留：{text}");
+        assert!(text.contains("git:(分支)"), "git 段应保留：{text}");
+        assert!(text.contains("中文输出"), "中文输出应保留：{text}");
+        assert!(text.contains("➜"), "prompt 符号应保留：{text}");
+    }
+
+    #[test]
+    fn zsh_rprompt_on_same_line() {
+        // zsh RPROMPT：\r 后 CUF 到右缘写右侧提示，再 \r 回行首编辑位。
+        let mut g = ScreenGrid::new(40, 5);
+        g.feed("❯ cmd");
+        g.feed("\r\x1b[30C10:24");
+        g.feed("\r\x1b[2D");
+        let text = g.visible_text();
+        let line = text.lines().last().unwrap_or_default();
+        assert!(line.contains("❯ cmd"), "prompt 侧应保留：{line}");
+        assert!(line.contains("10:24"), "RPROMPT 应在同一行：{line}");
+    }
+
+    #[test]
+    fn zsh_zle_edit_redraw_clears_stale_tail() {
+        // ZLE 编辑后全量重绘：\r + prompt + 新 buffer + EL 清掉旧尾残留。
+        let mut g = ScreenGrid::new(60, 5);
+        g.feed("❯ echo hello");
+        g.feed("\r❯ echo helXo\x1b[K");
+        let text = g.visible_text();
+        assert!(text.contains("echo helXo"), "编辑后 buffer 应渲染：{text}");
+        assert!(!text.contains("hello"), "旧尾应被 EL 清除：{text}");
+    }
+
+    #[test]
+    fn zsh_completion_menu_overlay() {
+        // 补全菜单：光标行下方列出候选（CUP 定位 + 多列文本），随后
+        // 光标回到编辑行——菜单与编辑行同屏共存。
+        let mut g = ScreenGrid::new(40, 8);
+        g.feed("❯ git \x1b[?2004h");
+        g.feed("\x1b[2;1Hcheckout   cherry     clean");
+        g.feed("\x1b[1;5H");
+        let text = g.visible_text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("❯ git"), "编辑行应保留：{text}");
+        assert!(
+            text.contains("checkout") && text.contains("cherry"),
+            "补全菜单应渲染：{text}"
+        );
+    }
 }
