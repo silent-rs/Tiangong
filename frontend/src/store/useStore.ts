@@ -2404,10 +2404,11 @@ export const useStore = create<AppState>((set, get) => ({
       ) {
         liveTpsTracker.record(sessionId, event.tokens);
       } else if (event.type === 'session_message_upsert') {
-        // 官方结算值回灌：只认定稿消息持久化的 `text_tps`（请求定稿为
-        // 单请求速度，turn 收尾被覆盖为本轮聚合速度）。不用 messageTpsOf
-        // 的折算兜底——流中快照即使带了 usage，也不该把半程平均速度当成
-        // 最终值清空窗口。流式中间快照没有 text_tps 时不处理。
+        // 官方结算值回灌：只认定稿消息持久化的 `text_tps`（官方
+        // completion_tokens / 输出阶段耗时，decode 口径）。不用
+        // messageTpsOf 的折算兜底——流中快照即使带了 usage，也不该把
+        // 半程平均速度当成最终值清空窗口。
+        // 流式中间快照没有 text_tps（textTpsOf 返回 null）时不处理。
         const message = event.message;
         if (message && typeof message !== 'string' && message.role === 'assistant') {
           const tps = textTpsOf(message);

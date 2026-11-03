@@ -99,27 +99,6 @@ pub(crate) async fn run_turn(
         message.set_final_reply(Some(candidate_id));
     }
 
-    // ── 本轮聚合输出速度写入本轮全部 assistant 消息 ──
-    // 同轮同值（Σ completion_tokens ÷ Σ 有效输出耗时）：批量端点下单请求
-    // 口径要么伪影要么含 TTFT，聚合互相稀释后平滑；终态前补发更新消息的
-    // 快照，实时会话与重载会话速度显示一致（消费方优先 turn_tps，进行中
-    // 与旧数据回退单请求 text_tps）。
-    for message_id in super::message::apply_turn_tps(&mut ctx.session, &turn_id) {
-        if let Some(mut snapshot) = ctx
-            .session
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-            .cloned()
-        {
-            snapshot.clear_transient_data();
-            let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
-                message: snapshot,
-                deferred_tool_injections: None,
-            });
-        }
-    }
-
     // ── 失败轮次追加用户可见的错误消息 ──
     // Notice 是"系统发给用户的通知"通道，角色本身保证排除出模型上下文与
     // 压缩摘要（context 构建、压缩、provider 转换三处过滤），无需再加

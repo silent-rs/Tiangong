@@ -95,13 +95,12 @@ export class LiveTpsTracker {
     this.prune(state, now);
   }
 
-  /** 官方结算值回灌：消息定稿时后端按「官方 completion_tokens / 输出
-   *  耗时」算好 `text_tps`（请求定稿为单请求速度，turn 收尾被覆盖为本轮
-   *  聚合速度——Σ tokens ÷ Σ 有效耗时，批量端点的伪影与回退口径互相
-   *  稀释后平滑），用它覆盖流内近似的最近值（`lastTps`），轮末与空闲
-   *  显示与历史回看一致。同时清空流内样本窗口——官方值是本轮最终
-   *  结论，过时的差分不应在下一次 snapshot 覆盖它（下一轮首个 delta 会
-   *  按累计回退语义重新开窗）。非法值（≤0 / 非有限）忽略。 */
+  /** 官方结算值回灌：消息定稿时后端按「官方 completion_tokens / 输出阶段
+   *  耗时（首末输出增量间隔，decode 口径）」算好 `text_tps`，用它覆盖流内
+   *  近似的最近值（`lastTps`），轮末与空闲显示与历史回看一致。同时清空
+   *  流内样本窗口——官方值是本轮最终结论，过时的差分不应在下一次 snapshot
+   *  覆盖它（下一轮首个 delta 会按累计回退语义重新开窗）。非法值（≤0 /
+   *  非有限）忽略。 */
   setLastTps(sessionId: string, tps: number | null | undefined): void {
     if (!sessionId) return;
     if (typeof tps !== 'number' || !Number.isFinite(tps) || tps <= 0) return;

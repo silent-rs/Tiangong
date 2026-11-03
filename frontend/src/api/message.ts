@@ -41,11 +41,9 @@ export type Role =
       /** 输出阶段耗时（毫秒）：首个输出增量（思考、正文或工具调用）到
        *  最后一个，decode 口径、不含 TTFT 排队。 */
       text_elapsed_ms?: number | null;
-      /** 输出速度（tokens/s）。两阶段语义：请求定稿时为本请求速度
-       *  （completion_tokens / 输出耗时）；turn 收尾后被后端统一覆盖为
-       *  本轮聚合速度（Σ completion_tokens ÷ Σ 有效输出耗时，同轮每条
-       *  assistant 消息同值）——批量端点下单请求口径随请求类型波动，
-       *  聚合稀释后平滑。字段缺失时按 usage/耗时折算兜底。 */
+      /** 输出速度（tokens/s，completion_tokens / 输出阶段耗时，含思考），
+       *  定稿时后端算好持久化，供历史回看与 token 统计直接复现；字段
+       *  缺失时按 usage/耗时折算兜底。 */
       text_tps?: number | null;
       /** 首字延迟 TTFT（毫秒）：请求发出到首个输出增量到达，含排队与
        *  服务端 prefill。独立延迟指标，不参与 TPS 分母。 */
