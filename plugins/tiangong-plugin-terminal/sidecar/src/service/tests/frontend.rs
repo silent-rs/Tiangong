@@ -1,4 +1,5 @@
-//! 前端协作生命周期：实例关闭回收、精确附着等待与存活集合 GC。
+//! 前端协作生命周期：实例关闭回收、精确附着等待与存活集合 GC，
+//! 以及 xterm 画面回传对模拟器快照的覆盖（后写者胜出）。
 
 use super::*;
 
@@ -11,21 +12,21 @@ async fn instance_closed_兜底回收幂等且校验归属() {
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = TerminalService::new();
 
-    // 模拟手动新建标签：终端编号由调用方指定（tab 编号）。
-    let opened = outcome_of(
-        service
-            .dispatch_test(tool_request(
-                "terminal",
-                serde_json::json!({"action": "open",}),
-                Some(("session-a", workspace.as_str())),
-            ))
-            .await,
-    );
-    let terminal = opened["summary"]
-        .as_str()
-        .unwrap_or_default()
-        .trim_start_matches("已打开终端 ")
-        .to_string();
+    // 模拟宿主标签：终端编号由调用方指定（tab 编号，v7 经 spawn 建立）。
+    let terminal = service
+        .spawn_session(SpawnRequest {
+            session_id: Some("terminal-inst-1".to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(workspace.clone()),
+            scope_id: Some("session-a".to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        })
+        .expect("建立终端失败")
+        .session_id;
 
     // 实例通知不携带工具上下文（宿主生命周期操作）：
     // session_id=宿主会话，instance_id=标签（终端）编号。
@@ -83,7 +84,7 @@ async fn instance_closed_兜底回收幂等且校验归属() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_command_等待前端精确附着后才执行() {
+async fn run_command_不等前端附着即执行_历史重放兜底() {
     let cwd = tempfile::tempdir().expect("创建测试目录失败");
     let workspace = cwd.path().to_string_lossy().to_string();
     let service = Arc::new(TerminalService::new());
@@ -92,58 +93,133 @@ async fn run_command_等待前端精确附着后才执行() {
         running_service
             .dispatch_test(tool_request(
                 "run_command",
-                serde_json::json!({"cmd": "printf", "args": ["attached"]}),
+                serde_json::json!({"cmd": "printf attached"}),
                 Some(("session-attached", workspace.as_str())),
             ))
             .await
     });
 
-    let terminal_id = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(terminal_id) = service
-                .sessions
-                .lock()
-                .expect("会话表锁损坏")
-                .keys()
-                .next()
-                .cloned()
-            {
-                break terminal_id;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("等待 Agent 终端创建超时");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!running.is_finished(), "前端尚未附着时命令不应开始并完成");
-
+    // PTY 执行不等观看者（issue #697）：无前端附着时命令照常执行完成，
+    // 页面随后附着时经 display_history 重放看到全部输出。
+    let response = tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("命令应不等前端附着即执行完成")
+        .expect("命令任务异常");
+    let outcome = outcome_of(response);
+    assert_eq!(outcome["stdout"], "attached");
+    let terminal_id = service
+        .sessions
+        .lock()
+        .expect("会话表锁损坏")
+        .keys()
+        .next()
+        .cloned()
+        .expect("应已创建终端");
     let found = service.find_by_scope(&FindRequest {
         scope_id: "session-attached".to_string(),
         session_id: Some(terminal_id.clone()),
     });
     assert_eq!(found.session_id.as_deref(), Some(terminal_id.as_str()));
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(
-        !running.is_finished(),
-        "仅查到 PTY 不能代替前端完成订阅与附着"
-    );
+    // 迟到附着（页面加载完成后）：历史重放包含命令输出。
+    assert!(found.history.contains("attached"), "重放历史应含命令输出");
     service
         .attach_frontend(TerminalBindingRequest {
             scope_id: "session-attached".to_string(),
             session_id: terminal_id.clone(),
         })
         .expect("确认前端附着失败");
-
-    let response = tokio::time::timeout(Duration::from_secs(10), running)
-        .await
-        .expect("前端附着后命令未完成")
-        .expect("命令任务异常");
-    let outcome = outcome_of(response);
-    assert_eq!(outcome["stdout"], "attached");
     service
         .kill_session(SessionIdRequest {
             session_id: terminal_id,
+        })
+        .expect("清理测试终端失败");
+}
+
+/// 桌面端画面权威链路（issue #697）：模拟器与前端回传按「后写者胜出」
+/// 滚动覆盖——同一 PTY 输出一份数据三用（模拟器快照、display_history、
+/// 通知），前端 xterm 渲染后的画面回传必然晚于模拟器写入，覆盖后以
+/// xterm 为权威；回传之后的新输出再次经模拟器写入，成为最新画面，
+/// 直到下一次回传。zsh/omz 的重绘流同理，无需按形态分支。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 前端画面回传与模拟器快照后写胜出() {
+    let cwd = tempfile::tempdir().expect("创建测试目录失败");
+    let workspace = cwd.path().to_string_lossy().to_string();
+    let service = TerminalService::new();
+    let terminal = service
+        .spawn_session(SpawnRequest {
+            session_id: Some("terminal-screen".to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(workspace.clone()),
+            scope_id: Some("session-screen".to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        })
+        .expect("建立终端失败")
+        .session_id;
+
+    // 1. 输出到达（headless 与桌面同路径）：模拟器无条件先写入快照。
+    //    样本为 zsh 风格重绘流：\r + prompt + buffer + EL 清尾。
+    ingest_screen_update(
+        &service.sessions,
+        &terminal,
+        "\x1b[32m❯\x1b[0m echo ping\r❯ echo ping\x1b[K",
+    );
+    service
+        .with_session(&terminal, |session| {
+            assert!(
+                session.screen_snapshot.contains("echo ping"),
+                "模拟器快照应先写入：{}",
+                session.screen_snapshot
+            );
+            Ok(())
+        })
+        .expect("读取会话失败");
+
+    // 2. 前端 xterm 回传（terminalScreenUpdate，节流 50ms 后）：晚于
+    //    模拟器写入，后写者胜出——xterm 渲染画面成为权威。
+    service
+        .update_screen(ScreenUpdateRequest {
+            session_id: terminal.clone(),
+            screen: "❯ echo ping\nping\n❯ xterm-authoritative".to_string(),
+        })
+        .expect("画面回传失败");
+    service
+        .with_session(&terminal, |session| {
+            assert_eq!(
+                session.screen_snapshot, "❯ echo ping\nping\n❯ xterm-authoritative",
+                "前端回传应覆盖模拟器快照（后写者胜出）"
+            );
+            assert!(session.screen_updates >= 2, "回传应推进画面版本");
+            Ok(())
+        })
+        .expect("读取会话失败");
+
+    // 3. 回传之后的新输出：模拟器再次写入成为最新画面（滚动权威，
+    //    直到下一次回传）——快照服务（terminal status / send）始终
+    //    读到最新可用画面。
+    ingest_screen_update(
+        &service.sessions,
+        &terminal,
+        "\r❯ echo pong\r❯ echo pong\x1b[K",
+    );
+    service
+        .with_session(&terminal, |session| {
+            assert!(
+                session.screen_snapshot.ends_with("echo pong"),
+                "新输出后模拟器再次胜出：{}",
+                session.screen_snapshot
+            );
+            Ok(())
+        })
+        .expect("读取会话失败");
+
+    service
+        .kill_session(SessionIdRequest {
+            session_id: terminal,
         })
         .expect("清理测试终端失败");
 }
@@ -212,7 +288,6 @@ async fn terminal_gc_按前端存活集合回收且不跨会话() {
         "request-a".to_string(),
         ActiveTool {
             terminal_id: "terminal-closed".to_string(),
-            interactive: false,
         },
     );
 

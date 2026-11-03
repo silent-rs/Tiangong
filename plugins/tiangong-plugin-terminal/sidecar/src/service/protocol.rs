@@ -25,6 +25,20 @@ const ZSH_EQUALS_DISABLE_SNIPPET: &str = "__tiangong_equals_restore=''\nif [ -n 
 /// 用户主动 `unsetopt equals` 的偏好不会被打开。
 const ZSH_EQUALS_RESTORE_SNIPPET: &str = "if [ -n \"$__tiangong_equals_restore\" ]; then eval 'setopt equals'; fi\nunset __tiangong_equals_restore\n";
 
+/// wrapper 的中断韧性（issue #697）：`\x03` 的 SIGINT 发给整个前台进程组，
+/// wrapper 脚本经登录 shell `source` 执行——默认语义下脚本随中断终止，
+/// cwd/rc/end marker 全部丢失，命令登记挂死（实测 pending 66 秒+、终端
+/// 不回池、续等等满窗口）。脚本开头捕获 INT：内层命令按 130（128+SIGINT）
+/// 中断后**脚本继续走完 marker 收尾**，退出码如实携带 130；尾部恢复默认
+/// 行为（不改变交互 shell 的 Ctrl-C 手感，窗口只有命令执行期间）。
+///
+/// 写法约束：POSIX 通用（bash/dash/zsh 的 `trap` 与恢复语法一致）；若用户
+/// 命令内部自行 `trap`（覆盖本捕获），尾部 `trap - INT` 统一恢复默认。
+const WRAPPER_INT_TRAP_SNIPPET: &str = "__tiangong_int_trapped=1\ntrap '__tiangong_rc=130' INT\n";
+const WRAPPER_INT_TRAP_RESTORE_SNIPPET: &str =
+    "if [ -n \"$__tiangong_int_trapped\" ]; then trap - INT; fi\nunset __tiangong_int_trapped\n";
+
+#[derive(Debug, Clone)]
 pub(super) struct CommandMarkers {
     pub(super) start: String,
     pub(super) end: String,
@@ -43,7 +57,7 @@ impl CommandMarkers {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct ParsedCommandOutput {
     pub(super) stdout: String,
     pub(super) exit_code: Option<i32>,
@@ -52,63 +66,29 @@ pub(super) struct ParsedCommandOutput {
 }
 
 impl ParsedCommandOutput {
-    pub(super) fn into_response(self, timed_out: bool) -> ExecResponse {
+    pub(super) fn into_response(self) -> ExecResponse {
         ExecResponse {
             stdout: self.stdout,
             stderr: String::new(),
-            exit_code: self.exit_code.unwrap_or(if timed_out { -1 } else { 0 }),
-            timed_out,
+            exit_code: self.exit_code.unwrap_or(0),
+            still_running: false,
             cwd_after: self.cwd_after,
-            interactive_mode: false,
             session_ended: false,
         }
     }
 }
 
-/// 把 Agent 的请求拼成要执行的命令文本。
+/// 校验并返回要执行的 shell 命令文本（cmd 参数，v7 单一入口）。
 ///
-/// **不含 cwd 切换**：工作目录由包装脚本负责（见 [`prepare_posix_command`]），
-/// 不能拼进命令文本。命令文本会原样回显给用户、记入 `running_command`
-/// 并出现在失败摘要里，混入 `cd ... &&` 会让用户看到自己绝不会这样敲的
-/// 命令；宿主每次调用都传会话工作目录，拼进去等于每条命令都平白多一截
-/// 前缀，用户命令与 Agent 命令的形态就不一致了。
-pub(super) fn command_from_request(request: &ExecRequest, shell: ShellKind) -> Result<String> {
-    if let Some(script) = request.script.as_deref() {
-        if script.trim().is_empty() {
-            bail!("script 不能为空");
-        }
-        return Ok(script.to_string());
-    }
-    if request.cmd.trim().is_empty() {
+/// 文本按所在 shell 的语义整体解释（管道、重定向、`&&` 等直接支持）；
+/// **不含 cwd 切换**——工作目录由包装脚本负责（见
+/// [`prepare_posix_command`]），拼进命令文本会污染回显与 `running_command`。
+pub(super) fn command_from_request(request: &ExecRequest, _shell: ShellKind) -> Result<String> {
+    let command = request.cmd.trim();
+    if command.is_empty() {
         bail!("cmd 不能为空");
     }
-    // cmd 可含参数（与 command 插件的 run_command 语义一致）：先按引号
-    // 感知规则拆分成程序名 + 内联参数，再逐词 quote 拼接，避免
-    // "git status" 被整体 quote 成单个命令名导致找不到命令。
-    let (program, inline_args) = split_command(request.cmd.trim());
-    let mut command = shell.quote(&program);
-    if shell == ShellKind::PowerShell {
-        command.insert_str(0, "& ");
-    }
-    for arg in inline_args.iter().chain(request.args.iter()) {
-        command.push(' ');
-        command.push_str(&shell.quote(arg));
-    }
-    Ok(command)
-}
-
-/// 交互模式的工作目录切换：作为独立一行写入 PTY，不并入命令文本。
-pub(super) fn interactive_cwd_command(cwd: Option<&str>, shell: ShellKind) -> Option<String> {
-    let cwd = cwd
-        .map(str::trim)
-        .filter(|cwd| !cwd.is_empty())
-        .map(shell_compatible_cwd)?;
-    let quoted = shell.quote(cwd);
-    Some(match shell {
-        ShellKind::Cmd => format!("cd /d {quoted}\r"),
-        ShellKind::PowerShell => format!("Set-Location -LiteralPath {quoted}\r"),
-        ShellKind::Posix => format!("cd {quoted}\r"),
-    })
+    Ok(command.to_string())
 }
 
 /// 包装脚本里的工作目录切换语句（不进入用户可见的命令文本）。
@@ -132,44 +112,6 @@ fn cwd_prelude(cwd: Option<&str>, shell: ShellKind) -> String {
         ),
         ShellKind::Posix => format!("cd {} || return $?\n", shell.quote(cwd)),
     }
-}
-
-/// 按引号感知规则拆分命令字符串为（程序名, 参数列表）。
-///
-/// 与 command 插件 sidecar 的 `split_command` 语义一致：单双引号成组、
-/// 反斜杠转义，空白分隔；无引号的裸词按空白切分。
-fn split_command(raw: &str) -> (String, Vec<String>) {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-    for ch in raw.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if !in_single && !cfg!(windows) => escaped = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.is_empty() {
-        parts.push(current);
-    }
-    if parts.is_empty() {
-        return (raw.to_string(), Vec::new());
-    }
-    let cmd = parts.remove(0);
-    (cmd, parts)
 }
 
 pub(super) struct PreparedCommand {
@@ -230,15 +172,17 @@ fn prepare_posix_command(
 /// 独立成函数便于测试直接对脚本文本断言。
 fn posix_wrapper_script(inner_path: &str, cwd: Option<&str>, markers: &CommandMarkers) -> String {
     format!(
-        "echo '{}'\n{}{}__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n. {}\n__tiangong_rc=$?\n{}if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n",
+        "echo '{}'\n{}{}{}__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n. {}\n__tiangong_rc=$?\n{}if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n{}\n",
         markers.start,
         cwd_prelude(cwd, ShellKind::Posix),
         ZSH_EQUALS_DISABLE_SNIPPET,
+        WRAPPER_INT_TRAP_SNIPPET,
         inner_path,
         ZSH_EQUALS_RESTORE_SNIPPET,
         markers.cwd,
         markers.exit_code,
         markers.end,
+        WRAPPER_INT_TRAP_RESTORE_SNIPPET,
     )
 }
 
@@ -372,27 +316,6 @@ mod tests {
     use super::*;
     use crate::service::shell::shell_ready_probe;
 
-    #[test]
-    fn split_command_拆分含参数的cmd() {
-        let (program, args) = split_command("git status --short");
-        assert_eq!(program, "git");
-        assert_eq!(args, vec!["status".to_string(), "--short".to_string()]);
-    }
-
-    #[test]
-    fn split_command_引号成组() {
-        let (program, args) = split_command("echo 'a b' \"c d\"");
-        assert_eq!(program, "echo");
-        assert_eq!(args, vec!["a b".to_string(), "c d".to_string()]);
-    }
-
-    #[test]
-    fn split_command_裸命令无参数() {
-        let (program, args) = split_command("ls");
-        assert_eq!(program, "ls");
-        assert!(args.is_empty());
-    }
-
     /// cwd 绝不能拼进命令文本：命令文本会原样回显给用户、记入
     /// running_command 并出现在失败摘要里，混入 `cd ... &&` 会让用户看到
     /// 自己绝不会这样敲的命令（宿主每次调用都带会话工作目录，等于每条
@@ -401,11 +324,8 @@ mod tests {
     fn cwd不进入命令文本而由包装脚本承担() {
         let request = ExecRequest {
             session_id: "s".to_string(),
-            cmd: "cargo".to_string(),
-            args: vec!["clippy".to_string()],
-            script: None,
+            cmd: "cargo clippy".to_string(),
             timeout: None,
-            interactive: false,
             cwd: Some("/work/repo".to_string()),
         };
         let command = command_from_request(&request, ShellKind::Posix).expect("拼装命令失败");
@@ -421,13 +341,32 @@ mod tests {
         let cd_at = wrapper.find(&format!("cd {quoted}")).expect("缺少 cd");
         let source_at = wrapper.find(". '/tmp/inner.sh'").expect("缺少 source");
         assert!(cd_at < source_at, "必须先切目录再执行命令");
+    }
 
-        // 交互模式同样不污染命令文本，改为独立一行写入。
-        assert_eq!(
-            interactive_cwd_command(Some("/work/repo"), ShellKind::Posix),
-            Some(format!("cd {quoted}\r"))
+    /// issue #697：wrapper 必须捕获 SIGINT——`\x03` 打到整个前台进程组，
+    /// 不捕获则脚本随中断终止、end marker 丢失，命令登记挂死。捕获在
+    /// source 之前、恢复在 PAGER 收尾之后（保证 marker 打印前 trap 仍生效）。
+    #[test]
+    fn wrapper捕获中断保证marker收尾() {
+        let markers = CommandMarkers::new("x");
+        let wrapper = posix_wrapper_script("'/tmp/inner.sh'", None, &markers);
+        let trap_at = wrapper
+            .find("trap '__tiangong_rc=130' INT")
+            .expect("缺少 INT 捕获");
+        let source_at = wrapper.find(". '/tmp/inner.sh'").expect("缺少 source");
+        assert!(trap_at < source_at, "捕获必须在执行内层命令之前");
+        let restore_at = wrapper.find("trap - INT").expect("缺少 INT 恢复");
+        let marker_at = wrapper.find("__TIANGONG_CWD_x__").expect("缺少 cwd marker");
+        assert!(
+            restore_at > marker_at,
+            "恢复默认行为放在 marker 收尾之后，避免中断竞态"
         );
-        assert_eq!(interactive_cwd_command(None, ShellKind::Posix), None);
+        // 恢复须由标记变量守护：用户命令内部自行 trap 时统一回默认，
+        // 且不改变交互 shell 的 Ctrl-C 手感。
+        assert!(
+            wrapper.contains("if [ -n \"$__tiangong_int_trapped\" ]; then trap - INT; fi"),
+            "恢复须有条件守护: {wrapper}"
+        );
     }
 
     #[test]

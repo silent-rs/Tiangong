@@ -241,11 +241,30 @@ impl ServerCoreManager {
             return Ok(false);
         }
 
+        // 会话权威工作区需在删除前解析（删除后不可再加载），用于路由
+        // 按工作区隔离的按需 sidecar 连接（与桌面端 prepare_release 一致）。
+        let release_workspace =
+            self.core_manager
+                .load_session(&session_id)
+                .ok()
+                .and_then(|session| {
+                    let cwd = session.cwd.trim();
+                    (!cwd.is_empty()).then(|| std::path::PathBuf::from(cwd))
+                });
+
         // 逻辑删除：原子移动到 trash + 取消 Core。
         self.core_manager
             .delete_session(&session_id)
             .await
             .map_err(anyhow::Error::msg)?;
+
+        // 释放声明实例资源的插件在该会话的全部实例（与桌面端
+        // delete_session 行为一致）：Server 常驻运行时不会随会话文件
+        // 删除而释放。尽力而为，失败不阻塞删除（空闲回收兜底）。
+        tiangong_plugin_runtime::release_session_plugin_resources(
+            &session_id,
+            release_workspace.as_deref(),
+        );
 
         self.trackers
             .lock()

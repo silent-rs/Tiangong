@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "yarn --cwd ../frontend build && yarn --cwd ../frontend dev",
     "beforeBuildCommand": "yarn --cwd ../frontend build",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:15173",
     "frontendDist": "../frontend/dist"
   },
   "app": {

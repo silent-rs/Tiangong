@@ -87,10 +87,41 @@ pub(super) fn publish_display_output(
     session_id: &str,
     data: &str,
 ) {
+    ingest_screen_update(sessions, session_id, data);
     record_display_output(sessions, session_id, data.as_bytes());
+    // 通知推送按订阅广播：无订阅方（CLI / Server）由传输层直接丢弃，
+    // sidecar 不按形态分支。
     let payload =
         serde_json::to_string(&OutputNotification { session_id, data }).unwrap_or_default();
     emit_notification(CHANNEL_OUTPUT, payload);
+}
+
+/// 把一段用户可见输出喂给会话的屏幕模拟器（issue #697）。
+///
+/// 不感知宿主形态、不看前端是否附着：模拟器**始终**维护并写入
+/// `screen_snapshot`。前端真实存在时，同一输出经通知送往前端渲染后由
+/// `terminalScreenUpdate` 回传覆盖（回传必然晚于本写入，后写者胜出，
+/// xterm 渲染画面仍是最终权威）；前端未附着（面板收起、后台会话、
+/// CLI / Server）时模拟器快照即为 `terminal_send` 可用的最新画面。
+/// 由此 terminal_send 的画面不再依赖前端是否在观看。
+pub(super) fn ingest_screen_update(
+    sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
+    session_id: &str,
+    visible: &str,
+) {
+    if visible.is_empty() {
+        return;
+    }
+    let mut sessions = sessions.lock().expect("会话表锁损坏");
+    let Some(session) = sessions.get_mut(session_id) else {
+        return;
+    };
+    let Ok(mut grid) = session.screen.lock() else {
+        return;
+    };
+    grid.feed(visible);
+    session.screen_snapshot = grid.visible_text();
+    session.screen_updates = session.screen_updates.saturating_add(1);
 }
 
 pub(super) fn contains_marker(text: &str) -> bool {

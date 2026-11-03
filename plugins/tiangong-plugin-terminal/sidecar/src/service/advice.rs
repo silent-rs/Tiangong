@@ -13,16 +13,16 @@
 const SCRIPT_LINE_THRESHOLD: usize = 3;
 
 /// 针对命令文本生成用法提示（可能为空）。
-pub(super) fn command_hints(command: &str, is_shell: bool) -> Vec<&'static str> {
+pub(super) fn command_hints(command: &str) -> Vec<&'static str> {
     let mut hints = Vec::new();
     if launches_background(command) {
         hints.push(
-            "检测到 nohup / & 后台启动：后台进程看不到输出、容易遗留。终端插件支持多终端并行，\
-长期运行的服务请用 terminal(action=open) 新开终端，再用 terminal(action=send)（enter=true）在前台运行，\
-用完发送 \\x03 停止并 terminal(action=close)；已启动的后台进程可在 terminal(action=status) 概要中查到 pid 并 kill",
+            "检测到 nohup / & 后台启动：后台进程看不到输出、容易遗留。长期运行的服务让它占一个终端前台跑\
+            （run_command 缺省 terminal_id 会自动选空闲终端或新建，返回的终端编号可用于后续交互），\
+            用完向该终端发送 \\x03 停止并 terminal(action=close)；已启动的后台进程可在 terminal(action=status) 概要中查到 pid 并 kill",
         );
     }
-    if is_shell && script_lines(command) > SCRIPT_LINE_THRESHOLD {
+    if script_lines(command) > SCRIPT_LINE_THRESHOLD {
         hints.push(
             "检测到多行脚本：多步操作请拆成多次 run_command 逐步执行并确认每步结果（某步失败不会\
 被后续步骤掩盖）；已有的脚本文件直接用 run_command 执行（如 bash scripts/x.sh）",
@@ -136,14 +136,10 @@ mod tests {
     #[test]
     fn 多行脚本才提示拆分() {
         let short = "cd crates\ncargo check";
-        assert!(command_hints(short, true).is_empty());
+        assert!(command_hints(short).is_empty());
         let long =
             "#!/bin/sh\nset -e\n\ncargo fmt\ncargo clippy \\\n  -- -D warnings\ncargo test\n";
         assert_eq!(script_lines(long), 4);
-        assert_eq!(command_hints(long, true).len(), 1);
-        assert!(
-            command_hints(long, false).is_empty(),
-            "run_command 不提示多行"
-        );
+        assert_eq!(command_hints(long).len(), 1);
     }
 }

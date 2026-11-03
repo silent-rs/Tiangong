@@ -953,9 +953,10 @@ impl ProcessSidecarConnection {
         if let Some(token) = self.config.server_token.as_deref() {
             command.env(SERVER_TOKEN_ENV, token);
         }
-        // 通过单独的 JSON 信封传递 exec_env，避免把贡献值直接暴露给所有 sidecar。
-        if self.config.plugin_id == "command"
-            && let Ok(env) = self.exec_env.lock()
+        // exec_env 由 core 汇总各插件贡献后全插件回注（Plugin::set_exec_env
+        // 语义，进程内插件与 stdio 连接本就全量收到）；IPC 传输层同样对
+        // 所有 sidecar 下发信封，不再按命令执行插件白名单窄化。
+        if let Ok(env) = self.exec_env.lock()
             && !env.is_empty()
             && let Ok(json) = serde_json::to_string(&*env)
         {

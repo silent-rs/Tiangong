@@ -9,20 +9,24 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 
 use super::protocol::{
-    CommandMarkers, ParsedCommandOutput, command_from_request, interactive_cwd_command,
-    parse_command_output, prepare_non_interactive_command,
+    CommandMarkers, ParsedCommandOutput, command_from_request, parse_command_output,
+    prepare_non_interactive_command,
 };
 use super::readiness::Foreground;
 use super::shell::{shell_ready_probe, shell_ready_probe_completed};
 use super::types::{ExecRequest, ExecResponse};
 use super::{COMMAND_POLL_INTERVAL_MS, SessionEndState, SessionPhase, TerminalService};
-use crate::persist;
 
-/// 非交互命令的静默挂起判定窗口：命令已写入 PTY 后持续无新输出、
-/// 前台被子程序占据、且该程序已把 tty 切成非规范模式（交互程序特征）
-/// 达到本时长，即认定它在等待用户按键。三个条件同时成立时信号很强，
-/// 窗口不需要很长——不必让调用方空等。
-const SILENT_INTERACTIVE_HANG_SECS: u64 = 5;
+/// `run_command` 的单次等待反馈预算默认值（秒，issue #697 续等协议）：
+/// 命令未在此窗口内完成**不中断**，登记为可续等命令并返回 still_running，
+/// Agent 从输出内容自行识别状况（等待输入、交互程序或仍在执行），用
+/// terminal(action=send, input="") 续等收割、status 查询或 \x03 中断。
+/// 短命令（绝大多数）窗口内直接完成，一次调用拿全结果。
+const EXEC_DEFAULT_WAIT_SECS: u64 = 5;
+
+/// `timeout` 参数的上限：与 terminal_send 的等待上限对齐，须小于宿主
+/// 工具时限，保证如实返回 still_running 而不是被宿主按超时取消。
+pub(super) const EXEC_MAX_WAIT_SECS: u64 = 110;
 
 /// 包装脚本夭折的兜底判定：start marker 已出现、退出码标记还没出现、
 /// 输出静默达本时长后，才开始探测「登录 shell 是否已回到提示符」。
@@ -56,14 +60,13 @@ const ABORTED_WRAPPER_PROBE_TIMEOUT_MS: u64 = 800;
 
 impl TerminalService {
     /// 命令使 shell 本身退出时的收尾：已解析出的命令退出码优先于
-    /// shell 退出码（结束标记先于 shell 退出的组合场景），超时语义下
-    /// 固定 -1；已收集输出照常返回，并回收死亡会话。
+    /// shell 退出码（结束标记先于 shell 退出的组合场景）；已收集输出
+    /// 照常返回，并回收死亡会话。
     fn ended_session_response(
         &self,
         session_id: &str,
         start_offset: u64,
         markers: &CommandMarkers,
-        timed_out: bool,
     ) -> Result<ExecResponse> {
         let shell_exit = match self.session_end_state(session_id) {
             SessionEndState::Ended(code) => Some(code),
@@ -75,13 +78,8 @@ impl TerminalService {
         let raw = self.raw_output_since(session_id, start_offset)?;
         let parsed = parse_command_output(&raw, markers);
         let parsed_exit_code = parsed.exit_code;
-        let mut response = parsed.into_response(timed_out);
-        if timed_out {
-            response.exit_code = -1;
-            response.stderr = "命令执行超时".to_string();
-        } else {
-            response.exit_code = parsed_exit_code.or(shell_exit).unwrap_or(0);
-        }
+        let mut response = parsed.into_response();
+        response.exit_code = parsed_exit_code.or(shell_exit).unwrap_or(0);
         response.session_ended = true;
         if shell_exit.is_some() {
             self.reap_ended_session(session_id);
@@ -97,37 +95,27 @@ impl TerminalService {
         })?;
         let _guard = exec_lock.lock().await;
         self.with_session(&request.session_id, |session| {
-            if session.phase == SessionPhase::Interactive {
-                bail!("终端正在运行交互程序");
+            if session.phase != SessionPhase::Idle && session.phase != SessionPhase::Reserved {
+                // 执行中/未就绪的终端不接受新命令：防止包装脚本混进
+                // 正在运行的命令输出或未收尾的 shell。
+                bail!("终端正忙（上条命令未完成或就绪确认未通过），可换终端或不指定 terminal_id 自动选择");
             }
             session.phase = SessionPhase::Running;
             session.running_command = Some(command.clone());
-            session.interactive_started = false;
             Ok(())
         })?;
 
         let result = async {
-            // 与正式版一致：先取消 shell 中的残留输入或前台命令，再用隐藏
-            // 探针确认登录 shell 已重新接管，最后才发送 Agent 的真实命令。
+            // 先取消 shell 中的残留输入或前台命令，再用隐藏探针确认登录
+            // shell 已重新接管，最后才发送 Agent 的真实命令。
             self.prepare_shell_for_command(&request.session_id).await?;
-            if request.interactive {
-                self.exec_interactive(
-                    &request.session_id,
-                    &command,
-                    request.cwd.as_deref(),
-                    request.timeout,
-                )
-                .await
-            } else {
-                self.exec_non_interactive(&request, &command).await
-            }
+            self.exec_non_interactive(&request, &command).await
         }
         .await;
-        let next_phase = if result
-            .as_ref()
-            .is_ok_and(|response| response.interactive_mode)
-        {
-            SessionPhase::Interactive
+        let next_phase = if result.as_ref().is_ok_and(|response| response.still_running) {
+            // 续等交还：命令仍在跑且已登记 pending_send，保持 Running
+            //（不被选终端复用），由续等调用或取消路径收尾。
+            SessionPhase::Running
         } else {
             SessionPhase::Idle
         };
@@ -146,6 +134,64 @@ impl TerminalService {
             Ok(())
         });
         result
+    }
+
+    /// 单次等待预算耗尽：把仍在执行的包装命令登记为待确认命令（带边界
+    /// 标记），交还控制权（issue #697 续等协议）。命令**不被中断**：续等
+    /// 经 terminal(action=send, input="") 走 marker 协议精确收割完整输出
+    /// 与退出码；pending 存在期间新的 enter=true 命令被拒绝，选终端跳过
+    /// 本终端——与交互会话的既有保护一致。
+    fn hand_over_running_command(
+        &self,
+        session_id: &str,
+        command: &str,
+        command_started_at: std::time::Instant,
+        start_offset: u64,
+        markers: &CommandMarkers,
+        budget_secs: u64,
+    ) -> ExecResponse {
+        // 截至目前的解析结果（输出重算一次，忽略环形缓冲截断的极端情形）。
+        let parsed = self
+            .raw_output_since(session_id, start_offset)
+            .map(|raw| parse_command_output(&raw, markers))
+            .unwrap_or_default();
+        // 会话已在等待中死亡：end marker 不会再出现，按死亡收尾。
+        if matches!(
+            self.session_end_state(session_id),
+            SessionEndState::Ended(_)
+        ) {
+            return self
+                .ended_session_response(session_id, start_offset, markers)
+                .unwrap_or_else(|error| {
+                    let mut response = parsed.into_response();
+                    response.stderr = format!("命令交还失败：{error:#}");
+                    response.exit_code = -1;
+                    response
+                });
+        }
+        let registered = self.with_session(session_id, |session| {
+            session.pending_send = Some(super::input::PendingSend::for_exec_handover(
+                command.trim().to_string(),
+                command_started_at,
+                start_offset,
+                markers.clone(),
+            ));
+            Ok(())
+        });
+        if registered.is_err() {
+            let mut response = parsed.into_response();
+            response.stderr = "命令仍在执行，但续等登记失败（终端已不可用）".to_string();
+            response.exit_code = -1;
+            return response;
+        }
+        let mut response = parsed.into_response();
+        response.still_running = true;
+        response.stderr = format!(
+            "命令未在单次等待窗口（{} 秒）内完成，未中断；继续等待并收割完整输出与退出码用 terminal（action=send，terminal_id 对应终端，input 留空），\
+            预期耗时更长的命令可显式设置更长的 timeout（秒，上限 {}），需要中断则发送 \\x03",
+            budget_secs, EXEC_MAX_WAIT_SECS,
+        );
+        response
     }
 
     async fn exec_non_interactive(
@@ -181,9 +227,14 @@ impl TerminalService {
             session.writer.flush().context("刷新终端命令失败")
         })?;
 
-        let deadline = request
+        // 单次等待反馈预算（issue #697）：到点不中断命令，登记续等并
+        // 返回 still_running——打断命令由 Agent 显式发送 `\x03`。
+        let budget_secs = request
             .timeout
-            .map(|timeout| Instant::now() + Duration::from_secs(timeout.max(1)));
+            .unwrap_or(EXEC_DEFAULT_WAIT_SECS)
+            .clamp(1, EXEC_MAX_WAIT_SECS);
+        let budget_deadline = Instant::now() + Duration::from_secs(budget_secs);
+        let command_started_at = Instant::now();
         let mut exit_code_seen_at = None;
         // 静默挂起检测基线：命令写入后输出停止增长的时刻。
         let mut last_raw_total = start_offset;
@@ -230,36 +281,12 @@ impl TerminalService {
             // 命令使 shell 本身退出（如 exit/登出）：end marker 不会出现，
             // 以已解析退出码（无则 shell 退出码）收尾，已收集输出照常返回。
             if matches!(end_state, SessionEndState::Ended(_)) {
-                return self.ended_session_response(
-                    &request.session_id,
-                    start_offset,
-                    &markers,
-                    false,
-                );
+                return self.ended_session_response(&request.session_id, start_offset, &markers);
             }
-            // 没有显式 timeout 的非交互命令：Agent 可能把交互程序
-            //（vi/ssh/python 等）当普通命令执行，程序停在等待输入，
-            // end marker 永不出现——原实现会在此无限轮询，工具调用
-            // 直到会话取消才结束，用户侧表现为"一直卡住"。
-            //
-            // 判据核心是 tty 模式而非静默时长：交互程序必然把 tty 切成
-            // 非规范模式逐键读取，而长时间的编译、测试从不碰 tty 模式，
-            // 因此跑多久都不会被误判打断（见 foreground_is_interactive）。
-            if deadline.is_none()
-                && last_output_at.elapsed() >= Duration::from_secs(SILENT_INTERACTIVE_HANG_SECS)
-                && self.foreground_is_interactive(&request.session_id) == Some(true)
-            {
-                tracing::info!(
-                    session_id = request.session_id,
-                    "命令静默且前台程序已切换 tty 为非规范模式，按交互程序收尾"
-                );
-                let mut response = parsed.into_response(false);
-                response.interactive_mode = true;
-                response.stderr =
-                    "命令长时间无输出，判定为交互程序正在等待输入；终端已转入交互状态，可用 terminal（action=send）继续操作"
-                        .to_string();
-                return Ok(response);
-            }
+            // 交互程序（vi/ssh/REPL/sudo 密码等）不在 exec 内判定（issue
+            // #697 终稿：sidecar 不做理解性判定）：等待窗口耗尽一律按
+            // still_running 交还，Agent 从返回输出自行识别状况并决定
+            // 续等收割、status 查询还是 \x03 中断。
             // 包装脚本夭折兜底：start marker 已出现，但 cwd/rc/end 边界
             // 永远不会再来了。
             //
@@ -314,7 +341,7 @@ impl TerminalService {
                         session_id = request.session_id,
                         "命令包装脚本未正常结束，shell 已回到提示符，按异常结束收尾"
                     );
-                    let mut response = reparsed.into_response(false);
+                    let mut response = reparsed.into_response();
                     response.exit_code = -1;
                     response.stderr =
                         "命令包装脚本未正常结束（命令可能存在语法/解析错误），已返回其结束前的输出"
@@ -322,29 +349,24 @@ impl TerminalService {
                     return Ok(response);
                 }
             }
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                // 会话已在等待中死亡：不能再向其发送中断键，按死亡收尾。
-                if matches!(
-                    self.session_end_state(&request.session_id),
-                    SessionEndState::Ended(_)
-                ) {
-                    return self.ended_session_response(
-                        &request.session_id,
-                        start_offset,
-                        &markers,
-                        true,
-                    );
-                }
-                self.with_session(&request.session_id, |session| {
-                    session
-                        .writer
-                        .write_all(b"\x03")
-                        .context("中断超时命令失败")?;
-                    session.writer.flush().context("刷新中断输入失败")
-                })?;
-                return self
-                    .collect_after_interrupt(&request.session_id, start_offset, &markers)
-                    .await;
+            // 单次等待预算耗尽且命令未完成（issue #697 续等协议）：不中断
+            // 命令，登记为可续等的包装命令并交还控制权——Agent 用
+            // terminal(action=send, input="") 续等收割，下次可显式设置更长
+            // 的 timeout；需要打断则由 Agent 主动发送 \x03。
+            if Instant::now() >= budget_deadline {
+                tracing::info!(
+                    session_id = request.session_id,
+                    budget_secs,
+                    "命令超过单次等待预算仍未完成，登记续等并交还控制权"
+                );
+                return Ok(self.hand_over_running_command(
+                    &request.session_id,
+                    command,
+                    command_started_at,
+                    start_offset,
+                    &markers,
+                    budget_secs,
+                ));
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
@@ -393,128 +415,12 @@ impl TerminalService {
         parsed: ParsedCommandOutput,
         end_state: SessionEndState,
     ) -> ExecResponse {
-        let mut response = parsed.into_response(false);
+        let mut response = parsed.into_response();
         if matches!(end_state, SessionEndState::Ended(_)) {
             response.session_ended = true;
             self.reap_ended_session(session_id);
         }
         response
-    }
-
-    async fn collect_after_interrupt(
-        &self,
-        session_id: &str,
-        start_offset: u64,
-        markers: &CommandMarkers,
-    ) -> Result<ExecResponse> {
-        let grace_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match self.session_end_state(session_id) {
-                // 中断后 shell 也可能随命令退出：按死亡收尾，不再等满宽限期。
-                SessionEndState::Ended(_) => {
-                    return self.ended_session_response(session_id, start_offset, markers, true);
-                }
-                // 已被回收：给出明确错误，不再读输出撞「会话不存在」。
-                SessionEndState::Reaped => {
-                    bail!("终端会话已被关闭或回收，命令结果不可恢复：{session_id}")
-                }
-                SessionEndState::Alive => {}
-            }
-            let raw = self.raw_output_since(session_id, start_offset)?;
-            let parsed = parse_command_output(&raw, markers);
-            if parsed.completed || Instant::now() >= grace_deadline {
-                let confirmed = parsed.completed;
-                let mut response = parsed.into_response(true);
-                response.exit_code = -1;
-                response.stderr = "命令执行超时".to_string();
-                if !confirmed {
-                    // 宽限耗尽不等于命令结束（前台可能忽略 SIGINT 仍在跑）：
-                    // 置回空闲会让状态查询错报空闲、命令信息丢失，下一条
-                    // 命令还会撞上仍在跑的前台命令。标记不可复用并遗留
-                    // 就绪探针，命令收尾后经恢复检测自动回池。
-                    self.mark_unresponsive_with_probe(session_id);
-                }
-                return Ok(response);
-            }
-            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
-        }
-    }
-
-    async fn exec_interactive(
-        &self,
-        session_id: &str,
-        command: &str,
-        cwd: Option<&str>,
-        wait_secs: Option<u64>,
-    ) -> Result<ExecResponse> {
-        let start_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
-        // 交互命令原样写进 PTY（用户看到的就是 Agent 请求的命令本身）。
-        // 工作目录改由前置的独立一行 `cd` 完成，不再污染命令文本。
-        let shell = self.with_session(session_id, |session| Ok(session.shell))?;
-        if let Some(enter) = interactive_cwd_command(cwd, shell) {
-            self.with_session(session_id, |session| {
-                session
-                    .writer
-                    .write_all(enter.as_bytes())
-                    .context("切换交互命令工作目录失败")?;
-                session.writer.flush().context("刷新工作目录切换失败")
-            })?;
-            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
-        }
-        self.with_session(session_id, |session| {
-            session
-                .writer
-                .write_all(format!("{}\r", command.trim_end()).as_bytes())
-                .context("写入交互命令失败")?;
-            session.writer.flush().context("刷新交互命令失败")?;
-            // 程序已真正进入前台：此后取消须保留终端并转交互状态。
-            session.interactive_started = true;
-            Ok(())
-        })?;
-
-        let deadline = Instant::now() + Duration::from_secs(wait_secs.unwrap_or(3).max(1));
-        let mut changed_at = None;
-        let mut last_len = 0;
-        loop {
-            // 已被回收：给出明确错误，不再读输出撞「会话不存在」。
-            if let SessionEndState::Reaped = self.session_end_state(session_id) {
-                bail!("终端会话已被关闭或回收，命令结果不可恢复：{session_id}");
-            }
-            let raw = self.raw_output_since(session_id, start_offset)?;
-            if raw.len() != last_len {
-                last_len = raw.len();
-                changed_at = Some(Instant::now());
-            }
-            if changed_at.is_some_and(|changed| changed.elapsed() >= Duration::from_millis(300))
-                || Instant::now() >= deadline
-            {
-                let mut processor = persist::TerminalLineProcessor::new();
-                let mut lines = processor.process(&String::from_utf8_lossy(&raw));
-                let current = processor.current_line();
-                if !current.trim().is_empty() {
-                    lines.push(current);
-                }
-                // 交互命令也可能结束 shell 本身（如 exit）：标记并回收，
-                // 让下次调用自然新建终端。
-                let session_ended = matches!(
-                    self.session_end_state(session_id),
-                    SessionEndState::Ended(_)
-                );
-                if session_ended {
-                    self.reap_ended_session(session_id);
-                }
-                return Ok(ExecResponse {
-                    stdout: lines.join("\n"),
-                    stderr: String::new(),
-                    exit_code: 0,
-                    timed_out: false,
-                    cwd_after: String::new(),
-                    interactive_mode: true,
-                    session_ended,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
-        }
     }
 }
 
@@ -522,7 +428,7 @@ impl TerminalService {
 mod tests {
     use super::*;
     use crate::service::types::{
-        AcquireRequest, SessionIdRequest, SpawnRequest, default_cols, default_rows,
+        AcquireRequest, SendRequest, SessionIdRequest, SpawnRequest, default_cols, default_rows,
     };
 
     #[cfg(unix)]
@@ -549,10 +455,7 @@ mod tests {
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
                 cmd: "ls".to_string(),
-                args: Vec::new(),
-                script: None,
                 timeout: Some(10),
-                interactive: false,
                 cwd: None,
             })
             .await
@@ -575,44 +478,51 @@ mod tests {
         let second = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("false".to_string()),
+                cmd: "false".to_string(),
                 timeout: Some(10),
-                interactive: false,
                 cwd: None,
             })
             .await
             .expect("第二次命令执行失败");
         assert_eq!(second.exit_code, 1);
 
-        let timed_out = service
+        // v7 续等协议（issue #697）：等待窗口（timeout=1）耗尽命令未完成
+        // → 不中断、登记续等、返回 still_running；用空 input 续等收割
+        // 完整输出与退出码，之后终端仍可继续执行。
+        let handed_over = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("sleep 5".to_string()),
+                cmd: "sleep 2 && echo ran".to_string(),
                 timeout: Some(1),
-                interactive: false,
                 cwd: None,
             })
             .await
-            .expect("超时命令执行失败");
-        assert!(timed_out.timed_out);
-        assert_eq!(timed_out.exit_code, -1);
+            .expect("交还命令执行失败");
+        assert!(handed_over.still_running, "窗口耗尽应交还: {handed_over:?}");
+
+        let harvested = service
+            .send_to_session(SendRequest {
+                scope_id: "terminal-sidecar-test".to_string(),
+                session_id: spawned.session_id.clone(),
+                input: String::new(),
+                wait: Some(10),
+                enter: false,
+            })
+            .await
+            .expect("续等收割失败");
+        assert_eq!(harvested.status, Some("completed"), "续等应收割完成");
+        assert_eq!(harvested.exit_code, 0, "退出码经 marker 精确取得");
+        assert!(harvested.stdout.contains("ran"), "收割输出: {harvested:?}");
 
         let after_timeout = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("printf 'still-alive\\n'".to_string()),
+                cmd: "printf 'still-alive\\n'".to_string(),
                 timeout: Some(10),
-                interactive: false,
                 cwd: None,
             })
             .await
-            .expect("超时后的命令执行失败");
+            .expect("收割后的命令执行失败");
         assert_eq!(after_timeout.exit_code, 0);
         assert_eq!(after_timeout.stdout, "still-alive");
         assert!(
@@ -661,16 +571,13 @@ mod tests {
         let result = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("echo A; echo ===; echo B".to_string()),
+                cmd: "echo A; echo ===; echo B".to_string(),
                 timeout: Some(15),
-                interactive: false,
                 cwd: None,
             })
             .await
             .expect("裸等号命令执行失败");
-        assert!(!result.timed_out, "裸等号命令不应超时: {result:?}");
+        assert!(!result.still_running, "裸等号命令应正常完成: {result:?}");
         assert_eq!(result.exit_code, 0, "裸等号命令应成功: {result:?}");
         let lines: Vec<&str> = result.stdout.lines().map(str::trim).collect();
         assert_eq!(lines, vec!["A", "===", "B"], "输出不完整: {result:?}");
@@ -679,11 +586,8 @@ mod tests {
         let next = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("echo still-usable".to_string()),
+                cmd: "echo still-usable".to_string(),
                 timeout: Some(15),
-                interactive: false,
                 cwd: None,
             })
             .await
@@ -722,16 +626,13 @@ mod tests {
         let result = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("echo before-error\necho \"unclosed\necho never".to_string()),
+                cmd: "echo before-error\necho \"unclosed\necho never".to_string(),
                 timeout: Some(15),
-                interactive: false,
                 cwd: None,
             })
             .await
             .expect("语法错误命令执行失败");
-        assert!(!result.timed_out, "语法错误不应表现为超时: {result:?}");
+        assert!(!result.still_running, "语法错误应正常收尾: {result:?}");
         assert_ne!(result.exit_code, 0, "语法错误应返回非零退出码: {result:?}");
         assert!(
             result.stdout.contains("before-error"),
@@ -773,11 +674,8 @@ mod tests {
             let result = service
                 .exec_in_session(ExecRequest {
                     session_id: spawned.session_id.clone(),
-                    cmd: String::new(),
-                    args: Vec::new(),
-                    script: Some(format!("echo first; sleep {delay}; echo late-output")),
+                    cmd: format!("echo first; sleep {delay}; echo late-output"),
                     timeout: Some(30),
-                    interactive: false,
                     cwd: None,
                 })
                 .await
@@ -826,16 +724,16 @@ mod tests {
         let result = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("sleep 6; echo slow-done".to_string()),
+                cmd: "sleep 6; echo slow-done".to_string(),
                 timeout: Some(30),
-                interactive: false,
                 cwd: None,
             })
             .await
             .expect("静默长命令执行失败");
-        assert!(!result.timed_out, "静默长命令不应超时: {result:?}");
+        assert!(
+            !result.still_running,
+            "窗口内完成的静默命令不交还: {result:?}"
+        );
         assert_eq!(result.exit_code, 0, "静默长命令应正常完成: {result:?}");
         assert!(
             result.stdout.contains("slow-done"),
@@ -876,14 +774,11 @@ mod tests {
         let result = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
                 // 子 shell 里 exec 一个新登录 shell：当前 shell 被顶替，
                 // wrapper 的 cwd/rc/end marker 全部不会再输出。
-                script: Some("echo before-abort; exec sh -i".to_string()),
+                cmd: "echo before-abort; exec sh -i".to_string(),
                 // 不设 timeout：没有兜底就会一路轮询到工具层超时。
                 timeout: None,
-                interactive: false,
                 cwd: None,
             })
             .await
@@ -899,8 +794,8 @@ mod tests {
         );
         assert_eq!(result.exit_code, -1, "夭折应返回 -1: {result:?}");
         assert!(
-            !result.timed_out,
-            "夭折不应被表述为超时（超时会另行标记不可复用）: {result:?}"
+            !result.still_running,
+            "夭折是确定性收尾，不是交还等待: {result:?}"
         );
         assert!(
             result.stdout.contains("before-abort"),
@@ -937,11 +832,8 @@ mod tests {
         let result = service
             .exec_in_session(ExecRequest {
                 session_id: spawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("echo before-exit; exit 7".to_string()),
+                cmd: "echo before-exit; exit 7".to_string(),
                 timeout: Some(10),
-                interactive: false,
                 cwd: None,
             })
             .await
@@ -987,11 +879,8 @@ mod tests {
         let second = service
             .exec_in_session(ExecRequest {
                 session_id: respawned.session_id.clone(),
-                cmd: String::new(),
-                args: Vec::new(),
-                script: Some("echo recovered".to_string()),
+                cmd: "echo recovered".to_string(),
                 timeout: Some(10),
-                interactive: false,
                 cwd: None,
             })
             .await
@@ -1038,7 +927,11 @@ mod tests {
             async move {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
-                    if service.foreground_is_interactive(&terminal) == Some(expected) {
+                    let interactive = matches!(
+                        service.foreground(&terminal),
+                        Some(Foreground::Program { interactive: true })
+                    );
+                    if interactive == expected {
                         return true;
                     }
                     if Instant::now() >= deadline {
@@ -1065,9 +958,11 @@ mod tests {
         // 这一条挂掉就意味着长时间编译/测试会被错误打断。
         write(b"sleep 30\r");
         tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(
-            service.foreground_is_interactive(&terminal),
-            Some(false),
+        assert!(
+            !matches!(
+                service.foreground(&terminal),
+                Some(Foreground::Program { interactive: true })
+            ),
             "安静的长命令（编译/测试同类）不得被判定为交互等待"
         );
 
