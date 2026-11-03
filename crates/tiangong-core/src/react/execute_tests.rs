@@ -2903,7 +2903,7 @@ async fn tool_call_round_persists_end_to_end_tps() {
         .expect("纯工具调用轮应有端到端耗时");
     assert!(elapsed > 0, "端到端耗时应为正数，实际 {elapsed}ms");
     let tps = tool_round.text_tps().expect("纯工具调用轮应有 text_tps");
-    let expected = (120 as f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0;
+    let expected = (120_f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0;
     assert_eq!(
         tps, expected,
         "text_tps 应等于 completion_tokens / 端到端耗时"
