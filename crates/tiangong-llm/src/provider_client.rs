@@ -164,13 +164,12 @@ pub struct ModelResponse {
     /// 消费方（token 统计 / TPS）不再出现空洞。计时在 SSE 消费侧（事件
     /// 真实到达时刻）完成，不经过转发通道。
     ///
-    /// **批量 flush 失真折算**：部分端点/网关把整段响应缓冲后一次性
+    /// **批量 flush 失真置空**：部分端点/网关把整段响应缓冲后一次性
     /// flush，增量间隔不反映真实生成时间（推算速度远超物理上限）。
-    /// 此时取**物理下界**（`completion_tokens ÷ 250 tok/s`，即生成这些
-    /// token 至少需要的时间）——失真轮速度封顶在可信上限，语义为
-    /// 「至少这么快，精确值不可测」。**不回退端到端**：网关预热（实测
-    /// opencode 恒定 ~3s TTFT）与生成无关，计入分母会把短输出轮拉成
-    /// 假低值。真实流式不受影响（速度在物理上限内或事件密度达标）。
+    /// 批量下发销毁了生成时序，真实速度不可观测——任何折算（端到端
+    /// 含网关预热、按物理上限封顶）都是编造的假值，诚实置空（`None`），
+    /// 消费方按「不可测」展示。真实流式不受影响（速度在物理上限内或
+    /// 事件密度达标，保留 decode 真值）。
     ///
     /// TPS 口径：`usage.completion_tokens / output_elapsed_ms`。分子官方
     /// 计量含思考 token，分母含思考输出时段，两者同口径。
@@ -1277,15 +1276,12 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     //    看事件密度（输出增量事件数 / completion_tokens）：真流式逐
     //    token 事件（实测密度 ≈ 1.0），批量/聚合轮密度 ≤ 0.4（2~15 个
     //    大块装下全部 token）。密度 ≥ 0.5 视为真流式，保留 decode；
-    //    否则视为批量伪影，**不再回退端到端**——网关预热（实测 opencode
-    //    恒定 ~3s TTFT）与生成无关，性质等同等待，计入分母会把短输出轮
-    //    拉成假低值（20~30 tok/s）。改用**物理下界**：`tokens ÷ 上限`
-    //    即生成这些 token 至少需要的时间——失真轮速度封顶在上限
-    //    （「至少这么快，精确值不可测」），无预热污染、无伪影。
+    //    否则视为批量伪影，**输出耗时置空（None）**——批量下发销毁了
+    //    生成时序，真实速度不可观测，任何折算（端到端含网关预热、按
+    //    物理上限封顶）都是编造的假值；诚实留空，消费方按「不可测」
+    //    展示。TTFT 仍独立记录（诊断网关/排队）。
     let decode_ms = output_clock.span_ms();
     const MAX_PLAUSIBLE_DECODE_TPS: f64 = 250.0;
-    let physical_floor_ms =
-        |tokens: usize| (tokens as f64 / MAX_PLAUSIBLE_DECODE_TPS * 1000.0).ceil() as u64;
     let output_elapsed_ms = match (decode_ms, usage.completion_tokens) {
         (Some(ms), tokens) if ms > 0 && tokens > 0 => {
             let implied_tps = tokens as f64 * 1000.0 / ms as f64;
@@ -1293,12 +1289,9 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             if implied_tps <= MAX_PLAUSIBLE_DECODE_TPS || streaming_events {
                 Some(ms)
             } else {
-                Some(physical_floor_ms(tokens).max(ms))
+                None
             }
         }
-        // 无输出增量（如纯 usage 流）：有 token 时仍给物理下界，
-        // 保证每条请求都有速度；无 token 则无耗时。
-        (_, tokens) if tokens > 0 => Some(physical_floor_ms(tokens)),
         _ => None,
     };
 
@@ -1801,12 +1794,12 @@ mod tests {
         assert!(response.ttft_ms.is_some_and(|ttft| ttft >= 280));
     }
 
-    /// 批量 flush（2 个大块装下 60 token、推算速度远超物理上限）用物理
-    /// 下界折算：`tokens ÷ 250 tok/s = 240ms`——**不含 300ms 的 TTFT
-    /// 预热**（网关等待与生成无关，计入会把短输出轮拉成假低值），速度
-    /// 封顶在可信上限（「至少 250 tok/s，精确值不可测」）。
+    /// 批量 flush（2 个大块装下 60 token、推算速度远超物理上限）输出
+    /// 耗时置空：批量下发销毁了生成时序，真实速度不可观测——任何折算
+    /// （端到端含 TTFT 预热、物理上限封顶）都是编造的假值。TTFT 仍独立
+    /// 记录（诊断网关/排队）。
     #[tokio::test]
-    async fn batched_flush_uses_physical_floor_without_ttft() {
+    async fn batched_flush_leaves_elapsed_unset() {
         let schedule = vec![
             (
                 Duration::from_millis(300),
@@ -1835,10 +1828,9 @@ mod tests {
             std::time::Instant::now(),
         )
         .await;
-        let elapsed = response.output_elapsed_ms.expect("应有输出耗时");
         assert_eq!(
-            elapsed, 240,
-            "批量 flush 应取物理下界（60 tok ÷ 250 tok/s = 240ms），不含 TTFT"
+            response.output_elapsed_ms, None,
+            "批量 flush 的输出耗时不可测，应诚实置空"
         );
         assert!(
             response.ttft_ms.is_some_and(|ttft| ttft >= 280),

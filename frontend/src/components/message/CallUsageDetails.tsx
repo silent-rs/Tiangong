@@ -77,9 +77,9 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
                 const elapsedMs = textElapsedMsOf(message);
                 const ttftMs = ttftMsOf(message);
                 const speedTitle = [
-                  tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens（含思考）· 生成耗时 ${formatDuration(elapsedMs)}（不含排队；批量端点为物理下界估计）` : null,
+                  tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens（含思考）· 生成耗时 ${formatDuration(elapsedMs)}（不含排队）` : null,
                   ttftMs != null ? `首字延迟 ${formatDuration(ttftMs)}（含排队与 prefill）` : null,
-                ].filter(Boolean).join(" · ") || (tps != null ? "输出速度（含思考）" : "无输出耗时数据");
+                ].filter(Boolean).join(" · ") || (tps != null ? "输出速度（含思考）" : "无输出耗时数据（端点批量下发时速度不可测）");
                 return <tr key={message.id} className="border-b border-border/30">
                   <td className="whitespace-nowrap px-2 py-1 text-muted-foreground/80" title={message.created_at}>{formatMessageTime(message.created_at) || "—"}</td>
                   <td className="max-w-48 break-all px-2 py-1" title={message.created_at}>{entry.model}<span className="block whitespace-nowrap opacity-70">{entry.source === "context_summary" ? "压缩" : "对话"}</span></td>
