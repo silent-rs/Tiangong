@@ -152,14 +152,16 @@ pub enum Role {
         /// 兜底逻辑折算。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
-        /// 输出速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
+        /// 输出速度（tokens/s）。**两阶段语义**：请求定稿时为本请求速度
+        /// （`usage.completion_tokens / text_elapsed_ms`，decode 或失真
+        /// 回退口径）；**turn 收尾时被统一覆盖为本轮聚合速度**（本轮全部
+        /// 请求 `Σ completion_tokens ÷ Σ 有效输出耗时`，同轮每条
+        /// assistant 消息同值）。
         ///
-        /// 官方 completion_tokens **含思考 token**（OpenAI/DeepSeek
-        /// reasoning、Anthropic thinking 均计入），分母为输出阶段耗时
-        /// （首末输出增量间隔，含思考与工具调用增量，不含 TTFT 排队），
-        /// 两者同口径且是真实 decode 吞吐——端到端口径会把长上下文的
-        /// prefill 摊进短输出的工具调用轮，各轮数值不可比；纯工具调用
-        /// 轮（无文本增量）同样有速度。
+        /// 聚合稀释（参考 dsh sessionStats）：批量端点下单请求口径要么
+        /// decode 间隔被压缩成伪影、要么回退端到端含 TTFT，随请求类型
+        /// 波动；聚合后数值平滑且贴近整体真实吞吐。历史数据为旧语义
+        /// （单请求值），消费方无需区分——都表示「该消息呈现的速度」。
         ///
         /// 定稿时由后端算好一并持久化，供历史回看与 token 统计复现，
         /// 无需消费方重算（字段缺失时按公式折算兜底）。
@@ -1143,6 +1145,9 @@ impl Message {
     }
 
     /// 记录模型调用用量（Assistant / Notice 生效）。
+    ///
+    /// 此处写入的 `text_tps` 是**单请求定稿速度**（turn 进行中的展示值）；
+    /// turn 收尾时由 `apply_turn_tps` 统一覆盖为本轮聚合速度，见字段说明。
     pub fn set_usage(&mut self, record: crate::token::MessageUsage) {
         // 先取耗时与 token 数（避免与 role 的可变借用冲突）；流式 usage 快照
         // 递增，每次重算收敛到最终值——比「只算一次」更能覆盖 usage 先于
@@ -1270,6 +1275,19 @@ impl Message {
         match &self.role {
             Role::Assistant { ttft_ms, .. } => *ttft_ms,
             _ => None,
+        }
+    }
+    /// 覆盖输出速度为 turn 聚合值（仅 Assistant 生效）；值变化返回 `true`
+    /// （供收尾判断是否补发 upsert）。见 `text_tps` 字段的聚合语义说明。
+    pub fn set_text_tps(&mut self, tps: f64) -> bool {
+        if let Role::Assistant { text_tps, .. } = &mut self.role {
+            if *text_tps == Some(tps) {
+                return false;
+            }
+            *text_tps = Some(tps);
+            true
+        } else {
+            false
         }
     }
 

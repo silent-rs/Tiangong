@@ -807,6 +807,56 @@ fn format_payload_value(value: &serde_json::Value) -> String {
     }
 }
 
+/// turn 收尾：把本轮聚合输出速度覆盖到本轮全部 assistant 消息的
+/// `text_tps`（同轮同值）。
+///
+/// 聚合 = 本轮各请求 `Σ completion_tokens ÷ Σ 有效 text_elapsed_ms`
+/// （参考 dsh sessionStats 的聚合稀释思路）：批量端点下单请求口径要么
+/// decode 间隔被压缩成伪影、要么回退端到端含 TTFT，随请求类型波动；
+/// 聚合让两种口径互相稀释，数值平滑且贴近整体真实吞吐。请求定稿时
+/// 先写单请求值（turn 进行中的展示），收尾时统一定格为聚合值。
+///
+/// 本轮范围 = turn 锚点（起轮用户消息）之后到末尾的 assistant 消息。
+/// 无任何有效耗时行（全部空洞）时不覆盖，保留定稿时的单请求值。
+/// 返回被更新消息的 ID（供终态前补发 upsert）。
+pub(crate) fn apply_turn_tps(session: &mut Session, turn_anchor_id: &str) -> Vec<String> {
+    let anchor_index = session
+        .messages
+        .iter()
+        .position(|message| message.id == turn_anchor_id);
+    let Some(anchor_index) = anchor_index else {
+        return Vec::new();
+    };
+    let mut tokens = 0u64;
+    let mut elapsed_ms = 0u64;
+    for message in &session.messages[anchor_index + 1..] {
+        if message.role != MessageRole::Assistant {
+            continue;
+        }
+        let Some(usage) = message.usage() else {
+            continue;
+        };
+        if let Some(ms) = message.text_elapsed_ms().filter(|ms| *ms > 0) {
+            tokens += usage.tokens.completion_tokens as u64;
+            elapsed_ms += ms;
+        }
+    }
+    if tokens == 0 || elapsed_ms == 0 {
+        return Vec::new();
+    }
+    let turn_tps = (tokens as f64 * 1000.0 / elapsed_ms as f64 * 10.0).round() / 10.0;
+    let mut updated = Vec::new();
+    for message in &mut session.messages[anchor_index + 1..] {
+        if message.role != MessageRole::Assistant {
+            continue;
+        }
+        if message.set_text_tps(turn_tps) {
+            updated.push(message.id.clone());
+        }
+    }
+    updated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
