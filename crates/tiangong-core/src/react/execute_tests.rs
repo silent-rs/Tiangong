@@ -2884,9 +2884,8 @@ async fn tool_call_round_persists_decode_tps() {
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
 
-    // 第一轮（工具调用轮）的 assistant 消息：输出耗时与速度均已持久化。
-    // mock 为整体 flush（增量间隔 ≈ 0）→ 触发失真回退，elapsed 取端到端
-    // （含 20ms 延迟），必然 > 0 且速度有值——不再是旧口径的 None 空洞。
+    // 第一轮（工具调用轮）：整体 flush → 失真折算物理下界
+    // （120 tok ÷ 250 tok/s = 480ms），不含 20ms 模拟 TTFT；速度封顶 250。
     let tool_round = harness
         .ctx
         .session
@@ -2901,22 +2900,21 @@ async fn tool_call_round_persists_decode_tps() {
         .expect("工具调用 assistant 消息应存在");
     let elapsed = tool_round
         .text_elapsed_ms()
-        .expect("纯工具调用轮应有输出耗时（工具调用增量计时 + 失真回退）");
-    assert!(elapsed > 0, "回退端到端后耗时应为正数，实际 {elapsed}ms");
+        .expect("纯工具调用轮应有输出耗时（物理下界折算）");
+    assert_eq!(
+        elapsed, 480,
+        "整体 flush 应折算物理下界（120 tok ÷ 250 tok/s），不含 TTFT"
+    );
     let tps = tool_round
         .text_tps()
-        .expect("纯工具调用轮应有 text_tps（失真回退后无 0ms 空洞）");
-    let expected = (120_f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0;
-    assert_eq!(
-        tps, expected,
-        "text_tps 应等于 completion_tokens / 输出耗时（decode 或失真回退口径）"
-    );
+        .expect("纯工具调用轮应有 text_tps（失真折算后无空洞）");
+    assert_eq!(tps, 250.0, "失真轮速度封顶在可信上限");
     assert!(
         tool_round.ttft_ms().is_some_and(|ttft| ttft > 0),
         "工具轮应持久化首字延迟（含 20ms 模拟延迟）"
     );
 
-    // 第二轮（文本轮）同样持久化输出耗时。
+    // 第二轮（文本轮）：同样整体 flush → 8 tok ÷ 250 = 32ms 物理下界。
     let text_round = harness
         .ctx
         .session
@@ -2924,6 +2922,6 @@ async fn tool_call_round_persists_decode_tps() {
         .iter()
         .find(|message| message.text_content().contains("已完成。"))
         .expect("最终文本消息应存在");
-    assert!(text_round.text_elapsed_ms().is_some_and(|ms| ms > 0));
+    assert!(text_round.text_elapsed_ms().is_some_and(|ms| ms >= 32));
     assert!(text_round.ttft_ms().is_some_and(|ttft| ttft > 0));
 }
