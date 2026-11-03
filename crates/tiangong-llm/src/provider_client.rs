@@ -157,13 +157,20 @@ pub struct ModelResponse {
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
     pub invalid_tool_calls: Vec<InvalidToolCall>,
-    /// 输出阶段耗时（毫秒）：首个输出增量到最后一个输出增量的间隔，
-    /// **decode 口径**、不含 TTFT（排队 + prefill）。
+    /// 输出阶段耗时（毫秒），**decode 口径**：首个输出增量到最后一个
+    /// 输出增量的间隔，不含 TTFT（排队 + prefill）。
     ///
     /// 输出增量包括正文、思考与**工具调用增量**——纯工具调用轮同样有值，
     /// 消费方（token 统计 / TPS）不再出现空洞。计时在 SSE 消费侧（事件
-    /// 真实到达时刻）完成，不经过转发通道。无任何输出增量（空响应 /
-    /// 非流式）时为 `None`。
+    /// 真实到达时刻）完成，不经过转发通道。
+    ///
+    /// **缓冲式端点失真回退**：部分端点/网关把整段响应缓冲后一次性
+    /// flush，增量间隔不反映真实生成时间（推算速度远超物理上限）。
+    /// 此时回退端到端时长（含 TTFT）——缓冲响应的服务端生成时间全部
+    /// 包含在 TTFT 内，端到端是其唯一可观测的真实口径。真实流式不受
+    /// 影响（推算速度在物理上限内，判别式见计量处）。
+    ///
+    /// 无任何输出增量（空响应 / 非流式）时为 `None`。
     ///
     /// TPS 口径：`usage.completion_tokens / output_elapsed_ms`。分子官方
     /// 计量含思考 token，分母含思考输出时段，两者同口径。
@@ -1247,6 +1254,32 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             .collect()
     };
 
+    // ── 输出耗时定稿（decode 口径 + 缓冲式端点失真回退）──
+    //
+    // 首选 decode 间隔（首末输出增量）；但部分端点/网关（实测 glm-5.3 经
+    // 中继）把整段响应缓冲后一次性 flush——增量在几十毫秒内密集到达，
+    // 间隔完全不反映真实生成时间，推算速度可达数千 tok/s（物理不可能：
+    // 真实 decode 上限约一两百 tok/s）。此时唯一可观测的真实口径是端到端
+    // （缓冲响应的服务端生成时间全部包含在 TTFT 内）。判别式：按 decode
+    // 间隔推算的速度超过物理上限即视为失真，回退端到端。
+    let decode_ms = span_ms(&output_clock);
+    let end_to_end_ms = output_clock
+        .1
+        .map(|last| last.duration_since(request_started_at).as_millis() as u64);
+    const MAX_PLAUSIBLE_DECODE_TPS: f64 = 1000.0;
+    let output_elapsed_ms = match (decode_ms, usage.completion_tokens) {
+        (Some(ms), tokens) if ms > 0 && tokens > 0 => {
+            let implied_tps = tokens as f64 * 1000.0 / ms as f64;
+            if implied_tps <= MAX_PLAUSIBLE_DECODE_TPS {
+                Some(ms)
+            } else {
+                end_to_end_ms
+            }
+        }
+        // 无输出增量（无耗时可用）或计量缺失：端到端兜底（可能仍为 None）。
+        _ => end_to_end_ms,
+    };
+
     ModelResponse {
         text: text.trim().to_string(),
         reasoning_content,
@@ -1255,7 +1288,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
         usage: usage.into(),
         tool_calls,
         invalid_tool_calls: Vec::new(),
-        output_elapsed_ms: span_ms(&output_clock),
+        output_elapsed_ms,
         reasoning_elapsed_ms: span_ms(&reasoning_clock),
         ttft_ms: output_clock
             .0

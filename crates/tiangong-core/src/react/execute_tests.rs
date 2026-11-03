@@ -2816,22 +2816,37 @@ async fn failed_tool_call_does_not_inject_images() {
     );
 }
 
-/// 纯工具调用轮（无正文/思考增量）也应有输出耗时与 TPS（修复回归）。
+/// 挂载带固定延迟的单次 SSE 响应：模拟「服务端生成完毕后整体 flush」的
+/// 缓冲式端点（实测 glm-5.3 经中继即此形态）——增量到达间隔远小于真实
+/// 生成时间，触发 `output_elapsed_ms` 的失真回退（端到端口径）。
+async fn mount_buffered_sse(server: &MockServer, chunks: Vec<serde_json::Value>) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_body(&chunks), "text/event-stream")
+                .set_delay(Duration::from_millis(20)),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+/// 纯工具调用轮（无正文/思考增量）也应有输出耗时与 TPS（修复回归），
+/// 且缓冲式端点（整体 flush、增量间隔 ≈ 0）不产生失真速度。
 ///
 /// 耗时由 provider 在 SSE 消费侧计量（decode 口径，随 `ModelResponse`
 /// 返回）：输出增量包括正文、思考与**工具调用增量**——旧口径只认文本
 /// 增量，纯工具调用轮 `text_elapsed_ms` / `text_tps` 全为 None，token
-/// 统计中该条请求速度列空洞。TTFT（请求发出 → 首个输出增量）作为独立
-/// 延迟指标一并持久化，不参与 TPS 分母。
-///
-/// 本地 mock SSE 一次性下发全部事件，首末输出增量的间隔可能不足 1ms，
-/// `as_millis` 取整为 0 时触发「耗时非正不记速度」的既有保护（tps 为
-/// None 属预期）；耗时 >0 时校验数值等于 completion_tokens / 耗时。
+/// 统计中该条请求速度列空洞。缓冲式端点按增量间隔推算的速度超过物理
+/// 上限时回退端到端（含 TTFT），实测样本中数千 tok/s 的失真值与
+/// elapsed=0 的空洞均由此消除。TTFT 为独立延迟指标一并持久化。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_call_round_persists_decode_tps() {
     let server = MockServer::builder().start().await;
     // 第一轮：纯工具调用（无 content/reasoning delta）+ usage。
-    mount_sse(
+    mount_buffered_sse(
         &server,
         vec![
             tool_call_chunk("call_echo", "echo", r#"{"message":"hi"}"#),
@@ -2840,7 +2855,7 @@ async fn tool_call_round_persists_decode_tps() {
     )
     .await;
     // 第二轮：文本收尾。
-    mount_sse(
+    mount_buffered_sse(
         &server,
         vec![text_delta_chunk("已完成。"), usage_chunk(20, 8)],
     )
@@ -2870,6 +2885,8 @@ async fn tool_call_round_persists_decode_tps() {
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
 
     // 第一轮（工具调用轮）的 assistant 消息：输出耗时与速度均已持久化。
+    // mock 为整体 flush（增量间隔 ≈ 0）→ 触发失真回退，elapsed 取端到端
+    // （含 20ms 延迟），必然 > 0 且速度有值——不再是旧口径的 None 空洞。
     let tool_round = harness
         .ctx
         .session
@@ -2884,21 +2901,19 @@ async fn tool_call_round_persists_decode_tps() {
         .expect("工具调用 assistant 消息应存在");
     let elapsed = tool_round
         .text_elapsed_ms()
-        .expect("纯工具调用轮应有输出耗时（工具调用增量计时）");
-    match (elapsed, tool_round.text_tps()) {
-        (elapsed, Some(tps)) if elapsed > 0 => {
-            let expected = (120_f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0;
-            assert_eq!(
-                tps, expected,
-                "text_tps 应等于 completion_tokens / 输出耗时（decode 口径）"
-            );
-        }
-        (0, None) => { /* 亚毫秒 decode：既有「耗时非正不记速度」保护 */ }
-        (elapsed, tps) => panic!("耗时 {elapsed}ms 与速度 {tps:?} 组合非法"),
-    }
+        .expect("纯工具调用轮应有输出耗时（工具调用增量计时 + 失真回退）");
+    assert!(elapsed > 0, "回退端到端后耗时应为正数，实际 {elapsed}ms");
+    let tps = tool_round
+        .text_tps()
+        .expect("纯工具调用轮应有 text_tps（失真回退后无 0ms 空洞）");
+    let expected = (120_f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0;
+    assert_eq!(
+        tps, expected,
+        "text_tps 应等于 completion_tokens / 输出耗时（decode 或失真回退口径）"
+    );
     assert!(
-        tool_round.ttft_ms().is_some(),
-        "工具轮应持久化首字延迟（首个工具调用增量到达）"
+        tool_round.ttft_ms().is_some_and(|ttft| ttft > 0),
+        "工具轮应持久化首字延迟（含 20ms 模拟延迟）"
     );
 
     // 第二轮（文本轮）同样持久化输出耗时。
@@ -2909,5 +2924,6 @@ async fn tool_call_round_persists_decode_tps() {
         .iter()
         .find(|message| message.text_content().contains("已完成。"))
         .expect("最终文本消息应存在");
-    assert!(text_round.text_elapsed_ms().is_some());
+    assert!(text_round.text_elapsed_ms().is_some_and(|ms| ms > 0));
+    assert!(text_round.ttft_ms().is_some_and(|ttft| ttft > 0));
 }
