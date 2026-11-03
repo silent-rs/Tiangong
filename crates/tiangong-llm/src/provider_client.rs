@@ -157,6 +157,25 @@ pub struct ModelResponse {
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
     pub invalid_tool_calls: Vec<InvalidToolCall>,
+    /// 输出阶段耗时（毫秒），**decode 口径、真实测量**：首个输出增量
+    /// 到最后一个输出增量的实测间隔，不含 TTFT（排队 + prefill / 网关
+    /// 预热）。输出增量包括正文、思考与**工具调用增量**——纯工具调用
+    /// 轮同样有值。计时在 SSE 消费侧（事件真实到达时刻）完成，不做
+    /// 任何阈值判别/置空/折算：批量下发端点的轮次间隔会被压缩（数值
+    /// 偏高），TTFT 列（含网关预热）是解读依据，由消费方自行判断。
+    ///
+    /// TPS 口径：`usage.completion_tokens / output_elapsed_ms`。分子官方
+    /// 计量含思考 token，分母含思考输出时段，两者同口径。
+    pub output_elapsed_ms: Option<u64>,
+    /// 思考阶段耗时（毫秒）：首个思考增量到最后一个思考增量的间隔；
+    /// 仅供思考块「思考耗时」展示，不参与 TPS 分母（思考时段已含在
+    /// `output_elapsed_ms` 内）。无思考增量时为 `None`。
+    pub reasoning_elapsed_ms: Option<u64>,
+    /// 首字延迟 TTFT（毫秒）：请求发出（HTTP 发起）到首个输出增量到达的
+    /// 间隔，含排队与服务端 prefill。独立于 TPS 的延迟指标——诊断「模型
+    /// 卡多久才开始吐字」；与 `output_elapsed_ms` 互补（端到端 ≈ TTFT +
+    /// 输出耗时）。无输出增量时为 `None`。
+    pub ttft_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +404,8 @@ impl SingleProviderClient {
                 | ProviderProtocol::OpenAiChatCompletions
                 | ProviderProtocol::Codex
         );
+        // TTFT 锚点：紧贴 HTTP 发起（provider.stream 内部）之前。
+        let request_started_at = std::time::Instant::now();
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         let response = consume_provider_stream_events_async(
             stream,
@@ -392,6 +413,7 @@ impl SingleProviderClient {
                 let _ = chunk_tx.send(chunk.clone());
             },
             preserve_tool_call_order,
+            request_started_at,
         )
         .await;
         filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
@@ -999,6 +1021,11 @@ fn convert_provider_response(response: ProviderResponse) -> ModelResponse {
             })
             .collect(),
         invalid_tool_calls: Vec::new(),
+        // 非流式响应没有增量事件，无从计量 decode/TTFT（不把整体耗时
+        // 冒充输出阶段耗时）。
+        output_elapsed_ms: None,
+        reasoning_elapsed_ms: None,
+        ttft_ms: None,
     }
 }
 
@@ -1063,6 +1090,8 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     mut stream: ProviderStream,
     on_delta: &mut F,
     preserve_tool_call_order: bool,
+    // TTFT 锚点：HTTP 请求发出前的时刻（由调用方在发起请求处记录）。
+    request_started_at: std::time::Instant,
 ) -> ModelResponse {
     let mut text = String::new();
     let mut reasoning_content = String::new();
@@ -1076,6 +1105,25 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     // 样是文本片段），故流中数字通常低于官方计量；O(1) 计数零开销、不阻塞
     // SSE 读取，官方 usage 到达时校准覆盖，结束收敛到官方计量。
     let mut output_delta_events: u64 = 0;
+    // 输出/思考阶段计时（decode 口径，见 ModelResponse 字段说明）：在 SSE
+    // 消费侧记录事件真实到达时刻（first / last）。
+    #[derive(Default)]
+    struct DeltaClock {
+        first: Option<std::time::Instant>,
+        last: Option<std::time::Instant>,
+    }
+    impl DeltaClock {
+        fn mark(&mut self) {
+            let now = std::time::Instant::now();
+            self.first.get_or_insert(now);
+            self.last = Some(now);
+        }
+        fn span_ms(&self) -> Option<u64> {
+            Some(self.last?.duration_since(self.first?).as_millis() as u64)
+        }
+    }
+    let mut output_clock = DeltaClock::default();
+    let mut reasoning_clock = DeltaClock::default();
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
     let mut tool_call_order: Vec<String> = Vec::new();
@@ -1093,6 +1141,8 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                 if !delta.is_empty() {
                     reasoning_content.push_str(&delta);
                     output_delta_events += 1;
+                    reasoning_clock.mark();
+                    output_clock.mark();
                     on_delta(&ModelStreamChunk {
                         content: String::new(),
                         reasoning_content: delta,
@@ -1110,6 +1160,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                 if !delta.is_empty() {
                     text.push_str(&delta);
                     output_delta_events += 1;
+                    output_clock.mark();
                     on_delta(&ModelStreamChunk {
                         content: delta,
                         reasoning_content: String::new(),
@@ -1126,6 +1177,9 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                 };
                 tool_call_order.push(call.id.clone());
                 tool_calls.insert(call.id, (call.name, args));
+                // 工具调用增量是输出的一部分（decode 计时覆盖纯工具调用轮），
+                // 但不向前端转发——工具调用聚合后随最终响应一次性返回。
+                output_clock.mark();
             }
             ProviderStreamEvent::ToolCallDelta {
                 call_id,
@@ -1142,6 +1196,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                     .entry(actual_id)
                     .or_insert_with(|| (String::new(), String::new()));
                 append_stream_tool_call_arguments(&mut entry.1, &partial_json);
+                output_clock.mark();
             }
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage);
@@ -1197,6 +1252,15 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             .collect()
     };
 
+    // ── 输出耗时定稿（真实测量，不做任何判别）──
+    //
+    // elapsed = 首末输出增量（正文/思考/工具调用增量）的实测间隔，
+    // TPS = 官方 completion_tokens ÷ 实测耗时。测出多少是多少：
+    // 批量下发端点的轮次间隔会被压缩（数值偏高），此时 TTFT 列
+    // （含网关预热）是解读依据，由消费方自行判断，不在计量处
+    // 做任何阈值/置空/折算。
+    let decode_ms = output_clock.span_ms();
+
     ModelResponse {
         text: text.trim().to_string(),
         reasoning_content,
@@ -1205,6 +1269,11 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
         usage: usage.into(),
         tool_calls,
         invalid_tool_calls: Vec::new(),
+        output_elapsed_ms: decode_ms,
+        reasoning_elapsed_ms: reasoning_clock.span_ms(),
+        ttft_ms: output_clock
+            .first
+            .map(|first| first.duration_since(request_started_at).as_millis() as u64),
     }
 }
 
@@ -1260,8 +1329,16 @@ fn block_on_provider_stream(
                 | ProviderDispatch::OpenAiChat(_)
                 | ProviderDispatch::Codex(_)
         );
+        // TTFT 锚点：紧贴 HTTP 发起之前。
+        let request_started_at = std::time::Instant::now();
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
-        Ok(consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await)
+        Ok(consume_provider_stream_events_async(
+            stream,
+            on_delta,
+            preserve_tool_call_order,
+            request_started_at,
+        )
+        .await)
     }
 
     match tokio::runtime::Handle::try_current() {
@@ -1478,6 +1555,9 @@ mod tests {
             },
             tool_calls,
             invalid_tool_calls: Vec::new(),
+            output_elapsed_ms: None,
+            reasoning_elapsed_ms: None,
+            ttft_ms: None,
         }
     }
 
@@ -1630,6 +1710,63 @@ mod tests {
         Box::pin(futures_util::stream::iter(events))
     }
 
+    /// 按时间表合成 ProviderStream：每个事件 yield 前等待指定时长，
+    /// 用于测试 decode 耗时的真实测量。
+    fn paced_stream(schedule: Vec<(Duration, ProviderStreamEvent)>) -> ProviderStream {
+        Box::pin(futures_util::stream::unfold(
+            schedule
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>(),
+            |mut queue| async move {
+                let (delay, event) = queue.pop_front()?;
+                tokio::time::sleep(delay).await;
+                Some((Ok::<_, crate::error::LlmError>(event), queue))
+            },
+        ))
+    }
+
+    /// 输出耗时 = 首末输出增量的实测间隔（真实测量，无任何判别）：TTFT
+    /// 300ms 不计入；三个增量（正文/正文/工具调用）各隔 50ms → elapsed
+    /// ≈ 100ms。
+    #[tokio::test]
+    async fn paced_stream_measures_real_decode_span() {
+        let schedule = vec![
+            (
+                Duration::from_millis(300),
+                ProviderStreamEvent::TextDelta("开".to_string()),
+            ),
+            (
+                Duration::from_millis(50),
+                ProviderStreamEvent::TextDelta("a".to_string()),
+            ),
+            (
+                Duration::from_millis(50),
+                ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: "c1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: json!({"city": "上海"}),
+                }),
+            ),
+            (
+                Duration::ZERO,
+                ProviderStreamEvent::Usage(TokenUsageData::new(10, 3)),
+            ),
+        ];
+        let response = consume_provider_stream_events_async(
+            paced_stream(schedule),
+            &mut |_| {},
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
+        let elapsed = response.output_elapsed_ms.expect("应有输出耗时");
+        assert!(
+            (90..=150).contains(&elapsed),
+            "elapsed 应为首末增量实测间隔（≈100ms），实际 {elapsed}ms"
+        );
+        assert!(response.ttft_ms.is_some_and(|ttft| ttft >= 280));
+    }
+
     #[tokio::test]
     async fn stream_interrupt_finalizes_produced_content() {
         let events = vec![
@@ -1655,9 +1792,13 @@ mod tests {
             )),
         ];
 
-        let response =
-            consume_provider_stream_events_async(synthetic_stream(events), &mut |_| {}, false)
-                .await;
+        let response = consume_provider_stream_events_async(
+            synthetic_stream(events),
+            &mut |_| {},
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
 
         // 断流时未收到终止事件，stop_reason 保持缺失。
         assert_eq!(response.stop_reason, None);
@@ -1684,9 +1825,13 @@ mod tests {
             )),
         ];
 
-        let response =
-            consume_provider_stream_events_async(synthetic_stream(events), &mut |_| {}, false)
-                .await;
+        let response = consume_provider_stream_events_async(
+            synthetic_stream(events),
+            &mut |_| {},
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
 
         assert_eq!(response.text, "");
         assert!(response.tool_calls.is_empty());
@@ -1700,9 +1845,13 @@ mod tests {
             Ok(ProviderStreamEvent::Error("overloaded_error".to_string())),
         ];
 
-        let response =
-            consume_provider_stream_events_async(synthetic_stream(events), &mut |_| {}, false)
-                .await;
+        let response = consume_provider_stream_events_async(
+            synthetic_stream(events),
+            &mut |_| {},
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
 
         assert_eq!(response.text, "写到一半");
         assert_eq!(response.stop_reason, None);

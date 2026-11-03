@@ -75,41 +75,9 @@ pub(super) enum LlmPurpose {
     React { request_injection_generation: u64 },
 }
 
-/// 单个流式阶段的耗时测量：记录首个与最后一个增量的到达时刻。
-#[derive(Default)]
-pub(super) struct StreamElapsed {
-    first: Option<std::time::Instant>,
-    last: Option<std::time::Instant>,
-}
-
-impl StreamElapsed {
-    /// 收到一个非空增量时调用。
-    pub(super) fn record(&mut self) {
-        let now = std::time::Instant::now();
-        if self.first.is_none() {
-            self.first = Some(now);
-        }
-        self.last = Some(now);
-    }
-
-    /// 首末增量间的时长（毫秒）；从未收到增量时为 `None`。
-    pub(super) fn elapsed_ms(&self) -> Option<u64> {
-        Some(self.last?.duration_since(self.first?).as_millis() as u64)
-    }
-}
-
-/// 一次模型流式输出中思考阶段与输出阶段（思考 + 正文）的耗时测量。
-///
-/// `text` 覆盖任何输出增量（思考或正文）的首末时刻：官方
-/// `completion_tokens` 含思考 token，tok/s 的分母必须与它同口径；
-/// 只统计正文会把「长思考 + 短正文」的轮次算成异常高的速度。
-#[derive(Default)]
-pub(super) struct StreamTiming {
-    pub(super) reasoning: StreamElapsed,
-    pub(super) text: StreamElapsed,
-}
-
-/// 活跃模型请求（阶段持有）。
+/// 活跃模型请求（阶段持有）。输出/思考耗时与 TTFT 由 provider 在 SSE
+/// 消费侧计量，随 `ModelResponse` 返回（decode 口径，见其字段说明），
+/// 本结构不再持有计时状态。
 pub(super) struct ActiveLlm {
     pub(super) purpose: LlmPurpose,
     pub(super) pending_msg_id: String,
@@ -119,7 +87,6 @@ pub(super) struct ActiveLlm {
     pub(super) streamed_text: String,
     pub(super) streamed_reasoning: String,
     pub(super) streaming_usage: TokenUsage,
-    pub(super) timing: StreamTiming,
 }
 
 impl ActiveLlm {

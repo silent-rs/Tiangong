@@ -145,19 +145,31 @@ pub enum Role {
         /// 思考阶段耗时（毫秒）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_elapsed_ms: Option<u64>,
-        /// 输出阶段耗时（毫秒）：从首个输出增量（思考或正文）到最后一个。
+        /// 输出阶段耗时（毫秒）：首个输出增量（思考、正文或工具调用）到
+        /// 最后一个输出增量的间隔，decode 口径、不含 TTFT 排队。
+        ///
+        /// 历史数据为旧口径（端到端或纯文本增量间隔）；缺失时消费方按
+        /// 兜底逻辑折算。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
         /// 输出速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
         ///
-        /// 官方 completion_tokens 含思考 token，因此分母取整个输出阶段
-        /// （含思考与正文增量），两者同口径；只统计正文会把「长思考 +
-        /// 短正文」的轮次算成异常高的速度。
+        /// 官方 completion_tokens **含思考 token**（OpenAI/DeepSeek
+        /// reasoning、Anthropic thinking 均计入），分母为输出阶段耗时
+        /// （首末输出增量间隔，含思考与工具调用增量，不含 TTFT 排队），
+        /// 两者同口径且是真实 decode 吞吐——端到端口径会把长上下文的
+        /// prefill 摊进短输出的工具调用轮，各轮数值不可比；纯工具调用
+        /// 轮（无文本增量）同样有速度。
         ///
         /// 定稿时由后端算好一并持久化，供历史回看与 token 统计复现，
         /// 无需消费方重算（字段缺失时按公式折算兜底）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_tps: Option<f64>,
+        /// 首字延迟 TTFT（毫秒）：请求发出（HTTP 发起）到首个输出增量
+        /// 到达，含排队与服务端 prefill。由 provider 在 SSE 消费侧计量。
+        /// 独立延迟指标，不参与 TPS 分母（TPS 为 decode 口径）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttft_ms: Option<u64>,
     },
     /// 工具结果。`tool_call_id` 为空只出现在旧版本会话（曾把运行时轨迹写成
     /// Tool 消息），这类消息不进入模型请求。
@@ -215,6 +227,7 @@ impl Role {
             reasoning_elapsed_ms: None,
             text_elapsed_ms: None,
             text_tps: None,
+            ttft_ms: None,
         }
     }
 
@@ -760,6 +773,7 @@ pub struct MessageRaw {
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
     text_tps: Option<f64>,
+    ttft_ms: Option<u64>,
     duration_ms: Option<u64>,
     // ── 当前格式独有 ──
     source: Option<UserSource>,
@@ -867,6 +881,7 @@ impl MessageRaw {
                     reasoning_elapsed_ms: self.reasoning_elapsed_ms,
                     text_elapsed_ms: self.text_elapsed_ms,
                     text_tps: self.text_tps,
+                    ttft_ms: self.ttft_ms,
                 }
             }
             MessageRole::Tool => Role::Tool {
@@ -1250,6 +1265,13 @@ impl Message {
             _ => None,
         }
     }
+    /// 首字延迟 TTFT（毫秒）；非助手消息为 `None`。
+    pub fn ttft_ms(&self) -> Option<u64> {
+        match &self.role {
+            Role::Assistant { ttft_ms, .. } => *ttft_ms,
+            _ => None,
+        }
+    }
 
     pub fn turn_status(&self) -> Option<TurnStatus> {
         match &self.role {
@@ -1422,6 +1444,7 @@ impl Message {
                 reasoning_elapsed_ms,
                 text_elapsed_ms,
                 text_tps,
+                ttft_ms,
             } => {
                 put("reasoning_content", Value::from(reasoning_content.as_str()));
                 put(
@@ -1447,6 +1470,7 @@ impl Message {
                     "text_tps",
                     serde_json::to_value(text_tps).unwrap_or_default(),
                 );
+                put("ttft_ms", serde_json::to_value(ttft_ms).unwrap_or_default());
             }
             Role::Tool {
                 tool_call_id,

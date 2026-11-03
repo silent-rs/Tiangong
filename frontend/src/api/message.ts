@@ -38,12 +38,16 @@ export type Role =
       usage?: MessageUsage | null;
       /** 本次模型输出思考阶段的耗时（毫秒）。 */
       reasoning_elapsed_ms?: number | null;
-      /** 输出阶段耗时（毫秒）：首个输出增量（思考或正文）到最后一个。 */
+      /** 输出阶段耗时（毫秒）：首个输出增量（思考、正文或工具调用）到
+       *  最后一个，decode 口径、不含 TTFT 排队。 */
       text_elapsed_ms?: number | null;
       /** 输出速度（tokens/s，completion_tokens / 输出阶段耗时，含思考），
        *  定稿时后端算好持久化，供历史回看与 token 统计直接复现；字段
        *  缺失时按 usage/耗时折算兜底。 */
       text_tps?: number | null;
+      /** 首字延迟 TTFT（毫秒）：请求发出到首个输出增量到达，含排队与
+       *  服务端 prefill。独立延迟指标，不参与 TPS 分母。 */
+      ttft_ms?: number | null;
     }
   | {
       role: 'tool';
@@ -134,14 +138,20 @@ export function textTpsOf(message: Message): number | null {
   return roleAs(message, 'assistant')?.text_tps ?? null;
 }
 
+/** 首字延迟 TTFT（毫秒）；非助手消息或旧数据为 `null`。 */
+export function ttftMsOf(message: Message): number | null {
+  return roleAs(message, 'assistant')?.ttft_ms ?? null;
+}
+
 /**
  * 单条 assistant 消息的输出速度（tokens/s）。
  *
  * 优先读后端定稿时持久化的 `text_tps`（历史回看直接复现）；字段缺失时
  * 按 `usage.completion_tokens / (text_elapsed_ms / 1000)` 折算兜底。
- * 官方的 completion_tokens 含思考 token，分母（输出阶段耗时）同样覆盖
- * 思考与正文增量，两者同口径；任一字段缺失/非法/耗时非正数时返回
- * `null`，调用方不展示、不占位误导。
+ * completion_tokens 含思考 token，text_elapsed_ms 为输出阶段耗时
+ * （首末输出增量间隔，含思考与工具调用增量，不含 TTFT 排队），
+ * 两者同口径；任一字段缺失/非法/耗时非正数时返回 `null`，
+ * 调用方不展示、不占位误导。
  */
 export function messageTpsOf(message: Message): number | null {
   const persisted = roleAs(message, 'assistant')?.text_tps;

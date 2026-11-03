@@ -70,6 +70,7 @@ pub(crate) fn append_assistant_tool_call_message(
     calls: &[&tiangong_llm::tool::ToolCall],
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 ) {
     let tool_calls = calls
         .iter()
@@ -92,6 +93,7 @@ pub(crate) fn append_assistant_tool_call_message(
             reasoning_elapsed_ms,
             text_elapsed_ms,
             text_tps: None,
+            ttft_ms,
         },
         vec![ContentBlock::text(text.trim())],
     );
@@ -107,6 +109,7 @@ pub(crate) fn append_assistant_tool_call_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn upsert_assistant_text_message(
     session: &mut Session,
     message_id: &str,
@@ -115,6 +118,7 @@ pub(crate) fn upsert_assistant_text_message(
     reasoning_signature: Option<String>,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 ) {
     let mut message = Message::with_role(
         Role::Assistant {
@@ -125,6 +129,7 @@ pub(crate) fn upsert_assistant_text_message(
             reasoning_elapsed_ms,
             text_elapsed_ms,
             text_tps: None,
+            ttft_ms,
         },
         vec![ContentBlock::text(text)],
     );

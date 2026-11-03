@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowUp, ArrowDown, Database, X } from "lucide-react";
-import { messageTpsOf, textElapsedMsOf, usageOf } from "@/api/message";
+import { messageTpsOf, textElapsedMsOf, ttftMsOf, usageOf } from "@/api/message";
 import { formatDuration, formatMessageTime, formatTpsText } from "./utils";
 import type { MessageItem } from "./types";
 import { cacheHitRate, sumUsage } from "./usage";
@@ -46,23 +46,32 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
             <span>缓存命中 {rateText(cacheHitRate(usage))}</span>
           </div>
           <div className="min-h-0 overflow-auto text-xs text-muted-foreground tabular-nums">
-            <table className="w-full min-w-[680px] text-left">
+            <table className="w-full min-w-[760px] text-left">
               <thead><tr className="border-b border-border/60">
-                {["时间", "模型 / 调用", "状态", "输入", "输出", "速度", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
+                {["时间", "模型 / 调用", "状态", "输入", "输出", "耗时", "速度", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
               </tr></thead>
               <tbody>{calls.map((message) => {
                 const entry = usageOf(message)!;
                 // 速度优先读消息持久化的 text_tps（历史回看直接复现），
-                // 旧数据由 messageTpsOf 按 usage/耗时折算兼容；耗时一并展示。
+                // 旧数据由 messageTpsOf 按 usage/耗时折算兼容；TTFT 为独立
+                // 延迟指标（不参与 TPS 分母），一并展示。
                 const tps = messageTpsOf(message);
                 const elapsedMs = textElapsedMsOf(message);
+                const ttftMs = ttftMsOf(message);
+                const speedTitle = [
+                  tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens（含思考）· 生成耗时 ${formatDuration(elapsedMs)}（不含排队）` : null,
+                  ttftMs != null ? `首字延迟 ${formatDuration(ttftMs)}（含排队与 prefill）` : null,
+                ].filter(Boolean).join(" · ") || (tps != null ? "输出速度（含思考）" : "无输出耗时数据");
                 return <tr key={message.id} className="border-b border-border/30">
                   <td className="whitespace-nowrap px-2 py-1 text-muted-foreground/80" title={message.created_at}>{formatMessageTime(message.created_at) || "—"}</td>
                   <td className="max-w-48 break-all px-2 py-1" title={message.created_at}>{entry.model}<span className="block whitespace-nowrap opacity-70">{entry.source === "context_summary" ? "压缩" : "对话"}</span></td>
                   <td className="whitespace-nowrap px-2 py-1">{statuses[entry.status]}</td>
                   <td className="px-2 py-1">{number.format(entry.prompt_tokens)}</td>
                   <td className="px-2 py-1">{number.format(entry.completion_tokens)}</td>
-                  <td className="whitespace-nowrap px-2 py-1" title={tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens · 输出阶段 ${formatDuration(elapsedMs)}（含思考）` : tps != null ? "输出速度（含思考）" : "无输出耗时数据"}>
+                  <td className="whitespace-nowrap px-2 py-1" title={elapsedMs != null ? `输出阶段实测耗时（不含排队）；首字延迟 ${ttftMs != null ? formatDuration(ttftMs) : "未知"}` : "无输出耗时数据"}>
+                    {elapsedMs != null ? formatDuration(elapsedMs) : "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-2 py-1" title={speedTitle}>
                     {tps != null ? formatTpsText(tps) : "—"}
                   </td>
                   <td className="px-2 py-1">{entry.prompt_cache_hit_tokens == null ? "未知" : number.format(entry.prompt_cache_hit_tokens)}</td>
