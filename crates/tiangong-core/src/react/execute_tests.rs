@@ -2815,3 +2815,108 @@ async fn failed_tool_call_does_not_inject_images() {
         tool_texts[1]
     );
 }
+
+/// 挂载带固定延迟的单次 SSE 响应（供耗时口径测试避免本地亚毫秒竞态）。
+async fn mount_delayed_sse(server: &MockServer, chunks: Vec<serde_json::Value>, delay: Duration) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_body(&chunks), "text/event-stream")
+                .set_delay(delay),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+/// 纯工具调用轮（无正文/思考增量）也应有端到端耗时与 TPS（修复回归）。
+///
+/// 旧口径按「首个输出增量 → 最后一个增量」计量耗时，纯工具调用轮没有
+/// 任何文本增量，`text_elapsed_ms` / `text_tps` 全为 None，token 统计中
+/// 该条请求速度列空洞。新口径从请求发起计时到流完成（即将执行工具），
+/// 每条请求都有真实速度；completion_tokens（含思考）与端到端时长同口径。
+///
+/// 两轮 mock 均加固定延迟：本地 SSE 在并发全量测试下端到端可能不足
+/// 1ms，`as_millis` 取整为 0 会触发「耗时非正不记速度」的既有保护，
+/// 与本测试要验证的口径无关。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_call_round_persists_end_to_end_tps() {
+    let server = MockServer::builder().start().await;
+    // 第一轮：纯工具调用（无 content/reasoning delta）+ usage。
+    mount_delayed_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_echo", "echo", r#"{"message":"hi"}"#),
+            usage_chunk(100, 120),
+        ],
+        Duration::from_millis(20),
+    )
+    .await;
+    // 第二轮：文本收尾。
+    mount_delayed_sse(
+        &server,
+        vec![text_delta_chunk("已完成。"), usage_chunk(20, 8)],
+        Duration::from_millis(20),
+    )
+    .await;
+
+    let invocations = Arc::new(Mutex::new(Vec::new()));
+    let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    overrides.insert(
+        "echo".to_string(),
+        Arc::new(EchoTool {
+            invocations: invocations.clone(),
+        }),
+    );
+    let tool = ToolSpec {
+        name: "echo".to_string(),
+        description: "回显消息".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+            "additionalProperties": false
+        }),
+    };
+    let mut harness = TestHarness::new(&server, vec![tool], overrides);
+
+    let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+    assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+
+    // 第一轮（工具调用轮）的 assistant 消息：端到端耗时与速度均已持久化。
+    let tool_round = harness
+        .ctx
+        .session
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .tool_calls()
+                .iter()
+                .any(|call| call.id == "call_echo")
+        })
+        .expect("工具调用 assistant 消息应存在");
+    let elapsed = tool_round
+        .text_elapsed_ms()
+        .expect("纯工具调用轮应有端到端耗时");
+    assert!(elapsed > 0, "端到端耗时应为正数，实际 {elapsed}ms");
+    let tps = tool_round.text_tps().expect("纯工具调用轮应有 text_tps");
+    let expected = (120 as f64 * 1000.0 / elapsed as f64 * 10.0).round() / 10.0;
+    assert_eq!(
+        tps, expected,
+        "text_tps 应等于 completion_tokens / 端到端耗时"
+    );
+
+    // 第二轮（文本轮）同样持久化速度。
+    let text_round = harness
+        .ctx
+        .session
+        .messages
+        .iter()
+        .find(|message| message.text_content().contains("已完成。"))
+        .expect("最终文本消息应存在");
+    assert!(text_round.text_tps().is_some());
+    assert!(text_round.text_elapsed_ms().is_some_and(|ms| ms > 0));
+}

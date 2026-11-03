@@ -145,14 +145,20 @@ pub enum Role {
         /// 思考阶段耗时（毫秒）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_elapsed_ms: Option<u64>,
-        /// 输出阶段耗时（毫秒）：从首个输出增量（思考或正文）到最后一个。
+        /// 单次 LLM 请求的端到端耗时（毫秒）：从请求发起到输出完成、即将
+        /// 处理工具调用的边界，覆盖 TTFT（排队 + prefill）、思考与正文。
+        ///
+        /// 历史数据为旧口径「首个输出增量到最后一个」；缺失时消费方按
+        /// 兜底逻辑折算。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
         /// 输出速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
         ///
-        /// 官方 completion_tokens 含思考 token，因此分母取整个输出阶段
-        /// （含思考与正文增量），两者同口径；只统计正文会把「长思考 +
-        /// 短正文」的轮次算成异常高的速度。
+        /// 官方 completion_tokens **含思考 token**（OpenAI/DeepSeek
+        /// reasoning、Anthropic thinking 均计入），分母取单次请求的端到端
+        /// 时长（TTFT + 思考 + 正文）——思考在分子分母两侧都完整参与，
+        /// 结果是真实端到端吞吐。只按增量间隔计量会把 TTFT 排除在外导致
+        /// 数值虚高，纯工具调用轮（无文本增量）则会缺失速度。
         ///
         /// 定稿时由后端算好一并持久化，供历史回看与 token 统计复现，
         /// 无需消费方重算（字段缺失时按公式折算兜底）。

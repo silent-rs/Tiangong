@@ -650,7 +650,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
             prompt_cache_hit_tokens: Some(70),
             prompt_cache_miss_tokens: Some(30),
         },
-        timing: StreamTiming::default(),
+        timing: StreamTiming::starting_at(std::time::Instant::now()),
     };
     let mut state = AgentLoopState::new(&harness.ctx);
     state.phase = Some(ExecutionPhase::WaitingModel(active));
