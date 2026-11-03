@@ -100,38 +100,24 @@ impl StreamElapsed {
 
 /// 一次模型请求的耗时测量。
 ///
-/// `request_started_at` 在请求发起（构造上下文 + spawn 流式任务）时记录，
-/// 请求完成（chunk 通道关闭、即将处理工具调用或定稿）时取
-/// [`StreamTiming::request_elapsed_ms`] 作为该次请求的 `text_elapsed_ms`：
-/// 端到端覆盖 TTFT（排队 + prefill）、思考与正文输出。这样
-/// `text_tps = completion_tokens / request_elapsed_ms` 与官方
-/// `completion_tokens` 同口径且是真实吞吐——官方 completion_tokens
-/// **含思考 token**（OpenAI/DeepSeek reasoning、Anthropic thinking 均计入），
-/// 分母端到端时长同样**含思考输出时段**，分子分母两侧思考都完整参与；
-/// 旧口径按「首末增量间隔」计量时不含 TTFT，数值虚高；纯工具调用轮
-/// （无正文/思考增量，首末窗口为空）则完全没有耗时与速度，token 统计
-/// 出现空洞。
+/// `output` 记录**首个输出增量到达 → 最后一个输出增量**的间隔，作为该次
+/// 请求的 `text_elapsed_ms`：decode 吞吐口径，排除 TTFT（排队 + prefill）。
+/// 输出增量包括正文、思考与**工具调用增量**（`ModelStreamChunk::
+/// tool_call_delta` 透传）——纯工具调用轮同样有耗时与速度，token 统计
+/// 不再出现空洞。`text_tps = completion_tokens / output_elapsed_ms` 与
+/// 官方 `completion_tokens` 同口径：分子含思考 token（OpenAI/DeepSeek
+/// reasoning、Anthropic thinking 均计入），分母含思考输出时段。
 ///
-/// `reasoning` 按思考增量首末间隔单独计量，仅供思考块「思考耗时」展示；
-/// 它不是 TPS 分母——思考时间已包含在端到端时长内，若再叠加会重复计时。
+/// 不采用端到端（请求发起 → 完成）口径：工具轮输出 token 少，长上下文
+/// 的 prefill 占比大，端到端平均会把短输出轮拉到远低于真实 decode 速度
+/// 的数值（如 20 vs 90 tok/s），各轮数值不可比。
+///
+/// `reasoning` 按思考增量首末间隔单独计量，仅供思考块「思考耗时」展示。
+#[derive(Default)]
 pub(super) struct StreamTiming {
-    request_started_at: std::time::Instant,
+    /// 输出阶段（正文 + 思考 + 工具调用增量）的首末时刻。
+    pub(super) output: StreamElapsed,
     pub(super) reasoning: StreamElapsed,
-}
-
-impl StreamTiming {
-    /// 以请求发起时刻 `started_at` 开始计量。
-    pub(super) fn starting_at(started_at: std::time::Instant) -> Self {
-        Self {
-            request_started_at: started_at,
-            reasoning: StreamElapsed::default(),
-        }
-    }
-
-    /// 请求发起至今的端到端时长（毫秒）；在请求完成或中断时读取。
-    pub(super) fn request_elapsed_ms(&self) -> u64 {
-        self.request_started_at.elapsed().as_millis() as u64
-    }
 }
 
 /// 活跃模型请求（阶段持有）。

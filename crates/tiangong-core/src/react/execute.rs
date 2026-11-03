@@ -420,9 +420,6 @@ fn start_llm_request(
     text_kind: StreamTextKind,
     tool_choice: Option<ToolChoice>,
 ) -> ActiveLlm {
-    // 端到端计时从请求准备（含上下文构造）前的时刻开始：text_tps 的分母
-    // 覆盖 TTFT 与全部输出，纯工具调用轮同样有真实耗时与速度。
-    let timing_started_at = std::time::Instant::now();
     // 由当前会话上下文构造请求；转换失败（如缺少 system prompt）时由请求
     // 任务返回错误，与模型请求失败走同一条恢复/失败链路。
     let request = ctx
@@ -461,7 +458,7 @@ fn start_llm_request(
         streamed_text: String::new(),
         streamed_reasoning: String::new(),
         streaming_usage: TokenUsage::default(),
-        timing: StreamTiming::starting_at(timing_started_at),
+        timing: StreamTiming::default(),
     }
 }
 
@@ -774,15 +771,24 @@ pub(super) async fn execute_turn(
                             if !chunk.reasoning_content.is_empty() {
                                 active.timing.reasoning.record();
                             }
+                            // 输出阶段计时（decode 口径，见 StreamTiming）：正文、
+                            // 思考与工具调用增量都算输出增量——纯工具调用轮
+                            // 同样有「首个输出增量 → 流完成」的耗时与 TPS。
+                            if !chunk.content.is_empty()
+                                || !chunk.reasoning_content.is_empty()
+                                || chunk.tool_call_delta
+                            {
+                                active.timing.output.record();
+                            }
                             active.streamed_text.push_str(&chunk.content);
                             active.streamed_reasoning.push_str(&chunk.reasoning_content);
                             active.sink.push_chunk(&chunk);
                             state.install_phase(reinstate_llm_phase(active));
                             continue 'agent_loop;
                         }
-                        // 通道关闭：完整响应可收取。此刻即「LLM 请求完成、即将
-                        // 处理工具调用」的边界，端到端时长覆盖 TTFT + 思考 +
-                        // 正文输出，作为 text_tps 的分母（见 StreamTiming）。
+                        // 通道关闭：完整响应可收取。输出耗时取首末输出增量
+                        // 间隔（decode 口径，见 StreamTiming）——不含 TTFT，
+                        // 工具轮与文本轮数值同尺度可比。
                         let ActiveLlm {
                             purpose,
                             pending_msg_id,
@@ -795,7 +801,7 @@ pub(super) async fn execute_turn(
                             ..
                         } = active;
                         let reasoning_elapsed_ms = timing.reasoning.elapsed_ms();
-                        let text_elapsed_ms = Some(timing.request_elapsed_ms());
+                        let text_elapsed_ms = timing.output.elapsed_ms();
                         sink.finish();
                         let response_result = match task.await {
                             Ok(result) => result,

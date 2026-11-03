@@ -145,20 +145,21 @@ pub enum Role {
         /// 思考阶段耗时（毫秒）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_elapsed_ms: Option<u64>,
-        /// 单次 LLM 请求的端到端耗时（毫秒）：从请求发起到输出完成、即将
-        /// 处理工具调用的边界，覆盖 TTFT（排队 + prefill）、思考与正文。
+        /// 输出阶段耗时（毫秒）：首个输出增量（思考、正文或工具调用）到
+        /// 最后一个输出增量的间隔，decode 口径、不含 TTFT 排队。
         ///
-        /// 历史数据为旧口径「首个输出增量到最后一个」；缺失时消费方按
+        /// 历史数据为旧口径（端到端或纯文本增量间隔）；缺失时消费方按
         /// 兜底逻辑折算。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_elapsed_ms: Option<u64>,
         /// 输出速度（tokens/s，`usage.completion_tokens / text_elapsed_ms`）。
         ///
         /// 官方 completion_tokens **含思考 token**（OpenAI/DeepSeek
-        /// reasoning、Anthropic thinking 均计入），分母取单次请求的端到端
-        /// 时长（TTFT + 思考 + 正文）——思考在分子分母两侧都完整参与，
-        /// 结果是真实端到端吞吐。只按增量间隔计量会把 TTFT 排除在外导致
-        /// 数值虚高，纯工具调用轮（无文本增量）则会缺失速度。
+        /// reasoning、Anthropic thinking 均计入），分母为输出阶段耗时
+        /// （首末输出增量间隔，含思考与工具调用增量，不含 TTFT 排队），
+        /// 两者同口径且是真实 decode 吞吐——端到端口径会把长上下文的
+        /// prefill 摊进短输出的工具调用轮，各轮数值不可比；纯工具调用
+        /// 轮（无文本增量）同样有速度。
         ///
         /// 定稿时由后端算好一并持久化，供历史回看与 token 统计复现，
         /// 无需消费方重算（字段缺失时按公式折算兜底）。

@@ -271,6 +271,14 @@ pub struct ModelStreamChunk {
     /// 会低于 token 数）；无任何分词开销。`Usage` 事件到达时用官方
     /// `completion_tokens` 校准覆盖，结束收敛到官方计量。
     pub cumulative_tokens: Option<u64>,
+    /// 本 chunk 携带工具调用增量（`ToolCallStart` / `ToolCallDelta` 透传）。
+    ///
+    /// 工具调用的名称与参数在 provider 层聚合后才随最终响应返回，流式
+    /// 阶段 core 看不到；此标志让输出耗时计时（decode 口径，见 core 的
+    /// `StreamTiming`）把工具增量也视为输出增量——纯工具调用轮同样有
+    /// 「首个输出增量 → 流完成」的耗时与 TPS。正文与思考均为空，
+    /// 对下游 sink / 实时 TPS 累计无影响。
+    pub tool_call_delta: bool,
 }
 
 pub trait ModelClient {
@@ -1098,6 +1106,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                         reasoning_content: delta,
                         usage: None,
                         cumulative_tokens: Some(output_delta_events),
+                        tool_call_delta: false,
                     });
                 }
             }
@@ -1115,6 +1124,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                         reasoning_content: String::new(),
                         usage: None,
                         cumulative_tokens: Some(output_delta_events),
+                        tool_call_delta: false,
                     });
                 }
             }
@@ -1126,6 +1136,15 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                 };
                 tool_call_order.push(call.id.clone());
                 tool_calls.insert(call.id, (call.name, args));
+                // 工具调用增量透传：正文/思考均为空，仅供 core 的输出耗时
+                // 计时识别（decode 口径，见 ModelStreamChunk::tool_call_delta）。
+                on_delta(&ModelStreamChunk {
+                    content: String::new(),
+                    reasoning_content: String::new(),
+                    usage: None,
+                    cumulative_tokens: None,
+                    tool_call_delta: true,
+                });
             }
             ProviderStreamEvent::ToolCallDelta {
                 call_id,
@@ -1142,6 +1161,14 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                     .entry(actual_id)
                     .or_insert_with(|| (String::new(), String::new()));
                 append_stream_tool_call_arguments(&mut entry.1, &partial_json);
+                // 同上：工具参数增量透传，驱动 decode 耗时计时。
+                on_delta(&ModelStreamChunk {
+                    content: String::new(),
+                    reasoning_content: String::new(),
+                    usage: None,
+                    cumulative_tokens: None,
+                    tool_call_delta: true,
+                });
             }
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage);
@@ -1155,6 +1182,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                     reasoning_content: String::new(),
                     usage: Some(usage.clone()),
                     cumulative_tokens: Some(output_delta_events),
+                    tool_call_delta: false,
                 });
             }
             ProviderStreamEvent::Error(message) => {

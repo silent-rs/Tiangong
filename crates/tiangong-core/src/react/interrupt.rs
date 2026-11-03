@@ -83,8 +83,8 @@ pub(super) async fn interrupt_active_work(
                 streaming_usage.merge_snapshot(&response.usage);
             }
             let _ = downgrade_summary;
-            // 中断时刻的端到端时长：取消的请求同样有真实耗时与速度口径
-            // （见 StreamTiming；reasoning 仍为思考增量首末间隔）。
+            // 输出耗时为 decode 口径（首末输出增量间隔，见 StreamTiming）；
+            // 未收到任何增量的中断请求无输出耗时，速度留空。
             persist_interrupted_llm_output(
                 ctx,
                 &purpose,
@@ -92,7 +92,7 @@ pub(super) async fn interrupt_active_work(
                 &streamed_text,
                 &streamed_reasoning,
                 timing.reasoning.elapsed_ms(),
-                Some(timing.request_elapsed_ms()),
+                timing.output.elapsed_ms(),
             );
             emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
             state.accumulated_usage.accumulate(&streaming_usage);

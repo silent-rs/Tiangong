@@ -139,9 +139,10 @@ export function textTpsOf(message: Message): number | null {
  *
  * 优先读后端定稿时持久化的 `text_tps`（历史回看直接复现）；字段缺失时
  * 按 `usage.completion_tokens / (text_elapsed_ms / 1000)` 折算兜底。
- * completion_tokens 含思考 token，text_elapsed_ms 为单次 LLM 请求的
- * 端到端时长（TTFT + 思考 + 正文），思考在分子分母两侧都完整参与；
- * 任一字段缺失/非法/耗时非正数时返回 `null`，调用方不展示、不占位误导。
+ * completion_tokens 含思考 token，text_elapsed_ms 为输出阶段耗时
+ * （首末输出增量间隔，含思考与工具调用增量，不含 TTFT 排队），
+ * 两者同口径；任一字段缺失/非法/耗时非正数时返回 `null`，
+ * 调用方不展示、不占位误导。
  */
 export function messageTpsOf(message: Message): number | null {
   const persisted = roleAs(message, 'assistant')?.text_tps;

@@ -626,6 +626,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
                 prompt_cache_miss_tokens: Some(100 - hit),
             }),
             cumulative_tokens: None,
+            tool_call_delta: false,
         })
         .unwrap();
     }
@@ -650,7 +651,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
             prompt_cache_hit_tokens: Some(70),
             prompt_cache_miss_tokens: Some(30),
         },
-        timing: StreamTiming::starting_at(std::time::Instant::now()),
+        timing: StreamTiming::default(),
     };
     let mut state = AgentLoopState::new(&harness.ctx);
     state.phase = Some(ExecutionPhase::WaitingModel(active));
