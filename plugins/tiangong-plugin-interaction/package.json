@@ -24,6 +24,7 @@
   },
   "resolutions": {
     "vite": "6.4.5",
-    "brace-expansion": "^2.1.7"
+    "brace-expansion": "^2.1.7",
+    "minimatch": "^11.0.1"
   }
 }
