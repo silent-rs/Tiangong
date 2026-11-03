@@ -64,9 +64,9 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
             )}
           </div>
           <div className="min-h-0 overflow-auto text-xs text-muted-foreground tabular-nums">
-            <table className="w-full min-w-[680px] text-left">
+            <table className="w-full min-w-[760px] text-left">
               <thead><tr className="border-b border-border/60">
-                {["时间", "模型 / 调用", "状态", "输入", "输出", "速度", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
+                {["时间", "模型 / 调用", "状态", "输入", "输出", "耗时", "速度", "缓存命中", "命中率"].map((label) => <th key={label} className="px-2 py-1 font-medium whitespace-nowrap">{label}</th>)}
               </tr></thead>
               <tbody>{calls.map((message) => {
                 const entry = usageOf(message)!;
@@ -86,6 +86,9 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
                   <td className="whitespace-nowrap px-2 py-1">{statuses[entry.status]}</td>
                   <td className="px-2 py-1">{number.format(entry.prompt_tokens)}</td>
                   <td className="px-2 py-1">{number.format(entry.completion_tokens)}</td>
+                  <td className="whitespace-nowrap px-2 py-1" title={elapsedMs != null ? `输出阶段实测耗时（不含排队）；首字延迟 ${ttftMs != null ? formatDuration(ttftMs) : "未知"}` : "无输出耗时数据"}>
+                    {elapsedMs != null ? formatDuration(elapsedMs) : "—"}
+                  </td>
                   <td className="whitespace-nowrap px-2 py-1" title={speedTitle}>
                     {tps != null ? formatTpsText(tps) : "—"}
                   </td>
