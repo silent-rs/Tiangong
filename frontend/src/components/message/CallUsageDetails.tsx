@@ -14,19 +14,6 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
   const calls = messages.filter((message) => usageOf(message) != null);
   if (calls.length === 0) return null;
   const usage = sumUsage(calls.map((message) => usageOf(message)!));
-  // 聚合平均速度（参考 dsh sessionStats 口径）：Σ completion_tokens ÷ Σ 有效
-  // 输出耗时。批量端点的伪影轮（token 全计、耗时极小）与回退轮（耗时含
-  // TTFT）在总和中互相稀释，聚合值比单行更贴近整体真实吞吐；无有效耗时
-  // 的行不参与（避免把空洞行当 0ms 计入拉爆平均）。
-  const timed = calls
-    .map((message) => ({
-      tokens: usageOf(message)!.completion_tokens,
-      ms: textElapsedMsOf(message) ?? 0,
-    }))
-    .filter((entry) => entry.ms > 0);
-  const timedTokens = timed.reduce((sum, entry) => sum + entry.tokens, 0);
-  const timedMs = timed.reduce((sum, entry) => sum + entry.ms, 0);
-  const avgTps = timedMs > 0 && timedTokens > 0 ? timedTokens / (timedMs / 1000) : null;
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
@@ -57,11 +44,6 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
             <span>输入 {number.format(usage.prompt_tokens)}</span>
             <span>输出 {number.format(usage.completion_tokens)}</span>
             <span>缓存命中 {rateText(cacheHitRate(usage))}</span>
-            {avgTps != null && (
-              <span title={`${number.format(timedTokens)} tokens ÷ ${(timedMs / 1000).toFixed(1)}s（聚合平均，含全部有耗时的调用）`}>
-                平均输出 {formatTpsText(avgTps)}
-              </span>
-            )}
           </div>
           <div className="min-h-0 overflow-auto text-xs text-muted-foreground tabular-nums">
             <table className="w-full min-w-[760px] text-left">
