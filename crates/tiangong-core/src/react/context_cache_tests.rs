@@ -599,7 +599,7 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
     use crate::react::execute::{AgentLoopState, ToolInjectionBuffer};
-    use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose, StreamTiming};
+    use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
     use tiangong_llm::{ModelResponse, ModelStreamChunk};
 
@@ -626,7 +626,6 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
                 prompt_cache_miss_tokens: Some(100 - hit),
             }),
             cumulative_tokens: None,
-            tool_call_delta: false,
         })
         .unwrap();
     }
@@ -651,7 +650,6 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
             prompt_cache_hit_tokens: Some(70),
             prompt_cache_miss_tokens: Some(30),
         },
-        timing: StreamTiming::default(),
     };
     let mut state = AgentLoopState::new(&harness.ctx);
     state.phase = Some(ExecutionPhase::WaitingModel(active));

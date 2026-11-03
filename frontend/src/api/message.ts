@@ -38,12 +38,16 @@ export type Role =
       usage?: MessageUsage | null;
       /** 本次模型输出思考阶段的耗时（毫秒）。 */
       reasoning_elapsed_ms?: number | null;
-      /** 输出阶段耗时（毫秒）：首个输出增量（思考或正文）到最后一个。 */
+      /** 输出阶段耗时（毫秒）：首个输出增量（思考、正文或工具调用）到
+       *  最后一个，decode 口径、不含 TTFT 排队。 */
       text_elapsed_ms?: number | null;
       /** 输出速度（tokens/s，completion_tokens / 输出阶段耗时，含思考），
        *  定稿时后端算好持久化，供历史回看与 token 统计直接复现；字段
        *  缺失时按 usage/耗时折算兜底。 */
       text_tps?: number | null;
+      /** 首字延迟 TTFT（毫秒）：请求发出到首个输出增量到达，含排队与
+       *  服务端 prefill。独立延迟指标，不参与 TPS 分母。 */
+      ttft_ms?: number | null;
     }
   | {
       role: 'tool';
@@ -132,6 +136,11 @@ export function textElapsedMsOf(message: Message): number | null {
 
 export function textTpsOf(message: Message): number | null {
   return roleAs(message, 'assistant')?.text_tps ?? null;
+}
+
+/** 首字延迟 TTFT（毫秒）；非助手消息或旧数据为 `null`。 */
+export function ttftMsOf(message: Message): number | null {
+  return roleAs(message, 'assistant')?.ttft_ms ?? null;
 }
 
 /**

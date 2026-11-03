@@ -8,6 +8,7 @@ use super::cancel::{abort_and_join, emit_cancel_usage};
 use super::execute::{AgentLoopState, ToolInjectionBuffer, persist_streamed_react_message};
 
 /// 持久化被中断的 LLM 请求已流式收到的部分输出（降级为 React 过程消息）。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn persist_interrupted_llm_output(
     ctx: &mut TurnContext,
     purpose: &LlmPurpose,
@@ -16,6 +17,7 @@ pub(super) fn persist_interrupted_llm_output(
     streamed_reasoning: &str,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 ) {
     match purpose {
         LlmPurpose::React { .. } => {
@@ -26,6 +28,7 @@ pub(super) fn persist_interrupted_llm_output(
                 streamed_reasoning,
                 reasoning_elapsed_ms,
                 text_elapsed_ms,
+                ttft_ms,
             );
         }
     }
@@ -66,7 +69,6 @@ pub(super) async fn interrupt_active_work(
                 mut streamed_reasoning,
                 mut streaming_usage,
                 mut chunk_rx,
-                timing,
                 ..
             } = active;
             sink.finish();
@@ -79,20 +81,27 @@ pub(super) async fn interrupt_active_work(
                 streamed_text.push_str(&chunk.content);
                 streamed_reasoning.push_str(&chunk.reasoning_content);
             }
-            if let Some(response) = completed_response {
+            let mut reasoning_elapsed_ms = None;
+            let mut text_elapsed_ms = None;
+            let mut ttft_ms = None;
+            if let Some(response) = &completed_response {
                 streaming_usage.merge_snapshot(&response.usage);
+                reasoning_elapsed_ms = response.reasoning_elapsed_ms;
+                text_elapsed_ms = response.output_elapsed_ms;
+                ttft_ms = response.ttft_ms;
             }
+            // 耗时由 provider 在 SSE 消费侧计量（decode 口径）；abort 后无
+            // 完整响应时无耗时，速度留空。
             let _ = downgrade_summary;
-            // 输出耗时为 decode 口径（首末输出增量间隔，见 StreamTiming）；
-            // 未收到任何增量的中断请求无输出耗时，速度留空。
             persist_interrupted_llm_output(
                 ctx,
                 &purpose,
                 &pending_msg_id,
                 &streamed_text,
                 &streamed_reasoning,
-                timing.reasoning.elapsed_ms(),
-                timing.output.elapsed_ms(),
+                reasoning_elapsed_ms,
+                text_elapsed_ms,
+                ttft_ms,
             );
             emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
             state.accumulated_usage.accumulate(&streaming_usage);

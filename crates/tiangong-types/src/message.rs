@@ -165,6 +165,11 @@ pub enum Role {
         /// 无需消费方重算（字段缺失时按公式折算兜底）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text_tps: Option<f64>,
+        /// 首字延迟 TTFT（毫秒）：请求发出（HTTP 发起）到首个输出增量
+        /// 到达，含排队与服务端 prefill。由 provider 在 SSE 消费侧计量。
+        /// 独立延迟指标，不参与 TPS 分母（TPS 为 decode 口径）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttft_ms: Option<u64>,
     },
     /// 工具结果。`tool_call_id` 为空只出现在旧版本会话（曾把运行时轨迹写成
     /// Tool 消息），这类消息不进入模型请求。
@@ -222,6 +227,7 @@ impl Role {
             reasoning_elapsed_ms: None,
             text_elapsed_ms: None,
             text_tps: None,
+            ttft_ms: None,
         }
     }
 
@@ -767,6 +773,7 @@ pub struct MessageRaw {
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
     text_tps: Option<f64>,
+    ttft_ms: Option<u64>,
     duration_ms: Option<u64>,
     // ── 当前格式独有 ──
     source: Option<UserSource>,
@@ -874,6 +881,7 @@ impl MessageRaw {
                     reasoning_elapsed_ms: self.reasoning_elapsed_ms,
                     text_elapsed_ms: self.text_elapsed_ms,
                     text_tps: self.text_tps,
+                    ttft_ms: self.ttft_ms,
                 }
             }
             MessageRole::Tool => Role::Tool {
@@ -1257,6 +1265,13 @@ impl Message {
             _ => None,
         }
     }
+    /// 首字延迟 TTFT（毫秒）；非助手消息为 `None`。
+    pub fn ttft_ms(&self) -> Option<u64> {
+        match &self.role {
+            Role::Assistant { ttft_ms, .. } => *ttft_ms,
+            _ => None,
+        }
+    }
 
     pub fn turn_status(&self) -> Option<TurnStatus> {
         match &self.role {
@@ -1429,6 +1444,7 @@ impl Message {
                 reasoning_elapsed_ms,
                 text_elapsed_ms,
                 text_tps,
+                ttft_ms,
             } => {
                 put("reasoning_content", Value::from(reasoning_content.as_str()));
                 put(
@@ -1454,6 +1470,7 @@ impl Message {
                     "text_tps",
                     serde_json::to_value(text_tps).unwrap_or_default(),
                 );
+                put("ttft_ms", serde_json::to_value(ttft_ms).unwrap_or_default());
             }
             Role::Tool {
                 tool_call_id,

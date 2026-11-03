@@ -75,52 +75,9 @@ pub(super) enum LlmPurpose {
     React { request_injection_generation: u64 },
 }
 
-/// 一次模型流式输出中思考阶段增量的耗时测量：记录首个与最后一个思考增量的到达时刻。
-#[derive(Default)]
-pub(super) struct StreamElapsed {
-    first: Option<std::time::Instant>,
-    last: Option<std::time::Instant>,
-}
-
-impl StreamElapsed {
-    /// 收到一个非空增量时调用。
-    pub(super) fn record(&mut self) {
-        let now = std::time::Instant::now();
-        if self.first.is_none() {
-            self.first = Some(now);
-        }
-        self.last = Some(now);
-    }
-
-    /// 首末增量间的时长（毫秒）；从未收到增量时为 `None`。
-    pub(super) fn elapsed_ms(&self) -> Option<u64> {
-        Some(self.last?.duration_since(self.first?).as_millis() as u64)
-    }
-}
-
-/// 一次模型请求的耗时测量。
-///
-/// `output` 记录**首个输出增量到达 → 最后一个输出增量**的间隔，作为该次
-/// 请求的 `text_elapsed_ms`：decode 吞吐口径，排除 TTFT（排队 + prefill）。
-/// 输出增量包括正文、思考与**工具调用增量**（`ModelStreamChunk::
-/// tool_call_delta` 透传）——纯工具调用轮同样有耗时与速度，token 统计
-/// 不再出现空洞。`text_tps = completion_tokens / output_elapsed_ms` 与
-/// 官方 `completion_tokens` 同口径：分子含思考 token（OpenAI/DeepSeek
-/// reasoning、Anthropic thinking 均计入），分母含思考输出时段。
-///
-/// 不采用端到端（请求发起 → 完成）口径：工具轮输出 token 少，长上下文
-/// 的 prefill 占比大，端到端平均会把短输出轮拉到远低于真实 decode 速度
-/// 的数值（如 20 vs 90 tok/s），各轮数值不可比。
-///
-/// `reasoning` 按思考增量首末间隔单独计量，仅供思考块「思考耗时」展示。
-#[derive(Default)]
-pub(super) struct StreamTiming {
-    /// 输出阶段（正文 + 思考 + 工具调用增量）的首末时刻。
-    pub(super) output: StreamElapsed,
-    pub(super) reasoning: StreamElapsed,
-}
-
-/// 活跃模型请求（阶段持有）。
+/// 活跃模型请求（阶段持有）。输出/思考耗时与 TTFT 由 provider 在 SSE
+/// 消费侧计量，随 `ModelResponse` 返回（decode 口径，见其字段说明），
+/// 本结构不再持有计时状态。
 pub(super) struct ActiveLlm {
     pub(super) purpose: LlmPurpose,
     pub(super) pending_msg_id: String,
@@ -130,7 +87,6 @@ pub(super) struct ActiveLlm {
     pub(super) streamed_text: String,
     pub(super) streamed_reasoning: String,
     pub(super) streaming_usage: TokenUsage,
-    pub(super) timing: StreamTiming,
 }
 
 impl ActiveLlm {

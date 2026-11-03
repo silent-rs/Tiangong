@@ -229,7 +229,6 @@ mod tests {
             reasoning_content: String::new(),
             usage: None,
             cumulative_tokens: Some(cumulative),
-            tool_call_delta: false,
         }
     }
 
@@ -240,7 +239,6 @@ mod tests {
             reasoning_content: String::new(),
             usage: Some(TokenUsageData::new(10, calibrated as usize)),
             cumulative_tokens: Some(calibrated),
-            tool_call_delta: false,
         }
     }
 

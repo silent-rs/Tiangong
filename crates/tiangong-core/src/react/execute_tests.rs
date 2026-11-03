@@ -2818,11 +2818,11 @@ async fn failed_tool_call_does_not_inject_images() {
 
 /// 纯工具调用轮（无正文/思考增量）也应有输出耗时与 TPS（修复回归）。
 ///
-/// 旧口径的计时窗口只认文本增量，纯工具调用轮没有任何文本增量，
-/// `text_elapsed_ms` / `text_tps` 全为 None，token 统计中该条请求速度列
-/// 空洞。新口径（decode）把工具调用增量（`ModelStreamChunk::
-/// tool_call_delta` 透传）也算输出增量，每条请求都有真实速度；
-/// completion_tokens（含思考）与输出阶段耗时同口径、不含 TTFT 排队。
+/// 耗时由 provider 在 SSE 消费侧计量（decode 口径，随 `ModelResponse`
+/// 返回）：输出增量包括正文、思考与**工具调用增量**——旧口径只认文本
+/// 增量，纯工具调用轮 `text_elapsed_ms` / `text_tps` 全为 None，token
+/// 统计中该条请求速度列空洞。TTFT（请求发出 → 首个输出增量）作为独立
+/// 延迟指标一并持久化，不参与 TPS 分母。
 ///
 /// 本地 mock SSE 一次性下发全部事件，首末输出增量的间隔可能不足 1ms，
 /// `as_millis` 取整为 0 时触发「耗时非正不记速度」的既有保护（tps 为
@@ -2896,6 +2896,10 @@ async fn tool_call_round_persists_decode_tps() {
         (0, None) => { /* 亚毫秒 decode：既有「耗时非正不记速度」保护 */ }
         (elapsed, tps) => panic!("耗时 {elapsed}ms 与速度 {tps:?} 组合非法"),
     }
+    assert!(
+        tool_round.ttft_ms().is_some(),
+        "工具轮应持久化首字延迟（首个工具调用增量到达）"
+    );
 
     // 第二轮（文本轮）同样持久化输出耗时。
     let text_round = harness

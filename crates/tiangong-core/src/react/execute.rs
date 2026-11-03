@@ -28,9 +28,7 @@ use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 use super::command::{CommandEffect, Deferred, handle_command};
 use super::compression::observed_total_tokens;
 use super::outcome::TurnExecutionResult;
-use super::phase::{
-    ActiveLlm, ExecutionBudget, ExecutionPhase, LlmPurpose, StreamTiming, ToolBatchState,
-};
+use super::phase::{ActiveLlm, ExecutionBudget, ExecutionPhase, LlmPurpose, ToolBatchState};
 use super::request;
 use super::tools;
 
@@ -120,6 +118,7 @@ fn record_tool_calls(
     stage: String,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 ) -> Vec<ToolCall> {
     let calls = response.tool_calls.clone();
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
@@ -163,6 +162,7 @@ fn record_tool_calls(
         &calls.iter().collect::<Vec<_>>(),
         reasoning_elapsed_ms,
         text_elapsed_ms,
+        ttft_ms,
     );
     emit_session_message_upsert(ctx, pending_msg_id);
     calls
@@ -458,7 +458,6 @@ fn start_llm_request(
         streamed_text: String::new(),
         streamed_reasoning: String::new(),
         streaming_usage: TokenUsage::default(),
-        timing: StreamTiming::default(),
     }
 }
 
@@ -469,6 +468,7 @@ pub(super) fn persist_streamed_react_message(
     streamed_reasoning: &str,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 ) {
     if streamed_text.trim().is_empty() && streamed_reasoning.trim().is_empty() {
         return;
@@ -481,6 +481,7 @@ pub(super) fn persist_streamed_react_message(
         None,
         reasoning_elapsed_ms,
         text_elapsed_ms,
+        ttft_ms,
     );
     emit_session_message_upsert(ctx, pending_msg_id);
 }
@@ -510,6 +511,7 @@ fn handle_react_text_response(
     response: &ModelResponse,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 ) -> ReactTextDisposition {
     // 合成占位符不是有效输出，不保存为消息。
     if is_synthetic_tool_call_placeholder(&response.text) {
@@ -524,6 +526,7 @@ fn handle_react_text_response(
         response.reasoning_signature.clone(),
         reasoning_elapsed_ms,
         text_elapsed_ms,
+        ttft_ms,
     );
     emit_session_message_upsert(ctx, pending_msg_id);
     append_runtime_tool_message_with_reasoning(
@@ -768,27 +771,16 @@ pub(super) async fn execute_turn(
                                 let usage: TokenUsage = chunk_usage.clone().into();
                                 active.streaming_usage.merge_snapshot(&usage);
                             }
-                            if !chunk.reasoning_content.is_empty() {
-                                active.timing.reasoning.record();
-                            }
-                            // 输出阶段计时（decode 口径，见 StreamTiming）：正文、
-                            // 思考与工具调用增量都算输出增量——纯工具调用轮
-                            // 同样有「首个输出增量 → 流完成」的耗时与 TPS。
-                            if !chunk.content.is_empty()
-                                || !chunk.reasoning_content.is_empty()
-                                || chunk.tool_call_delta
-                            {
-                                active.timing.output.record();
-                            }
                             active.streamed_text.push_str(&chunk.content);
                             active.streamed_reasoning.push_str(&chunk.reasoning_content);
                             active.sink.push_chunk(&chunk);
                             state.install_phase(reinstate_llm_phase(active));
                             continue 'agent_loop;
                         }
-                        // 通道关闭：完整响应可收取。输出耗时取首末输出增量
-                        // 间隔（decode 口径，见 StreamTiming）——不含 TTFT，
-                        // 工具轮与文本轮数值同尺度可比。
+                        // 通道关闭：完整响应可收取。输出/思考耗时与 TTFT 由
+                        // provider 在 SSE 消费侧计量（decode 口径，见
+                        // ModelResponse 字段说明），随响应带回；错误路径
+                        // （任务失败/panic）无响应也无耗时。
                         let ActiveLlm {
                             purpose,
                             pending_msg_id,
@@ -796,17 +788,23 @@ pub(super) async fn execute_turn(
                             task,
                             streamed_text,
                             streamed_reasoning,
-                            timing,
                             streaming_usage,
                             ..
                         } = active;
-                        let reasoning_elapsed_ms = timing.reasoning.elapsed_ms();
-                        let text_elapsed_ms = timing.output.elapsed_ms();
                         sink.finish();
                         let response_result = match task.await {
                             Ok(result) => result,
                             Err(error) => Err(anyhow::anyhow!(error.to_string())),
                         };
+                        let (reasoning_elapsed_ms, text_elapsed_ms, ttft_ms) =
+                            match &response_result {
+                                Ok(response) => (
+                                    response.reasoning_elapsed_ms,
+                                    response.output_elapsed_ms,
+                                    response.ttft_ms,
+                                ),
+                                Err(_) => (None, None, None),
+                            };
                         let next = complete_llm_request(
                             ctx,
                             &mut state,
@@ -818,6 +816,7 @@ pub(super) async fn execute_turn(
                             streamed_reasoning,
                             reasoning_elapsed_ms,
                             text_elapsed_ms,
+                            ttft_ms,
                             response_result,
                             streaming_usage,
                         );
@@ -895,6 +894,7 @@ fn complete_llm_request(
     streamed_reasoning: String,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
+    ttft_ms: Option<u64>,
     response_result: anyhow::Result<ModelResponse>,
     streaming_usage: TokenUsage,
 ) -> NextStep {
@@ -910,6 +910,7 @@ fn complete_llm_request(
                 &streamed_reasoning,
                 reasoning_elapsed_ms,
                 text_elapsed_ms,
+                ttft_ms,
             );
             let mut response = match response_result {
                 Ok(response) => response,
@@ -978,6 +979,7 @@ fn complete_llm_request(
                     &response,
                     reasoning_elapsed_ms,
                     text_elapsed_ms,
+                    ttft_ms,
                 );
                 NextStep::Phase(finish_react_text(
                     ctx,
@@ -995,6 +997,7 @@ fn complete_llm_request(
                     format!("react-round-{}", state.budget.request_round),
                     reasoning_elapsed_ms,
                     text_elapsed_ms,
+                    ttft_ms,
                 );
                 NextStep::ExecuteTools(ToolBatchState {
                     calls: calls.into_iter().enumerate().collect(),
