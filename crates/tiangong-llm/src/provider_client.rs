@@ -1254,19 +1254,22 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             .collect()
     };
 
-    // ── 输出耗时定稿（decode 口径 + 缓冲式端点失真回退）──
+    // ── 输出耗时定稿（decode 口径 + 批量 flush 失真回退）──
     //
-    // 首选 decode 间隔（首末输出增量）；但部分端点/网关（实测 glm-5.3 经
-    // 中继）把整段响应缓冲后一次性 flush——增量在几十毫秒内密集到达，
-    // 间隔完全不反映真实生成时间，推算速度可达数千 tok/s（物理不可能：
-    // 真实 decode 上限约一两百 tok/s）。此时唯一可观测的真实口径是端到端
-    // （缓冲响应的服务端生成时间全部包含在 TTFT 内）。判别式：按 decode
-    // 间隔推算的速度超过物理上限即视为失真，回退端到端。
+    // 首选 decode 间隔（首末输出增量）；但「工具调用阶段」的增量常被
+    // 批量推送（直连 DeepSeek 官方实测：68~90 token 在 77~92ms 内密集
+    // 到达，事件间隔中位 <1ms；opencode 等代理进一步聚合为 2~6 个大块）
+    // ——间隔完全不反映真实生成时间，推算速度可达数百甚至数千 tok/s。
+    // 实测主流云模型真实 decode 速度 90~182 tok/s，取 2.5 倍裕量作物理
+    // 上限：超过即视为批量 flush 伪影，回退端到端时长（含 TTFT）——批量
+    // 响应的服务端生成时间全部包含在 TTFT 内，端到端是其唯一可观测的
+    // 真实口径。文本增量通常逐 token 流式（间隔真实），不受影响；本地
+    // 高速部署若真实速度超过上限会被误回退为端到端口径（偏低但非虚假）。
     let decode_ms = span_ms(&output_clock);
     let end_to_end_ms = output_clock
         .1
         .map(|last| last.duration_since(request_started_at).as_millis() as u64);
-    const MAX_PLAUSIBLE_DECODE_TPS: f64 = 1000.0;
+    const MAX_PLAUSIBLE_DECODE_TPS: f64 = 250.0;
     let output_elapsed_ms = match (decode_ms, usage.completion_tokens) {
         (Some(ms), tokens) if ms > 0 && tokens > 0 => {
             let implied_tps = tokens as f64 * 1000.0 / ms as f64;

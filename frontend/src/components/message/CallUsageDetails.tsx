@@ -59,8 +59,8 @@ export function CallUsageDetails({ messages }: { messages: MessageItem[] }) {
                 const elapsedMs = textElapsedMsOf(message);
                 const ttftMs = ttftMsOf(message);
                 const speedTitle = [
-                  tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens（含思考）· 生成耗时 ${formatDuration(elapsedMs)}（不含排队）` : null,
-                  ttftMs != null ? `首字延迟 ${formatDuration(ttftMs)}（含排队与 prefill）` : null,
+                  tps != null && elapsedMs != null ? `输出 ${number.format(entry.completion_tokens)} tokens（含思考）· 生成耗时 ${formatDuration(elapsedMs)}` : null,
+                  ttftMs != null ? `首字延迟 ${formatDuration(ttftMs)}（含排队与 prefill；与生成耗时相近时为批量端点回退口径）` : null,
                 ].filter(Boolean).join(" · ") || (tps != null ? "输出速度（含思考）" : "无输出耗时数据");
                 return <tr key={message.id} className="border-b border-border/30">
                   <td className="whitespace-nowrap px-2 py-1 text-muted-foreground/80" title={message.created_at}>{formatMessageTime(message.created_at) || "—"}</td>
