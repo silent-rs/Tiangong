@@ -2884,9 +2884,9 @@ async fn tool_call_round_persists_decode_tps() {
     let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
 
-    // 第一轮（工具调用轮）：整体 flush（增量间隔 ≈ 0、密度远低于逐
-    // token）→ 输出耗时不可测，诚实置空——不再编造（伪影 / 含预热的
-    // 端到端 / 物理上限封顶都是假值）。TTFT 仍持久化（含 20ms 模拟延迟）。
+    // 第一轮（工具调用轮）：输出耗时 = 实测间隔（真实测量，无判别）。
+    // 本地单次 flush 下间隔可能为 0ms（毫秒内全部到达）——elapsed 为
+    // Some(0)、速度按既有「耗时非正不记速度」保护留空；TTFT 独立记录。
     let tool_round = harness
         .ctx
         .session
@@ -2899,18 +2899,16 @@ async fn tool_call_round_persists_decode_tps() {
                 .any(|call| call.id == "call_echo")
         })
         .expect("工具调用 assistant 消息应存在");
-    assert_eq!(
-        tool_round.text_elapsed_ms(),
-        None,
-        "批量 flush 的输出耗时不可测，应置空"
+    assert!(
+        tool_round.text_elapsed_ms().is_some(),
+        "纯工具调用轮应有实测输出耗时（工具调用增量计时）"
     );
-    assert_eq!(tool_round.text_tps(), None, "速度随之不可测");
     assert!(
         tool_round.ttft_ms().is_some_and(|ttft| ttft > 0),
         "工具轮应持久化首字延迟（含 20ms 模拟延迟）"
     );
 
-    // 第二轮（文本轮）同样整体 flush → 不可测置空。
+    // 第二轮（文本轮）同样持久化实测间隔。
     let text_round = harness
         .ctx
         .session
@@ -2918,6 +2916,6 @@ async fn tool_call_round_persists_decode_tps() {
         .iter()
         .find(|message| message.text_content().contains("已完成。"))
         .expect("最终文本消息应存在");
-    assert_eq!(text_round.text_elapsed_ms(), None);
+    assert!(text_round.text_elapsed_ms().is_some());
     assert!(text_round.ttft_ms().is_some_and(|ttft| ttft > 0));
 }

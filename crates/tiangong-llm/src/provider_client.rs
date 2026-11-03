@@ -157,19 +157,12 @@ pub struct ModelResponse {
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
     pub invalid_tool_calls: Vec<InvalidToolCall>,
-    /// 输出阶段耗时（毫秒），**decode 口径**：首个输出增量到最后一个
-    /// 输出增量的间隔，不含 TTFT（排队 + prefill / 网关预热）。
-    ///
-    /// 输出增量包括正文、思考与**工具调用增量**——纯工具调用轮同样有值，
-    /// 消费方（token 统计 / TPS）不再出现空洞。计时在 SSE 消费侧（事件
-    /// 真实到达时刻）完成，不经过转发通道。
-    ///
-    /// **批量 flush 失真置空**：毫秒级 flush 的批量下发（实测 889~
-    /// 1017、6000k+ tok/s 伪影）销毁了生成时序，真实速度不可观测——
-    /// 任何折算都是编造的假值，诚实置空（`None`），消费方按「不可测」
-    /// 展示。轻聚合（每事件数 token、间隔仍反映生成节奏，实测 opencode
-    /// 正文轮 216~296）与真实高速流式（官方 333，事件密度 ≈ 1.0）均
-    /// 保留 decode 真值，判别式见计量处。
+    /// 输出阶段耗时（毫秒），**decode 口径、真实测量**：首个输出增量
+    /// 到最后一个输出增量的实测间隔，不含 TTFT（排队 + prefill / 网关
+    /// 预热）。输出增量包括正文、思考与**工具调用增量**——纯工具调用
+    /// 轮同样有值。计时在 SSE 消费侧（事件真实到达时刻）完成，不做
+    /// 任何阈值判别/置空/折算：批量下发端点的轮次间隔会被压缩（数值
+    /// 偏高），TTFT 列（含网关预热）是解读依据，由消费方自行判断。
     ///
     /// TPS 口径：`usage.completion_tokens / output_elapsed_ms`。分子官方
     /// 计量含思考 token，分母含思考输出时段，两者同口径。
@@ -1113,20 +1106,17 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     // SSE 读取，官方 usage 到达时校准覆盖，结束收敛到官方计量。
     let mut output_delta_events: u64 = 0;
     // 输出/思考阶段计时（decode 口径，见 ModelResponse 字段说明）：在 SSE
-    // 消费侧记录事件真实到达时刻。`events` 计输出增量事件数（含工具调用
-    // 增量），用于判别增量粒度（真流式逐 token vs 批量/聚合大块）。
+    // 消费侧记录事件真实到达时刻（first / last）。
     #[derive(Default)]
     struct DeltaClock {
         first: Option<std::time::Instant>,
         last: Option<std::time::Instant>,
-        events: u64,
     }
     impl DeltaClock {
         fn mark(&mut self) {
             let now = std::time::Instant::now();
             self.first.get_or_insert(now);
             self.last = Some(now);
-            self.events += 1;
         }
         fn span_ms(&self) -> Option<u64> {
             Some(self.last?.duration_since(self.first?).as_millis() as u64)
@@ -1262,40 +1252,14 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             .collect()
     };
 
-    // ── 输出耗时定稿（decode 口径 + 批量 flush 失真回退）──
+    // ── 输出耗时定稿（真实测量，不做任何判别）──
     //
-    // 首选 decode 间隔（首末输出增量）；但「工具调用阶段」的增量常被
-    // 批量推送（直连 DeepSeek 官方实测：68~90 token 在 77~92ms 内密集
-    // 到达；opencode 等代理进一步聚合为 2~6 个大块）——间隔完全不反映
-    // 真实生成时间，推算速度可达数百甚至数千 tok/s。
-    //
-    // 判别分两段（速度阈值与事件密度缺一不可）：
-    // 1. 推算速度 ≤ 500 tok/s：主流模型常规输出（实测 91~182；DeepSeek
-    //    官方长思考/长输出 333；opencode「轻聚合」轮——每事件约 3.7
-    //    token、间隔仍反映生成节奏——实测 216~296，均保留）。上限取
-    //    500：真实值留 1.5 倍裕量，同时拦截毫秒级 flush 的重伪影
-    //    （直连批量工具轮实测 889~1017、6000k+）；
-    // 2. 推算速度 > 500 时看事件密度（输出增量事件数 /
-    //    completion_tokens）：真流式逐 token 事件（实测密度 ≈ 1.0），
-    //    密度 ≥ 0.5 视为真流式保留 decode——为未来更快模型/本地部署
-    //    留豁免；否则视为批量伪影，**输出耗时置空（None）**——批量
-    //    下发销毁了生成时序，真实速度不可观测，任何折算（端到端含
-    //    网关预热、按物理上限封顶）都是编造的假值；诚实留空，消费方
-    //    按「不可测」展示。TTFT 仍独立记录（诊断网关/排队）。
+    // elapsed = 首末输出增量（正文/思考/工具调用增量）的实测间隔，
+    // TPS = 官方 completion_tokens ÷ 实测耗时。测出多少是多少：
+    // 批量下发端点的轮次间隔会被压缩（数值偏高），此时 TTFT 列
+    // （含网关预热）是解读依据，由消费方自行判断，不在计量处
+    // 做任何阈值/置空/折算。
     let decode_ms = output_clock.span_ms();
-    const MAX_PLAUSIBLE_DECODE_TPS: f64 = 500.0;
-    let output_elapsed_ms = match (decode_ms, usage.completion_tokens) {
-        (Some(ms), tokens) if ms > 0 && tokens > 0 => {
-            let implied_tps = tokens as f64 * 1000.0 / ms as f64;
-            let streaming_events = output_clock.events as f64 / tokens as f64 >= 0.5;
-            if implied_tps <= MAX_PLAUSIBLE_DECODE_TPS || streaming_events {
-                Some(ms)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
 
     ModelResponse {
         text: text.trim().to_string(),
@@ -1305,7 +1269,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
         usage: usage.into(),
         tool_calls,
         invalid_tool_calls: Vec::new(),
-        output_elapsed_ms,
+        output_elapsed_ms: decode_ms,
         reasoning_elapsed_ms: reasoning_clock.span_ms(),
         ttft_ms: output_clock
             .first
@@ -1747,7 +1711,7 @@ mod tests {
     }
 
     /// 按时间表合成 ProviderStream：每个事件 yield 前等待指定时长，
-    /// 用于测试 decode 耗时判别（真流式 vs 批量 flush）。
+    /// 用于测试 decode 耗时的真实测量。
     fn paced_stream(schedule: Vec<(Duration, ProviderStreamEvent)>) -> ProviderStream {
         Box::pin(futures_util::stream::unfold(
             schedule
@@ -1761,66 +1725,31 @@ mod tests {
         ))
     }
 
-    /// 真流式高速输出（逐 token 事件、推算速度 >250）保留 decode 口径：
-    /// 首事件延迟 300ms（模拟 TTFT），100 个增量各隔 1ms（decode ≈250ms，
-    /// 推算 ≈400 tok/s，事件密度 1.0）——不得误判批量伪影回退端到端
-    /// （≈550ms+）。两分支（速度可信 / 密度豁免）均应保留 decode。
+    /// 输出耗时 = 首末输出增量的实测间隔（真实测量，无任何判别）：TTFT
+    /// 300ms 不计入；三个增量（正文/正文/工具调用）各隔 50ms → elapsed
+    /// ≈ 100ms。
     #[tokio::test]
-    async fn paced_high_density_stream_keeps_decode_elapsed() {
-        let mut schedule = vec![(
-            Duration::from_millis(300),
-            ProviderStreamEvent::TextDelta("开".to_string()),
-        )];
-        for _ in 0..99 {
-            schedule.push((
-                Duration::from_millis(1),
-                ProviderStreamEvent::TextDelta("a".to_string()),
-            ));
-        }
-        schedule.push((
-            Duration::ZERO,
-            ProviderStreamEvent::Usage(TokenUsageData::new(10, 100)),
-        ));
-        let response = consume_provider_stream_events_async(
-            paced_stream(schedule),
-            &mut |_| {},
-            false,
-            std::time::Instant::now(),
-        )
-        .await;
-        let elapsed = response.output_elapsed_ms.expect("应有输出耗时");
-        assert!(
-            elapsed < 450,
-            "高密度真流式应保留 decode 口径，实际 {elapsed}ms（端到端 ≈550ms+）"
-        );
-        assert!(response.ttft_ms.is_some_and(|ttft| ttft >= 280));
-    }
-
-    /// 批量 flush（2 个大块装下 60 token、推算速度远超物理上限）输出
-    /// 耗时置空：批量下发销毁了生成时序，真实速度不可观测——任何折算
-    /// （端到端含 TTFT 预热、物理上限封顶）都是编造的假值。TTFT 仍独立
-    /// 记录（诊断网关/排队）。
-    #[tokio::test]
-    async fn batched_flush_leaves_elapsed_unset() {
+    async fn paced_stream_measures_real_decode_span() {
         let schedule = vec![
             (
                 Duration::from_millis(300),
+                ProviderStreamEvent::TextDelta("开".to_string()),
+            ),
+            (
+                Duration::from_millis(50),
+                ProviderStreamEvent::TextDelta("a".to_string()),
+            ),
+            (
+                Duration::from_millis(50),
                 ProviderStreamEvent::ToolCallStart(ToolCall {
                     id: "c1".to_string(),
                     name: "get_weather".to_string(),
-                    arguments: json!({"city": "上海", "unit": "celsius", "detail": "x".repeat(40)}),
+                    arguments: json!({"city": "上海"}),
                 }),
             ),
             (
-                Duration::from_millis(3),
-                ProviderStreamEvent::ToolCallDelta {
-                    call_id: "c1".to_string(),
-                    partial_json: "\"extra\":true}".to_string(),
-                },
-            ),
-            (
                 Duration::ZERO,
-                ProviderStreamEvent::Usage(TokenUsageData::new(10, 60)),
+                ProviderStreamEvent::Usage(TokenUsageData::new(10, 3)),
             ),
         ];
         let response = consume_provider_stream_events_async(
@@ -1830,14 +1759,12 @@ mod tests {
             std::time::Instant::now(),
         )
         .await;
-        assert_eq!(
-            response.output_elapsed_ms, None,
-            "批量 flush 的输出耗时不可测，应诚实置空"
-        );
+        let elapsed = response.output_elapsed_ms.expect("应有输出耗时");
         assert!(
-            response.ttft_ms.is_some_and(|ttft| ttft >= 280),
-            "TTFT 仍独立记录（含网关预热）"
+            (90..=150).contains(&elapsed),
+            "elapsed 应为首末增量实测间隔（≈100ms），实际 {elapsed}ms"
         );
+        assert!(response.ttft_ms.is_some_and(|ttft| ttft >= 280));
     }
 
     #[tokio::test]
