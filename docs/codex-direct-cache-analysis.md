@@ -202,3 +202,22 @@ WS-only 之后，协议异常只剩流内形态（HTTP 层恒为 200）。实测
   透明（issue #551 的中断收尾语义不变）；与打开阶段共享 `WS_MAX_ATTEMPTS=3`。
 - 新增观测日志：`Codex WS 流内瞬时错误（产出前）`、
   `Codex WS 流中段瞬时错误（无可见产出）`（均带 attempt）。
+
+### 补记：流间异常统一收敛到消费层（2026-11-04 深夜）
+
+按「同一层修复所有该类异常」要求，流中段重试从 codex provider 上移到
+`provider_client` 消费层（`consume_stream_with_retry`），全部 provider 生效：
+
+- **统一判定**：流中断（Err 项或流内 Error 事件）且**无可见产出**（正文/工具
+  调用；思考增量不算）且错误可重试 → 重发请求；退避 600ms×n 封顶 10s，
+  总额度 **10 次**（原 3 次）。鉴权/请求非法类不重试。
+- **可重试口径**：传输/超时/限流类直接重试；provider 错误按瞬时签名
+  （`server_is_overloaded` / `server_error` / 消息含 retry 提示），签名实现
+  下沉 `crate::stream` 与 codex 共用。
+- **codex**：流中段自愈层删除（避免双层重试相乘），打开阶段（连接/发送/
+  探测）重试保留，额度同步 10 次。
+- **openai_chatcompletions**：补流内 `{"error":{...}}` 载荷解析（此前被静默
+  丢弃，与 codex 裸 error 同类），错误码进 `[code]` 文案。
+
+观测日志：`流中断且无可见产出，统一层重发请求`（带 attempt / backoff_ms /
+error），所有 provider 一致。
