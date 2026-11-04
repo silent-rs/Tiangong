@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "generate-image-openai",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "sidecar": {
     "binary": "tiangong-generate-image-openai-sidecar",
     "transport_protocol": "0.1.0",
@@ -62,7 +62,8 @@
         "description": "通过 Responses API 生成图片的配置",
         "icon": "image",
         "entry": "app/settings.html",
-        "context": []
+        "context": [],
+        "sandbox": "iframe"
       }
     ]
   },
