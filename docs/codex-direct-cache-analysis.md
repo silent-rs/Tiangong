@@ -62,22 +62,77 @@ sub2api（官方身份伪装 + uTLS + session 头 + WS + 粘性调度）用户�
    包裹并去掉 `stream` 字段；握手/发送失败按连接级降级 HTTP。会话内 ReAct 循环
    天然串行，复用同一连接，把同一会话钉在同一服务节点。
 4. **出站 TLS 指纹**（同上文件，改用 `wreq`）：WS 传输从 rustls 换成 `wreq`
-   （BoringSSL），TLS 参数按 Chrome 档位仿真——Chrome 与 Bun（opencode 运行时）
-   同属 BoringSSL 家族，是纯 Rust 生态里最接近的现成档位。`http2(false)` +
-   `http1_only()` 把 ALPN 压成 `http/1.1`（RFC 6455 Upgrade 只能走 HTTP/1.1），
-   与 Bun 建立 WS 时的表现一致。身份头不改：`originator` 仍是 `tiangong`。
+   （BoringSSL），ClientHello 逐项对齐 Bun 1.4.4（opencode 的运行时）：套件表、
+   曲线顺序（含 X25519MLKEM768）、签名算法、扩展顺序、OCSP/SCT 开关全部一致，
+   关闭 GREASE；ALPN 固定 `http/1.1`（RFC 6455 Upgrade 只能走 HTTP/1.1）。
+   身份头不改：`originator` 仍是 `tiangong`，另补一个 `user-agent: tiangong/<ver>`
+   ——真实客户端都会自报 UA，缺 UA 本身是非常规形态信号。
 
-   指纹对照（`https://tls.peet.ws/api/all` 实测，同一机器同一出口）：
+   指纹对照（`https://tls.peet.ws/api/all` 实测）：
 
-   | 客户端 | JA4 | 套件/扩展数 |
+   | 客户端 | JA3 | JA4 |
    | --- | --- | --- |
-   | rustls（改造前） | `t13d1011h1_61a7ad8aa9b6_0d308c48d2a3` | 10 / 11 |
-   | wreq + Chrome149 档位（改造后） | `t13d1516h1_8daaf6152771_d8a2da3f94cd` | 15 / 16 |
+   | rustls（改造前） | `17566ca5ef4f00e808521ac378ef76d0` | `t13d1011h1_61a7ad8aa9b6_0d308c48d2a3` |
+   | Chrome 档位（中间态，不够像） | `cbfc60b0a4d16f23a120b880c65b51ba` | `t13d1516h1_8daaf6152771_d8a2da3f94cd` |
+   | **当前实现** | **`1523504b38f0fae0d881d4b6554aac1b`** | **`t13d1713h1_5b57614c22b0_7f527383e249`** |
+   | Bun 1.4.4 实测（基准） | `1523504b38f0fae0d881d4b6554aac1b` | `t13d1713h1_5b57614c22b0_7f527383e249` |
 
-   改造后加密套件表即 Chrome 序列（`c02b c02c c02f c030 cca8 cca9` …），WS 升级
-   经 BoringSSL 往返验证可用（`wss://ws.postman-echo.com/raw` echo 正常）。
+   `peetprint` 亦逐字相同：`772-771|1.1|4588-29-23-24|1027-…-513|1||4865-…-53|0-10-11-13-16-18-23-35-43-45-5-51-65281`。
+   可复跑的核对：`cargo test -p tiangong-llm -- --ignored codex_ws_fingerprint`。
 
-   注：曾实现的「零产出兜底重试」按产品决策撤除——ChatGPT 直连不做静默重试。
+### 3.1 「opencode 稳定、天工不稳定」的真实原因：重试，不是身份
+
+指纹对齐后，单请求层面两侧并无质的差别（2026-11-04 同一账号、同一时间窗口）：
+
+| 客户端 | 单请求结果 |
+| --- | --- |
+| opencode CLI 连续 6 次 | 6/6 成功（单次耗时仍可达 19s） |
+| 我们的探针（Bun 同指纹 + opencode 全套头 + 真实体量 body） | 4/5、3/5 成功，其余为 `server_is_overloaded` / 通用 error |
+| 我们的探针（Chrome 档位 + tiangong 身份） | 4/6、2/6 成功 |
+
+opencode 的稳定来自 `ModelRetry` / `SessionRunnerRetry`：指数退避 2s→(封顶 10s)、
+最多 10 次，且**只在「本轮尚未产出任何内容」时重试**（源码 `recovery:
+"retry-full"` 分支与 `!recorded.outputStarted` 判定）。它把上游约 2~4 成的单请求
+降载完全吃掉，外部只看到「永远成功」。天工按产品决策不做静默重试，因此每一次
+降载都会直达用户。
+
+结论：指纹改造把「几乎必降载」拉到「与 opencode 同档」，但要做到 opencode 那种
+观感，仍需要零产出重试（语义上无重复内容风险，因为只在没有任何 delta 时重试）。
+重试只解决「能不能用」，缓存命中由下一节的条件决定。
+
+### 3.2 缓存命中的真正前提：前缀逐字节稳定（2026-11-04 实测）
+
+用与生产完全相同的 WS 客户端（Bun 同指纹 + `session-id`/`session_id` 双头 +
+`prompt_cache_key`，后者天工 `build_request_json` 本来就会写）跑 append-only
+四轮，读 `response.usage.input_tokens_details.cached_tokens`：
+
+| 条件 | turn1 | turn2 | turn3 | turn4 |
+| --- | --- | --- | --- | --- |
+| 前缀每轮都变（实验 bug：盐写在请求内） | 0% | 0% | 0% | 0% |
+| 前缀跨轮稳定、`prompt_cache_key` 有 | 0% | 92% | 90% | 89% |
+| 前缀跨轮稳定、`prompt_cache_key` 无 | 0% | 92% | 90% | 89% |
+| 前缀稳定但被别的请求缓存过（公共块） | 93% | 96% | 95% | 94% |
+
+三条结论：
+
+1. **紧邻命中不需要 `prompt_cache_key`**，`session-id` 会话亲和头足够；首发请求
+   天然 0%（无块可命），从第二轮起应达到 90% 上下并随上下文按 128 块递增。
+2. **前缀只要有一个字符变了，其后所有块全废**——第一次实验里盐写在每轮请求内，
+   四轮全部 0%，与用户观察到的现象一致。
+3. 空闲后仍能命中说明公共块层跨请求内容寻址；它给出的是陈旧命中，不是紧邻命中。
+
+因此「大面积 0 命中」的判据很明确：要么每轮请求的前缀（`instructions` 或历史
+序列化）在变，要么会话亲和标识在变。为免抓包，Codex 请求会打一条零内容泄漏的
+结构日志：
+
+```
+Codex 请求前缀稳定度 session_id=… comparable=true instructions_same=true
+append_only=true prev_items=12 cur_items=14 first_diff_item=None
+```
+
+`instructions_same=false` → system prompt 每轮在变（含插件段落顺序/内容）；
+`append_only=false` + `first_diff_item=Some(i)` → 第 i 项历史被改写或裁剪；
+三者全绿仍 0 命中，则问题在会话标识或上游路由，而不是请求内容。
 
 预期效果：降载从「对话失败」变为「偶发延迟数秒」（已由裸 error 事件解析透出真实原因）。
 
