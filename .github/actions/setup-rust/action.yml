@@ -42,7 +42,9 @@ runs:
 
     - name: Install Linux system dependencies
       # tiangong-core 间接引入 tantivy/lancedb/rusqlite/scraper，
-      # tiangong-plugin-* 与 tiangong-app 引入 tauri，均需下列系统库。
+      # tiangong-plugin-* 与 tiangong-app 引入 tauri，均需下列系统库；
+      # tiangong-llm 的 wreq/btls-sys（BoringSSL）需要 clang/libclang
+      # （bindgen 解析头文件，缺 stddef.h 会直接失败）、cmake 与 nasm。
       shell: bash
       run: |
         # GitHub runner 预装的 Microsoft apt 源偶发 403，提前移除避免污染 apt-get update
@@ -56,7 +58,11 @@ runs:
           libgtk-3-dev \
           libayatana-appindicator3-dev \
           librsvg2-dev \
-          patchelf
+          patchelf \
+          clang \
+          libclang-dev \
+          cmake \
+          nasm
 
     - name: Install cargo-nextest
       if: ${{ inputs.install-nextest == 'true' }}

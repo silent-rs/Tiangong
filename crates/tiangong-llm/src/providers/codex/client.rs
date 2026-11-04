@@ -1,11 +1,10 @@
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
 use super::auth::{CODEX_MODELS_CLIENT_VERSION, CODEX_ORIGINATOR};
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::providers::openai::mapping::normalize_api_base;
-use crate::providers::openai::{ResponsesClient, ResponsesStreamResponse};
 
 use super::config::CodexConfig;
 
@@ -20,11 +19,17 @@ impl CodexClient {
         Self { config }
     }
 
-    /// 取访问令牌并补齐 Codex 请求头（originator / 账号 ID / 数据驻留）。
+    /// 取访问令牌并补齐 Codex 请求头（originator / 账号 ID / 数据驻留 / UA）。
     async fn auth(&self, force_refresh: bool) -> Result<(String, HeaderMap), LlmError> {
         let access = super::auth::access(force_refresh).await?;
         let mut headers = self.config.headers.clone();
         headers.insert("originator", HeaderValue::from_static(CODEX_ORIGINATOR));
+        // 真实客户端（Codex CLI、opencode）都会自报 UA；缺 UA 是非常规形态的信号。
+        if !headers.contains_key(reqwest::header::USER_AGENT)
+            && let Ok(value) = HeaderValue::from_str(crate::headers::TIANGONG_USER_AGENT)
+        {
+            headers.insert(reqwest::header::USER_AGENT, value);
+        }
         if let Some(account_id) = access.account_id.as_deref()
             && let Ok(mut value) = HeaderValue::from_str(account_id)
         {
@@ -39,24 +44,31 @@ impl CodexClient {
         Ok((access.access_token, headers))
     }
 
-    /// 发起流式请求；鉴权失败（401）时强制续期后重试一次。
-    pub(super) async fn stream(
+    /// 组装 WS 传输的请求上下文：`(url, 头列表)`。
+    ///
+    /// 与 HTTP 路径同一套鉴权与身份头（`auth()` 结果 + 调用方注入的 session
+    /// 亲和头），Authorization 随 WS 握手发送；URL 为 `/responses` 的 wss 形态。
+    pub(super) async fn ws_request_context(
         &self,
-        model: &str,
-        payload: Value,
-    ) -> Result<ResponsesStreamResponse, LlmError> {
-        let (token, headers) = self.auth(false).await?;
-        let client = ResponsesClient::new(self.config.responses_config(token, headers));
-        match client.stream(model, payload.clone()).await {
-            Err(LlmError::Authentication(message)) => {
-                tracing::info!(error = %message, "Codex 请求鉴权失败，刷新登录后重试");
-                let (token, headers) = self.auth(true).await?;
-                ResponsesClient::new(self.config.responses_config(token, headers))
-                    .stream(model, payload)
-                    .await
-            }
-            other => other,
+        session_headers: HeaderMap,
+    ) -> Result<(String, Vec<(String, String)>), LlmError> {
+        let (token, mut headers) = self.auth(false).await?;
+        for (name, value) in session_headers.iter() {
+            headers.insert(name, value.clone());
         }
+        let mut pairs: Vec<(String, String)> = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_string(), v.to_string()))
+            })
+            .collect();
+        pairs.push(("Authorization".to_string(), format!("Bearer {token}")));
+        let base = self.config.base_url.trim_end_matches('/');
+        let url = format!("{base}/responses").replacen("https://", "wss://", 1);
+        Ok((url, pairs))
     }
 
     /// 模型目录：`GET /models?client_version=`，返回 `models[].slug`。
@@ -106,6 +118,23 @@ impl CodexClient {
     }
 }
 
+/// 为 `/responses` 请求注入会话亲和头。
+///
+/// ChatGPT Codex 后端按 session 头路由 prompt cache：opencode 以 `session-id`
+/// 头获得缓存路由（源码注释 "ChatGPT routes its prompt cache on this
+/// header"），sub2api / Codex CLI 使用下划线形态 `session_id`。两种形态同值
+/// 注入，值取本会话 id——append-only 会话内全程稳定，是块级前缀缓存命中的
+/// 路由键。仅流式请求路径调用，模型目录等低频接口不需要。
+pub(super) fn with_session_headers(mut headers: HeaderMap, session_id: Option<&str>) -> HeaderMap {
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty())
+        && let Ok(value) = HeaderValue::from_str(session_id)
+    {
+        headers.insert(HeaderName::from_static("session-id"), value.clone());
+        headers.insert(HeaderName::from_static("session_id"), value);
+    }
+    headers
+}
+
 /// 解析 Codex `/models` 响应：仅保留 `visibility=list`（或未标注）的模型，按服务端顺序去重。
 pub(super) fn parse_models(body: &str) -> Result<Vec<ProviderModelInfo>, LlmError> {
     let value: Value = serde_json::from_str(body)
@@ -146,7 +175,44 @@ pub(super) fn parse_models(body: &str) -> Result<Vec<ProviderModelInfo>, LlmErro
 
 #[cfg(test)]
 mod tests {
-    use super::parse_models;
+    use super::{HeaderMap, parse_models, with_session_headers};
+
+    #[test]
+    fn session_headers_injected_in_both_forms() {
+        let headers = with_session_headers(HeaderMap::new(), Some("03h605565vhaxu3a591ictc93"));
+        assert_eq!(
+            headers.get("session-id").and_then(|v| v.to_str().ok()),
+            Some("03h605565vhaxu3a591ictc93")
+        );
+        assert_eq!(
+            headers.get("session_id").and_then(|v| v.to_str().ok()),
+            Some("03h605565vhaxu3a591ictc93")
+        );
+    }
+
+    #[test]
+    fn session_headers_skipped_for_missing_or_blank() {
+        for session_id in [None, Some(""), Some("   ")] {
+            let headers = with_session_headers(HeaderMap::new(), session_id);
+            assert!(headers.get("session-id").is_none());
+            assert!(headers.get("session_id").is_none());
+        }
+    }
+
+    #[test]
+    fn session_headers_keep_existing_headers() {
+        let mut base = HeaderMap::new();
+        base.insert(
+            reqwest::header::HeaderName::from_static("originator"),
+            reqwest::header::HeaderValue::from_static("tiangong"),
+        );
+        let headers = with_session_headers(base, Some("sid-1"));
+        assert_eq!(
+            headers.get("originator"),
+            Some(&"tiangong".parse().unwrap())
+        );
+        assert_eq!(headers.get("session-id"), Some(&"sid-1".parse().unwrap()));
+    }
 
     #[test]
     fn parses_listed_models_with_context_window() {
