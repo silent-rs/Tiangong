@@ -411,6 +411,7 @@ impl SingleProviderClient {
                 let _ = chunk_tx.send(chunk.clone());
             },
             preserve_tool_call_order,
+            self.on_retry.clone(),
         )
         .await?;
         filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
@@ -741,7 +742,8 @@ impl ModelClient for SingleProviderClient {
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse> {
         let (provider, request, tools) = self.prepare_request(req)?;
-        let response = block_on_provider_stream(provider, request, on_delta)?;
+        let response =
+            block_on_provider_stream(provider, request, on_delta, self.on_retry.clone())?;
         filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
     }
 
@@ -1149,6 +1151,7 @@ async fn consume_stream_with_retry<F: FnMut(&ModelStreamChunk) + ?Sized>(
     request: &ProviderRequest,
     on_delta: &mut F,
     preserve_tool_call_order: bool,
+    on_retry: Option<OnRetryCallback>,
 ) -> Result<ModelResponse> {
     // TTFT 锚点：紧贴首次 HTTP 发起（provider.stream 内部）之前；重试轮次
     // 共用同一锚点，TTFT 反映端到端等待。
@@ -1188,6 +1191,14 @@ async fn consume_stream_with_retry<F: FnMut(&ModelStreamChunk) + ?Sized>(
             error = %detail,
             "流中断且无可见产出，统一层重发请求"
         );
+        if let Some(notify) = &on_retry {
+            notify(
+                (attempt + 1) as u32,
+                MAX_STREAM_RETRY_ATTEMPTS as u32,
+                backoff.as_millis() as u64,
+                &detail,
+            );
+        }
         tokio::time::sleep(backoff).await;
         attempt += 1;
     }
@@ -1443,11 +1454,13 @@ fn block_on_provider_stream(
     provider: ProviderDispatch,
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    on_retry: Option<OnRetryCallback>,
 ) -> Result<ModelResponse> {
     async fn run_stream(
         provider: ProviderDispatch,
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
+        on_retry: Option<OnRetryCallback>,
     ) -> Result<ModelResponse> {
         let preserve_tool_call_order = matches!(
             &provider,
@@ -1455,12 +1468,21 @@ fn block_on_provider_stream(
                 | ProviderDispatch::OpenAiChat(_)
                 | ProviderDispatch::Codex(_)
         );
-        consume_stream_with_retry(&provider, &request, on_delta, preserve_tool_call_order).await
+        consume_stream_with_retry(
+            &provider,
+            &request,
+            on_delta,
+            preserve_tool_call_order,
+            on_retry,
+        )
+        .await
     }
 
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(run_stream(provider, request, on_delta)))
+            tokio::task::block_in_place(|| {
+                handle.block_on(run_stream(provider, request, on_delta, on_retry.clone()))
+            })
         }
         Ok(_) => {
             let (response, chunks) = std::thread::scope(|scope| {
@@ -1471,10 +1493,12 @@ fn block_on_provider_stream(
                             .build()
                             .context("初始化异步运行时失败")?;
                         let mut chunks = Vec::new();
-                        let response =
-                            runtime.block_on(run_stream(provider, request, &mut |chunk| {
-                                chunks.push(chunk.clone())
-                            }));
+                        let response = runtime.block_on(run_stream(
+                            provider,
+                            request,
+                            &mut |chunk| chunks.push(chunk.clone()),
+                            on_retry.clone(),
+                        ));
                         Ok::<_, anyhow::Error>((response, chunks))
                     })
                     .join()
@@ -1490,7 +1514,7 @@ fn block_on_provider_stream(
                 .enable_all()
                 .build()
                 .context("初始化异步运行时失败")?;
-            runtime.block_on(run_stream(provider, request, on_delta))
+            runtime.block_on(run_stream(provider, request, on_delta, on_retry))
         }
     }
 }
