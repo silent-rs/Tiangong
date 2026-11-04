@@ -158,3 +158,29 @@ append_only=true prev_items=12 cur_items=14 first_diff_item=None
   正常应为建连一次后持续「请求经 WS 传输」；出现「Codex WS 发送失败」「首帧前断开」
   说明该次尝试的连接已失效，随后会在 WS 上重建重试（日志带 `attempt`），不会回落 HTTP。
   想看连接复用细节可加 `TIANGONG_LOG=info,tiangong_llm::providers::codex::ws=debug`。
+
+## 6. 流内错误事件的处理（2026-11-04 补记）
+
+WS-only 之后，协议异常只剩流内形态（HTTP 层恒为 200）。实测冒烟曾命中：
+
+```
+[server_error] An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.
+```
+
+处理策略（`feat/codex-session-id-header`，提交 `aa2f1a3b`）：
+
+- **可重试判定**：流内 `error` 事件且满足其一——`code` 为 `server_is_overloaded` /
+  `server_error`，或消息含 "overload" / "retry your request"。首帧即命中时（零产出
+  阶段）丢弃连接、在 WS 上重建重试（同 `WS_MAX_ATTEMPTS=3`、退避 600ms×n），不降级
+  HTTP；降载是节点/桶级状态，重建连接可能路由到未降载节点。
+- **不重试**：鉴权、请求非法等错误原样上抛；首帧之后才出现的错误不重试（避免重复
+  已产出内容）。
+- **连接归还门槛**：只有 `response.completed`（clean 终态）消费完毕才把连接放回
+  池中；`error` / `response.failed` / `response.incomplete` 终态或流被提前放弃一律
+  丢弃连接——服务端在异常终态后可能立即关闭连接，归还只会把下一发请求打到半死
+  连接上。
+- **可观测性**：裸 `error` 事件的错误码进入错误文案（`[code] message`）；重试与
+  归还路径均有 warn/debug 日志（`Codex WS 流内瞬时错误` / `Codex WS 连接已归还池中`）。
+
+冒烟验证：改动前同一路径 4 轮中 2 轮失败（均为此形态）；改动后连续 2 轮通过
+（34s / 12.7s），单测 28 passed。
