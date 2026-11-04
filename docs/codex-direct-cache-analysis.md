@@ -57,10 +57,14 @@ sub2api（官方身份伪装 + uTLS + session 头 + WS + 粘性调度）用户�
 2. **裸 `error` 事件解析**（`crates/tiangong-llm/src/providers/openai/stream.rs`）：
    此前落入 `_ => {}` 被静默丢弃，流「正常」结束但零产出，是部分神秘空回复的
    直接原因；现转为 Error 事件走统一中断路径。
-3. **WebSocket 传输**（`crates/tiangong-llm/src/providers/codex/ws.rs`）：按会话
-   持久连接 `wss://…/backend-api/codex/responses`，请求体加 `type: "response.create"`
-   包裹并去掉 `stream` 字段；握手/发送失败按连接级降级 HTTP。会话内 ReAct 循环
-   天然串行，复用同一连接，把同一会话钉在同一服务节点。
+3. **WebSocket 传输（唯一通道）**（`crates/tiangong-llm/src/providers/codex/ws.rs`）：
+   按会话持久连接 `wss://…/backend-api/codex/responses`，请求体加
+   `type: "response.create"` 包裹并去掉 `stream` 字段。会话内 ReAct 循环天然串行，
+   复用同一连接，把同一会话钉在同一服务节点。
+   **不再降级 HTTP**：传输形态（HTTP/WS）是不同的指纹形态，上游按形态分桶，回落
+   HTTP 会打断会话亲和与前缀缓存路由；因此连接失败/首帧前断开一律在 WS 上重建
+   连接重试（最多 3 次，退避 600ms×n），首帧之后的中断不重试（避免重复已产出
+   内容）。无会话 id 时使用不入池的一次性连接，避免不同会话共用连接。
 4. **出站 TLS 指纹**（同上文件，改用 `wreq`）：WS 传输从 rustls 换成 `wreq`
    （BoringSSL），ClientHello 逐项对齐 Bun 1.4.4（opencode 的运行时）：套件表、
    曲线顺序（含 X25519MLKEM768）、签名算法、扩展顺序、OCSP/SCT 开关全部一致，
@@ -150,5 +154,7 @@ append_only=true prev_items=12 cur_items=14 first_diff_item=None
 - 命中日志：`grep "kv cache 命中统计" ~/.tiangong/logs/tiangong.<date>`；
 - 判读口径：单请求 0% 属常态波动，看会话累计与「cached 是否随上下文增长」；
 - 冷启动预期：闲置后前几分钟全 miss 属正常（条目可见性滞后 + TTL 过期）；
-- 传输路径：`grep "Codex WS 连接已建立\|Codex 请求经 WS 传输\|降级 HTTP"`——正常应为
-  建连一次后持续「请求经 WS 传输」，出现「降级 HTTP」说明连接级失败已回落。
+- 传输路径：`grep "Codex WS 连接已建立\|Codex 请求经 WS 传输\|Codex WS 发送失败"`——
+  正常应为建连一次后持续「请求经 WS 传输」；出现「Codex WS 发送失败」「首帧前断开」
+  说明该次尝试的连接已失效，随后会在 WS 上重建重试（日志带 `attempt`），不会回落 HTTP。
+  想看连接复用细节可加 `TIANGONG_LOG=info,tiangong_llm::providers::codex::ws=debug`。
