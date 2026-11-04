@@ -99,6 +99,14 @@ export function PluginIframe({
     const handler = (event: MessageEvent) => {
       if (event.source !== source) return;
       const data = event.data;
+      // 插件页面就绪通知：宿主在页面脚本注册监听之前发出的 host context
+      // 可能已丢失（mount 即发与 iframe 加载存在竞态），收到 ready 后重发。
+      // 所有 postMessage 协议的插件页面共用此握手（加载完成 → ready →
+      // 等待 tiangong_host_context）。
+      if (data && data.type === 'plugin_host_ready') {
+        sendHostContext();
+        return;
+      }
       // 事件订阅/退订（iframe 容器经 postMessage 发起，宿主做能力校验）
       if (data && data.type === 'plugin_subscribe' && typeof data.event === 'string'
         && data.event.length > 0 && data.event.length <= 128 && data.channel === channel) {
@@ -141,7 +149,7 @@ export function PluginIframe({
     return () => {
       window.setTimeout(() => window.removeEventListener('message', handler), 1000);
     };
-  }, [channel, pluginId, sessionId]);
+  }, [channel, pluginId, sessionId, sendHostContext]);
 
   return (
     <div className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
