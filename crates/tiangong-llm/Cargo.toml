@@ -29,6 +29,9 @@ getrandom = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
+# Codex WS 传输：wreq 提供 BoringSSL（与 Bun 同族）TLS 指纹
+wreq = { version = "=6.0.0-rc.31", features = ["ws"] }
+
 
 [dev-dependencies]
 wiremock = { workspace = true }

@@ -2,8 +2,6 @@ use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 
-use crate::providers::openai::OpenAiResponsesConfig;
-
 pub(crate) use crate::providers::openai::RetryNotifier;
 
 /// Codex 后端配置。鉴权不在配置中：每次请求从 ChatGPT 登录态取令牌。
@@ -30,20 +28,6 @@ impl CodexConfig {
             max_retries: 3,
             retry_notifier: None,
         }
-    }
-
-    /// 以给定令牌与请求头构造一次请求所用的 Responses 配置（复用其发送与重试）。
-    pub(super) fn responses_config(
-        &self,
-        access_token: String,
-        headers: HeaderMap,
-    ) -> OpenAiResponsesConfig {
-        let mut config = OpenAiResponsesConfig::new(access_token, self.base_url.clone());
-        config.headers = headers;
-        config.timeout = self.timeout;
-        config.max_retries = self.max_retries;
-        config.retry_notifier = self.retry_notifier.clone();
-        config
     }
 }
 

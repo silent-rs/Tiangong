@@ -5,7 +5,6 @@ use super::auth::{CODEX_MODELS_CLIENT_VERSION, CODEX_ORIGINATOR};
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::providers::openai::mapping::normalize_api_base;
-use crate::providers::openai::{ResponsesClient, ResponsesStreamResponse};
 
 use super::config::CodexConfig;
 
@@ -20,11 +19,17 @@ impl CodexClient {
         Self { config }
     }
 
-    /// 取访问令牌并补齐 Codex 请求头（originator / 账号 ID / 数据驻留）。
+    /// 取访问令牌并补齐 Codex 请求头（originator / 账号 ID / 数据驻留 / UA）。
     async fn auth(&self, force_refresh: bool) -> Result<(String, HeaderMap), LlmError> {
         let access = super::auth::access(force_refresh).await?;
         let mut headers = self.config.headers.clone();
         headers.insert("originator", HeaderValue::from_static(CODEX_ORIGINATOR));
+        // 真实客户端（Codex CLI、opencode）都会自报 UA；缺 UA 是非常规形态的信号。
+        if !headers.contains_key(reqwest::header::USER_AGENT)
+            && let Ok(value) = HeaderValue::from_str(crate::headers::TIANGONG_USER_AGENT)
+        {
+            headers.insert(reqwest::header::USER_AGENT, value);
+        }
         if let Some(account_id) = access.account_id.as_deref()
             && let Ok(mut value) = HeaderValue::from_str(account_id)
         {
@@ -39,30 +44,31 @@ impl CodexClient {
         Ok((access.access_token, headers))
     }
 
-    /// 发起流式请求；鉴权失败（401）时强制续期后重试一次。
+    /// 组装 WS 传输的请求上下文：`(url, 头列表)`。
     ///
-    /// `session_id` 非空时注入会话亲和头（见 [`with_session_headers`]），
-    /// 帮助 ChatGPT Codex 后端把同一会话的请求路由到同一缓存视图。
-    pub(super) async fn stream(
+    /// 与 HTTP 路径同一套鉴权与身份头（`auth()` 结果 + 调用方注入的 session
+    /// 亲和头），Authorization 随 WS 握手发送；URL 为 `/responses` 的 wss 形态。
+    pub(super) async fn ws_request_context(
         &self,
-        model: &str,
-        payload: Value,
-        session_id: Option<&str>,
-    ) -> Result<ResponsesStreamResponse, LlmError> {
-        let (token, headers) = self.auth(false).await?;
-        let headers = with_session_headers(headers, session_id);
-        let client = ResponsesClient::new(self.config.responses_config(token, headers));
-        match client.stream(model, payload.clone()).await {
-            Err(LlmError::Authentication(message)) => {
-                tracing::info!(error = %message, "Codex 请求鉴权失败，刷新登录后重试");
-                let (token, headers) = self.auth(true).await?;
-                let headers = with_session_headers(headers, session_id);
-                ResponsesClient::new(self.config.responses_config(token, headers))
-                    .stream(model, payload)
-                    .await
-            }
-            other => other,
+        session_headers: HeaderMap,
+    ) -> Result<(String, Vec<(String, String)>), LlmError> {
+        let (token, mut headers) = self.auth(false).await?;
+        for (name, value) in session_headers.iter() {
+            headers.insert(name, value.clone());
         }
+        let mut pairs: Vec<(String, String)> = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_string(), v.to_string()))
+            })
+            .collect();
+        pairs.push(("Authorization".to_string(), format!("Bearer {token}")));
+        let base = self.config.base_url.trim_end_matches('/');
+        let url = format!("{base}/responses").replacen("https://", "wss://", 1);
+        Ok((url, pairs))
     }
 
     /// 模型目录：`GET /models?client_version=`，返回 `models[].slug`。
@@ -119,7 +125,7 @@ impl CodexClient {
 /// header"），sub2api / Codex CLI 使用下划线形态 `session_id`。两种形态同值
 /// 注入，值取本会话 id——append-only 会话内全程稳定，是块级前缀缓存命中的
 /// 路由键。仅流式请求路径调用，模型目录等低频接口不需要。
-fn with_session_headers(mut headers: HeaderMap, session_id: Option<&str>) -> HeaderMap {
+pub(super) fn with_session_headers(mut headers: HeaderMap, session_id: Option<&str>) -> HeaderMap {
     if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty())
         && let Ok(value) = HeaderValue::from_str(session_id)
     {

@@ -11,8 +11,10 @@
 pub mod auth;
 mod client;
 mod config;
+mod prefix;
 mod provider;
 pub mod usage;
+mod ws;
 
 pub use auth::{
     CODEX_BASE_URL, CodexAuthStatus, CodexLoginStart, access_readonly, cancel_login,
