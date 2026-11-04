@@ -476,7 +476,17 @@ pub(super) fn map_stream_event(
             Ok(events)
         }
         StreamEvent::MessageStop => Ok(vec![ProviderStreamEvent::MessageEnd { stop_reason: None }]),
-        StreamEvent::Error { message } => Ok(vec![ProviderStreamEvent::Error(message)]),
+        StreamEvent::Error {
+            error_type,
+            message,
+        } => {
+            let display = if error_type.is_empty() {
+                message
+            } else {
+                format!("[{error_type}] {message}")
+            };
+            Ok(vec![ProviderStreamEvent::Error(display)])
+        }
         StreamEvent::Ping | StreamEvent::Unknown => Ok(Vec::new()),
     }
 }

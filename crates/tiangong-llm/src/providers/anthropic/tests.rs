@@ -471,3 +471,25 @@ async fn test_provider_list_models() {
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "claude-3-7-sonnet");
 }
+#[test]
+fn stream_error_event_carries_error_type_prefix() {
+    // Anthropic 流内 error 事件（如 overloaded_error）：错误码进 [code] 文案，
+    // 供消费层统一重试按签名判定（此前整坨 JSON 当 message，码被丢弃）。
+    let mut state = crate::providers::anthropic::mapping::AnthropicStreamState::default();
+    let events = crate::providers::anthropic::mapping::map_stream_event(
+        &mut state,
+        StreamEvent::Error {
+            error_type: "overloaded_error".to_string(),
+            message: "Overloaded".to_string(),
+        },
+    )
+    .expect("error 事件应映射成功");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            crate::stream::ProviderStreamEvent::Error(message)
+                if message == "[overloaded_error] Overloaded"
+        )),
+        "实际 events: {events:?}"
+    );
+}

@@ -217,12 +217,19 @@ fn map_event(
             events.push(ProviderStreamEvent::MessageEnd {
                 stop_reason: Some(StopReason::Other("failed".to_string())),
             });
-            let message = response
-                .error
-                .as_ref()
+            let error = response.error.as_ref();
+            let code = error
+                .and_then(|error| error.code.clone())
+                .unwrap_or_default();
+            let message = error
                 .and_then(|error| error.message.clone())
                 .unwrap_or_else(|| "Responses 请求失败".to_string());
-            events.push(ProviderStreamEvent::Error(message));
+            let display = if code.is_empty() {
+                message
+            } else {
+                format!("[{code}] {message}")
+            };
+            events.push(ProviderStreamEvent::Error(display));
             events
         }
         // 其余事件（文本/思考完成片、web_search、custom 工具、未知事件）
@@ -543,7 +550,7 @@ mod tests {
         let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
         assert!(flattened.iter().any(|event| matches!(
             event,
-            ProviderStreamEvent::Error(message) if message == "内部错误"
+            ProviderStreamEvent::Error(message) if message == "[server_error] 内部错误"
         )));
         // MessageEnd 先于 Error：上层遇 Error 即中断，先收尾才能保留 stop_reason。
         assert!(flattened.iter().any(|event| matches!(

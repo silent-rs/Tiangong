@@ -78,8 +78,12 @@ pub(crate) fn complete_response_events(
 /// - `server_error`：上游内部错误，实测消息自带 "You can retry your request"；
 /// - 消息含 "retry your request" / "overload" 的变体（无错误码的裸 error 事件）。
 pub(crate) fn retryable_stream_error_signature(code: &str, message: &str) -> bool {
+    let lower_code = code.to_ascii_lowercase();
     let lower = message.to_ascii_lowercase();
-    matches!(code, "server_is_overloaded" | "server_error")
+    // 错误码按子串匹配，覆盖各家族命名：server_is_overloaded（OpenAI/Codex）、
+    // overloaded_error（Anthropic）、server_error 等。
+    lower_code.contains("overload")
+        || lower_code.contains("server_error")
         || lower.contains("overload")
         || lower.contains("retry your request")
 }
@@ -91,5 +95,42 @@ pub(crate) fn retryable_stream_error_message(message: &str) -> bool {
     {
         Some((code, rest)) => retryable_stream_error_signature(code, rest.trim_start()),
         None => retryable_stream_error_signature("", message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retryable_stream_error_signature;
+
+    #[test]
+    fn retryable_signature_covers_provider_error_code_families() {
+        // OpenAI / Codex
+        assert!(retryable_stream_error_signature(
+            "server_is_overloaded",
+            "busy"
+        ));
+        assert!(retryable_stream_error_signature("server_error", "internal"));
+        // Anthropic
+        assert!(retryable_stream_error_signature(
+            "overloaded_error",
+            "Overloaded"
+        ));
+        // 变体大小写
+        assert!(retryable_stream_error_signature("ServerOverloaded", "x"));
+        // 不可重试
+        assert!(!retryable_stream_error_signature(
+            "invalid_request_error",
+            "bad"
+        ));
+        assert!(!retryable_stream_error_signature(
+            "authentication_error",
+            "no key"
+        ));
+        // 仅文案命中
+        assert!(retryable_stream_error_signature(
+            "",
+            "You can retry your request"
+        ));
+        assert!(!retryable_stream_error_signature("", "boom"));
     }
 }
