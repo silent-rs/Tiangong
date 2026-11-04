@@ -454,13 +454,8 @@ impl SingleProviderClient {
     async fn list_codex_model_infos(
         cfg: &ModelEndpoint,
     ) -> Result<Vec<crate::model::ProviderModelInfo>> {
-        let provider = build_codex_provider_from_config(
-            cfg,
-            cfg.timeout_ms,
-            None,
-            &scru128::new().to_string(),
-            MAX_RETRIES,
-        )?;
+        let provider =
+            build_codex_provider_from_config(cfg, cfg.timeout_ms, &scru128::new().to_string())?;
         provider.list_models().await.map_err(map_llm_error)
     }
     /// [`Self::list_model_infos_async`] 的同步版本（CLI 使用）。
@@ -632,13 +627,7 @@ impl SingleProviderClient {
                 )?,
             ))),
             ProviderProtocol::Codex => Ok(ProviderDispatch::Codex(Box::new(
-                build_codex_provider_from_config(
-                    &self.cfg,
-                    timeout_ms,
-                    self.on_retry.clone(),
-                    session_id,
-                    max_retries,
-                )?,
+                build_codex_provider_from_config(&self.cfg, timeout_ms, session_id)?,
             ))),
             ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
                 build_openai_provider_from_config(
@@ -810,14 +799,12 @@ fn build_openai_responses_provider_from_config(
 fn build_codex_provider_from_config(
     cfg: &ModelEndpoint,
     timeout_ms: u64,
-    on_retry: Option<OnRetryCallback>,
     session_id: &str,
-    max_retries: u32,
 ) -> Result<CodexProvider> {
+    // 重试额度为代码常量（打开阶段 WS_MAX_ATTEMPTS / 流间由消费层统一），
+    // 不再随 client 配置走。
     let mut config = CodexConfig::new(cfg.base_url.clone());
     config.timeout = Duration::from_millis(timeout_ms);
-    config.max_retries = max_retries;
-    config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(CodexProvider::new(config))
 }
