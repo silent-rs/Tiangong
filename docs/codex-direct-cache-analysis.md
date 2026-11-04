@@ -57,21 +57,37 @@ sub2api（官方身份伪装 + uTLS + session 头 + WS + 粘性调度）用户�
 2. **裸 `error` 事件解析**（`crates/tiangong-llm/src/providers/openai/stream.rs`）：
    此前落入 `_ => {}` 被静默丢弃，流「正常」结束但零产出，是部分神秘空回复的
    直接原因；现转为 Error 事件走统一中断路径。
-3. **零产出兜底重试**（`crates/tiangong-llm/src/provider_client.rs`）：流结束后
-   正文/思考/工具调用均为空时退避 2s/5s 重试两次；耗尽后透出真实原因（流内
-   错误或「上游返回空响应」），不再落入笼统的「模型未产生有效回复」。仅对
-   ChatGPT 直连形态（Responses/Codex 协议）启用，DeepSeek/Anthropic 保持原语义。
-   已有产出的流不重试（避免内容重复）。
+3. **WebSocket 传输**（`crates/tiangong-llm/src/providers/codex/ws.rs`）：按会话
+   持久连接 `wss://…/backend-api/codex/responses`，请求体加 `type: "response.create"`
+   包裹并去掉 `stream` 字段；握手/发送失败按连接级降级 HTTP。会话内 ReAct 循环
+   天然串行，复用同一连接，把同一会话钉在同一服务节点。
+4. **出站 TLS 指纹**（同上文件，改用 `wreq`）：WS 传输从 rustls 换成 `wreq`
+   （BoringSSL），TLS 参数按 Chrome 档位仿真——Chrome 与 Bun（opencode 运行时）
+   同属 BoringSSL 家族，是纯 Rust 生态里最接近的现成档位。`http2(false)` +
+   `http1_only()` 把 ALPN 压成 `http/1.1`（RFC 6455 Upgrade 只能走 HTTP/1.1），
+   与 Bun 建立 WS 时的表现一致。身份头不改：`originator` 仍是 `tiangong`。
 
-预期效果：降载从「对话失败」变为「偶发延迟数秒」；错误信息可诊断。
+   指纹对照（`https://tls.peet.ws/api/all` 实测，同一机器同一出口）：
+
+   | 客户端 | JA4 | 套件/扩展数 |
+   | --- | --- | --- |
+   | rustls（改造前） | `t13d1011h1_61a7ad8aa9b6_0d308c48d2a3` | 10 / 11 |
+   | wreq + Chrome149 档位（改造后） | `t13d1516h1_8daaf6152771_d8a2da3f94cd` | 15 / 16 |
+
+   改造后加密套件表即 Chrome 序列（`c02b c02c c02f c030 cca8 cca9` …），WS 升级
+   经 BoringSSL 往返验证可用（`wss://ws.postman-echo.com/raw` echo 正常）。
+
+   注：曾实现的「零产出兜底重试」按产品决策撤除——ChatGPT 直连不做静默重试。
+
+预期效果：降载从「对话失败」变为「偶发延迟数秒」（已由裸 error 事件解析透出真实原因）。
 
 ## 4. 后续路线（按投入递增）
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| P0 | session-id 头 + 重试兜底 + error 事件修复 | ✅ 已完成，待功能验证 |
-| P1 | 出站 TLS 指纹伪装（curl-impersonate sidecar 或 rustls 定制，Chrome/BoringSSL 级） | 未开始，最大一块 |
-| P2 | WebSocket 传输（`wss://…/codex/responses`，请求体加 `type:"response.create"` 包裹，事件流同 SSE；opencode/sub2api 双实现可参照） | 未开始 |
+| P0 | session-id 头 + error 事件修复 | ✅ 已完成 |
+| P1 | 出站 TLS 指纹（`wreq`/BoringSSL，Chrome 档位仿真） | ✅ 已完成（WS 传输；HTTP 回退路径仍用 rustls） |
+| P2 | WebSocket 传输（`wss://…/codex/responses`，请求体加 `type:"response.create"` 包裹，事件流同 SSE） | ✅ 已完成 |
 | P3 | 模型面策略：保持动态 `/models` + 不发真实 version 头（sol 可用性依赖此） | 现状即满足 |
 
 ## 5. 验证与观测方法
@@ -79,4 +95,5 @@ sub2api（官方身份伪装 + uTLS + session 头 + WS + 粘性调度）用户�
 - 命中日志：`grep "kv cache 命中统计" ~/.tiangong/logs/tiangong.<date>`；
 - 判读口径：单请求 0% 属常态波动，看会话累计与「cached 是否随上下文增长」；
 - 冷启动预期：闲置后前几分钟全 miss 属正常（条目可见性滞后 + TTL 过期）；
-- 重试生效标志：日志出现「流式请求零产出，退避后重试」，对话不再中断。
+- 传输路径：`grep "Codex WS 连接已建立\|Codex 请求经 WS 传输\|降级 HTTP"`——正常应为
+  建连一次后持续「请求经 WS 传输」，出现「降级 HTTP」说明连接级失败已回落。
