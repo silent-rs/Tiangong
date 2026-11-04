@@ -150,7 +150,11 @@ impl LlmProvider for CodexProvider {
         let mut payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         adapt_payload(&mut payload);
-        match self.client.stream(&model, payload).await? {
+        match self
+            .client
+            .stream(&model, payload, req.session_id.as_deref())
+            .await?
+        {
             // 服务端返回一次性 JSON：复用非流式解析，合成等价的流事件序列。
             ResponsesStreamResponse::Complete(value) => {
                 let response =
