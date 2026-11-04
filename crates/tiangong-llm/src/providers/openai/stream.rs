@@ -159,6 +159,22 @@ fn parse_stream_event_with_state(
                 stop_reason: completed_stop_reason(payload),
             }));
         }
+        // 裸 error 事件：ChatGPT Codex 后端会以该形态推送 server_is_overloaded
+        // 等流内错误（HTTP 200 + `event: error`，error.message 携带原因）。
+        // 此前落入 `_ => {}` 被静默丢弃，流「正常」结束但零产出，表现为
+        // 莫名的空回复；必须转成 Error 事件走统一的中断/重试路径。
+        "error" => {
+            let (code, message) = error_event_fields(payload);
+            let display = if code.is_empty() {
+                message
+            } else {
+                format!("[{code}] {message}")
+            };
+            events.push(Ok(ProviderStreamEvent::Error(display)));
+            events.push(Ok(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(crate::response::StopReason::Other(event_type.to_string())),
+            }));
+        }
         "response.failed" | "response.incomplete" => {
             if let Some(usage) = payload
                 .get("response")
@@ -185,6 +201,28 @@ fn parse_stream_event_with_state(
         _ => {}
     }
     events
+}
+
+/// 提取流内 `error` 事件的错误码与消息（两个字段可在顶层或 `error` 对象内）。
+///
+/// Codex 后端的降载错误形如 `{"type":"error","code":"server_is_overloaded",
+/// "message":"…"}`，也存在仅顶层字段或仅 `error.message` 的变体。错误码进入
+/// 展示文案（`[code] message`）便于日志定位，也是上层判断可否重试的依据。
+pub(crate) fn error_event_fields(payload: &Value) -> (String, String) {
+    let error = payload.get("error");
+    let code = error
+        .and_then(|e| e.get("code"))
+        .or_else(|| payload.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let message = error
+        .and_then(|e| e.get("message"))
+        .or_else(|| payload.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("Responses 流式请求失败")
+        .to_string();
+    (code, message)
 }
 
 fn completed_stop_reason(payload: &Value) -> Option<crate::response::StopReason> {
@@ -585,6 +623,54 @@ mod tests {
         assert_eq!(
             tool_delta_count, 0,
             "已收到 delta 后 completed 不应再补发完整 arguments: {completed_events:?}"
+        );
+    }
+
+    #[test]
+    fn bare_error_event_carries_code_in_message() {
+        let payload = json!({
+            "type": "error",
+            "error": { "code": "server_is_overloaded", "message": "The server is overloaded" }
+        });
+        let events = parse_stream_event(&payload);
+        match &events[0] {
+            Ok(ProviderStreamEvent::Error(message)) => {
+                assert!(message.contains("[server_is_overloaded]"), "{message}");
+                assert!(message.contains("The server is overloaded"));
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_error_event_without_code_keeps_plain_message() {
+        let payload = json!({ "type": "error", "message": "boom" });
+        let events = parse_stream_event(&payload);
+        match &events[0] {
+            Ok(ProviderStreamEvent::Error(message)) => assert_eq!(message, "boom"),
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_event_fields_reads_top_level_and_nested_variants() {
+        let nested = json!({
+            "type": "error",
+            "error": { "code": "server_is_overloaded", "message": "busy" }
+        });
+        assert_eq!(
+            super::error_event_fields(&nested),
+            ("server_is_overloaded".to_string(), "busy".to_string())
+        );
+        let top_level = json!({ "type": "error", "code": "c1", "message": "m1" });
+        assert_eq!(
+            super::error_event_fields(&top_level),
+            ("c1".to_string(), "m1".to_string())
+        );
+        let bare = json!({ "type": "error" });
+        assert_eq!(
+            super::error_event_fields(&bare),
+            (String::new(), "Responses 流式请求失败".to_string())
         );
     }
 }

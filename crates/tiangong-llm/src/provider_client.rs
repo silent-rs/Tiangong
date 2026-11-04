@@ -404,18 +404,16 @@ impl SingleProviderClient {
                 | ProviderProtocol::OpenAiChatCompletions
                 | ProviderProtocol::Codex
         );
-        // TTFT 锚点：紧贴 HTTP 发起（provider.stream 内部）之前。
-        let request_started_at = std::time::Instant::now();
-        let stream = provider.stream(request).await.map_err(map_llm_error)?;
-        let response = consume_provider_stream_events_async(
-            stream,
+        let response = consume_stream_with_retry(
+            &provider,
+            &request,
             &mut |chunk: &ModelStreamChunk| {
                 let _ = chunk_tx.send(chunk.clone());
             },
             preserve_tool_call_order,
-            request_started_at,
+            self.on_retry.clone(),
         )
-        .await;
+        .await?;
         filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
     }
 
@@ -744,7 +742,8 @@ impl ModelClient for SingleProviderClient {
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse> {
         let (provider, request, tools) = self.prepare_request(req)?;
-        let response = block_on_provider_stream(provider, request, on_delta)?;
+        let response =
+            block_on_provider_stream(provider, request, on_delta, self.on_retry.clone())?;
         filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
     }
 
@@ -1080,19 +1079,147 @@ fn collect_provider_reasoning_signature(response: &ProviderResponse) -> Option<S
         })
 }
 
+/// 流间统一重试：流中断且无可见产出、错误可重试时，重发请求的最大总尝试次数。
+const MAX_STREAM_RETRY_ATTEMPTS: usize = 10;
+/// 流间重试退避基数：第 n 次重试前等待 min(基数 × n, 上限)。
+const STREAM_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(600);
+/// 流间重试退避上限。
+const STREAM_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(10);
+
+fn stream_retry_backoff(failed_attempts: usize) -> Duration {
+    std::cmp::min(
+        STREAM_RETRY_BACKOFF_BASE * failed_attempts as u32,
+        STREAM_RETRY_BACKOFF_CAP,
+    )
+}
+
+/// 流中断原因（统一重试判定用）。
+enum StreamInterrupt {
+    /// 底层流 Err 项（传输/超时/provider 映射错误等原始错误）。
+    Error(crate::error::LlmError),
+    /// 流内 Error 事件的错误文案（provider 自报）。
+    Message(String),
+}
+
+impl StreamInterrupt {
+    fn display(&self) -> String {
+        match self {
+            StreamInterrupt::Error(err) => err.to_string(),
+            StreamInterrupt::Message(message) => message.clone(),
+        }
+    }
+
+    /// 是否值得统一层重发：传输/超时/限流类直接重试；provider 错误按瞬时
+    /// 签名（降载 / server_error / 显式重试提示）判定；鉴权、请求非法等
+    /// 重试无意义。
+    fn retryable(&self) -> bool {
+        match self {
+            StreamInterrupt::Error(err) => match err {
+                crate::error::LlmError::Transport(_)
+                | crate::error::LlmError::Timeout(_)
+                | crate::error::LlmError::Stream(_)
+                | crate::error::LlmError::RateLimited(_) => true,
+                crate::error::LlmError::Provider { message, .. } => {
+                    crate::stream::retryable_stream_error_message(message)
+                }
+                _ => false,
+            },
+            StreamInterrupt::Message(message) => {
+                crate::stream::retryable_stream_error_message(message)
+            }
+        }
+    }
+}
+
+/// 流消费结果：响应 + 中断信息（供统一重试判定）。
+struct StreamOutcome {
+    response: ModelResponse,
+    /// 流因错误提前结束（Err 项或流内 Error 事件）时的错误信息。
+    interrupt: Option<StreamInterrupt>,
+    /// 已产出可见内容（正文/工具调用）：true 时重发会重复产出，不可重试。
+    visible_output: bool,
+}
+
+/// 消费 provider 事件流；中断且无可见产出、错误可重试时统一重发请求。
+///
+/// 各 provider 的建立阶段重试在各自 client 内完成；本层覆盖「流已建立、
+/// 中途死于瞬时错误」的场景（如上游受理数秒后才降载），对所有 provider 一致：
+/// 仅在尚无可见产出（正文/工具调用）时重发，绝不重复已产出的内容；思考增量
+/// 不算可见产出，重发后会重新流出。总额度 [`MAX_STREAM_RETRY_ATTEMPTS`]。
+async fn consume_stream_with_retry<F: FnMut(&ModelStreamChunk) + ?Sized>(
+    provider: &ProviderDispatch,
+    request: &ProviderRequest,
+    on_delta: &mut F,
+    preserve_tool_call_order: bool,
+    on_retry: Option<OnRetryCallback>,
+) -> Result<ModelResponse> {
+    // TTFT 锚点：紧贴首次 HTTP 发起（provider.stream 内部）之前；重试轮次
+    // 共用同一锚点，TTFT 反映端到端等待。
+    let request_started_at = std::time::Instant::now();
+    let mut attempt = 1usize;
+    loop {
+        let stream = provider
+            .stream(request.clone())
+            .await
+            .map_err(map_llm_error)?;
+        let outcome = consume_provider_stream_events_async(
+            stream,
+            on_delta,
+            preserve_tool_call_order,
+            request_started_at,
+        )
+        .await;
+        let should_retry = attempt < MAX_STREAM_RETRY_ATTEMPTS
+            && !outcome.visible_output
+            && outcome
+                .interrupt
+                .as_ref()
+                .is_some_and(StreamInterrupt::retryable);
+        if !should_retry {
+            return Ok(outcome.response);
+        }
+        let detail = outcome
+            .interrupt
+            .as_ref()
+            .map(StreamInterrupt::display)
+            .unwrap_or_default();
+        let backoff = stream_retry_backoff(attempt);
+        tracing::warn!(
+            attempt = attempt + 1,
+            max_attempts = MAX_STREAM_RETRY_ATTEMPTS,
+            backoff_ms = backoff.as_millis() as u64,
+            error = %detail,
+            "流中断且无可见产出，统一层重发请求"
+        );
+        if let Some(notify) = &on_retry {
+            notify(
+                (attempt + 1) as u32,
+                MAX_STREAM_RETRY_ATTEMPTS as u32,
+                backoff.as_millis() as u64,
+                &detail,
+            );
+        }
+        tokio::time::sleep(backoff).await;
+        attempt += 1;
+    }
+}
+
 /// 消费流事件并组装响应。
 ///
 /// 流中断（传输错误或流内错误事件）时直接结束循环，把已产出的内容定稿为
 /// 本次响应（issue #551）：断在 tool_use 参数 JSON 中间的调用带 `__parse_error`
 /// 标记，由上层既有的无效参数链路处理；开头即断时为空响应，由上层按无效
-/// 输出处理。调用方对中断无感，不再让整轮失败。
+/// 输出处理。调用方对中断无感，不再让整轮失败。中断详情随 [`StreamOutcome`]
+/// 返回，由 [`consume_stream_with_retry`] 统一判定是否重发。
 async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Sized>(
     mut stream: ProviderStream,
     on_delta: &mut F,
     preserve_tool_call_order: bool,
     // TTFT 锚点：HTTP 请求发出前的时刻（由调用方在发起请求处记录）。
     request_started_at: std::time::Instant,
-) -> ModelResponse {
+) -> StreamOutcome {
+    let mut interrupt: Option<StreamInterrupt> = None;
+    let mut visible_output = false;
     let mut text = String::new();
     let mut reasoning_content = String::new();
     let mut reasoning_signature: Option<String> = None;
@@ -1133,6 +1260,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             Ok(event) => event,
             Err(err) => {
                 tracing::warn!(error = %err, "流式响应中断，按已产出内容收尾");
+                interrupt = Some(StreamInterrupt::Error(err));
                 break;
             }
         };
@@ -1159,6 +1287,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             ProviderStreamEvent::TextDelta(delta) => {
                 if !delta.is_empty() {
                     text.push_str(&delta);
+                    visible_output = true;
                     output_delta_events += 1;
                     output_clock.mark();
                     on_delta(&ModelStreamChunk {
@@ -1170,6 +1299,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                 }
             }
             ProviderStreamEvent::ToolCallStart(call) => {
+                visible_output = true;
                 let args = if call.arguments.is_null() || call.arguments == json!({}) {
                     String::new()
                 } else {
@@ -1196,6 +1326,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                     .entry(actual_id)
                     .or_insert_with(|| (String::new(), String::new()));
                 append_stream_tool_call_arguments(&mut entry.1, &partial_json);
+                visible_output = true;
                 output_clock.mark();
             }
             ProviderStreamEvent::Usage(stream_usage) => {
@@ -1214,6 +1345,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             }
             ProviderStreamEvent::Error(message) => {
                 tracing::warn!(error = %message, "流式响应中断，按已产出内容收尾");
+                interrupt = Some(StreamInterrupt::Message(message.clone()));
                 break;
             }
             ProviderStreamEvent::MessageEnd {
@@ -1261,7 +1393,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     // 做任何阈值/置空/折算。
     let decode_ms = output_clock.span_ms();
 
-    ModelResponse {
+    let response = ModelResponse {
         text: text.trim().to_string(),
         reasoning_content,
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
@@ -1274,6 +1406,11 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
         ttft_ms: output_clock
             .first
             .map(|first| first.duration_since(request_started_at).as_millis() as u64),
+    };
+    StreamOutcome {
+        response,
+        interrupt,
+        visible_output,
     }
 }
 
@@ -1300,7 +1437,7 @@ impl ProviderDispatch {
     }
 
     async fn stream(
-        self,
+        &self,
         request: ProviderRequest,
     ) -> std::result::Result<ProviderStream, crate::error::LlmError> {
         match self {
@@ -1317,11 +1454,13 @@ fn block_on_provider_stream(
     provider: ProviderDispatch,
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    on_retry: Option<OnRetryCallback>,
 ) -> Result<ModelResponse> {
     async fn run_stream(
         provider: ProviderDispatch,
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
+        on_retry: Option<OnRetryCallback>,
     ) -> Result<ModelResponse> {
         let preserve_tool_call_order = matches!(
             &provider,
@@ -1329,21 +1468,21 @@ fn block_on_provider_stream(
                 | ProviderDispatch::OpenAiChat(_)
                 | ProviderDispatch::Codex(_)
         );
-        // TTFT 锚点：紧贴 HTTP 发起之前。
-        let request_started_at = std::time::Instant::now();
-        let stream = provider.stream(request).await.map_err(map_llm_error)?;
-        Ok(consume_provider_stream_events_async(
-            stream,
+        consume_stream_with_retry(
+            &provider,
+            &request,
             on_delta,
             preserve_tool_call_order,
-            request_started_at,
+            on_retry,
         )
-        .await)
+        .await
     }
 
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(run_stream(provider, request, on_delta)))
+            tokio::task::block_in_place(|| {
+                handle.block_on(run_stream(provider, request, on_delta, on_retry.clone()))
+            })
         }
         Ok(_) => {
             let (response, chunks) = std::thread::scope(|scope| {
@@ -1354,10 +1493,12 @@ fn block_on_provider_stream(
                             .build()
                             .context("初始化异步运行时失败")?;
                         let mut chunks = Vec::new();
-                        let response =
-                            runtime.block_on(run_stream(provider, request, &mut |chunk| {
-                                chunks.push(chunk.clone())
-                            }));
+                        let response = runtime.block_on(run_stream(
+                            provider,
+                            request,
+                            &mut |chunk| chunks.push(chunk.clone()),
+                            on_retry.clone(),
+                        ));
                         Ok::<_, anyhow::Error>((response, chunks))
                     })
                     .join()
@@ -1373,7 +1514,7 @@ fn block_on_provider_stream(
                 .enable_all()
                 .build()
                 .context("初始化异步运行时失败")?;
-            runtime.block_on(run_stream(provider, request, on_delta))
+            runtime.block_on(run_stream(provider, request, on_delta, on_retry))
         }
     }
 }
@@ -1752,13 +1893,14 @@ mod tests {
                 ProviderStreamEvent::Usage(TokenUsageData::new(10, 3)),
             ),
         ];
-        let response = consume_provider_stream_events_async(
+        let outcome = consume_provider_stream_events_async(
             paced_stream(schedule),
             &mut |_| {},
             false,
             std::time::Instant::now(),
         )
         .await;
+        let response = outcome.response;
         let elapsed = response.output_elapsed_ms.expect("应有输出耗时");
         assert!(
             (90..=150).contains(&elapsed),
@@ -1792,7 +1934,7 @@ mod tests {
             )),
         ];
 
-        let response = consume_provider_stream_events_async(
+        let outcome = consume_provider_stream_events_async(
             synthetic_stream(events),
             &mut |_| {},
             false,
@@ -1800,6 +1942,7 @@ mod tests {
         )
         .await;
 
+        let response = outcome.response;
         // 断流时未收到终止事件，stop_reason 保持缺失。
         assert_eq!(response.stop_reason, None);
         assert_eq!(response.text, "部分输出");
@@ -1825,7 +1968,7 @@ mod tests {
             )),
         ];
 
-        let response = consume_provider_stream_events_async(
+        let outcome = consume_provider_stream_events_async(
             synthetic_stream(events),
             &mut |_| {},
             false,
@@ -1833,8 +1976,13 @@ mod tests {
         )
         .await;
 
+        let response = outcome.response;
         assert_eq!(response.text, "");
         assert!(response.tool_calls.is_empty());
+        // 中断详情供统一重试层判定：传输类错误且无可见产出 → 可重试。
+        let interrupt = outcome.interrupt.expect("开头即断应带中断信息");
+        assert!(!outcome.visible_output);
+        assert!(interrupt.retryable());
     }
 
     #[tokio::test]
@@ -1845,7 +1993,7 @@ mod tests {
             Ok(ProviderStreamEvent::Error("overloaded_error".to_string())),
         ];
 
-        let response = consume_provider_stream_events_async(
+        let outcome = consume_provider_stream_events_async(
             synthetic_stream(events),
             &mut |_| {},
             false,
@@ -1853,10 +2001,37 @@ mod tests {
         )
         .await;
 
+        let response = outcome.response;
         assert_eq!(response.text, "写到一半");
         assert_eq!(response.stop_reason, None);
     }
 
+    #[test]
+    fn stream_interrupt_retryable_classification() {
+        use crate::error::LlmError;
+        let transport = StreamInterrupt::Error(LlmError::Transport("broken pipe".into()));
+        assert!(transport.retryable());
+        let timeout = StreamInterrupt::Error(LlmError::Timeout(1000));
+        assert!(timeout.retryable());
+        let rate_limited = StreamInterrupt::Error(LlmError::RateLimited("429".into()));
+        assert!(rate_limited.retryable());
+        let overloaded =
+            StreamInterrupt::Message("[server_is_overloaded] Our servers are overloaded.".into());
+        assert!(overloaded.retryable());
+        let plain_overload = StreamInterrupt::Message("Overloaded, please retry".into());
+        assert!(plain_overload.retryable());
+        let provider_transient = StreamInterrupt::Error(LlmError::Provider {
+            provider: "codex",
+            message: "[server_error] You can retry your request.".into(),
+        });
+        assert!(provider_transient.retryable());
+        let invalid = StreamInterrupt::Error(LlmError::InvalidRequest("bad".into()));
+        assert!(!invalid.retryable());
+        let fatal = StreamInterrupt::Message("[invalid_request_error] unsupported".into());
+        assert!(!fatal.retryable());
+        let boom = StreamInterrupt::Message("boom".into());
+        assert!(!boom.retryable());
+    }
     fn sse_body(chunks: &[Value]) -> Vec<u8> {
         let mut body = String::new();
         for chunk in chunks {

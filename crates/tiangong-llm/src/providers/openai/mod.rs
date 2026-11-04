@@ -15,3 +15,4 @@ pub use config::OpenAiResponsesConfig;
 pub(crate) use config::RetryNotifier;
 pub use provider::OpenAiResponsesProvider;
 pub(crate) use provider::map_responses_stream;
+pub(crate) use stream::error_event_fields;

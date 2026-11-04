@@ -360,8 +360,24 @@ fn parse_sse_event(event_type: &str, data: &str) -> Result<StreamEvent, Anthropi
     if event_type == "error" {
         let payload: Value = serde_json::from_str(data)
             .map_err(|err| AnthropicError::Serialization(err.to_string()))?;
+        // 官方错误载荷形如 {"type":"error","error":{"type":"overloaded_error",
+        // "message":"…"}}：error.type 是判定瞬时错误的最可靠信号（如
+        // overloaded_error）。此前整坨 JSON 当 message，既不可读也丢了码。
+        let error = payload.get("error");
+        let error_type = error
+            .and_then(|e| e.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let message = error
+            .and_then(|e| e.get("message"))
+            .or_else(|| payload.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| data.to_string());
         return Ok(StreamEvent::Error {
-            message: payload.to_string(),
+            error_type,
+            message,
         });
     }
 

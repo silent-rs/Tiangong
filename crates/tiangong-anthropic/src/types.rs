@@ -362,6 +362,8 @@ pub enum StreamEvent {
     MessageStop,
     Ping,
     Error {
+        /// 错误类别（error.type，如 overloaded_error / api_error）。
+        error_type: String,
         message: String,
     },
     Unknown,
