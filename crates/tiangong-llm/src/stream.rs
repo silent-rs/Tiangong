@@ -70,3 +70,26 @@ pub(crate) fn complete_response_events(
     }));
     events
 }
+
+/// 错误码 + 消息是否为上游瞬时错误信号（流间统一重试判定用）。
+///
+/// 三类信号：
+/// - `server_is_overloaded`：降载（节点/桶级状态，重发可能落到其他节点）；
+/// - `server_error`：上游内部错误，实测消息自带 "You can retry your request"；
+/// - 消息含 "retry your request" / "overload" 的变体（无错误码的裸 error 事件）。
+pub(crate) fn retryable_stream_error_signature(code: &str, message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    matches!(code, "server_is_overloaded" | "server_error")
+        || lower.contains("overload")
+        || lower.contains("retry your request")
+}
+/// 已组装为 `[code] message` 的错误文案是否为瞬时错误（流中段统一重试判定用）。
+pub(crate) fn retryable_stream_error_message(message: &str) -> bool {
+    match message
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+    {
+        Some((code, rest)) => retryable_stream_error_signature(code, rest.trim_start()),
+        None => retryable_stream_error_signature("", message),
+    }
+}
