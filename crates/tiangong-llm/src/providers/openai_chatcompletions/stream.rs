@@ -23,6 +23,24 @@ impl OpenAiStreamDecoder {
         payload: &Value,
     ) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
         let mut events = Vec::new();
+        // 流内错误载荷：OpenAI 兼容网关会在流中以 data:{"error":{...}} 推送
+        // 错误；此前 payload 无 choices/usage 被静默丢弃，空回复表现为
+        // 「正常」结束。统一转 Error 事件（错误码进文案），交给消费层的
+        // 中断/统一重试链路处理。
+        if payload.get("error").is_some_and(|error| !error.is_null()) {
+            let (code, message) = crate::providers::openai::error_event_fields(payload);
+            let display = if code.is_empty() {
+                message
+            } else {
+                format!("[{code}] {message}")
+            };
+            return vec![
+                Ok(ProviderStreamEvent::Error(display)),
+                Ok(ProviderStreamEvent::MessageEnd {
+                    stop_reason: Some(crate::response::StopReason::Other("error".to_string())),
+                }),
+            ];
+        }
         if let Some(usage) = payload.get("usage") {
             events.push(Ok(ProviderStreamEvent::Usage(super::mapping::parse_usage(
                 usage,
@@ -149,6 +167,28 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn parse_payload_surfaces_in_stream_error() {
+        // OpenAI 兼容网关的流内错误载荷：转 Error 事件且错误码进文案，
+        // 不再被静默丢弃。
+        let mut decoder = OpenAiStreamDecoder::default();
+        let events = unwrap_events(
+            &mut decoder,
+            serde_json::json!({
+                "error": {
+                    "code": "server_is_overloaded",
+                    "message": "Our servers are currently overloaded"
+                }
+            }),
+        );
+        match &events[0] {
+            ProviderStreamEvent::Error(message) => {
+                assert!(message.contains("server_is_overloaded"), "{message}");
+                assert!(message.contains("currently overloaded"), "{message}");
+            }
+            other => panic!("expected error event, got {other:?}"),
+        }
+    }
     #[test]
     fn accumulates_parallel_calls_and_flushes_in_provider_order() {
         let mut decoder = OpenAiStreamDecoder::default();
