@@ -5,6 +5,35 @@ use tiangong_plugin_memory_protocol::rumination::{
 };
 use tiangong_types::{ContentBlock, Message, MessageRole, PluginSession};
 
+/// 反刍轮次消息文本：`Text` 块照抄；附件/媒体块以一行占位概括——用户只发
+/// 附件时提炼不出正文，但该消息不能整条从反刍中丢失。`ModelInstruction`
+/// 是宿主写给模型的说明（附件注入背景等），不属于用户意图，不进入反刍。
+fn turn_message_text(message: &Message) -> String {
+    fn push_placeholder(text: &mut String, label: &str) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("[附件] ");
+        text.push_str(label);
+    }
+
+    let mut text = String::new();
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text: content } => text.push_str(content),
+            ContentBlock::ModelInstruction { .. } => {}
+            ContentBlock::Media { title, url, .. } => {
+                let label = title.as_deref().unwrap_or(url);
+                push_placeholder(&mut text, label);
+            }
+            ContentBlock::Image { asset, .. } | ContentBlock::AssetReference { asset } => {
+                push_placeholder(&mut text, &asset.original_name);
+            }
+        }
+    }
+    text
+}
+
 pub(crate) fn build_turn_memory_result(
     session: &PluginSession,
     messages: &[&Message],
@@ -32,7 +61,12 @@ pub(crate) fn build_turn_memory_result(
             continue;
         }
         let tool_name = message.tool_name().unwrap_or("");
-        let summary = message.text_content();
+        let summary = message
+            .content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .collect::<Vec<_>>()
+            .join("");
         let file_path = path_by_call_id
             .get(message.tool_call_id().unwrap_or_default())
             .copied();
@@ -66,7 +100,7 @@ pub(crate) fn build_turn_memory_result(
             if message.kind() == MessageRole::User && !message.is_user_input() {
                 return None;
             }
-            let content = compact_single_memory_text(&message.text_content(), 400);
+            let content = compact_single_memory_text(&turn_message_text(message), 400);
             (!content.is_empty()).then(|| TurnMessage {
                 role: role.to_string(),
                 content,
@@ -121,7 +155,12 @@ fn extract_turn_tool_calls(messages: &[&Message]) -> Vec<String> {
         if message.role != MessageRole::Tool {
             continue;
         }
-        let text = message.text_content();
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .collect::<Vec<_>>()
+            .join("");
         for name in parse_tool_calls_line(&text)
             .into_iter()
             .chain(parse_tool_trace_name(&text))
@@ -167,7 +206,12 @@ fn extract_turn_artifacts(messages: &[&Message]) -> Vec<TurnArtifact> {
         if message.role != MessageRole::Tool {
             continue;
         }
-        let text = message.text_content();
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .collect::<Vec<_>>()
+            .join("");
         let tool_name = parse_tool_trace_name(&text);
         for artifact in parse_media_artifacts_from_tool_trace(&text, tool_name.as_deref()) {
             let key = artifact
@@ -222,9 +266,24 @@ fn build_turn_memory_summary(messages: &[&Message], artifacts: &[TurnArtifact]) 
         .iter()
         .rev()
         .find(|message| {
-            message.role == MessageRole::Assistant && !message.text_content().trim().is_empty()
+            message.role == MessageRole::Assistant
+                && message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .any(|text| !text.trim().is_empty())
         })
-        .map(|message| compact_single_memory_text(&message.text_content(), 600))
+        .map(|message| {
+            compact_single_memory_text(
+                &message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .collect::<Vec<_>>()
+                    .join(""),
+                600,
+            )
+        })
         .unwrap_or_default();
     if !assistant_summary.is_empty() {
         return assistant_summary;
@@ -386,7 +445,7 @@ mod tests {
     }
 
     /// 构造 RFC 0017 的插件反馈图片注入消息（role=User、phase=HostInjected，
-    /// ModelInstruction + Image 块，text_content 为空）。
+    /// ModelInstruction + Image 块，没有用户可见的 Text 块）。
     fn host_injected_image_message() -> Message {
         let mut message = Message::new(MessageRole::User, String::new());
         message.content = vec![
@@ -422,6 +481,30 @@ mod tests {
         assert_eq!(result.turn_messages[0].role, "user");
         assert_eq!(result.turn_messages[0].content, "帮我看下这张截图");
         assert_eq!(result.user_input, "帮我看下这张截图");
+    }
+
+    /// 用户只发附件（无 Text 块）：反刍轮次消息不能整条丢失，附件以
+    /// 占位行进入文本；宿主 ModelInstruction 说明不属于用户意图，不混入。
+    #[test]
+    fn turn_messages_keep_attachment_only_user_message() {
+        let mut user = Message::new(MessageRole::User, String::new());
+        user.content = vec![
+            ContentBlock::model_instruction("[attachment provenance]"),
+            ContentBlock::asset_reference(tiangong_types::StoredAsset {
+                asset_id: "a-2".to_string(),
+                local_path: "/media/report.xlsx".to_string(),
+                original_name: "report.xlsx".to_string(),
+                mime_type: "application/vnd.ms-excel".to_string(),
+                size: 2048,
+                kind: tiangong_types::MediaKind::File,
+            }),
+        ];
+        let session = test_session(vec![user]);
+        let messages: Vec<&Message> = session.messages.iter().collect();
+        let result = build_turn_memory_result(&session, &messages, "", TurnStatus::Completed);
+        assert_eq!(result.turn_messages.len(), 1);
+        assert_eq!(result.turn_messages[0].role, "user");
+        assert_eq!(result.turn_messages[0].content, "[附件] report.xlsx");
     }
 
     #[test]

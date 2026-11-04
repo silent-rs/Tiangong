@@ -20,7 +20,7 @@ pub fn handle_command(
         "/help" | "/h" | "/?" => print_help(),
         "/new" => {
             state.active_session_id = scru128::new().to_string();
-            output::print_status("已打开新对话（发送首条消息后才会记录）");
+            output::status("已打开新对话（发送首条消息后才会记录）");
         }
         _ if command == "/history"
             || command == "/sessions"
@@ -35,16 +35,16 @@ pub fn handle_command(
         }
         "/cancel" => {
             if state.core_manager.cancel_core(&state.active_session_id) {
-                output::print_status("已取消当前任务");
+                output::status("已取消当前任务");
             } else {
-                output::print_warn("当前没有可取消的任务");
+                output::warn("当前没有可取消的任务");
             }
         }
         "/config" => {
             open_config(state, config)?;
         }
         _ => {
-            output::print_warn(&format!("未知命令：{command}，输入 /help 查看可用命令"));
+            output::warn(&format!("未知命令：{command}，输入 /help 查看可用命令"));
         }
     }
 
@@ -53,18 +53,18 @@ pub fn handle_command(
 
 /// 打开网页配置页，页面关闭后重新加载配置供后续新对话使用。
 fn open_config(state: &mut TiangongState, config: &CoreConfigProvider) -> Result<()> {
-    output::print_status("正在打开配置页，完成后在页面点击\"完成并关闭\"返回对话…");
+    output::status("正在打开配置页，完成后在页面点击\"完成并关闭\"返回对话…");
     crate::web_config::run(crate::web_config::WebConfigOptions::default())?;
     // 配置页直接写盘：重新加载，让新建会话使用最新模型、信任模式与 Prompt。
     let next = tiangong_config::registry::init();
     config.replace(next.to_core_config());
     state.config = next;
-    output::print_status("配置已重新加载（对已开启的对话，模型与插件变更在新对话中生效）");
+    output::status("配置已重新加载（对已开启的对话，模型与插件变更在新对话中生效）");
     Ok(())
 }
 
 fn print_help() {
-    output::print_info(&completion::help_text());
+    println!("{}", completion::help_text());
 }
 
 fn handle_sessions(state: &mut TiangongState, arg: &str) -> Result<()> {
@@ -76,11 +76,11 @@ fn handle_sessions(state: &mut TiangongState, arg: &str) -> Result<()> {
                 .ok()
                 .map(|s| s.title)
                 .unwrap_or_else(|| "未知".to_string());
-            output::print_status(&format!("已切换会话：{title}"));
+            output::status(&format!("已切换会话：{title}"));
             if let Some(session) = core_manager.load_session(&state.active_session_id).ok()
                 && !session.messages.is_empty()
             {
-                output::print_session_messages(&session.messages);
+                output::session_messages(&session.messages);
             }
         }
         return Ok(());
@@ -108,12 +108,12 @@ fn handle_sessions(state: &mut TiangongState, arg: &str) -> Result<()> {
         .unwrap_or_default();
 
     state.active_session_id = target_id.clone();
-    output::print_status(&format!("已切换会话：{title}"));
+    output::status(&format!("已切换会话：{title}"));
 
     if let Some(session) = core_manager.load_session(&target_id).ok()
         && !session.messages.is_empty()
     {
-        output::print_session_messages(&session.messages);
+        output::session_messages(&session.messages);
     }
 
     Ok(())

@@ -191,14 +191,27 @@ pub fn user_outline(messages: &[tiangong_types::Message]) -> Vec<UserOutlineItem
         if is_anchor {
             outline.push(UserOutlineItem {
                 id: message.id.clone(),
-                question: truncate_chars(&message.text_content(), OUTLINE_QUESTION_CHARS),
+                question: truncate_chars(
+                    &message
+                        .content
+                        .iter()
+                        .filter_map(|block| block.as_text())
+                        .collect::<Vec<_>>()
+                        .join(""),
+                    OUTLINE_QUESTION_CHARS,
+                ),
                 answer: String::new(),
             });
             continue;
         }
         if let Some(last) = outline.last_mut() {
             if last.answer.is_empty() {
-                let text = message.text_content();
+                let text = message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .collect::<Vec<_>>()
+                    .join("");
                 if !text.trim().is_empty() {
                     last.answer = truncate_chars(&text, OUTLINE_ANSWER_CHARS);
                 }

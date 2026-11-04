@@ -9,6 +9,7 @@
 
 use tiangong_core::prompt::SystemPromptConfig;
 use tiangong_core::session::{Message, MessageRole, MessageToolCall, Role, Session};
+use tiangong_types::ContentBlock;
 
 // ── 辅助工具 ─────────────────────────────────────────────────
 
@@ -89,7 +90,12 @@ fn new_path_system_prompt_includes_summary() {
     let context = session.context();
     // 第一条应为 System 消息
     assert_eq!(context[0].role, MessageRole::System);
-    let system_text = context[0].text_content();
+    let system_text = context[0]
+        .content
+        .iter()
+        .filter_map(|block| block.as_text())
+        .collect::<Vec<_>>()
+        .join("");
     // 验证摘要已嵌入 system prompt
     assert!(
         system_text.contains("早期对话讨论了文件读取和文件修改操作"),
@@ -121,7 +127,12 @@ fn new_path_system_prompt_includes_all_sections() {
     ]);
     let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
     assert_eq!(msg.role, MessageRole::System);
-    let text = msg.text_content();
+    let text = msg
+        .content
+        .iter()
+        .filter_map(|block| block.as_text())
+        .collect::<Vec<_>>()
+        .join("");
     // 插件段（按注册顺序保留）
     assert!(text.contains("产品身份段"), "应包含产品身份段");
     assert!(text.contains("通用规则段"), "应包含通用规则段");
@@ -150,7 +161,7 @@ fn new_path_messages_increment_across_turns() {
     let ctx1 = session.context();
     assert_eq!(ctx1.len(), 2); // system + 1 条消息
     assert_eq!(ctx1[1].role, MessageRole::User);
-    assert_eq!(ctx1[1].text_content(), "你好");
+    assert_eq!(ctx1[1].content.as_slice(), [ContentBlock::text("你好")]);
     // 第 2 轮
     session.append_message(MessageRole::Assistant, "你好！有什么可以帮你的？");
     let ctx2 = session.context();
@@ -236,7 +247,10 @@ fn new_path_tool_calls_preserved_in_context() {
     let tool_result = &context[3];
     assert_eq!(tool_result.role, MessageRole::Tool);
     assert_eq!(tool_result.tool_call_id(), Some("call_abc"));
-    assert_eq!(tool_result.text_content(), "fn main() {}");
+    assert_eq!(
+        tool_result.content.as_slice(),
+        [ContentBlock::text("fn main() {}")]
+    );
 }
 
 #[test]
@@ -259,7 +273,12 @@ fn new_path_tool_context_messages_preserved() {
     assert_eq!(tc.role, MessageRole::Tool);
     assert!(tc.tool_call_id().is_none());
     assert_eq!(tc.tool_name(), Some("react_completion_check"));
-    assert!(tc.text_content().contains("未完成"));
+    assert!(
+        tc.content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .any(|text| text.contains("未完成"))
+    );
 }
 
 #[test]
@@ -282,7 +301,11 @@ fn new_path_clear_and_rebuild_system_prompt() {
     assert_eq!(context_after.len(), 1, "清空后只有 system prompt message");
     // 摘要段不应出现
     assert!(
-        !context_after[0].text_content().contains("此前对话摘要"),
+        !context_after[0]
+            .content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .any(|text| text.contains("此前对话摘要")),
         "清空后 system prompt 不应包含摘要段"
     );
 }

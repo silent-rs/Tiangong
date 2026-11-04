@@ -4,7 +4,7 @@ use crate::*;
 fn message_new() {
     let msg = Message::new(MessageRole::User, "你好");
     assert_eq!(msg.role, MessageRole::User);
-    assert_eq!(msg.text_content(), "你好");
+    assert_eq!(msg.content.as_slice(), &[ContentBlock::text("你好")]);
     assert!(!msg.id.is_empty());
     assert!(!msg.created_at.is_empty());
 }
@@ -763,7 +763,10 @@ fn session_serde_roundtrip() {
     let parsed: Session = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.title, "测试会话");
     assert_eq!(parsed.messages.len(), 2);
-    assert_eq!(parsed.messages[0].text_content(), "你好");
+    assert_eq!(
+        parsed.messages[0].content.as_slice(),
+        &[ContentBlock::text("你好")]
+    );
 }
 
 #[test]

@@ -917,8 +917,13 @@ mod model_endpoint_tests {
             .messages
             .iter()
             .find(|message| {
-                message.text_content().starts_with(record_prefix.as_str())
-                    && message.text_content().contains("已切换模型")
+                message
+                    .content
+                    .iter()
+                    .find_map(|block| block.as_text())
+                    .is_some_and(|text| {
+                        text.starts_with(record_prefix.as_str()) && text.contains("已切换模型")
+                    })
             })
             .expect("切换应在消息列表留痕");
         assert_eq!(
@@ -927,15 +932,22 @@ mod model_endpoint_tests {
             "留痕用 Notice：按角色排除出模型上下文与压缩范围"
         );
         assert!(
-            record.text_content().contains("picked-model"),
-            "留痕应说明切换到哪个模型：{}",
-            record.text_content()
+            record
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("picked-model")),
+            "留痕应说明切换到哪个模型：{:?}",
+            record.content
         );
         assert!(
-            !saved
-                .context()
-                .iter()
-                .any(|message| message.text_content().starts_with(record_prefix.as_str())),
+            !saved.context().iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .find_map(|block| block.as_text())
+                    .is_some_and(|text| text.starts_with(record_prefix.as_str()))
+            }),
             "留痕不得进入模型上下文"
         );
 
@@ -945,7 +957,11 @@ mod model_endpoint_tests {
             events.iter().any(|event| matches!(
                 event,
                 StreamEvent::SessionMessageUpsert { message, .. }
-                    if message.text_content().starts_with("[上下文管理] 已切换模型")
+                    if message
+                        .content
+                        .iter()
+                        .find_map(|block| block.as_text())
+                        .is_some_and(|text| text.starts_with("[上下文管理] 已切换模型"))
             )),
             "应推送留痕消息到前端"
         );

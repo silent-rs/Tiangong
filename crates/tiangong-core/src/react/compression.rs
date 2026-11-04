@@ -702,9 +702,11 @@ mod tests {
     use crate::config::agent::AgentConfig;
     use crate::permission::TrustMode;
     use crate::session::Message;
+
     use crate::session::MessageToolCall;
     use tiangong_llm::SingleProviderClient;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
+    use tiangong_types::ContentBlock;
 
     /// 评审问题 3 回归：折叠区间末尾是宿主注入消息（role=User 但无
     /// 真实输入文本）时，锚点必须越过它取到更早的真实用户消息，
@@ -912,8 +914,14 @@ mod tests {
         }
         let context = ctx.session.context();
         assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[1].text_content(), "第三轮问题");
-        assert_eq!(context[2].text_content(), "第三轮回答");
+        assert_eq!(
+            context[1].content.as_slice(),
+            [ContentBlock::text("第三轮问题")]
+        );
+        assert_eq!(
+            context[2].content.as_slice(),
+            [ContentBlock::text("第三轮回答")]
+        );
         assert!(
             ctx.session
                 .messages
@@ -945,7 +953,13 @@ mod tests {
             .session
             .messages
             .iter()
-            .position(|message| message.text_content().starts_with("[上下文管理]"))
+            .position(|message| {
+                message
+                    .content
+                    .iter()
+                    .find_map(|block| block.as_text())
+                    .is_some_and(|text| text.starts_with("[上下文管理]"))
+            })
             .expect("应写入压缩记录");
         assert_eq!(
             record_index, 4,
@@ -964,11 +978,18 @@ mod tests {
 
         // Notice 不进模型上下文：保留区首条仍是第三轮问题。
         let context = ctx.session.context();
-        assert_eq!(context[1].text_content(), "第三轮问题");
+        assert_eq!(
+            context[1].content.as_slice(),
+            [ContentBlock::text("第三轮问题")]
+        );
         assert!(
-            !context
-                .iter()
-                .any(|message| message.text_content().starts_with("[上下文管理]")),
+            !context.iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .find_map(|block| block.as_text())
+                    .is_some_and(|text| text.starts_with("[上下文管理]"))
+            }),
             "压缩记录不得进入模型上下文"
         );
     }

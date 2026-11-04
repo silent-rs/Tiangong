@@ -1,10 +1,7 @@
-#![allow(dead_code)]
-
 use tiangong_types::{MentionGroup, MentionRequest, MentionTarget};
 
 /// 补全候选项
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CompletionCandidate {
     /// 补全后的完整文本（替换触发词）
     pub value: String,

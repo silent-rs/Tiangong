@@ -161,7 +161,14 @@ mod tests {
         let texts: Vec<String> = turn_snapshot(&session, &anchor_id)
             .messages
             .iter()
-            .map(Message::text_content)
+            .map(|message: &Message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
             .collect();
         assert_eq!(
             texts,
@@ -184,7 +191,14 @@ mod tests {
         let texts: Vec<String> = turn_snapshot(&session, &anchor_id)
             .messages
             .iter()
-            .map(Message::text_content)
+            .map(|message: &Message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
             .collect();
         assert_eq!(texts, vec!["本轮输入", "本轮回复"]);
     }

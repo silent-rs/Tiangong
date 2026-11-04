@@ -71,7 +71,11 @@ fn build_prompt_text(engine: &RuntimeEngine, session: &Session) -> String {
     let sections = engine.collect_plugin_prompt_sections();
     let config = SystemPromptConfig::from_plugin_sections(sections);
     let msg = build_full_system_prompt(session, &config);
-    msg.text_content()
+    msg.content
+        .iter()
+        .filter_map(|block| block.as_text())
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 // ── 测试用例 ─────────────────────────────────────────────────

@@ -65,7 +65,12 @@ pub async fn get_session(req: Request) -> Result<Response> {
         .map(|m| MessageSummary {
             id: m.id.clone(),
             role: format!("{:?}", m.role).to_lowercase(),
-            content: m.text_content(),
+            content: m
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .collect::<Vec<_>>()
+                .join(""),
             created_at: m.created_at.clone(),
         })
         .collect();

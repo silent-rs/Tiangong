@@ -980,7 +980,9 @@ fn assign_legacy_final_replies(messages: &mut [Message], hints: &[Option<LegacyH
             Some(LegacyAssistantPhase::Summary) => summary = Some(messages[index].id.clone()),
             Some(LegacyAssistantPhase::Normal)
                 if messages[index].tool_calls().is_empty()
-                    && !messages[index].text_content().trim().is_empty() =>
+                    && messages[index].content.iter().any(|block| {
+                        block.as_text().is_some_and(|text| !text.trim().is_empty())
+                    }) =>
             {
                 normal = Some(messages[index].id.clone());
             }
@@ -1307,29 +1309,6 @@ impl Message {
         self.user_source().is_some_and(UserSource::is_user_input)
     }
 
-    /// 拼接所有 `Text` 块（用户可见文本）。
-    ///
-    /// **计划淘汰，新代码不要使用。**
-    ///
-    /// 该方法只取 `ContentBlock::Text`，会静默丢弃 `ModelInstruction`
-    /// （宿主写给模型的说明，含附件路径等）、`AssetReference` / `Image`
-    /// （附件本身）等内容块；名称却像是“整条消息的文本”，已导致调用方
-    /// 误用（例如会话索引因此漏记附件路径、只发附件的消息整条丢失）。
-    ///
-    /// 消息内容以 `content: Vec<ContentBlock>` 完整提供，调用方应按自身
-    /// 需求直接遍历内容块、自行决定取舍，而不是依赖这里的固定裁剪。
-    ///
-    /// 淘汰计划：现有调用点逐步改为直接处理 `content` 后移除本方法。
-    /// 暂不标注 `#[deprecated]`：现存调用点较多，且工作区以
-    /// `clippy -D warnings` 为门禁，待调用点迁移完成后再加属性并删除。
-    pub fn text_content(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(|b| b.as_text())
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
     /// 是否包含非文本内容块
     pub fn has_media(&self) -> bool {
         self.content.iter().any(|b| !b.is_text())
@@ -1523,11 +1502,14 @@ mod tests {
         let message = Message::notice("上下文管理", "已切换模型：test-model");
         assert_eq!(message.role, MessageRole::Notice);
         assert_eq!(
-            message.text_content(),
-            "[上下文管理] 已切换模型：test-model"
+            message.content.as_slice(),
+            &[ContentBlock::text("[上下文管理] 已切换模型：test-model")]
         );
         // 其他类别同一形态，适配后续不同类型的系统通知。
         let other = Message::notice("插件管理", "已安装 demo");
-        assert_eq!(other.text_content(), "[插件管理] 已安装 demo");
+        assert_eq!(
+            other.content.as_slice(),
+            &[ContentBlock::text("[插件管理] 已安装 demo")]
+        );
     }
 }
