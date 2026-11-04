@@ -159,6 +159,23 @@ fn parse_stream_event_with_state(
                 stop_reason: completed_stop_reason(payload),
             }));
         }
+        // 裸 error 事件：ChatGPT Codex 后端会以该形态推送 server_is_overloaded
+        // 等流内错误（HTTP 200 + `event: error`，error.message 携带原因）。
+        // 此前落入 `_ => {}` 被静默丢弃，流「正常」结束但零产出，表现为
+        // 莫名的空回复；必须转成 Error 事件走统一的中断/重试路径。
+        "error" => {
+            let message = payload
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .or_else(|| payload.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("Responses 流式请求失败")
+                .to_string();
+            events.push(Ok(ProviderStreamEvent::Error(message)));
+            events.push(Ok(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(crate::response::StopReason::Other(event_type.to_string())),
+            }));
+        }
         "response.failed" | "response.incomplete" => {
             if let Some(usage) = payload
                 .get("response")
