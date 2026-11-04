@@ -499,8 +499,14 @@ pub fn assistant_outgoing_after_user(session: &Session, user_message_id: &str) -
     let mut texts = Vec::new();
     let mut media_items = Vec::new();
     for message in selected {
-        let (text, referenced_files) =
-            extract_local_files_from_text(session, &message.text_content());
+        // IM 回复仅取助手输出的用户可见文本（`Text` 块）。
+        let message_text = message
+            .content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .collect::<Vec<_>>()
+            .join("");
+        let (text, referenced_files) = extract_local_files_from_text(session, &message_text);
         if !text.trim().is_empty() {
             texts.clear();
             texts.push(text);

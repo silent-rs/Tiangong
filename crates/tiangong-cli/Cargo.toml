@@ -18,4 +18,3 @@ anyhow = { workspace = true }
 scru128 = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
-termimad = { workspace = true }

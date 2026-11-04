@@ -105,7 +105,12 @@ fn main() {
     let session = core.into_session().expect("worker 应正常退出");
     println!("消息数: {}", session.messages.len());
     for (i, m) in session.messages.iter().enumerate() {
-        let text = m.text_content();
+        let text: String = m
+            .content
+            .iter()
+            .filter_map(|block| block.as_text())
+            .collect::<Vec<_>>()
+            .join("");
         let preview: String = text.chars().take(80).collect();
         println!(
             "[{i}] {:?} clen={} | {}",

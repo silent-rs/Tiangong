@@ -14,7 +14,6 @@ use super::test_support::*;
 use crate::agent_input::{AgentInput, AgentInputKind};
 use crate::permission::TrustMode;
 use crate::session::MessageRole;
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_balanced() {
     use crate::config::core::{CoreConfig, CoreConfigProvider};
@@ -355,10 +354,13 @@ async fn plain_question_completes_with_done_event() {
 
     let session = env.load_session(&sid);
     assert!(
-        session
-            .messages
-            .iter()
-            .any(|message| message.text_content().contains("贪心算法是一种")),
+        session.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("贪心算法是一种"))
+        }),
         "分段 SSE 回复应完整保存进 session"
     );
     let request = chat_request_at(&server, 0).await;
@@ -403,8 +405,11 @@ async fn legacy_prompt_is_reassembled_next_turn_and_failed_reset_keeps_history()
         .system_prompt_message
         .as_ref()
         .unwrap()
-        .text_content()
-        .to_string();
+        .content
+        .iter()
+        .filter_map(|block| block.as_text())
+        .collect::<Vec<_>>()
+        .join("");
     assert!(
         !prompt_text.contains("旧系统提示"),
         "旧手工提示应被重拼替换: {prompt_text}"
@@ -567,14 +572,22 @@ async fn steering_message_aborts_and_restarts_current_turn() {
             .iter()
             .filter(|message| {
                 message.role == MessageRole::Assistant
-                    && message.text_content().contains("按新方向完成")
+                    && message
+                        .content
+                        .iter()
+                        .filter_map(|block| block.as_text())
+                        .any(|text| text.contains("按新方向完成"))
             })
             .count(),
         1
     );
     assert!(!session.messages.iter().any(|message| {
         message.role == MessageRole::Assistant
-            && message.text_content().contains("长时间任务执行中")
+            && message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("长时间任务执行中"))
             && session.is_final_reply(&message.id)
     }));
     routes["slow-original"].assert_hits(1);

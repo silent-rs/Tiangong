@@ -190,7 +190,13 @@ impl ContextCompressor {
         let boundary = session.messages[..split_point].iter().rev().find(|message| {
             message.role != MessageRole::System && message.role != MessageRole::Notice
         }).map(|message| {
-            let tail: String = message.text_content().chars().rev().take(512).collect::<Vec<_>>().into_iter().rev().collect();
+            let text: String = message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .collect::<Vec<_>>()
+                .join("");
+            let tail: String = text.chars().rev().take(512).collect::<Vec<_>>().into_iter().rev().collect();
             serde_json::json!({"role":message.kind(),"tool_call_id":message.tool_call_id(),"tool_call_ids":message.tool_calls().iter().map(|call|&call.id).collect::<Vec<_>>(),"text_end":tail})
         }).unwrap_or(serde_json::Value::Null);
         format!(

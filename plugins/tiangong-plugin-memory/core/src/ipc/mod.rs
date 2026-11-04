@@ -1765,7 +1765,7 @@ mod lifecycle_tests {
     }
 
     /// 构造 RFC 0017 的插件反馈图片注入消息：role=User、phase=HostInjected，
-    /// 内容为 ModelInstruction（provenance）+ Image 块，`text_content()` 为空。
+    /// 内容为 ModelInstruction（provenance）+ Image 块，没有用户可见的 Text 块。
     fn host_injected_image_message() -> tiangong_types::Message {
         let mut message =
             tiangong_types::Message::new(tiangong_types::MessageRole::User, String::new());

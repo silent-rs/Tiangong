@@ -25,6 +25,7 @@ use std::time::Duration;
 use tiangong_llm::SingleProviderClient;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
 use tiangong_llm::{ModelEndpoint, ProviderProtocol};
+use tiangong_types::ContentBlock;
 use tiangong_types::{StreamEvent, TokenUsage, stream::ContextCompressAction};
 use tokio::sync::{Barrier, Notify};
 use wiremock::matchers::{header, method, path};
@@ -510,10 +511,16 @@ async fn need_more_work_marker_continues_model_loop() {
         .clone()
         .expect("应有最终答复候选");
     assert!(assistant_messages.iter().any(|message| {
-        message.id != final_id && message.text_content().contains("[need_more_work]")
+        message.id != final_id
+            && message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("[need_more_work]"))
     }));
     assert!(assistant_messages.iter().any(|message| {
-        message.id == final_id && message.text_content() == "所有检查均已完成。"
+        message.id == final_id
+            && message.content.as_slice() == [ContentBlock::text("所有检查均已完成。")]
     }));
 }
 
@@ -563,7 +570,10 @@ async fn compression_persists_summary_and_keeps_recent_interaction() {
     // 不注入合成续接消息。
     let context = harness.ctx.session.context();
     assert_eq!(context[0].role, MessageRole::System);
-    assert_eq!(context[1].text_content(), "继续提出新问题");
+    assert_eq!(
+        context[1].content.as_slice(),
+        [ContentBlock::text("继续提出新问题")]
+    );
     assert!(
         harness.ctx.session.messages.iter().all(|message| {
             message.user_source() != Some(crate::session::UserSource::CompressedResume)
@@ -666,7 +676,7 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
     assert_eq!(context[2].role, MessageRole::Assistant);
     assert!(context.iter().any(|message| {
         message.tool_call_id() == Some("latest-call")
-            && message.text_content() == "recent-tool-output"
+            && message.content.as_slice() == [ContentBlock::text("recent-tool-output")]
     }));
 
     let requests = server.received_requests().await.unwrap();
@@ -973,7 +983,12 @@ async fn returns_cancelled_on_cancel_command() {
     );
     assert!(harness.ctx.session.deferred_tool_injections.is_empty());
     assert!(harness.ctx.session.messages.iter().any(|message| {
-        message.role == MessageRole::Tool && message.text_content().contains("cancelled_probe")
+        message.role == MessageRole::Tool
+            && message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("cancelled_probe"))
     }));
     let injection_snapshots = harness
         .stream_rx
@@ -1187,7 +1202,7 @@ async fn run_turn_emits_single_done_and_anchors_status_to_latest_user_message() 
     assert!(reloaded.messages.iter().any(|m| {
         m.id == final_id
             && m.role == MessageRole::Assistant
-            && m.text_content() == "你好,我是测试助手。"
+            && m.content.as_slice() == [ContentBlock::text("你好,我是测试助手。")]
     }));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1249,7 +1264,7 @@ async fn final_persistence_failure_clears_final_reply() {
 struct LifecycleCountingPlugin {
     started: Arc<AtomicU32>,
     finished: Arc<AtomicU32>,
-    finished_texts: Arc<std::sync::Mutex<Vec<String>>>,
+    finished_contents: Arc<std::sync::Mutex<Vec<Vec<ContentBlock>>>>,
 }
 
 impl LifecycleCountingPlugin {
@@ -1257,7 +1272,7 @@ impl LifecycleCountingPlugin {
         Self {
             started,
             finished,
-            finished_texts: Arc::default(),
+            finished_contents: Arc::default(),
         }
     }
 }
@@ -1274,11 +1289,8 @@ impl Plugin for LifecycleCountingPlugin {
         self.started.fetch_add(1, Ordering::SeqCst);
     }
     fn on_turn_finished(&self, session: &tiangong_types::PluginSession) {
-        *self.finished_texts.lock().unwrap() = session
-            .messages
-            .iter()
-            .map(|message| message.text_content())
-            .collect();
+        *self.finished_contents.lock().unwrap() =
+            session.messages.iter().map(|m| m.content.clone()).collect();
         self.finished.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -1450,7 +1462,7 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
         hook_started.clone(),
         hook_finished.clone(),
     ));
-    let finished_texts = plugin.finished_texts.clone();
+    let finished_contents = plugin.finished_contents.clone();
     let TestHarness {
         ctx,
         cmd_tx,
@@ -1501,16 +1513,23 @@ async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
     wait_for_counter(&hook_finished, 1);
     assert_eq!(hook_finished.load(Ordering::SeqCst), 1);
     // 插件快照只含本轮：首条为本轮用户输入，运行中引导消息与最终回复都在本轮内。
-    let texts = finished_texts.lock().unwrap().clone();
-    assert_eq!(texts.first().map(String::as_str), Some("你好"), "{texts:?}");
+    let contents = finished_contents.lock().unwrap().clone();
+    assert_eq!(
+        contents.first().map(|blocks| blocks.as_slice()),
+        Some(&[ContentBlock::text("你好")][..]),
+        "{contents:?}"
+    );
     assert!(
-        texts.iter().any(|text| text.contains("看这张新截图")),
-        "引导消息应在本轮快照内: {texts:?}"
+        contents.iter().any(|blocks| blocks
+            .iter()
+            .filter_map(|block| block.as_text())
+            .any(|text| text.contains("看这张新截图"))),
+        "引导消息应在本轮快照内: {contents:?}"
     );
     assert_eq!(
-        texts.last().map(String::as_str),
-        Some("好的。"),
-        "{texts:?}"
+        contents.last().map(|blocks| blocks.as_slice()),
+        Some(&[ContentBlock::text("好的。")][..]),
+        "{contents:?}"
     );
     assert!(
         server
@@ -1608,7 +1627,11 @@ async fn final_status_anchors_to_turn_start_message_after_injection() {
         .iter()
         .find(|m| m.role == MessageRole::User)
         .expect("应有原始用户消息");
-    assert_eq!(first.text_content(), "你好", "原始用户消息应保持");
+    assert_eq!(
+        first.content.as_slice(),
+        [ContentBlock::text("你好")],
+        "原始用户消息应保持"
+    );
     assert!(first.turn_status().is_some(), "最终状态应写入起轮消息");
     // 唯一终态保持（ALR-109）。
     let terminal: Vec<String> = stream_rx
@@ -2222,14 +2245,13 @@ async fn returns_failed_when_react_request_fails() {
         panic!("模型请求失败应返回 Failed，实际: {:?}", result.outcome);
     };
     assert!(!message.is_empty(), "模型请求失败必须返回错误原因");
-    assert!(
-        harness
-            .ctx
-            .session
-            .messages
+    assert!(harness.ctx.session.messages.iter().any(|session_message| {
+        session_message
+            .content
             .iter()
-            .any(|session_message| session_message.text_content().contains(message))
-    );
+            .filter_map(|block| block.as_text())
+            .any(|text| text.contains(message))
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2322,7 +2344,12 @@ async fn handles_runtime_feedback_while_request_is_running() {
     );
     assert_eq!(result.usage.total_tokens, 30);
     assert!(ctx.session.messages.iter().any(|message| {
-        message.role == MessageRole::Tool && message.text_content().contains("runtime_probe")
+        message.role == MessageRole::Tool
+            && message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("runtime_probe"))
     }));
     assert!(ctx.session.deferred_tool_injections.is_empty());
 
@@ -2392,7 +2419,12 @@ async fn returns_cancelled_when_tool_execution_is_cancelled() {
         .messages
         .iter()
         .filter(|message| {
-            message.role == MessageRole::Tool && message.text_content().contains("中断")
+            message.role == MessageRole::Tool
+                && message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .any(|text| text.contains("中断"))
         })
         .filter_map(|message| message.tool_call_id())
         .collect::<Vec<_>>();
@@ -2528,7 +2560,11 @@ async fn continues_after_tool_failure() {
     assert!(harness.ctx.session.messages.iter().any(|message| {
         message.role == MessageRole::Tool
             && message.tool_name() == Some("failing")
-            && message.text_content().contains("test failure")
+            && message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("test failure"))
     }));
 }
 
@@ -2758,9 +2794,14 @@ async fn failed_tool_call_does_not_inject_images() {
         .messages
         .iter()
         .filter(|message| message.role == crate::session::MessageRole::Tool)
-        .map(|message| message.text_content())
         .rev()
-        .find(|content| content.contains("[tool_failure]"))
+        .find_map(|message| {
+            message
+                .content
+                .iter()
+                .find_map(|block| block.as_text())
+                .filter(|text| text.contains("[tool_failure]"))
+        })
         .expect("应渲染 [tool_failure]");
     assert!(
         failure_text.contains("error_kind: argument_error"),
@@ -2797,22 +2838,26 @@ async fn failed_tool_call_does_not_inject_images() {
     assert_eq!(pending.len(), 1, "成功结果应注入图片");
 
     // 未注册处理器的工具：core 不自行生成抬头，结果原样交给模型。
-    let tool_texts: Vec<String> = ctx
+    let tool_contents: Vec<&[ContentBlock]> = ctx
         .session
         .messages
         .iter()
         .filter(|message| message.role == crate::session::MessageRole::Tool)
-        .map(|message| message.text_content())
+        .map(|message| message.content.as_slice())
         .collect();
     assert!(
-        tool_texts[0].starts_with("[tool_failure]"),
-        "失败结果不应带 core 生成的抬头：{}",
-        tool_texts[0]
+        tool_contents[0]
+            .iter()
+            .find_map(|block| block.as_text())
+            .is_some_and(|text| text.starts_with("[tool_failure]")),
+        "失败结果不应带 core 生成的抬头：{tool_contents:?}"
     );
     assert!(
-        !tool_texts[1].starts_with("调用"),
-        "成功结果不应带 core 生成的抬头：{}",
-        tool_texts[1]
+        !tool_contents[1]
+            .iter()
+            .find_map(|block| block.as_text())
+            .is_some_and(|text| text.starts_with("调用")),
+        "成功结果不应带 core 生成的抬头：{tool_contents:?}"
     );
 }
 
@@ -2914,7 +2959,13 @@ async fn tool_call_round_persists_decode_tps() {
         .session
         .messages
         .iter()
-        .find(|message| message.text_content().contains("已完成。"))
+        .find(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .any(|text| text.contains("已完成。"))
+        })
         .expect("最终文本消息应存在");
     assert!(text_round.text_elapsed_ms().is_some());
     assert!(text_round.ttft_ms().is_some_and(|ttft| ttft > 0));

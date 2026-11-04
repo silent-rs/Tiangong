@@ -675,7 +675,14 @@ pub fn inject_tool_to_messages(
         .iter()
         .rev()
         .find(|msg| msg.role == MessageRole::Tool && msg.tool_name() == Some(INJECTION_TOOL_NAME))
-        .is_some_and(|msg| msg.text_content() == output);
+        .is_some_and(|msg| {
+            msg.content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .collect::<Vec<_>>()
+                .join("")
+                == output
+        });
     if is_dup {
         tracing::debug!(session_id = %session.id, tool_name, "skip tool injection: identical to previous");
         return false;
@@ -724,7 +731,14 @@ pub fn inject_tool_to_session(
                     .session
                     .messages
                     .last()
-                    .map(|message| message.text_content())
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| block.as_text())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
                     .unwrap_or_default();
                 (
                     assistant.id.clone(),
