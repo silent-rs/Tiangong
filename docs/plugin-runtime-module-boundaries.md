@@ -13,9 +13,8 @@
 | 1 | 删除死代码 `seams.rs`（151 行 / 4 自测） | 去掉 WASM 时代遗留的空抽象 |
 | 2 | 工具键解析归契约域（新 `tool_key`） | 消除 D1→D7 反向依赖 |
 | 3 | 存储布局契约 `storage_layout` + `sandbox_ensured_writable` | 消除 D5→D9（沙箱组装不再认识开发目录） |
-| 4 | 权威策略表外移 `tiangong-plugin-policy` crate | runtime 生产代码不再含插件 ID；桌面/CLI/Server/e2e 同源注入 |
+| 4 | 权威策略表归位 `host_policy/table`（不再单独出 crate） | runtime 生产代码不再含插件 ID 策略分支；桌面/CLI/Server/e2e 同源注入 |
 | 5 | 一次性进程形态与官方签名要求入策略 | 去掉 `"command"` 字面量分支 |
-
 | 6 | 传输层注入 `RuntimeEnv` + `SidecarEvents`（D5 的输入接缝） | 消除 D5→D4：沙箱开关/退出标志/授权路径与三类通知改由状态机注入 |
 | 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
 | 8 | 验证编排归状态机（新 `registry/reverify`） | 消除 D2→D4（信任域只留记录读写，不再起连接） |
@@ -23,8 +22,10 @@
 | 10 | 调用层注入 `RuntimeFeedback` + `SidecarAccess`，结果抬头归调用域 | 消除 D6→D7（调用层不再直发桥接事件） |
 | 11 | `SidecarAccess` 承载取连接与旁路调用 | 消除 D6→D4（调用层不再自己解析安装目录/连接形态） |
 | 12 | 插件集变更广播改为注入出口；展示投影域归属修正 | 消除 D4→D7（状态机不再直连桥接） |
-度量：跨域引用边 34 → 24，违规边 15 → 5；`crate::plugin_dev` 在传输层引用清零，
+度量：跨域引用边 34 → 24（引用次数 222 → 204），违规边 15 → 5；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
+附录 A/B 已补齐 `tool_key`、`storage_layout`、`content_manifest` 三处模块的归属，拆分前基线
+用同一脚本重算，边数与违规边不变，仅引用次数口径更严。
 
 ## 1. 目的与判定标准
 
@@ -139,11 +140,16 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 ### D8 策略（Host Policy）
 
-- **拥有**：`HostExecutionPolicy` 数据结构与默认值（全沙箱、零能力、stdio）。
-- **不拥有**：「哪个插件 ID 获得什么」——这是宿主产品策略。
-- **已修复**：策略表外移为独立 crate `tiangong-plugin-policy`；runtime 只留
-  `HostExecutionPolicy` 数据结构、`set_host_policy_provider` 注入点与 fail-closed 默认
-  （全沙箱、零特权、stdio）。一次性进程形态与"必须官方签名"也由策略声明，
+- **拥有**：`HostExecutionPolicy` 数据结构与默认值（全沙箱、零能力、stdio），以及内置
+  插件 ID 的权威策略表（`host_policy/table.rs`）。
+- **不拥有**：宿主运行期追加的策略覆盖——由 `set_host_policy_provider` 注入，本域只负责
+  「provider 优先、缺省回落内置表」的解析顺序。
+- **已修复**：权威表放在本域的 `host_policy/table.rs`——`install()` 注册默认表、
+  `execution_policy()` 按插件 ID 查表，宿主只经 `host_policy::install()` 一处注入。
+  该表一度外移为独立 crate `tiangong-plugin-policy`，但它只有 runtime 自己消费、没有
+  第二个调用方，独立 crate 只换来一次跨 crate 组装噪音，已回融（§0 步 4）。其余模块
+  仍只见 `HostExecutionPolicy` 数据结构、`set_host_policy_provider` 注入点与 fail-closed
+  默认（全沙箱、零特权、stdio）。一次性进程形态与"必须官方签名"也由策略声明，
   runtime 不再出现 `"command"` 字面量分支。
 
 ### D9 创作工作流（Authoring，待迁出）
@@ -268,19 +274,20 @@ pub struct HostServices {
 | 6 | D9 创作 → 宿主 | 命名空间可注册 + 步 5 | runtime 内 `rg plugin-dev` 为空；creator e2e 全绿 | 中 |
 | 7 | D4/D5/D6 内核 | 全部接缝 | 跨域边 ≤ 矩阵允许集合；static 数下降 | 高 |
 
-建议在步 1 之前先做一次**零行为改动**的整理：删 `seams.rs`、`D8` 的策略表外移、`D5→D9` 的目录常量入 `StorageLayout`。这三项不依赖任何接缝，可独立验证。
+建议在步 1 之前先做一次**零行为改动**的整理：删 `seams.rs`、`D8` 的策略表归位到 `host_policy/table.rs`、`D5→D9` 的目录常量入 `StorageLayout`。这三项不依赖任何接缝，可独立验证。
 
 ## 6. 度量基线（每步复核）
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
 | 跨域引用边 | 34 | 24 | ≤ 矩阵允许的 20 条 |
+| 跨域引用次数 | 222 | 204 | 随边数收敛 |
 | 违规边 | 15 | 5 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
 | `use super::*` | 36 处（生产代码） | 36 处 | 0（隐式耦合无法审计） |
-| runtime 内插件 ID 字面量 | 5 个 ID / 多处**策略分支** | 策略分支 0（策略表在 D8）；目录默认集合与展示映射仍留 D3/D7（`DEFAULT_PLUGIN_IDS`、分类表、`builtin_tables`） | 策略分支恒为 0；数据表按产品需要保留 |
+| runtime 内插件 ID 字面量 | 5 个 ID / 多处**策略分支** | 策略分支 0（策略表在 D8 的 `host_policy/table.rs`）；目录默认集合与展示映射仍留 D3/D7（`DEFAULT_PLUGIN_IDS`、分类表、`builtin_tables`） | 策略分支恒为 0；数据表按产品需要保留 |
 
 复核脚本见附录 B，可在任意提交上重跑，得到同样口径的数字。
 
@@ -298,6 +305,8 @@ pub struct HostServices {
 | `manifest.rs` | D1 契约 | 1747 |
 | `slots.rs` | D1 契约 | 478 |
 | `launch_policy.rs` | D1 契约 | 338 |
+| `tool_key.rs` | D1 契约 | 63 |
+| `storage_layout.rs` | D1 契约 | 99 |
 | `signature.rs` | D2 信任 | 762 |
 | `trust.rs` | D2 信任 | 497 |
 | `verification.rs` | D2 信任 | 402 |
@@ -333,7 +342,8 @@ pub struct HostServices {
 | `tool_icons.rs` | D4 状态机 | 487 |
 | `tool_titles.rs` | D4 状态机 | 230 |
 | `builtin_tables.rs` | D4 状态机 | 211 |
-| `host_policy.rs` | D8 策略 | 225 |
+| `host_policy.rs` | D8 策略 | 226 |
+| `host_policy/table.rs` | D8 策略 | 233 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
 | `plugin_dev/trust.rs` | D9 创作 | 194 |
 | `lib.rs` | 根 | 112 |
@@ -351,15 +361,18 @@ cd crates/plugin/tiangong-plugin-runtime/src && python3 - <<'PY'
 import os, re, collections
 PREFIX=[('registry/migrations','D3'),('registry/legacy','D3'),('registry/connections','D5'),
  ('registry','D4'),('sidecar','D5'),('plugin_dev','D9'),
- ('manifest','D1'),('slots','D1'),('launch_policy','D1'),
- ('signature','D2'),('trust','D2'),('verification','D2'),
+ ('manifest','D1'),('slots','D1'),('launch_policy','D1'),('tool_key','D1'),('storage_layout','D1'),
+ ('signature','D2'),('trust','D2'),('verification','D2'),('content_manifest','D2'),
  ('artifacts','D3'),('events','D4'),
  ('interpreter_env','D5'),('platform','D5'),('launcher_update','D5'),
  ('invocation','D6'),('execution','D6'),('ts_plugin','D6'),('ts_tools','D6'),('runtime_feedback','D6'),
  ('bridge','D7'),('core_bridge','D7'),('tool_icons','D4'),('tool_titles','D4'),('builtin_tables','D4'),
  ('host_policy','D8'),('lib','D0'),('test_support','D0')]
-MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','signature':'D2','trust':'D2','verification':'D2',
- 'artifacts':'D3','registry':'D4','events':'D4','sidecar':'D5','interpreter_env':'D5','platform':'D5',
+MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','tool_key':'D1','storage_layout':'D1',
+ 'signature':'D2','trust':'D2',
+ 'verification':'D2','content_manifest':'D2',
+ 'artifacts':'D3','registry':'D4','events':'D4','sidecar':'D5',
+ 'interpreter_env':'D5','platform':'D5',
  'launcher_update':'D5','invocation':'D6','execution':'D6','ts_plugin':'D6','ts_tools':'D6',
  'runtime_feedback':'D6','bridge':'D7',
  'core_bridge':'D7','tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4','host_policy':'D8',

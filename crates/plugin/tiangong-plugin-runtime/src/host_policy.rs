@@ -5,9 +5,8 @@
 //!
 //! # 职责边界
 //!
-//! 本模块只定义**策略数据结构**与**注入点**，不含任何插件 ID：
-//! 「哪个插件获得哪些特权」是宿主产品策略（桌面宿主见 `plugin_policy`
-//! 模块），宿主启动时经 [`set_host_policy_provider`] 注入。未注入时按
+//! 本模块只定义**策略数据结构**与**注入点**：「哪个插件获得哪些特权」是
+//! 宿主产品策略，集中在 [`table`]（[`install`] 注入）。未注入时按
 //! [`HostExecutionPolicy::sandboxed_default`] 处理——进沙箱、零特权、
 //! stdio（fail-closed），保证漏配不会放大权限。
 //!
@@ -25,6 +24,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
 use crate::launch_policy::CAPABILITY_CREDENTIAL_SERVICES;
+
+pub mod table;
+
+pub use table::{execution_policy, install};
 
 /// sidecar 与宿主的通信通道（宿主权威决定，插件不声明——spawn 时由
 /// 宿主注入环境变量选择，sidecar 通用库自动适配）。

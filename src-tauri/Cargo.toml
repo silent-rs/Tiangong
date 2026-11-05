@@ -15,7 +15,6 @@ tiangong-types = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
-tiangong-plugin-policy = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-config = { workspace = true }
 silent = { workspace = true, features = ["scheduler"] }

@@ -1,19 +1,21 @@
 //! 宿主权威执行策略表：插件身份 → 沙箱与特权。
 //!
-//! 这是**产品策略**而非运行时机制：runtime 只保留策略数据结构与注入点
-//! （`tiangong_plugin_runtime::host_policy`），「哪个插件 ID 获得哪些特权」
-//! 集中在这里，由各宿主（桌面、CLI、Server、e2e）在启动时经 [`install`]
-//! 注入。未注入时 runtime 按全沙箱零特权处理（fail-closed）。
+//! 这是**产品策略**而非运行时机制：`host_policy` 只保留策略数据结构与注入
+//! 点，「哪个插件 ID 获得哪些特权」集中在本表，由各宿主（桌面、CLI、Server、
+//! e2e）在启动时经 [`install`] 注入。未注入时 runtime 按全沙箱零特权处理
+//! （fail-closed）。
 //!
 //! 授权原则：特权只按**已验证的官方发布者签名 + 精确插件 ID** 授予；插件
 //! 清单的自声明与调用载荷都不构成提权输入。
+//!
+//! 与运行时同 crate 维护：策略表是宿主与 runtime 之间唯一的产品知识，
+//! 拆成独立 crate 只会多一层依赖而没有边界收益——真正需要机制化的部分
+//! （数据结构、解析、fail-closed 默认）都在 `super`。
 
 use std::sync::Arc;
 
-use tiangong_plugin_runtime::host_policy::{
-    HostExecutionPolicy, UserCredentialReadAccess, set_host_policy_provider,
-};
-use tiangong_plugin_runtime::launch_policy::{
+use super::{HostExecutionPolicy, UserCredentialReadAccess, set_host_policy_provider};
+use crate::launch_policy::{
     CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_PROCESS_INSPECTION,
 };
 
@@ -78,8 +80,8 @@ pub fn execution_policy(plugin_id: &str, official_signed: bool) -> HostExecution
 
 #[cfg(test)]
 mod tests {
+    use super::super::{SidecarTransport, clear_host_policy_provider};
     use super::*;
-    use tiangong_plugin_runtime::host_policy::{SidecarTransport, clear_host_policy_provider};
 
     const OFFICIAL_IDS: &[&str] = &[
         "terminal",
@@ -221,11 +223,11 @@ mod tests {
     #[serial_test::serial]
     fn install_后运行时按本表解析() {
         install();
-        let policy = tiangong_plugin_runtime::host_policy::resolve("terminal", true);
+        let policy = super::super::resolve("terminal", true);
         assert!(policy.plugin_dev_write);
         assert!(policy.user_credential_reads.ssh);
         clear_host_policy_provider();
-        let default = tiangong_plugin_runtime::host_policy::resolve("terminal", true);
+        let default = super::super::resolve("terminal", true);
         assert!(!default.plugin_dev_write, "未注入时必须 fail-closed");
     }
 }

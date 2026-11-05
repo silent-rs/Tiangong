@@ -151,10 +151,10 @@ fn main() {
     // 供插件 sidecar 与命令通道子进程全树使用。
     tiangong_plugin_runtime::ensure_interpreter_env();
     // 宿主权威执行策略：插件 ID → 沙箱与特权的映射属于宿主产品策略
-    // （见 tiangong-plugin-policy crate），runtime 只保留数据结构与注入点。
-    // 必须在任何插件预加载/进程拉起之前安装；未注入时 runtime 按全沙箱
-    // 零特权处理（fail-closed）。
-    tiangong_plugin_policy::install();
+    // （见 runtime 的 `host_policy::table`），机制层只保留数据结构与注入点。
+    // 必须在任何插件预加载/进程拉起之前安装；未注入时按全沙箱零特权处理
+    // （fail-closed）。
+    tiangong_plugin_runtime::host_policy::install();
     // 宿主注册的桥接命名空间：插件创作链（plugin-dev.*）属产品流程，
     // 由宿主注册处理器，runtime 不含其实现。
     tiangong_plugin_runtime::register_bridge_namespace(
