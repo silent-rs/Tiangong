@@ -292,25 +292,9 @@ fn sidecar_connection_inner(
         if let Some(workspace) = workspace {
             config = config.with_sandbox_workspace(Some(workspace));
         }
-        // 插件开发目录写域（host_policy 按已验证官方身份授予）：devkit
-        // CLI 经终端命令通道写入 plugins-dev（项目骨架与构建产物）；导入
-        // 收件箱 plugins/.inbox 承载待安装产物（`.` 前缀使 discovery 不扫描，
-        // 正式安装目录 plugins/ 不在授权之列——安装仍经宿主 plugin-dev 通道
-        // 的构建指纹核验或用户原生确认把关）。目录保障（预创建与防符号
-        // 链接篡改）见 ensured_writable_root。
-        if host_policy.plugin_dev_write {
-            for writable_dir in [
-                storage_root.join(crate::plugin_dev::PLUGIN_DEV_DIR),
-                storage_root
-                    .join("plugins")
-                    .join(crate::plugin_dev::PLUGIN_INBOX_DIR),
-            ]
-            .into_iter()
-            .filter_map(crate::sidecar::stdio::sandbox_exemptions::ensured_writable_root)
-            {
-                config = config.push_sandbox_extra_writable(writable_dir);
-            }
-        }
+        // 插件开发目录写域：仅翻译 host_policy 判定，目录汇入与保障在
+        // 沙箱策略组装层（stdio 组装块 + ensured_writable_root）。
+        config = config.with_sandbox_plugin_dev_write(host_policy.plugin_dev_write);
     }
     if let Some(signed_release) = signed_release {
         // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。
