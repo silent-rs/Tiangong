@@ -170,6 +170,7 @@ pub fn set_plugin_dev_import_confirm(handler: ImportConfirmHandler) {
 
 /// 清除导入确认回调（测试隔离用：恢复 fail-closed 初始态）。
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn clear_plugin_dev_import_confirm_for_test() {
     if let Ok(mut current) = IMPORT_CONFIRM.write() {
         *current = None;
