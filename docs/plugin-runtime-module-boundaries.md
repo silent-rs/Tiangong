@@ -4,6 +4,21 @@
 > 关联：`docs/plugin-runtime-lifecycle.md`（生命周期所有权）、`docs/plugin-harness-design.md`（插件形态）、`docs/plugin-development.md`（公共中立约束）
 > 适用：`crates/plugin/tiangong-plugin-runtime`
 
+## 0. 本轮进展（feature/plugin-runtime-architecture）
+
+已完成（全部零行为改动，逐步验证）：
+
+| 步 | 内容 | 效果 |
+|---|---|---|
+| 1 | 删除死代码 `seams.rs`（151 行 / 4 自测） | 去掉 WASM 时代遗留的空抽象 |
+| 2 | 工具键解析归契约域（新 `tool_key`） | 消除 D1→D7 反向依赖 |
+| 3 | 存储布局契约 `storage_layout` + `sandbox_ensured_writable` | 消除 D5→D9（沙箱组装不再认识开发目录） |
+| 4 | 权威策略表外移 `tiangong-plugin-policy` crate | runtime 生产代码不再含插件 ID；桌面/CLI/Server/e2e 同源注入 |
+| 5 | 一次性进程形态与官方签名要求入策略；市场展示数据外移宿主 | 去掉 `"command"` 字面量分支与 `DEFAULT_PLUGIN_IDS`/分类表 |
+
+度量：跨域引用边 34 → 32，违规边 15 → 13；`crate::plugin_dev` 在传输层引用清零，
+runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
+
 ## 1. 目的与判定标准
 
 `tiangong-plugin-runtime` 目前承载了天工插件的全部子系统：装载执行、sidecar 进程与 OS 沙箱、安装分发、签名信任、宿主桥、Core 适配、插件创作工作流。体量本身不是问题，**职责混在一个 crate、边界只靠注释维持**才是：拆模块时无法判断「移动这段代码会不会把策略带进机制层」「断开这条依赖会不会丢掉一条隐式调用」。
@@ -41,8 +56,8 @@
 - **拥有**：`plugin.json` schema 与校验规则、Slot/贡献声明类型、`LaunchPolicy` ↔ Launcher JSON 线格式、工具键（`工具名:参数=取值`）解析。
 - **不拥有**：磁盘布局、进程、权限决策、展示兜底表、任何状态。
 - **对外 seam**：`PluginManifest::load/parse`、`SlotRegistry`、`LaunchPolicy`（由 `tests/launch_policy_contract.rs` 与 Launcher 语义对齐）。
-- **当前越界**：`manifest.rs:699-717` 调用 `tool_icons::{parse_tool_key, PLUGIN_DEFAULT_ICON_KEY}`（D7），契约反向依赖展示。
-- **修法**：工具键解析下沉为 `manifest::tool_key`（或同级 `tool_key.rs`），D7 反向引用。
+- **已修复**：工具键解析下沉为 `tool_key`（D1），`manifest` 与展示层都从契约取键解析；
+  目录契约集中在 `storage_layout`，各域不再各自拼路径。
 
 ### D2 信任（Trust）
 
@@ -59,10 +74,12 @@
 - **拥有**：远程目录获取/下载/校验、staging 事务（不可变副本 + `Drop` 清理）、install/import/enable/disable/rollback/uninstall、旧 ID 迁移、安装期失败回滚。
 - **不拥有**：运行中的连接与会话资源、签名算法、插件启用后的状态广播。
 - **对外 seam**：`stage_plugin_archive / stage_local_plugin → StagedPlugin`、`install_staged_plugin(root, staged) → PluginStatus`、`uninstall_plugin(root, id, keep_data)`。
-- **当前越界**：
-  - `artifacts.rs` 混入市场展示数据（`DEFAULT_PLUGIN_IDS`、`plugin_categories`、首启标记）与 `stage_local_plugin`；
-  - `migrations.rs` 5 处调 `ts_tools::cancel_plugin_calls`、3 处调 `bridge::clear_plugin_subscriptions`、1 处调 `launcher_update::revoke_persistent_grants`——**安装事务直接摆布别人的运行时资源**。
-- **修法**：展示数据外移；安装/卸载收尾改为发布 `PluginChangeEvent`（D4 已具备事件总线），由订阅者停资源。
+- **已修复**：市场展示数据（默认插件、场景分类、首启标记）迁至宿主 `plugin_market`；
+  `artifacts` 只保留目录检索/下载/安装。
+- **当前越界**：`migrations.rs` 5 处调 `ts_tools::cancel_plugin_calls`、3 处调
+  `bridge::clear_plugin_subscriptions`、1 处调 `launcher_update::revoke_persistent_grants`——
+  **安装事务直接摆布别人的运行时资源**。
+- **修法**：安装/卸载收尾改为发布 `PluginChangeEvent`（D4 已具备事件总线），由订阅者停资源。
 
 ### D4 状态机（Registry / Lifecycle）
 
@@ -79,10 +96,12 @@
 - **拥有**：进程拉起/终止/进程树、stdio 与 TCP 帧、握手、超时、取消、环境注入、**沙箱策略组装**（输入是已定策略）、连接池与换代、解释器发现、Launcher 能力探测。
 - **不拥有**：插件 ID、开发目录、安装目录布局、是否启用、prompt/tool 刷新语义、插件是否可信。
 - **对外 seam**：入 `SidecarConfig`（含存储布局、`HostExecutionPolicy`、运行时环境）；出 `dyn SidecarConnection`、`SidecarNotificationForwarder`、`SidecarEventHandler`。
-- **当前越界**：
-  - `sidecar/stdio/mod.rs` 9 处调 D4（`refresh_prompt_sections`、`refresh_tool_specs`、`dispatch_tools_recovered`、`sandbox_disabled`、`sidecars_shutting_down`、`persistent_grants_path`），2 处引用 `plugin_dev::{PLUGIN_DEV_DIR, PLUGIN_INBOX_DIR}`（D9）——**OS 沙箱组装认识插件创作目录**；
-  - `sidecar.rs` 3 处调 D4 的 refresh 函数。
-- **修法**：目录入 `StorageLayout`；关闭标志/沙箱开关/grants 路径入 `RuntimeEnv`；三个 refresh 改为 `SidecarEventHandler` 回调。
+- **已修复**：开发目录经 `StorageLayout` 由连接构造层翻译成 `sandbox_ensured_writable`，
+  传输层只做目录保障，不再认识 `plugin_dev`（D5→D9 清零）。
+- **当前越界**：`sidecar/stdio/mod.rs` 9 处调 D4（`refresh_prompt_sections`、`refresh_tool_specs`、
+  `dispatch_tools_recovered`、`sandbox_disabled`、`sidecars_shutting_down`、`persistent_grants_path`），
+  `sidecar.rs` 3 处调 D4 的 refresh 函数。
+- **修法**：关闭标志/沙箱开关/grants 路径入 `RuntimeEnv`；三个 refresh 改为 `SidecarEventHandler` 回调。
 
 ### D6 调用（Invocation）
 
@@ -103,8 +122,10 @@
 
 - **拥有**：`HostExecutionPolicy` 数据结构与默认值（全沙箱、零能力、stdio）。
 - **不拥有**：「哪个插件 ID 获得什么」——这是宿主产品策略。
-- **当前越界**：`resolve()` 硬编码 `terminal`/`command`/`computer-use`/`volcengine`/`plugin-creator`（`host_policy.rs:88-119`），与 `catalog_snapshot()` 的官方 ID 表。
-- **修法**：`resolve` 的表外移宿主，runtime 只留 `HostPolicyProvider` 注入点，缺省 fail-closed。
+- **已修复**：策略表外移为独立 crate `tiangong-plugin-policy`；runtime 只留
+  `HostExecutionPolicy` 数据结构、`set_host_policy_provider` 注入点与 fail-closed 默认
+  （全沙箱、零特权、stdio）。一次性进程形态与"必须官方签名"也由策略声明，
+  runtime 不再出现 `"command"` 字面量分支。
 
 ### D9 创作工作流（Authoring，待迁出）
 
@@ -138,20 +159,18 @@
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（15 条边 / 82 处引用）
+### 当前违规（13 条边 / 73 处引用，本轮已消 2 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
-| D1→D7 | 4 | `manifest.rs:699-717` | 契约依赖展示键解析 | 工具键归 D1 |
 | D2→D4 | 10 | `verification.rs` | 记录读写 + 重验编排混在一起 | 拆 record / reverify |
 | D2→D5 | 3 | `signature.rs` | 引用传输层常量 | 常量取 update crate |
-| D3→D4 | 8 | `artifacts.rs:780,793`、`migrations.rs:411,421` | 前者是安装入口 re-export（假阳性）；后者真实越界 | `assemble_*` 归 D4 内部 |
+| D3→D4 | 8 | `artifacts.rs:780,793`、`migrations.rs:411,421` | 安装入口 re-export（假阳性）+ `assemble_*` 真实越界 | `assemble_*` 归 D4 内部 |
 | D3→D5 | 1 | `migrations.rs` | 卸载时撤销 launcher grants | 改发事件 |
 | D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
 | D3→D7 | 3 | `migrations.rs` | 清插件订阅 | 改发事件 |
 | D4→D7 | 10 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
 | D5→D4 | 9 | `sidecar.rs`、`stdio/mod.rs` | 传输层调 refresh/shutdown/grants | 注入 `RuntimeEnv` + `SidecarEvents` |
-| D5→D9 | 2 | `stdio/mod.rs:604-613` | 沙箱组装认识开发目录 | 目录入 `StorageLayout` |
 | D6→D4 | 6 | `ts_plugin.rs`、`ts_tools.rs` | 适配器直接取连接/清单 | 注入 `SidecarAccess` / `ManifestQuery` |
 | D6→D7 | 12 | `invocation.rs`、`ts_*.rs` | 调用层直接发 bridge 事件 | 注入 `RuntimeFeedback` |
 | D7→D9 | 1 | `bridge.rs:233` | 硬编码 plugin-dev 命名空间 | 命名空间可注册 |
@@ -237,14 +256,15 @@ pub struct HostServices {
 
 ## 6. 度量基线（每步复核）
 
-| 指标 | 当前 | 目标 |
-|---|---|---|
-| 跨域引用边 | 34 | ≤ 矩阵允许的 20 条 |
-| 跨域引用处数 | 231 | 逐步下降 |
-| 顶层模块 2-循环 | 10 组 | 0 |
-| 全局 `static` | 24 | 仅保留进程级单例（如 shutdown 标志） |
-| 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 由 `HostServices` 一处构造替代 |
-| `use super::*` | 36 处（生产代码） | 0（隐式耦合无法审计） |
+| 指标 | 拆分前 | 本轮后 | 目标 |
+|---|---|---|---|
+| 跨域引用边 | 34 | 32 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 13 | 0 |
+| 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
+| 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
+| 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
+| `use super::*` | 36 处（生产代码） | 36 处 | 0（隐式耦合无法审计） |
+| runtime 内插件 ID 字面量 | 5 个 ID / 多处分支 | 0（`builtin_tables` 展示映射除外） | 0 |
 
 复核脚本见附录 B，可在任意提交上重跑，得到同样口径的数字。
 
