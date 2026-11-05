@@ -26,12 +26,17 @@ mod trust;
 pub(crate) use trust::clear_plugin_dev_trusted_installer_for_test;
 use trust::ensure_install_authorized;
 pub use trust::{
-    InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint, note_trusted_build,
-    set_plugin_dev_trusted_installer, trusted_build_fingerprint,
+    ImportSummary, InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint,
+    note_trusted_build, set_plugin_dev_import_confirm, set_plugin_dev_trusted_installer,
+    trusted_build_fingerprint,
 };
 
 /// 开发目录名（位于存储根下，与 plugins/ 平级）。
 pub const PLUGIN_DEV_DIR: &str = "plugins-dev";
+/// 插件导入收件箱子目录名（位于 plugins/ 下，`.` 前缀使 discovery 的
+/// 目录扫描天然跳过——收件箱内容不参与加载，只有经宿主确认导入并
+/// 签名落锚后才会进入正式安装目录）。
+pub const PLUGIN_INBOX_DIR: &str = ".inbox";
 /// 项目元数据文件名（位于项目目录根部）。
 pub(crate) const PROJECT_META_FILE: &str = ".plugin-dev.json";
 
@@ -56,12 +61,17 @@ pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
             serde_json::to_value(result)?
         }
         "list" => serde_json::to_value(list(&storage_root)?)?,
+        "import" => {
+            let request: IdRequest = parse_payload(payload)?;
+            let result = import_from_inbox(&storage_root, plugin_id, &request.id)?;
+            serde_json::to_value(result)?
+        }
         "status" => {
             let request: IdRequest = parse_payload(payload)?;
             serde_json::to_value(status(&storage_root, &request.id)?)?
         }
         _ => bail!(
-            "plugin-dev 未知方法 {method}（宿主仅提供 install/list/status；\
+            "plugin-dev 未知方法 {method}（宿主仅提供 install/import/list/status；\
              init/validate/build/run/logs 经命令通道执行 @silent-ai/plugin-creator devkit）"
         ),
     };
@@ -304,6 +314,105 @@ fn sign_staged_with_user_key(
     std::fs::write(&release_path, serde_json::to_vec_pretty(&release)?)?;
     crate::trust::sign_with_user_key(storage_root, &release_path)?;
     Ok(())
+}
+
+// ── import（inbox 收件箱）──
+
+/// 从收件箱导入插件：staging 暂存 → 清单校验 → 摘要用户确认 → 用户密钥
+/// 签名 → 导入正式目录。
+///
+/// 与 [`install`] 的授权差异：install 的免确认依据是「宿主观察到的真实
+/// 构建指纹」；inbox 产物来源不受控（沙箱内进程也能写入收件箱），因此
+/// 授权点必须是用户本人在宿主原生对话框上对**暂存副本摘要**的批准
+/// （fail-closed：未注入回调、拒绝或超时均拒绝导入）。摘要与导入作用于
+/// 同一份暂存副本，防「确认内容 ≠ 安装内容」。
+fn import_from_inbox(
+    storage_root: &Path,
+    caller_plugin_id: &str,
+    plugin_id: &str,
+) -> Result<InstallResult> {
+    trust::ensure_trusted_installer(storage_root, caller_plugin_id)?;
+    // 插件 ID 即收件箱子目录名；复用数据目录同款路径段校验，拒绝
+    // `..`/`/` 等以收件箱为跳板的路径逃逸。
+    let mut components = std::path::Path::new(plugin_id).components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        bail!("插件 ID 不能作为收件箱目录名: {plugin_id}");
+    }
+    let inbox_dir = storage_root
+        .join("plugins")
+        .join(PLUGIN_INBOX_DIR)
+        .join(plugin_id);
+    if !inbox_dir.join("plugin.json").is_file() {
+        bail!(
+            "收件箱中没有插件 {plugin_id} 的产物（{} 不含 plugin.json）",
+            inbox_dir.display()
+        );
+    }
+    // 先暂存不可变副本：收件箱是沙箱可写区，确认窗口期内原目录可能被
+    // 替换；摘要与导入都必须基于副本（与 install 的 staging 同款理由）。
+    let staged = crate::artifacts::stage_local_plugin(storage_root, &inbox_dir)?;
+    let staged_manifest = staged.path().join("plugin.json");
+    let manifest = PluginManifest::load(&staged_manifest)
+        .with_context(|| format!("收件箱产物清单无效: {}", staged_manifest.display()))?;
+    if manifest.id != plugin_id {
+        bail!(
+            "收件箱产物清单 ID {} 与请求导入的 {plugin_id} 不一致，请检查目录名与 plugin.json",
+            manifest.id
+        );
+    }
+    let (file_count, total_bytes) = count_tree(staged.path());
+    let summary = trust::ImportSummary {
+        plugin_id: manifest.id.clone(),
+        version: manifest.version.clone(),
+        name: manifest.name.clone(),
+        permissions: manifest.permissions.clone(),
+        file_count,
+        total_bytes,
+        source: inbox_dir.clone(),
+    };
+    trust::confirm_import(&summary)?;
+    // 批准后与 install 同链：内容清单双向校验 + 用户密钥签名 + 导入。
+    sign_staged_with_user_key(storage_root, staged.path(), &manifest)?;
+    let status = crate::registry::import_staged_plugin(storage_root, staged.path())?;
+    tracing::info!(
+        plugin = %status.id,
+        version = %status.manifest_version,
+        "plugin-dev 收件箱导入完成"
+    );
+    Ok(InstallResult {
+        plugin_id: status.id,
+        version: status.manifest_version,
+        state: status.state,
+        enabled: status.enabled,
+    })
+}
+
+/// 递归统计目录的文件数与总字节数（摘要展示用；跟随普通目录，跳过
+/// 符号链接本身）。
+fn count_tree(root: &Path) -> (u64, u64) {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    fn walk(dir: &Path, files: &mut u64, bytes: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                walk(&entry.path(), files, bytes);
+            } else if file_type.is_file() {
+                *files += 1;
+                *bytes += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            }
+        }
+    }
+    walk(root, &mut files, &mut bytes);
+    (files, bytes)
 }
 
 // ── status ──

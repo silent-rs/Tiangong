@@ -118,14 +118,19 @@
     {
       "name": "plugin_install",
       "non_idempotent": true,
-      "description": "把开发目录中已构建的插件项目安装为天工可用插件（读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物，须先经 plugin_devkit build 构建成功）。安装由宿主以本机用户密钥自动签名并验证，免确认（仅官方 Plugin Creator 可触发；构建后修改产物会被指纹核验拒绝）。迭代修改代码后需重新 build 再 install（每次构建只授予一次安装）。安装后当前会话即可使用：本机自制插件经固定工具 call_local_plugin 动态调用（清单由系统注入对话），已开启的会话在下一轮生效，无需新开会话。",
+      "description": "安装插件的唯一通道（仅官方 Plugin Creator 可触发），来源二选一：source=dev（默认）读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物，须先经 plugin_devkit build 构建成功；宿主以本机用户密钥自动签名并验证，免确认——构建后修改产物会被指纹核验拒绝，每次构建只授予一次安装，迭代后需重新 build 再 install。source=inbox 读取收件箱 ~/.tiangong/plugins/.inbox/<id>/ 的外来产物（非 devkit 构建链：手动构建、外部工具产出等）；导入前宿主弹原生确认对话框展示摘要（ID、版本、文件规模、声明权限），用户批准才安装，拒绝或超时即失败（fail-closed），确认与安装作用于同一份暂存副本；产物须含完整 plugin.json 与 content-manifest.json。两种来源不自动回退：dev 指纹失配直接失败，不会改走 inbox。安装后当前会话即可使用：本机自制插件经固定工具 call_local_plugin 动态调用（清单由系统注入对话），已开启的会话在下一轮生效，无需新开会话。",
       "input_schema": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string",
             "minLength": 1,
-            "description": "项目 ID（plugin.json 中的插件 ID）"
+            "description": "项目 ID（plugin.json 中的插件 ID，dev 来源为 plugins-dev 目录名，inbox 来源为收件箱目录名）"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["dev", "inbox"],
+            "description": "产物来源：dev=开发目录构建产物（默认；免确认，构建指纹核验）；inbox=收件箱外来产物（需用户原生确认）"
           }
         },
         "required": [
@@ -136,9 +141,9 @@
     }
   ],
   "prompt": [
-    "自建插件创作流程（plugin creator）：全部操作经本插件工具完成——plugin_init 生成骨架（模板 ui-app/ts-tool/ts-npx/node-sidecar/node-tool；纯能力无界面用 node-tool，需要面板或交互用 node-sidecar/ts-tool）→ 浏览并按需求实现 → plugin_devkit validate/build（工程模板构建需本机 Node ≥ 20 与 yarn，添加依赖用 plugin_devkit add，锁定精确版本）→ plugin_install 安装（官方 Creator 专属：宿主自动签名，免确认）→ 迭代时改码后重新 build/install。构建失败用 plugin_devkit logs 读日志定位。无需 npx 或命令通道。",
+    "自建插件创作流程（plugin creator）：全部操作经本插件工具完成——plugin_init 生成骨架（模板 ui-app/ts-tool/ts-npx/node-sidecar/node-tool；纯能力无界面用 node-tool，需要面板或交互用 node-sidecar/ts-tool）→ 浏览并按需求实现 → plugin_devkit validate/build（工程模板构建需本机 Node ≥ 20 与 yarn，添加依赖用 plugin_devkit add，锁定精确版本）→ plugin_install 安装（官方 Creator 专属：宿主自动签名，免确认）→ 迭代时改码后重新 build/install。构建失败用 plugin_devkit logs 读日志定位。无需 npx 或命令通道。外来产物（非 devkit 构建链，如用户手动构建）放入收件箱 ~/.tiangong/plugins/.inbox/<id>/ 后用 plugin_install(source=inbox) 导入：宿主弹原生确认对话框展示摘要，用户批准才安装（fail-closed）；dev 与 inbox 来源不自动回退。",
     "生成规范：1) 能力最小化，只申请必需权限，纯 UI/TS 工具插件绝不声明 sidecar.invoke；2) 交互类 UI 贡献 slot 为官方专属，自建插件只用 extension.tab 与 settings.plugin-page；3) 每引入外部 npm 依赖必须注明用途；4) node-sidecar 模板的常驻服务写业务逻辑在 sidecar/main.mjs 的 dispatch，依赖经 plugin_devkit add 添加（构建时打进单文件）；5) 能力型插件在 plugin.json 声明 mention（推荐 candidates_op 指向 sidecar 的提及候选操作，供用户 @plugin:<id> 点名调用；hint 为 v0.17.6 兼容写法，仅限存量插件）；6) 插件页面禁止使用 File System Access API（showSaveFilePicker/showOpenFilePicker 等，宿主 webview 是 WebKit 不支持）——导出文件用 SDK 的 saveFileDialog（plugin.json 声明 dialog.use 权限），经宿主原生保存对话框由用户选择位置；7) extension.tab 实例若持有后端资源（子进程、PTY、远程连接等），贡献声明 \"instance_resources\": true 并由 sidecar 按 instance_id（runtime.context.app.instance_id）归属资源、实现 instanceClosed{session_id,instance_id} 与 listInstances{session_id}→{instances:[{instance_id}]}（均幂等）；beforeClose 只做状态保存，释放以宿主发出的 instanceClosed 为准；无后端资源的 App 不声明该字段，仅用 registerCleanup。",
-    "plugin_install 是唯一安装通道（官方 Creator 自动签名安装 + 注册表加载）；不要尝试用文件复制等方式绕过安装流程。"
+    "plugin_install 是唯一安装通道（默认 dev 来源：官方 Creator 自动签名 + 构建指纹核验 + 注册表加载；inbox 来源：收件箱导入，经用户原生确认把关）；不要尝试用文件复制等方式绕过安装流程。"
   ],
   "mention": {
     "candidates_op": "plugin-creator.mention_candidates"

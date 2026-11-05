@@ -112,10 +112,11 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     // 进程表查询（pgrep/pkill 经 sysmond，#677）：排查后台进程、确认服务
     // 是否在跑属于命令执行位的日常操作，同样只按已验证官方身份授予。
     let process_inspection = official_signed && matches!(plugin_id, "terminal" | "command");
-    // 插件开发目录写域：devkit 工具链的真实写操作经终端命令通道执行
-    // （plugin-creator 只提供 prompt 引导与宿主 install 通道，不在 sidecar
-    // 内落盘）。command 处于淘汰序列（#697 阶段 3），不新增授权。
-    let plugin_dev_write = official_signed && plugin_id == "terminal";
+    // 插件开发目录写域：devkit 工具链在 terminal（命令通道手动构建/调试
+    // npx devkit）与 plugin-creator（sidecar 内真实执行 init/build/add，
+    // 见 main.mjs 的 dispatch——不是纯 prompt）两个执行位落地。command
+    // 处于淘汰序列（#697 阶段 3），不新增授权。
+    let plugin_dev_write = official_signed && matches!(plugin_id, "terminal" | "plugin-creator");
     // Git/SSH/GitHub CLI 需经系统凭据服务解析用户身份与读取凭据，随凭据
     // 目录读取能力一并授予；证书验证由网络授权独立开放。
     let credential_services = user_credential_reads.ssh || user_credential_reads.github_cli;
@@ -211,15 +212,17 @@ mod tests {
     }
 
     #[test]
-    fn plugin_dev_write_is_granted_only_to_official_terminal() {
-        assert!(
-            resolve("terminal", true).plugin_dev_write,
-            "官方 terminal 承载 devkit CLI，需要插件开发目录写域"
-        );
+    fn plugin_dev_write_is_granted_only_to_official_terminal_and_creator() {
+        for id in ["terminal", "plugin-creator"] {
+            assert!(
+                resolve(id, true).plugin_dev_write,
+                "官方 {id} 承载 devkit 工具链，需要插件开发目录写域"
+            );
+        }
         for (id, official) in [
             ("terminal", false),
+            ("plugin-creator", false),
             ("command", true),
-            ("plugin-creator", true),
             ("fetch", true),
             ("unknown-third-party", true),
         ] {

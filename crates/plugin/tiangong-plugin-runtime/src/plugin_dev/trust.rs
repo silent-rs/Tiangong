@@ -5,7 +5,7 @@
 //! 存在经宿主进程内真实构建的指纹登记——堵住前端自报身份冒充安装任意
 //! 目录内容的通道。对外路径经 `plugin_dev` 根模块重导出保持稳定。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -107,6 +107,17 @@ pub(super) fn ensure_install_authorized(
     plugin_id: &str,
     project_id: &str,
 ) -> Result<String> {
+    ensure_trusted_installer(storage_root, plugin_id)?;
+    trusted_build_fingerprint(plugin_id, project_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "项目 {project_id} 缺少受信构建登记（先经该插件的 sidecar 完成构建，再安装）"
+        )
+    })
+}
+
+/// 受信安装方判定（install 与 import 共用）：调用方必须是宿主注入策略
+/// 判定的受信创作插件；缺失或拒绝即 fail-closed。
+pub(super) fn ensure_trusted_installer(storage_root: &Path, plugin_id: &str) -> Result<()> {
     let official_signed = crate::registry::find_installed_plugin(storage_root, plugin_id)
         .ok()
         .and_then(|installed| installed.signed_release)
@@ -123,9 +134,62 @@ pub(super) fn ensure_install_authorized(
     if !handler(&identity) {
         bail!("插件 {plugin_id} 无自动签名安装资格（用户密钥签名安装仅限受信创作插件）");
     }
-    trusted_build_fingerprint(plugin_id, project_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "项目 {project_id} 缺少受信构建登记（先经该插件的 sidecar 完成构建，再安装）"
-        )
-    })
+    Ok(())
+}
+
+/// 待确认的导入摘要：呈现给用户做安装决策的信息。字段取自**暂存副本**，
+/// 而非 inbox 原目录——inbox 是沙箱可写区，确认与导入必须作用于同一份
+/// 不可变副本，防止「确认内容 ≠ 安装内容」。
+#[derive(Debug, Clone)]
+pub struct ImportSummary {
+    pub plugin_id: String,
+    pub version: String,
+    pub name: Option<String>,
+    /// 清单声明的权限（安装后即生效的授权面）。
+    pub permissions: Vec<String>,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    /// 暂存副本对应的 inbox 来源目录（仅用于展示）。
+    pub source: PathBuf,
+}
+
+/// 导入确认回调：宿主弹原生对话框展示摘要，返回值表示用户是否批准。
+/// 由宿主启动时注入；缺失时 import fail-closed（对齐 TrustedInstallerHandler
+/// 模式——runtime 保持插件中立，用户决策发生在宿主侧）。
+pub type ImportConfirmHandler = Arc<dyn Fn(&ImportSummary) -> bool + Send + Sync>;
+
+static IMPORT_CONFIRM: std::sync::RwLock<Option<ImportConfirmHandler>> =
+    std::sync::RwLock::new(None);
+
+/// 注入导入确认回调（覆盖语义；缺失时 import fail-closed）。
+pub fn set_plugin_dev_import_confirm(handler: ImportConfirmHandler) {
+    if let Ok(mut current) = IMPORT_CONFIRM.write() {
+        *current = Some(handler);
+    }
+}
+
+/// 清除导入确认回调（测试隔离用：恢复 fail-closed 初始态）。
+#[cfg(test)]
+pub(crate) fn clear_plugin_dev_import_confirm_for_test() {
+    if let Ok(mut current) = IMPORT_CONFIRM.write() {
+        *current = None;
+    }
+}
+
+/// 请求用户确认导入：未注入回调、回调不可用或用户拒绝均返回 Err
+/// （fail-closed）。授权依据是用户本人对摘要的批准，调用方插件身份
+/// 不构成替代。
+pub(super) fn confirm_import(summary: &ImportSummary) -> Result<()> {
+    let handler = IMPORT_CONFIRM
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
+        .ok_or_else(|| anyhow::anyhow!("宿主未接入导入确认回调，拒绝导入（fail-closed）"))?;
+    if !handler(summary) {
+        bail!(
+            "用户未批准插件 {} 的导入（拒绝或超时均视为拒绝）",
+            summary.plugin_id
+        );
+    }
+    Ok(())
 }

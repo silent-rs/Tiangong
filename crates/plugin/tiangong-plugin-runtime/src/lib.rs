@@ -61,8 +61,9 @@ pub use events::{
 };
 pub use interpreter_env::ensure_interpreter_env;
 pub use plugin_dev::{
-    InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint, note_trusted_build,
-    set_plugin_dev_trusted_installer, trusted_build_fingerprint,
+    ImportSummary, InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint,
+    note_trusted_build, set_plugin_dev_import_confirm, set_plugin_dev_trusted_installer,
+    trusted_build_fingerprint,
 };
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
