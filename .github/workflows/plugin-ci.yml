@@ -68,6 +68,7 @@ jobs:
           sdk_changed=false
           sidecar_shared_changed=false
           update_shared_changed=false
+          llm_shared_changed=false
           fallback_all=false
           scoped_change=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
@@ -91,6 +92,14 @@ jobs:
               crates/plugin/tiangong-plugin-update/*)
                 # 发布/更新约定：只选中 sidecar 声明依赖它的插件（如 memory 自更新）。
                 update_shared_changed=true
+                ;;
+              crates/tiangong-llm/*)
+                # tiangong-llm 被多个插件 sidecar 直接或间接依赖（memory 经
+                # core/consolidator，generate-image-openai 与 analyze-attachment
+                # 直接依赖）。LLM crate 变更会波及插件闭包的编译与链接：#767
+                # 曾因该路径不在本矩阵触发范围内，BoringSSL/SQLCipher 符号冲突
+                # 在 CI 盲区破坏 memory sidecar 链接、直到发布才被发现。
+                llm_shared_changed=true
                 ;;
               crates/plugin/tiangong-plugin-runtime/*)
                 # 宿主 Runtime：插件不依赖它（见依赖方向护栏测试），不触发插件检查。
@@ -206,12 +215,23 @@ jobs:
               && grep -qE '^tiangong-plugin-update([ .=]|$)' "$sidecar_manifest"; then
               uses_update=true
             fi
+            # 依赖 tiangong-llm 的判定与 update 同思路，但依赖可能声明在插件
+            # 内部 crate（memory 的 core/、consolidator/）而非 sidecar 本体，
+            # 因此对插件根下全部 Cargo.toml 递归匹配。
+            uses_llm=false
+            if [[ "$has_sidecar" == "true" ]] \
+              && grep -rqE '^tiangong-llm([ .=]|$)' "$root" --include='Cargo.toml'; then
+              uses_llm=true
+            fi
             sidecar_selected=false
             if [[ "$has_sidecar" == "true" ]] \
               && [[ "$direct_change" == "true" || "$sidecar_shared_changed" == "true" ]]; then
               sidecar_selected=true
             fi
             if [[ "$update_shared_changed" == "true" && "$uses_update" == "true" ]]; then
+              sidecar_selected=true
+            fi
+            if [[ "$llm_shared_changed" == "true" && "$uses_llm" == "true" ]]; then
               sidecar_selected=true
             fi
             if [[ "$plugin_selected" != "true" && "$sidecar_selected" != "true" ]]; then
