@@ -127,7 +127,7 @@ fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
     };
     post_install_sidecar_check_with(
         plugin_id,
-        || crate::verification::verify_installed_sidecar(storage_root, &installed),
+        || reverify::verify_installed_sidecar(storage_root, &installed),
         |record| crate::verification::save_verification(&installed.directory, record),
     );
 }
@@ -450,7 +450,7 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
     if installed.manifest.sidecar.is_none() {
         anyhow::bail!("插件 {plugin_id} 未声明 sidecar，无需验证");
     }
-    let record = crate::verification::verify_installed_sidecar(storage_root, &installed)?;
+    let record = reverify::verify_installed_sidecar(storage_root, &installed)?;
     crate::verification::save_verification(&installed.directory, &record)?;
     refresh_verified_sidecar(plugin_id, record.capabilities);
     prewarm_plugin_sidecar(storage_root, plugin_id);
@@ -482,7 +482,7 @@ fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginS
     // 回滚后制品变化，现有验证记录（摘要锚定新制品）随之失效；删除记录
     // 并触发补验证，为回滚版本重建能力快照。
     crate::verification::remove_verification(&current.directory);
-    crate::verification::reverify_installed_sidecars(storage_root);
+    reverify::reverify_installed_sidecars(storage_root);
 
     let rolled_back = find_installed_plugin(storage_root, plugin_id)?;
     if let Err(error) = reload_plugin_inner(storage_root, &rolled_back) {

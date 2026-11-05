@@ -106,11 +106,9 @@ fn preload_installed_plugins_inner(
     // 都由运行时在后台重新拉起，各入口无需单独处理。
     super::keepalive::ensure_keepalive_started();
     if wait_for_ready {
-        if let Err(error) = crate::verification::reverify_installed_sidecars_blocking(
-            storage_root,
-            false,
-            Some("desktop"),
-        ) {
+        if let Err(error) =
+            reverify::reverify_installed_sidecars_blocking(storage_root, false, Some("desktop"))
+        {
             failures.push(format!("{error:#}"));
         }
         for installed in installed_plugins
@@ -149,7 +147,7 @@ fn preload_installed_plugins_inner(
     }
     // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
     // 不阻塞应用启动，也不在工具调用热路径同步执行。
-    crate::verification::reverify_installed_sidecars(storage_root);
+    reverify::reverify_installed_sidecars(storage_root);
     #[cfg(windows)]
     prewarm_resident_sidecars(storage_root);
 

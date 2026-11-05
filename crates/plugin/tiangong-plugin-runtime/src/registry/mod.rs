@@ -42,6 +42,7 @@ mod keepalive;
 mod legacy;
 mod loader;
 mod migrations;
+mod reverify;
 mod views;
 
 use connections::stop_loaded_sidecar;
@@ -54,6 +55,7 @@ pub use inventory::*;
 pub use legacy::*;
 pub use loader::*;
 pub use migrations::*;
+pub use reverify::*;
 pub use views::*;
 
 /// 本地信任标记（安装时原生确认后由宿主写入插件目录）。

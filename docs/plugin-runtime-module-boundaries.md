@@ -18,7 +18,8 @@
 
 | 6 | 传输层注入 `RuntimeEnv` + `SidecarEvents`（D5 的输入接缝） | 消除 D5→D4：沙箱开关/退出标志/授权路径与三类通知改由状态机注入 |
 | 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
-度量：跨域引用边 34 → 29，违规边 15 → 10；`crate::plugin_dev` 在传输层引用清零，
+| 8 | 验证编排归状态机（新 `registry/reverify`） | 消除 D2→D4（信任域只留记录读写，不再起连接） |
+度量：跨域引用边 34 → 28，违规边 15 → 9；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -40,9 +41,9 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | 域 | 名称 | 文件数 | 行数 | 一句话职责 |
 |---|---|---|---|---|
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
-| D2 | 信任 | 4 | 1927 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
+| D2 | 信任 | 4 | 1772 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
 | D3 | 分发与安装 | 3 | 2685 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
-| D4 | 状态机 | 7 | 3507 | 维护「装了哪些、各自什么状态」并广播变化 |
+| D4 | 状态机 | 8 | 3673 | 维护「装了哪些、各自什么状态」并广播变化 |
 | D5 | 进程与传输 | 10 | 7263 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
 | D6 | 调用 | 4 | 1788 | 一次插件调用的身份、上下文、取消、进度与结果 |
 | D7 | 宿主集成 | 5 | 2459 | 把插件能力接进 Core 与前端 |
@@ -51,7 +52,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | — | crate 根与测试支撑 | 2 | 516 | `lib.rs` / `test_support` |
 | — | 测试文件 | 2 | 516 | 不参与域划分 |
 
-合计 25621 行，与 `wc -l` 全量一致（可复核）。
+合计 25632 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -69,9 +70,9 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 - **已修复**：内容清单全树校验从传输层（`SidecarConfig::verify_integrity_manifest`）迁到
   `content_manifest`（D2），常量直接取 `tiangong-plugin-update`；验签与 sidecar 启动前复核
   共用同一实现，D2→D5 清零。
-- **当前越界**：
-  - `verification.rs` 的 10 处引用指向 D4：`prewarm_plugin_sidecar`、`ephemeral_sidecar_connection`、`discover_installed_plugins`、`refresh_verified_sidecar`、`set_runtime_error` 等——**记录读写与重验编排混在同一文件**；
-- **修法**：拆 `trust/record.rs`（纯记录）+ `registry/reverify.rs`（编排归 D4）。
+- **已修复**：`verification.rs` 只留记录读写（路径推导、制品摘要、`load/save/remove`）；
+  「何时验证、复用常驻连接还是起临时连接、能力写回运行态、失败记运行错误」的编排
+  迁到 `registry/reverify.rs`（D4），D2→D4 清零。
 
 ### D3 分发与安装（Distribution & Install）
 
@@ -163,11 +164,10 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（10 条边 / 58 处引用，本轮已消 5 条）
+### 当前违规（9 条边 / 48 处引用，本轮已消 6 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
-| D2→D4 | 10 | `verification.rs` | 记录读写 + 重验编排混在一起 | 拆 record / reverify |
 | D3→D4 | 8 | `artifacts.rs:780,793`、`migrations.rs:411,421` | 安装入口 re-export（假阳性）+ `assemble_*` 真实越界 | `assemble_*` 归 D4 内部 |
 | D3→D5 | 1 | `migrations.rs` | 卸载时撤销 launcher grants | 改发事件 |
 | D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
@@ -252,7 +252,7 @@ pub struct HostServices {
 | 1 | D1 契约 → `tiangong-plugin-contract` | 工具键归位 | runtime 内 `manifest`/`slots`/`launch_policy` 只经 re-export 引用；D1 出边为 0 | 低 |
 | 2 | D5 叶子（`interpreter_env`、`platform`、launcher 能力探测）→ `tiangong-plugin-process` | `StorageLayout` | 新 crate 不引用 registry/bridge/plugin_dev | 低 |
 | 3 | D7 展示（`tool_icons`/`tool_titles`/`builtin_tables`）→ 宿主 | 步 1 | runtime 不再含展示兜底表；D4→D7 边消失 | 低 |
-| 4 | D2 信任 → `tiangong-plugin-trust` | 拆 record / reverify | D2 无出边（除 D1）；验签 e2e 全绿 | 中 |
+| 4 | D2 信任 → `tiangong-plugin-trust` | 拆 record / reverify（已就绪） | D2 无出边（除 D1）；验签 e2e 全绿 | 中 |
 | 5 | D3 安装 → `tiangong-plugin-install` | `LifecycleEvents` | D3 出边只剩 D1/D2；安装/回滚/卸载 e2e 全绿 | 中 |
 | 6 | D9 创作 → 宿主 | 命名空间可注册 + 步 5 | runtime 内 `rg plugin-dev` 为空；creator e2e 全绿 | 中 |
 | 7 | D4/D5/D6 内核 | 全部接缝 | 跨域边 ≤ 矩阵允许集合；static 数下降 | 高 |
@@ -263,8 +263,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 29 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 10 | 0 |
+| 跨域引用边 | 34 | 28 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 9 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -289,14 +289,15 @@ pub struct HostServices {
 | `launch_policy.rs` | D1 契约 | 338 |
 | `signature.rs` | D2 信任 | 762 |
 | `trust.rs` | D2 信任 | 497 |
-| `verification.rs` | D2 信任 | 557 |
+| `verification.rs` | D2 信任 | 402 |
 | `content_manifest.rs` | D2 信任 | 111 |
+| `registry/reverify.rs` | D4 状态机 | 166 |
 | `artifacts.rs` | D3 安装 | 1509 |
 | `registry/migrations.rs` | D3 安装 | 1076 |
 | `registry/legacy.rs` | D3 安装 | 100 |
-| `registry/mod.rs` | D4 状态机 | 537 |
+| `registry/mod.rs` | D4 状态机 | 539 |
 | `registry/loader.rs` | D4 状态机 | 1442 |
-| `registry/discovery.rs` | D4 状态机 | 489 |
+| `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
