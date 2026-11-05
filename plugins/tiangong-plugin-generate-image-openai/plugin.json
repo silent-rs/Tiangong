@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "generate-image-openai",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "sidecar": {
     "binary": "tiangong-generate-image-openai-sidecar",
     "transport_protocol": "0.1.0",
@@ -51,6 +51,9 @@
   ],
   "tool_icons": {
     "generate_image": "assets/tool-generate-image.svg"
+  },
+  "mention": {
+    "candidates_op": "generate-image-openai.mention_candidates"
   },
   "ui": {
     "sandbox": "shadow",

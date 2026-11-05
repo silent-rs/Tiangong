@@ -11,9 +11,9 @@ use tiangong_llm::{ModelCapability, ModelsConfig, ProviderProtocol};
 use tiangong_plugin_generate_image_openai_protocol::{
     Ack, ChatgptAccountInfo, ConfigBootstrap, ConfigSelection, Empty, GENERATE_OPERATION,
     GET_CONFIG_OPERATION, GenerateRequest, GenerateResponse, GeneratedImage,
-    IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, ModelInfo, ModelSource, PLUGIN_ID,
-    PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint, SET_CONFIG_OPERATION,
-    TOOL_GENERATE_IMAGE,
+    IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, MENTION_CANDIDATES_OPERATION,
+    ModelInfo, ModelSource, PLUGIN_ID, PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint,
+    SET_CONFIG_OPERATION, TOOL_GENERATE_IMAGE,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -110,6 +110,16 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             }
             serde_json::to_value(Ack::default()).context("序列化 reconfigure 响应失败")
         }
+
+        // @ 提及候选：仅入口 entry（value/label/kind 由宿主按清单合成），
+        // 不提供内容候选。查询词过滤由 CoreManager 聚合层统一处理，载荷忽略。
+        MENTION_CANDIDATES_OPERATION => Ok(json!({
+            "entry": {
+                "hint": "生成或编辑图片",
+                "mark": "图",
+            },
+            "candidates": [],
+        })),
 
         other => Err(anyhow!("未知的操作: {other}")),
     }
@@ -602,6 +612,31 @@ mod tests {
         assert_eq!(
             image_protocol_for(ProviderProtocol::OpenAi),
             ImageApiProtocol::Responses
+        );
+    }
+
+    /// @ 提及候选查询：返回入口 entry（hint 非空、mark 1-4 字符）与空
+    /// candidates；载荷为完整 MentionQuery，任意查询词下响应一致。
+    #[tokio::test]
+    async fn mention_candidates_returns_entry_only() {
+        let response = dispatch_operation(
+            MENTION_CANDIDATES_OPERATION,
+            serde_json::json!({ "query": "生图", "context": {} }),
+        )
+        .await
+        .unwrap();
+
+        let entry = response.get("entry").expect("entry 必须存在");
+        let hint = entry["hint"].as_str().unwrap_or_default();
+        assert!(!hint.trim().is_empty(), "hint 不能为空：{entry}");
+        let mark = entry["mark"].as_str().unwrap_or_default();
+        assert!(
+            (1..=4).contains(&mark.chars().count()),
+            "mark 须为 1-4 字符：{mark}"
+        );
+        assert!(
+            response["candidates"].as_array().is_some_and(Vec::is_empty),
+            "无内容候选，candidates 须为空数组：{response}"
         );
     }
 
