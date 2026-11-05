@@ -31,7 +31,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 mod process;
-mod sandbox_exemptions;
+pub(crate) mod sandbox_exemptions;
 
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,
@@ -597,6 +597,25 @@ impl StdioSidecarConnection {
                 &self.config.plugin_id,
                 &self.config.data_dir,
             ));
+            // 插件开发目录写域（host_policy 按已验证官方身份授予 terminal /
+            // plugin-creator，经连接配置传入）：devkit 项目目录与导入收件箱。
+            // 收件箱以 `.` 前缀避免 discovery 扫描；正式安装目录 plugins/
+            // 不在授权之列（安装经宿主指纹核验或用户确认把关）。
+            if self.config.sandbox_plugin_dev_write {
+                policy.extra_writable.extend(
+                    [
+                        self.config
+                            .storage_root
+                            .join(crate::plugin_dev::PLUGIN_DEV_DIR),
+                        self.config
+                            .storage_root
+                            .join("plugins")
+                            .join(crate::plugin_dev::PLUGIN_INBOX_DIR),
+                    ]
+                    .into_iter()
+                    .filter_map(sandbox_exemptions::ensured_writable_root),
+                );
+            }
             // 工具链缓存（npm 等）是功能基础设施而非用户数据：npx/uvx
             // 启动 MCP server 需要写包缓存。
             if let Some(home) = crate::interpreter_env::user_home_dir() {

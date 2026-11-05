@@ -239,3 +239,168 @@ pub fn write_dev_project(storage_root: &Path, project_id: &str) -> PathBuf {
 pub fn install_dev_project(storage_root: &Path, project_id: &str) -> anyhow::Result<String> {
     crate::plugin_dev::install(storage_root, project_id, None).map(|result| result.plugin_id)
 }
+
+// ── plugin-dev 测试装置（crate 内测试与 e2e 共用）──
+
+/// 初始化测试配置并准备测试 Launcher 信任链：sidecar 恒走沙箱（策略表
+/// 不接受关闭输入），本组装置以测试密钥签名的真实 Launcher 覆盖安装/
+/// 签名/调用契约的完整链路。
+pub fn init_config_with_launcher(root: &Path) {
+    let config_dir = root.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    tiangong_config::registry::init_from_dir(&config_dir);
+    crate::test_support::ensure_test_launcher_signed(root).unwrap();
+}
+
+/// 在 PATH（或 TIANGONG_NODE_PATH）中查找 node 解释器（None 跳过测试）。
+pub fn find_node() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("TIANGONG_NODE_PATH") {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+        .find(|path| path.is_file())
+}
+
+/// 写入最小的 plugin-dev 项目（`<存储根>/plugins-dev/<id>/`：元数据 +
+/// 源码清单），与 devkit init 产出的项目登记形态一致。
+pub fn make_dev_project(storage_root: &Path, project_id: &str) -> PathBuf {
+    let dir = write_dev_project(storage_root, project_id);
+    std::fs::write(
+        dir.join("plugin.json"),
+        r#"{"schema_version":2,"id":"x","version":"0.2.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#
+            .replace("\"x\"", &format!("\"{project_id}\"")),
+    )
+    .unwrap();
+    dir
+}
+
+/// 构造 devkit 风格的 node sidecar 构建产物（含内容哈希清单）。
+pub fn make_node_sidecar_release(storage_root: &Path, project_id: &str) -> PathBuf {
+    let release = storage_root
+        .join(crate::plugin_dev::PLUGIN_DEV_DIR)
+        .join(project_id)
+        .join("release");
+    std::fs::create_dir_all(release.join("app")).unwrap();
+    std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+    std::fs::write(
+        release.join("plugin.json"),
+        format!(
+            r#"{{"schema_version":2,"id":"{project_id}","version":"0.1.0","permissions":["sidecar.invoke"],"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","entry":"app/index.html"}}]}},"sidecar":{{"runtime":"node","entry":"sidecar/main.mjs"}}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
+    let sdk = node_sidecar_sdk();
+    std::fs::copy(
+        &sdk,
+        release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+    )
+    .unwrap();
+    std::fs::write(
+        release.join("sidecar/main.mjs"),
+        r#"
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+await runSidecar({
+  pluginId: 'ID_PLACEHOLDER',
+  pluginVersion: '0.1.0',
+  dispatch(operation, payload) {
+    if (operation === 'demo.echo') {
+      return { payload: { text: payload?.text ?? '' } };
+    }
+    if (operation === 'demo.temp') {
+      const tempDir = os.tmpdir();
+      const target = path.join(tempDir, `tiangong-temp-probe-${process.pid}.txt`);
+      fs.writeFileSync(target, 'one');
+      const reopened = fs.readFileSync(target, 'utf8') === 'one';
+      fs.appendFileSync(target, '-two');
+      const modified = fs.readFileSync(target, 'utf8') === 'one-two';
+      fs.unlinkSync(target);
+      return { payload: { tempDir, reopened, modified, removed: !fs.existsSync(target) } };
+    }
+    return { payload: {} };
+  },
+});
+"#
+        .replace("ID_PLACEHOLDER", project_id),
+    )
+    .unwrap();
+    write_content_manifest(&release);
+    release
+}
+
+/// devkit build 同款内容清单：全树（排除清单自身）路径 + sha256。
+pub fn write_content_manifest(release: &Path) {
+    use sha2::Digest;
+    let mut files = Vec::new();
+    let mut stack = vec![release.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                stack.push(entry.path());
+            } else {
+                let path = entry.path();
+                let relative = path.strip_prefix(release).unwrap().display().to_string();
+                if relative == "content-manifest.json" {
+                    continue;
+                }
+                let raw = std::fs::read(&path).unwrap();
+                files.push(serde_json::json!({
+                    "path": relative.replace('\\', "/"),
+                    "sha256": hex::encode(sha2::Sha256::digest(&raw)),
+                }));
+            }
+        }
+    }
+    std::fs::write(
+        release.join("content-manifest.json"),
+        serde_json::json!({"algorithm": "sha256", "files": files}).to_string(),
+    )
+    .unwrap();
+}
+
+/// 递归复制目录树（测试装置用）。
+pub fn copy_tree(source: &Path, target: &Path) {
+    std::fs::create_dir_all(target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let destination = target.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            std::fs::copy(entry.path(), destination).unwrap();
+        }
+    }
+}
+
+/// 恢复受信安装方判定的 fail-closed 初始态（测试隔离）。
+pub fn clear_plugin_dev_trusted_installer() {
+    crate::plugin_dev::clear_plugin_dev_trusted_installer_for_test();
+}
+
+/// 恢复导入确认回调的 fail-closed 初始态（测试隔离）。
+pub fn clear_plugin_dev_import_confirm() {
+    crate::plugin_dev::clear_plugin_dev_import_confirm_for_test();
+}
+
+/// 安装 plugin-dev 项目产物并显式携带受信构建指纹期望（与桥接 call 层
+/// 同款核验分支；`expected_fingerprint` 失配即拒绝）。返回安装的插件 ID。
+pub fn install_dev_project_checked(
+    storage_root: &Path,
+    project_id: &str,
+    caller: &str,
+    expected_fingerprint: &str,
+) -> anyhow::Result<String> {
+    crate::plugin_dev::install(
+        storage_root,
+        project_id,
+        Some((caller, expected_fingerprint)),
+    )
+    .map(|result| result.plugin_id)
+}

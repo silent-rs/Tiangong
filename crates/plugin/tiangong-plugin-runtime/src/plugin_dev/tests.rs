@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -22,17 +23,6 @@ macro_rules! require_native_sandbox {
     };
 }
 
-/// 初始化测试配置并准备测试 Launcher 信任链：sidecar 恒走沙箱
-///（策略表不接受关闭输入），本组测试以测试密钥签名的真实 Launcher
-/// 覆盖安装/签名/调用契约的完整链路。
-/// 使用此准备步骤的测试以 integration_ 开头，供 nextest 限制重型测试并发。
-fn init_config_with_launcher(root: &Path) {
-    let config_dir = root.join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    tiangong_config::registry::init_from_dir(&config_dir);
-    crate::test_support::ensure_test_launcher_signed(root).unwrap();
-}
-
 fn wait_for_pid_file(path: &Path, timeout: std::time::Duration, context: &str) -> i32 {
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -51,263 +41,20 @@ fn wait_for_pid_file(path: &Path, timeout: std::time::Duration, context: &str) -
     }
 }
 
-fn make_project(root: &Path, id: &str) -> PathBuf {
-    let dir = root.join(PLUGIN_DEV_DIR).join(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-            dir.join(PROJECT_META_FILE),
-            json!({"plugin_id": id, "name": id, "template": "ts-npx", "created_at": "2026-08-25 00:00:00"})
-                .to_string(),
-        )
-        .unwrap();
-    std::fs::write(
-            dir.join("plugin.json"),
-            r#"{"schema_version":2,"id":"x","version":"0.2.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#
-                .replace("\"x\"", &format!("\"{id}\"")),
-        )
-        .unwrap();
-    dir
-}
-
-#[test]
-fn 项目id白名单拒绝路径逃逸() {
-    assert!(validate_project_id("my-plugin_1.0").is_ok());
-    for bad in ["", ".", "..", "../escape", "a/b", "a\\b", "空 格"] {
-        assert!(validate_project_id(bad).is_err(), "应当拒绝 {bad:?}");
-    }
-}
-
-#[test]
-fn list_返回项目与版本状态() {
-    let root = tempfile::tempdir().unwrap();
-    make_project(root.path(), "demo");
-    std::fs::create_dir_all(
-        root.path()
-            .join(PLUGIN_DEV_DIR)
-            .join("demo")
-            .join("release"),
-    )
-    .unwrap();
-    std::fs::write(
-            root.path().join(PLUGIN_DEV_DIR).join("demo").join("release/plugin.json"),
-            r#"{"schema_version":2,"id":"demo","version":"0.1.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#,
-        )
-        .unwrap();
-    let entries = list(root.path()).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, "demo");
-    assert_eq!(entries[0].source_version.as_deref(), Some("0.2.0"));
-    assert_eq!(entries[0].release_version.as_deref(), Some("0.1.0"));
-    assert!(entries[0].installed_version.is_none());
-}
-
-#[test]
-fn status_未初始化返回不存在() {
-    let root = tempfile::tempdir().unwrap();
-    let result = status(root.path(), "ghost").unwrap();
-    assert!(!result.exists);
-}
-
-/// 安装完整链（功能验证）：确认桩 → 暂存（不可变副本）→ 用户密钥签名
-/// → 导入 → 安装目录与注册表就位；确认信息（版本）来自暂存副本而非
-/// 可变的 release/。无 sidecar 的纯 UI/工具模板同样获得 local 签名
-/// （动态调用通道的分流判据，P0 回归）。
-#[test]
-#[serial_test::serial]
-fn install_完整链_暂存确认导入与注册表() {
-    let root = tempfile::tempdir().unwrap();
-    tiangong_config::registry::init_from_dir(root.path());
-    let project = root.path().join(PLUGIN_DEV_DIR).join("inst-demo");
-    std::fs::create_dir_all(project.join("release/dist")).unwrap();
-    std::fs::write(
-        project.join(PROJECT_META_FILE),
-        r#"{"plugin_id":"inst-demo","name":"安装链验证","template":"ts-npx","created_at":"t"}"#,
-    )
-    .unwrap();
-    std::fs::write(
-            project.join("release/plugin.json"),
-            r#"{"schema_version":2,"id":"inst-demo","version":"9.9.9","permissions":[],"entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"ui":{"contributions":[{"slot":"extension.tab","id":"app","title":"安装链验证","entry":"dist/index.html"}]}}"#,
-        )
-        .unwrap();
-    std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
-    write_content_manifest(&project.join("release"));
-
-    let result = install(root.path(), "inst-demo", None).expect("安装完整链");
-    assert_eq!(result.plugin_id, "inst-demo");
-    assert_eq!(result.version, "9.9.9");
-    assert!(result.enabled, "安装后应启用");
-    // 安装目录与注册表
-    assert!(root.path().join("plugins/inst-demo/plugin.json").is_file());
-    assert!(
-        root.path()
-            .join("plugins/inst-demo/dist/index.html")
-            .is_file()
-    );
-    // 无 sidecar 模板同样拿到 local 签名（动态调用通道判据）。
-    assert!(
-        root.path().join("plugins/inst-demo/release.json").is_file(),
-        "纯 UI/工具模板安装后应有签名清单"
-    );
-    assert!(
-        crate::registry::is_local_plugin("inst-demo"),
-        "无 sidecar 自制插件应命中 local 判据"
-    );
-    assert!(
-        crate::registry::plugin_manifest("inst-demo").is_some(),
-        "注册表应可见已装插件"
-    );
-    // @提及来源实时聚合：安装后立即可查（不依赖会话 Core 快照）。提及
-    // 内容自 v2 起由 sidecar 的 candidates_op 提供，本装置是无 sidecar 的
-    // UI 模板，故返回空候选而非报错——内容链路由 registry::loader 与
-    // ts_plugin 的单测覆盖。
-    let mentions = crate::registry::mention_sources()
-        .into_iter()
-        .flat_map(|source| {
-            source
-                .query(&tiangong_types::MentionQuery::default())
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        mentions.is_empty(),
-        "无 sidecar 插件不产生提及候选（内容只能来自 candidates_op）：{mentions:?}"
-    );
-}
-
-#[test]
-fn install_缺构建产物时给出devkit指引() {
-    let root = tempfile::tempdir().unwrap();
-    make_project(root.path(), "demo");
-    let error = install(root.path(), "demo", None).unwrap_err();
-    assert!(
-        error.to_string().contains("@silent-ai/plugin-creator"),
-        "应指引 devkit 命令：{error}"
-    );
-}
-
-fn find_node_for_test() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("TIANGONG_NODE_PATH") {
-        let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
-        .find(|path| path.is_file())
-}
-
-/// 构造 devkit 风格的 node sidecar 构建产物（含内容哈希清单）。
-fn make_node_sidecar_release(root: &Path, id: &str) -> PathBuf {
-    let release = root.join(PLUGIN_DEV_DIR).join(id).join("release");
-    std::fs::create_dir_all(release.join("app")).unwrap();
-    std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
-    std::fs::write(
-            release.join("plugin.json"),
-            format!(
-                r#"{{"schema_version":2,"id":"{id}","version":"0.1.0","permissions":["sidecar.invoke"],"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","entry":"app/index.html"}}]}},"sidecar":{{"runtime":"node","entry":"sidecar/main.mjs"}}}}"#
-            ),
-        )
-        .unwrap();
-    std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
-    let sdk = crate::test_support::node_sidecar_sdk();
-    std::fs::copy(
-        &sdk,
-        release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
-    )
-    .unwrap();
-    std::fs::write(
-        release.join("sidecar/main.mjs"),
-        r#"
-import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-await runSidecar({
-  pluginId: 'ID_PLACEHOLDER',
-  pluginVersion: '0.1.0',
-  dispatch(operation, payload) {
-    if (operation === 'demo.echo') {
-      return { payload: { text: payload?.text ?? '' } };
-    }
-    if (operation === 'demo.temp') {
-      const tempDir = os.tmpdir();
-      const target = path.join(tempDir, `tiangong-temp-probe-${process.pid}.txt`);
-      fs.writeFileSync(target, 'one');
-      const reopened = fs.readFileSync(target, 'utf8') === 'one';
-      fs.appendFileSync(target, '-two');
-      const modified = fs.readFileSync(target, 'utf8') === 'one-two';
-      fs.unlinkSync(target);
-      return { payload: { tempDir, reopened, modified, removed: !fs.existsSync(target) } };
-    }
-    return { payload: {} };
-  },
-});
-"#
-        .replace("ID_PLACEHOLDER", id),
-    )
-    .unwrap();
-    write_content_manifest(&release);
-    release
-}
-
-/// devkit build 同款内容清单：release 全树（排除清单自身）路径 + sha256。
-fn write_content_manifest(release: &Path) {
-    use sha2::Digest;
-    let mut files = Vec::new();
-    let mut stack = vec![release.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                stack.push(entry.path());
-            } else {
-                let path = entry.path();
-                let relative = path.strip_prefix(release).unwrap().display().to_string();
-                if relative == "content-manifest.json" {
-                    continue;
-                }
-                let raw = std::fs::read(&path).unwrap();
-                files.push(json!({
-                    "path": relative.replace('\\', "/"),
-                    "sha256": hex::encode(sha2::Sha256::digest(&raw)),
-                }));
-            }
-        }
-    }
-    std::fs::write(
-        release.join("content-manifest.json"),
-        json!({"algorithm": "sha256", "files": files}).to_string(),
-    )
-    .unwrap();
-}
-
-fn copy_tree_for_test(source: &Path, target: &Path) {
-    std::fs::create_dir_all(target).unwrap();
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let destination = target.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree_for_test(&entry.path(), &destination);
-        } else {
-            std::fs::copy(entry.path(), destination).unwrap();
-        }
-    }
-}
-
 /// 按需 sidecar 的沙箱写域随新版统一调用上下文的工作区构造：真实
 /// 插件写会话工作区成功，写存储根之外的路径被沙箱拒绝。
 #[test]
 #[serial_test::serial]
 fn integration_按需sidecar_新版上下文工作区成为沙箱写域() {
-    let Some(_node) = find_node_for_test() else {
+    let Some(_node) = test_support::find_node() else {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let root = tempfile::tempdir().unwrap();
     require_native_sandbox!();
-    init_config_with_launcher(root.path());
+    test_support::init_config_with_launcher(root.path());
     let id = "workspace-probe";
-    make_project(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
     let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
     std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
     std::fs::write(
@@ -343,7 +90,7 @@ await runSidecar({
 "#,
     )
     .unwrap();
-    write_content_manifest(&release);
+    test_support::write_content_manifest(&release);
     install(root.path(), id, None).expect("安装写域探测插件");
 
     // 会话工作区与外部目录（存储根之外）。
@@ -405,16 +152,16 @@ await runSidecar({
 #[test]
 #[serial_test::serial]
 fn integration_sidecar验证记录_安装生成_重验恢复_卸载清理() {
-    let Some(_node) = find_node_for_test() else {
+    let Some(_node) = test_support::find_node() else {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let root = tempfile::tempdir().unwrap();
     require_native_sandbox!();
-    init_config_with_launcher(root.path());
+    test_support::init_config_with_launcher(root.path());
     let id = "verify-record-demo";
-    make_project(root.path(), id);
-    make_node_sidecar_release(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
+    test_support::make_node_sidecar_release(root.path(), id);
     install(root.path(), id, None).expect("安装应完成 sidecar 完整验证并生成记录");
 
     let plugin_directory = root.path().join("plugins").join(id);
@@ -482,52 +229,14 @@ fn integration_sidecar验证记录_安装生成_重验恢复_卸载清理() {
 }
 
 #[test]
-#[serial_test::serial]
-fn integration_解释器sidecar_创作链自动签名安装_真实调用与篡改拒绝() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let id = "node-sc-demo";
-    make_project(root.path(), id);
-    make_node_sidecar_release(root.path(), id);
-
-    let result = install(root.path(), id, None).expect("解释器 sidecar 安装");
-    assert_eq!(result.plugin_id, id);
-
-    // 真实调用：宿主 stdio 连接 ↔ node 解释器 sidecar。
-    let response =
-        crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({"text": "本地信任"}))
-            .expect("sidecar 调用");
-    assert_eq!(response["text"], "本地信任");
-
-    // 篡改安装目录内的入口脚本：内容清单复核必须拒绝。
-    let installed_entry = root
-        .path()
-        .join("plugins")
-        .join(id)
-        .join("sidecar/main.mjs");
-    std::fs::write(&installed_entry, "// tampered\n").unwrap();
-    let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
-        .expect_err("篡改后应拒绝启动");
-    assert!(
-        format!("{error:#}").contains("篡改"),
-        "应报篡改错误：{error:#}"
-    );
-}
-
-#[test]
 fn 解释器sidecar_无有效签名时拒绝启动() {
     let root = tempfile::tempdir().unwrap();
     let id = "node-sc-notrusted";
-    make_project(root.path(), id);
-    let release = make_node_sidecar_release(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
+    let release = test_support::make_node_sidecar_release(root.path(), id);
     // 手动把产物放进安装目录，不经 plugin-dev 确认链（无 local-trust.json）。
     let installed = root.path().join("plugins").join(id);
-    copy_tree_for_test(&release, &installed);
+    test_support::copy_tree(&release, &installed);
     let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
         .expect_err("无有效签名应拒绝");
     assert!(
@@ -536,213 +245,21 @@ fn 解释器sidecar_无有效签名时拒绝启动() {
     );
 }
 
-/// 安装授权五场景：fail-closed、非受信插件、非官方签名的固定 ID、
-/// 缺构建登记、受信齐全。
-/// 调用方插件为已安装的 node demo 插件（install 本体直调装好）。
-#[test]
-#[serial_test::serial]
-fn integration_安装授权_五场景() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let caller = "node-sc-auth-caller";
-    make_project(root.path(), caller);
-    make_node_sidecar_release(root.path(), caller);
-    // 待安装的项目产物。
-    let target = "node-sc-auth-target";
-    make_project(root.path(), target);
-    make_node_sidecar_release(root.path(), target);
-    // 调用方插件本体先经 install 直调装好（其自身安装不经桥接授权）。
-    install(root.path(), caller, None).expect("调用方插件安装");
-
-    let payload = |id: &str| serde_json::json!({ "id": id }).to_string();
-
-    // 1) 未注入受信判定：fail-closed。
-    clear_plugin_dev_trusted_installer_for_test();
-    let error = call(caller, "plugin-dev.install", &payload(target))
-        .expect_err("未注入受信判定应 fail-closed");
-    assert!(format!("{error:#}").contains("fail-closed"), "{error:#}");
-
-    // 2) 非受信插件（判定只认别的插件）。
-    set_plugin_dev_trusted_installer(Arc::new(|identity: &InstallerIdentity| {
-        identity.plugin_id == "someone-else"
-    }));
-    let error = call(caller, "plugin-dev.install", &payload(target)).expect_err("非受信插件应拒绝");
-    assert!(
-        format!("{error:#}").contains("无自动签名安装资格"),
-        "{error:#}"
-    );
-
-    // 3) 受信但缺构建登记。
-    let expected_caller = caller.to_string();
-    set_plugin_dev_trusted_installer(Arc::new(move |identity: &InstallerIdentity| {
-        identity.plugin_id == expected_caller
-    }));
-    let error = call(caller, "plugin-dev.install", &payload(target)).expect_err("缺构建登记应拒绝");
-    assert!(
-        format!("{error:#}").contains("缺少受信构建登记"),
-        "{error:#}"
-    );
-
-    // 5) 受信 + 已登记（指纹锚定构建产物）：完整签名安装链成功。
-    let target_fingerprint = {
-        use sha2::Digest;
-        let manifest_raw = std::fs::read(
-            root.path()
-                .join(PLUGIN_DEV_DIR)
-                .join(target)
-                .join("release/content-manifest.json"),
-        )
-        .unwrap();
-        hex::encode(sha2::Sha256::digest(&manifest_raw))
-    };
-    note_trusted_build(caller, target, Some(target_fingerprint.clone()));
-    let result =
-        call(caller, "plugin-dev.install", &payload(target)).expect("受信且已登记应安装成功");
-    assert!(result.contains(target), "{result}");
-    // 清理全局态，避免污染其他测试。
-    clear_plugin_dev_trusted_installer_for_test();
-}
-
-/// 指纹核验：构建登记后篡改产物（重算内容清单）再经桥接安装必须拒绝；
-/// 成功安装消费登记（再次安装需重新构建）。
-#[test]
-#[serial_test::serial]
-fn integration_指纹核验_篡改产物拒绝与安装消费() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let caller = "node-sc-fp-caller";
-    let target = "node-sc-fp-target";
-    make_project(root.path(), caller);
-    make_node_sidecar_release(root.path(), caller);
-    make_project(root.path(), target);
-    make_node_sidecar_release(root.path(), target);
-    install(root.path(), caller, None).expect("调用方插件安装");
-
-    let expected_caller = caller.to_string();
-    set_plugin_dev_trusted_installer(Arc::new(move |identity: &InstallerIdentity| {
-        identity.plugin_id == expected_caller
-    }));
-    let release_dir = root
-        .path()
-        .join(PLUGIN_DEV_DIR)
-        .join(target)
-        .join("release");
-    let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
-    note_trusted_build(caller, target, Some(fingerprint));
-
-    // 构建后篡改产物（改文件并重算内容清单）：指纹失配拒绝。
-    std::fs::write(
-        release_dir.join("sidecar/main.mjs"),
-        "// tampered after build",
-    )
-    .unwrap();
-    write_content_manifest(&release_dir);
-    let error = call(
-        caller,
-        "plugin-dev.install",
-        &serde_json::json!({ "id": target }).to_string(),
-    )
-    .expect_err("篡改产物应拒绝安装");
-    assert!(format!("{error:#}").contains("不一致"), "{error:#}");
-
-    // 恢复产物并重新登记（等价重新构建）：安装成功且登记被消费。
-    make_node_sidecar_release(root.path(), target);
-    let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
-    note_trusted_build(caller, target, Some(fingerprint));
-    call(
-        caller,
-        "plugin-dev.install",
-        &serde_json::json!({ "id": target }).to_string(),
-    )
-    .expect("登记匹配应安装成功");
-    assert!(
-        trusted_build_fingerprint(caller, target).is_none(),
-        "安装成功后登记应被消费"
-    );
-    // 消费后再次安装：要求重新构建。
-    let error = call(
-        caller,
-        "plugin-dev.install",
-        &serde_json::json!({ "id": target }).to_string(),
-    )
-    .expect_err("消费后应要求重新构建");
-    assert!(
-        format!("{error:#}").contains("缺少受信构建登记"),
-        "{error:#}"
-    );
-    clear_plugin_dev_trusted_installer_for_test();
-}
-
-/// 失败构建撤销：note(None) 语义清除旧登记后不可安装。
-#[test]
-#[serial_test::serial]
-fn integration_失败构建_撤销登记后不可安装() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let caller = "node-sc-revoke-caller";
-    let target = "node-sc-revoke-target";
-    make_project(root.path(), caller);
-    make_node_sidecar_release(root.path(), caller);
-    make_project(root.path(), target);
-    make_node_sidecar_release(root.path(), target);
-    install(root.path(), caller, None).expect("调用方插件安装");
-
-    let expected_caller = caller.to_string();
-    set_plugin_dev_trusted_installer(Arc::new(move |identity: &InstallerIdentity| {
-        identity.plugin_id == expected_caller
-    }));
-    let release_dir = root
-        .path()
-        .join(PLUGIN_DEV_DIR)
-        .join(target)
-        .join("release");
-    let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
-    note_trusted_build(caller, target, Some(fingerprint));
-    // 构建失败：观察者撤销登记。
-    note_trusted_build(caller, target, None);
-    let error = call(
-        caller,
-        "plugin-dev.install",
-        &serde_json::json!({ "id": target }).to_string(),
-    )
-    .expect_err("撤销后应拒绝安装");
-    assert!(
-        format!("{error:#}").contains("缺少受信构建登记"),
-        "{error:#}"
-    );
-    clear_plugin_dev_trusted_installer_for_test();
-}
-
 /// sidecar 结果观察者：bridge 的 sidecar.* 成功调用触发（宿主溯源登记
 /// 的机制基础）。
 #[test]
 #[serial_test::serial]
 fn integration_sidecar观察者_成功调用触发() {
-    let Some(_node) = find_node_for_test() else {
+    let Some(_node) = test_support::find_node() else {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let root = tempfile::tempdir().unwrap();
     require_native_sandbox!();
-    init_config_with_launcher(root.path());
+    test_support::init_config_with_launcher(root.path());
     let id = "node-sc-observer";
-    make_project(root.path(), id);
-    make_node_sidecar_release(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
+    test_support::make_node_sidecar_release(root.path(), id);
     install(root.path(), id, None).expect("安装");
 
     let observed = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
@@ -795,155 +312,21 @@ fn integration_sidecar观察者_成功调用触发() {
     );
 }
 
-/// 三方导入链：签名归档 → 导入发布者公钥 → 暂存解包 → 签名验证安装
-/// → sidecar 真实调用 → 移除公钥后失效。
-#[test]
-#[serial_test::serial]
-fn integration_三方导入_签名归档安装与移除公钥后失效() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let id = "node-sc-third-party";
-    make_project(root.path(), id);
-    let release = make_node_sidecar_release(root.path(), id);
-
-    // 三方开发者视角：以自己的密钥为插件签发签名清单（发布者 acme-dev）。
-    let sha256_of = |path: std::path::PathBuf| {
-        use sha2::Digest;
-        hex::encode(sha2::Sha256::digest(std::fs::read(&path).unwrap()))
-    };
-    let release_json = json!({
-        "schema_version": 1,
-        "id": id,
-        "version": "0.1.0",
-        "publisher": "acme-dev",
-        "permissions": ["sidecar.invoke"],
-        "manifest": {
-            "path": "plugin.json",
-            "sha256": sha256_of(release.join("plugin.json")),
-        },
-        "ui": [{
-            "path": "app/index.html",
-            "sha256": sha256_of(release.join("app/index.html")),
-        }],
-        "content_manifest": {
-            "path": "content-manifest.json",
-            "sha256": sha256_of(release.join("content-manifest.json")),
-        },
-    });
-    std::fs::write(
-        release.join("release.json"),
-        serde_json::to_vec_pretty(&release_json).unwrap(),
-    )
-    .unwrap();
-    let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-    let signature = minisign::sign(
-        Some(&keypair.pk),
-        &keypair.sk,
-        serde_json::to_vec_pretty(&release_json).unwrap().as_slice(),
-        None,
-        None,
-    )
-    .unwrap();
-    use base64::Engine;
-    std::fs::write(
-        release.join("release.json.sig"),
-        base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
-    )
-    .unwrap();
-
-    // 打三方分发归档（tar.zst，含签名清单与内容清单，排除 local-trust）。
-    let archive = root.path().join(format!("{id}-0.1.0.tar.zst"));
-    {
-        let file = std::fs::File::create(&archive).unwrap();
-        let encoder = zstd::Encoder::new(file, 3).unwrap();
-        let mut builder = tar::Builder::new(encoder);
-        let mut stack = vec![release.clone()];
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                let name = entry.file_name();
-                if directory == release
-                    && matches!(name.to_string_lossy().as_ref(), "local-trust.json")
-                {
-                    continue;
-                }
-                if entry.file_type().unwrap().is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                let relative = path.strip_prefix(&release).unwrap();
-                builder.append_path_with_name(&path, relative).unwrap();
-            }
-        }
-        builder.into_inner().unwrap().finish().unwrap();
-    }
-
-    // 未导入公钥：归档可解包暂存，但安装（签名验证）拒绝。
-    let staged = crate::artifacts::stage_plugin_archive(root.path(), &archive).expect("归档暂存");
-    let error = crate::registry::import_staged_plugin(root.path(), staged.path())
-        .expect_err("未导入三方公钥应拒绝安装");
-    assert!(
-        format!("{error:#}").contains("未导入"),
-        "应给出公钥导入指引：{error:#}"
-    );
-    // 显式释放失败暂存（shadowing 的旧绑定活到作用域结束才 Drop，
-    // 会干扰下方事务目录断言；生产路径失败返回即释放）。
-    drop(staged);
-
-    // 导入公钥后：安装 → 真实调用成功。
-    let public_b64 = base64::engine::general_purpose::STANDARD
-        .encode(keypair.pk.to_box().unwrap().into_string());
-    crate::trust::import_trusted_publisher(root.path(), "acme-dev", &public_b64).unwrap();
-    let staged = crate::artifacts::stage_plugin_archive(root.path(), &archive).expect("归档暂存");
-    crate::registry::import_staged_plugin(root.path(), staged.path()).expect("三方签名插件安装");
-    let response =
-        crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({"text": "三方"}))
-            .expect("三方插件 sidecar 调用");
-    assert_eq!(response["text"], "三方");
-    // 安装成功后事务目录不应累积残留（数据保留壳/坏残留即清）。
-    let transactions = root.path().join("plugins").join(".transactions");
-    let leftovers: Vec<_> = std::fs::read_dir(&transactions)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "事务目录残留：{:?}",
-        leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
-    );
-
-    // 移除公钥：下次启动即失效（重新发现验证时公钥缺失）。
-    crate::trust::remove_trusted_publisher(root.path(), "acme-dev").unwrap();
-    let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
-        .expect_err("移除公钥后应拒绝启动");
-    assert!(
-        format!("{error:#}").contains("未导入"),
-        "应报公钥缺失：{error:#}"
-    );
-}
-
 /// 官方签名与本地信任混用拒绝：本地信任安装后再落入官方签名文件，
 /// 两种信任来源同时存在时启动门槛必须拒绝（来源不明确）。
 #[test]
 #[serial_test::serial]
 fn integration_解释器sidecar_官方签名与本地信任混用拒绝() {
-    let Some(_node) = find_node_for_test() else {
+    let Some(_node) = test_support::find_node() else {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let root = tempfile::tempdir().unwrap();
     require_native_sandbox!();
-    init_config_with_launcher(root.path());
+    test_support::init_config_with_launcher(root.path());
     let id = "node-sc-mixed-trust";
-    make_project(root.path(), id);
-    make_node_sidecar_release(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
+    test_support::make_node_sidecar_release(root.path(), id);
     install(root.path(), id, None).expect("签名链安装");
 
     // 遗留本地信任插件（升级前存量形态）+ 官方签名同存：制造双信任
@@ -1016,171 +399,21 @@ fn integration_解释器sidecar_官方签名与本地信任混用拒绝() {
     );
 }
 
-/// 与任何真实指纹都不可能相等的占位（拒绝路径用）。
-fn unreachable_fingerprint() -> String {
-    "0".repeat(64)
-}
-
-/// 纯 UI 插件的构建指纹核验（无 sidecar 形态同样受登记约束）：构建后
-/// 修改产物被拒，重新登记（等价重新构建）后放行。
-#[test]
-#[serial_test::serial]
-fn integration_纯ui插件_构建指纹核验() {
-    let root = tempfile::tempdir().unwrap();
-    // 纯 UI 产物无 sidecar：安装不触发沙箱内验证，无需原生沙箱环境。
-    init_config_with_launcher(root.path());
-    let id = "ui-fp-demo";
-    make_project(root.path(), id);
-    // 纯 UI 产物：ui 贡献 + 内容清单，无 sidecar（devkit 全模板统一生成清单）。
-    let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
-    std::fs::create_dir_all(release.join("app")).unwrap();
-    std::fs::write(
-            release.join("plugin.json"),
-            format!(
-                r#"{{"schema_version":2,"id":"{id}","version":"0.1.0","permissions":[],"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","entry":"app/index.html"}}]}}}}"#
-            ),
-        )
-        .unwrap();
-    std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
-    write_content_manifest(&release);
-
-    // 受信调用方（模拟宿主判定）+ 指纹登记后经桥接安装成功。
-    let fingerprint = content_manifest_fingerprint(&release).unwrap();
-    note_trusted_build("plugin-creator", id, Some(fingerprint));
-    // 桥接调用要求调用方插件已加载——本测试聚焦指纹路径，直调 install
-    // 并显式传入登记期望（与 call 层同款核验分支）。
-    let install_result = install(
-        root.path(),
-        id,
-        Some(("plugin-creator", &unreachable_fingerprint())),
-    );
-    // 上面故意用失配指纹断言拒绝路径：
-    assert!(
-        install_result.is_err_and(|error| format!("{error:#}").contains("不一致")),
-        "纯 UI 产物同样受指纹核验约束"
-    );
-    // 正确指纹放行。
-    let release_dir = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
-    let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
-    let result = install(root.path(), id, Some(("plugin-creator", &fingerprint)))
-        .expect("纯 UI 指纹匹配应安装成功");
-    assert_eq!(result.plugin_id, id);
-}
-
-/// 无界面纯工具插件（node-tool 形态）：无 ui 贡献即可安装（校验解耦），
-/// 工具契约（操作名=工具名、ToolOutcome 形状）经 sidecar 真实往返。
-#[test]
-#[serial_test::serial]
-fn integration_无界面纯工具插件_安装与工具契约() {
-    let Some(_node) = find_node_for_test() else {
-        eprintln!("跳过：PATH 中未找到 node");
-        return;
-    };
-    let root = tempfile::tempdir().unwrap();
-    require_native_sandbox!();
-    init_config_with_launcher(root.path());
-    let id = "pure-tool-demo";
-    make_project(root.path(), id);
-    // 构造 node-tool 形态产物：tools + sidecar，无 ui/wasm。
-    let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
-    std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
-    std::fs::write(
-            release.join("plugin.json"),
-            r#"{"schema_version":2,"id":"pure-tool-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"text_analyze","description":"文本分析","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"},"mention":{"candidates_op":"pure-tool-demo.mention_candidates"}}"#,
-        )
-        .unwrap();
-    let sdk = crate::test_support::node_sidecar_sdk();
-    std::fs::copy(
-        &sdk,
-        release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
-    )
-    .unwrap();
-    std::fs::write(
-            release.join("sidecar/main.mjs"),
-            r#"
-import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
-await runSidecar({
-  pluginId: 'pure-tool-demo',
-  dispatch(operation, payload) {
-    if (operation === 'text_analyze') {
-      const text = typeof payload?.text === 'string' ? payload.text : '';
-      return { payload: { ok: true, summary: `文本 ${[...text].length} 字`, stdout: [...text].reverse().join(''), stderr: '', exit_code: 0 } };
-    }
-    return { payload: {} };
-  },
-});
-"#,
-        )
-        .unwrap();
-    write_content_manifest(&release);
-
-    let result = install(root.path(), id, None).expect("无界面纯工具插件应可安装");
-    assert_eq!(result.plugin_id, id);
-
-    // 工具契约：操作名 = 工具名，参数 = 工具参数对象，返回 ToolOutcome。
-    let response = crate::registry::invoke_sidecar(
-        root.path(),
-        id,
-        "text_analyze",
-        json!({"text": "天工abc"}),
-    )
-    .expect("工具直连调用");
-    assert_eq!(response["ok"], json!(true), "响应: {response}");
-    assert_eq!(response["summary"], json!("文本 5 字"));
-    assert_eq!(response["stdout"], json!("cba工天"));
-}
-
-/// 自定义图标往返：带 png 图标的插件安装后，read_plugin_icon 返回正确
-/// 字节与 MIME（read 走 loaded_plugins 内存表，install 后可用）。
-#[test]
-#[serial_test::serial]
-fn integration_插件图标_安装与读取往返() {
-    let root = tempfile::tempdir().unwrap();
-    // 纯 UI 产物无 sidecar：安装不触发沙箱内验证，无需原生沙箱环境。
-    init_config_with_launcher(root.path());
-    let id = "icon-demo";
-    make_project(root.path(), id);
-    let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
-    std::fs::create_dir_all(release.join("app")).unwrap();
-    std::fs::create_dir_all(release.join("icons")).unwrap();
-    // 最小 PNG（1x1 透明像素）。
-    const MINIMAL_PNG: [u8; 67] = [
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
-    std::fs::write(release.join("icons/app.png"), MINIMAL_PNG).unwrap();
-    std::fs::write(
-            release.join("plugin.json"),
-            r#"{"schema_version":2,"id":"icon-demo","version":"0.1.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","title":"图标验证","entry":"app/index.html","icon":"icons/app.png"}]}}"#,
-        )
-        .unwrap();
-    std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
-    write_content_manifest(&release);
-
-    install(root.path(), id, None).expect("带图标插件安装");
-
-    let (data, mime) = crate::registry::read_plugin_icon(id, "app").expect("读取插件图标");
-    assert_eq!(mime, "image/png");
-    assert_eq!(data.as_slice(), MINIMAL_PNG);
-}
 /// 工具级超时与进程终止：阻塞型 node 工具（sleep）超过工具声明的
 /// timeout_ms 时及时失败，且按需 sidecar 进程被终止（不留活进程）。
 #[test]
 #[ignore = "Agent Handler 不再自动超时；仅显式取消终止"]
 #[serial_test::serial]
 fn integration_直连工具_超时终止进程() {
-    let Some(_node) = find_node_for_test() else {
+    let Some(_node) = test_support::find_node() else {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let root = tempfile::tempdir().unwrap();
     require_native_sandbox!();
-    init_config_with_launcher(root.path());
+    test_support::init_config_with_launcher(root.path());
     let id = "blocking-tool";
-    make_project(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
     let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
     std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
     std::fs::write(
@@ -1212,7 +445,7 @@ await runSidecar({
 "#,
     )
     .unwrap();
-    write_content_manifest(&release);
+    test_support::write_content_manifest(&release);
 
     install(root.path(), id, None).expect("安装阻塞工具插件");
 
@@ -1275,15 +508,15 @@ await runSidecar({
 #[ignore = "Agent Handler 不再自动超时；并发取消由显式取消链路覆盖"]
 #[serial_test::serial]
 fn integration_直连工具_并发隔离与取消归属() {
-    let Some(_node) = find_node_for_test() else {
+    let Some(_node) = test_support::find_node() else {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let root = tempfile::tempdir().unwrap();
     require_native_sandbox!();
-    init_config_with_launcher(root.path());
+    test_support::init_config_with_launcher(root.path());
     let id = "concurrent-tool";
-    make_project(root.path(), id);
+    test_support::make_dev_project(root.path(), id);
     let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
     std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
     std::fs::write(
@@ -1318,7 +551,7 @@ await runSidecar({
 "#,
         )
         .unwrap();
-    write_content_manifest(&release);
+    test_support::write_content_manifest(&release);
     install(root.path(), id, None).expect("安装并发工具插件");
 
     let pid_file = root.path().join("slow.pid");

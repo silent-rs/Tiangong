@@ -292,6 +292,9 @@ fn sidecar_connection_inner(
         if let Some(workspace) = workspace {
             config = config.with_sandbox_workspace(Some(workspace));
         }
+        // 插件开发目录写域：仅翻译 host_policy 判定，目录汇入与保障在
+        // 沙箱策略组装层（stdio 组装块 + ensured_writable_root）。
+        config = config.with_sandbox_plugin_dev_write(host_policy.plugin_dev_write);
     }
     if let Some(signed_release) = signed_release {
         // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。

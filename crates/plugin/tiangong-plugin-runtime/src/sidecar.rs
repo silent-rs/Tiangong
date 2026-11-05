@@ -225,6 +225,10 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
+    /// 插件开发目录写域（plugins-dev 与收件箱 plugins/.inbox；仅宿主按
+    /// 已验证官方身份授予 terminal / plugin-creator）。目录保障与汇入
+    /// 在沙箱策略组装层处理（stdio 组装块）。
+    pub sandbox_plugin_dev_write: bool,
     /// 宿主授予的沙箱特殊能力；原样写入 Launcher 策略。
     pub sandbox_capabilities: std::collections::BTreeSet<String>,
     pub start_timeout: Duration,
@@ -294,6 +298,7 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
+            sandbox_plugin_dev_write: false,
             sandbox_capabilities: std::collections::BTreeSet::new(),
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -332,6 +337,12 @@ impl SidecarConfig {
 
     pub fn with_sandbox_user_cache_write(mut self, allowed: bool) -> Self {
         self.sandbox_user_cache_write = allowed;
+        self
+    }
+
+    /// 授予插件开发目录写域（plugins-dev 与收件箱）。
+    pub fn with_sandbox_plugin_dev_write(mut self, granted: bool) -> Self {
+        self.sandbox_plugin_dev_write = granted;
         self
     }
 
@@ -536,6 +547,13 @@ impl SidecarConfig {
     /// 沙箱额外可写根（每次执行的专用临时目录等）。
     pub fn with_sandbox_extra_writable(mut self, extra: Vec<PathBuf>) -> Self {
         self.sandbox_extra_writable = extra;
+        self
+    }
+
+    /// 追加单个沙箱额外可写根（保留已有项；与
+    /// [`SidecarConfig::with_sandbox_extra_writable`] 的整体覆盖语义互补）。
+    pub fn push_sandbox_extra_writable(mut self, path: PathBuf) -> Self {
+        self.sandbox_extra_writable.push(path);
         self
     }
 

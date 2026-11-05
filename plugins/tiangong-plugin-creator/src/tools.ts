@@ -1,7 +1,7 @@
 // 工具处理核心：Agent 工具调用与创作页共用同一后端。
 // 开发工具链（init/validate/build/add/run/logs）经本插件的按需 node sidecar
-// 执行（bridge sidecar.devkit.*，每次调用独立进程）；安装与只读查询走宿主
-// 受限通道（plugin-dev.install/list）。
+// 执行（bridge sidecar.devkit.*，每次调用独立进程）；安装、收件箱导入与
+// 只读查询走宿主受限通道（plugin-dev.install/import/list）。
 import type { HostBridge } from '@tiangong/plugin-sdk';
 
 /** 工具结果（宿主 ts_tools 契约：ok/summary/exit_code 必填）。 */
@@ -59,13 +59,15 @@ async function sidecarCall<T>(
   return JSON.parse(raw) as T;
 }
 
-/** 宿主侧受限通道（安装与只读查询）。 */
+/** 宿主侧受限通道（安装、导入与只读查询）。 */
 export const pluginDev = {
   /** 把指令文本直接交给当前会话的 Agent 处理（session.input.sendText）。 */
   sendToAgent: (bridge: HostBridge, text: string) =>
     bridge.call('session.input.sendText', JSON.stringify({ text })).then(() => true),
   install: (bridge: HostBridge, id: string) =>
     pluginDevCall<InstallResult>(bridge, 'install', { id }),
+  import: (bridge: HostBridge, id: string) =>
+    pluginDevCall<InstallResult>(bridge, 'import', { id }),
   list: (bridge: HostBridge) => pluginDevCall<ProjectEntry[]>(bridge, 'list', {}),
 };
 
@@ -107,41 +109,78 @@ function fail(summary: string): ToolOutcome {
   return { ok: false, summary, stdout: '', stderr: '', exit_code: 1 };
 }
 
-/** 分发一次 Agent 工具调用：plugin_init / plugin_devkit / plugin_install。 */
+/** 分发一次 Agent 工具调用：plugin_creator（action 模式统一入口）。 */
 export async function handleAgentTool(
   bridge: HostBridge,
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolOutcome> {
   try {
-    if (name === 'plugin_init') {
-      const template = String(args.template ?? '');
-      const id = String(args.id ?? '');
-      const displayName = args.name === undefined ? undefined : String(args.name);
-      const result = await devkit.init(bridge, template, id, displayName);
-      return summarizeDevkit('init', result);
+    if (name !== 'plugin_creator') {
+      return fail(`未知工具 ${name}`);
     }
-    if (name === 'plugin_devkit') {
-      const command = String(args.command ?? '');
-      const commandArgs = Array.isArray(args.args)
-        ? args.args.map((item) => String(item))
-        : [];
-      const result = await devkitCommand(bridge, command, commandArgs);
-      return summarizeDevkit(command, result);
+    const action = String(args.action ?? '');
+    const id = String(args.id ?? '');
+    const extra = Array.isArray(args.args)
+      ? args.args.map((item) => String(item))
+      : [];
+    switch (action) {
+      case 'init': {
+        const template = String(args.template ?? '');
+        const displayName =
+          args.name === undefined ? undefined : String(args.name);
+        const result = await devkit.init(bridge, template, id, displayName);
+        return summarizeDevkit('init', result);
+      }
+      case 'validate':
+      case 'build':
+      case 'run':
+      case 'add': {
+        if (!id) {
+          return fail(`action=${action} 需要参数 id`);
+        }
+        const result = await devkitCommand(bridge, action, [id, ...extra]);
+        return summarizeDevkit(action, result);
+      }
+      case 'logs': {
+        // logs 的参数形态自带前缀（dev:<id> / plugin:<id>），完整经 args
+        // 透传；未带 args 时按 id 的已安装插件日志查询。
+        const result = await devkitCommand(
+          bridge,
+          'logs',
+          extra.length ? extra : [id],
+        );
+        return summarizeDevkit('logs', result);
+      }
+      case 'install': {
+        if (!id) {
+          return fail('action=install 需要参数 id');
+        }
+        const source = args.source === 'inbox' ? 'inbox' : 'dev';
+        const result =
+          source === 'inbox'
+            ? await pluginDev.import(bridge, id)
+            : await pluginDev.install(bridge, id);
+        const origin =
+          source === 'inbox'
+            ? '已经用户确认并从收件箱导入'
+            : '已安装（开发目录构建产物，指纹核验通过）';
+        return ok(
+          `插件 ${result.plugin_id} v${result.version} ${origin}（状态 ${result.state}，` +
+            `${result.enabled ? '已启用' : '未启用'}）。含 extension.tab 贡献时可在拓展区打开；` +
+            '含 mention 声明时可在输入框 @plugin:<id> 点名调用。' +
+            '注意：本机自制插件安装后当前会话即可使用：经固定工具 call_local_plugin 动态调用' +
+            '（清单由系统注入对话，已开启的会话在下一轮生效），无需新开会话。',
+        );
+      }
+      default:
+        return fail(
+          `未知 action：${action || '（缺失）'}（init/validate/build/add/run/logs/install）`,
+        );
     }
-    if (name === 'plugin_install') {
-      const id = String(args.id ?? '');
-      const result = await pluginDev.install(bridge, id);
-      return ok(
-        `插件 ${result.plugin_id} v${result.version} 已安装（状态 ${result.state}，` +
-          `${result.enabled ? '已启用' : '未启用'}）。含 extension.tab 贡献时可在拓展区打开；` +
-          '含 mention 声明时可在输入框 @plugin:<id> 点名调用。' +
-          '注意：本机自制插件安装后当前会话即可使用：经固定工具 call_local_plugin 动态调用' +
-          '（清单由系统注入对话，已开启的会话在下一轮生效），无需新开会话。',
-      );
-    }
-    return fail(`未知工具 ${name}`);
   } catch (error) {
-    return fail(`工具 ${name} 失败：${error instanceof Error ? error.message : String(error)}`);
+    return fail(
+      `工具 ${name}（action=${String(args.action ?? '')}）失败：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }

@@ -573,6 +573,41 @@ fn run_gui() {
                     identity.plugin_id == "plugin-creator" && identity.official_signed
                 },
             ));
+            // 3) 收件箱导入确认 = 宿主原生对话框征求用户批准（fail-closed：
+            //    对话框不可用、用户拒绝或关闭均视为拒绝）。inbox 产物来源
+            //    不受控（沙箱内进程可写收件箱），授权依据只能是用户本人
+            //    对暂存副本摘要的批准；调用方插件身份不构成替代。
+            tiangong_plugin_runtime::set_plugin_dev_import_confirm({
+                let app_handle = app.handle().clone();
+                Arc::new(
+                    move |summary: &tiangong_plugin_runtime::ImportSummary| {
+                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                        let permissions = if summary.permissions.is_empty() {
+                            "（无）".to_string()
+                        } else {
+                            summary.permissions.join(", ")
+                        };
+                        let message = format!(
+                            "即将从收件箱导入并安装插件：\n\n{}\t{}\n来源：{}\n规模：{} 个文件 / {:.1} KB\n声明权限：{}\n\n安装后该插件的工具与提示将进入会话，是否允许？",
+                            summary.plugin_id,
+                            summary.version,
+                            summary.source.display(),
+                            summary.file_count,
+                            summary.total_bytes as f64 / 1024.0,
+                            permissions,
+                        );
+                        app_handle
+                            .dialog()
+                            .message(message)
+                            .title("确认插件导入")
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "安装".to_string(),
+                                "拒绝".to_string(),
+                            ))
+                            .blocking_show()
+                    },
+                )
+            });
             tiangong_plugin_runtime::set_sidecar_result_observer(Arc::new(
                 |plugin_id: &str, operation: &str, payload: &str, result: &str| {
                     if plugin_id != "plugin-creator" || operation != "devkit.build" {
