@@ -115,7 +115,7 @@ fn install_staged_plugin_inner(
     } else {
         PluginChangeKind::Installed
     };
-    crate::events::announced(kind, &plugin_id, status)
+    crate::events::announced(kind, &plugin_id, Some(storage_root), status)
 }
 
 /// 安装/升级成功后的 sidecar 运行检查（尽力而为）：临时启动进程完成
@@ -273,7 +273,7 @@ pub fn set_plugin_enabled(
     } else {
         PluginChangeKind::Disabled
     };
-    crate::events::announced(kind, plugin_id, result)
+    crate::events::announced(kind, plugin_id, Some(storage_root), result)
 }
 
 fn set_plugin_enabled_inner(
@@ -392,7 +392,12 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let result = rollback_plugin_inner(storage_root, plugin_id);
-    crate::events::announced(PluginChangeKind::Upgraded, plugin_id, result)
+    crate::events::announced(
+        PluginChangeKind::Upgraded,
+        plugin_id,
+        Some(storage_root),
+        result,
+    )
 }
 
 fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
@@ -442,22 +447,18 @@ fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginS
 /// 校验，先查无效插件登记表，命中则直接走同一删除路径后返回。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let result = uninstall_plugin_inner(storage_root, plugin_id, keep_data);
-    crate::events::announced(PluginChangeKind::Uninstalled, plugin_id, result)
+    crate::events::announced(
+        PluginChangeKind::Uninstalled,
+        plugin_id,
+        Some(storage_root),
+        result,
+    )
 }
 
 fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let _operation = LOAD_OPERATION
         .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
-    #[cfg(windows)]
-    {
-        let cache = persistent_grants_path(storage_root, plugin_id);
-        if cache.is_file() {
-            stop_loaded_sidecar(plugin_id)?;
-            stop_connection_for_directory(&plugin_directory(storage_root, plugin_id))?;
-            crate::launcher_update::revoke_persistent_grants(storage_root, &cache)?;
-        }
-    }
     if remove_invalid_plugin_if_registered(storage_root, plugin_id, keep_data)? {
         return Ok(());
     }

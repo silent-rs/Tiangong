@@ -9,6 +9,7 @@
 //! 本 crate 的迁移 API（避免重入持有操作写锁）。`fingerprint` 为发布
 //! 时刻的启用插件指纹，订阅者免重算。
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// 一次插件生命周期迁移的种类。
@@ -43,6 +44,9 @@ pub struct PluginChangeEvent {
     pub plugin_id: String,
     /// 发布时刻的启用插件指纹（id@version），订阅者免重算。
     pub fingerprint: String,
+    /// 发布时刻的存储根（部分事件由 sidecar 通知触发，拿不到时为 `None`）。
+    /// 卸载收尾据此定位沙箱授权记录，订阅者无需自行推导。
+    pub storage_root: Option<std::path::PathBuf>,
 }
 
 /// 插件变化监听者。同步调用，实现方自行保证不阻塞迁移线程。
@@ -104,12 +108,17 @@ pub fn set_plugins_changed_listener(listener: Option<PluginsChangedListener>) {
 /// 必须在本 crate 所有注册表锁释放后调用（指纹计算内部会短暂持锁）。
 /// 同时把变更下发给订阅了 `plugins.changed` 的插件页面——主前端的宿主
 /// 事件到达不了插件沙箱，插件页面经桥接订阅后自行刷新。
-pub(crate) fn announce_plugin_change(kind: PluginChangeKind, plugin_id: &str) {
+pub(crate) fn announce_plugin_change(
+    kind: PluginChangeKind,
+    plugin_id: &str,
+    storage_root: Option<&Path>,
+) {
     let fingerprint = crate::registry::enabled_plugin_fingerprint();
     let event = PluginChangeEvent {
         kind,
         plugin_id: plugin_id.to_string(),
         fingerprint,
+        storage_root: storage_root.map(Path::to_path_buf),
     };
     release_plugin_resources(&event);
     let listener = listener_slot()
@@ -145,6 +154,12 @@ fn release_plugin_resources(event: &PluginChangeEvent) {
     ) {
         crate::ts_tools::cancel_plugin_calls(&event.plugin_id);
     }
+    // 卸载后撤销该插件的沙箱持久授权（Windows AppContainer 记录）。
+    if event.kind == PluginChangeKind::Uninstalled
+        && let Some(root) = event.storage_root.as_deref()
+    {
+        crate::launcher_update::revoke_plugin_grants(root, &event.plugin_id);
+    }
 }
 
 /// 迁移结果包装：成功时广播事件，失败原样透传。
@@ -155,10 +170,11 @@ fn release_plugin_resources(event: &PluginChangeEvent) {
 pub(crate) fn announced<T, E>(
     kind: PluginChangeKind,
     plugin_id: &str,
+    storage_root: Option<&Path>,
     result: Result<T, E>,
 ) -> Result<T, E> {
     if result.is_ok() {
-        announce_plugin_change(kind, plugin_id);
+        announce_plugin_change(kind, plugin_id, storage_root);
     }
     result
 }

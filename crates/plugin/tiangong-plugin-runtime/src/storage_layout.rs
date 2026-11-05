@@ -12,6 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::Digest;
+
 /// 正式安装目录名。
 pub const PLUGINS_DIR: &str = "plugins";
 /// 插件开发目录名（位于存储根下，与 `plugins/` 平级）。
@@ -68,6 +70,17 @@ impl<'a> StorageLayout<'a> {
     /// sidecar 沙箱的额外可写根（spawn 前保障目录存在且非符号链接）。
     pub fn dev_writable_roots(&self) -> Vec<PathBuf> {
         vec![self.dev_root(), self.inbox()]
+    }
+
+    /// 沙箱持久授权目录（Windows AppContainer 授权记录）。
+    pub fn grants(&self) -> PathBuf {
+        self.root.join("sandbox").join("grants")
+    }
+
+    /// 单个插件的持久授权记录（按插件 ID 的 SHA-256 命名，避免非法文件名字符）。
+    pub fn grant_record(&self, plugin_id: &str) -> PathBuf {
+        let key = hex::encode(sha2::Sha256::digest(plugin_id.as_bytes()));
+        self.grants().join(format!("{key}.json"))
     }
 }
 

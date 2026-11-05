@@ -6,7 +6,7 @@
 
 ## 0. 本轮进展（feature/plugin-runtime-architecture）
 
-已完成（全部零行为改动，逐步验证）：
+已完成（逐步验证；除第 16 步明确标注的一处授权撤销失败降级外，全部零行为改动）：
 
 | 步 | 内容 | 效果 |
 |---|---|---|
@@ -25,7 +25,8 @@
 | 13 | 生命周期事件收尾：停用/卸载/换代后由事件发布方释放运行时资源 | 消除 D3→D6、D3→D7（安装事务不再摆布调用层与桥接层） |
 | 14 | 安装编排归位：`refresh_verified_sidecar` 归 `loader`、`install_plugin_from_repository` 归安装事务 | 消除 D3→D4 的 `assemble_*` 与安装入口调用（只剩事件发布） |
 | 15 | 创作域决定保留在 runtime，依赖收窄为公开入口（新增 `plugin_publisher`） | D9→D4 只剩 seam 调用（不再读 `InstalledPlugin` 内部结构） |
-度量：跨域引用边 34 → 22（引用次数 195 → 173），违规边 15 → 1（违规引用 69 → 1）；
+| 16 | Windows 卸载撤销 launcher 授权改走事件路径（`PluginChangeEvent` 携带 `storage_root`，`StorageLayout` 新增 `grants()/grant_record()`） | 消除 D3→D5（最后一条违规边，违规归零）；本步含一处有意的小语义变化：撤销失败降级为警告、不再中止卸载 |
+度量：跨域引用边 34 → 21（引用次数 195 → 175），违规边 15 → 0（违规引用 69 → 0）；
 `crate::plugin_dev` 在传输层引用清零，runtime 生产代码中的插件 ID 字面量清零
 （`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。附录 A/B 已补齐 `tool_key`、
 `storage_layout`、`content_manifest` 三处模块的归属，并跳过 `#[cfg(test)] mod` 块；
@@ -61,7 +62,7 @@
 | — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2024 | 不参与域划分 |
 
-合计 25945 行，与 `wc -l` 全量一致（可复核）。
+合计 26501 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -98,9 +99,10 @@
 - **已修复**：`refresh_verified_sidecar`（重验后刷新适配器与段落，调 `assemble_*`）归 `loader`；
   `install_plugin_from_repository`（下载 + 安装编排）从 `artifacts` 移入本域事务文件，
   `artifacts` 只负责目录检索、下载与 staging。
-- **当前越界**：Windows 卸载前撤销 launcher 授权（`launcher_update::revoke_persistent_grants`）
-  需要 `storage_root` 上下文，事件不携带，暂留本域（`#[cfg(windows)]`，macOS 侧无法验证，
-  改到事件路径前先补 Windows 验证）。
+- **已修复**：Windows 卸载前的 launcher 授权撤销改走事件路径——`PluginChangeEvent`
+  携带 `storage_root`，`events::release_plugin_resources` 在 Uninstalled 时调
+  `launcher_update::revoke_plugin_grants`（D4→D5，矩阵允许），本域不再引用传输层
+  （D3→D5 清零，违规边归零）。
 
 ### D4 状态机（Registry / Lifecycle）
 
@@ -206,11 +208,14 @@
 \*\*\* D9→D4 仅限公开入口（`plugin_publisher` / `plugin_install_directory` / `find_installed_plugin` /
 `list_plugins` / `plugin_manifest`）：创作域保留在 runtime，只经 seam 取状态。
 
-### 当前违规（1 条边 / 1 处引用，本轮已消 14 条）
-
-| 边 | 引用 | 位置 | 性质 | 处置 |
-|---|---|---|---|---|
-| D3→D5 | 1 | `migrations.rs`（Windows 撤销 launcher grants） | 需要 `storage_root` 上下文，事件不携带 | 先补 Windows 验证，再考虑把授权路径并入 `PluginChangeEvent` |
+### 当前违规（0 条边，本轮已消 15 条）
+最后一条 D3→D5（`migrations.rs` 撤销 launcher grants）已消除：`PluginChangeEvent` 携带
+`storage_root`，撤销由事件发布方（`events::release_plugin_resources` →
+`launcher_update::revoke_plugin_grants`）在 Uninstalled 时执行，属矩阵允许的 D4→D5。
+授权路径推导统一到 `StorageLayout::grant_record`（spawn 授予与卸载撤销同源）。
+注意一处有意的小语义变化：撤销时机从「删目录之前」移到「事务成功之后」的事件收尾，
+撤销失败从「中止卸载」降为「记录警告、卸载照常完成」——授权记录是运行时资源而非安装
+事务的一部分，目录已删除后回滚卸载反而制造不一致。Windows 分支依赖 CI 的 Windows check 覆盖。
 
 ## 4. 拆分前必须先立的接缝
 
@@ -298,10 +303,10 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 22 | ≤ 矩阵允许的 20 条 |
-| 跨域引用次数 | 195 | 173 | 随边数收敛 |
-| 违规边 | 15 | 1 | 0 |
-| 违规引用次数 | 69 | 1 | 0 |
+| 跨域引用边 | 34 | 21 | ≤ 矩阵允许的 20 条 |
+| 跨域引用次数 | 195 | 175 | 随边数收敛 |
+| 违规边 | 15 | 0 | 0 |
+| 违规引用次数 | 69 | 0 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -325,26 +330,26 @@ pub struct HostServices {
 | `slots.rs` | D1 契约 | 478 |
 | `launch_policy.rs` | D1 契约 | 338 |
 | `tool_key.rs` | D1 契约 | 63 |
-| `storage_layout.rs` | D1 契约 | 99 |
+| `storage_layout.rs` | D1 契约 | 112 |
 | `signature.rs` | D2 信任 | 762 |
 | `trust.rs` | D2 信任 | 497 |
 | `verification.rs` | D2 信任 | 402 |
 | `content_manifest.rs` | D2 信任 | 111 |
 | `registry/reverify.rs` | D4 状态机 | 166 |
 | `artifacts.rs` | D3 安装 | 1543 |
-| `registry/migrations.rs` | D3 安装 | 1039 |
+| `registry/migrations.rs` | D3 安装 | 1040 |
 | `registry/legacy.rs` | D3 安装 | 100 |
 | `registry/mod.rs` | D4 状态机 | 593 |
-| `registry/loader.rs` | D4 状态机 | 1520 |
+| `registry/loader.rs` | D4 状态机 | 1530 |
 | `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
-| `events.rs` | D4 状态机 | 164 |
+| `events.rs` | D4 状态机 | 180 |
 | `sidecar.rs` | D5 传输 | 1888 |
 | `sidecar/stdio/mod.rs` | D5 传输 | 1565 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
-| `launcher_update.rs` | D5 传输 | 477 |
+| `launcher_update.rs` | D5 传输 | 495 |
 | `sidecar/stdio/process.rs` | D5 传输 | 475 |
 | `sidecar/stdio/sandbox_exemptions.rs` | D5 传输 | 473 |
 | `registry/connections.rs` | D5 传输 | 454 |
@@ -356,7 +361,7 @@ pub struct HostServices {
 | `invocation.rs` | D6 调用 | 335 |
 | `execution.rs` | D6 调用 | 42 |
 | `runtime_feedback.rs` | D6 调用 | 34 |
-| `bridge.rs` | D7 宿主集成 | 1060 |
+| `bridge.rs` | D7 宿主集成 | 1062 |
 | `core_bridge.rs` | D7 宿主集成 | 610 |
 | `tool_icons.rs` | D4 状态机 | 487 |
 | `tool_titles.rs` | D4 状态机 | 230 |

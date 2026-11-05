@@ -922,6 +922,7 @@ mod tests {
         crate::events::announce_plugin_change(
             crate::events::PluginChangeKind::Installed,
             PLUGIN_ID,
+            None,
         );
         assert!(
             event_subscriptions()
@@ -933,6 +934,7 @@ mod tests {
         crate::events::announce_plugin_change(
             crate::events::PluginChangeKind::Uninstalled,
             PLUGIN_ID,
+            None,
         );
         assert!(
             !event_subscriptions()

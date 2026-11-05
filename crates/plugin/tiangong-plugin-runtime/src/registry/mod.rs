@@ -74,11 +74,7 @@ static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// 按插件持久化的整套授权记录（常驻 sidecar 使用）。
 #[cfg(windows)]
 pub(crate) fn persistent_grants_path(storage_root: &Path, plugin_id: &str) -> PathBuf {
-    let key = hex::encode(sha2::Sha256::digest(plugin_id.as_bytes()));
-    storage_root
-        .join("sandbox")
-        .join("grants")
-        .join(format!("{key}.json"))
+    crate::storage_layout::StorageLayout::new(storage_root).grant_record(plugin_id)
 }
 
 /// 配置撤权时先停用旧连接，再撤销已登记的文件身份并按新配置重建。

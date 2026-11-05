@@ -144,7 +144,12 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
 /// 迁移成功（含制品未变化的幂等短路）即广播插件变化事件。
 pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let result = reload_plugin_entry(storage_root, plugin_id);
-    crate::events::announced(PluginChangeKind::Upgraded, plugin_id, result)
+    crate::events::announced(
+        PluginChangeKind::Upgraded,
+        plugin_id,
+        Some(storage_root),
+        result,
+    )
 }
 
 fn reload_plugin_entry(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
@@ -864,7 +869,11 @@ pub(crate) fn refresh_tool_specs(plugin_id: &str) {
         );
     }
     // 工具清单变化即插件能力变化：与升级/启停同一事件通道。
-    crate::events::announce_plugin_change(crate::events::PluginChangeKind::ToolsChanged, plugin_id);
+    crate::events::announce_plugin_change(
+        crate::events::PluginChangeKind::ToolsChanged,
+        plugin_id,
+        None,
+    );
 }
 
 /// sidecar 经 [`PROMPT_UPDATED_CHANNEL`] 通知段落变更时重取并更新注册表；
@@ -950,6 +959,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
     crate::events::announce_plugin_change(
         crate::events::PluginChangeKind::PromptSectionsChanged,
         plugin_id,
+        None,
     );
 }
 
