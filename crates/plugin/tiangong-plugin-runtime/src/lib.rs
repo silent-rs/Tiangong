@@ -48,11 +48,12 @@ mod ts_tools;
 pub mod verification;
 
 pub use bridge::{
-    BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call,
-    bridge_call_with_workspace, bridge_emit, bridge_subscribe, bridge_unsubscribe,
-    emit_plugins_changed, invoke_plugin_sidecar, release_session_plugin_resources,
-    request_app_open, set_app_handler, set_browser_handler, set_dialog_handler, set_event_emitter,
-    set_session_input_handler, set_terminal_handler, set_webview_handler,
+    BRIDGE_NAMESPACES, BridgeNamespace, BridgeNamespaceHandler, EVENT_NAMESPACE_PREFIXES,
+    NativeServiceHandler, bridge_call, bridge_call_with_workspace, bridge_emit, bridge_subscribe,
+    bridge_unsubscribe, emit_plugins_changed, invoke_plugin_sidecar, register_bridge_namespace,
+    release_session_plugin_resources, request_app_open, set_app_handler, set_browser_handler,
+    set_dialog_handler, set_event_emitter, set_session_input_handler, set_terminal_handler,
+    set_webview_handler, unregister_bridge_namespace,
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use core_bridge::{

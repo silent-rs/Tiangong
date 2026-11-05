@@ -155,6 +155,18 @@ fn main() {
     // 必须在任何插件预加载/进程拉起之前安装；未注入时 runtime 按全沙箱
     // 零特权处理（fail-closed）。
     tiangong_plugin_policy::install();
+    // 宿主注册的桥接命名空间：插件创作链（plugin-dev.*）属产品流程，
+    // 由宿主注册处理器，runtime 不含其实现。
+    tiangong_plugin_runtime::register_bridge_namespace(
+        tiangong_plugin_runtime::BridgeNamespace {
+            prefix: "plugin-dev.",
+            permission: "plugin-dev.use",
+            description: "插件开发受限通道（写范围锁定开发目录）",
+        },
+        std::sync::Arc::new(|plugin_id, method, payload| {
+            tiangong_plugin_runtime::plugin_dev::call(plugin_id, method, payload)
+        }),
+    );
 
     // 无参数 → GUI
     if std::env::args().len() <= 1 {

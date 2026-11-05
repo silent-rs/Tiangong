@@ -70,11 +70,6 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         description: "本插件 sidecar 原生逻辑层",
     },
     BridgeNamespace {
-        prefix: "plugin-dev.",
-        permission: "plugin-dev.use",
-        description: "插件开发受限通道（写范围锁定 plugins-dev 开发目录，RFC 0017 D23）",
-    },
-    BridgeNamespace {
         prefix: "dialog.",
         permission: "dialog.use",
         description: "系统对话框原语（保存文件：原生目录选择 + 宿主落盘）",
@@ -96,11 +91,68 @@ pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
     "webview.",
 ];
 
-/// 查找 method 所属的桥接命名空间。
-pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
+/// 查找 method 所属的桥接命名空间（内置白名单优先，其次宿主注册）。
+pub fn namespace_of(method: &str) -> Option<BridgeNamespace> {
     BRIDGE_NAMESPACES
         .iter()
         .find(|namespace| method.starts_with(namespace.prefix))
+        .cloned()
+        .or_else(|| {
+            host_namespaces().lock().ok().and_then(|namespaces| {
+                namespaces
+                    .iter()
+                    .find(|entry| method.starts_with(entry.namespace.prefix))
+                    .map(|entry| entry.namespace.clone())
+            })
+        })
+}
+/// 宿主注册的命名空间处理器：`(plugin_id, method, payload) -> 结果 JSON`。
+pub type BridgeNamespaceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
+struct HostNamespace {
+    namespace: BridgeNamespace,
+    handler: BridgeNamespaceHandler,
+}
+fn host_namespaces() -> &'static Mutex<Vec<HostNamespace>> {
+    static SLOT: OnceLock<Mutex<Vec<HostNamespace>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(Vec::new()))
+}
+/// 注册宿主命名空间：前缀、所需权限与处理器都由宿主提供。
+///
+/// 运行时只保留与产品无关的机制型命名空间（`storage.` / `tool.resolve` 等）；
+/// 面向具体产品流程的命名空间（如插件创作链）由宿主在启动时注册，运行时
+/// 不引用其实现模块。重复注册同一前缀以后者为准。
+pub fn register_bridge_namespace(namespace: BridgeNamespace, handler: BridgeNamespaceHandler) {
+    let mut namespaces = host_namespaces()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    namespaces.retain(|entry| entry.namespace.prefix != namespace.prefix);
+    namespaces.push(HostNamespace { namespace, handler });
+}
+/// 注销宿主命名空间（宿主热重载与测试隔离使用）。
+pub fn unregister_bridge_namespace(prefix: &str) {
+    let mut namespaces = host_namespaces()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    namespaces.retain(|entry| entry.namespace.prefix != prefix);
+}
+fn host_namespace_handler(prefix: &str) -> Option<BridgeNamespaceHandler> {
+    host_namespaces().lock().ok().and_then(|namespaces| {
+        namespaces
+            .iter()
+            .find(|entry| entry.namespace.prefix == prefix)
+            .map(|entry| Arc::clone(&entry.handler))
+    })
+}
+/// 当前可用的全部命名空间前缀（内置 + 宿主注册），用于错误信息。
+fn available_namespace_prefixes() -> Vec<&'static str> {
+    let mut prefixes = BRIDGE_NAMESPACES
+        .iter()
+        .map(|namespace| namespace.prefix)
+        .collect::<Vec<_>>();
+    if let Ok(namespaces) = host_namespaces().lock() {
+        prefixes.extend(namespaces.iter().map(|entry| entry.namespace.prefix));
+    }
+    prefixes
 }
 
 fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'static str {
@@ -168,23 +220,23 @@ pub fn bridge_call_with_workspace(
         tracing::warn!(plugin_id, method, "bridge.call 拒绝未知 method");
         bail!(
             "bridge.call 拒绝未知 method {method}（插件 {plugin_id}），可命名空间：{}",
-            BRIDGE_NAMESPACES
-                .iter()
-                .map(|ns| ns.prefix)
-                .collect::<Vec<_>>()
-                .join(" ")
+            available_namespace_prefixes().join(" ")
         );
     };
 
     let manifest = crate::registry::plugin_manifest(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 未加载"))?;
-    let permission = required_bridge_permission(method, namespace);
+    let permission = required_bridge_permission(method, &namespace);
     if !has_bridge_permission(&manifest, permission) {
         tracing::warn!(plugin_id, method, permission, "bridge.call 权限不足");
         bail!(
             "bridge.call 插件 {plugin_id} 未声明权限 {permission}，无法调用 {}",
             namespace.prefix
         );
+    }
+    // 宿主注册的命名空间由宿主处理器接管，运行时不含其实现代码。
+    if let Some(handler) = host_namespace_handler(namespace.prefix) {
+        return handler(plugin_id, method, payload);
     }
 
     match namespace.prefix {
@@ -228,9 +280,6 @@ pub fn bridge_call_with_workspace(
         "tool." if method.starts_with("browser.") => {
             native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload)
         }
-        // plugin-dev.*：插件开发受限通道（模板 init/构建/安装/校验/日志），
-        // 服务实现见 plugin_dev 模块；写范围锁定开发目录（RFC 0017 D23）。
-        "plugin-dev." => crate::plugin_dev::call(plugin_id, method, payload),
         // dialog.*：系统对话框原语（保存文件）。宿主 webview 是 WebKit，
         // 无 File System Access API——文件保存必须经宿主原生对话框。
         "dialog." => native_service_call(&DIALOG_HANDLER, "dialog", plugin_id, method, payload),

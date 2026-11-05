@@ -19,7 +19,8 @@
 | 6 | 传输层注入 `RuntimeEnv` + `SidecarEvents`（D5 的输入接缝） | 消除 D5→D4：沙箱开关/退出标志/授权路径与三类通知改由状态机注入 |
 | 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
 | 8 | 验证编排归状态机（新 `registry/reverify`） | 消除 D2→D4（信任域只留记录读写，不再起连接） |
-度量：跨域引用边 34 → 28，违规边 15 → 9；`crate::plugin_dev` 在传输层引用清零，
+| 9 | 桥接命名空间可注册（宿主注册 `plugin-dev.`） | 消除 D7→D9（runtime 不含创作链路由） |
+度量：跨域引用边 34 → 27，违规边 15 → 8；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -46,13 +47,13 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D4 | 状态机 | 8 | 3673 | 维护「装了哪些、各自什么状态」并广播变化 |
 | D5 | 进程与传输 | 10 | 7263 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
 | D6 | 调用 | 4 | 1788 | 一次插件调用的身份、上下文、取消、进度与结果 |
-| D7 | 宿主集成 | 5 | 2459 | 把插件能力接进 Core 与前端 |
+| D7 | 宿主集成 | 5 | 2508 | 把插件能力接进 Core 与前端 |
 | D8 | 策略 | 1 | 225 | 描述「某插件被授予什么」 |
 | D9 | 创作工作流 | 2 | 674 | 把开发目录的项目变成已安装插件 |
-| — | crate 根与测试支撑 | 2 | 516 | `lib.rs` / `test_support` |
-| — | 测试文件 | 2 | 516 | 不参与域划分 |
+| — | crate 根与测试支撑 | 2 | 517 | `lib.rs` / `test_support` |
+| — | 测试文件 | 3 | 2014 | 不参与域划分 |
 
-合计 25632 行，与 `wc -l` 全量一致（可复核）。
+合计 25682 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -120,8 +121,11 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 - **拥有**：bridge 命名空间白名单与权限、原生服务路由、事件订阅表、Core 适配器聚合（`RuntimeCorePlugin`）、展示表构建。
 - **不拥有**：业务实现（宿主注入）、插件状态（D4）。
-- **当前越界**：`bridge.rs:233` 硬编码 `plugin-dev.` 命名空间直连 D9；同文件另外 5 个命名空间却是「宿主注入处理器」——同一张表两种接法。
-- **修法**：命名空间表支持宿主注册（`register_bridge_namespace(prefix, permission, handler)`），plugin-dev 由宿主注册。
+- **已修复**：命名空间表支持宿主注册——`register_bridge_namespace(BridgeNamespace, handler)`
+  由桌面 / CLI / Server 在启动时注册 `plugin-dev.`，`bridge.rs` 不再引用 D9；权限与错误
+  信息同样来自注册项，未注册时按未知 method 拒绝（fail-closed）。
+- **当前越界**：`events.rs` 直发 `emit_plugins_changed`、`views.rs` 用 D7 的展示兜底表
+  （见 D4→D7）。
 
 ### D8 策略（Host Policy）
 
@@ -164,7 +168,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（9 条边 / 48 处引用，本轮已消 6 条）
+### 当前违规（8 条边 / 47 处引用，本轮已消 7 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
@@ -175,7 +179,6 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D4→D7 | 8 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
 | D6→D4 | 6 | `ts_plugin.rs`、`ts_tools.rs` | 适配器直接取连接/清单 | 注入 `SidecarAccess` / `ManifestQuery` |
 | D6→D7 | 12 | `invocation.rs`、`ts_*.rs` | 调用层直接发 bridge 事件 | 注入 `RuntimeFeedback` |
-| D7→D9 | 1 | `bridge.rs:233` | 硬编码 plugin-dev 命名空间 | 命名空间可注册 |
 | D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 走 D3/D4 公开入口 |
 
 ## 4. 拆分前必须先立的接缝
@@ -263,8 +266,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 28 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 9 | 0 |
+| 跨域引用边 | 34 | 27 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 8 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -316,7 +319,7 @@ pub struct HostServices {
 | `ts_tools.rs` | D6 调用 | 428 |
 | `invocation.rs` | D6 调用 | 333 |
 | `execution.rs` | D6 调用 | 42 |
-| `bridge.rs` | D7 宿主集成 | 911 |
+| `bridge.rs` | D7 宿主集成 | 960 |
 | `core_bridge.rs` | D7 宿主集成 | 620 |
 | `tool_icons.rs` | D7 宿主集成 | 487 |
 | `tool_titles.rs` | D7 宿主集成 | 230 |
@@ -324,7 +327,7 @@ pub struct HostServices {
 | `host_policy.rs` | D8 策略 | 225 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
 | `plugin_dev/trust.rs` | D9 创作 | 194 |
-| `lib.rs` | 根 | 110 |
+| `lib.rs` | 根 | 111 |
 | `test_support.rs` | 测试支撑 | 406 |
 | `registry/tests.rs` | 测试 | 1135 |
 | `plugin_dev/tests.rs` | 测试 | 616 |

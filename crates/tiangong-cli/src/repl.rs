@@ -37,6 +37,18 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     // 预加载前先安装宿主权威策略表（runtime 不含插件 ID，未注入即全沙箱
     // 零特权，命令类插件会失去 Git 工作流与命令执行位能力）。
     tiangong_plugin_policy::install();
+    // 宿主注册的桥接命名空间：插件创作链（plugin-dev.*）属产品流程，
+    // 由宿主注册处理器，runtime 不含其实现。
+    tiangong_plugin_runtime::register_bridge_namespace(
+        tiangong_plugin_runtime::BridgeNamespace {
+            prefix: "plugin-dev.",
+            permission: "plugin-dev.use",
+            description: "插件开发受限通道（写范围锁定开发目录）",
+        },
+        std::sync::Arc::new(|plugin_id, method, payload| {
+            tiangong_plugin_runtime::plugin_dev::call(plugin_id, method, payload)
+        }),
+    );
     let mut plugin_preload = Some({
         let storage_root = storage_root.clone();
         let core_manager = state.core_manager.clone();
