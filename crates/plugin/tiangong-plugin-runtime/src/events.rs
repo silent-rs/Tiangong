@@ -53,6 +53,26 @@ fn listener_slot() -> &'static Mutex<Option<PluginsChangedListener>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
+/// crate 内部订阅者：runtime 各域在迁移事实发布时自行释放资源。
+///
+/// 安装事务（D3）只负责制品与磁盘状态；挂起的工具调用、桥接订阅这类
+/// 运行时资源由拥有它们的域按事件收尾，安装代码不再直接调用它们。
+fn internal_listener_slot() -> &'static Mutex<Vec<PluginsChangedListener>> {
+    static SLOT: OnceLock<Mutex<Vec<PluginsChangedListener>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 注册 crate 内部订阅者（仅本 crate 可见）。
+///
+/// 注册一次即可：调用方用 `OnceLock` 之类的守卫保证幂等，重复注册会导致
+/// 同一事件被通知多次。
+pub(crate) fn add_plugins_changed_listener(listener: PluginsChangedListener) {
+    internal_listener_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(listener);
+}
+
 /// 插件集变更的页面广播出口。
 ///
 /// 主前端的宿主事件到达不了插件沙箱，订阅了 `plugins.changed` 的插件页面
@@ -91,6 +111,7 @@ pub(crate) fn announce_plugin_change(kind: PluginChangeKind, plugin_id: &str) {
         plugin_id: plugin_id.to_string(),
         fingerprint,
     };
+    release_plugin_resources(&event);
     let listener = listener_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -98,8 +119,31 @@ pub(crate) fn announce_plugin_change(kind: PluginChangeKind, plugin_id: &str) {
     if let Some(listener) = listener {
         listener(&event);
     }
+    let internal = internal_listener_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    for listener in internal {
+        listener(&event);
+    }
     if let Some(broadcast) = plugin_change_broadcaster() {
         broadcast();
+    }
+}
+
+/// 迁移事实发布前的资源收尾：停用、卸载、换代之后，该插件挂起的工具
+/// 调用与桥接订阅都不再有意义。
+///
+/// 释放动作放在事件发布方（本域）而不是安装事务里：安装代码只负责制品
+/// 与磁盘状态，运行时资源由拥有它的域按同一份事实各自收尾，避免安装路径
+/// 反向依赖调用层与桥接层。桥接订阅由 `bridge::install_runtime_feedback`
+/// 注册的内部订阅者清理（D7 订阅 D4，方向与依赖矩阵一致）。
+fn release_plugin_resources(event: &PluginChangeEvent) {
+    if matches!(
+        event.kind,
+        PluginChangeKind::Disabled | PluginChangeKind::Uninstalled | PluginChangeKind::Upgraded
+    ) {
+        crate::ts_tools::cancel_plugin_calls(&event.plugin_id);
     }
 }
 

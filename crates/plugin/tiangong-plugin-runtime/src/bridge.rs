@@ -542,6 +542,28 @@ pub fn install_runtime_feedback() {
     // 插件集变更也要推给订阅了 `plugins.changed` 的插件页面：主前端的宿主
     // 事件到达不了插件沙箱，页面经桥接订阅后自行刷新。
     crate::events::set_plugin_change_broadcaster(Arc::new(emit_plugins_changed));
+    register_lifecycle_cleanup();
+}
+
+/// 订阅生命周期事件，在插件停用/卸载/换代后清空它的桥接订阅。
+///
+/// 卸载路径原先由安装事务直接调用 [`clear_plugin_subscriptions`]；改成
+/// 本域按事件收尾后，安装代码不再反向依赖桥接层（D7 订阅 D4）。
+/// 只注册一次：宿主重复调用 [`install_runtime_feedback`] 不会重复清理。
+fn register_lifecycle_cleanup() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        crate::events::add_plugins_changed_listener(Arc::new(|event| {
+            if matches!(
+                event.kind,
+                crate::events::PluginChangeKind::Disabled
+                    | crate::events::PluginChangeKind::Uninstalled
+                    | crate::events::PluginChangeKind::Upgraded
+            ) {
+                clear_plugin_subscriptions(&event.plugin_id);
+            }
+        }));
+    });
 }
 fn native_service_call(
     handler: &OnceLock<NativeServiceHandler>,
@@ -884,6 +906,41 @@ mod tests {
         assert!(has_bridge_permission(&declared, "session.read"));
         assert!(!has_bridge_permission(&declared, "storage.private"));
         let _ = session_ns;
+    }
+    #[test]
+    #[serial_test::serial]
+    fn 生命周期事件清空插件订阅() {
+        const PLUGIN_ID: &str = "bridge-lifecycle-cleanup";
+        register_lifecycle_cleanup();
+        event_subscriptions()
+            .lock()
+            .unwrap()
+            .entry(PLUGIN_ID.to_string())
+            .or_default()
+            .insert("plugins.changed".to_string(), 1);
+        // 安装类事件与资源释放无关，订阅必须保留。
+        crate::events::announce_plugin_change(
+            crate::events::PluginChangeKind::Installed,
+            PLUGIN_ID,
+        );
+        assert!(
+            event_subscriptions()
+                .lock()
+                .unwrap()
+                .contains_key(PLUGIN_ID),
+            "安装事件不应清空订阅"
+        );
+        crate::events::announce_plugin_change(
+            crate::events::PluginChangeKind::Uninstalled,
+            PLUGIN_ID,
+        );
+        assert!(
+            !event_subscriptions()
+                .lock()
+                .unwrap()
+                .contains_key(PLUGIN_ID),
+            "卸载事件应清空该插件订阅"
+        );
     }
 }
 

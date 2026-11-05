@@ -296,8 +296,6 @@ fn set_plugin_enabled_inner(
             remove_file_if_exists(&marker)?;
         } else {
             create_disabled_marker(&marker)?;
-            crate::ts_tools::cancel_plugin_calls(plugin_id);
-            crate::bridge::clear_plugin_subscriptions(plugin_id);
         }
         let mut plugins = loaded_plugins()
             .lock()
@@ -351,8 +349,6 @@ fn set_plugin_enabled_inner(
         for adapter in &ts_instances {
             adapter.set_enabled(false);
         }
-        crate::ts_tools::cancel_plugin_calls(plugin_id);
-        crate::bridge::clear_plugin_subscriptions(plugin_id);
         if let Err(error) = stop_connection_for_directory(&installed.directory) {
             for adapter in &ts_instances {
                 adapter.set_enabled(true);
@@ -475,7 +471,6 @@ fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginS
     }
 
     stop_loaded_sidecar(plugin_id)?;
-    crate::ts_tools::cancel_plugin_calls(plugin_id);
     let transaction = transaction_directory(storage_root, "rollback")?;
     swap_with_rollback(&current.directory, &rollback, &transaction, current.enabled)?;
 
@@ -540,8 +535,6 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
         );
     }
     stop_loaded_sidecar(plugin_id)?;
-    crate::ts_tools::cancel_plugin_calls(plugin_id);
-    crate::bridge::clear_plugin_subscriptions(plugin_id);
     // 补齐连接表兜底：插件不在 loaded_plugins 时，仍可能保留在 sidecar 连接表中，
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
@@ -746,7 +739,6 @@ fn replace_installed_plugin(
     // 避免 Windows 上旧进程占用导致目录切换或旧文件清理失败。
     stop_connection_for_directory(&current.directory)?;
     kill_sidecar_orphans(current);
-    crate::ts_tools::cancel_plugin_calls(&current.manifest.id);
     unload_plugin_adapters(&current.manifest.id);
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {

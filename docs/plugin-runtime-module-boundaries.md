@@ -22,10 +22,12 @@
 | 10 | 调用层注入 `RuntimeFeedback` + `SidecarAccess`，结果抬头归调用域 | 消除 D6→D7（调用层不再直发桥接事件） |
 | 11 | `SidecarAccess` 承载取连接与旁路调用 | 消除 D6→D4（调用层不再自己解析安装目录/连接形态） |
 | 12 | 插件集变更广播改为注入出口；展示投影域归属修正 | 消除 D4→D7（状态机不再直连桥接） |
-度量：跨域引用边 34 → 24（引用次数 222 → 204），违规边 15 → 5；`crate::plugin_dev` 在传输层引用清零，
-runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
-附录 A/B 已补齐 `tool_key`、`storage_layout`、`content_manifest` 三处模块的归属，拆分前基线
-用同一脚本重算，边数与违规边不变，仅引用次数口径更严。
+| 13 | 生命周期事件收尾：停用/卸载/换代后由事件发布方释放运行时资源 | 消除 D3→D6、D3→D7（安装事务不再摆布调用层与桥接层） |
+度量：跨域引用边 34 → 22（引用次数 195 → 177），违规边 15 → 3（违规引用 69 → 13）；
+`crate::plugin_dev` 在传输层引用清零，runtime 生产代码中的插件 ID 字面量清零
+（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。附录 A/B 已补齐 `tool_key`、
+`storage_layout`、`content_manifest` 三处模块的归属，并跳过 `#[cfg(test)] mod` 块；
+拆分前基线用同一脚本重算，边数与违规边不变，只有引用次数口径更严。
 
 ## 1. 目的与判定标准
 
@@ -87,10 +89,14 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 - **注**：市场展示数据（默认插件集合、场景分类、首启标记）**保留在本域**——它们是
   `AvailablePlugin` 这份目录视图的组成部分，宿主再包一层只会增加一份平行的数据结构；
   真正需要外移的是「插件 ID → 执行特权」这类策略（已由 D8 承载）。
-- **当前越界**：`migrations.rs` 5 处调 `ts_tools::cancel_plugin_calls`、3 处调
-  `bridge::clear_plugin_subscriptions`、1 处调 `launcher_update::revoke_persistent_grants`——
-  **安装事务直接摆布别人的运行时资源**。
-- **修法**：安装/卸载收尾改为发布 `PluginChangeEvent`（D4 已具备事件总线），由订阅者停资源。
+- **已修复**：安装事务不再摆布别人的运行时资源。停用/卸载/换代后，挂起的工具调用由
+  `events::release_plugin_resources` 取消（D4→D6，矩阵允许），桥接订阅由 `bridge` 注册的
+  内部订阅者清理（D7→D4）——原先 5 处 `ts_tools::cancel_plugin_calls` 与 3 处
+  `bridge::clear_plugin_subscriptions` 已从本域移除。
+- **当前越界**：`artifacts.rs` 仍调状态机的安装入口（`install_staged_plugin`、`PluginStatus`）；
+  `migrations.rs` 的 `assemble_*` 是状态机内部实现；Windows 卸载前撤销 launcher 授权
+  （`launcher_update::revoke_persistent_grants`）需要 `storage_root` 上下文，事件不携带，
+  暂留本域（`#[cfg(windows)]`，macOS 侧无法验证，改到事件路径前先补 Windows 验证）。
 
 ### D4 状态机（Registry / Lifecycle）
 
@@ -184,15 +190,13 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（5 条边 / 21 处引用，本轮已消 10 条）
+### 当前违规（3 条边 / 13 处引用，本轮已消 12 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
-| D3→D4 | 8 | `artifacts.rs:780,793`、`migrations.rs:411,421` | 安装入口 re-export（假阳性）+ `assemble_*` 真实越界 | `assemble_*` 归 D4 内部 |
-| D3→D5 | 1 | `migrations.rs` | 卸载时撤销 launcher grants | 改发事件 |
-| D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
-| D3→D7 | 3 | `migrations.rs` | 清插件订阅 | 改发事件 |
-| D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 走 D3/D4 公开入口 |
+| D3→D4 | 8 | `artifacts.rs`、`migrations.rs` 的 `assemble_*` | 安装入口 re-export（假阳性）+ 状态机内部实现 | `assemble_*` 归 D4 内部；安装入口随拆 crate 变 re-export |
+| D3→D5 | 1 | `migrations.rs`（Windows 撤销 launcher grants） | 需要 `storage_root` 上下文，事件不携带 | 先补 Windows 验证，再考虑把授权路径并入 `PluginChangeEvent` |
+| D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 随创作域迁出宿主一并解决 |
 
 ## 4. 拆分前必须先立的接缝
 
@@ -280,9 +284,10 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 24 | ≤ 矩阵允许的 20 条 |
-| 跨域引用次数 | 222 | 204 | 随边数收敛 |
-| 违规边 | 15 | 5 | 0 |
+| 跨域引用边 | 34 | 22 | ≤ 矩阵允许的 20 条 |
+| 跨域引用次数 | 195 | 177 | 随边数收敛 |
+| 违规边 | 15 | 3 | 0 |
+| 违规引用次数 | 69 | 13 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -354,7 +359,8 @@ pub struct HostServices {
 
 ## 附录 B：复核脚本
 
-统计口径：按文件归属域；`crate::<模块>` 引用按模块主文件归域；跳过整行注释与行尾注释；跳过 `tests.rs` 与 `test_*.rs`；跨域才计数。
+统计口径：按文件归属域；`crate::<模块>` 引用按模块主文件归域；跳过整行注释与行尾注释；
+跳过 `tests.rs`、`test_*.rs` 与 `#[cfg(test)] mod` 块（测试代码不算生产依赖）；跨域才计数。
 
 ```bash
 cd crates/plugin/tiangong-plugin-runtime/src && python3 - <<'PY'
@@ -369,18 +375,33 @@ PREFIX=[('registry/migrations','D3'),('registry/legacy','D3'),('registry/connect
  ('bridge','D7'),('core_bridge','D7'),('tool_icons','D4'),('tool_titles','D4'),('builtin_tables','D4'),
  ('host_policy','D8'),('lib','D0'),('test_support','D0')]
 MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','tool_key':'D1','storage_layout':'D1',
- 'signature':'D2','trust':'D2',
- 'verification':'D2','content_manifest':'D2',
+ 'signature':'D2','trust':'D2','verification':'D2','content_manifest':'D2',
  'artifacts':'D3','registry':'D4','events':'D4','sidecar':'D5',
- 'interpreter_env':'D5','platform':'D5',
- 'launcher_update':'D5','invocation':'D6','execution':'D6','ts_plugin':'D6','ts_tools':'D6',
- 'runtime_feedback':'D6','bridge':'D7',
- 'core_bridge':'D7','tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4','host_policy':'D8',
- 'plugin_dev':'D9'}
+ 'interpreter_env':'D5','platform':'D5','launcher_update':'D5','invocation':'D6','execution':'D6',
+ 'ts_plugin':'D6','ts_tools':'D6','runtime_feedback':'D6','bridge':'D7','core_bridge':'D7',
+ 'tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4','host_policy':'D8','plugin_dev':'D9'}
 def dom(key):
     for p,d in PREFIX:
         base=p.rstrip('/')
         if key==base or key.startswith(base+'/'): return d
+MOD_RE=re.compile(r'\s*(pub\s+)?mod\s+\w+\s*\{')
+def strip_test_modules(text):
+    lines=text.split('\n'); out=[]; i=0
+    while i<len(lines):
+        if lines[i].strip()=='#[cfg(test)]':
+            j=i+1
+            while j<len(lines) and j<i+4 and (lines[j].strip()=='' or lines[j].strip().startswith('#')):
+                j+=1
+            if j<len(lines) and MOD_RE.match(lines[j]):
+                depth=0; k=j
+                while k<len(lines):
+                    depth+=lines[k].count('{')-lines[k].count('}')
+                    if depth==0: break
+                    k+=1
+                i=k+1; continue
+            i+=1; continue
+        out.append(lines[i]); i+=1
+    return '\n'.join(out)
 edges=collections.Counter(); detail=collections.defaultdict(set)
 for root,_,files in os.walk('.'):
     for f in files:
@@ -389,7 +410,7 @@ for root,_,files in os.walk('.'):
         src=dom(p[:-3])
         if not src or src=='D0': continue
         lines=[]
-        for ln in open(p).read().splitlines():
+        for ln in strip_test_modules(open(p).read()).split('\n'):
             if ln.lstrip().startswith('//'): continue
             m=re.search(r'(?<=\s)//',ln)
             lines.append(ln[:m.start()] if m else ln)
@@ -402,5 +423,3 @@ for (s,d),n in sorted(edges.items()):
     print(f"{s}->{d} {n:3d}  {sorted(detail[(s,d)])}")
 PY
 ```
-
-已知口径误差：经 re-export 调用的函数（如 `crate::registry::install_staged_plugin` 实际属 D3）会被记成 D4，统计时按附录 A 的归属人工修正。
