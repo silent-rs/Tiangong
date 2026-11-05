@@ -71,7 +71,7 @@ async function startCreation() {
   const instruction = [
     `请为我创建一个天工插件「${name}」。`,
     `形态：${templates[selectedTemplate.value] ?? selectedTemplate.value}（plugin creator 的 ${selectedTemplate.value} 模板）。`,
-    '请用 plugin creator 的 devkit 开始：为它起一个合适的英文插件 id（小写字母数字与 - _ .），执行 init 生成骨架后浏览模板结构，然后向我确认需求要点，再继续实现、validate、build，完成后用 plugin_install 安装。',
+    '请用 plugin creator 的 devkit 开始：为它起一个合适的英文插件 id（小写字母数字与 - _ .），执行 init 生成骨架后浏览模板结构，然后向我确认需求要点，再继续实现、validate、build，完成后用 plugin_creator 工具 action=install 安装。',
   ].join('\n');
   try {
     await pluginDev.sendToAgent(bridge.value, instruction);
@@ -94,7 +94,7 @@ async function buildProject(entry: ProjectEntry) {
       show('success', `${entry.id} 构建完成`, '产物在项目 release/ 目录，可直接安装。');
       await recordHistory(`构建 ${entry.id}`);
     } else {
-      show('error', `${entry.id} 构建失败`, `${result.error ?? '未知错误'}（可让 Agent 用 plugin_devkit logs 读完整日志）`);
+      show('error', `${entry.id} 构建失败`, `${result.error ?? '未知错误'}（可让 Agent 用 plugin_creator 的 action=logs 读完整日志）`);
     }
     await refreshProjects();
   } catch (error) {
@@ -145,7 +145,10 @@ onMounted(async () => {
       );
       // 本页执行的开发操作（init/build/add 等）改变了项目集，立即刷新——
       // 这是 Agent 创建插件时项目列表的主刷新路径。
-      if (invocation.name === 'plugin_init' || invocation.name === 'plugin_devkit') {
+      const action = String(
+        (invocation.arguments as Record<string, unknown> | null)?.action ?? '',
+      );
+      if (['init', 'validate', 'build', 'add', 'run'].includes(action)) {
         void refreshProjects();
       }
       try {

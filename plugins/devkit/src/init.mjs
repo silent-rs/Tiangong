@@ -85,7 +85,7 @@ export async function init(argv, ctx) {
     template,
     directory: projectDir,
     files,
-    next: '在项目内按需求实现（模板内有示例与说明），然后 validate → build → 安装（plugin_install 工具）',
+    next: '在项目内按需求实现（模板内有示例与说明），然后 validate → build → 安装（plugin_creator 工具 action=install）',
   };
 }
 

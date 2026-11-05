@@ -88,9 +88,7 @@ pub(crate) const BUILTIN_TOOL_ICONS: &[(&str, &str)] = &[
     ("update_workspace_state", "bot"),
     // 交互与插件
     ("request_user", "message-circle-question"),
-    ("plugin_init", "package"),
-    ("plugin_devkit", "package"),
-    ("plugin_install", "package"),
+    ("plugin_creator", "package"),
     ("call_local_plugin", "puzzle"),
     ("list_local_plugins", "puzzle"),
     ("plugin_injection", "plug"),
