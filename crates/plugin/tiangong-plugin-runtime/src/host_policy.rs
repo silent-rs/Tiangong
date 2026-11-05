@@ -61,6 +61,12 @@ pub struct HostExecutionPolicy {
     pub user_credential_reads: UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub allow_user_cache_write: bool,
+    /// 是否允许写入插件开发目录 `~/.tiangong/plugins-dev/`。devkit CLI
+    /// （`npx @silent-ai/plugin-creator`）经终端命令通道执行 init/validate/
+    /// build/run/logs，项目骨架与构建产物写入开发目录；安装仍由宿主
+    /// plugin-dev 通道把关（构建指纹登记 + 用户确认）。仅按已验证官方
+    /// 身份授予，插件清单声明不构成授权输入。
+    pub plugin_dev_write: bool,
     /// 沙箱内授予的特殊能力名（凭据服务、录音、无头浏览器等，见
     /// `launch_policy::CAPABILITY_*`）。整条链路只传这一个集合；能力怎样
     /// 变成系统规则由 Launcher 定义。
@@ -106,6 +112,10 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     // 进程表查询（pgrep/pkill 经 sysmond，#677）：排查后台进程、确认服务
     // 是否在跑属于命令执行位的日常操作，同样只按已验证官方身份授予。
     let process_inspection = official_signed && matches!(plugin_id, "terminal" | "command");
+    // 插件开发目录写域：devkit 工具链的真实写操作经终端命令通道执行
+    // （plugin-creator 只提供 prompt 引导与宿主 install 通道，不在 sidecar
+    // 内落盘）。command 处于淘汰序列（#697 阶段 3），不新增授权。
+    let plugin_dev_write = official_signed && plugin_id == "terminal";
     // Git/SSH/GitHub CLI 需经系统凭据服务解析用户身份与读取凭据，随凭据
     // 目录读取能力一并授予；证书验证由网络授权独立开放。
     let credential_services = user_credential_reads.ssh || user_credential_reads.github_cli;
@@ -125,6 +135,7 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
         transport: SidecarTransport::Stdio,
         user_credential_reads,
         allow_user_cache_write: git_workflow,
+        plugin_dev_write,
         capabilities,
     }
 }
@@ -197,6 +208,26 @@ mod tests {
 
         assert!(third_party.sandbox, "非官方同名插件必须保持 OS 沙箱");
         assert_eq!(third_party.transport, SidecarTransport::Stdio);
+    }
+
+    #[test]
+    fn plugin_dev_write_is_granted_only_to_official_terminal() {
+        assert!(
+            resolve("terminal", true).plugin_dev_write,
+            "官方 terminal 承载 devkit CLI，需要插件开发目录写域"
+        );
+        for (id, official) in [
+            ("terminal", false),
+            ("command", true),
+            ("plugin-creator", true),
+            ("fetch", true),
+            ("unknown-third-party", true),
+        ] {
+            assert!(
+                !resolve(id, official).plugin_dev_write,
+                "{id}（official={official}）不应获得插件开发目录写域"
+            );
+        }
     }
 
     #[test]

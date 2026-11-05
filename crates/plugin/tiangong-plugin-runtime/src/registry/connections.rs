@@ -292,6 +292,49 @@ fn sidecar_connection_inner(
         if let Some(workspace) = workspace {
             config = config.with_sandbox_workspace(Some(workspace));
         }
+        // 插件开发目录写域（host_policy 按已验证官方身份授予）：devkit
+        // CLI 经终端命令通道写入 plugins-dev（项目骨架与构建产物）。目录
+        // 可能尚未初始化（新装机首次开发），先确保存在——传输层的
+        // retain_existing_writable_roots 会静默丢弃不存在的目录；符号链接
+        // 或非目录项视为篡改，拒绝授权（fail-closed）。安装仍走宿主
+        // plugin-dev 通道，终端不因此获得 plugins/ 写权限。
+        if host_policy.plugin_dev_write {
+            let dev_root = storage_root.join(crate::plugin_dev::PLUGIN_DEV_DIR);
+            let granted = match std::fs::symlink_metadata(&dev_root) {
+                Ok(meta) if meta.file_type().is_dir() => Some(dev_root),
+                Ok(_) => {
+                    tracing::warn!(
+                        path = %dev_root.display(),
+                        "插件开发目录不是实体目录，跳过写域授权"
+                    );
+                    None
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::create_dir_all(&dev_root) {
+                        Ok(()) => Some(dev_root),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                path = %dev_root.display(),
+                                "创建插件开发目录失败，跳过写域授权"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %dev_root.display(),
+                        "检查插件开发目录失败，跳过写域授权"
+                    );
+                    None
+                }
+            };
+            if let Some(dev_root) = granted {
+                config = config.push_sandbox_extra_writable(dev_root);
+            }
+        }
     }
     if let Some(signed_release) = signed_release {
         // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。

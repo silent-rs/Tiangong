@@ -539,6 +539,13 @@ impl SidecarConfig {
         self
     }
 
+    /// 追加单个沙箱额外可写根（保留已有项；与
+    /// [`SidecarConfig::with_sandbox_extra_writable`] 的整体覆盖语义互补）。
+    pub fn push_sandbox_extra_writable(mut self, path: PathBuf) -> Self {
+        self.sandbox_extra_writable.push(path);
+        self
+    }
+
     /// 增加宿主权威的读取拒绝路径。
     pub fn with_sandbox_denied_read_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.sandbox_denied_read_paths = paths;
