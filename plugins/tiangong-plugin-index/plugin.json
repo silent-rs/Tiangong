@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "index",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "sidecar": {
     "binary": "tiangong-index-sidecar",
     "transport_protocol": "0.1.0",
@@ -95,7 +95,8 @@
         "title": "索引管理",
         "description": "工作区索引列表与重建/删除",
         "entry": "app/index.html",
-        "context": []
+        "context": [],
+        "sandbox": "iframe"
       }
     ]
   },

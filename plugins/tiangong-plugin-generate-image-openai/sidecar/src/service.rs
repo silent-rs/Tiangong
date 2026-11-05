@@ -11,9 +11,9 @@ use tiangong_llm::{ModelCapability, ModelsConfig, ProviderProtocol};
 use tiangong_plugin_generate_image_openai_protocol::{
     Ack, ChatgptAccountInfo, ConfigBootstrap, ConfigSelection, Empty, GENERATE_OPERATION,
     GET_CONFIG_OPERATION, GenerateRequest, GenerateResponse, GeneratedImage,
-    IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, ModelInfo, ModelSource, PLUGIN_ID,
-    PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint, SET_CONFIG_OPERATION,
-    TOOL_GENERATE_IMAGE,
+    IMAGE_PROTOCOL_VERSION, ImageApiProtocol, ImageGenConfig, MENTION_CANDIDATES_OPERATION,
+    ModelInfo, ModelSource, PLUGIN_ID, PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint,
+    SET_CONFIG_OPERATION, TOOL_GENERATE_IMAGE,
 };
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
@@ -110,6 +110,16 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
             }
             serde_json::to_value(Ack::default()).context("序列化 reconfigure 响应失败")
         }
+
+        // @ 提及候选：仅入口 entry（value/label/kind 由宿主按清单合成），
+        // 不提供内容候选。查询词过滤由 CoreManager 聚合层统一处理，载荷忽略。
+        MENTION_CANDIDATES_OPERATION => Ok(json!({
+            "entry": {
+                "hint": "生成或编辑图片",
+                "mark": "图",
+            },
+            "candidates": [],
+        })),
 
         other => Err(anyhow!("未知的操作: {other}")),
     }
@@ -605,6 +615,132 @@ mod tests {
         );
     }
 
+    /// @ 提及候选查询：返回入口 entry（hint 非空、mark 1-4 字符）与空
+    /// candidates；载荷为完整 MentionQuery，任意查询词下响应一致。
+    #[tokio::test]
+    async fn mention_candidates_returns_entry_only() {
+        let response = dispatch_operation(
+            MENTION_CANDIDATES_OPERATION,
+            serde_json::json!({ "query": "生图", "context": {} }),
+        )
+        .await
+        .unwrap();
+
+        let entry = response.get("entry").expect("entry 必须存在");
+        let hint = entry["hint"].as_str().unwrap_or_default();
+        assert!(!hint.trim().is_empty(), "hint 不能为空：{entry}");
+        let mark = entry["mark"].as_str().unwrap_or_default();
+        assert!(
+            (1..=4).contains(&mark.chars().count()),
+            "mark 须为 1-4 字符：{mark}"
+        );
+        assert!(
+            response["candidates"].as_array().is_some_and(Vec::is_empty),
+            "无内容候选，candidates 须为空数组：{response}"
+        );
+    }
+
+    /// 设置页全链路回归：get_config 返回 chat 模型列表（含 codex provider），
+    /// set_config 保存 global=codex key 成功且回显。隔离 env 驱动，不依赖真实
+    /// models.json / 数据目录。
+    #[tokio::test]
+    async fn settings_config_roundtrip_lists_models_and_saves_selection() {
+        struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    // SAFETY: 测试尾部恢复，无并发。
+                    unsafe {
+                        match value {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().expect("临时目录");
+        std::fs::write(
+            tmp.path().join("models.json"),
+            r#"{
+              "providers": {
+                "codex-main": { "base_url": "", "api_key": "", "protocol": "codex" },
+                "openai-main": { "base_url": "https://api.openai.com/v1", "api_key": "sk-test", "protocol": "openai" }
+              },
+              "models": {
+                "gpt-chatgpt": { "provider": "codex-main", "model": "gpt-5.6", "capabilities": ["chat"] },
+                "gpt-api": { "provider": "openai-main", "model": "gpt-5.4", "capabilities": ["chat"] }
+              },
+              "routing": {}
+            }"#,
+        )
+        .expect("写 models.json");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("建数据目录");
+        let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = [
+            "TIANGONG_STORAGE_ROOT",
+            "TIANGONG_PLUGIN_STORAGE_DATA_DIR",
+            "TIANGONG_PLUGIN_ID",
+        ]
+        .iter()
+        .map(|key| {
+            let key: &'static str = unsafe { std::mem::transmute(*key) };
+            (key, std::env::var_os(key))
+        })
+        .collect();
+        // SAFETY: 测试独占进程内的该静态锁前已串行化（无并发 env 访问）。
+        unsafe {
+            std::env::set_var("TIANGONG_STORAGE_ROOT", tmp.path());
+            std::env::set_var("TIANGONG_PLUGIN_STORAGE_DATA_DIR", &data_dir);
+            std::env::remove_var("TIANGONG_PLUGIN_ID");
+        }
+        let _restore = EnvRestore(saved);
+
+        // 1) get_config：模型列表含 codex 与 openai 两条 chat 模型
+        let bootstrap = dispatch_operation(GET_CONFIG_OPERATION, serde_json::json!({}))
+            .await
+            .expect("get_config 应成功");
+        let models = bootstrap["models"].as_array().expect("models 数组");
+        assert_eq!(models.len(), 2, "应列出全部 chat 模型: {bootstrap}");
+        let by_key = |key: &str| {
+            models
+                .iter()
+                .find(|m| m["key"].as_str() == Some(key))
+                .unwrap_or_else(|| panic!("缺少模型 {key}: {bootstrap}"))
+        };
+        assert_eq!(by_key("gpt-chatgpt")["provider"], "codex-main");
+        assert_eq!(by_key("gpt-chatgpt")["model"], "gpt-5.6");
+        assert_eq!(by_key("gpt-api")["configured"], true);
+        let chatgpt_models: Vec<&str> = bootstrap["chatgpt"]["models"]
+            .as_array()
+            .expect("chatgpt.models 数组")
+            .iter()
+            .filter_map(|m| m.as_str())
+            .collect();
+        assert_eq!(
+            chatgpt_models,
+            vec!["gpt-5.6"],
+            "chatgpt 模型应来自 codex provider"
+        );
+
+        // 2) set_config：global 选择 codex 模型应成功
+        dispatch_operation(
+            SET_CONFIG_OPERATION,
+            serde_json::json!({"source": "global", "global_model_key": "gpt-chatgpt"}),
+        )
+        .await
+        .expect("set_config(global=codex) 应成功");
+
+        // 3) get_config 回显
+        let bootstrap2 = dispatch_operation(GET_CONFIG_OPERATION, serde_json::json!({}))
+            .await
+            .expect("get_config 二次应成功");
+        assert_eq!(
+            bootstrap2["config"]["global_model_key"].as_str(),
+            Some("gpt-chatgpt"),
+            "配置应回显: {bootstrap2}"
+        );
+    }
     #[test]
     fn chatgpt_selection_resolves_without_secret() {
         let selection = ConfigSelection {

@@ -271,6 +271,29 @@ describe('PluginSandbox 沙箱容器', () => {
     expect(container!.querySelector('iframe')).toBeTruthy();
     expect(shadowHost()).toBeNull();
   });
+  it('iframe 页面发 plugin_host_ready 后宿主重发 host context', async () => {
+    // postMessage 协议的插件页面加载完成后发 plugin_host_ready，等待宿主回传
+    // tiangong_host_context；宿主 mount 即发的 context 可能早于页面监听器注册
+    // 而丢失，收到 ready 通知必须重发（否则页面 hostReady 永久挂起）。
+    await render(
+      <PluginSandbox pluginId="p8" contributionId="c8" sandbox="iframe" html="<body>b</body>" />,
+    );
+    const iframe = container!.querySelector('iframe') as HTMLIFrameElement;
+    expect(iframe).toBeTruthy();
+    const target = iframe.contentWindow!;
+    const posted: Array<Record<string, unknown>> = [];
+    target.postMessage = ((message: Record<string, unknown>) => {
+      posted.push(message);
+    }) as typeof target.postMessage;
+    // 模拟页面脚本发就绪通知（source 必须是本 iframe 的 window）
+    window.dispatchEvent(
+      new MessageEvent('message', { source: target, data: { type: 'plugin_host_ready' } }),
+    );
+    await act(async () => {});
+    const context = posted.find((message) => message?.type === 'tiangong_host_context');
+    expect(context).toBeTruthy();
+    expect(typeof context?.channel).toBe('string');
+  });
 
   it('native 模式给出占位说明', async () => {
     await render(

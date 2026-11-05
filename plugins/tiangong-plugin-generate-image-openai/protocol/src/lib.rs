@@ -16,6 +16,9 @@ pub const GENERATE_OPERATION: &str = "generate";
 pub const GET_CONFIG_OPERATION: &str = "get_config";
 pub const SET_CONFIG_OPERATION: &str = "set_config";
 pub const RECONFIGURE_OPERATION: &str = "reconfigure";
+/// @ 提及候选查询操作：返回入口 entry（能力型插件被 `@plugin:` 点名），
+/// 无内容候选。载荷为宿主 MentionQuery，查询词过滤由聚合层统一处理。
+pub const MENTION_CANDIDATES_OPERATION: &str = "generate-image-openai.mention_candidates";
 
 /// 一个类型化的 Image 业务操作。
 pub trait ImageOperation {
