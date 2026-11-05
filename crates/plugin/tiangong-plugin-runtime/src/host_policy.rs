@@ -65,6 +65,11 @@ pub struct HostExecutionPolicy {
     /// `launch_policy::CAPABILITY_*`）。整条链路只传这一个集合；能力怎样
     /// 变成系统规则由 Launcher 定义。
     pub capabilities: BTreeSet<String>,
+    /// sidecar 采用「每请求一次性进程」形态（命令执行位：每次调用独立
+    /// 进程、独立沙箱与工作区）。由宿主策略决定，插件清单不参与。
+    pub ephemeral_sidecar: bool,
+    /// 未通过官方发布者签名校验即拒绝启动（宿主对特定执行位的硬要求）。
+    pub require_official_signature: bool,
 }
 
 impl HostExecutionPolicy {
@@ -78,6 +83,8 @@ impl HostExecutionPolicy {
             allow_user_cache_write: false,
             plugin_dev_write: false,
             capabilities: BTreeSet::new(),
+            ephemeral_sidecar: false,
+            require_official_signature: false,
         }
     }
 

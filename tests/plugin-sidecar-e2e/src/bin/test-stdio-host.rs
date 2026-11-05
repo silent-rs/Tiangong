@@ -119,7 +119,8 @@ fn run_command_sandbox(sidecar: PathBuf, state_dir: PathBuf) -> Result<()> {
     )
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(600))
     .with_protocols(COMMAND_TRANSPORT_PROTOCOL, COMMAND_PROTOCOL_VERSION)
-    .with_sandbox_program_root(Some(plugin_root));
+    .with_sandbox_program_root(Some(plugin_root))
+    .with_ephemeral_sidecar(true);
     let connection = EphemeralCommandConnection::new(config);
     connection.update_exec_env(BTreeMap::from([(
         "HOME".to_string(),

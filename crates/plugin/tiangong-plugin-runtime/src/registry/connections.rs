@@ -226,10 +226,11 @@ fn sidecar_connection_inner(
     // 不读 manifest 的 sandbox / sandbox_network（插件自声明是提权通道）。
     let official_signed =
         signed_release.is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
-    if installed.manifest.id == "command" && !official_signed {
-        bail!("command 插件必须由官方发布者签名");
-    }
     let host_policy = crate::host_policy::resolve(&installed.manifest.id, official_signed);
+    // 宿主对特定执行位（命令执行位）的硬要求：必须官方签名。
+    if host_policy.require_official_signature && !official_signed {
+        bail!("插件 {} 必须由官方发布者签名", installed.manifest.id);
+    }
     // 用户全局沙箱开关只控制首次实际使用才启动的 sidecar：terminal、
     // command、解释器和清单声明的按需插件。随 App 启动的预加载常驻服务
     // 继续执行宿主强制沙箱；配置读取失败按开启处理（fail-safe）。
@@ -314,10 +315,12 @@ fn sidecar_connection_inner(
             .with_interpreter(launch)
             .with_integrity_manifest(installed.directory.join(CONTENT_MANIFEST_FILE));
     }
-    config = config.with_lifecycle(installed.manifest.sidecar_lifecycle());
+    config = config
+        .with_lifecycle(installed.manifest.sidecar_lifecycle())
+        .with_ephemeral_sidecar(host_policy.ephemeral_sidecar);
 
     if ephemeral {
-        return Ok(if installed.manifest.id == "command" {
+        return Ok(if host_policy.ephemeral_sidecar {
             Arc::new(EphemeralCommandConnection::new(config)) as Arc<dyn SidecarConnection>
         } else if use_stdio {
             Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>
@@ -343,7 +346,7 @@ fn sidecar_connection_inner(
     if !connections.contains_key(&connection_key) {
         // 通信通道由宿主策略表权威决定（插件不声明）：spawn 时注入的
         // 环境变量即通道选择，sidecar 通用库自动适配。
-        let connection: Arc<dyn SidecarConnection> = if installed.manifest.id == "command" {
+        let connection: Arc<dyn SidecarConnection> = if host_policy.ephemeral_sidecar {
             Arc::new(EphemeralCommandConnection::new(config))
         } else if use_stdio {
             Arc::new(StdioSidecarConnection::new(config))

@@ -47,6 +47,9 @@ pub fn execution_policy(plugin_id: &str, official_signed: bool) -> HostExecution
     // 官方 volcengine 提供按住说话录音，sidecar 需在沙箱内经 CoreAudio 打开
     // 麦克风；仅按已验证官方身份授予。
     let audio_input = official_signed && plugin_id == "volcengine";
+    // 命令执行位：每请求一次性进程（独立工作区与沙箱），且必须官方签名——
+    // 未签名的同名插件在连接构造时即拒绝启动。
+    let command_execution_slot = plugin_id == "command";
 
     let mut policy =
         HostExecutionPolicy::sandboxed_default().with_user_credential_reads(if git_workflow {
@@ -60,6 +63,8 @@ pub fn execution_policy(plugin_id: &str, official_signed: bool) -> HostExecution
     policy.allow_user_cache_write = git_workflow;
     policy.plugin_dev_write = plugin_dev_write;
     policy.sandbox = !accessibility_host_child;
+    policy.ephemeral_sidecar = command_execution_slot;
+    policy.require_official_signature = command_execution_slot;
     if command_slot {
         policy = policy
             .with_capability(CAPABILITY_BROWSER_RUNTIME)
@@ -189,6 +194,18 @@ mod tests {
                 !execution_policy(id, official).plugin_dev_write,
                 "{id}（official={official}）不应获得开发写域"
             );
+        }
+    }
+
+    #[test]
+    fn 命令执行位采用一次性进程且要求官方签名() {
+        let command = execution_policy("command", true);
+        assert!(command.ephemeral_sidecar, "command 需每请求一次性进程");
+        assert!(command.require_official_signature, "command 必须官方签名");
+        for id in ["terminal", "fetch", "fs", "unknown-third-party"] {
+            let policy = execution_policy(id, true);
+            assert!(!policy.ephemeral_sidecar, "{id} 不应采用一次性进程");
+            assert!(!policy.require_official_signature, "{id} 不应强制官方签名");
         }
     }
 

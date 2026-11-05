@@ -243,6 +243,9 @@ pub struct SidecarConfig {
     pub lifecycle: crate::manifest::SidecarLifecycle,
     /// 是否为注册表共享连接的主进程（见 [`INSTANCE_ROLE_ENV`]）。
     pub primary_instance: bool,
+    /// 每请求一次性进程形态（命令执行位）：连接构造层按宿主策略声明，
+    /// 一次性连接据此校验自身形态，避免被误用为常驻连接。
+    pub ephemeral_sidecar: bool,
     /// 内容哈希清单（本地信任解释器 sidecar 的 spawn 前复核锚）。
     pub integrity_manifest: Option<PathBuf>,
     // OS 沙箱字段为沙箱覆盖分支预留的配置面（本分支仅传输层，无消费方）。
@@ -307,6 +310,7 @@ impl SidecarConfig {
             interpreter: None,
             lifecycle: crate::manifest::SidecarLifecycle::OnDemand,
             primary_instance: false,
+            ephemeral_sidecar: false,
             integrity_manifest: None,
             sandbox: false,
             sandbox_follows_user_switch: false,
@@ -370,6 +374,12 @@ impl SidecarConfig {
     /// 标记为注册表共享连接的主进程。
     pub fn with_primary_instance(mut self, primary: bool) -> Self {
         self.primary_instance = primary;
+        self
+    }
+
+    /// 声明每请求一次性进程形态（命令执行位；由宿主策略决定）。
+    pub fn with_ephemeral_sidecar(mut self, ephemeral: bool) -> Self {
+        self.ephemeral_sidecar = ephemeral;
         self
     }
 
