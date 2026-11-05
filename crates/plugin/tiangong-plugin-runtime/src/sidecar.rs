@@ -225,10 +225,10 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
-    /// 插件开发目录写域（plugins-dev 与收件箱 plugins/.inbox；仅宿主按
-    /// 已验证官方身份授予 terminal / plugin-creator）。目录保障与汇入
-    /// 在沙箱策略组装层处理（stdio 组装块）。
-    pub sandbox_plugin_dev_write: bool,
+    /// spawn 前保障存在且非符号链接的额外可写根（宿主授予的固定写域，
+    /// 如插件开发目录与导入收件箱）。具体是哪些目录由宿主判定并传入，
+    /// 传输层只负责目录保障与汇入。
+    pub sandbox_ensured_writable: Vec<PathBuf>,
     /// 宿主授予的沙箱特殊能力；原样写入 Launcher 策略。
     pub sandbox_capabilities: std::collections::BTreeSet<String>,
     pub start_timeout: Duration,
@@ -298,7 +298,7 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
-            sandbox_plugin_dev_write: false,
+            sandbox_ensured_writable: Vec::new(),
             sandbox_capabilities: std::collections::BTreeSet::new(),
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -340,9 +340,9 @@ impl SidecarConfig {
         self
     }
 
-    /// 授予插件开发目录写域（plugins-dev 与收件箱）。
-    pub fn with_sandbox_plugin_dev_write(mut self, granted: bool) -> Self {
-        self.sandbox_plugin_dev_write = granted;
+    /// 设置 spawn 前需保障的额外可写根（目录不存在则创建，符号链接则丢弃）。
+    pub fn with_sandbox_ensured_writable(mut self, roots: Vec<PathBuf>) -> Self {
+        self.sandbox_ensured_writable = roots;
         self
     }
 

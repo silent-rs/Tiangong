@@ -37,6 +37,7 @@ pub mod host_policy;
 
 pub mod signature;
 pub mod slots;
+pub mod storage_layout;
 pub mod tool_icons;
 pub mod tool_key;
 pub mod tool_titles;
