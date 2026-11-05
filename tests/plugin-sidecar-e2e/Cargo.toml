@@ -29,3 +29,6 @@ tempfile = { workspace = true }
 # official_catalog_e2e：三方发布者签名与签名文件编码
 minisign = "0.9"
 base64 = { workspace = true }
+# plugin_creator_e2e：三方分发归档（tar.zst）构造
+tar = { workspace = true }
+zstd = { workspace = true }

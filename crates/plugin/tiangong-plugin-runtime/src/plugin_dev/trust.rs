@@ -33,8 +33,8 @@ pub fn set_plugin_dev_trusted_installer(handler: TrustedInstallerHandler) {
     }
 }
 
-/// 清除受信安装方判定（测试隔离用：恢复 fail-closed 初始态）。
-#[cfg(test)]
+/// 清除受信安装方判定（恢复 fail-closed 初始态）。测试隔离用；经
+/// test_support 对 e2e 开放，不进入 lib 公共 API 面。
 pub(crate) fn clear_plugin_dev_trusted_installer_for_test() {
     if let Ok(mut current) = TRUSTED_INSTALLER.write() {
         *current = None;
@@ -168,9 +168,8 @@ pub fn set_plugin_dev_import_confirm(handler: ImportConfirmHandler) {
     }
 }
 
-/// 清除导入确认回调（测试隔离用：恢复 fail-closed 初始态）。
-#[cfg(test)]
-#[allow(dead_code)]
+/// 清除导入确认回调（恢复 fail-closed 初始态）。测试隔离用；经
+/// test_support 对 e2e 开放。
 pub(crate) fn clear_plugin_dev_import_confirm_for_test() {
     if let Ok(mut current) = IMPORT_CONFIRM.write() {
         *current = None;

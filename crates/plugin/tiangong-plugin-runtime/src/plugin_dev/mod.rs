@@ -22,13 +22,14 @@ use crate::manifest::PluginManifest;
 
 mod trust;
 
-#[cfg(test)]
-pub(crate) use trust::clear_plugin_dev_trusted_installer_for_test;
 use trust::ensure_install_authorized;
 pub use trust::{
     ImportSummary, InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint,
     note_trusted_build, set_plugin_dev_import_confirm, set_plugin_dev_trusted_installer,
     trusted_build_fingerprint,
+};
+pub(crate) use trust::{
+    clear_plugin_dev_import_confirm_for_test, clear_plugin_dev_trusted_installer_for_test,
 };
 
 /// 开发目录名（位于存储根下，与 plugins/ 平级）。
