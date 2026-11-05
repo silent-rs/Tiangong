@@ -28,6 +28,7 @@ pub mod plugin_dev;
 /// 宿主与 sidecar 共用的通信协议（定义在 `tiangong-plugin-sidecar`）。
 pub use tiangong_plugin_sidecar::protocol;
 pub mod registry;
+pub mod runtime_feedback;
 pub mod sidecar;
 /// 测试支撑（非公开 API，仅供测试复用）。
 #[doc(hidden)]

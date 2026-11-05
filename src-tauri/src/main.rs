@@ -167,6 +167,9 @@ fn main() {
             tiangong_plugin_runtime::plugin_dev::call(plugin_id, method, payload)
         }),
     );
+    // 桥接层作为调用层反馈出口：进度里的 app 原语、页面事件与订阅查询
+    // 都由桥接路由（未安装时调用层按宿主未接入退化）。
+    tiangong_plugin_runtime::bridge::install_runtime_feedback();
 
     // 无参数 → GUI
     if std::env::args().len() <= 1 {

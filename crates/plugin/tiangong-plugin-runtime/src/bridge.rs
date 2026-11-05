@@ -516,6 +516,30 @@ pub(crate) fn handle_runtime_feedback(plugin_id: &str, message: &str) -> bool {
     true
 }
 
+/// 桥接层作为调用层反馈出口的实现：控制反馈、页面事件与 App 原语都经桥接路由。
+#[derive(Debug)]
+struct BridgeRuntimeFeedback;
+impl crate::runtime_feedback::RuntimeFeedback for BridgeRuntimeFeedback {
+    fn handle_progress(&self, plugin_id: &str, message: &str) -> bool {
+        handle_runtime_feedback(plugin_id, message)
+    }
+    fn has_subscriber(&self, plugin_id: &str, channel: &str) -> bool {
+        plugin_has_subscriber(plugin_id, channel)
+    }
+    fn emit_to_plugin(&self, plugin_id: &str, channel: &str, payload: &str) {
+        bridge_emit_to(plugin_id, channel, payload);
+    }
+    fn open_app(&self, plugin_id: &str, payload: &str) -> Result<String> {
+        open_app_for_plugin(plugin_id, payload)
+    }
+}
+/// 把桥接层安装为调用层的反馈出口（宿主启动时调用一次，重复调用无副作用）。
+///
+/// 未安装时调用层按「宿主未接入」退化：控制反馈不消费、页面事件不推送、
+/// App 实例不拉起——与未注入对应原生服务时的行为一致。
+pub fn install_runtime_feedback() {
+    crate::runtime_feedback::set_runtime_feedback(Arc::new(BridgeRuntimeFeedback));
+}
 fn native_service_call(
     handler: &OnceLock<NativeServiceHandler>,
     service: &str,
@@ -733,6 +757,22 @@ pub fn plugin_has_subscriber(plugin_id: &str, channel: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime反馈只识别受控app原语() {
+        assert!(!handle_runtime_feedback("demo", "普通进度"));
+        assert!(!handle_runtime_feedback(
+            "demo",
+            r#"{"type":"progress","message":"50%"}"#,
+        ));
+        assert!(handle_runtime_feedback(
+            "demo",
+            r#"{"type":"app.open","payload":{"instance_id":"a"}}"#,
+        ));
+        assert!(handle_runtime_feedback(
+            "demo",
+            r#"{"host_action":{"method":"app.close","payload":{"instance_id":"a"}}}"#,
+        ));
+    }
 
     #[test]
     fn 命名空间识别正确() {

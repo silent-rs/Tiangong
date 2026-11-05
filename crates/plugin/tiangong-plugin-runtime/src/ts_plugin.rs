@@ -50,6 +50,8 @@ pub struct TsPluginAdapter {
     workspace: RwLock<String>,
     /// 声明 lifecycle 能力且带 sidecar：生命周期钩子转发给 sidecar。
     lifecycle_sidecar: AtomicBool,
+    /// 旁路调用 sidecar 的入口（生命周期钩子等），由装载器注入。
+    sidecar_invoker: RwLock<Option<std::sync::Arc<dyn crate::sidecar::SidecarInvoker>>>,
 }
 
 impl TsPluginAdapter {
@@ -95,6 +97,17 @@ impl TsPluginAdapter {
             session_id: RwLock::new(String::new()),
             workspace: RwLock::new(String::new()),
             lifecycle_sidecar: AtomicBool::new(Self::lifecycle_sidecar_of(manifest)),
+            sidecar_invoker: RwLock::new(None),
+        }
+    }
+    /// 注入旁路 sidecar 调用入口（构造后由装载器设置）。
+    pub(crate) fn set_sidecar_invoker(
+        &self,
+        invoker: std::sync::Arc<dyn crate::sidecar::SidecarInvoker>,
+    ) {
+        match self.sidecar_invoker.write() {
+            Ok(mut slot) => *slot = Some(invoker),
+            Err(poisoned) => *poisoned.into_inner() = Some(invoker),
         }
     }
 
@@ -167,9 +180,16 @@ impl TsPluginAdapter {
             return;
         };
         let operation = format!("lifecycle.{hook}");
-        if let Err(error) =
-            crate::bridge::invoke_plugin_sidecar(&self.id, &operation, payload, None)
-        {
+        let invoker = self
+            .sidecar_invoker
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        let Some(invoker) = invoker else {
+            tracing::debug!(plugin_id = %self.id, operation, "未注入 sidecar 调用入口，跳过生命周期转发");
+            return;
+        };
+        if let Err(error) = invoker.invoke(&self.id, &operation, payload, None) {
             tracing::warn!(plugin_id = %self.id, %error, operation, "生命周期钩子转发失败");
         }
     }
@@ -401,12 +421,23 @@ impl ToolOverrideHandler for TsPluginAdapter {
     }
 
     fn result_header(&self, call: &ToolCall, ok: bool) -> Option<String> {
-        Some(crate::core_bridge::plugin_result_header(
-            &self.id, &call.name, ok,
-        ))
+        Some(plugin_result_header(&self.id, &call.name, ok))
     }
 }
 
+/// 工具结果抬头的状态词。
+pub(crate) fn result_status_text(ok: bool) -> &'static str {
+    if ok { "成功" } else { "失败" }
+}
+/// 插件工具结果的抬头：带上实际处理的插件 id 与插件声明的原工具名。
+///
+/// 抬头由插件侧（runtime 适配器）提供，core 只原样放在结果首行。
+pub(crate) fn plugin_result_header(plugin_id: &str, tool_name: &str, ok: bool) -> String {
+    format!(
+        "调用插件 {plugin_id} 的 {tool_name}：{}",
+        result_status_text(ok)
+    )
+}
 fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
     manifest.ui_contributions().is_empty() && manifest.sidecar.is_some()
 }
@@ -504,7 +535,9 @@ async fn invoke_sidecar_tool(
             if let Some(invocation) = &runtime_invocation {
                 invocation.progress(message);
             } else {
-                crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message);
+                if let Some(feedback) = crate::runtime_feedback::runtime_feedback() {
+                    feedback.handle_progress(&plugin_id_for_feedback, &message);
+                }
             }
         };
         match invocation_context {
@@ -964,22 +997,5 @@ mod tests {
 
     fn adapter_route(adapter: &TsPluginAdapter, tool_name: &str) -> crate::invocation::HandlerKind {
         adapter.handler_for_tool(tool_name).unwrap()
-    }
-
-    #[test]
-    fn runtime反馈只识别受控app原语() {
-        assert!(!crate::bridge::handle_runtime_feedback("demo", "普通进度"));
-        assert!(!crate::bridge::handle_runtime_feedback(
-            "demo",
-            r#"{"type":"progress","message":"50%"}"#,
-        ));
-        assert!(crate::bridge::handle_runtime_feedback(
-            "demo",
-            r#"{"type":"app.open","payload":{"instance_id":"a"}}"#,
-        ));
-        assert!(crate::bridge::handle_runtime_feedback(
-            "demo",
-            r#"{"host_action":{"method":"app.close","payload":{"instance_id":"a"}}}"#,
-        ));
     }
 }

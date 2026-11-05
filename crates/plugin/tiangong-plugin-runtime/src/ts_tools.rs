@@ -43,7 +43,11 @@ fn request_plugin_ui(plugin_id: &str, session_id: &str) {
     last_by_plugin.insert(cooldown_key, now);
     drop(last_by_plugin);
     let payload = serde_json::json!({ "session_id": session_id, "mode": "background" }).to_string();
-    match crate::bridge::open_app_for_plugin(plugin_id, &payload) {
+    let opened = match crate::runtime_feedback::runtime_feedback() {
+        Some(feedback) => feedback.open_app(plugin_id, &payload),
+        None => Err(anyhow::anyhow!("宿主尚未接入 app 原生服务")),
+    };
+    match opened {
         Ok(_) => tracing::info!(
             plugin_id,
             session_id,
@@ -197,7 +201,8 @@ pub async fn execute(
     // 无人接应时请求宿主后台挂载插件实例（通用能力，不区分官方与三方
     // 插件）：实例挂载后 shell 订阅 tool.requested，bridge_subscribe 会
     // 重放本调用。
-    let subscribed = crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested");
+    let subscribed = crate::runtime_feedback::runtime_feedback()
+        .is_some_and(|feedback| feedback.has_subscriber(&plugin_id, "tool.requested"));
     tracing::info!(
         plugin_id = %plugin_id,
         invocation_id = %invocation_id,
@@ -379,7 +384,9 @@ fn emit_requested(plugin_id: &str, invocation: &TsToolInvocation) {
         );
         return;
     }
-    crate::bridge::bridge_emit_to(plugin_id, "tool.requested", &payload);
+    if let Some(feedback) = crate::runtime_feedback::runtime_feedback() {
+        feedback.emit_to_plugin(plugin_id, "tool.requested", &payload);
+    }
 }
 
 fn emit_closed(plugin_id: &str, invocation_id: &str, status: TsToolCloseStatus) {
@@ -388,7 +395,9 @@ fn emit_closed(plugin_id: &str, invocation_id: &str, status: TsToolCloseStatus) 
         status,
     };
     if let Ok(payload) = serde_json::to_string(&event) {
-        crate::bridge::bridge_emit_to(plugin_id, "tool.closed", &payload);
+        if let Some(feedback) = crate::runtime_feedback::runtime_feedback() {
+            feedback.emit_to_plugin(plugin_id, "tool.closed", &payload);
+        }
     } else {
         tracing::warn!(plugin_id, invocation_id, "序列化 TS 工具闭合事件失败");
     }

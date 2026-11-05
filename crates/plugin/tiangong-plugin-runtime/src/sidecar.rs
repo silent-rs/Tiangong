@@ -237,6 +237,20 @@ pub trait SidecarEvents: Send + Sync + std::fmt::Debug {
     /// 工具规格需要重新获取。
     fn tools_updated(&self, _plugin_id: &str) {}
 }
+/// 调用层需要的 sidecar 调用入口：按插件 ID 定位连接并转发一次操作。
+///
+/// 定位规则（安装目录、存储根、按需/常驻连接选择）属于状态机，调用层
+/// 只依赖本 trait；未注入时生命周期钩子等旁路调用退化为跳过。
+pub trait SidecarInvoker: Send + Sync + std::fmt::Debug {
+    /// 调用指定插件 sidecar 的一个操作。
+    fn invoke(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        payload: serde_json::Value,
+        workspace: Option<&Path>,
+    ) -> Result<serde_json::Value>;
+}
 /// 未注入宿主实现时的默认环境：沙箱开启、不退出、无持久授权。
 #[derive(Debug)]
 struct DefaultRuntimeEnv;

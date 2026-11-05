@@ -20,7 +20,8 @@
 | 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
 | 8 | 验证编排归状态机（新 `registry/reverify`） | 消除 D2→D4（信任域只留记录读写，不再起连接） |
 | 9 | 桥接命名空间可注册（宿主注册 `plugin-dev.`） | 消除 D7→D9（runtime 不含创作链路由） |
-度量：跨域引用边 34 → 27，违规边 15 → 8；`crate::plugin_dev` 在传输层引用清零，
+| 10 | 调用层注入 `RuntimeFeedback` + `SidecarInvoker`，结果抬头归调用域 | 消除 D6→D7（调用层不再直发桥接事件） |
+度量：跨域引用边 34 → 26，违规边 15 → 7；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -29,7 +30,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 本文档给出拆分的安全前提：
 
-1. **域划分**：41 个生产源文件各自归属唯一职责域（39 个归入九域，2 个是 crate 根 / 测试支撑），每个域明确「拥有什么 / 不拥有什么 / 对外只有哪些入口」；
+1. **域划分**：42 个生产源文件各自归属唯一职责域（40 个归入九域，2 个是 crate 根 / 测试支撑），每个域明确「拥有什么 / 不拥有什么 / 对外只有哪些入口」；
 2. **依赖矩阵**：域间只允许单向依赖；当前违规逐条列出，可复核；
 3. **拆分顺序**：按依赖拓扑排出 7 步，每步有前置接缝、验收标准与回滚方式。
 
@@ -44,16 +45,16 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
 | D2 | 信任 | 4 | 1772 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
 | D3 | 分发与安装 | 3 | 2685 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
-| D4 | 状态机 | 8 | 3673 | 维护「装了哪些、各自什么状态」并广播变化 |
-| D5 | 进程与传输 | 10 | 7263 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
-| D6 | 调用 | 4 | 1788 | 一次插件调用的身份、上下文、取消、进度与结果 |
-| D7 | 宿主集成 | 5 | 2508 | 把插件能力接进 Core 与前端 |
+| D4 | 状态机 | 8 | 3693 | 维护「装了哪些、各自什么状态」并广播变化 |
+| D5 | 进程与传输 | 10 | 7277 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
+| D6 | 调用 | 5 | 1849 | 一次插件调用的身份、上下文、取消、进度与结果 |
+| D7 | 宿主集成 | 5 | 2538 | 把插件能力接进 Core 与前端 |
 | D8 | 策略 | 1 | 225 | 描述「某插件被授予什么」 |
 | D9 | 创作工作流 | 2 | 674 | 把开发目录的项目变成已安装插件 |
-| — | crate 根与测试支撑 | 2 | 517 | `lib.rs` / `test_support` |
+| — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2014 | 不参与域划分 |
 
-合计 25682 行，与 `wc -l` 全量一致（可复核）。
+合计 25808 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -114,8 +115,12 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 - **拥有**：`RequestInvocationContext` 解析、取消顺序、TS 工具 pending 表、结果回填与进度上报、同步执行边界。
 - **不拥有**：连接构造（D5）、注册表状态（D4）、前端事件通道（D7）。
 - **对外 seam**：`dispatch`、`select_ts_handler`、`capabilities_handle_tool`。
-- **当前越界**：`ts_plugin.rs` 4 处调 D4 的连接函数、`ts_tools.rs` 调 `registry::plugin_manifest`；`invocation.rs` 与 `ts_*` 共 12 处直接调 `bridge::*` 发事件。
-- **修法**：注入 `SidecarAccess`（按 plugin_id + workspace 取连接）与 `ManifestQuery`；事件改由注入的 `RuntimeFeedback` 接口发出。
+- **已修复**：事件与 App 原语改由 `RuntimeFeedback`（`runtime_feedback` 模块）出口发出，
+  桥接层经 `bridge::install_runtime_feedback` 注册实现，D6→D7 清零；生命周期钩子改走注入的
+  `SidecarInvoker`（`SidecarConfig` 同级的传输层 trait，装载器注入 `RegistrySidecarInvoker`）；
+  `plugin_result_header` 等结果抬头归调用域（D7 反向调用，方向合法）。
+- **当前越界**：`ts_plugin.rs` 5 处调 D4 的连接函数、`ts_tools.rs` 调 `registry::plugin_manifest`。
+- **修法**：注入 `SidecarAccess`（按 plugin_id + workspace 取连接）与 `ManifestQuery`。
 
 ### D7 宿主集成（Host Integration）
 
@@ -168,7 +173,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（8 条边 / 47 处引用，本轮已消 7 条）
+### 当前违规（7 条边 / 35 处引用，本轮已消 8 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
@@ -178,7 +183,6 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D3→D7 | 3 | `migrations.rs` | 清插件订阅 | 改发事件 |
 | D4→D7 | 8 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
 | D6→D4 | 6 | `ts_plugin.rs`、`ts_tools.rs` | 适配器直接取连接/清单 | 注入 `SidecarAccess` / `ManifestQuery` |
-| D6→D7 | 12 | `invocation.rs`、`ts_*.rs` | 调用层直接发 bridge 事件 | 注入 `RuntimeFeedback` |
 | D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 走 D3/D4 公开入口 |
 
 ## 4. 拆分前必须先立的接缝
@@ -266,8 +270,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 27 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 8 | 0 |
+| 跨域引用边 | 34 | 26 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 7 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -298,14 +302,14 @@ pub struct HostServices {
 | `artifacts.rs` | D3 安装 | 1509 |
 | `registry/migrations.rs` | D3 安装 | 1076 |
 | `registry/legacy.rs` | D3 安装 | 100 |
-| `registry/mod.rs` | D4 状态机 | 539 |
-| `registry/loader.rs` | D4 状态机 | 1442 |
+| `registry/mod.rs` | D4 状态机 | 558 |
+| `registry/loader.rs` | D4 状态机 | 1443 |
 | `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
 | `events.rs` | D4 状态机 | 101 |
-| `sidecar.rs` | D5 传输 | 1859 |
+| `sidecar.rs` | D5 传输 | 1873 |
 | `sidecar/stdio/mod.rs` | D5 传输 | 1565 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
 | `launcher_update.rs` | D5 传输 | 477 |
@@ -315,19 +319,20 @@ pub struct HostServices {
 | `sidecar/command.rs` | D5 传输 | 336 |
 | `launcher_update/windows_cache.rs` | D5 传输 | 152 |
 | `platform.rs` | D5 传输 | 21 |
-| `ts_plugin.rs` | D6 调用 | 985 |
-| `ts_tools.rs` | D6 调用 | 428 |
-| `invocation.rs` | D6 调用 | 333 |
+| `ts_plugin.rs` | D6 调用 | 1001 |
+| `ts_tools.rs` | D6 调用 | 437 |
+| `invocation.rs` | D6 调用 | 335 |
 | `execution.rs` | D6 调用 | 42 |
-| `bridge.rs` | D7 宿主集成 | 960 |
-| `core_bridge.rs` | D7 宿主集成 | 620 |
+| `runtime_feedback.rs` | D6 调用 | 34 |
+| `bridge.rs` | D7 宿主集成 | 1000 |
+| `core_bridge.rs` | D7 宿主集成 | 610 |
 | `tool_icons.rs` | D7 宿主集成 | 487 |
 | `tool_titles.rs` | D7 宿主集成 | 230 |
 | `builtin_tables.rs` | D7 宿主集成 | 211 |
 | `host_policy.rs` | D8 策略 | 225 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
 | `plugin_dev/trust.rs` | D9 创作 | 194 |
-| `lib.rs` | 根 | 111 |
+| `lib.rs` | 根 | 112 |
 | `test_support.rs` | 测试支撑 | 406 |
 | `registry/tests.rs` | 测试 | 1135 |
 | `plugin_dev/tests.rs` | 测试 | 616 |
@@ -346,12 +351,13 @@ PREFIX=[('registry/migrations','D3'),('registry/legacy','D3'),('registry/connect
  ('signature','D2'),('trust','D2'),('verification','D2'),
  ('artifacts','D3'),('events','D4'),
  ('interpreter_env','D5'),('platform','D5'),('launcher_update','D5'),
- ('invocation','D6'),('execution','D6'),('ts_plugin','D6'),('ts_tools','D6'),
+ ('invocation','D6'),('execution','D6'),('ts_plugin','D6'),('ts_tools','D6'),('runtime_feedback','D6'),
  ('bridge','D7'),('core_bridge','D7'),('tool_icons','D7'),('tool_titles','D7'),('builtin_tables','D7'),
  ('host_policy','D8'),('lib','D0'),('test_support','D0')]
 MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','signature':'D2','trust':'D2','verification':'D2',
  'artifacts':'D3','registry':'D4','events':'D4','sidecar':'D5','interpreter_env':'D5','platform':'D5',
- 'launcher_update':'D5','invocation':'D6','execution':'D6','ts_plugin':'D6','ts_tools':'D6','bridge':'D7',
+ 'launcher_update':'D5','invocation':'D6','execution':'D6','ts_plugin':'D6','ts_tools':'D6',
+ 'runtime_feedback':'D6','bridge':'D7',
  'core_bridge':'D7','tool_icons':'D7','tool_titles':'D7','builtin_tables':'D7','host_policy':'D8',
  'plugin_dev':'D9'}
 def dom(key):

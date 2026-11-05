@@ -520,6 +520,25 @@ impl crate::sidecar::RuntimeEnv for RegistryRuntimeEnv {
         }
     }
 }
+/// 调用层 sidecar 调用入口的注册表实现：安装目录 → 存储根 → 共享/按需
+/// 连接由状态机决定，调用层不重复这套解析。
+#[derive(Debug)]
+pub(crate) struct RegistrySidecarInvoker;
+impl crate::sidecar::SidecarInvoker for RegistrySidecarInvoker {
+    fn invoke(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        payload: serde_json::Value,
+        workspace: Option<&Path>,
+    ) -> Result<serde_json::Value> {
+        let storage_root = plugin_install_directory(plugin_id)
+            .and_then(|directory| directory.parent().map(Path::to_path_buf))
+            .and_then(|plugins_dir| plugins_dir.parent().map(Path::to_path_buf))
+            .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+        invoke_sidecar_with_workspace(&storage_root, plugin_id, operation, payload, workspace)
+    }
+}
 /// 传输层通知事件的注册表实现：工具恢复直接分发，prompt 与工具规格变更
 /// 走重取流程（阻塞 I/O，由传输层在读循环外另起线程调用）。
 #[derive(Debug)]

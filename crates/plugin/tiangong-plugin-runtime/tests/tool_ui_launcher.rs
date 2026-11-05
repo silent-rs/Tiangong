@@ -49,6 +49,8 @@ fn init_globals() {
                 Ok(r#"{"ok":true}"#.to_string())
             },
         ));
+        // 调用层经反馈出口路由页面事件与 app 原语（桥接层安装自身实现）。
+        tiangong_plugin_runtime::bridge::install_runtime_feedback();
         set_event_emitter(Arc::new(|plugin_id: &str, channel: &str, payload: &str| {
             EVENT_HITS.lock().unwrap().push((
                 plugin_id.to_string(),

@@ -49,6 +49,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             tiangong_plugin_runtime::plugin_dev::call(plugin_id, method, payload)
         }),
     );
+    // 桥接层作为调用层反馈出口：进度里的 app 原语、页面事件与订阅查询
+    // 都由桥接路由（未安装时调用层按宿主未接入退化）。
+    tiangong_plugin_runtime::bridge::install_runtime_feedback();
     let mut plugin_preload = Some({
         let storage_root = storage_root.clone();
         let core_manager = state.core_manager.clone();

@@ -96,7 +96,9 @@ impl RuntimeInvocation {
         if self.inner.state.load(Ordering::Acquire) != RUNNING {
             return;
         }
-        if crate::bridge::handle_runtime_feedback(self.plugin_id(), &message) {
+        if crate::runtime_feedback::runtime_feedback()
+            .is_some_and(|feedback| feedback.handle_progress(self.plugin_id(), &message))
+        {
             return;
         }
         let Some(feedback) = &self.inner.feedback else {
