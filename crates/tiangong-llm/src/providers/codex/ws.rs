@@ -16,16 +16,18 @@
 //! 丢弃连接，下次请求重建；闲置 [`WS_IDLE_TTL`] 的池条目惰性回收。会话内
 //! ReAct 循环天然串行，与单连接串行复用一致。
 //!
-//! 本传输是 Codex 的**唯一**请求通道：连接失败不降级 HTTP（HTTP 与 WS 是两种
-//! 指纹形态，上游按形态分桶，切换会打断会话亲和与前缀缓存路由），重试与重建
-//! 全在 WS 上完成，见 `provider::stream_via_ws`。无会话 id 时使用不入池的
+//! 本传输是 Codex 的**唯一**请求通道：连接失败不降级 HTTP（保持传输形态一致，
+//! 避免打断会话亲和与前缀缓存路由），重试与重建全在 WS 上完成，见
+//! `provider::stream_via_ws`。无会话 id 时使用不入池的
 //! 一次性连接，避免不同会话共享同一条连接。
 //!
-//! 传输层用 `wreq`（BoringSSL）而非 rustls：上游按 TLS 指纹分桶，Bun（opencode
-//! 的运行时）的 BoringSSL 指纹能进正常桶，rustls 指纹落入降载桶（见
-//! `docs/codex-direct-cache-analysis.md`）。指纹逐项对齐 Bun 1.4.4 的 ClientHello
-//! （ja3/ja4/peetprint 与 Bun 实测逐字一致），ALPN 只留 `http/1.1`——WS 握手只能
-//! 走 HTTP/1.1（RFC 6455 Upgrade）。身份头保持不变：只换指纹，不改自称。
+//! 传输层用 `tokio-tungstenite`（rustls）。此前曾用 `wreq`（BoringSSL）逐项伪装
+//! Bun 1.4.4 的 TLS 指纹，依据是「rustls 指纹落入上游降载桶」的假设；后续实测
+//! 证伪——不稳定与缓存 miss 的根因是重试不够完善（#766 已在消费层修复），
+//! TLS 指纹并非决定性信号（见 `docs/codex-direct-cache-analysis.md` 勘误）。
+//! wreq/BoringSSL 因此整体移除：它与 SQLCipher 的 vendored OpenSSL 存在
+//! `BIO_*` 等公共符号冲突，阻塞 memory 插件（rusqlite）链接。身份头
+//! （originator/UA/session-id）保持不变。
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -33,36 +35,25 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use futures_util::SinkExt;
 use futures_util::Stream;
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
-use wreq::tls::{AlpnProtocol, TlsOptions};
-use wreq::ws::WebSocket;
-use wreq::ws::message::Message;
+use tokio_tungstenite::MaybeTlsStream;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderName;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use crate::error::LlmError;
 
 /// 空闲连接回收阈值。上游对闲置长连接有自己的超时（实测约几分钟），
 /// 客户端主动回收可避免把请求发到半死连接上。
 const WS_IDLE_TTL: Duration = Duration::from_secs(240);
-/// WS 握手超时。
+/// WS 握手超时（连接 + TLS + upgrade 握手整体）。
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// TLS ClientHello 的套件表：与 Bun 1.4.4（opencode 运行时，BoringSSL）完全一致。
-const WS_CIPHER_LIST: &str = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:\
-TLS_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:\
-TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:\
-TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:\
-TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:\
-TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:\
-TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:TLS_RSA_WITH_AES_128_GCM_SHA256:\
-TLS_RSA_WITH_AES_256_GCM_SHA384:TLS_RSA_WITH_AES_128_CBC_SHA:TLS_RSA_WITH_AES_256_CBC_SHA";
-/// 曲线顺序：与 Bun 相同（含 X25519MLKEM768）。
-const WS_CURVES: &str = "X25519MLKEM768:X25519:P-256:P-384";
-/// 签名算法顺序：与 Bun 相同。
-const WS_SIGALGS: &str = "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
-ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:rsa_pss_rsae_sha512:\
-rsa_pkcs1_sha512:ed25519:ecdsa_secp521r1_sha512:rsa_pkcs1_sha1";
 
 /// 事件流载荷与 HTTP SSE 路径同构（`Result<Value, OpenAIError>`），
 /// 复用 `map_responses_stream` 的全部解析逻辑。
@@ -87,56 +78,30 @@ fn pool() -> &'static Mutex<HashMap<String, PoolEntry>> {
     WS_POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 进程级 WS 客户端：TLS 指纹与连接池共享，一次构建反复使用。
-///
-/// 指纹逐项对齐 Bun 1.4.4（opencode 的运行时）：BoringSSL + 同一套件表/曲线/
-/// 签名算法/扩展顺序，`tls.peet.ws` 实测 ja3/ja4/peetprint 三项与 Bun 逐字一致。
-/// 只把 ALPN 固定成 `http/1.1`——RFC 6455 的 Upgrade 握手只能走 HTTP/1.1。
-/// 不注入任何浏览器默认头，身份头仍由调用方给定。
-fn ws_client() -> Result<&'static wreq::Client, LlmError> {
-    static CLIENT: OnceLock<Result<wreq::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            let tls = TlsOptions::builder()
-                .alpn_protocols([AlpnProtocol::HTTP1])
-                .grease_enabled(false)
-                .enable_ocsp_stapling(true)
-                .enable_signed_cert_timestamps(true)
-                .preserve_tls13_cipher_list(true)
-                .cipher_list(WS_CIPHER_LIST)
-                .curves_list(WS_CURVES)
-                .sigalgs_list(WS_SIGALGS)
-                .build();
-            wreq::Client::builder()
-                .tls_options(tls)
-                .http1_only()
-                .connect_timeout(WS_CONNECT_TIMEOUT)
-                .build()
-                .map_err(|err| err.to_string())
-        })
-        .as_ref()
-        .map_err(|err| LlmError::Transport(format!("创建 Codex WS 客户端失败：{err}")))
-}
-
 /// 已建立的 WS 连接。请求在其上串行执行；不绑定单个请求。
 pub(crate) struct WsConnection {
-    ws: WebSocket,
+    ws: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
 }
 
 impl WsConnection {
     async fn connect(url: &str, headers: &[(String, String)]) -> Result<Self, LlmError> {
-        let mut request = ws_client()?.websocket(url);
+        let mut request = url
+            .into_client_request()
+            .map_err(|err| LlmError::Transport(format!("Codex WS URL 无效：{err}")))?;
+        let request_headers = request.headers_mut();
         for (name, value) in headers {
-            request = request.header(name.as_str(), value.as_str());
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+                LlmError::Transport(format!("Codex WS 握手头无效（{name}）：{err}"))
+            })?;
+            let value = HeaderValue::from_str(value).map_err(|err| {
+                LlmError::Transport(format!("Codex WS 握手头值无效（{name}）：{err}"))
+            })?;
+            request_headers.insert(name, value);
         }
-        let response = tokio::time::timeout(WS_CONNECT_TIMEOUT, request.send())
+        let (ws, _response) = tokio::time::timeout(WS_CONNECT_TIMEOUT, connect_async(request))
             .await
             .map_err(|_| LlmError::Timeout(WS_CONNECT_TIMEOUT.as_millis() as u64))?
             .map_err(|err| LlmError::Transport(format!("Codex WS 连接失败：{err}")))?;
-        let ws = response
-            .into_websocket()
-            .await
-            .map_err(|err| LlmError::Transport(format!("Codex WS 握手失败：{err}")))?;
         tracing::info!(url, "Codex WS 连接已建立");
         Ok(Self { ws })
     }
@@ -169,7 +134,7 @@ fn classify_frame(message: Message) -> FrameOutcome {
         },
         Message::Close(frame) => {
             let detail = frame
-                .map(|frame| format!("{:?} {}", frame.code, frame.reason))
+                .map(|frame| format!("{:?} {}", frame.code, frame.reason.as_str()))
                 .unwrap_or_else(|| "无".to_string());
             FrameOutcome::Broken(frame_error(format!("Codex WS 连接关闭：{detail}")))
         }
@@ -177,6 +142,8 @@ fn classify_frame(message: Message) -> FrameOutcome {
             "Codex WS 意外的二进制帧（{} 字节）",
             bytes.len()
         ))),
+        // tungstenite 读路径不会产出裸帧，穷尽匹配兜底。
+        Message::Frame(_) => FrameOutcome::Broken(frame_error("Codex WS 意外的裸帧".to_string())),
     }
 }
 
@@ -410,27 +377,5 @@ mod tests {
         let delta = json!({ "type": "response.output_text.delta", "delta": "x" });
         assert!(!super::is_terminal_event(&delta));
         assert!(!super::is_clean_terminal(&delta));
-    }
-
-    /// 手动核对指纹：`cargo test -p tiangong-llm -- --ignored --nocapture codex_ws_fingerprint`
-    ///
-    /// 期望命中 `ja3=1523504b38f0fae0d881d4b6554aac1b`（Bun 1.4.4 实测值）；改动
-    /// [`super::WS_CIPHER_LIST`] 等常量后应重跑此测试确认未偏离。
-    #[tokio::test]
-    #[ignore = "需要联网的手动核对"]
-    async fn codex_ws_fingerprint_matches_bun() {
-        let body = super::ws_client()
-            .unwrap()
-            .get("https://tls.peet.ws/api/all")
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let ja3 = value["tls"]["ja3_hash"].as_str().unwrap_or_default();
-        println!("ja3={ja3} ja4={}", value["tls"]["ja4"]);
-        assert_eq!(ja3, "1523504b38f0fae0d881d4b6554aac1b");
     }
 }

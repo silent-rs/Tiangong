@@ -14,28 +14,21 @@
 //! `image2`（第 2、4 轮插入同一张图）。凭据文件默认读 `TIANGONG_STORAGE_ROOT`
 //! 下的 `auth/codex.json`，可用 `TIANGONG_CODEX_AUTH` 直接指定。
 //!
-//! 注意：本文件里的 TLS 参数必须与 `src/providers/codex/ws.rs` 保持一致，否则
-//! 探针测到的就不是生产链路的形态。
+//! 注意：本文件的握手头与传输形态必须与 `src/providers/codex/ws.rs` 保持
+//! 一致，否则探针测到的就不是生产链路的形态。
 
 use std::time::Duration;
 
-use wreq::tls::{AlpnProtocol, TlsOptions};
-use wreq::ws::message::Message;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-const CIPHER_LIST: &str = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:\
-TLS_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:\
-TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:\
-TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:\
-TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:\
-TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:\
-TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:TLS_RSA_WITH_AES_128_GCM_SHA256:\
-TLS_RSA_WITH_AES_256_GCM_SHA384:TLS_RSA_WITH_AES_128_CBC_SHA:TLS_RSA_WITH_AES_256_CBC_SHA";
-const CURVES: &str = "X25519MLKEM768:X25519:P-256:P-384";
-const SIGALGS: &str = "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
-ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:rsa_pss_rsae_sha512:\
-rsa_pkcs1_sha512:ed25519:ecdsa_secp521r1_sha512:rsa_pkcs1_sha1";
 const MODEL: &str = "gpt-5.6-terra";
 const ENDPOINT: &str = "wss://chatgpt.com/backend-api/codex/responses";
+/// 与生产侧 [`crate::providers::codex::ws`] 的握手超时一致。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Turn {
     text: String,
@@ -43,22 +36,36 @@ struct Turn {
     input_tokens: u64,
 }
 
-fn client() -> wreq::Client {
-    let tls = TlsOptions::builder()
-        .alpn_protocols([AlpnProtocol::HTTP1])
-        .grease_enabled(false)
-        .enable_ocsp_stapling(true)
-        .enable_signed_cert_timestamps(true)
-        .preserve_tls13_cipher_list(true)
-        .cipher_list(CIPHER_LIST)
-        .curves_list(CURVES)
-        .sigalgs_list(SIGALGS)
-        .build();
-    wreq::Client::builder()
-        .tls_options(tls)
-        .http1_only()
-        .build()
-        .expect("构建 WS 客户端")
+/// 与生产链路同形态的 WS 连接：tokio-tungstenite（rustls）+ 相同握手头。
+async fn connect(
+    token: &str,
+    account: &str,
+    session: &str,
+) -> Result<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, String> {
+    let mut request = ENDPOINT
+        .into_client_request()
+        .map_err(|err| format!("url {err}"))?;
+    let headers = request.headers_mut();
+    for (key, value) in [
+        ("Authorization", format!("Bearer {token}")),
+        ("originator", "tiangong".to_string()),
+        ("session-id", session.to_string()),
+        ("session_id", session.to_string()),
+        ("ChatGPT-Account-Id", account.to_string()),
+        (
+            "user-agent",
+            format!("tiangong/{}", env!("CARGO_PKG_VERSION")),
+        ),
+    ] {
+        let name = HeaderName::from_bytes(key.as_bytes()).map_err(|err| format!("header {err}"))?;
+        let value = HeaderValue::from_str(&value).map_err(|err| format!("header {err}"))?;
+        headers.insert(name, value);
+    }
+    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
+        .await
+        .map_err(|_| "timeout".to_string())?
+        .map_err(|err| format!("connect {err}"))?;
+    Ok(ws)
 }
 
 /// 读取测试账号凭据：`TIANGONG_CODEX_AUTH` 优先，其次 `TIANGONG_STORAGE_ROOT`。
@@ -101,35 +108,13 @@ fn user_with_image(text: &str, data_url: &str) -> serde_json::Value {
 }
 
 async fn one_turn(
-    client: &wreq::Client,
     token: &str,
     account: &str,
     session: &str,
     salt: &str,
     input: &serde_json::Value,
 ) -> Result<Turn, String> {
-    let mut request = client.websocket(ENDPOINT);
-    for (key, value) in [
-        ("Authorization".to_string(), format!("Bearer {token}")),
-        ("originator".to_string(), "tiangong".to_string()),
-        ("session-id".to_string(), session.to_string()),
-        ("session_id".to_string(), session.to_string()),
-        ("ChatGPT-Account-Id".to_string(), account.to_string()),
-        (
-            "user-agent".to_string(),
-            format!("tiangong/{}", env!("CARGO_PKG_VERSION")),
-        ),
-    ] {
-        request = request.header(key.as_str(), value.as_str());
-    }
-    let resp = request
-        .send()
-        .await
-        .map_err(|err| format!("connect {err}"))?;
-    let mut ws = resp
-        .into_websocket()
-        .await
-        .map_err(|err| format!("upgrade {err}"))?;
+    let mut ws = connect(token, account, session).await?;
     let payload = serde_json::json!({
         "type": "response.create",
         "model": MODEL,
@@ -147,7 +132,7 @@ async fn one_turn(
 
     let mut text = String::new();
     loop {
-        match tokio::time::timeout(Duration::from_secs(120), ws.recv()).await {
+        match tokio::time::timeout(Duration::from_secs(120), ws.next()).await {
             Err(_) => return Err("timeout".into()),
             Ok(None) => return Err("closed".into()),
             Ok(Some(Err(err))) => return Err(format!("frame {err}")),
@@ -188,7 +173,6 @@ const TINY_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA
 /// 同一会话跑四轮 append-only，打印每轮缓存命中；`image_turns` 指定哪几轮带图。
 async fn run(label: &str, image_turns: &[u32], tiny: bool, nudge: bool) {
     let (token, account) = credentials();
-    let client = client();
     let session = format!(
         "ses_probe_{}_{}",
         label,
@@ -223,7 +207,7 @@ async fn run(label: &str, image_turns: &[u32], tiny: bool, nudge: bool) {
         let input = serde_json::Value::Array(history.clone());
         let mut result = Err("init".to_string());
         for attempt in 0..8u64 {
-            result = one_turn(&client, &token, &account, &session, &salt, &input).await;
+            result = one_turn(&token, &account, &session, &salt, &input).await;
             if result.is_ok() {
                 break;
             }
