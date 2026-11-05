@@ -20,8 +20,9 @@
 | 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
 | 8 | 验证编排归状态机（新 `registry/reverify`） | 消除 D2→D4（信任域只留记录读写，不再起连接） |
 | 9 | 桥接命名空间可注册（宿主注册 `plugin-dev.`） | 消除 D7→D9（runtime 不含创作链路由） |
-| 10 | 调用层注入 `RuntimeFeedback` + `SidecarInvoker`，结果抬头归调用域 | 消除 D6→D7（调用层不再直发桥接事件） |
-度量：跨域引用边 34 → 26，违规边 15 → 7；`crate::plugin_dev` 在传输层引用清零，
+| 10 | 调用层注入 `RuntimeFeedback` + `SidecarAccess`，结果抬头归调用域 | 消除 D6→D7（调用层不再直发桥接事件） |
+| 11 | `SidecarAccess` 承载取连接与旁路调用 | 消除 D6→D4（调用层不再自己解析安装目录/连接形态） |
+度量：跨域引用边 34 → 25，违规边 15 → 6；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -45,16 +46,16 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
 | D2 | 信任 | 4 | 1772 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
 | D3 | 分发与安装 | 3 | 2756 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
-| D4 | 状态机 | 8 | 3693 | 维护「装了哪些、各自什么状态」并广播变化 |
-| D5 | 进程与传输 | 10 | 7277 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
-| D6 | 调用 | 5 | 1849 | 一次插件调用的身份、上下文、取消、进度与结果 |
+| D4 | 状态机 | 8 | 3728 | 维护「装了哪些、各自什么状态」并广播变化 |
+| D5 | 进程与传输 | 10 | 7292 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
+| D6 | 调用 | 5 | 1833 | 一次插件调用的身份、上下文、取消、进度与结果 |
 | D7 | 宿主集成 | 5 | 2538 | 把插件能力接进 Core 与前端 |
 | D8 | 策略 | 1 | 225 | 描述「某插件被授予什么」 |
 | D9 | 创作工作流 | 2 | 674 | 把开发目录的项目变成已安装插件 |
 | — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
-| — | 测试文件 | 3 | 2014 | 不参与域划分 |
+| — | 测试文件 | 3 | 2024 | 不参与域划分 |
 
-合计 25879 行，与 `wc -l` 全量一致（可复核）。
+合计 25923 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -120,8 +121,10 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
   桥接层经 `bridge::install_runtime_feedback` 注册实现，D6→D7 清零；生命周期钩子改走注入的
   `SidecarInvoker`（`SidecarConfig` 同级的传输层 trait，装载器注入 `RegistrySidecarInvoker`）；
   `plugin_result_header` 等结果抬头归调用域（D7 反向调用，方向合法）。
-- **当前越界**：`ts_plugin.rs` 5 处调 D4 的连接函数、`ts_tools.rs` 调 `registry::plugin_manifest`。
-- **修法**：注入 `SidecarAccess`（按 plugin_id + workspace 取连接）与 `ManifestQuery`。
+- **已修复**：取连接与旁路调用统一走注入的 `SidecarAccess`（传输层 trait，装载器注入
+  `RegistrySidecarAccess`）：安装目录 → 存储根 → 按需/常驻连接形态的判定留在状态机，
+  调用层只拿「连接 + 是否一次性」；`extension.tab` 判定改为适配器按清单快照传入。
+  D6→D4 清零。
 
 ### D7 宿主集成（Host Integration）
 
@@ -174,7 +177,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（7 条边 / 35 处引用，本轮已消 8 条）
+### 当前违规（6 条边 / 29 处引用，本轮已消 9 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
@@ -183,7 +186,6 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
 | D3→D7 | 3 | `migrations.rs` | 清插件订阅 | 改发事件 |
 | D4→D7 | 8 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
-| D6→D4 | 6 | `ts_plugin.rs`、`ts_tools.rs` | 适配器直接取连接/清单 | 注入 `SidecarAccess` / `ManifestQuery` |
 | D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 走 D3/D4 公开入口 |
 
 ## 4. 拆分前必须先立的接缝
@@ -228,9 +230,10 @@ pub trait SidecarEvents: Send + Sync {
 }
 // 消除：sidecar.rs 与 stdio 对 registry refresh 函数的直接调用
 
-// 5) 连接访问（D6 → D5）
-pub trait SidecarAccess: Send + Sync {
-    fn connection(&self, plugin_id: &str, workspace: Option<&Path>) -> Result<Arc<dyn SidecarConnection>>;
+// 5) 连接访问（D6 → D5；已落地）
+pub trait SidecarAccess: Send + Sync + Debug {
+    fn connection(&self, plugin_id: &str, session_workspace: Option<&Path>) -> Result<PluginConnection>; // { connection, ephemeral }
+    fn invoke(&self, plugin_id: &str, operation: &str, payload: Value, workspace: Option<&Path>) -> Result<Value>;
 }
 // 消除：ts_plugin 对 registry::{sidecar_connection, ephemeral_sidecar_connection...} 的 4 处调用
 
@@ -271,8 +274,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 26 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 7 | 0 |
+| 跨域引用边 | 34 | 25 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 6 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -303,14 +306,14 @@ pub struct HostServices {
 | `artifacts.rs` | D3 安装 | 1580 |
 | `registry/migrations.rs` | D3 安装 | 1076 |
 | `registry/legacy.rs` | D3 安装 | 100 |
-| `registry/mod.rs` | D4 状态机 | 558 |
+| `registry/mod.rs` | D4 状态机 | 593 |
 | `registry/loader.rs` | D4 状态机 | 1443 |
 | `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
 | `events.rs` | D4 状态机 | 101 |
-| `sidecar.rs` | D5 传输 | 1873 |
+| `sidecar.rs` | D5 传输 | 1888 |
 | `sidecar/stdio/mod.rs` | D5 传输 | 1565 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
 | `launcher_update.rs` | D5 传输 | 477 |
@@ -320,8 +323,8 @@ pub struct HostServices {
 | `sidecar/command.rs` | D5 传输 | 336 |
 | `launcher_update/windows_cache.rs` | D5 传输 | 152 |
 | `platform.rs` | D5 传输 | 21 |
-| `ts_plugin.rs` | D6 调用 | 1001 |
-| `ts_tools.rs` | D6 调用 | 437 |
+| `ts_plugin.rs` | D6 调用 | 987 |
+| `ts_tools.rs` | D6 调用 | 435 |
 | `invocation.rs` | D6 调用 | 335 |
 | `execution.rs` | D6 调用 | 42 |
 | `runtime_feedback.rs` | D6 调用 | 34 |
@@ -336,7 +339,7 @@ pub struct HostServices {
 | `lib.rs` | 根 | 112 |
 | `test_support.rs` | 测试支撑 | 406 |
 | `registry/tests.rs` | 测试 | 1135 |
-| `plugin_dev/tests.rs` | 测试 | 616 |
+| `plugin_dev/tests.rs` | 测试 | 626 |
 | `sidecar/stdio/tests.rs` | 测试 | 263 |
 
 ## 附录 B：复核脚本

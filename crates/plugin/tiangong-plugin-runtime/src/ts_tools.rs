@@ -148,11 +148,14 @@ impl Drop for PendingGuard {
     }
 }
 
+/// 执行一次 TS 工具调用。`has_extension_tab` 由适配器按清单快照传入：
+/// 插件是否声明了 `extension.tab` 贡献（决定无订阅者时能否靠拉起页面接应）。
 pub async fn execute(
     plugin_id: String,
     call: ToolCall,
     _timeout_ms: u64,
     runtime_invocation: Option<crate::invocation::RuntimeInvocation>,
+    has_extension_tab: bool,
 ) -> ToolResult {
     let context = runtime_invocation
         .as_ref()
@@ -212,12 +215,7 @@ pub async fn execute(
     );
     // 全局已有订阅者不代表本会话已有匹配实例。始终按「插件 + 会话」
     // 请求执行壳，前端会对同会话实例去重；挂载后的订阅重放本调用。
-    let has_ui = crate::registry::plugin_manifest(&plugin_id).is_some_and(|manifest| {
-        manifest
-            .ui_contributions()
-            .iter()
-            .any(|contribution| contribution.slot == "extension.tab")
-    });
+    let has_ui = has_extension_tab;
     if !has_ui && !subscribed {
         let _ = pending_calls()
             .lock()

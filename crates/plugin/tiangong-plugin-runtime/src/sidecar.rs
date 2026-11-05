@@ -237,12 +237,27 @@ pub trait SidecarEvents: Send + Sync + std::fmt::Debug {
     /// 工具规格需要重新获取。
     fn tools_updated(&self, _plugin_id: &str) {}
 }
-/// 调用层需要的 sidecar 调用入口：按插件 ID 定位连接并转发一次操作。
+/// 一次插件调用拿到的连接及其形态。
+pub struct PluginConnection {
+    /// 连接（共享常驻或本次调用独占）。
+    pub connection: Arc<dyn SidecarConnection>,
+    /// 一次性进程形态：调用结束或取消即终止，与其他调用互不共享。
+    pub ephemeral: bool,
+}
+/// 调用层需要的插件运行态访问：取连接、旁路调用。
 ///
-/// 定位规则（安装目录、存储根、按需/常驻连接选择）属于状态机，调用层
-/// 只依赖本 trait；未注入时生命周期钩子等旁路调用退化为跳过。
-pub trait SidecarInvoker: Send + Sync + std::fmt::Debug {
-    /// 调用指定插件 sidecar 的一个操作。
+/// 安装目录 → 存储根 → 按需/常驻连接的选择属于状态机（清单声明的生命
+/// 周期、是否预加载、会话工作区是否参与），调用层只依赖本 trait；未注入
+/// 时工具调用返回「运行环境未初始化」，生命周期钩子等旁路调用跳过。
+pub trait SidecarAccess: Send + Sync + std::fmt::Debug {
+    /// 为一次工具调用取连接。`session_workspace` 是宿主权威会话工作区；
+    /// 预加载形态的常驻插件忽略它（保持宿主强制沙箱的共享连接）。
+    fn connection(
+        &self,
+        plugin_id: &str,
+        session_workspace: Option<&Path>,
+    ) -> Result<PluginConnection>;
+    /// 调用指定插件 sidecar 的一个操作（生命周期钩子等旁路调用）。
     fn invoke(
         &self,
         plugin_id: &str,

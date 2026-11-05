@@ -520,11 +520,46 @@ impl crate::sidecar::RuntimeEnv for RegistryRuntimeEnv {
         }
     }
 }
-/// 调用层 sidecar 调用入口的注册表实现：安装目录 → 存储根 → 共享/按需
-/// 连接由状态机决定，调用层不重复这套解析。
+/// 调用层插件运行态访问的注册表实现：安装目录 → 存储根 → 共享/按需连接
+/// 由状态机决定，调用层不重复这套解析。
 #[derive(Debug)]
-pub(crate) struct RegistrySidecarInvoker;
-impl crate::sidecar::SidecarInvoker for RegistrySidecarInvoker {
+pub(crate) struct RegistrySidecarAccess;
+impl crate::sidecar::SidecarAccess for RegistrySidecarAccess {
+    fn connection(
+        &self,
+        plugin_id: &str,
+        session_workspace: Option<&Path>,
+    ) -> Result<crate::sidecar::PluginConnection> {
+        let directory = plugin_install_directory(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let storage_root = directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+        let installed = find_installed_plugin(storage_root, plugin_id)?;
+        // 按需形态：每次调用独立临时连接——进程完全归属本次调用，超时/取消
+        // 只终止自己，并发调用互不可见；常驻形态：共享缓存连接（进程内多路
+        // 复用），守卫取消当前共享进程（换代重启，常驻语义的单进程权衡）。
+        let ephemeral =
+            installed.manifest.sidecar_lifecycle() == crate::manifest::SidecarLifecycle::OnDemand;
+        // 预加载常驻服务不接受会话工作区：保持宿主强制沙箱的共享连接。
+        let session_workspace = if installed.manifest.should_preload_sidecar() {
+            None
+        } else {
+            session_workspace
+        };
+        let connection = if ephemeral {
+            ephemeral_sidecar_connection_with_workspace(storage_root, &installed, session_workspace)
+        } else if session_workspace.is_some() {
+            sidecar_connection_with_workspace(storage_root, &installed, false, session_workspace)
+        } else {
+            sidecar_connection(storage_root, &installed, false)
+        }?;
+        Ok(crate::sidecar::PluginConnection {
+            connection,
+            ephemeral,
+        })
+    }
     fn invoke(
         &self,
         plugin_id: &str,

@@ -41,6 +41,8 @@ pub struct TsPluginAdapter {
     has_sidecar: AtomicBool,
     /// 清单声明了 UI 贡献。
     has_ui: AtomicBool,
+    /// 清单声明了 `extension.tab` 贡献（TS 工具是否有页面可接应）。
+    has_extension_tab: AtomicBool,
     /// 安装阶段验证记录中的 sidecar 能力；None 表示记录缺失或失效
     ///（路由回退 UI 或返回不可用，不做即时探测）。
     verified_sidecar: RwLock<Option<Vec<String>>>,
@@ -50,8 +52,8 @@ pub struct TsPluginAdapter {
     workspace: RwLock<String>,
     /// 声明 lifecycle 能力且带 sidecar：生命周期钩子转发给 sidecar。
     lifecycle_sidecar: AtomicBool,
-    /// 旁路调用 sidecar 的入口（生命周期钩子等），由装载器注入。
-    sidecar_invoker: RwLock<Option<std::sync::Arc<dyn crate::sidecar::SidecarInvoker>>>,
+    /// 插件运行态访问（取连接、旁路调用），由装载器注入。
+    sidecar_access: RwLock<Option<std::sync::Arc<dyn crate::sidecar::SidecarAccess>>>,
 }
 
 impl TsPluginAdapter {
@@ -93,22 +95,35 @@ impl TsPluginAdapter {
             sidecar_direct: AtomicBool::new(sidecar_direct_of(manifest)),
             has_sidecar: AtomicBool::new(manifest.sidecar.is_some()),
             has_ui: AtomicBool::new(!manifest.ui_contributions().is_empty()),
+            has_extension_tab: AtomicBool::new(
+                manifest
+                    .ui_contributions()
+                    .iter()
+                    .any(|contribution| contribution.slot == "extension.tab"),
+            ),
             verified_sidecar: RwLock::new(verified_sidecar),
             session_id: RwLock::new(String::new()),
             workspace: RwLock::new(String::new()),
             lifecycle_sidecar: AtomicBool::new(Self::lifecycle_sidecar_of(manifest)),
-            sidecar_invoker: RwLock::new(None),
+            sidecar_access: RwLock::new(None),
         }
     }
-    /// 注入旁路 sidecar 调用入口（构造后由装载器设置）。
-    pub(crate) fn set_sidecar_invoker(
+    /// 注入插件运行态访问入口（构造后由装载器设置）。
+    pub(crate) fn set_sidecar_access(
         &self,
-        invoker: std::sync::Arc<dyn crate::sidecar::SidecarInvoker>,
+        access: std::sync::Arc<dyn crate::sidecar::SidecarAccess>,
     ) {
-        match self.sidecar_invoker.write() {
-            Ok(mut slot) => *slot = Some(invoker),
-            Err(poisoned) => *poisoned.into_inner() = Some(invoker),
+        match self.sidecar_access.write() {
+            Ok(mut slot) => *slot = Some(access),
+            Err(poisoned) => *poisoned.into_inner() = Some(access),
         }
+    }
+    /// 当前运行态访问入口（未注入时为 None）。
+    fn sidecar_access(&self) -> Option<std::sync::Arc<dyn crate::sidecar::SidecarAccess>> {
+        self.sidecar_access
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     /// 注入所属宿主会话 ID（构造后由装载器设置）。
@@ -180,12 +195,7 @@ impl TsPluginAdapter {
             return;
         };
         let operation = format!("lifecycle.{hook}");
-        let invoker = self
-            .sidecar_invoker
-            .read()
-            .ok()
-            .and_then(|slot| slot.clone());
-        let Some(invoker) = invoker else {
+        let Some(invoker) = self.sidecar_access() else {
             tracing::debug!(plugin_id = %self.id, operation, "未注入 sidecar 调用入口，跳过生命周期转发");
             return;
         };
@@ -382,6 +392,8 @@ impl ToolOverrideHandler for TsPluginAdapter {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let sidecar_access = self.sidecar_access();
+        let has_extension_tab = self.has_extension_tab.load(Ordering::Acquire);
         // 路由只消费安装阶段保存的验证能力，不启动 sidecar 探测。
         let handler = self.handler_for_tool(&call.name);
         let invocation = crate::invocation::RuntimeInvocation::new(
@@ -398,6 +410,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
                 match handler {
                     Ok(crate::invocation::HandlerKind::Sidecar) => Some(
                         invoke_sidecar_tool(
+                            sidecar_access,
                             &plugin_id,
                             call,
                             tool_timeout_ms,
@@ -411,6 +424,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
                             call,
                             tool_timeout_ms,
                             Some(invocation.clone()),
+                            has_extension_tab,
                         )
                         .await,
                     ),
@@ -450,30 +464,15 @@ fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
 /// Handler 调用本身不设时限；用户或会话取消时，进程守卫负责定向取消
 /// 当前请求。启动、连接和写入仍保留基础故障保护。
 async fn invoke_sidecar_tool(
+    access: Option<std::sync::Arc<dyn crate::sidecar::SidecarAccess>>,
     plugin_id: &str,
     call: ToolCall,
     _timeout_ms: u64,
     runtime_invocation: Option<crate::invocation::RuntimeInvocation>,
 ) -> ToolResult {
-    let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
-        return sidecar_tool_failure(plugin_id, "插件未加载");
+    let Some(access) = access else {
+        return sidecar_tool_failure(plugin_id, "插件运行环境未初始化");
     };
-    let Some(storage_root) = directory
-        .parent()
-        .and_then(|parent| parent.parent())
-        .map(std::path::Path::to_path_buf)
-    else {
-        return sidecar_tool_failure(plugin_id, "无法定位插件存储根");
-    };
-    let installed = match crate::registry::find_installed_plugin(&storage_root, plugin_id) {
-        Ok(installed) => installed,
-        Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
-    };
-    // 按需形态：每次调用独立临时连接——进程完全归属本次调用，超时/取消
-    // 只终止自己，并发调用互不可见；常驻形态：共享缓存连接（进程内多路
-    // 复用），守卫取消当前共享进程（换代重启，常驻语义的单进程权衡）。
-    let on_demand =
-        installed.manifest.sidecar_lifecycle() == crate::manifest::SidecarLifecycle::OnDemand;
     let context = runtime_invocation
         .as_ref()
         .map(|invocation| invocation.context().clone());
@@ -482,29 +481,13 @@ async fn invoke_sidecar_tool(
         .as_ref()
         .map(|context| std::path::PathBuf::from(&context.workspace))
         .unwrap_or_default();
-    let session_workspace = if installed.manifest.should_preload_sidecar() {
-        None
-    } else {
-        Some(authoritative_workspace.as_path())
-    };
-    let connection = if on_demand {
-        crate::registry::ephemeral_sidecar_connection_with_workspace(
-            &storage_root,
-            &installed,
-            session_workspace,
-        )
-    } else if session_workspace.is_some() {
-        crate::registry::sidecar_connection_with_workspace(
-            &storage_root,
-            &installed,
-            false,
-            session_workspace,
-        )
-    } else {
-        crate::registry::sidecar_connection(&storage_root, &installed, false)
-    };
-    let connection = match connection {
-        Ok(connection) => connection,
+    // 连接形态（按需一次性 / 常驻共享）由状态机按清单声明决定。
+    let opened = access.connection(plugin_id, Some(authoritative_workspace.as_path()));
+    let crate::sidecar::PluginConnection {
+        connection,
+        ephemeral,
+    } = match opened {
+        Ok(opened) => opened,
         Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
     };
     if let Some(invocation) = &runtime_invocation {
@@ -521,7 +504,7 @@ async fn invoke_sidecar_tool(
         // 新统一路径的取消由 RuntimeInvocation 唯一触发；旧测试/兼容入口
         // 仍使用进程守卫，避免没有统一对象时遗留 sidecar。
         connection: runtime_invocation.is_none().then(|| connection.clone()),
-        stop_on_drop: on_demand,
+        stop_on_drop: ephemeral,
         session_id: session_id.clone(),
     };
     let operation = call.name.clone();
@@ -628,25 +611,28 @@ impl Drop for SidecarProcessGuard {
     }
 }
 
-/// 测试通道：经真实直连路径调用（安装与阻塞超时验证）。
+/// 测试通道：经真实直连路径调用（安装与阻塞超时验证）。运行态访问入口
+/// 由调用方（测试）提供，生产路径由装载器注入。
 #[cfg(test)]
 pub(crate) async fn invoke_sidecar_tool_for_test(
+    access: std::sync::Arc<dyn crate::sidecar::SidecarAccess>,
     plugin_id: &str,
     call: ToolCall,
     timeout_ms: u64,
 ) -> ToolResult {
-    invoke_sidecar_tool(plugin_id, call, timeout_ms, None).await
+    invoke_sidecar_tool(Some(access), plugin_id, call, timeout_ms, None).await
 }
 
 /// 测试通道：携带统一调用生命周期（含新版权威工作区与取消）的真实
 /// 直连调用，验证按需沙箱写域随会话工作区构造。
 #[cfg(test)]
 pub(crate) async fn invoke_sidecar_tool_with_invocation_for_test(
+    access: std::sync::Arc<dyn crate::sidecar::SidecarAccess>,
     plugin_id: &str,
     call: ToolCall,
     invocation: crate::invocation::RuntimeInvocation,
 ) -> ToolResult {
-    invoke_sidecar_tool(plugin_id, call, 0, Some(invocation)).await
+    invoke_sidecar_tool(Some(access), plugin_id, call, 0, Some(invocation)).await
 }
 
 fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {
