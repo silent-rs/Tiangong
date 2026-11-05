@@ -8,6 +8,8 @@
 //! `plugin_call` 通道）；其余命名空间完成白名单与权限定形，宿主服务路由在
 //! 对应接缝任务中接入。事件订阅当前只提供登记骨架，事件源在事件接缝任务接入。
 
+pub mod core_bridge;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};

@@ -2,10 +2,10 @@
 
 use serde_json::Value;
 
-use super::connections::{
+use super::*;
+use crate::transport::connections::{
     loaded_plugin_matches, stop_connection_for_directory, stop_loaded_sidecar,
 };
-use super::*;
 
 /// 当前应进入 Core 的插件 id 列表（按 `load_installed_plugins` 同一套
 /// 可用性过滤与排序：入口声明、`model_requirements` 能力、prompt 置顶）。
@@ -172,7 +172,7 @@ fn reload_plugin_entry(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
         .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 热加载后状态丢失"))
 }
 
-pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
+pub(crate) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
     // 清单插件可能仅提供 UI，也可能通过 Desktop TS 工具适配器接入 Core。
     // UI 记录直接替换；存活 Core 中的 TS 适配器原位更新，下一轮立即使用新清单。
     {
@@ -1106,7 +1106,7 @@ fn plugin_state(enabled: bool, error: Option<&str>) -> &'static str {
         "loaded"
     }
 }
-pub(super) fn list_plugin_status_without_preload(
+pub(crate) fn list_plugin_status_without_preload(
     manifest: &PluginManifest,
 ) -> Option<PluginStatus> {
     let (generation, sidecar, load_error, runtime_error, enabled, directory) = {

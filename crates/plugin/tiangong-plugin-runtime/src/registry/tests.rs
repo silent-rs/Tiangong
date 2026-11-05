@@ -1,7 +1,8 @@
 //! registry 的注册表级单元测试（原文件级测试模块整体迁移）。
 
-use super::connections::remove_sidecar_connection;
-use super::migrations::post_install_sidecar_check_with;
+use crate::distribution::migrations::post_install_sidecar_check_with;
+use crate::transport::connections::remove_sidecar_connection;
+use sha2::Digest;
 
 use super::*;
 

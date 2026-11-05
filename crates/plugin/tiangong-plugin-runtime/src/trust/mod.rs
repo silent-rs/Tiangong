@@ -13,6 +13,10 @@
 //! 本模块不做交互决策；调用方必须保证不向插件代码或 Agent 工具暴露这些
 //! 管理接口。
 
+pub mod content_manifest;
+pub mod signature;
+pub mod verification;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};

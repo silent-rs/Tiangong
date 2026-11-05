@@ -3,6 +3,11 @@
 //! Core 的 Plugin/ToolOverrideHandler 调度保持不变。WASM、sidecar 与 TS UI
 //! Adapter 进入 Runtime 后，都用本对象统一身份、上下文、取消、进度和闭合。
 
+pub(crate) mod execution;
+pub mod runtime_feedback;
+pub(crate) mod ts_plugin;
+pub(crate) mod ts_tools;
+
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};

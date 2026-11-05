@@ -6,18 +6,12 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use semver::Version;
 use serde::Serialize;
-use sha2::Digest;
 use tiangong_core::core::Plugin;
 
-use crate::events::PluginChangeKind;
-use crate::interpreter_env::{self, InterpreterKind};
-use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
-use crate::sidecar::{
-    CONTENT_MANIFEST_FILE, EphemeralCommandConnection, InterpreterLaunch, ProcessSidecarConnection,
-    SidecarConfig, SidecarConnection, StdioSidecarConnection,
-};
+use self::events::PluginChangeKind;
+use crate::manifest::{MANIFEST_FILE, PluginManifest};
+use crate::sidecar::SidecarConnection;
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
 
@@ -28,38 +22,40 @@ use crate::ts_plugin::TsPluginAdapter;
 // `pub use` 重导出，外部路径 `crate::registry::*` 保持不变。
 //
 // - `inventory`：自制插件判据、对话内清单与能力指纹
-// - `legacy`：旧插件 ID 迁移（合并保留目录、归档旧目录）
 // - `discovery`：磁盘发现、预加载与插件记录构建
 // - `loader`：查询视图与 Core 适配器创建
 // - `views`：slots/贡献/扩展页等 manifest 级视图
-// - `migrations`：安装/启停/回滚/卸载与文件系统事务
-// - `connections`：sidecar 连接池（复用/换代/临时连接）与停机清理
+// - `events`：插件变化事件发布与运行时资源收尾
+// - `tool_icons`/`tool_titles`/`builtin_tables`：清单声明的展示投影
+//（安装事务在 `crate::distribution`，连接池在 `crate::transport::connections`，
+//  二者的公开入口经本模块重导出保持 `registry::` 路径稳定）
 
-mod connections;
+pub mod builtin_tables;
 mod discovery;
+pub mod events;
 mod inventory;
 mod keepalive;
-mod legacy;
 mod loader;
-mod migrations;
-mod reverify;
+pub(crate) mod reverify;
+pub mod tool_icons;
+pub mod tool_titles;
 mod views;
 
-use connections::stop_loaded_sidecar;
-pub(crate) use connections::{
+pub use crate::distribution::legacy::*;
+pub use crate::distribution::migrations::*;
+use crate::transport::connections::stop_loaded_sidecar;
+pub(crate) use crate::transport::connections::{
     ephemeral_sidecar_connection, ephemeral_sidecar_connection_with_workspace, sidecar_connection,
     sidecar_connection_with_workspace, stop_connection_for_directory,
 };
 pub use discovery::*;
 pub use inventory::*;
-pub use legacy::*;
 pub use loader::*;
-pub use migrations::*;
 pub use reverify::*;
 pub use views::*;
 
 /// 本地信任标记（安装时原生确认后由宿主写入插件目录）。
-const LOCAL_TRUST_FILE: &str = "local-trust.json";
+pub(crate) const LOCAL_TRUST_FILE: &str = "local-trust.json";
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
@@ -68,7 +64,7 @@ static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new
 static SIDECAR_CONNECTIONS: OnceLock<
     Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>,
 > = OnceLock::new();
-static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
+pub(crate) static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 按插件持久化的整套授权记录（常驻 sidecar 使用）。
@@ -142,9 +138,9 @@ pub(crate) fn background_sidecar_operation() -> Option<std::sync::RwLockWriteGua
 /// 按需启动 sidecar 的沙箱策略在进程启动后不可扩权，因此连接缓存必须
 /// 同时按安装目录和会话工作区区分，不能让默认连接遮蔽当前对话的可写域。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SidecarConnectionKey {
-    directory: PathBuf,
-    workspace: Option<PathBuf>,
+pub(crate) struct SidecarConnectionKey {
+    pub(crate) directory: PathBuf,
+    pub(crate) workspace: Option<PathBuf>,
 }
 
 /// 全局 server 连接信息（可覆盖更新），spawn 时注入所有 sidecar。
@@ -192,7 +188,7 @@ fn storage_root_of(directory: &Path) -> Option<PathBuf> {
 }
 
 /// 取当前已设置的 server 连接信息（未设置返回 None）。
-fn current_server_endpoint() -> Option<(String, Option<String>)> {
+pub(crate) fn current_server_endpoint() -> Option<(String, Option<String>)> {
     SERVER_ENDPOINT.lock().ok().and_then(|guard| guard.clone())
 }
 
@@ -234,8 +230,8 @@ fn restart_sidecars_for_server_change() {
     }
 }
 
-const DISABLED_MARKER: &str = ".disabled";
-const ROLLBACK_DIR: &str = ".rollback";
+pub(crate) const DISABLED_MARKER: &str = ".disabled";
+pub(crate) const ROLLBACK_DIR: &str = ".rollback";
 
 /// 天工运行入口类型。
 ///
@@ -296,37 +292,37 @@ pub(crate) struct InstalledPlugin {
     pub(crate) signed_release: Option<SignedPluginRelease>,
 }
 
-struct LoadedPlugin {
-    directory: PathBuf,
-    manifest: PluginManifest,
+pub(crate) struct LoadedPlugin {
+    pub(crate) directory: PathBuf,
+    pub(crate) manifest: PluginManifest,
     /// 安装时验定的签名发布信息（None=未签名/本地信任）。
     /// `publisher == local` 是自制插件动态调用通道的分流判据，
     /// 安装时确定、终身不变。
-    signed_release: Option<SignedPluginRelease>,
-    generation: u64,
-    ts_instances: Vec<Weak<TsPluginAdapter>>,
-    sidecar: Option<Arc<dyn SidecarConnection>>,
+    pub(crate) signed_release: Option<SignedPluginRelease>,
+    pub(crate) generation: u64,
+    pub(crate) ts_instances: Vec<Weak<TsPluginAdapter>>,
+    pub(crate) sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
-    verified_sidecar: Option<Vec<String>>,
+    pub(crate) verified_sidecar: Option<Vec<String>>,
     /// **装载时组装**的动态 prompt 段落（清单声明 + 握手验证通过时经
     /// [`PROMPT_SECTIONS_OPERATION`] 读取一次）。None=未声明或未获取；
     /// Some(段落)（可为空数组）。sidecar 经 [`PROMPT_UPDATED_CHANNEL`]
     /// 通知变更时重取；内容变化计入能力指纹，触发上下文交接。
-    prompt_sections: Option<Vec<String>>,
+    pub(crate) prompt_sections: Option<Vec<String>>,
     /// **装载时拉取**的 sidecar 动态工具规格快照（清单 `tools` 声明
     /// `{"type":"sidecar"}` 条目 + 握手 `tools` 能力时经
     /// [`TOOL_SPECS_OPERATION`] 读取一次）。None=未声明或未获取；
     /// Some(规格)（可为空数组）。sidecar 经 [`TOOLS_UPDATED_CHANNEL`]
     /// 通知变更时重取；core 每轮经适配器 `tool_specs()` 读取，快照
     /// 更新后下一轮工具装配自动生效。
-    dynamic_tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
+    pub(crate) dynamic_tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
     /// 数据/制品/逻辑层加载错误（解释器不可发现等）：
     /// 插件不满足安装条件，安装路径据此回滚。
-    load_error: Option<String>,
+    pub(crate) load_error: Option<String>,
     /// 启动/握手/运行检查错误（常驻 sidecar 起不来、验证失败、记录保存
     /// 失败等）：插件保留安装，插件管理显示启动异常，重试验证成功后清除。
-    runtime_error: Option<String>,
-    enabled: bool,
+    pub(crate) runtime_error: Option<String>,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -364,7 +360,7 @@ pub struct InvalidPluginEntry {
     pub reason: String,
 }
 
-fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
+pub(crate) fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
     LOADED_PLUGINS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -397,8 +393,8 @@ fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
     INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn sidecar_connections() -> &'static Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>
-{
+pub(crate) fn sidecar_connections()
+-> &'static Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>> {
     SIDECAR_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

@@ -1,11 +1,21 @@
 //! 安装/启停/回滚/卸载与文件系统事务（staged 校验、换代交换、
 //! 数据保留目录、禁用标记、IO 重试工具）。
 
-use super::connections::{
+use super::legacy::PRESERVED_ENTRIES;
+use crate::events::PluginChangeKind;
+use crate::manifest::{MANIFEST_FILE, PluginManifest};
+use crate::registry::reverify;
+use crate::registry::*;
+use crate::signature::verify_signed_release;
+use crate::transport::connections::{
     kill_sidecar_orphans, remove_sidecar_connection, sidecar_binary_path,
     stop_connection_for_directory, stop_loaded_sidecar, unload_plugin_adapters,
 };
-use super::*;
+use anyhow::{Context, Result, bail};
+use semver::Version;
+use std::path::{Path, PathBuf};
+use std::sync::Weak;
+use std::time::{Duration, Instant};
 
 use crate::artifacts::{PluginRepository, ProgressFn};
 
@@ -136,7 +146,7 @@ fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
 
 // 验证和保存是两个外部操作，状态处理只依赖它们的结果。
 // 单元测试可分别注入失败，无需启动真实 sidecar 或改变目录权限。
-pub(super) fn post_install_sidecar_check_with(
+pub(crate) fn post_install_sidecar_check_with(
     plugin_id: &str,
     verify: impl FnOnce() -> Result<crate::verification::SidecarVerification>,
     save: impl FnOnce(&crate::verification::SidecarVerification) -> Result<()>,
@@ -223,7 +233,7 @@ pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
     }
 }
 
-pub(super) fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) -> Result<()> {
+pub(crate) fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) -> Result<()> {
     let _operation = LOAD_OPERATION
         .read()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -792,7 +802,7 @@ fn swap_with_rollback(
     Ok(())
 }
 
-pub(super) fn preserve_only_data(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn preserve_only_data(source: &Path, destination: &Path) -> Result<()> {
     let data = source.join("data");
     std::fs::create_dir_all(destination)?;
     if data.exists() {
@@ -915,7 +925,7 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn ensure_directory(path: &Path) -> Result<()> {
+pub(crate) fn ensure_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("读取目录失败: {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -964,12 +974,12 @@ where
 }
 
 /// 重命名文件/目录，遇到暂时性占用时重试。
-pub(super) fn rename_with_retry(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> Result<()> {
     retry_io(|| std::fs::rename(from, to))
         .with_context(|| format!("重命名失败: {} -> {}", from.display(), to.display()))
 }
 
-pub(super) fn remove_directory_if_exists(path: &Path) -> Result<()> {
+pub(crate) fn remove_directory_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             bail!("拒绝删除符号链接目录: {}", path.display())
@@ -981,21 +991,21 @@ pub(super) fn remove_directory_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn transaction_directory(storage_root: &Path, label: &str) -> Result<PathBuf> {
+pub(crate) fn transaction_directory(storage_root: &Path, label: &str) -> Result<PathBuf> {
     let root = plugins_directory(storage_root).join(".transactions");
     std::fs::create_dir_all(&root)?;
     Ok(root.join(format!("{}-{label}", scru128::new())))
 }
 
-pub(super) fn plugins_directory(storage_root: &Path) -> PathBuf {
+pub(crate) fn plugins_directory(storage_root: &Path) -> PathBuf {
     storage_root.join("plugins")
 }
 
-pub(super) fn plugin_directory(storage_root: &Path, plugin_id: &str) -> PathBuf {
+pub(crate) fn plugin_directory(storage_root: &Path, plugin_id: &str) -> PathBuf {
     plugins_directory(storage_root).join(plugin_id)
 }
 
-pub(super) fn rollback_directory(directory: &Path, plugin_id: &str) -> PathBuf {
+pub(crate) fn rollback_directory(directory: &Path, plugin_id: &str) -> PathBuf {
     directory
         .parent()
         .unwrap_or(directory)
