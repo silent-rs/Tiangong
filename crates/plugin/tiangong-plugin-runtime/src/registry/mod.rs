@@ -26,11 +26,10 @@ use crate::ts_plugin::TsPluginAdapter;
 // - `loader`：查询视图与 Core 适配器创建
 // - `views`：slots/贡献/扩展页等 manifest 级视图
 // - `events`：插件变化事件发布与运行时资源收尾
-// - `tool_icons`/`tool_titles`/`builtin_tables`：清单声明的展示投影
+// - `tool_icons`/`tool_titles`：清单声明的展示投影
 //（安装事务在 `crate::distribution`，连接池在 `crate::transport::connections`，
 //  二者的公开入口经本模块重导出保持 `registry::` 路径稳定）
 
-pub mod builtin_tables;
 mod discovery;
 pub mod events;
 mod inventory;

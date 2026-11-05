@@ -9,8 +9,7 @@
 //! 数据路径、业务事件或条件分支。单个插件需要的行为必须放在该插件的私有协议
 //! 或 sidecar 中。只有能被任意插件复用、且无需理解业务负载的机制，才能进入
 //! 运行时。完整约束见 `docs/plugin-development.md` 的“公共中立约束”。
-//! 唯一的过渡期例外是 [`builtin_tables`]：宿主展示用的工具名映射纯数据集中
-//! 于此，插件自行声明后逐条删除。
+//! （曾有的内置展示表例外已移除：工具图标全线由插件在清单中声明。）
 
 // ── 域目录（物理布局与 docs/plugin-runtime-module-boundaries.md 九域一致）──
 pub mod bridge;
@@ -51,7 +50,7 @@ pub use plugin_dev::{
     note_trusted_build, set_plugin_dev_import_confirm, set_plugin_dev_trusted_installer,
     trusted_build_fingerprint,
 };
-pub use registry::{builtin_tables, events, tool_icons, tool_titles};
+pub use registry::{events, tool_icons, tool_titles};
 pub use sidecar::{
     ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,
     set_sidecar_notification_forwarder,

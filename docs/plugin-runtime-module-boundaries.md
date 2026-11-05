@@ -27,13 +27,14 @@
 | 15 | 创作域决定保留在 runtime，依赖收窄为公开入口（新增 `plugin_publisher`） | D9→D4 只剩 seam 调用（不再读 `InstalledPlugin` 内部结构） |
 | 16 | Windows 卸载撤销 launcher 授权改走事件路径（`PluginChangeEvent` 携带 `storage_root`，`StorageLayout` 新增 `grants()/grant_record()`） | 消除 D3→D5（显式路径口径下最后一条违规边）；本步含一处有意的小语义变化：撤销失败降级为警告、不再中止卸载 |
 | 17 | **目录按九域重组**：36 个文件移入 9 个域目录（contract/trust/distribution/registry/transport/invocation/bridge/host_policy/plugin_dev），旧公开路径全部经 lib.rs/registry 重导出保持稳定；杂居文件的 `use super::*` 全部显式化 | 目录=域，物理布局与域划分一致；度量盲区消除（见下方度量修正） |
+| 18 | **删除 `builtin_tables` 展示内置表**：工具图标全线由插件在 `tool_icons` 清单声明（未声明走前端默认图标）；终端字形表与 `tool_args_presentation` 命令一并移除（前端与远程白名单已无消费者，CLI 工具行不再显示字形） | runtime 不再按工具名维护展示映射，公共中立约束的过渡期例外清零 |
 度量（两口径，附录 B 可复核）：显式 `crate::` 路径口径下，跨域边 34 → 21、违规边 15 → 0；
 第 17 步目录重组把杂居文件的 `use super::*` 显式化并改用目录判域后，**真实口径**为
 跨域边 24 / 引用 192 / 违规边 3（D3→D4 三处、D3→D5 一处、D5→D4 三处，共 7 处引用）——
 这些依赖在旧口径下经相对路径互相遮蔽，从未被计入；此前的「违规 0」是度量盲区假象，
 本设计稿以真实口径为准。
 `crate::plugin_dev` 在传输层引用清零，runtime 生产代码中的插件 ID 字面量清零
-（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。附录 A/B 已补齐 `tool_key`、
+（该例外已随第 18 步移除）。附录 A/B 已补齐 `tool_key`、
 `storage_layout`、`content_manifest` 三处模块的归属，并跳过 `#[cfg(test)] mod` 块；
 拆分前基线用同一脚本重算，边数与违规边不变，只有引用次数口径更严。
 
@@ -67,7 +68,7 @@
 | — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2024 | 不参与域划分 |
 
-合计 26544 行（域目录 26039 + 根 `lib.rs` 99 + `test_support.rs` 406），与 `wc -l` 全量一致（可复核）。
+合计 26272 行（域目录 26039 + 根 `lib.rs` 99 + `test_support.rs` 406），与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -111,7 +112,7 @@
 
 ### D4 状态机（Registry / Lifecycle）
 
-- **拥有**：`LoadedPlugin` 记录、加载/卸载/启用状态、全局操作锁、启动预加载、常驻保活、启用指纹与对话内清单、manifest 级视图查询、变化事件发布、**插件目录的展示投影**（`views` 与 `tool_icons` / `tool_titles` / `builtin_tables`——图标与标题是清单声明加内置兜底的投影，不是宿主集成）。
+- **拥有**：`LoadedPlugin` 记录、加载/卸载/启用状态、全局操作锁、启动预加载、常驻保活、启用指纹与对话内清单、manifest 级视图查询、变化事件发布、**插件目录的展示投影**（`views` 与 `tool_icons` / `tool_titles`——图标与标题是清单声明的投影，不是宿主集成）。
 - **不拥有**：调用执行（D6）、连接与进程细节（D5）、Core 适配（D7）、安装事务（D3）、server 生命周期。
 - **对外 seam**：`list_plugins`、`plugin_manifest(id)`、`find_installed_plugin`、
   `plugin_install_directory(id)`、`plugin_publisher(root, id)`、`enabled_plugin_fingerprint`、
@@ -162,7 +163,7 @@
 - **拥有**：`HostExecutionPolicy` 数据结构与默认值（全沙箱、零能力、stdio），以及内置
   插件 ID 的权威策略表（`host_policy/table.rs`）。
 - **不拥有**：宿主运行期追加的策略覆盖——由 `set_host_policy_provider` 注入，本域只负责
-  「provider 优先、缺省回落内置表」的解析顺序。
+  「provider 优先」的解析顺序。
 - **已修复**：权威表放在本域的 `host_policy/table.rs`——`install()` 注册默认表、
   `execution_policy()` 按插件 ID 查表，宿主只经 `host_policy::install()` 一处注入。
   该表一度外移为独立 crate `tiangong-plugin-policy`，但它只有 runtime 自己消费、没有
@@ -299,7 +300,7 @@ pub struct HostServices {
 |---|---|---|---|---|
 | 1 | D1 契约 → `tiangong-plugin-contract` | 工具键归位 | runtime 内 `manifest`/`slots`/`launch_policy` 只经 re-export 引用；D1 出边为 0 | 低 |
 | 2 | D5 叶子（`interpreter_env`、`platform`、launcher 能力探测）→ `tiangong-plugin-process` | `StorageLayout` | 新 crate 不引用 registry/bridge/plugin_dev | 低 |
-| 3 | D7 展示（`tool_icons`/`tool_titles`/`builtin_tables`）→ 宿主 | 步 1 | runtime 不再含展示兜底表；D4→D7 边消失 | 低 |
+| 3 | D7 展示（`tool_icons`/`tool_titles`）→ 宿主 | 步 1 | runtime 不再含展示兜底表；D4→D7 边消失 | 低 |
 | 4 | D2 信任 → `tiangong-plugin-trust` | 拆 record / reverify（已就绪） | D2 无出边（除 D1）；验签 e2e 全绿 | 中 |
 | 5 | D3 安装 → `tiangong-plugin-install` | `LifecycleEvents` | D3 出边只剩 D1/D2；安装/回滚/卸载 e2e 全绿 | 中 |
 | 6 | D9 创作 → 宿主 | 命名空间可注册 + 步 5 | runtime 内 `rg plugin-dev` 为空；creator e2e 全绿 | 中 |
@@ -319,7 +320,7 @@ pub struct HostServices {
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
 | `use super::*` | 36 处（生产代码） | 36 处 | 0（隐式耦合无法审计） |
-| runtime 内插件 ID 字面量 | 5 个 ID / 多处**策略分支** | 策略分支 0（策略表在 D8 的 `host_policy/table.rs`）；目录默认集合与展示映射仍留 D3/D7（`DEFAULT_PLUGIN_IDS`、分类表、`builtin_tables`） | 策略分支恒为 0；数据表按产品需要保留 |
+| runtime 内插件 ID 字面量 | 5 个 ID / 多处**策略分支** | 策略分支 0（策略表在 D8 的 `host_policy/table.rs`）；目录默认集合仍留 D3（`DEFAULT_PLUGIN_IDS`、分类表）；展示内置表已删除（第 18 步） | 策略分支恒为 0；数据表按产品需要保留 |
 
 复核脚本见附录 B，可在任意提交上重跑，得到同样口径的数字。两口径差异全部来自
 `use super::*` 相对路径：旧口径只解析显式 `crate::` 前缀，目录重组（第 17 步）后
@@ -349,7 +350,6 @@ crate 内相对引用已全部显式化，目录判域口径即真实口径。
 | `distribution/legacy.rs` | D3 安装 | 104 |
 | `distribution/migrations.rs` | D3 安装 | 1050 |
 | `distribution/mod.rs` | D3 安装 | 6 |
-| `registry/builtin_tables.rs` | D4 状态机 | 211 |
 | `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/events.rs` | D4 状态机 | 180 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
@@ -358,7 +358,7 @@ crate 内相对引用已全部显式化，目录判域口径即真实口径。
 | `registry/mod.rs` | D4 状态机 | 585 |
 | `registry/reverify.rs` | D4 状态机 | 166 |
 | `registry/tests.rs` | 测试 | 1136 |
-| `registry/tool_icons.rs` | D4 状态机 | 487 |
+| `registry/tool_icons.rs` | D4 状态机 | 428 |
 | `registry/tool_titles.rs` | D4 状态机 | 230 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `transport/connections.rs` | D5 传输 | 465 |
@@ -414,7 +414,7 @@ MOD2DOM = {
   # D3 distribution
   'artifacts':'D3','distribution':'D3',
   # D4 registry（events 等移入 registry/；别名经 lib.rs）
-  'registry':'D4','events':'D4','tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4',
+  'registry':'D4','events':'D4','tool_icons':'D4','tool_titles':'D4',
   # D5 transport（connections 移入 transport/；别名经 lib.rs）
   'sidecar':'D5','interpreter_env':'D5','launcher_update':'D5','platform':'D5',
   'transport':'D5',

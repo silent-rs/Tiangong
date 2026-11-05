@@ -944,7 +944,6 @@ fn run_gui() {
             tiangong_app::commands::plugin_read_icon,
             tiangong_app::commands::list_tool_icons,
             tiangong_app::commands::list_tool_titles,
-            tiangong_app::commands::tool_args_presentation,
             tiangong_app::commands::plugin_read_tool_icon,
             tiangong_app::commands::plugin_list_trusted_publishers,
             tiangong_app::commands::plugin_import_trusted_publisher,
