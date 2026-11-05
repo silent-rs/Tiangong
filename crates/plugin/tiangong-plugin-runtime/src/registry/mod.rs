@@ -484,5 +484,54 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
         "沙箱开关已切换：按需 sidecar 当前进程已停止，后续调用将按新策略重建"
     );
 }
+/// 传输层运行时事实的注册表实现：把状态机的全局开关与存储布局翻译成
+/// 传输层可读的只读事实（沙箱开关、退出标志、持久授权路径）。
+#[derive(Debug)]
+pub(crate) struct RegistryRuntimeEnv {
+    /// 持久授权记录所在的存储根（仅 Windows AppContainer 使用）。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    storage_root: PathBuf,
+}
+impl RegistryRuntimeEnv {
+    pub(crate) fn new(storage_root: impl Into<PathBuf>) -> Self {
+        Self {
+            storage_root: storage_root.into(),
+        }
+    }
+}
+impl crate::sidecar::RuntimeEnv for RegistryRuntimeEnv {
+    fn sandbox_disabled(&self) -> bool {
+        sandbox_disabled()
+    }
+    fn shutting_down(&self) -> bool {
+        sidecars_shutting_down()
+    }
+    fn persistent_grants_path(&self, plugin_id: &str) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            Some(persistent_grants_path(&self.storage_root, plugin_id))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = plugin_id;
+            None
+        }
+    }
+}
+/// 传输层通知事件的注册表实现：工具恢复直接分发，prompt 与工具规格变更
+/// 走重取流程（阻塞 I/O，由传输层在读循环外另起线程调用）。
+#[derive(Debug)]
+pub(crate) struct RegistrySidecarEvents;
+impl crate::sidecar::SidecarEvents for RegistrySidecarEvents {
+    fn tools_recovered(&self, plugin_id: &str, payload: &str) {
+        dispatch_tools_recovered(plugin_id, payload);
+    }
+    fn prompt_updated(&self, plugin_id: &str) {
+        refresh_prompt_sections(plugin_id);
+    }
+    fn tools_updated(&self, plugin_id: &str) {
+        refresh_tool_specs(plugin_id);
+    }
+}
 #[cfg(test)]
 mod tests;

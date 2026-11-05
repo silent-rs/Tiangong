@@ -278,7 +278,12 @@ fn sidecar_connection_inner(
     .with_user_credential_reads(host_policy.user_credential_reads)
     .with_sandbox_user_cache_write(host_policy.allow_user_cache_write)
     .with_sandbox_capabilities(host_policy.capabilities.clone())
-    .with_sandbox_user_policy(&tiangong_config::registry::try_sandbox_policy());
+    .with_sandbox_user_policy(&tiangong_config::registry::try_sandbox_policy())
+    // 传输层不读全局状态：沙箱开关、退出标志与授权路径由状态机注入。
+    .with_runtime_env(std::sync::Arc::new(super::RegistryRuntimeEnv::new(
+        storage_root,
+    )))
+    .with_sidecar_events(std::sync::Arc::new(super::RegistrySidecarEvents));
     // 统一写域：宿主会话工作区 + 存储根（敏感清单双禁由传输层施加）。
     // 没有会话上下文的全局调用才使用应用默认工作区；带会话上下文时
     // 不采信插件 payload，也不允许默认工作区覆盖当前对话。

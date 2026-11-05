@@ -210,6 +210,48 @@ impl SensitiveStorageAccess {
     }
 }
 
+/// 传输层需要的宿主运行时事实：沙箱开关、退出状态、持久授权路径。
+///
+/// 由连接构造层（注册表状态机）实现并注入 [`SidecarConfig`]。传输层只在真正
+/// 需要时调用（例如每次 spawn 重新读取用户开关），不自行读取全局状态，因此
+/// 不反向依赖状态机模块。
+pub trait RuntimeEnv: Send + Sync + std::fmt::Debug {
+    /// 用户全局沙箱开关是否关闭。
+    fn sandbox_disabled(&self) -> bool;
+    /// 宿主是否正在退出：退出期间拒绝启动新的 sidecar。
+    fn shutting_down(&self) -> bool;
+    /// 常驻 sidecar 的持久授权记录路径（Windows AppContainer）；不适用返回 `None`。
+    fn persistent_grants_path(&self, _plugin_id: &str) -> Option<PathBuf> {
+        None
+    }
+}
+/// sidecar 主动通知的响应出口（工具恢复、prompt 段落与工具规格变更）。
+///
+/// 传输层只负责识别帧并投递；重取与刷新语义属于注册表状态机。实现方若需要
+/// 阻塞 I/O，必须自行切换到独立线程——读循环所在线程不做阻塞等待。
+pub trait SidecarEvents: Send + Sync + std::fmt::Debug {
+    /// sidecar 声明工具已恢复，`payload` 为原始通知载荷。
+    fn tools_recovered(&self, _plugin_id: &str, _payload: &str) {}
+    /// prompt 段落需要重新获取。
+    fn prompt_updated(&self, _plugin_id: &str) {}
+    /// 工具规格需要重新获取。
+    fn tools_updated(&self, _plugin_id: &str) {}
+}
+/// 未注入宿主实现时的默认环境：沙箱开启、不退出、无持久授权。
+#[derive(Debug)]
+struct DefaultRuntimeEnv;
+impl RuntimeEnv for DefaultRuntimeEnv {
+    fn sandbox_disabled(&self) -> bool {
+        false
+    }
+    fn shutting_down(&self) -> bool {
+        false
+    }
+}
+/// 未注入宿主实现时的默认事件出口：忽略全部通知。
+#[derive(Debug)]
+struct DefaultSidecarEvents;
+impl SidecarEvents for DefaultSidecarEvents {}
 /// 一个插件 sidecar 的本地运行配置。
 #[derive(Debug, Clone)]
 pub struct SidecarConfig {
@@ -278,6 +320,10 @@ pub struct SidecarConfig {
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     #[allow(dead_code)]
     pub sandbox_network: bool,
+    /// 宿主运行时事实（沙箱开关/退出状态/持久授权路径），由连接构造层注入。
+    pub runtime_env: Arc<dyn RuntimeEnv>,
+    /// sidecar 主动通知的事件出口，由连接构造层注入。
+    pub events: Arc<dyn SidecarEvents>,
 }
 
 impl SidecarConfig {
@@ -323,7 +369,19 @@ impl SidecarConfig {
             sandbox_program_root: None,
             sandbox_program_sha256: None,
             sandbox_network: false,
+            runtime_env: Arc::new(DefaultRuntimeEnv),
+            events: Arc::new(DefaultSidecarEvents),
         }
+    }
+    /// 注入宿主运行时事实（沙箱开关、退出状态、持久授权路径）。
+    pub fn with_runtime_env(mut self, env: Arc<dyn RuntimeEnv>) -> Self {
+        self.runtime_env = env;
+        self
+    }
+    /// 注入 sidecar 通知事件出口（工具恢复、prompt 与工具规格刷新）。
+    pub fn with_sidecar_events(mut self, events: Arc<dyn SidecarEvents>) -> Self {
+        self.events = events;
+        self
     }
 
     pub fn with_sensitive_storage(mut self, access: SensitiveStorageAccess) -> Self {
@@ -726,6 +784,7 @@ impl ProcessSidecarConnection {
             self.config.endpoint.clone(),
             token.clone(),
             Arc::clone(&self.notification_token),
+            Arc::clone(&self.config.events),
         ) {
             return;
         }
@@ -1371,6 +1430,7 @@ fn spawn_sidecar_notification_listener(
     endpoint_path: std::path::PathBuf,
     token: String,
     listener_token: Arc<Mutex<Option<String>>>,
+    events: Arc<dyn SidecarEvents>,
 ) -> bool {
     let forwarder = SIDECAR_NOTIFICATION_FORWARDER.get().cloned();
     // 常驻任务需要 tokio reactor；无 runtime 上下文（同步宿主/测试环境）时
@@ -1390,6 +1450,7 @@ fn spawn_sidecar_notification_listener(
                 &endpoint_path,
                 &token,
                 forwarder.as_ref(),
+                &events,
             )
             .await
             {
@@ -1430,6 +1491,7 @@ async fn run_notification_connection(
     endpoint_path: &std::path::Path,
     token: &str,
     forwarder: Option<&SidecarNotificationForwarder>,
+    events: &Arc<dyn SidecarEvents>,
 ) -> Result<()> {
     let endpoint_json = tokio::fs::read_to_string(endpoint_path)
         .await
@@ -1472,20 +1534,22 @@ async fn run_notification_connection(
         match serde_json::from_str::<crate::protocol::IpcFrame>(line.trim_end()) {
             Ok(crate::protocol::IpcFrame::Notification { channel, payload }) => {
                 if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
-                    crate::registry::dispatch_tools_recovered(plugin_id, &payload);
+                    events.tools_recovered(plugin_id, &payload);
                 }
                 if channel == tiangong_plugin_sidecar::protocol::PROMPT_UPDATED_CHANNEL {
                     // 段落重取是阻塞 I/O：通知读循环只投递，不等待完成。
                     let plugin_id = plugin_id.to_string();
+                    let events = Arc::clone(events);
                     std::thread::spawn(move || {
-                        crate::registry::refresh_prompt_sections(&plugin_id);
+                        events.prompt_updated(&plugin_id);
                     });
                 }
                 if channel == tiangong_plugin_sidecar::protocol::TOOLS_UPDATED_CHANNEL {
                     // 工具规格重取同样是阻塞 I/O：只投递，不等待完成。
                     let plugin_id = plugin_id.to_string();
+                    let events = Arc::clone(events);
                     std::thread::spawn(move || {
-                        crate::registry::refresh_tool_specs(&plugin_id);
+                        events.tools_updated(&plugin_id);
                     });
                 }
                 if let Some(forwarder) = forwarder {

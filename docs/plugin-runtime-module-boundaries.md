@@ -16,7 +16,8 @@
 | 4 | 权威策略表外移 `tiangong-plugin-policy` crate | runtime 生产代码不再含插件 ID；桌面/CLI/Server/e2e 同源注入 |
 | 5 | 一次性进程形态与官方签名要求入策略；市场展示数据外移宿主 | 去掉 `"command"` 字面量分支与 `DEFAULT_PLUGIN_IDS`/分类表 |
 
-度量：跨域引用边 34 → 32，违规边 15 → 13；`crate::plugin_dev` 在传输层引用清零，
+| 6 | 传输层注入 `RuntimeEnv` + `SidecarEvents`（D5 的输入接缝） | 消除 D5→D4：沙箱开关/退出标志/授权路径与三类通知改由状态机注入 |
+度量：跨域引用边 34 → 31，违规边 15 → 12；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -25,7 +26,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 本文档给出拆分的安全前提：
 
-1. **域划分**：41 个生产源文件各自归属唯一职责域（38 个归入九域，3 个是 crate 根 / 测试支撑 / 待删代码），每个域明确「拥有什么 / 不拥有什么 / 对外只有哪些入口」；
+1. **域划分**：40 个生产源文件各自归属唯一职责域（38 个归入九域，2 个是 crate 根 / 测试支撑），每个域明确「拥有什么 / 不拥有什么 / 对外只有哪些入口」；
 2. **依赖矩阵**：域间只允许单向依赖；当前违规逐条列出，可复核；
 3. **拆分顺序**：按依赖拓扑排出 7 步，每步有前置接缝、验收标准与回滚方式。
 
@@ -39,17 +40,17 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 |---|---|---|---|---|
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
 | D2 | 信任 | 3 | 1819 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
-| D3 | 分发与安装 | 3 | 2756 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
-| D4 | 状态机 | 7 | 3458 | 维护「装了哪些、各自什么状态」并广播变化 |
-| D5 | 进程与传输 | 10 | 7283 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
+| D3 | 分发与安装 | 3 | 2685 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
+| D4 | 状态机 | 7 | 3507 | 维护「装了哪些、各自什么状态」并广播变化 |
+| D5 | 进程与传输 | 10 | 7363 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
 | D6 | 调用 | 4 | 1788 | 一次插件调用的身份、上下文、取消、进度与结果 |
-| D7 | 宿主集成 | 5 | 2482 | 把插件能力接进 Core 与前端 |
-| D8 | 策略 | 1 | 389 | 描述「某插件被授予什么」 |
-| D9 | 创作工作流 | 2 | 681 | 把开发目录的项目变成已安装插件 |
-| — | crate 根与死代码 | 3 | 666 | `lib.rs` / `test_support` / `seams`（待删） |
+| D7 | 宿主集成 | 5 | 2459 | 把插件能力接进 Core 与前端 |
+| D8 | 策略 | 1 | 225 | 描述「某插件被授予什么」 |
+| D9 | 创作工作流 | 2 | 675 | 把开发目录的项目变成已安装插件 |
+| — | crate 根与测试支撑 | 2 | 515 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2014 | 不参与域划分 |
 
-合计 25899 行，与 `wc -l` 全量一致（可复核）。
+合计 25613 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -95,13 +96,13 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 - **拥有**：进程拉起/终止/进程树、stdio 与 TCP 帧、握手、超时、取消、环境注入、**沙箱策略组装**（输入是已定策略）、连接池与换代、解释器发现、Launcher 能力探测。
 - **不拥有**：插件 ID、开发目录、安装目录布局、是否启用、prompt/tool 刷新语义、插件是否可信。
-- **对外 seam**：入 `SidecarConfig`（含存储布局、`HostExecutionPolicy`、运行时环境）；出 `dyn SidecarConnection`、`SidecarNotificationForwarder`、`SidecarEventHandler`。
+- **对外 seam**：入 `SidecarConfig`（含存储布局、`HostExecutionPolicy`、`RuntimeEnv`、`SidecarEvents`）；出 `dyn SidecarConnection`、`SidecarNotificationForwarder`。
 - **已修复**：开发目录经 `StorageLayout` 由连接构造层翻译成 `sandbox_ensured_writable`，
   传输层只做目录保障，不再认识 `plugin_dev`（D5→D9 清零）。
-- **当前越界**：`sidecar/stdio/mod.rs` 9 处调 D4（`refresh_prompt_sections`、`refresh_tool_specs`、
-  `dispatch_tools_recovered`、`sandbox_disabled`、`sidecars_shutting_down`、`persistent_grants_path`），
-  `sidecar.rs` 3 处调 D4 的 refresh 函数。
-- **修法**：关闭标志/沙箱开关/grants 路径入 `RuntimeEnv`；三个 refresh 改为 `SidecarEventHandler` 回调。
+- **已修复**：传输层不再读状态机。`RuntimeEnv`（沙箱开关、退出标志、持久授权路径）与
+  `SidecarEvents`（工具恢复、prompt 段落、工具规格）两个 trait 定义在 D5，由 D4 实现并随
+  `SidecarConfig` 注入；`sidecar.rs` 与 `sidecar/stdio/mod.rs` 的 12 处 D4 调用清零，D5→D4 边消失。
+  传输层保留「读循环只投递、阻塞 I/O 另起线程」的原语义。
 
 ### D6 调用（Invocation）
 
@@ -159,7 +160,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（13 条边 / 73 处引用，本轮已消 2 条）
+### 当前违规（12 条边 / 65 处引用，本轮已消 3 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
@@ -169,8 +170,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D3→D5 | 1 | `migrations.rs` | 卸载时撤销 launcher grants | 改发事件 |
 | D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
 | D3→D7 | 3 | `migrations.rs` | 清插件订阅 | 改发事件 |
-| D4→D7 | 10 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
-| D5→D4 | 9 | `sidecar.rs`、`stdio/mod.rs` | 传输层调 refresh/shutdown/grants | 注入 `RuntimeEnv` + `SidecarEvents` |
+| D4→D7 | 8 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
 | D6→D4 | 6 | `ts_plugin.rs`、`ts_tools.rs` | 适配器直接取连接/清单 | 注入 `SidecarAccess` / `ManifestQuery` |
 | D6→D7 | 12 | `invocation.rs`、`ts_*.rs` | 调用层直接发 bridge 事件 | 注入 `RuntimeFeedback` |
 | D7→D9 | 1 | `bridge.rs:233` | 硬编码 plugin-dev 命名空间 | 命名空间可注册 |
@@ -199,6 +199,8 @@ pub type HostPolicyProvider = Arc<dyn Fn(&str, bool) -> HostExecutionPolicy + Se
 // 缺省：全沙箱、零能力、stdio（fail-closed）；宿主启动时注入权威表
 
 // 3) 运行时环境（D5 的输入）
+//    已落地形态为 trait：不取快照，沙箱开关每次 spawn 重读、退出标志每次启动前重读，
+//    另含 persistent_grants_path(plugin_id) -> Option<PathBuf>（非 Windows 恒 None）。
 pub struct RuntimeEnv {
     pub sandbox_disabled: bool,
     pub shutting_down: bool,
@@ -208,6 +210,8 @@ pub struct RuntimeEnv {
 // 消除：stdio → registry::{sandbox_disabled, sidecars_shutting_down, persistent_grants_path}
 
 // 4) sidecar 事件（D5 → D4）
+//    已落地：tools_recovered(plugin_id, payload: &str)、prompt_updated、tools_updated；
+//    阻塞 I/O 由传输层在读循环之外另起线程调用。
 pub trait SidecarEvents: Send + Sync {
     fn prompt_updated(&self, plugin_id: &str);
     fn tools_updated(&self, plugin_id: &str);
@@ -258,8 +262,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 32 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 13 | 0 |
+| 跨域引用边 | 34 | 31 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 12 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -285,23 +289,23 @@ pub struct HostServices {
 | `signature.rs` | D2 信任 | 765 |
 | `trust.rs` | D2 信任 | 497 |
 | `verification.rs` | D2 信任 | 557 |
-| `artifacts.rs` | D3 安装 | 1580 |
+| `artifacts.rs` | D3 安装 | 1509 |
 | `registry/migrations.rs` | D3 安装 | 1076 |
 | `registry/legacy.rs` | D3 安装 | 100 |
-| `registry/mod.rs` | D4 状态机 | 488 |
+| `registry/mod.rs` | D4 状态机 | 537 |
 | `registry/loader.rs` | D4 状态机 | 1442 |
 | `registry/discovery.rs` | D4 状态机 | 489 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
 | `events.rs` | D4 状态机 | 101 |
-| `sidecar.rs` | D5 传输 | 1882 |
-| `sidecar/stdio/mod.rs` | D5 传输 | 1574 |
+| `sidecar.rs` | D5 传输 | 1956 |
+| `sidecar/stdio/mod.rs` | D5 传输 | 1568 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
 | `launcher_update.rs` | D5 传输 | 477 |
 | `sidecar/stdio/process.rs` | D5 传输 | 475 |
 | `sidecar/stdio/sandbox_exemptions.rs` | D5 传输 | 473 |
-| `registry/connections.rs` | D5 传输 | 442 |
+| `registry/connections.rs` | D5 传输 | 454 |
 | `sidecar/command.rs` | D5 传输 | 336 |
 | `launcher_update/windows_cache.rs` | D5 传输 | 152 |
 | `platform.rs` | D5 传输 | 21 |
@@ -311,15 +315,14 @@ pub struct HostServices {
 | `execution.rs` | D6 调用 | 42 |
 | `bridge.rs` | D7 宿主集成 | 911 |
 | `core_bridge.rs` | D7 宿主集成 | 620 |
-| `tool_icons.rs` | D7 宿主集成 | 510 |
+| `tool_icons.rs` | D7 宿主集成 | 487 |
 | `tool_titles.rs` | D7 宿主集成 | 230 |
 | `builtin_tables.rs` | D7 宿主集成 | 211 |
-| `host_policy.rs` | D8 策略 | 389 |
-| `plugin_dev/mod.rs` | D9 创作 | 486 |
+| `host_policy.rs` | D8 策略 | 225 |
+| `plugin_dev/mod.rs` | D9 创作 | 480 |
 | `plugin_dev/trust.rs` | D9 创作 | 195 |
 | `lib.rs` | 根 | 109 |
 | `test_support.rs` | 测试支撑 | 406 |
-| `seams.rs` | 待删除 | 151 |
 | `registry/tests.rs` | 测试 | 1135 |
 | `plugin_dev/tests.rs` | 测试 | 616 |
 | `sidecar/stdio/tests.rs` | 测试 | 263 |
@@ -339,12 +342,12 @@ PREFIX=[('registry/migrations','D3'),('registry/legacy','D3'),('registry/connect
  ('interpreter_env','D5'),('platform','D5'),('launcher_update','D5'),
  ('invocation','D6'),('execution','D6'),('ts_plugin','D6'),('ts_tools','D6'),
  ('bridge','D7'),('core_bridge','D7'),('tool_icons','D7'),('tool_titles','D7'),('builtin_tables','D7'),
- ('host_policy','D8'),('lib','D0'),('test_support','D0'),('seams','D0')]
+ ('host_policy','D8'),('lib','D0'),('test_support','D0')]
 MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','signature':'D2','trust':'D2','verification':'D2',
  'artifacts':'D3','registry':'D4','events':'D4','sidecar':'D5','interpreter_env':'D5','platform':'D5',
  'launcher_update':'D5','invocation':'D6','execution':'D6','ts_plugin':'D6','ts_tools':'D6','bridge':'D7',
  'core_bridge':'D7','tool_icons':'D7','tool_titles':'D7','builtin_tables':'D7','host_policy':'D8',
- 'plugin_dev':'D9','seams':'D0'}
+ 'plugin_dev':'D9'}
 def dom(key):
     for p,d in PREFIX:
         base=p.rstrip('/')
