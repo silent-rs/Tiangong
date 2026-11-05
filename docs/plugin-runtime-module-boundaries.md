@@ -17,7 +17,8 @@
 | 5 | 一次性进程形态与官方签名要求入策略；市场展示数据外移宿主 | 去掉 `"command"` 字面量分支与 `DEFAULT_PLUGIN_IDS`/分类表 |
 
 | 6 | 传输层注入 `RuntimeEnv` + `SidecarEvents`（D5 的输入接缝） | 消除 D5→D4：沙箱开关/退出标志/授权路径与三类通知改由状态机注入 |
-度量：跨域引用边 34 → 31，违规边 15 → 12；`crate::plugin_dev` 在传输层引用清零，
+| 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
+度量：跨域引用边 34 → 29，违规边 15 → 10；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -26,7 +27,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 本文档给出拆分的安全前提：
 
-1. **域划分**：40 个生产源文件各自归属唯一职责域（38 个归入九域，2 个是 crate 根 / 测试支撑），每个域明确「拥有什么 / 不拥有什么 / 对外只有哪些入口」；
+1. **域划分**：41 个生产源文件各自归属唯一职责域（39 个归入九域，2 个是 crate 根 / 测试支撑），每个域明确「拥有什么 / 不拥有什么 / 对外只有哪些入口」；
 2. **依赖矩阵**：域间只允许单向依赖；当前违规逐条列出，可复核；
 3. **拆分顺序**：按依赖拓扑排出 7 步，每步有前置接缝、验收标准与回滚方式。
 
@@ -39,18 +40,18 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | 域 | 名称 | 文件数 | 行数 | 一句话职责 |
 |---|---|---|---|---|
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
-| D2 | 信任 | 3 | 1819 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
+| D2 | 信任 | 4 | 1927 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
 | D3 | 分发与安装 | 3 | 2685 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
 | D4 | 状态机 | 7 | 3507 | 维护「装了哪些、各自什么状态」并广播变化 |
-| D5 | 进程与传输 | 10 | 7363 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
+| D5 | 进程与传输 | 10 | 7263 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
 | D6 | 调用 | 4 | 1788 | 一次插件调用的身份、上下文、取消、进度与结果 |
 | D7 | 宿主集成 | 5 | 2459 | 把插件能力接进 Core 与前端 |
 | D8 | 策略 | 1 | 225 | 描述「某插件被授予什么」 |
-| D9 | 创作工作流 | 2 | 675 | 把开发目录的项目变成已安装插件 |
-| — | crate 根与测试支撑 | 2 | 515 | `lib.rs` / `test_support` |
-| — | 测试文件 | 3 | 2014 | 不参与域划分 |
+| D9 | 创作工作流 | 2 | 674 | 把开发目录的项目变成已安装插件 |
+| — | crate 根与测试支撑 | 2 | 516 | `lib.rs` / `test_support` |
+| — | 测试文件 | 2 | 516 | 不参与域划分 |
 
-合计 25613 行，与 `wc -l` 全量一致（可复核）。
+合计 25621 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -64,11 +65,13 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 - **拥有**：发布者 → 公钥路由、签名清单验证、内容清单全树校验、本机用户密钥、第三方公钥登记、安装期验证记录（capabilities 快照）。
 - **不拥有**：何时触发重验（编排）、安装事务、进程启动。
-- **对外 seam**：`verify_signed_release(dir, &manifest)`、`sign_with_user_key`、`resolve_publisher_pubkey`、`save_verification / load_valid_capabilities / remove_verification`。
+- **对外 seam**：`verify_signed_release(dir, &manifest)`、`content_manifest::verify`、`sign_with_user_key`、`resolve_publisher_pubkey`、`save_verification / load_valid_capabilities / remove_verification`。
+- **已修复**：内容清单全树校验从传输层（`SidecarConfig::verify_integrity_manifest`）迁到
+  `content_manifest`（D2），常量直接取 `tiangong-plugin-update`；验签与 sidecar 启动前复核
+  共用同一实现，D2→D5 清零。
 - **当前越界**：
   - `verification.rs` 的 10 处引用指向 D4：`prewarm_plugin_sidecar`、`ephemeral_sidecar_connection`、`discover_installed_plugins`、`refresh_verified_sidecar`、`set_runtime_error` 等——**记录读写与重验编排混在同一文件**；
-  - `signature.rs` 3 处指向 D5：`crate::sidecar::CONTENT_MANIFEST_FILE`（该常量本身来自 `tiangong-plugin-update`）。
-- **修法**：拆 `trust/record.rs`（纯记录）+ `registry/reverify.rs`（编排归 D4）；常量直接取 `tiangong_plugin_update`。
+- **修法**：拆 `trust/record.rs`（纯记录）+ `registry/reverify.rs`（编排归 D4）。
 
 ### D3 分发与安装（Distribution & Install）
 
@@ -132,7 +135,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 - **拥有**：开发目录项目元数据（`.plugin-dev.json`）、项目 list/status、收件箱（`.inbox`）导入、受信构建指纹登记。
 - **目标**：迁出 runtime 到宿主（`src-tauri/src/plugin_authoring/`），经 D3 安装入口 + D2 签名完成，bridge 命名空间由宿主注册。
-- **当前越界**：直接调 `registry::{import_staged_plugin, find_installed_plugin, plugin_install_directory}`（D3/D4）、`artifacts::stage_local_plugin`（D3）、`sidecar` 完整性校验（D5）。
+- **当前越界**：直接调 `registry::{import_staged_plugin, find_installed_plugin, plugin_install_directory}`（D3/D4）、`artifacts::stage_local_plugin`（D3）；完整性校验已改走 D2 的 `content_manifest`（D9→D5 清零）。
 
 ### 待迁出的横切项
 
@@ -140,7 +143,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 |---|---|---|
 | `interpreter_env.rs`（1451 行） | 通用 node/python 发现埋在 D5 | 独立 crate（`tiangong-interpreter`），D5 与宿主共用 |
 | `launcher_update.rs`（629 行） | 自安装/自更新 + 能力探测混在一起 | 能力探测留 D5；安装更新迁宿主基础设施 |
-| `seams.rs`（151 行） | 零消费者（WASM 淘汰后遗留） | 删除 |
+| `seams.rs`（151 行） | 零消费者（WASM 淘汰后遗留） | 已删除 |
 
 ## 3. 域依赖矩阵
 
@@ -160,12 +163,11 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（12 条边 / 65 处引用，本轮已消 3 条）
+### 当前违规（10 条边 / 58 处引用，本轮已消 5 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
 | D2→D4 | 10 | `verification.rs` | 记录读写 + 重验编排混在一起 | 拆 record / reverify |
-| D2→D5 | 3 | `signature.rs` | 引用传输层常量 | 常量取 update crate |
 | D3→D4 | 8 | `artifacts.rs:780,793`、`migrations.rs:411,421` | 安装入口 re-export（假阳性）+ `assemble_*` 真实越界 | `assemble_*` 归 D4 内部 |
 | D3→D5 | 1 | `migrations.rs` | 卸载时撤销 launcher grants | 改发事件 |
 | D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
@@ -175,7 +177,6 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D6→D7 | 12 | `invocation.rs`、`ts_*.rs` | 调用层直接发 bridge 事件 | 注入 `RuntimeFeedback` |
 | D7→D9 | 1 | `bridge.rs:233` | 硬编码 plugin-dev 命名空间 | 命名空间可注册 |
 | D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 走 D3/D4 公开入口 |
-| D9→D5 | 4 | `plugin_dev/*` | 完整性校验直接调传输层 | 走 D2 的校验入口 |
 
 ## 4. 拆分前必须先立的接缝
 
@@ -262,8 +263,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 31 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 12 | 0 |
+| 跨域引用边 | 34 | 29 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 10 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -286,9 +287,10 @@ pub struct HostServices {
 | `manifest.rs` | D1 契约 | 1747 |
 | `slots.rs` | D1 契约 | 478 |
 | `launch_policy.rs` | D1 契约 | 338 |
-| `signature.rs` | D2 信任 | 765 |
+| `signature.rs` | D2 信任 | 762 |
 | `trust.rs` | D2 信任 | 497 |
 | `verification.rs` | D2 信任 | 557 |
+| `content_manifest.rs` | D2 信任 | 111 |
 | `artifacts.rs` | D3 安装 | 1509 |
 | `registry/migrations.rs` | D3 安装 | 1076 |
 | `registry/legacy.rs` | D3 安装 | 100 |
@@ -299,8 +301,8 @@ pub struct HostServices {
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
 | `events.rs` | D4 状态机 | 101 |
-| `sidecar.rs` | D5 传输 | 1956 |
-| `sidecar/stdio/mod.rs` | D5 传输 | 1568 |
+| `sidecar.rs` | D5 传输 | 1859 |
+| `sidecar/stdio/mod.rs` | D5 传输 | 1565 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
 | `launcher_update.rs` | D5 传输 | 477 |
 | `sidecar/stdio/process.rs` | D5 传输 | 475 |
@@ -320,8 +322,8 @@ pub struct HostServices {
 | `builtin_tables.rs` | D7 宿主集成 | 211 |
 | `host_policy.rs` | D8 策略 | 225 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
-| `plugin_dev/trust.rs` | D9 创作 | 195 |
-| `lib.rs` | 根 | 109 |
+| `plugin_dev/trust.rs` | D9 创作 | 194 |
+| `lib.rs` | 根 | 110 |
 | `test_support.rs` | 测试支撑 | 406 |
 | `registry/tests.rs` | 测试 | 1135 |
 | `plugin_dev/tests.rs` | 测试 | 616 |

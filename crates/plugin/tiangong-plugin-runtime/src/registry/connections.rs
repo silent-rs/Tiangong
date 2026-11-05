@@ -435,7 +435,7 @@ fn verify_local_trust(directory: &Path) -> Result<bool> {
             directory.display()
         );
     }
-    crate::sidecar::SidecarConfig::verify_integrity_manifest(&manifest_path, directory)?;
+    crate::content_manifest::verify(&manifest_path, directory)?;
     Ok(true)
 }
 

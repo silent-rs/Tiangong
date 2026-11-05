@@ -275,10 +275,10 @@ fn sign_staged_with_user_key(
     manifest: &PluginManifest,
 ) -> Result<()> {
     let manifest_path = staged_path.join(crate::manifest::MANIFEST_FILE);
-    let content_manifest_path = staged_path.join(crate::sidecar::CONTENT_MANIFEST_FILE);
+    let content_manifest_path = staged_path.join(crate::content_manifest::CONTENT_MANIFEST_FILE);
     // 签名前先双向校验内容清单（与旧本地信任落锚同款前置），不完整清单
     // 在安装时即拒绝。
-    crate::sidecar::SidecarConfig::verify_integrity_manifest(&content_manifest_path, staged_path)?;
+    crate::content_manifest::verify(&content_manifest_path, staged_path)?;
     let artifact = |path: &Path| -> Result<crate::signature::SignedArtifact> {
         Ok(crate::signature::SignedArtifact {
             path: path

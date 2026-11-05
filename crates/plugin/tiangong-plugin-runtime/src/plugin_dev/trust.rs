@@ -58,16 +58,15 @@ fn trusted_builds() -> &'static std::sync::Mutex<TrustedBuildTable> {
 /// 计算构建产物内容清单指纹（`<目录>/content-manifest.json` 整体 sha256）。
 /// 宿主观察者登记受信构建与 install 核验暂存副本使用同一算法。
 pub fn content_manifest_fingerprint(directory: &Path) -> Result<String> {
-    let raw = std::fs::read(directory.join(crate::sidecar::CONTENT_MANIFEST_FILE)).with_context(
-        || {
+    let raw = std::fs::read(directory.join(crate::content_manifest::CONTENT_MANIFEST_FILE))
+        .with_context(|| {
             format!(
                 "读取构建产物内容清单失败: {}",
                 directory
-                    .join(crate::sidecar::CONTENT_MANIFEST_FILE)
+                    .join(crate::content_manifest::CONTENT_MANIFEST_FILE)
                     .display()
             )
-        },
-    )?;
+        })?;
     use sha2::Digest;
     Ok(hex::encode(sha2::Sha256::digest(&raw)))
 }

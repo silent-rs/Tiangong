@@ -489,10 +489,7 @@ impl StdioSidecarConnection {
                             .parent()
                             .ok_or_else(|| anyhow!("内容清单缺少父目录")),
                     )?;
-                    preparation(SidecarConfig::verify_integrity_manifest(
-                        manifest_path,
-                        root,
-                    ))?;
+                    preparation(crate::content_manifest::verify(manifest_path, root))?;
                 }
                 let program =
                     preparation(crate::interpreter_env::resolve_interpreter(launch.kind))?;

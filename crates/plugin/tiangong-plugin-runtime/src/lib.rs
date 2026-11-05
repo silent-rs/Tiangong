@@ -15,6 +15,7 @@
 pub mod artifacts;
 pub mod bridge;
 pub mod builtin_tables;
+pub mod content_manifest;
 pub mod core_bridge;
 pub mod events;
 pub mod interpreter_env;
