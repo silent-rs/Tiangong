@@ -23,7 +23,8 @@
 | 11 | `SidecarAccess` 承载取连接与旁路调用 | 消除 D6→D4（调用层不再自己解析安装目录/连接形态） |
 | 12 | 插件集变更广播改为注入出口；展示投影域归属修正 | 消除 D4→D7（状态机不再直连桥接） |
 | 13 | 生命周期事件收尾：停用/卸载/换代后由事件发布方释放运行时资源 | 消除 D3→D6、D3→D7（安装事务不再摆布调用层与桥接层） |
-度量：跨域引用边 34 → 22（引用次数 195 → 177），违规边 15 → 3（违规引用 69 → 13）；
+| 14 | 安装编排归位：`refresh_verified_sidecar` 归 `loader`、`install_plugin_from_repository` 归安装事务 | 消除 D3→D4 的 `assemble_*` 与安装入口调用（只剩事件发布） |
+度量：跨域引用边 34 → 22（引用次数 195 → 173），违规边 15 → 2（违规引用 69 → 5）；
 `crate::plugin_dev` 在传输层引用清零，runtime 生产代码中的插件 ID 字面量清零
 （`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。附录 A/B 已补齐 `tool_key`、
 `storage_layout`、`content_manifest` 三处模块的归属，并跳过 `#[cfg(test)] mod` 块；
@@ -93,10 +94,12 @@
   `events::release_plugin_resources` 取消（D4→D6，矩阵允许），桥接订阅由 `bridge` 注册的
   内部订阅者清理（D7→D4）——原先 5 处 `ts_tools::cancel_plugin_calls` 与 3 处
   `bridge::clear_plugin_subscriptions` 已从本域移除。
-- **当前越界**：`artifacts.rs` 仍调状态机的安装入口（`install_staged_plugin`、`PluginStatus`）；
-  `migrations.rs` 的 `assemble_*` 是状态机内部实现；Windows 卸载前撤销 launcher 授权
-  （`launcher_update::revoke_persistent_grants`）需要 `storage_root` 上下文，事件不携带，
-  暂留本域（`#[cfg(windows)]`，macOS 侧无法验证，改到事件路径前先补 Windows 验证）。
+- **已修复**：`refresh_verified_sidecar`（重验后刷新适配器与段落，调 `assemble_*`）归 `loader`；
+  `install_plugin_from_repository`（下载 + 安装编排）从 `artifacts` 移入本域事务文件，
+  `artifacts` 只负责目录检索、下载与 staging。
+- **当前越界**：Windows 卸载前撤销 launcher 授权（`launcher_update::revoke_persistent_grants`）
+  需要 `storage_root` 上下文，事件不携带，暂留本域（`#[cfg(windows)]`，macOS 侧无法验证，
+  改到事件路径前先补 Windows 验证）。
 
 ### D4 状态机（Registry / Lifecycle）
 
@@ -180,7 +183,7 @@
 |---|---|---|---|---|---|---|---|---|---|
 | D1 契约 | — | | | | | | | | |
 | D2 信任 | ✓ | — | | | | | | | |
-| D3 安装 | ✓ | ✓ | — | | | | | | |
+| D3 安装 | ✓ | ✓ | — | ✓\*\* | | | | | |
 | D4 状态机 | ✓ | ✓ | ✓\* | — | ✓ | ✓ | | | |
 | D5 传输 | ✓ | ✓ | | | — | | | ✓ | |
 | D6 调用 | ✓ | | | | ✓ | — | | | |
@@ -189,12 +192,12 @@
 | D9 创作 | ✓ | ✓ | ✓ | | | | | | — |
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
+\*\* D3→D4 仅限「发布生命周期事件」（`crate::events`，接缝 7）：安装事务广播事实，不读状态机状态。
 
-### 当前违规（3 条边 / 13 处引用，本轮已消 12 条）
+### 当前违规（2 条边 / 5 处引用，本轮已消 13 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
-| D3→D4 | 8 | `artifacts.rs`、`migrations.rs` 的 `assemble_*` | 安装入口 re-export（假阳性）+ 状态机内部实现 | `assemble_*` 归 D4 内部；安装入口随拆 crate 变 re-export |
 | D3→D5 | 1 | `migrations.rs`（Windows 撤销 launcher grants） | 需要 `storage_root` 上下文，事件不携带 | 先补 Windows 验证，再考虑把授权路径并入 `PluginChangeEvent` |
 | D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 随创作域迁出宿主一并解决 |
 
@@ -285,9 +288,9 @@ pub struct HostServices {
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
 | 跨域引用边 | 34 | 22 | ≤ 矩阵允许的 20 条 |
-| 跨域引用次数 | 195 | 177 | 随边数收敛 |
-| 违规边 | 15 | 3 | 0 |
-| 违规引用次数 | 69 | 13 | 0 |
+| 跨域引用次数 | 195 | 173 | 随边数收敛 |
+| 违规边 | 15 | 2 | 0 |
+| 违规引用次数 | 69 | 5 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -317,16 +320,16 @@ pub struct HostServices {
 | `verification.rs` | D2 信任 | 402 |
 | `content_manifest.rs` | D2 信任 | 111 |
 | `registry/reverify.rs` | D4 状态机 | 166 |
-| `artifacts.rs` | D3 安装 | 1580 |
-| `registry/migrations.rs` | D3 安装 | 1076 |
+| `artifacts.rs` | D3 安装 | 1543 |
+| `registry/migrations.rs` | D3 安装 | 1039 |
 | `registry/legacy.rs` | D3 安装 | 100 |
 | `registry/mod.rs` | D4 状态机 | 593 |
-| `registry/loader.rs` | D4 状态机 | 1443 |
+| `registry/loader.rs` | D4 状态机 | 1510 |
 | `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
-| `events.rs` | D4 状态机 | 120 |
+| `events.rs` | D4 状态机 | 164 |
 | `sidecar.rs` | D5 传输 | 1888 |
 | `sidecar/stdio/mod.rs` | D5 传输 | 1565 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
@@ -342,12 +345,12 @@ pub struct HostServices {
 | `invocation.rs` | D6 调用 | 335 |
 | `execution.rs` | D6 调用 | 42 |
 | `runtime_feedback.rs` | D6 调用 | 34 |
-| `bridge.rs` | D7 宿主集成 | 1003 |
+| `bridge.rs` | D7 宿主集成 | 1060 |
 | `core_bridge.rs` | D7 宿主集成 | 610 |
 | `tool_icons.rs` | D4 状态机 | 487 |
 | `tool_titles.rs` | D4 状态机 | 230 |
 | `builtin_tables.rs` | D4 状态机 | 211 |
-| `host_policy.rs` | D8 策略 | 226 |
+| `host_policy.rs` | D8 策略 | 228 |
 | `host_policy/table.rs` | D8 策略 | 233 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
 | `plugin_dev/trust.rs` | D9 创作 | 194 |
@@ -361,6 +364,8 @@ pub struct HostServices {
 
 统计口径：按文件归属域；`crate::<模块>` 引用按模块主文件归域；跳过整行注释与行尾注释；
 跳过 `tests.rs`、`test_*.rs` 与 `#[cfg(test)] mod` 块（测试代码不算生产依赖）；跨域才计数。
+违规边按 §3 矩阵判定，接缝 7 允许的「安装域发布生命周期事件」（`D3->D4` 的 `events` 引用）
+不计入违规。
 
 ```bash
 cd crates/plugin/tiangong-plugin-runtime/src && python3 - <<'PY'
@@ -380,6 +385,9 @@ MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','tool_key':'D1','stor
  'interpreter_env':'D5','platform':'D5','launcher_update':'D5','invocation':'D6','execution':'D6',
  'ts_plugin':'D6','ts_tools':'D6','runtime_feedback':'D6','bridge':'D7','core_bridge':'D7',
  'tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4','host_policy':'D8','plugin_dev':'D9'}
+ALLOW={'D1':set(),'D2':{'D1'},'D3':{'D1','D2'},'D4':{'D1','D2','D3','D5','D6'},
+ 'D5':{'D1','D2','D8'},'D6':{'D1','D5'},'D7':{'D1','D4','D6'},'D8':{'D1'},'D9':{'D1','D2','D3'}}
+SEAM={('D3','D4'):{'events'}}
 def dom(key):
     for p,d in PREFIX:
         base=p.rstrip('/')
@@ -402,7 +410,8 @@ def strip_test_modules(text):
             i+=1; continue
         out.append(lines[i]); i+=1
     return '\n'.join(out)
-edges=collections.Counter(); detail=collections.defaultdict(set)
+edges=collections.Counter(); mods=collections.defaultdict(collections.Counter)
+detail=collections.defaultdict(set)
 for root,_,files in os.walk('.'):
     for f in files:
         if not f.endswith('.rs') or f=='tests.rs' or f.startswith('test_'): continue
@@ -417,9 +426,16 @@ for root,_,files in os.walk('.'):
         for mod in re.findall(r'crate::([a-z_]+)',"\n".join(lines)):
             dst=MOD2DOM.get(mod)
             if dst and dst!=src and dst!='D0':
-                edges[(src,dst)]+=1; detail[(src,dst)].add(p)
+                edges[(src,dst)]+=1; mods[(src,dst)][mod]+=1; detail[(src,dst)].add(p)
 print("跨域边:",len(edges),"引用:",sum(edges.values()))
 for (s,d),n in sorted(edges.items()):
     print(f"{s}->{d} {n:3d}  {sorted(detail[(s,d)])}")
+viol=[]
+for (s,d),n in edges.items():
+    if d in ALLOW[s]: continue
+    left=n-sum(mods[(s,d)][m] for m in SEAM.get((s,d),()))
+    if left>0: viol.append((s,d,left))
+print("违规边:",len(viol),"引用:",sum(v[2] for v in viol))
+for s,d,n in sorted(viol): print(f"  {s}->{d} {n}")
 PY
 ```

@@ -767,43 +767,6 @@ impl PluginRepository {
     }
 }
 
-/// 从 OSS 仓库下载并安装插件（宿主命令层的完整下沉实现）。
-///
-/// 流程：目录检索 → 下载暂存（progress 可选回调）→ 阻塞线程安装事务。
-/// 安装成功由 [`crate::registry`] 的迁移函数广播插件变化事件（含指纹），
-/// 宿主订阅者自行响应；本函数不承担任何通知扇出。计时日志与原
-/// `download_and_install_plugin` 对齐，便于排障对照。
-pub async fn install_plugin_from_repository(
-    storage_root: &Path,
-    plugin_id: &str,
-    progress: Option<ProgressFn>,
-) -> Result<crate::registry::PluginStatus> {
-    let total_started = std::time::Instant::now();
-    let repository = PluginRepository::new()?;
-    let download_started = std::time::Instant::now();
-    let staged = repository
-        .download(storage_root, plugin_id, progress)
-        .await
-        .with_context(|| format!("下载插件 {plugin_id} 失败"))?;
-    let download_ms = download_started.elapsed().as_millis() as u64;
-
-    let install_started = std::time::Instant::now();
-    let (staged_root, staged_path) = (storage_root.to_path_buf(), staged.path.clone());
-    let status = tokio::task::spawn_blocking(move || {
-        crate::registry::install_staged_plugin(&staged_root, &staged_path)
-    })
-    .await
-    .with_context(|| format!("安装插件 {plugin_id} 任务失败"))??;
-    tracing::info!(
-        plugin_id,
-        download_ms,
-        install_ms = install_started.elapsed().as_millis() as u64,
-        total_ms = total_started.elapsed().as_millis() as u64,
-        "插件下载安装完成"
-    );
-    Ok(status)
-}
-
 fn create_staged_plugin(storage_root: &Path) -> Result<StagedPlugin> {
     let root = storage_root.join("plugins").join(TRANSACTIONS_DIR);
     ensure_not_symlink(&root)?;

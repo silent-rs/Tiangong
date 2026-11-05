@@ -466,7 +466,7 @@ pub(crate) async fn dispatch(ctx: &WebConfigContext, command: &str, args: Value)
         "install_plugin" | "upgrade_plugin" => {
             let PluginIdArgs { plugin_id } = parse(args)?;
             to_json(
-                tiangong_plugin_runtime::artifacts::install_plugin_from_repository(
+                tiangong_plugin_runtime::registry::install_plugin_from_repository(
                     &dir, &plugin_id, None,
                 )
                 .await?,

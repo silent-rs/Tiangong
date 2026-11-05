@@ -4167,7 +4167,7 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
 
 // 插件装卸/启停成功后的宿主响应（前端刷新、上下文交接打标）已改为
 // runtime 插件变化事件的订阅者（见 main.rs setup 注册）；命令层不再扇出。
-// 下载/安装编排同样下沉 runtime（artifacts::install_plugin_from_repository），
+// 下载/安装编排同样下沉 runtime（registry::install_plugin_from_repository），
 // 宿主仅注入进度回调转发到前端事件。
 
 /// 下载并安装：runtime 编排 + 宿主进度事件转发。
@@ -4186,7 +4186,7 @@ pub(crate) async fn download_and_install_plugin(
             );
         }
     });
-    tiangong_plugin_runtime::artifacts::install_plugin_from_repository(
+    tiangong_plugin_runtime::registry::install_plugin_from_repository(
         &storage_root,
         &plugin_id,
         Some(progress),

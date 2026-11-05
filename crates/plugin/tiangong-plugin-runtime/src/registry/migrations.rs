@@ -7,6 +7,8 @@ use super::connections::{
 };
 use super::*;
 
+use crate::artifacts::{PluginRepository, ProgressFn};
+
 pub fn install_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<PluginStatus> {
     install_staged_plugin_inner(storage_root, staged_path, false)
 }
@@ -368,73 +370,6 @@ fn set_plugin_enabled_inner(
     refreshed.enabled = enabled;
     list_plugin_status_without_preload(&refreshed.manifest)
         .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"))
-}
-
-/// 后台补验证/重新验证成功后，同步刷新注册表与存活 TS 适配器的验证能力
-///（已构建的 Core 实例立即按新能力路由，无需等待下一次 Core 构建）。
-pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String>) {
-    let (manifest, enabled, directory, ts_instances) = {
-        let Ok(mut plugins) = loaded_plugins().lock() else {
-            return;
-        };
-        let Some(loaded) = plugins.get_mut(plugin_id) else {
-            return;
-        };
-        loaded.verified_sidecar = Some(capabilities.clone());
-        // 运行检查重新成功：sidecar 已可真实握手，清除此前登记的启动
-        // 异常（load_error 属安装前提类，不受影响）。
-        loaded.runtime_error = None;
-        (
-            loaded.manifest.clone(),
-            loaded.enabled,
-            loaded.directory.clone(),
-            loaded
-                .ts_instances
-                .iter()
-                .filter_map(|weak| weak.upgrade())
-                .collect::<Vec<_>>(),
-        )
-    };
-    // 能力变化可能改变段落门控（sidecar 条目）：按新能力在锁外重新组装
-    // （组装含阻塞 I/O，不得持锁），记录与适配器共用同一份结果。
-    let storage_root = directory
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf);
-    let sections = storage_root
-        .as_deref()
-        .and_then(|root| {
-            crate::registry::assemble_prompt_sections(
-                root,
-                &directory,
-                &manifest,
-                Some(capabilities.as_slice()),
-            )
-        })
-        .unwrap_or_default();
-    // 工具规格快照同样按新能力重取（声明 sidecar 工具条目的插件）。
-    let tool_specs = storage_root.as_deref().and_then(|root| {
-        crate::registry::assemble_dynamic_tool_specs(root, &manifest, Some(capabilities.as_slice()))
-    });
-    for adapter in &ts_instances {
-        adapter.reconfigure(
-            &manifest,
-            enabled,
-            Some(capabilities.clone()),
-            sections.clone(),
-            tool_specs.clone().unwrap_or_default(),
-        );
-    }
-    if let Ok(mut plugins) = loaded_plugins().lock()
-        && let Some(loaded) = plugins.get_mut(plugin_id)
-    {
-        loaded.prompt_sections = if manifest.prompt.is_some() {
-            Some(sections)
-        } else {
-            None
-        };
-        loaded.dynamic_tool_specs = tool_specs;
-    }
 }
 
 /// 重新验证插件 sidecar 并保存记录（后台补验证失败后的重试入口）。
@@ -1065,4 +1000,40 @@ pub(super) fn rollback_directory(directory: &Path, plugin_id: &str) -> PathBuf {
         .unwrap_or(directory)
         .join(ROLLBACK_DIR)
         .join(plugin_id)
+}
+
+/// 从 OSS 仓库下载并安装插件（宿主命令层的完整下沉实现）。
+///
+/// 流程：目录检索 → 下载暂存（progress 可选回调）→ 阻塞线程安装事务。
+/// 安装成功由 [`install_staged_plugin`] 广播插件变化事件（含指纹），
+/// 宿主订阅者自行响应；本函数不承担任何通知扇出。计时日志与原
+/// `download_and_install_plugin` 对齐，便于排障对照。
+pub async fn install_plugin_from_repository(
+    storage_root: &Path,
+    plugin_id: &str,
+    progress: Option<ProgressFn>,
+) -> Result<PluginStatus> {
+    let total_started = std::time::Instant::now();
+    let repository = PluginRepository::new()?;
+    let download_started = std::time::Instant::now();
+    let staged = repository
+        .download(storage_root, plugin_id, progress)
+        .await
+        .with_context(|| format!("下载插件 {plugin_id} 失败"))?;
+    let download_ms = download_started.elapsed().as_millis() as u64;
+
+    let install_started = std::time::Instant::now();
+    let (staged_root, staged_path) = (storage_root.to_path_buf(), staged.path().to_path_buf());
+    let status =
+        tokio::task::spawn_blocking(move || install_staged_plugin(&staged_root, &staged_path))
+            .await
+            .with_context(|| format!("安装插件 {plugin_id} 任务失败"))??;
+    tracing::info!(
+        plugin_id,
+        download_ms,
+        install_ms = install_started.elapsed().as_millis() as u64,
+        total_ms = total_started.elapsed().as_millis() as u64,
+        "插件下载安装完成"
+    );
+    Ok(status)
 }
