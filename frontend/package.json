@@ -1,7 +1,7 @@
 {
   "name": "tiangong-frontend",
   "private": true,
-  "version": "0.17.13",
+  "version": "0.17.14",
   "type": "module",
   "scripts": {
     "dev": "vite --port 15173",
