@@ -53,6 +53,23 @@ fn listener_slot() -> &'static Mutex<Option<PluginsChangedListener>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
+/// 插件集变更的页面广播出口。
+///
+/// 主前端的宿主事件到达不了插件沙箱，订阅了 `plugins.changed` 的插件页面
+/// 需要一条单独的推送通道；具体怎么推（桥接事件、测试记录器）由注入方决定，
+/// 状态机只负责在迁移成功后调用。
+pub type PluginChangeBroadcaster = Arc<dyn Fn() + Send + Sync>;
+fn broadcaster_slot() -> &'static OnceLock<PluginChangeBroadcaster> {
+    static SLOT: OnceLock<PluginChangeBroadcaster> = OnceLock::new();
+    &SLOT
+}
+/// 注册页面广播出口（宿主启动时调用一次，重复调用以首次为准）。
+pub fn set_plugin_change_broadcaster(broadcaster: PluginChangeBroadcaster) {
+    let _ = broadcaster_slot().set(broadcaster);
+}
+fn plugin_change_broadcaster() -> Option<PluginChangeBroadcaster> {
+    broadcaster_slot().get().cloned()
+}
 /// 注册插件变化监听者（重复调用覆盖旧值；传 `None` 注销）。
 ///
 /// 未注册时事件静默丢弃——server/cli 等无宿主 UI 的入口不注册即可。
@@ -81,7 +98,9 @@ pub(crate) fn announce_plugin_change(kind: PluginChangeKind, plugin_id: &str) {
     if let Some(listener) = listener {
         listener(&event);
     }
-    crate::bridge::emit_plugins_changed();
+    if let Some(broadcast) = plugin_change_broadcaster() {
+        broadcast();
+    }
 }
 
 /// 迁移结果包装：成功时广播事件，失败原样透传。

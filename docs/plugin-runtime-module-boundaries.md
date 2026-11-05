@@ -22,7 +22,8 @@
 | 9 | 桥接命名空间可注册（宿主注册 `plugin-dev.`） | 消除 D7→D9（runtime 不含创作链路由） |
 | 10 | 调用层注入 `RuntimeFeedback` + `SidecarAccess`，结果抬头归调用域 | 消除 D6→D7（调用层不再直发桥接事件） |
 | 11 | `SidecarAccess` 承载取连接与旁路调用 | 消除 D6→D4（调用层不再自己解析安装目录/连接形态） |
-度量：跨域引用边 34 → 25，违规边 15 → 6；`crate::plugin_dev` 在传输层引用清零，
+| 12 | 插件集变更广播改为注入出口；展示投影域归属修正 | 消除 D4→D7（状态机不再直连桥接） |
+度量：跨域引用边 34 → 24，违规边 15 → 5；`crate::plugin_dev` 在传输层引用清零，
 runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。
 
 ## 1. 目的与判定标准
@@ -46,16 +47,16 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
 | D2 | 信任 | 4 | 1772 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
 | D3 | 分发与安装 | 3 | 2756 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
-| D4 | 状态机 | 8 | 3728 | 维护「装了哪些、各自什么状态」并广播变化 |
+| D4 | 状态机 | 11 | 4675 | 维护「装了哪些、各自什么状态」并广播变化 |
 | D5 | 进程与传输 | 10 | 7292 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
 | D6 | 调用 | 5 | 1833 | 一次插件调用的身份、上下文、取消、进度与结果 |
-| D7 | 宿主集成 | 5 | 2538 | 把插件能力接进 Core 与前端 |
+| D7 | 宿主集成 | 2 | 1613 | 把插件能力接进 Core 与前端 |
 | D8 | 策略 | 1 | 225 | 描述「某插件被授予什么」 |
 | D9 | 创作工作流 | 2 | 674 | 把开发目录的项目变成已安装插件 |
 | — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2024 | 不参与域划分 |
 
-合计 25923 行，与 `wc -l` 全量一致（可复核）。
+合计 25945 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -92,13 +93,14 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 ### D4 状态机（Registry / Lifecycle）
 
-- **拥有**：`LoadedPlugin` 记录、加载/卸载/启用状态、全局操作锁、启动预加载、常驻保活、启用指纹与对话内清单、manifest 级视图查询、变化事件发布。
+- **拥有**：`LoadedPlugin` 记录、加载/卸载/启用状态、全局操作锁、启动预加载、常驻保活、启用指纹与对话内清单、manifest 级视图查询、变化事件发布、**插件目录的展示投影**（`views` 与 `tool_icons` / `tool_titles` / `builtin_tables`——图标与标题是清单声明加内置兜底的投影，不是宿主集成）。
 - **不拥有**：调用执行（D6）、连接与进程细节（D5）、Core 适配（D7）、安装事务（D3）、server 生命周期。
 - **对外 seam**：`list_plugins`、`plugin_manifest(id)`、`find_installed_plugin`、`enabled_plugin_fingerprint`、`PluginChangeEvent`。
+- **已修复**：`events.rs` 的页面广播改为注入出口（`set_plugin_change_broadcaster`，桥接层在
+  `install_runtime_feedback` 时注册）；`views.rs` 用到的展示投影归本域（域归属修正，非代码搬迁）。
 - **当前越界**：
   - `registry/mod.rs:156` 持有 `SERVER_ENDPOINT` 并在变化时重启所有 sidecar——server 生命周期状态寄生在状态机里；
-  - `loader.rs` 混入 sidecar 调用、mention 来源、Core 适配器创建（见 D6/D7）；
-  - `events.rs` 直接调 `bridge::emit_plugins_changed`（D7）；`views.rs` 直接构建展示表（D7）。
+  - `loader.rs` 混入 sidecar 调用、mention 来源、Core 适配器创建（见 D6/D7）。
 
 ### D5 进程与传输（Process & Transport）
 
@@ -128,13 +130,12 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 ### D7 宿主集成（Host Integration）
 
-- **拥有**：bridge 命名空间白名单与权限、原生服务路由、事件订阅表、Core 适配器聚合（`RuntimeCorePlugin`）、展示表构建。
+- **拥有**：bridge 命名空间白名单与权限、原生服务路由、事件订阅表、Core 适配器聚合（`RuntimeCorePlugin`）。
 - **不拥有**：业务实现（宿主注入）、插件状态（D4）。
 - **已修复**：命名空间表支持宿主注册——`register_bridge_namespace(BridgeNamespace, handler)`
   由桌面 / CLI / Server 在启动时注册 `plugin-dev.`，`bridge.rs` 不再引用 D9；权限与错误
   信息同样来自注册项，未注册时按未知 method 拒绝（fail-closed）。
-- **当前越界**：`events.rs` 直发 `emit_plugins_changed`、`views.rs` 用 D7 的展示兜底表
-  （见 D4→D7）。
+- **已修复**：`events.rs` 不再直连本域，改由本域注册广播出口（D4→D7 清零）。
 
 ### D8 策略（Host Policy）
 
@@ -177,7 +178,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 
-### 当前违规（6 条边 / 29 处引用，本轮已消 9 条）
+### 当前违规（5 条边 / 21 处引用，本轮已消 10 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
@@ -185,7 +186,6 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | D3→D5 | 1 | `migrations.rs` | 卸载时撤销 launcher grants | 改发事件 |
 | D3→D6 | 5 | `migrations.rs` | 安装/卸载取消 TS 调用 | 改发事件 |
 | D3→D7 | 3 | `migrations.rs` | 清插件订阅 | 改发事件 |
-| D4→D7 | 8 | `events.rs`、`views.rs` | 事件直发 bridge；视图建展示表 | bridge 订阅事件；展示表外移 |
 | D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 走 D3/D4 公开入口 |
 
 ## 4. 拆分前必须先立的接缝
@@ -274,8 +274,8 @@ pub struct HostServices {
 
 | 指标 | 拆分前 | 本轮后 | 目标 |
 |---|---|---|---|
-| 跨域引用边 | 34 | 25 | ≤ 矩阵允许的 20 条 |
-| 违规边 | 15 | 6 | 0 |
+| 跨域引用边 | 34 | 24 | ≤ 矩阵允许的 20 条 |
+| 违规边 | 15 | 5 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -312,7 +312,7 @@ pub struct HostServices {
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
-| `events.rs` | D4 状态机 | 101 |
+| `events.rs` | D4 状态机 | 120 |
 | `sidecar.rs` | D5 传输 | 1888 |
 | `sidecar/stdio/mod.rs` | D5 传输 | 1565 |
 | `interpreter_env.rs` | D5 传输 | 1451 |
@@ -328,11 +328,11 @@ pub struct HostServices {
 | `invocation.rs` | D6 调用 | 335 |
 | `execution.rs` | D6 调用 | 42 |
 | `runtime_feedback.rs` | D6 调用 | 34 |
-| `bridge.rs` | D7 宿主集成 | 1000 |
+| `bridge.rs` | D7 宿主集成 | 1003 |
 | `core_bridge.rs` | D7 宿主集成 | 610 |
-| `tool_icons.rs` | D7 宿主集成 | 487 |
-| `tool_titles.rs` | D7 宿主集成 | 230 |
-| `builtin_tables.rs` | D7 宿主集成 | 211 |
+| `tool_icons.rs` | D4 状态机 | 487 |
+| `tool_titles.rs` | D4 状态机 | 230 |
+| `builtin_tables.rs` | D4 状态机 | 211 |
 | `host_policy.rs` | D8 策略 | 225 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
 | `plugin_dev/trust.rs` | D9 创作 | 194 |
@@ -356,13 +356,13 @@ PREFIX=[('registry/migrations','D3'),('registry/legacy','D3'),('registry/connect
  ('artifacts','D3'),('events','D4'),
  ('interpreter_env','D5'),('platform','D5'),('launcher_update','D5'),
  ('invocation','D6'),('execution','D6'),('ts_plugin','D6'),('ts_tools','D6'),('runtime_feedback','D6'),
- ('bridge','D7'),('core_bridge','D7'),('tool_icons','D7'),('tool_titles','D7'),('builtin_tables','D7'),
+ ('bridge','D7'),('core_bridge','D7'),('tool_icons','D4'),('tool_titles','D4'),('builtin_tables','D4'),
  ('host_policy','D8'),('lib','D0'),('test_support','D0')]
 MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','signature':'D2','trust':'D2','verification':'D2',
  'artifacts':'D3','registry':'D4','events':'D4','sidecar':'D5','interpreter_env':'D5','platform':'D5',
  'launcher_update':'D5','invocation':'D6','execution':'D6','ts_plugin':'D6','ts_tools':'D6',
  'runtime_feedback':'D6','bridge':'D7',
- 'core_bridge':'D7','tool_icons':'D7','tool_titles':'D7','builtin_tables':'D7','host_policy':'D8',
+ 'core_bridge':'D7','tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4','host_policy':'D8',
  'plugin_dev':'D9'}
 def dom(key):
     for p,d in PREFIX:

@@ -539,6 +539,9 @@ impl crate::runtime_feedback::RuntimeFeedback for BridgeRuntimeFeedback {
 /// App 实例不拉起——与未注入对应原生服务时的行为一致。
 pub fn install_runtime_feedback() {
     crate::runtime_feedback::set_runtime_feedback(Arc::new(BridgeRuntimeFeedback));
+    // 插件集变更也要推给订阅了 `plugins.changed` 的插件页面：主前端的宿主
+    // 事件到达不了插件沙箱，页面经桥接订阅后自行刷新。
+    crate::events::set_plugin_change_broadcaster(Arc::new(emit_plugins_changed));
 }
 fn native_service_call(
     handler: &OnceLock<NativeServiceHandler>,
