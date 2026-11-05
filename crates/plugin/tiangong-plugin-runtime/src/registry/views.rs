@@ -401,10 +401,10 @@ fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
                 let Some(declared) = declared else { continue };
                 // 特指键 `工具名:参数=取值` 归到工具名，不单独成为工具。
                 for key in declared.keys() {
-                    let Some((tool, _)) = crate::tool_icons::parse_tool_key(key) else {
+                    let Some((tool, _)) = crate::tool_key::parse_tool_key(key) else {
                         continue;
                     };
-                    if tool != crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
+                    if tool != crate::tool_key::PLUGIN_DEFAULT_ICON_KEY
                         && !tools.iter().any(|name| name == tool)
                     {
                         tools.push(tool.to_string());

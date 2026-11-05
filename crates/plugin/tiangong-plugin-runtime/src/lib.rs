@@ -27,7 +27,6 @@ pub mod plugin_dev;
 /// 宿主与 sidecar 共用的通信协议（定义在 `tiangong-plugin-sidecar`）。
 pub use tiangong_plugin_sidecar::protocol;
 pub mod registry;
-pub mod seams;
 pub mod sidecar;
 /// 测试支撑（非公开 API，仅供测试复用）。
 #[doc(hidden)]
@@ -39,6 +38,7 @@ pub mod host_policy;
 pub mod signature;
 pub mod slots;
 pub mod tool_icons;
+pub mod tool_key;
 pub mod tool_titles;
 pub mod trust;
 mod ts_plugin;
@@ -65,7 +65,6 @@ pub use plugin_dev::{
     note_trusted_build, set_plugin_dev_import_confirm, set_plugin_dev_trusted_installer,
     trusted_build_fingerprint,
 };
-pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
     ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,
     set_sidecar_notification_forwarder,

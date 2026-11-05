@@ -56,7 +56,7 @@ fn declared_variants(
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut variants: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for key in declared.into_iter().flat_map(BTreeMap::keys) {
-        let Some((name, Some((arg, value)))) = crate::tool_icons::parse_tool_key(key) else {
+        let Some((name, Some((arg, value)))) = crate::tool_key::parse_tool_key(key) else {
             continue;
         };
         if name != tool {

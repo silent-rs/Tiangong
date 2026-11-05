@@ -696,8 +696,8 @@ impl PluginManifest {
                 if let Some(key) = decl.tools.iter().find(|key| {
                     let key = key.trim();
                     key.is_empty()
-                        || key == crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
-                        || crate::tool_icons::parse_tool_key(key).is_none()
+                        || key == crate::tool_key::PLUGIN_DEFAULT_ICON_KEY
+                        || crate::tool_key::parse_tool_key(key).is_none()
                 }) {
                     bail!(
                         "插件 {} 贡献 {} 的 tools 项 {key} 不合法（应为工具名或 工具名:参数=取值）",
@@ -713,8 +713,8 @@ impl PluginManifest {
                 for (key, title) in &decl.titles {
                     let key = key.trim();
                     let valid_key = !key.is_empty()
-                        && key != crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
-                        && crate::tool_icons::parse_tool_key(key).is_some();
+                        && key != crate::tool_key::PLUGIN_DEFAULT_ICON_KEY
+                        && crate::tool_key::parse_tool_key(key).is_some();
                     if !valid_key || !covered.contains(&tool_of(key)) {
                         bail!(
                             "插件 {} 贡献 {} 的 titles 键 {key} 不合法（须为 tools 中工具的 工具名 或 工具名:参数=取值）",

@@ -22,14 +22,8 @@ use tiangong_core::tools::extension::namespaced_tool_name;
 
 use crate::builtin_tables::{BUILTIN_TOOL_ICONS, builtin_tool_icon};
 
-/// `tool_icons` 中表示「本插件其余工具」的键。
-pub const PLUGIN_DEFAULT_ICON_KEY: &str = "*";
-
-/// 特指键中工具名与参数条件的分隔符（`工具名:参数=取值`）。
-const ARG_KEY_SEPARATOR: char = ':';
-
-/// 特指键中参数名的长度上限。
-const MAX_ARG_NAME_LEN: usize = 64;
+/// 工具键解析归契约层（[`crate::tool_key`]），此处重导出保持公开路径稳定。
+pub use crate::tool_key::{PLUGIN_DEFAULT_ICON_KEY, parse_tool_key};
 
 /// 图标资源扩展名白名单（与 UI 贡献图标一致）。
 const ICON_RESOURCE_EXTENSIONS: &[&str] = &["png", "svg", "jpg", "jpeg"];
@@ -68,23 +62,6 @@ impl ToolIcon {
             })
             .map_or(self.icon.as_str(), String::as_str)
     }
-}
-
-/// 解析工具键（`tool_icons` 的键与工具视图贡献的 `tools` 项共用）：通用键
-/// 返回 `(工具名, None)`，特指键返回 `(工具名, Some((参数名, 取值)))`；
-/// 特指键格式不合法时返回 None。
-pub fn parse_tool_key(key: &str) -> Option<(&str, Option<(&str, &str)>)> {
-    let Some((tool, condition)) = key.split_once(ARG_KEY_SEPARATOR) else {
-        return Some((key, None));
-    };
-    let (arg, value) = condition.split_once('=')?;
-    let valid_arg = !arg.is_empty()
-        && arg.len() <= MAX_ARG_NAME_LEN
-        && arg
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
-    (!tool.is_empty() && tool != PLUGIN_DEFAULT_ICON_KEY && valid_arg && !value.is_empty())
-        .then_some((tool, Some((arg, value))))
 }
 
 /// 参与建表的插件信息：插件 id、`tool_icons` 声明与插件声明的工具原名。
@@ -148,7 +125,7 @@ fn declared_variants(
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut variants: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for key in declared.into_iter().flat_map(BTreeMap::keys) {
-        if !key.contains(ARG_KEY_SEPARATOR) {
+        if !crate::tool_key::is_specific_key(key) {
             continue;
         }
         let Some((name, Some((arg, value)))) = parse_tool_key(key) else {
