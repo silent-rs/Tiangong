@@ -96,6 +96,43 @@ pub(super) fn retain_existing_writable_roots(policy: &mut crate::launch_policy::
     });
 }
 
+/// 授权用可写根的目录保障：不存在则创建（`retain_existing_writable_roots`
+/// 会静默丢弃不存在目录，新装机首次授权前必须预创建）；符号链接或非
+/// 目录项视为篡改，跳过授权并记录（fail-closed）。
+pub(crate) fn ensured_writable_root(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_dir() => Some(path),
+        Ok(_) => {
+            tracing::warn!(
+                path = %path.display(),
+                "沙箱可写根目录不是实体目录，跳过授权"
+            );
+            None
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::create_dir_all(&path) {
+                Ok(()) => Some(path),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %path.display(),
+                        "创建沙箱可写根目录失败，跳过授权"
+                    );
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %path.display(),
+                "检查沙箱可写根目录失败，跳过授权"
+            );
+            None
+        }
+    }
+}
+
 /// 存储根统一写域下的插件自有数据根目录名（`~/.tiangong/data/<插件 id>`）。
 pub(crate) const STORAGE_DATA_DIR: &str = "data";
 /// 存储根下所有沙箱插件共享可写的顶层目录：`media/` 是跨插件媒体交换区

@@ -31,7 +31,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 mod process;
-mod sandbox_exemptions;
+pub(crate) mod sandbox_exemptions;
 
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,

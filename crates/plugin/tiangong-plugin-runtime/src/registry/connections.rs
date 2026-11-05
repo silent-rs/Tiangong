@@ -296,51 +296,19 @@ fn sidecar_connection_inner(
         // CLI 经终端命令通道写入 plugins-dev（项目骨架与构建产物）；导入
         // 收件箱 plugins/.inbox 承载待安装产物（`.` 前缀使 discovery 不扫描，
         // 正式安装目录 plugins/ 不在授权之列——安装仍经宿主 plugin-dev 通道
-        // 的构建指纹核验或用户原生确认把关）。目录可能尚未初始化（新装机
-        // 首次开发/导入），先确保存在——传输层的 retain_existing_writable_
-        // roots 会静默丢弃不存在的目录；符号链接或非目录项视为篡改，
-        // 拒绝授权（fail-closed）。
+        // 的构建指纹核验或用户原生确认把关）。目录保障（预创建与防符号
+        // 链接篡改）见 ensured_writable_root。
         if host_policy.plugin_dev_write {
             for writable_dir in [
                 storage_root.join(crate::plugin_dev::PLUGIN_DEV_DIR),
                 storage_root
                     .join("plugins")
                     .join(crate::plugin_dev::PLUGIN_INBOX_DIR),
-            ] {
-                let granted = match std::fs::symlink_metadata(&writable_dir) {
-                    Ok(meta) if meta.file_type().is_dir() => Some(writable_dir),
-                    Ok(_) => {
-                        tracing::warn!(
-                            path = %writable_dir.display(),
-                            "插件开发写域目录不是实体目录，跳过授权"
-                        );
-                        None
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        match std::fs::create_dir_all(&writable_dir) {
-                            Ok(()) => Some(writable_dir),
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    path = %writable_dir.display(),
-                                    "创建插件开发写域目录失败，跳过授权"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            path = %writable_dir.display(),
-                            "检查插件开发写域目录失败，跳过授权"
-                        );
-                        None
-                    }
-                };
-                if let Some(writable_dir) = granted {
-                    config = config.push_sandbox_extra_writable(writable_dir);
-                }
+            ]
+            .into_iter()
+            .filter_map(crate::sidecar::stdio::sandbox_exemptions::ensured_writable_root)
+            {
+                config = config.push_sandbox_extra_writable(writable_dir);
             }
         }
     }
