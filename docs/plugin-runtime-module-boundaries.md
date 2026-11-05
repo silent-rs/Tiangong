@@ -24,7 +24,8 @@
 | 12 | 插件集变更广播改为注入出口；展示投影域归属修正 | 消除 D4→D7（状态机不再直连桥接） |
 | 13 | 生命周期事件收尾：停用/卸载/换代后由事件发布方释放运行时资源 | 消除 D3→D6、D3→D7（安装事务不再摆布调用层与桥接层） |
 | 14 | 安装编排归位：`refresh_verified_sidecar` 归 `loader`、`install_plugin_from_repository` 归安装事务 | 消除 D3→D4 的 `assemble_*` 与安装入口调用（只剩事件发布） |
-度量：跨域引用边 34 → 22（引用次数 195 → 173），违规边 15 → 2（违规引用 69 → 5）；
+| 15 | 创作域决定保留在 runtime，依赖收窄为公开入口（新增 `plugin_publisher`） | D9→D4 只剩 seam 调用（不再读 `InstalledPlugin` 内部结构） |
+度量：跨域引用边 34 → 22（引用次数 195 → 173），违规边 15 → 1（违规引用 69 → 1）；
 `crate::plugin_dev` 在传输层引用清零，runtime 生产代码中的插件 ID 字面量清零
 （`builtin_tables` 的展示映射仍按原计划作为过渡期例外）。附录 A/B 已补齐 `tool_key`、
 `storage_layout`、`content_manifest` 三处模块的归属，并跳过 `#[cfg(test)] mod` 块；
@@ -105,7 +106,9 @@
 
 - **拥有**：`LoadedPlugin` 记录、加载/卸载/启用状态、全局操作锁、启动预加载、常驻保活、启用指纹与对话内清单、manifest 级视图查询、变化事件发布、**插件目录的展示投影**（`views` 与 `tool_icons` / `tool_titles` / `builtin_tables`——图标与标题是清单声明加内置兜底的投影，不是宿主集成）。
 - **不拥有**：调用执行（D6）、连接与进程细节（D5）、Core 适配（D7）、安装事务（D3）、server 生命周期。
-- **对外 seam**：`list_plugins`、`plugin_manifest(id)`、`find_installed_plugin`、`enabled_plugin_fingerprint`、`PluginChangeEvent`。
+- **对外 seam**：`list_plugins`、`plugin_manifest(id)`、`find_installed_plugin`、
+  `plugin_install_directory(id)`、`plugin_publisher(root, id)`、`enabled_plugin_fingerprint`、
+  `PluginChangeEvent`。
 - **已修复**：`events.rs` 的页面广播改为注入出口（`set_plugin_change_broadcaster`，桥接层在
   `install_runtime_feedback` 时注册）；`views.rs` 用到的展示投影归本域（域归属修正，非代码搬迁）。
 - **当前越界**：
@@ -161,11 +164,18 @@
   默认（全沙箱、零特权、stdio）。一次性进程形态与"必须官方签名"也由策略声明，
   runtime 不再出现 `"command"` 字面量分支。
 
-### D9 创作工作流（Authoring，待迁出）
+### D9 创作工作流（Authoring，保留在 runtime）
 
-- **拥有**：开发目录项目元数据（`.plugin-dev.json`）、项目 list/status、收件箱（`.inbox`）导入、受信构建指纹登记。
-- **目标**：迁出 runtime 到宿主（`src-tauri/src/plugin_authoring/`），经 D3 安装入口 + D2 签名完成，bridge 命名空间由宿主注册。
-- **当前越界**：直接调 `registry::{import_staged_plugin, find_installed_plugin, plugin_install_directory}`（D3/D4）、`artifacts::stage_local_plugin`（D3）；完整性校验已改走 D2 的 `content_manifest`（D9→D5 清零）。
+- **拥有**：开发目录项目元数据（`.plugin-dev.json`）、项目 list/status、收件箱（`.inbox`）导入、
+  受信构建指纹登记、`plugin-dev.*` 桥接命名空间处理器（宿主启动时注册）。
+- **决定（保留）**：原计划迁出宿主，但 `plugin_dev::call` 被桌面、CLI、Server 三个入口都注册为
+  桥接命名空间处理器，只迁 `src-tauri` 会让后两者失去创作链；迁成独立 crate 又只多一层依赖
+  （与策略表同一结论）。因此**保留在本 crate**，改为把依赖收窄到公开 seam。
+- **依赖收窄**：只剩三个公开入口——`registry::import_staged_plugin`（D3 安装入口）、
+  `registry::plugin_install_directory`、`registry::plugin_publisher`（D4 公开查询，本轮新增，
+  取代直接读 `InstalledPlugin.signed_release`）；完整性校验走 D2 的 `content_manifest`
+  （D9→D5 清零）。
+- **若将来迁出**：前置条件是创作链在三个入口共用同一份实现，届时按独立 crate 重新评估。
 
 ### 待迁出的横切项
 
@@ -189,17 +199,18 @@
 | D6 调用 | ✓ | | | | ✓ | — | | | |
 | D7 宿主集成 | ✓ | | | ✓ | | ✓ | — | | |
 | D8 策略 | ✓ | | | | | | | — | |
-| D9 创作 | ✓ | ✓ | ✓ | | | | | | — |
+| D9 创作 | ✓ | ✓ | ✓ | ✓\*\*\* | | | | | — |
 
 \* D4→D3 仅限「安装/卸载公开入口」，状态机不实现事务细节。
 \*\* D3→D4 仅限「发布生命周期事件」（`crate::events`，接缝 7）：安装事务广播事实，不读状态机状态。
+\*\*\* D9→D4 仅限公开入口（`plugin_publisher` / `plugin_install_directory` / `find_installed_plugin` /
+`list_plugins` / `plugin_manifest`）：创作域保留在 runtime，只经 seam 取状态。
 
-### 当前违规（2 条边 / 5 处引用，本轮已消 13 条）
+### 当前违规（1 条边 / 1 处引用，本轮已消 14 条）
 
 | 边 | 引用 | 位置 | 性质 | 处置 |
 |---|---|---|---|---|
 | D3→D5 | 1 | `migrations.rs`（Windows 撤销 launcher grants） | 需要 `storage_root` 上下文，事件不携带 | 先补 Windows 验证，再考虑把授权路径并入 `PluginChangeEvent` |
-| D9→D4 | 4 | `plugin_dev/*` | 安装入口（假阳性）+ 状态查询 | 随创作域迁出宿主一并解决 |
 
 ## 4. 拆分前必须先立的接缝
 
@@ -289,8 +300,8 @@ pub struct HostServices {
 |---|---|---|---|
 | 跨域引用边 | 34 | 22 | ≤ 矩阵允许的 20 条 |
 | 跨域引用次数 | 195 | 173 | 随边数收敛 |
-| 违规边 | 15 | 2 | 0 |
-| 违规引用次数 | 69 | 5 | 0 |
+| 违规边 | 15 | 1 | 0 |
+| 违规引用次数 | 69 | 1 | 0 |
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
@@ -324,7 +335,7 @@ pub struct HostServices {
 | `registry/migrations.rs` | D3 安装 | 1039 |
 | `registry/legacy.rs` | D3 安装 | 100 |
 | `registry/mod.rs` | D4 状态机 | 593 |
-| `registry/loader.rs` | D4 状态机 | 1510 |
+| `registry/loader.rs` | D4 状态机 | 1520 |
 | `registry/discovery.rs` | D4 状态机 | 487 |
 | `registry/views.rs` | D4 状态机 | 476 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
@@ -353,7 +364,7 @@ pub struct HostServices {
 | `host_policy.rs` | D8 策略 | 228 |
 | `host_policy/table.rs` | D8 策略 | 233 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
-| `plugin_dev/trust.rs` | D9 创作 | 194 |
+| `plugin_dev/trust.rs` | D9 创作 | 192 |
 | `lib.rs` | 根 | 112 |
 | `test_support.rs` | 测试支撑 | 406 |
 | `registry/tests.rs` | 测试 | 1135 |
@@ -364,8 +375,10 @@ pub struct HostServices {
 
 统计口径：按文件归属域；`crate::<模块>` 引用按模块主文件归域；跳过整行注释与行尾注释；
 跳过 `tests.rs`、`test_*.rs` 与 `#[cfg(test)] mod` 块（测试代码不算生产依赖）；跨域才计数。
-违规边按 §3 矩阵判定，接缝 7 允许的「安装域发布生命周期事件」（`D3->D4` 的 `events` 引用）
-不计入违规。
+
+违规边按 §3 矩阵判定，两类接缝引用豁免：
+- `D3->D4` 的 `events`（接缝 7：安装域只发布生命周期事件）；
+- `D9->D4` 的公开入口（`D4_SEAM_FOR_D9` 白名单；创作域保留在 runtime，只经公开 seam 取状态）。
 
 ```bash
 cd crates/plugin/tiangong-plugin-runtime/src && python3 - <<'PY'
@@ -387,7 +400,9 @@ MOD2DOM={'manifest':'D1','slots':'D1','launch_policy':'D1','tool_key':'D1','stor
  'tool_icons':'D4','tool_titles':'D4','builtin_tables':'D4','host_policy':'D8','plugin_dev':'D9'}
 ALLOW={'D1':set(),'D2':{'D1'},'D3':{'D1','D2'},'D4':{'D1','D2','D3','D5','D6'},
  'D5':{'D1','D2','D8'},'D6':{'D1','D5'},'D7':{'D1','D4','D6'},'D8':{'D1'},'D9':{'D1','D2','D3'}}
-SEAM={('D3','D4'):{'events'}}
+# D9 可用的 D4 公开入口（import_staged_plugin 属 D3 安装入口，经 registry 路径可见）。
+D4_SEAM_FOR_D9={'plugin_publisher','plugin_install_directory','find_installed_plugin',
+ 'list_plugins','plugin_manifest','enabled_plugin_fingerprint','import_staged_plugin'}
 def dom(key):
     for p,d in PREFIX:
         base=p.rstrip('/')
@@ -411,7 +426,7 @@ def strip_test_modules(text):
         out.append(lines[i]); i+=1
     return '\n'.join(out)
 edges=collections.Counter(); mods=collections.defaultdict(collections.Counter)
-detail=collections.defaultdict(set)
+detail=collections.defaultdict(set); seam_viol=collections.Counter()
 for root,_,files in os.walk('.'):
     for f in files:
         if not f.endswith('.rs') or f=='tests.rs' or f.startswith('test_'): continue
@@ -423,17 +438,22 @@ for root,_,files in os.walk('.'):
             if ln.lstrip().startswith('//'): continue
             m=re.search(r'(?<=\s)//',ln)
             lines.append(ln[:m.start()] if m else ln)
-        for mod in re.findall(r'crate::([a-z_]+)',"\n".join(lines)):
-            dst=MOD2DOM.get(mod)
-            if dst and dst!=src and dst!='D0':
+        for ln in lines:
+            for mod in re.findall(r'crate::([a-z_]+)', ln):
+                dst=MOD2DOM.get(mod)
+                if not dst or dst==src or dst=='D0': continue
                 edges[(src,dst)]+=1; mods[(src,dst)][mod]+=1; detail[(src,dst)].add(p)
+                if (src,dst)==('D9','D4') and not any(fn in ln for fn in D4_SEAM_FOR_D9):
+                    seam_viol[(src,dst)]+=1
 print("跨域边:",len(edges),"引用:",sum(edges.values()))
 for (s,d),n in sorted(edges.items()):
     print(f"{s}->{d} {n:3d}  {sorted(detail[(s,d)])}")
 viol=[]
 for (s,d),n in edges.items():
     if d in ALLOW[s]: continue
-    left=n-sum(mods[(s,d)][m] for m in SEAM.get((s,d),()))
+    if (s,d)==('D3','D4'): left=n-mods[(s,d)]['events']
+    elif (s,d)==('D9','D4'): left=seam_viol[(s,d)]
+    else: left=n
     if left>0: viol.append((s,d,left))
 print("违规边:",len(viol),"引用:",sum(v[2] for v in viol))
 for s,d,n in sorted(viol): print(f"  {s}->{d} {n}")

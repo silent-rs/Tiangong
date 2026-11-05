@@ -514,6 +514,16 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     loaded.enabled.then(|| loaded.directory.clone())
 }
 
+/// 已安装插件的已验证发布者 ID（签名清单的 `publisher`；`None` 表示未签名或本地信任）。
+///
+/// 创作域用它判定调用方是否官方签名，不必接触 `InstalledPlugin` 的内部结构。
+pub fn plugin_publisher(storage_root: &Path, plugin_id: &str) -> Option<String> {
+    find_installed_plugin(storage_root, plugin_id)
+        .ok()
+        .and_then(|installed| installed.signed_release)
+        .map(|release| release.publisher)
+}
+
 /// 清单声明的工具是否全部由 sidecar 承接（无需桌面前端页面执行）。
 ///
 /// Server/CLI 没有插件前端，只有满足该条件的清单工具插件才能在这些入口

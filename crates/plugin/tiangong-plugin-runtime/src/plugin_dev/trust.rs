@@ -117,10 +117,8 @@ pub(super) fn ensure_install_authorized(
 /// 受信安装方判定（install 与 import 共用）：调用方必须是宿主注入策略
 /// 判定的受信创作插件；缺失或拒绝即 fail-closed。
 pub(super) fn ensure_trusted_installer(storage_root: &Path, plugin_id: &str) -> Result<()> {
-    let official_signed = crate::registry::find_installed_plugin(storage_root, plugin_id)
-        .ok()
-        .and_then(|installed| installed.signed_release)
-        .is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
+    let official_signed = crate::registry::plugin_publisher(storage_root, plugin_id)
+        .is_some_and(|publisher| publisher == crate::trust::OFFICIAL_PUBLISHER);
     let handler = TRUSTED_INSTALLER
         .read()
         .ok()
