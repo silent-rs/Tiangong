@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "generate-image-openai",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "sidecar": {
     "binary": "tiangong-generate-image-openai-sidecar",
     "transport_protocol": "0.1.0",
