@@ -14,7 +14,7 @@
 | 2 | 工具键解析归契约域（新 `tool_key`） | 消除 D1→D7 反向依赖 |
 | 3 | 存储布局契约 `storage_layout` + `sandbox_ensured_writable` | 消除 D5→D9（沙箱组装不再认识开发目录） |
 | 4 | 权威策略表外移 `tiangong-plugin-policy` crate | runtime 生产代码不再含插件 ID；桌面/CLI/Server/e2e 同源注入 |
-| 5 | 一次性进程形态与官方签名要求入策略；市场展示数据外移宿主 | 去掉 `"command"` 字面量分支与 `DEFAULT_PLUGIN_IDS`/分类表 |
+| 5 | 一次性进程形态与官方签名要求入策略 | 去掉 `"command"` 字面量分支 |
 
 | 6 | 传输层注入 `RuntimeEnv` + `SidecarEvents`（D5 的输入接缝） | 消除 D5→D4：沙箱开关/退出标志/授权路径与三类通知改由状态机注入 |
 | 7 | 内容清单校验归信任域（新 `content_manifest`） | 消除 D2→D5 与 D9→D5（验签、创作、spawn 前复核共用一份实现） |
@@ -44,7 +44,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 |---|---|---|---|---|
 | D1 | 契约 | 3 | 2563 | 把外部输入翻译成类型并校验形状 |
 | D2 | 信任 | 4 | 1772 | 回答「这份制品是否可信、由谁发布、覆盖了什么」 |
-| D3 | 分发与安装 | 3 | 2685 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
+| D3 | 分发与安装 | 3 | 2756 | 把外部来源的插件变成 `plugins/` 下一条正确记录 |
 | D4 | 状态机 | 8 | 3693 | 维护「装了哪些、各自什么状态」并广播变化 |
 | D5 | 进程与传输 | 10 | 7277 | 把 sidecar 声明变成可用进程与连接，并把沙箱策略落到进程上 |
 | D6 | 调用 | 5 | 1849 | 一次插件调用的身份、上下文、取消、进度与结果 |
@@ -54,7 +54,7 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 | — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2014 | 不参与域划分 |
 
-合计 25808 行，与 `wc -l` 全量一致（可复核）。
+合计 25879 行，与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -81,8 +81,9 @@ runtime 生产代码中的插件 ID 字面量清零（`builtin_tables` 的展示
 - **拥有**：远程目录获取/下载/校验、staging 事务（不可变副本 + `Drop` 清理）、install/import/enable/disable/rollback/uninstall、旧 ID 迁移、安装期失败回滚。
 - **不拥有**：运行中的连接与会话资源、签名算法、插件启用后的状态广播。
 - **对外 seam**：`stage_plugin_archive / stage_local_plugin → StagedPlugin`、`install_staged_plugin(root, staged) → PluginStatus`、`uninstall_plugin(root, id, keep_data)`。
-- **已修复**：市场展示数据（默认插件、场景分类、首启标记）迁至宿主 `plugin_market`；
-  `artifacts` 只保留目录检索/下载/安装。
+- **注**：市场展示数据（默认插件集合、场景分类、首启标记）**保留在本域**——它们是
+  `AvailablePlugin` 这份目录视图的组成部分，宿主再包一层只会增加一份平行的数据结构；
+  真正需要外移的是「插件 ID → 执行特权」这类策略（已由 D8 承载）。
 - **当前越界**：`migrations.rs` 5 处调 `ts_tools::cancel_plugin_calls`、3 处调
   `bridge::clear_plugin_subscriptions`、1 处调 `launcher_update::revoke_persistent_grants`——
   **安装事务直接摆布别人的运行时资源**。
@@ -276,7 +277,7 @@ pub struct HostServices {
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
 | `use super::*` | 36 处（生产代码） | 36 处 | 0（隐式耦合无法审计） |
-| runtime 内插件 ID 字面量 | 5 个 ID / 多处分支 | 0（`builtin_tables` 展示映射除外） | 0 |
+| runtime 内插件 ID 字面量 | 5 个 ID / 多处**策略分支** | 策略分支 0（策略表在 D8）；目录默认集合与展示映射仍留 D3/D7（`DEFAULT_PLUGIN_IDS`、分类表、`builtin_tables`） | 策略分支恒为 0；数据表按产品需要保留 |
 
 复核脚本见附录 B，可在任意提交上重跑，得到同样口径的数字。
 
@@ -299,7 +300,7 @@ pub struct HostServices {
 | `verification.rs` | D2 信任 | 402 |
 | `content_manifest.rs` | D2 信任 | 111 |
 | `registry/reverify.rs` | D4 状态机 | 166 |
-| `artifacts.rs` | D3 安装 | 1509 |
+| `artifacts.rs` | D3 安装 | 1580 |
 | `registry/migrations.rs` | D3 安装 | 1076 |
 | `registry/legacy.rs` | D3 安装 | 100 |
 | `registry/mod.rs` | D4 状态机 | 558 |

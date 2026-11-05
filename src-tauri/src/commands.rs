@@ -4082,7 +4082,7 @@ pub async fn list_plugins(
 #[tauri::command]
 pub async fn list_available_plugins(
     state: State<'_, TiangongApp>,
-) -> Result<Vec<crate::plugin_market::AvailablePluginView>, String> {
+) -> Result<Vec<tiangong_plugin_runtime::artifacts::AvailablePlugin>, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
@@ -4091,12 +4091,6 @@ pub async fn list_available_plugins(
     repository
         .list_available(&storage_root)
         .await
-        .map(|plugins| {
-            plugins
-                .into_iter()
-                .map(crate::plugin_market::AvailablePluginView::new)
-                .collect()
-        })
         .map_err(|error| error.to_string())
 }
 
@@ -4106,7 +4100,7 @@ pub struct DefaultPluginCheck {
     /// 是否需要弹出首次启动推荐引导（标记未完成且存在缺失的默认插件）。
     pub first_launch_pending: bool,
     /// 缺失的默认插件（OSS 目录中存在、当前平台支持且尚未安装）。
-    pub missing: Vec<crate::plugin_market::AvailablePluginView>,
+    pub missing: Vec<tiangong_plugin_runtime::artifacts::AvailablePlugin>,
     /// OSS 目录拉取失败原因。网络异常时不强弹引导，下次启动再试。
     pub catalog_error: Option<String>,
 }
@@ -4121,7 +4115,7 @@ pub async fn check_default_plugins(
         .await?;
 
     // 已完成首次启动引导，直接跳过，不再打扰用户。
-    if crate::plugin_market::is_first_launch_completed(&storage_root) {
+    if tiangong_plugin_runtime::artifacts::is_first_launch_completed(&storage_root) {
         return Ok(DefaultPluginCheck {
             first_launch_pending: false,
             missing: Vec::new(),
@@ -4145,9 +4139,8 @@ pub async fn check_default_plugins(
 
     let missing: Vec<_> = available
         .into_iter()
-        .map(crate::plugin_market::AvailablePluginView::new)
-        .filter(|view| {
-            view.is_default && view.plugin.supported && view.plugin.installed_version.is_none()
+        .filter(|plugin| {
+            plugin.is_default && plugin.supported && plugin.installed_version.is_none()
         })
         .collect();
 
@@ -4165,7 +4158,7 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
     tauri::async_runtime::spawn_blocking(move || {
-        crate::plugin_market::mark_first_launch_completed(&storage_root)
+        tiangong_plugin_runtime::artifacts::mark_first_launch_completed(&storage_root)
             .map_err(|error| error.to_string())
     })
     .await

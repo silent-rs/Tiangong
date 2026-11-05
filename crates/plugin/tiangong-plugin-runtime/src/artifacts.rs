@@ -22,8 +22,71 @@ const CATALOG_VERSION: u32 = 1;
 /// 平台无关制品的目录键（解释器插件归档）：任一具体平台均可安装。
 const ANY_PLATFORM_KEY: &str = "any";
 const TRANSACTIONS_DIR: &str = ".transactions";
+const FIRST_LAUNCH_MARKER: &str = ".first_launch_completed";
+
+/// 默认插件 ID 列表。
+///
+/// 这些插件提供 Agent 的基础能力（系统提示词、文件操作、命令执行、网络获取、
+/// 索引搜索、技能管理、MCP 工具桥接、审批征询、终端与浏览器），确保用户安装后即可
+/// 获得基本体验。
+pub const DEFAULT_PLUGIN_IDS: &[&str] = &[
+    "prompt",
+    "fs",
+    "command",
+    "fetch",
+    "index",
+    "skill",
+    "mcp",
+    "interaction",
+    "terminal",
+    "browser",
+];
+
 /// 与 `registry::DISABLED_MARKER` 保持一致的禁用标记文件名。
 const DISABLED_MARKER_FILE: &str = ".disabled";
+
+/// 场景分类常量：日常工作。
+pub const CATEGORY_DAILY: &str = "daily";
+/// 场景分类：编程开发。
+pub const CATEGORY_CODING: &str = "coding";
+
+/// 返回某插件的场景分类标签（多标签，可同时属于多个分类）。
+///
+/// 未在映射中声明的插件默认归入日常分类，保证插件市场不会出现无分类的孤立条目。
+pub fn plugin_categories(id: &str) -> Vec<&'static str> {
+    match id {
+        // 基础能力：日常与编程通用。
+        "prompt" | "fs" | "command" | "fetch" | "index" | "skill" | "mcp" | "memory"
+        | "interaction" | "terminal" | "browser" => {
+            vec![CATEGORY_DAILY, CATEGORY_CODING]
+        }
+        // 编程开发专属。
+        "coding" => vec![CATEGORY_CODING],
+        // 其余（定时任务、多媒体生成/分析）默认归入日常。
+        _ => vec![CATEGORY_DAILY],
+    }
+}
+
+/// 判断插件是否属于默认插件集合。
+pub fn is_default_plugin(id: &str) -> bool {
+    DEFAULT_PLUGIN_IDS.contains(&id)
+}
+
+/// 首次启动引导是否已完成（标记文件存在即视为完成）。
+pub fn is_first_launch_completed(storage_root: &Path) -> bool {
+    storage_root.join(FIRST_LAUNCH_MARKER).is_file()
+}
+
+/// 写入首次启动完成标记。内容为当前本地时间，便于排查。
+pub fn mark_first_launch_completed(storage_root: &Path) -> Result<()> {
+    let marker = storage_root.join(FIRST_LAUNCH_MARKER);
+    std::fs::create_dir_all(storage_root)
+        .with_context(|| format!("创建存储目录失败: {}", storage_root.display()))?;
+    let timestamp = chrono::Local::now().naive_local().to_string();
+    std::fs::write(&marker, timestamp)
+        .with_context(|| format!("写入首次启动标记失败: {}", marker.display()))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AvailablePlugin {
     pub id: String,
@@ -36,6 +99,12 @@ pub struct AvailablePlugin {
     /// 已安装插件的启用状态（未安装时为 false）。
     #[serde(default)]
     pub installed_enabled: bool,
+    /// 是否为默认插件（基础能力，首次启动时会推荐安装）。
+    #[serde(default)]
+    pub is_default: bool,
+    /// 场景分类标签（多标签，值为 `daily` / `coding` 的任意组合）。
+    #[serde(default)]
+    pub categories: Vec<&'static str>,
 }
 
 pub struct StagedPlugin {
@@ -334,6 +403,8 @@ impl PluginRepository {
                     .is_some_and(|local| version_is_newer(local, &plugin.version));
                 AvailablePlugin {
                     supported: sidecar_supported(&plugin.sidecars, &platform),
+                    is_default: is_default_plugin(&plugin.id),
+                    categories: plugin_categories(&plugin.id),
                     installed_enabled: installed_state.is_some_and(|state| state.enabled),
                     id: plugin.id,
                     name: plugin.name,
