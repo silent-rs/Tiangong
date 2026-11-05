@@ -1,5 +1,15 @@
 # ChatGPT（Codex）直连链路的缓存命中与稳定性分析
 
+> **勘误（2026-11-05，wreq 移除）**：本文 2.1 节把「TLS 指纹」列为分桶主信号，
+> 并据此落地了 wreq/BoringSSL 的 Bun 指纹伪装（#767）。后续长期实测证伪了该
+> 权重：不稳定的真实根因是**流间瞬时异常缺少统一重试**，已由 #766 在消费层
+> 修复（重试额度 10 次）；TLS 指纹（rustls vs BoringSSL）对稳定性和缓存命中
+> 未见决定性影响。传输（WS 长连接）、`session-id` 会话亲和头、originator/UA
+> 等信号的结论维持不变。wreq/BoringSSL 已整体回退为 tokio-tungstenite
+> （rustls）——其 vendored BoringSSL 与 memory 插件 SQLCipher 的 vendored
+> OpenSSL 存在 `BIO_*` 公共符号冲突，阻塞插件构建（详见
+> `crates/tiangong-llm/src/providers/codex/ws.rs` 模块注释）。
+
 > 结论先行：直连不稳定与缓存 0 命中不是天工请求构造的缺陷，而是 ChatGPT Codex
 > 后端按「客户端多信号指纹」分桶的结果——非官方客户端形态的流量被路由到只提供
 > 弱缓存、高降载的服务面。本文记录完整证据链、本仓库已落地的防御性修复，以及
