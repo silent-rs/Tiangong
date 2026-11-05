@@ -150,6 +150,11 @@ fn main() {
     // GUI/受限环境下探测 node/python 并注入 TIANGONG_*_PATH 与 PATH 前置，
     // 供插件 sidecar 与命令通道子进程全树使用。
     tiangong_plugin_runtime::ensure_interpreter_env();
+    // 宿主权威执行策略：插件 ID → 沙箱与特权的映射属于宿主产品策略
+    // （见 tiangong-plugin-policy crate），runtime 只保留数据结构与注入点。
+    // 必须在任何插件预加载/进程拉起之前安装；未注入时 runtime 按全沙箱
+    // 零特权处理（fail-closed）。
+    tiangong_plugin_policy::install();
 
     // 无参数 → GUI
     if std::env::args().len() <= 1 {

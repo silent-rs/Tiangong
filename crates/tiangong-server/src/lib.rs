@@ -35,6 +35,10 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     // 与桌面端/CLI 一致：已安装插件由 runtime 统一预加载（后台进行，不阻塞
     // 监听）。会话 Core 的 runtime 聚合桥每次调用都按注册表取插件，加载
     // 完成后的请求即可用到全部插件工具。
+    //
+    // 预加载前先安装宿主权威策略表（runtime 不含插件 ID，未注入即全沙箱
+    // 零特权，命令类插件会失去 Git 工作流与命令执行位能力）。
+    tiangong_plugin_policy::install();
     {
         let storage_root = storage_root.clone();
         std::thread::spawn(move || {

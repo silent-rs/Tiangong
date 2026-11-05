@@ -10565,6 +10565,7 @@ dependencies = [
  "tiangong-entry",
  "tiangong-llm",
  "tiangong-media-archive",
+ "tiangong-plugin-policy",
  "tiangong-plugin-runtime",
  "tiangong-relay",
  "tiangong-server",
@@ -10601,6 +10602,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-policy",
  "tiangong-plugin-runtime",
  "tiangong-types",
  "tokio",
@@ -11146,6 +11148,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-policy"
+version = "0.17.13"
+dependencies = [
+ "serial_test",
+ "tiangong-plugin-runtime",
+]
+
+[[package]]
 name = "tiangong-plugin-prompt-protocol"
 version = "0.2.0"
 dependencies = [
@@ -11296,6 +11306,7 @@ dependencies = [
  "tempfile",
  "tiangong-config",
  "tiangong-plugin-command-protocol",
+ "tiangong-plugin-policy",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
  "tokio",
@@ -11548,6 +11559,7 @@ dependencies = [
  "tiangong-core",
  "tiangong-llm",
  "tiangong-media-archive",
+ "tiangong-plugin-policy",
  "tiangong-plugin-runtime",
  "tiangong-types",
  "tokio",

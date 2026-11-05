@@ -296,7 +296,7 @@ fn sidecar_connection_inner(
         // 在沙箱策略组装层（stdio 组装块 + ensured_writable_root）。
         if host_policy.plugin_dev_write {
             config = config.with_sandbox_ensured_writable(
-                crate::storage_layout::StorageLayout::new(&storage_root).dev_writable_roots(),
+                crate::storage_layout::StorageLayout::new(storage_root).dev_writable_roots(),
             );
         }
     }

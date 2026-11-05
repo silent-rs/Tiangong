@@ -66,6 +66,9 @@ fn prepare_creator() -> Option<tempfile::TempDir> {
     let config_dir = root.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
     tiangong_config::registry::init_from_dir(&config_dir);
+    // 宿主权威策略表与生产同源（tiangong-plugin-policy）：创作链需要
+    // 插件开发目录写域。runtime 不含插件 ID，未注入即全沙箱零特权。
+    tiangong_plugin_policy::install();
     test_support::ensure_test_launcher_signed(root.path()).unwrap();
     let dev_root = test_support::write_dev_project(root.path(), CREATOR_ID);
     copy_tree(&release, &dev_root.join("release"));

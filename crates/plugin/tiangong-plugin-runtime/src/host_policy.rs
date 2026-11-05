@@ -1,27 +1,31 @@
 //! sidecar 运行时的宿主权威执行策略。
 //!
-//! 分层隔离：WASM handler 在宿主进程内由 wasmtime 能力沙箱隔离（进程内
-//! 无法再套 OS 沙箱）；sidecar 默认经 Launcher 进 OS 沙箱；用户可显式关闭首次实际使用才启动的按需进程沙箱。
+//! 分层隔离：sidecar 默认经 Launcher 进 OS 沙箱；用户可显式关闭首次实际
+//! 使用才启动的按需进程沙箱。
+//!
+//! # 职责边界
+//!
+//! 本模块只定义**策略数据结构**与**注入点**，不含任何插件 ID：
+//! 「哪个插件获得哪些特权」是宿主产品策略（桌面宿主见 `plugin_policy`
+//! 模块），宿主启动时经 [`set_host_policy_provider`] 注入。未注入时按
+//! [`HostExecutionPolicy::sandboxed_default`] 处理——进沙箱、零特权、
+//! stdio（fail-closed），保证漏配不会放大权限。
 //!
 //! 不变式（沙箱不进行 agent 执行过程中升级）：
-//! - 策略是纯函数，仅在连接构造时求值一次并定死，不读任何全局可变
-//!   状态；插件清单与 agent 运行时的任何声明/请求都不构成提权输入。
-//! - 运行中的连接不升级也不降级；策略变更只可能来自用户设置，且在
-//!   下一次连接构造时生效。
+//! - 策略只在连接构造时求值一次并定死；插件清单与 agent 运行时的任何
+//!   声明/请求都不构成提权输入。
+//! - 运行中的连接不升级也不降级；策略变更只可能来自用户设置或宿主注入，
+//!   且在下一次连接构造时生效。
 //! - ephemeral 形态（command）每次请求构造独立快照与独立沙箱实例，
 //!   属"每请求隔离"而非升级。
 //!
-//! 网络维度：沙箱开启即视为执行安全，网络全放行。用户凭据默认禁读；
-//! 官方 terminal/command 为保持完整 Git 工作流，固定获得 SSH 与 GitHub
-//! CLI 配置目录的只读例外，并获得沙箱内运行无头浏览器与查询进程表
-//! （pgrep/pkill）的能力；其他插件不能通过清单或调用载荷申请这些能力。
+//! 网络维度：沙箱开启即视为执行安全，网络全放行。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock};
 
-use crate::launch_policy::{
-    CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_CREDENTIAL_SERVICES,
-    CAPABILITY_PROCESS_INSPECTION,
-};
+use crate::launch_policy::CAPABILITY_CREDENTIAL_SERVICES;
+
 /// sidecar 与宿主的通信通道（宿主权威决定，插件不声明——spawn 时由
 /// 宿主注入环境变量选择，sidecar 通用库自动适配）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,13 +45,6 @@ pub struct UserCredentialReadAccess {
     pub github_cli: bool,
 }
 
-impl UserCredentialReadAccess {
-    const GIT_WORKFLOW: Self = Self {
-        ssh: true,
-        github_cli: true,
-    };
-}
-
 /// 单个插件的宿主侧执行策略。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExecutionPolicy {
@@ -61,329 +58,161 @@ pub struct HostExecutionPolicy {
     pub user_credential_reads: UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub allow_user_cache_write: bool,
-    /// 是否允许写入插件开发目录 `~/.tiangong/plugins-dev/`。devkit CLI
-    /// （`npx @silent-ai/plugin-creator`）经终端命令通道执行 init/validate/
-    /// build/run/logs，项目骨架与构建产物写入开发目录；安装仍由宿主
-    /// plugin-dev 通道把关（构建指纹登记 + 用户确认）。仅按已验证官方
-    /// 身份授予，插件清单声明不构成授权输入。
+    /// 是否允许写入插件开发目录（宿主按已验证身份授予创作类插件；
+    /// 目录清单由连接构造层经存储布局翻译，传输层不感知来源）。
     pub plugin_dev_write: bool,
     /// 沙箱内授予的特殊能力名（凭据服务、录音、无头浏览器等，见
     /// `launch_policy::CAPABILITY_*`）。整条链路只传这一个集合；能力怎样
     /// 变成系统规则由 Launcher 定义。
     pub capabilities: BTreeSet<String>,
 }
+
 impl HostExecutionPolicy {
+    /// 缺省策略：进沙箱、零特权、stdio。宿主未注入提供者时使用。
+    pub fn sandboxed_default() -> Self {
+        Self {
+            sandbox: true,
+            allow_network: true,
+            transport: SidecarTransport::Stdio,
+            user_credential_reads: UserCredentialReadAccess::default(),
+            allow_user_cache_write: false,
+            plugin_dev_write: false,
+            capabilities: BTreeSet::new(),
+        }
+    }
+
     /// 是否授予了指定沙箱能力。
     pub fn has(&self, capability: &str) -> bool {
         self.capabilities.contains(capability)
     }
-}
 
-/// 解析插件的宿主执行策略。
-///
-/// 本策略只定义宿主的强制沙箱基线，不读取用户开关。是否跟随用户全局
-/// 沙箱开关由 registry 按进程生命周期标记，并由 SidecarConfig 在每次 spawn
-/// 时组合；预加载常驻服务不接受开关降级。策略本身保持纯函数。
-pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
-    let git_workflow = official_signed && matches!(plugin_id, "terminal" | "command");
-    let user_credential_reads = if git_workflow {
-        UserCredentialReadAccess::GIT_WORKFLOW
-    } else {
-        UserCredentialReadAccess::default()
-    };
-    // 官方 computer-use 在所有平台都不进 OS 沙箱，必须与用户桌面处于同一
-    // 权限级别，否则桌面控制能力整体失效：
-    // - macOS：辅助功能授权归属于天工 App，再套 Seatbelt 时 AXIsProcessTrusted
-    //   无法继承宿主授权；
-    // - Windows：AppContainer 令牌为低完整性级别，SetCursorPos 被拒绝
-    //   （0x80070005），跨进程 UI Automation 调用受 UIPI 限制而阻塞，且经它
-    //   启动的应用会继承沙箱令牌；
-    // - Linux：bubblewrap 隔离会切断 AT-SPI2 会话总线与图形会话访问。
-    // 仅对已通过官方发布者签名校验的同名插件保留宿主直启；第三方、自签和
-    // 本地插件不得按名称获得例外。通信仍固定使用 stdio，生命周期仍由宿主管理。
-    let accessibility_host_child = official_signed && plugin_id == "computer-use";
-    // 官方 volcengine 提供按住说话录音，sidecar 需在沙箱内经 CoreAudio 打开
-    // 麦克风；仅按已验证官方身份授予，清单声明不构成授权输入。
-    let audio_input = official_signed && plugin_id == "volcengine";
-    // 无头浏览器运行能力（Puppeteer/Playwright/HyperFrames）与 Git 工作流同属
-    // "命令执行位"，按已验证官方身份授予；保持独立字段以便两者分开调整。
-    // command 退役（#697 阶段 3）后改为只认 terminal。
-    let browser_runtime = official_signed && matches!(plugin_id, "terminal" | "command");
-    // 进程表查询（pgrep/pkill 经 sysmond，#677）：排查后台进程、确认服务
-    // 是否在跑属于命令执行位的日常操作，同样只按已验证官方身份授予。
-    let process_inspection = official_signed && matches!(plugin_id, "terminal" | "command");
-    // 插件开发目录写域：devkit 工具链在 terminal（命令通道手动构建/调试
-    // npx devkit）与 plugin-creator（sidecar 内真实执行 init/build/add，
-    // 见 main.mjs 的 dispatch——不是纯 prompt）两个执行位落地。command
-    // 处于淘汰序列（#697 阶段 3），不新增授权。
-    let plugin_dev_write = official_signed && matches!(plugin_id, "terminal" | "plugin-creator");
-    // Git/SSH/GitHub CLI 需经系统凭据服务解析用户身份与读取凭据，随凭据
-    // 目录读取能力一并授予；证书验证由网络授权独立开放。
-    let credential_services = user_credential_reads.ssh || user_credential_reads.github_cli;
-    let capabilities = [
-        (CAPABILITY_CREDENTIAL_SERVICES, credential_services),
-        (CAPABILITY_AUDIO_INPUT, audio_input),
-        (CAPABILITY_BROWSER_RUNTIME, browser_runtime),
-        (CAPABILITY_PROCESS_INSPECTION, process_inspection),
-    ]
-    .into_iter()
-    .filter(|(_, granted)| *granted)
-    .map(|(capability, _)| capability.to_string())
-    .collect();
-    HostExecutionPolicy {
-        sandbox: !accessibility_host_child,
-        allow_network: true,
-        transport: SidecarTransport::Stdio,
-        user_credential_reads,
-        allow_user_cache_write: git_workflow,
-        plugin_dev_write,
-        capabilities,
+    /// 设置用户凭据目录读取能力。凭据服务能力由 [`resolve`] 统一补齐
+    /// （Git/SSH/GitHub CLI 需经系统凭据服务解析用户身份）。
+    pub fn with_user_credential_reads(mut self, access: UserCredentialReadAccess) -> Self {
+        self.user_credential_reads = access;
+        self
+    }
+
+    /// 追加一项沙箱特殊能力。
+    pub fn with_capability(mut self, capability: &str) -> Self {
+        self.capabilities.insert(capability.to_string());
+        self
     }
 }
 
-/// 策略表快照（审计与测试用）；沙箱开关默认开启。
-pub fn catalog_snapshot() -> BTreeMap<String, HostExecutionPolicy> {
-    [
-        "command",
-        "fetch",
-        "mcp",
-        "scheduler",
-        "memory",
-        "fs",
-        "terminal",
-        "index",
-    ]
-    .iter()
-    .map(|id| ((*id).to_string(), resolve(id, true)))
-    .collect()
+/// 宿主权威策略提供者：`(插件 ID, 是否官方签名) → 执行策略`。
+///
+/// 由宿主启动时注入（覆盖语义）。runtime 不持有任何插件 ID——策略表属于
+/// 宿主产品数据；未注入时 [`resolve`] 返回 fail-closed 默认策略。
+pub type HostPolicyProvider = Arc<dyn Fn(&str, bool) -> HostExecutionPolicy + Send + Sync>;
+
+static HOST_POLICY_PROVIDER: RwLock<Option<HostPolicyProvider>> = RwLock::new(None);
+
+/// 注入宿主权威策略提供者（覆盖语义；缺失时全沙箱零特权）。
+pub fn set_host_policy_provider(provider: HostPolicyProvider) {
+    if let Ok(mut current) = HOST_POLICY_PROVIDER.write() {
+        *current = Some(provider);
+    }
+}
+
+/// 清除宿主策略提供者（恢复 fail-closed 默认）。测试隔离用。
+pub fn clear_host_policy_provider() {
+    if let Ok(mut current) = HOST_POLICY_PROVIDER.write() {
+        *current = None;
+    }
+}
+
+/// 解析插件的宿主执行策略：有注入则用宿主表，否则 fail-closed 默认。
+///
+/// 本策略只定义宿主的强制沙箱基线，不读取用户开关。是否跟随用户全局
+/// 沙箱开关由 registry 按进程生命周期标记，并由 SidecarConfig 在每次 spawn
+/// 时组合；预加载常驻服务不接受开关降级。
+pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
+    let policy = HOST_POLICY_PROVIDER
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
+        .map(|provider| provider(plugin_id, official_signed))
+        .unwrap_or_else(HostExecutionPolicy::sandboxed_default);
+    normalize(policy)
+}
+
+/// 补齐策略派生关系：凭据目录读取必然需要凭据服务能力。放在 runtime 而
+/// 不是宿主表里，保证宿主只声明"能读哪些凭据"也不会漏掉服务授权。
+fn normalize(mut policy: HostExecutionPolicy) -> HostExecutionPolicy {
+    if policy.user_credential_reads.ssh || policy.user_credential_reads.github_cli {
+        policy
+            .capabilities
+            .insert(CAPABILITY_CREDENTIAL_SERVICES.to_string());
+    }
+    policy
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_policy::{
+        CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_PROCESS_INSPECTION,
+    };
 
-    #[test]
-    fn all_plugins_are_sandboxed_with_stdio_by_default() {
-        for id in [
-            "command",
-            "fetch",
-            "mcp",
-            "scheduler",
-            "memory",
-            "fs",
-            "terminal",
-            "index",
-            "unknown-third-party",
-        ] {
-            let policy = resolve(id, true);
-            assert!(policy.sandbox, "{id} 默认必须进沙箱");
-            assert_eq!(
-                policy.transport,
-                SidecarTransport::Stdio,
-                "{id} 沙箱形态走 stdio"
-            );
-            assert!(policy.allow_network, "{id} 沙箱开启即网络全放行");
-        }
+    fn provider(policy: HostExecutionPolicy) -> HostPolicyProvider {
+        Arc::new(move |_, _| policy.clone())
     }
 
     #[test]
-    fn resolve_defines_forced_sandbox_baseline() {
-        // 权威策略表只表达强制沙箱基线；用户开关在 SidecarConfig spawn 层组合。
-        for id in ["command", "fetch", "fs"] {
-            let policy = resolve(id, true);
-            assert!(policy.sandbox, "{id} 恒沙箱");
-            assert_eq!(policy.transport, SidecarTransport::Stdio);
-        }
+    #[serial_test::serial]
+    fn 未注入提供者时按沙箱零特权处理() {
+        clear_host_policy_provider();
+        let policy = resolve("terminal", true);
+        assert!(policy.sandbox);
+        assert_eq!(policy.transport, SidecarTransport::Stdio);
+        assert!(policy.allow_network);
+        assert!(policy.capabilities.is_empty());
+        assert!(!policy.user_credential_reads.ssh);
+        assert!(!policy.allow_user_cache_write);
+        assert!(!policy.plugin_dev_write);
     }
 
     #[test]
-    fn computer_use_accessibility_exception_requires_official_signature() {
-        let official = resolve("computer-use", true);
-        let third_party = resolve("computer-use", false);
+    #[serial_test::serial]
+    fn 注入提供者后按宿主表解析且与插件身份无关() {
+        let mut granted = HostExecutionPolicy::sandboxed_default();
+        granted = granted.with_capability(CAPABILITY_AUDIO_INPUT);
+        set_host_policy_provider(provider(granted));
+        // runtime 不区分插件 ID：同一份策略对任意身份生效。
+        assert!(resolve("任意插件", true).has(CAPABILITY_AUDIO_INPUT));
+        assert!(resolve("另一个插件", false).has(CAPABILITY_AUDIO_INPUT));
+        clear_host_policy_provider();
+        assert!(!resolve("任意插件", true).has(CAPABILITY_AUDIO_INPUT));
+    }
 
-        assert!(
-            !official.sandbox,
-            "官方 computer-use 在所有平台都应与用户桌面同权限运行"
+    #[test]
+    #[serial_test::serial]
+    fn 凭据读取连带授予凭据服务能力() {
+        let with_credentials = HostExecutionPolicy::sandboxed_default().with_user_credential_reads(
+            UserCredentialReadAccess {
+                ssh: true,
+                github_cli: false,
+            },
         );
-        assert_eq!(official.transport, SidecarTransport::Stdio);
+        set_host_policy_provider(provider(with_credentials));
+        assert!(resolve("任意插件", true).has(CAPABILITY_CREDENTIAL_SERVICES));
 
-        assert!(third_party.sandbox, "非官方同名插件必须保持 OS 沙箱");
-        assert_eq!(third_party.transport, SidecarTransport::Stdio);
+        let without = HostExecutionPolicy::sandboxed_default();
+        set_host_policy_provider(provider(without));
+        assert!(!resolve("任意插件", true).has(CAPABILITY_CREDENTIAL_SERVICES));
+        clear_host_policy_provider();
     }
 
     #[test]
-    fn plugin_dev_write_is_granted_only_to_official_terminal_and_creator() {
-        for id in ["terminal", "plugin-creator"] {
-            assert!(
-                resolve(id, true).plugin_dev_write,
-                "官方 {id} 承载 devkit 工具链，需要插件开发目录写域"
-            );
-        }
-        for (id, official) in [
-            ("terminal", false),
-            ("plugin-creator", false),
-            ("command", true),
-            ("fetch", true),
-            ("unknown-third-party", true),
-        ] {
-            assert!(
-                !resolve(id, official).plugin_dev_write,
-                "{id}（official={official}）不应获得插件开发目录写域"
-            );
-        }
-    }
-
-    #[test]
-    fn official_signature_does_not_unsandbox_other_plugins() {
-        for id in ["terminal", "command", "mcp", "unknown-third-party"] {
-            assert!(resolve(id, true).sandbox, "官方 {id} 不应获得辅助功能例外");
-        }
-    }
-
-    #[test]
-    fn git_credentials_are_readable_only_to_official_terminal_and_command() {
-        for id in ["terminal", "command"] {
-            assert_eq!(
-                resolve(id, true).user_credential_reads,
-                UserCredentialReadAccess::GIT_WORKFLOW,
-                "官方 {id} 应获得 Git 凭据只读能力"
-            );
-            assert!(resolve(id, true).allow_user_cache_write);
-            assert_eq!(
-                resolve(id, false).user_credential_reads,
-                UserCredentialReadAccess::default(),
-                "非官方 {id} 不得按名称获得凭据能力"
-            );
-            assert!(!resolve(id, false).allow_user_cache_write);
-        }
-        for id in ["coding", "fetch", "mcp", "unknown-third-party"] {
-            assert_eq!(
-                resolve(id, true).user_credential_reads,
-                UserCredentialReadAccess::default(),
-                "{id} 不需要 Git 凭据读取能力"
-            );
-            assert!(!resolve(id, true).allow_user_cache_write);
-        }
-    }
-
-    #[test]
-    fn audio_input_is_granted_only_to_official_volcengine() {
-        let official = resolve("volcengine", true);
-        assert!(
-            official.has(CAPABILITY_AUDIO_INPUT),
-            "官方 volcengine 需要录音能力"
-        );
-        assert!(official.sandbox, "录音授权不改变沙箱基线");
-        assert!(
-            !resolve("volcengine", false).has(CAPABILITY_AUDIO_INPUT),
-            "非官方同名插件不得按名称获得录音能力"
-        );
-        for id in ["terminal", "command", "computer-use", "unknown-third-party"] {
-            assert!(
-                !resolve(id, true).has(CAPABILITY_AUDIO_INPUT),
-                "{id} 不需要录音能力"
-            );
-        }
-    }
-
-    #[test]
-    fn browser_runtime_is_granted_only_to_official_terminal_and_command() {
-        for id in ["terminal", "command"] {
-            let official = resolve(id, true);
-            assert!(
-                official.has(CAPABILITY_BROWSER_RUNTIME),
-                "官方 {id} 需要无头浏览器能力"
-            );
-            assert!(official.sandbox, "浏览器授权不改变沙箱基线");
-            assert!(
-                !resolve(id, false).has(CAPABILITY_BROWSER_RUNTIME),
-                "非官方同名 {id} 不得按名称获得无头浏览器能力"
-            );
-        }
-        for id in [
-            "mcp",
-            "volcengine",
-            "computer-use",
-            "fetch",
-            "unknown-third-party",
-        ] {
-            assert!(
-                !resolve(id, true).has(CAPABILITY_BROWSER_RUNTIME),
-                "{id} 不需要无头浏览器能力"
-            );
-        }
-    }
-
-    #[test]
-    fn process_inspection_is_granted_only_to_official_terminal_and_command() {
-        for id in ["terminal", "command"] {
-            let official = resolve(id, true);
-            assert!(
-                official.has(CAPABILITY_PROCESS_INSPECTION),
-                "官方 {id} 需要进程表查询能力"
-            );
-            assert!(official.sandbox, "进程表查询授权不改变沙箱基线");
-            assert!(
-                !resolve(id, false).has(CAPABILITY_PROCESS_INSPECTION),
-                "非官方同名 {id} 不得按名称获得进程表查询能力"
-            );
-        }
-        for id in [
-            "mcp",
-            "volcengine",
-            "computer-use",
-            "fetch",
-            "unknown-third-party",
-        ] {
-            assert!(
-                !resolve(id, true).has(CAPABILITY_PROCESS_INSPECTION),
-                "{id} 不需要进程表查询能力"
-            );
-        }
-    }
-    #[test]
-    fn capability_grant_table_matches_previous_boolean_grants() {
-        // 迁移前的授权表（布尔字段时代）：凭据服务随 Git 工作流，录音只给
-        // volcengine，无头浏览器给 terminal/command；非官方一律不授予。
-        // #677 起官方 terminal/command 另获进程表查询能力。
-        let ids = [
-            "terminal",
-            "command",
-            "volcengine",
-            "computer-use",
-            "mcp",
-            "fetch",
-            "fs",
-            "unknown-third-party",
-        ];
-        for id in ids {
-            for official in [false, true] {
-                let git = official && matches!(id, "terminal" | "command");
-                let mut expected = BTreeSet::new();
-                if git {
-                    expected.insert(CAPABILITY_CREDENTIAL_SERVICES.to_string());
-                    expected.insert(CAPABILITY_BROWSER_RUNTIME.to_string());
-                    expected.insert(CAPABILITY_PROCESS_INSPECTION.to_string());
-                }
-                if official && id == "volcengine" {
-                    expected.insert(CAPABILITY_AUDIO_INPUT.to_string());
-                }
-                assert_eq!(
-                    resolve(id, official).capabilities,
-                    expected,
-                    "{id} official={official} 的能力授权表必须与迁移前一致"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn policy_is_pure_and_stable() {
-        // 不变式：同一输入恒返回同一策略（无隐藏全局状态），策略仅由
-        // 插件 id 与已验证发布者身份决定——agent 执行过程中不存在升级输入。
-        for id in ["command", "fetch", "mcp"] {
-            assert_eq!(resolve(id, true), resolve(id, true));
-            assert_eq!(resolve(id, false), resolve(id, false));
-        }
+    fn 默认策略常量覆盖沙箱与能力() {
+        // 能力常量与策略字段一一对应，避免宿主表引用了 runtime 不认识的名称。
+        let policy = HostExecutionPolicy::sandboxed_default()
+            .with_capability(CAPABILITY_BROWSER_RUNTIME)
+            .with_capability(CAPABILITY_PROCESS_INSPECTION);
+        assert!(policy.has(CAPABILITY_BROWSER_RUNTIME));
+        assert!(policy.has(CAPABILITY_PROCESS_INSPECTION));
+        assert!(!policy.has(CAPABILITY_CREDENTIAL_SERVICES));
+        assert!(!policy.has(CAPABILITY_AUDIO_INPUT));
     }
 }

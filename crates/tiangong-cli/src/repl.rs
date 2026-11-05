@@ -33,6 +33,10 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     // 与桌面端一致：已安装插件由 runtime 统一预加载，Core 工具与 @提及都从
     // 同一份注册表取。预加载含 WASM 编译、耗时较长，放到后台进行，不阻塞
     // 进入输入；首次建 Core 前等待其完成，保证本轮工具齐全。
+    //
+    // 预加载前先安装宿主权威策略表（runtime 不含插件 ID，未注入即全沙箱
+    // 零特权，命令类插件会失去 Git 工作流与命令执行位能力）。
+    tiangong_plugin_policy::install();
     let mut plugin_preload = Some({
         let storage_root = storage_root.clone();
         let core_manager = state.core_manager.clone();
