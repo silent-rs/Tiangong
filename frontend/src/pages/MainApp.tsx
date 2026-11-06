@@ -9,6 +9,7 @@ import {
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { CentralModeView } from '@/components/central/CentralModeView';
+import { CentralTransition } from '@/components/central/CentralTransition';
 import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
@@ -93,6 +94,15 @@ export function MainApp() {
   // 中枢模式：注册 Cmd/Ctrl+Shift+J 快捷键（仅 desktop），centralActive 驱动布局分支
   useCentralModeHotkey();
   const { centralActive } = useCentralMode();
+  // 切换过渡层：进入播 900ms 全屏科技感过渡，退出 280ms 快速收缩
+  const [centralPhase, setCentralPhase] = useState<'idle' | 'entering' | 'exiting'>('idle');
+  const prevCentralActiveRef = useRef(centralActive);
+  useEffect(() => {
+    if (centralActive === prevCentralActiveRef.current) return;
+    const entering = centralActive;
+    prevCentralActiveRef.current = centralActive;
+    setCentralPhase(entering ? 'entering' : 'exiting');
+  }, [centralActive]);
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const { showWarning } = useToast();
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -850,6 +860,13 @@ export function MainApp() {
         <FirstRunModelSetup
           open={modelSetupOpen}
           onOpenChange={setModelSetupOpen}
+        />
+      )}
+      {/* 中枢模式切换过渡层：fixed 覆盖，动画结束自动卸载 */}
+      {centralPhase !== 'idle' && (
+        <CentralTransition
+          phase={centralPhase}
+          onDone={() => setCentralPhase('idle')}
         />
       )}
     </SidebarProvider>

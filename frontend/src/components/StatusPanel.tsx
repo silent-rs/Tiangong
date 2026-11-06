@@ -82,6 +82,14 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
     setIsEditing(false);
   }, [activeSessionId]);
 
+  // 中枢模式下标题固定为「中枢」，退出可能残留的标题编辑态
+  useEffect(() => {
+    if (centralMode) {
+      setIsEditing(false);
+      savingRef.current = false;
+    }
+  }, [centralMode]);
+
   const startEditing = () => {
     if (!activeSession) return;
     setEditValue(currentTitle);
@@ -128,17 +136,20 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
       onMouseDown={startWindowDrag}
     >
       <div className="flex items-center gap-2">
-        <Button
-          data-no-drag
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={toggleSidebar}
-        >
-          <PanelLeft className="h-4 w-4" />
-          <span className="sr-only">切换侧边栏</span>
-        </Button>
-        {!sidebarOpen && (
+        {/* 中枢模式：隐藏侧栏开关与新对话（单一中枢对话，会话操作不在此进行） */}
+        {!centralMode && (
+          <Button
+            data-no-drag
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={toggleSidebar}
+          >
+            <PanelLeft className="h-4 w-4" />
+            <span className="sr-only">切换侧边栏</span>
+          </Button>
+        )}
+        {!centralMode && !sidebarOpen && (
           <Button
             data-no-drag
             variant="ghost"
@@ -150,12 +161,15 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <SquarePen className="h-4 w-4" />
           </Button>
         )}
-        <Separator orientation="vertical" className="mr-2 h-4" />
+        {!centralMode && <Separator orientation="vertical" className="mr-2 h-4" />}
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
-              {(isNewConversation || activeSession) && (
-                isNewConversation ? (
+              {centralMode ? (
+                <BreadcrumbPage className="font-medium">中枢</BreadcrumbPage>
+              ) : (
+                (isNewConversation || activeSession) &&
+                (isNewConversation ? (
                   <BreadcrumbPage>新对话</BreadcrumbPage>
                 ) : isEditing ? (
                   <input
@@ -176,6 +190,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
                     {currentTitle}
                   </BreadcrumbPage>
                 )
+              )
               )}
             </BreadcrumbItem>
           </BreadcrumbList>
@@ -198,7 +213,8 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <span>v{updateAvailable.version}</span>
           </button>
         )}
-        {/* 中枢模式入口：仅 desktop 宿主提供（设计稿 §4.1；浏览器配置页与远程 H5 不提供） */}
+        {/* 中枢模式入口：仅 desktop 宿主提供（设计稿 §4.1；浏览器配置页与远程 H5 不提供）。
+            进入与退出复用同一按钮（toggle）。 */}
         {canUseCentral && (
           <button
             data-no-drag
@@ -214,8 +230,9 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <Sparkles className="w-4 h-4" />
           </button>
         )}
-        {!remote && <SearchButton />}
-        {!remote && (
+        {/* 中枢模式为单一对话：搜索 / 插件管理 / 拓展区均不在中枢内操作 */}
+        {!centralMode && !remote && <SearchButton />}
+        {!centralMode && !remote && (
           <button
             data-no-drag
             onClick={() => setPendingSettingsTab('plugin-manager')}
@@ -225,7 +242,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <Puzzle className="w-4 h-4" />
           </button>
         )}
-        {onToggleExtension && !remote && (
+        {onToggleExtension && !remote && !centralMode && (
           <button
             data-no-drag
             onClick={onToggleExtension}

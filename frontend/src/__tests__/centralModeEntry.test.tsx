@@ -1,9 +1,13 @@
 /**
  * 中枢模式前端入口测试（设计稿 §4.1 / §16）。
  *
- * 关键约束（用户与设计稿共同要求）：中枢模式仅在 desktop（Tauri 桌面窗口）
- * 宿主下可进入——浏览器配置页（web host）与远程 H5（remote host）不提供
- * 入口、快捷键不生效，即便 store 状态被置位也不切换视图。
+ * 关键约束（用户与设计稿共同要求）：
+ * - 中枢模式仅在 desktop（Tauri 桌面窗口）宿主下可进入——浏览器配置页
+ *   （web host）与远程 H5（remote host）不提供入口、快捷键不生效，
+ *   store 状态被置位也不切换视图；
+ * - 进入后状态持久化（localStorage），重启直接回到中枢模式；
+ * - 中枢模式下顶栏标题显示「中枢」，隐藏新对话 / 搜索 / 插件管理 / 拓展区，
+ *   退出复用顶栏进入按钮（toggle）。
  */
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -66,16 +70,24 @@ vi.mock('@/components/InteractionPluginHost', () => ({
 vi.mock('@/components/InputOverlayPluginHost', () => ({
   InputOverlayPluginHost: () => null,
 }));
-vi.mock('@/components/LazyComponents', () => ({
-  LazyMessageInput: () => null,
-  LazyMessageList: () => null,
-  LazyStatusPanel: () => null,
+// 顶栏渲染真实 StatusPanel：覆盖中枢模式标题 / 按钮隐藏 / 退出按钮
+vi.mock('@/components/LazyComponents', async () => {
+  const { StatusPanel } = await import('@/components/StatusPanel');
+  return {
+    LazyMessageInput: () => null,
+    LazyMessageList: () => null,
+    LazyStatusPanel: () => <StatusPanel onToggleExtension={() => {}} />,
+  };
+});
+vi.mock('@/components/GlobalStatusPluginHost', () => ({
+  GlobalStatusPluginHost: () => null,
 }));
 vi.mock('@/components/TabsContainer', () => ({ TabsContainer: () => null }));
 vi.mock('@/components/ExtensionMatrix', () => ({ ExtensionMatrix: () => null }));
 vi.mock('@/components/RemoteStatusBanner', () => ({ RemoteStatusBanner: () => null }));
 vi.mock('@/components/ui/sidebar', () => ({
   SidebarProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  useSidebar: () => ({ toggleSidebar: vi.fn(), open: false }),
 }));
 vi.mock('@/components/Toast', () => ({
   useToast: () => ({ showWarning: vi.fn() }),
@@ -87,6 +99,10 @@ vi.mock('@/utils/desktopNotification', () => ({
 
 const { isDesktopHost } = await import('@/api/host');
 const { useCentralMode, useCentralModeHotkey } = await import('@/hooks/useCentralMode');
+const {
+  CENTRAL_MODE_STORAGE_KEY,
+  readPersistedCentralMode,
+} = await import('@/lib/centralModePreference');
 const { useStore } = await import('@/store/useStore');
 
 /** 宿主形态注入：desktop（默认）/ web 配置页 / 远程 H5。 */
@@ -107,7 +123,7 @@ function pressCentralHotkey() {
   );
 }
 
-/** 挂载 MainApp（真实布局分支 + 真实 CentralModeView），返回清理函数。 */
+/** 挂载 MainApp（真实布局分支 + 真实 CentralModeView + 真实 StatusPanel）。 */
 async function mountMainApp(): Promise<() => void> {
   const { MainApp } = await import('@/pages/MainApp');
   const container = document.createElement('div');
@@ -127,9 +143,21 @@ function textIncludes(text: string): boolean {
   return document.body.textContent?.includes(text) ?? false;
 }
 
-describe('isDesktopHost 宿主判定', () => {
-  afterEach(() => setHost('desktop'));
+function queryByTitle(title: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[title="${title}"]`);
+}
 
+beforeEach(() => {
+  setHost('desktop');
+  localStorage.removeItem(CENTRAL_MODE_STORAGE_KEY);
+  useStore.setState({ centralMode: false });
+});
+
+afterEach(() => {
+  setHost('desktop');
+});
+
+describe('isDesktopHost 宿主判定', () => {
   it('desktop（无注入）为 true', () => {
     setHost('desktop');
     expect(isDesktopHost()).toBe(true);
@@ -149,11 +177,6 @@ describe('isDesktopHost 宿主判定', () => {
 describe('中枢模式布局分支', () => {
   let cleanup: (() => void) | undefined;
 
-  beforeEach(() => {
-    setHost('desktop');
-    useStore.setState({ centralMode: false });
-  });
-
   afterEach(() => {
     cleanup?.();
     cleanup = undefined;
@@ -171,7 +194,6 @@ describe('中枢模式布局分支', () => {
       useStore.getState().setCentralMode(true);
     });
     expect(textIncludes('app-sidebar')).toBe(false);
-    expect(textIncludes('天工中枢')).toBe(true);
     // 无上下文默认问候（设计稿 §4.2 原文）
     expect(textIncludes('我是天工中枢')).toBe(true);
   });
@@ -183,17 +205,18 @@ describe('中枢模式布局分支', () => {
       useStore.getState().setCentralMode(true);
     });
     expect(textIncludes('app-sidebar')).toBe(true);
-    expect(textIncludes('天工中枢')).toBe(false);
+    expect(textIncludes('我是天工中枢')).toBe(false);
   });
 
-  it('中枢视图点击退出按钮恢复普通模式', async () => {
+  it('退出复用顶栏进入按钮（toggle）：点击后恢复普通模式', async () => {
     cleanup = await mountMainApp();
+    // 进入
     act(() => {
       useStore.getState().setCentralMode(true);
     });
-    const exitButton = Array.from(document.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('退出中枢模式'),
-    );
+    expect(textIncludes('app-sidebar')).toBe(false);
+    // 顶栏中枢按钮（进入后语义变为退出）
+    const exitButton = document.querySelector<HTMLElement>('[aria-label="退出中枢模式"]');
     expect(exitButton).toBeTruthy();
     act(() => {
       exitButton?.click();
@@ -203,21 +226,52 @@ describe('中枢模式布局分支', () => {
   });
 });
 
-describe('中枢模式快捷键（Cmd/Ctrl+Shift+J）', () => {
+describe('中枢模式顶栏（StatusPanel）', () => {
   let cleanup: (() => void) | undefined;
-
-  beforeEach(() => {
-    setHost('desktop');
-    useStore.setState({ centralMode: false });
-  });
 
   afterEach(() => {
     cleanup?.();
     cleanup = undefined;
-    setHost('desktop');
   });
 
-  /** 快捷键注册在 MainApp（useCentralModeHotkey），渲染 MainApp 生效。 */
+  it('中枢模式下标题显示「中枢」，普通模式显示会话标题', async () => {
+    cleanup = await mountMainApp();
+    expect(textIncludes('新对话')).toBe(true); // 普通模式默认标题
+    act(() => {
+      useStore.getState().setCentralMode(true);
+    });
+    expect(textIncludes('中枢')).toBe(true);
+    expect(textIncludes('新对话')).toBe(false);
+  });
+
+  it('中枢模式下隐藏新对话 / 搜索 / 插件管理 / 拓展区，普通模式均在', async () => {
+    cleanup = await mountMainApp();
+    // 普通模式全部可见
+    expect(queryByTitle('新对话')).not.toBeNull();
+    expect(queryByTitle('搜索消息')).not.toBeNull();
+    expect(queryByTitle('插件管理')).not.toBeNull();
+    expect(queryByTitle('打开拓展区')).not.toBeNull();
+
+    act(() => {
+      useStore.getState().setCentralMode(true);
+    });
+    expect(queryByTitle('新对话')).toBeNull();
+    expect(queryByTitle('搜索消息')).toBeNull();
+    expect(queryByTitle('插件管理')).toBeNull();
+    expect(queryByTitle('打开拓展区')).toBeNull();
+    // 中枢按钮本身保留（toggle 退出入口）
+    expect(document.querySelector('[aria-label="退出中枢模式"]')).not.toBeNull();
+  });
+});
+
+describe('中枢模式快捷键（Cmd/Ctrl+Shift+J）', () => {
+  let cleanup: (() => void) | undefined;
+
+  afterEach(() => {
+    cleanup?.();
+    cleanup = undefined;
+  });
+
   it('desktop 下切换开关，重复按键切回', async () => {
     cleanup = await mountMainApp();
     act(() => pressCentralHotkey());
@@ -231,6 +285,65 @@ describe('中枢模式快捷键（Cmd/Ctrl+Shift+J）', () => {
     cleanup = await mountMainApp();
     act(() => pressCentralHotkey());
     expect(useStore.getState().centralMode).toBe(false);
+  });
+});
+
+describe('中枢模式状态持久化', () => {
+  it('setCentralMode 写入 localStorage，重启读取恢复', async () => {
+    act(() => {
+      useStore.getState().setCentralMode(true);
+    });
+    expect(localStorage.getItem(CENTRAL_MODE_STORAGE_KEY)).toBe('true');
+    act(() => {
+      useStore.getState().setCentralMode(false);
+    });
+    expect(localStorage.getItem(CENTRAL_MODE_STORAGE_KEY)).toBe('false');
+  });
+
+  it('readPersistedCentralMode：非法值与缺键回退 false', () => {
+    expect(readPersistedCentralMode()).toBe(false);
+    localStorage.setItem(CENTRAL_MODE_STORAGE_KEY, 'garbage');
+    expect(readPersistedCentralMode()).toBe(false);
+    localStorage.setItem(CENTRAL_MODE_STORAGE_KEY, 'true');
+    expect(readPersistedCentralMode()).toBe(true);
+    localStorage.removeItem(CENTRAL_MODE_STORAGE_KEY);
+    expect(readPersistedCentralMode()).toBe(false);
+  });
+});
+
+describe('中枢模式切换过渡层', () => {
+  let cleanup: (() => void) | undefined;
+
+  afterEach(() => {
+    cleanup?.();
+    cleanup = undefined;
+    vi.useRealTimers();
+  });
+
+  it('进入播放过渡层并在 900ms 后卸载；退出 280ms 后卸载', async () => {
+    vi.useFakeTimers();
+    cleanup = await mountMainApp();
+
+    act(() => {
+      useStore.getState().setCentralMode(true);
+    });
+    expect(document.querySelector('[data-testid="central-transition"]')).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(950);
+    });
+    expect(document.querySelector('[data-testid="central-transition"]')).toBeNull();
+    // 中枢视图已就位
+    expect(textIncludes('我是天工中枢')).toBe(true);
+
+    act(() => {
+      useStore.getState().setCentralMode(false);
+    });
+    expect(document.querySelector('[data-testid="central-transition"]')).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(320);
+    });
+    expect(document.querySelector('[data-testid="central-transition"]')).toBeNull();
+    expect(textIncludes('app-sidebar')).toBe(true);
   });
 });
 
@@ -257,11 +370,6 @@ describe('useCentralMode hook 行为', () => {
     return api;
   }
 
-  beforeEach(() => {
-    setHost('desktop');
-    useStore.setState({ centralMode: false });
-  });
-
   afterEach(() => {
     cleanup?.();
     cleanup = undefined;
@@ -287,6 +395,21 @@ describe('useCentralMode hook 行为', () => {
     const web = mountProbe();
     web.exitCentral();
     expect(useStore.getState().centralMode).toBe(false);
+  });
+});
+
+// 重启直入：必须放最后（vi.resetModules 会影响后续动态 import 的模块图）
+describe('重启直接进入中枢模式', () => {
+  it('localStorage 预置 true 时，新 store 实例初始化即中枢模式', async () => {
+    localStorage.setItem(CENTRAL_MODE_STORAGE_KEY, 'true');
+    vi.resetModules();
+    const { useStore: freshStore } = await import('@/store/useStore');
+    expect(freshStore.getState().centralMode).toBe(true);
+
+    localStorage.setItem(CENTRAL_MODE_STORAGE_KEY, 'false');
+    vi.resetModules();
+    const { useStore: normalStore } = await import('@/store/useStore');
+    expect(normalStore.getState().centralMode).toBe(false);
   });
 });
 

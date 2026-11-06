@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
+import { persistCentralMode, readPersistedCentralMode } from '../lib/centralModePreference';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {
@@ -1018,7 +1019,8 @@ export interface AppState {
 
   // 从外部触发打开设置页到指定 tab
   pendingSettingsTab: string | null;
-  /** 中枢模式开关（POC）：仅 desktop 宿主可进入，视图分支切换、不影响会话数据。 */
+  /** 中枢模式开关：进入/退出时持久化（localStorage），重启按上次状态直接进入；
+   *  仅 desktop 宿主真正切换视图（布局守卫见 useCentralMode）。 */
   centralMode: boolean;
   setCentralMode: (on: boolean) => void;
   setPendingSettingsTab: (tab: string | null) => void;
@@ -1138,8 +1140,12 @@ export const useStore = create<AppState>((set, get) => ({
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
-  centralMode: false,
-  setCentralMode: (on) => set({ centralMode: on }),
+  centralMode: readPersistedCentralMode(),
+  setCentralMode: (on) => {
+    set({ centralMode: on });
+    // 记录停留偏好：重启直接回到上次的模式（见 lib/centralModePreference）
+    persistCentralMode(on);
+  },
   sandboxDisabled: null,
   autoUpdate: null,
   sandboxState: null,
