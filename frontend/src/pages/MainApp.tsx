@@ -94,15 +94,22 @@ export function MainApp() {
   // 中枢模式：注册 Cmd/Ctrl+Shift+J 快捷键（仅 desktop），centralActive 驱动布局分支
   useCentralModeHotkey();
   const { centralActive } = useCentralMode();
-  // 切换过渡层：进入播 900ms 全屏科技感过渡，退出 280ms 快速收缩
-  const [centralPhase, setCentralPhase] = useState<'idle' | 'entering' | 'exiting'>('idle');
+  // 两阶段切换过渡（设计稿 §4.1）：
+  // 阶段一 title-scan（2s）：激光扫 title 切换顶部，主区域维持原视图；
+  // 阶段二 shatter：粒子打碎主区域 → 银河轮转 2 圈 → 重组为中枢 UI（进入），
+  // 或快速爆散消散（退出）。
+  const [centralPhase, setCentralPhase] = useState<'idle' | 'title-scan' | 'shatter'>('idle');
   const prevCentralActiveRef = useRef(centralActive);
   useEffect(() => {
     if (centralActive === prevCentralActiveRef.current) return;
     const entering = centralActive;
     prevCentralActiveRef.current = centralActive;
-    setCentralPhase(entering ? 'entering' : 'exiting');
+    // 进入走两阶段；退出直接粒子消散（title 反向扫描由 StatusPanel 同步播放）
+    setCentralPhase(entering ? 'title-scan' : 'shatter');
   }, [centralActive]);
+  // 布局显示与模式状态分离：title-scan 阶段维持普通布局（等激光扫完顶部），
+  // shatter 起切换布局——切换瞬间被全屏粒子层遮盖，视觉连续。
+  const centralDisplay = centralActive && centralPhase !== 'title-scan';
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const { showWarning } = useToast();
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -752,7 +759,9 @@ export function MainApp() {
         />
 
         <div className="flex flex-1 min-h-0">
-          {centralActive ? (
+          {/* centralDisplay：模式开启且非 title 扫描期才切换布局——扫描期维持
+              普通视图，shatter 起切换（瞬间被全屏粒子层遮盖）；含 desktop 守卫。 */}
+          {centralDisplay ? (
             <CentralModeView />
           ) : (
           <>
@@ -862,11 +871,16 @@ export function MainApp() {
           onOpenChange={setModelSetupOpen}
         />
       )}
-      {/* 中枢模式切换过渡层：fixed 覆盖，动画结束自动卸载 */}
+      {/* 中枢模式两阶段切换过渡层：激光扫 title（2s）→ 粒子银河重组，动画结束自动卸载 */}
       {centralPhase !== 'idle' && (
         <CentralTransition
           phase={centralPhase}
-          onDone={() => setCentralPhase('idle')}
+          entering={centralActive}
+          onDone={() =>
+            setCentralPhase((phase) =>
+              phase === 'title-scan' ? 'shatter' : 'idle',
+            )
+          }
         />
       )}
     </SidebarProvider>

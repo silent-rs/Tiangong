@@ -6,6 +6,19 @@ import { startWindowDrag } from '@/lib/windowDrag';
 import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle, Sparkles } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useCentralMode } from '@/hooks/useCentralMode';
+
+/** title 激光扫描进度：0（未开始）→ 1（扫完）。 */
+interface TitleScan {
+  active: boolean;
+  x: number;
+  /** true = 普通标题 →「中枢」；false = 反向恢复 */
+  toCentral: boolean;
+}
+
+/** 进入方向扫描时长与停留（与 CentralTransition 阶段一时长对齐：扫描后维持足 2s）。 */
+const TITLE_SCAN_MS = 750;
+const TITLE_SCAN_HOLD_MS = 2000 - TITLE_SCAN_MS;
+const TITLE_SCAN_REVERSE_MS = 500;
 import { useSearchStore } from '@/store/useSearchStore';
 import { Separator } from './ui/separator';
 import { GlobalStatusPluginHost } from './GlobalStatusPluginHost';
@@ -90,6 +103,35 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
     }
   }, [centralMode]);
 
+  // title 激光扫描：centralMode 翻转时播放（进入 750ms 扫描 + 维持；退出反向 500ms）
+  const [titleScan, setTitleScan] = useState<TitleScan | null>(null);
+  const scanRafRef = useRef<number | null>(null);
+  const scanHoldRef = useRef<number | null>(null);
+  const prevCentralModeRef = useRef(centralMode);
+  useEffect(() => {
+    if (centralMode === prevCentralModeRef.current) return;
+    const toCentral = centralMode;
+    prevCentralModeRef.current = centralMode;
+    const duration = toCentral ? TITLE_SCAN_MS : TITLE_SCAN_REVERSE_MS;
+    const start = performance.now();
+    setTitleScan({ active: true, x: 0, toCentral });
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      setTitleScan((s) => (s ? { ...s, x: t } : s));
+      if (t < 1) {
+        scanRafRef.current = requestAnimationFrame(tick);
+      } else {
+        const hold = toCentral ? TITLE_SCAN_HOLD_MS : 160;
+        scanHoldRef.current = window.setTimeout(() => setTitleScan(null), hold);
+      }
+    };
+    scanRafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (scanRafRef.current !== null) cancelAnimationFrame(scanRafRef.current);
+      if (scanHoldRef.current !== null) window.clearTimeout(scanHoldRef.current);
+    };
+  }, [centralMode]);
+
   const startEditing = () => {
     if (!activeSession) return;
     setEditValue(currentTitle);
@@ -165,8 +207,52 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
-              {centralMode ? (
-                <BreadcrumbPage className="font-medium">中枢</BreadcrumbPage>
+              {titleScan?.active ? (
+                // 激光扫描期：旧标题暗态铺底，新标题随激光从左向右揭示，
+                // 激光束（青芯白热）+ 尾迹光带同步推进（进入维持至 2s 再静止）
+                <span className="relative inline-flex items-center" data-testid="central-title-scan">
+                  <span className="opacity-40">{titleScan.toCentral ? currentTitle : '中枢'}</span>
+                  <span
+                    aria-hidden
+                    className={`absolute inset-0 ${titleScan.toCentral ? 'font-medium text-primary' : ''}`}
+                    style={{
+                      clipPath: `inset(0 ${(1 - titleScan.x) * 100}% 0 0)`,
+                      textShadow: '0 0 12px rgba(34,211,238,.85), 0 0 30px rgba(167,139,250,.45)',
+                    }}
+                  >
+                    {titleScan.toCentral ? '中枢' : currentTitle}
+                  </span>
+                  {titleScan.x < 1 ? (
+                    <>
+                      <span
+                        className="absolute top-1/2 h-7 w-[2px] -translate-y-1/2 rounded-full"
+                        style={{
+                          left: `${titleScan.x * 100}%`,
+                          background:
+                            'linear-gradient(180deg, transparent, #22d3ee 28%, #f0f9ff 50%, #22d3ee 72%, transparent)',
+                          boxShadow:
+                            '0 0 10px rgba(34,211,238,.95), 0 0 26px rgba(34,211,238,.6), 0 0 44px rgba(167,139,250,.35)',
+                        }}
+                      />
+                      <span
+                        className="pointer-events-none absolute inset-y-0"
+                        style={{
+                          left: 0,
+                          width: `${titleScan.x * 100}%`,
+                          background:
+                            'linear-gradient(90deg, rgba(34,211,238,0), rgba(34,211,238,.13) 70%, rgba(34,211,238,.26))',
+                        }}
+                      />
+                    </>
+                  ) : null}
+                </span>
+              ) : centralMode ? (
+                <BreadcrumbPage
+                  className="animate-central-title-glow font-medium"
+                  data-testid="central-title"
+                >
+                  中枢
+                </BreadcrumbPage>
               ) : (
                 (isNewConversation || activeSession) &&
                 (isNewConversation ? (
