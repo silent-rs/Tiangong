@@ -56,6 +56,10 @@ pub struct TiangongApp {
     pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
+    /// 中枢对话专用 CoreManager：storage_root 独立（`{storage_root}/central`），
+    /// 普通会话链路（列表/删除/回收/元数据）不触达；模型等全局配置与普通
+    /// manager 共享同一 provider。见 `crate::central`。
+    pub central_core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -148,6 +152,12 @@ impl TiangongApp {
         let config = core_state.core_manager.config().clone();
         let storage_root = core_state.config.storage_root.clone();
         let core_manager = core_state.core_manager.clone();
+        // 中枢对话独立执行域：storage_root 独立（与普通会话物理隔离），
+        // 模型等全局配置共享同一 provider（Arc 语义，设置变更两侧同步）。
+        let central_core_manager = tiangong_core_manager::CoreManager::new(
+            config.clone(),
+            crate::central::central_storage_root(&storage_root),
+        );
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
 
         let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
@@ -177,6 +187,7 @@ impl TiangongApp {
                 storage_root.clone(),
             ),
             core_manager,
+            central_core_manager,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -784,8 +795,13 @@ impl TiangongApp {
             .await
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
-        let existing_session = self.core_manager.load_session(session_id).ok();
-        let workspace_dir = workspace_dir
+        // 中枢对话固定路由到独立 manager（单独存储，见 crate::central）；
+        // workspace 不由调用方指定：中枢是控制面，不绑定工作区（§6），
+        // Core 构造统一用全局默认目录（无工作型工具，仅作路径兜底）。
+        let is_central = crate::central::is_central_session(session_id);
+        let manager = self.manager_for(session_id);
+        let existing_session = manager.load_session(session_id).ok();
+        let workspace_dir = if is_central { None } else { workspace_dir }
             .filter(|cwd| !cwd.trim().is_empty())
             .unwrap_or(default_workspace_dir);
         if let Some(session) = existing_session {
@@ -801,18 +817,39 @@ impl TiangongApp {
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
         // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
+        //
+        // 中枢对话插件集为空（§5.2/§5.3 权限隔离由宿主在 Core 构造点强制，
+        // 不靠提示词；§5.3 白名单工具集随中枢编排后续片接入）：中枢助手
+        // 不携带任何工作型工具，聚合桥（runtime 全量插件）不挂载。
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
-        self.core_manager
+        let central_plugins = Vec::new();
+        manager
             .ensure_core(
                 session_id,
                 session_config,
                 workspace_dir,
                 initial_model_ref,
                 stream_tx,
-                || factory.build_plugins_sync(session_id, models),
+                move || {
+                    if is_central {
+                        central_plugins
+                    } else {
+                        factory.build_plugins_sync(session_id, models)
+                    }
+                },
             )
             .await
+    }
+
+    /// 按 session_id 选择 CoreManager：中枢对话固定路由到独立 manager，
+    /// 其余走普通 manager。所有按会话操作 Core 的入口都应经由此方法路由。
+    pub(crate) fn manager_for(&self, session_id: &str) -> &tiangong_core_manager::CoreManager {
+        if crate::central::is_central_session(session_id) {
+            &self.central_core_manager
+        } else {
+            &self.core_manager
+        }
     }
 
     /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：
@@ -943,7 +980,7 @@ impl TiangongApp {
         }
         self.handoff_before_deliver(session_id).await;
         self.flush_pending_snapshot(session_id);
-        self.core_manager
+        self.manager_for(session_id)
             .deliver_user_message(
                 session_id,
                 AgentInputKind::prepared_with_id(message_id, prepared)

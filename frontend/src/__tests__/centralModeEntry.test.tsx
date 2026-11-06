@@ -108,9 +108,9 @@ const { isDesktopHost } = await import('@/api/host');
 const { useCentralMode, useCentralModeHotkey } = await import('@/hooks/useCentralMode');
 const {
   CENTRAL_MODE_STORAGE_KEY,
-  CENTRAL_SESSION_STORAGE_KEY,
   readPersistedCentralMode,
 } = await import('@/lib/centralModePreference');
+const { CENTRAL_SESSION_ID } = await import('@/lib/centralSession');
 const { useStore } = await import('@/store/useStore');
 
 /** 宿主形态注入：desktop（默认）/ web 配置页 / 远程 H5。 */
@@ -158,7 +158,6 @@ function queryByTitle(title: string): HTMLElement | null {
 beforeEach(() => {
   setHost('desktop');
   localStorage.removeItem(CENTRAL_MODE_STORAGE_KEY);
-  localStorage.removeItem(CENTRAL_SESSION_STORAGE_KEY);
   useStore.setState({
     centralMode: false,
     preCentralContext: null,
@@ -212,14 +211,17 @@ describe('中枢模式布局分支', () => {
       useStore.getState().setCentralMode(true);
     });
     expect(textIncludes('app-sidebar')).toBe(false);
-    // 中枢视图挂载（对话链路复用 ChatPanel，空态问候由 MessageList 呈现）
+    // 中枢视图挂载（专属输入区 + 消息列表复用）
     expect(document.querySelector('[data-testid="central-mode-view"]')).not.toBeNull();
-    // 进入即建立中枢对话绑定（新对话态，绑定 ID 写入 localStorage）
+    // 进入即切到固定中枢对话（单独存储，见 lib/centralSession）
     await act(async () => {
       await Promise.resolve();
     });
-    expect(useStore.getState().newConversationId).toBe('central-entry-1');
-    expect(localStorage.getItem(CENTRAL_SESSION_STORAGE_KEY)).toBe('central-entry-1');
+    expect(useStore.getState().activeSessionId).toBe(CENTRAL_SESSION_ID);
+    // 普通会话列表不包含中枢对话
+    expect(
+      useStore.getState().sessions.some((s) => s.id === CENTRAL_SESSION_ID),
+    ).toBe(false);
   });
 
   it('非 desktop 宿主下置位 centralMode 不切换视图（双保险）', async () => {

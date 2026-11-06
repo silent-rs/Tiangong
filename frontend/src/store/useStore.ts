@@ -1,11 +1,10 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
 import {
-  persistCentralSessionId,
   persistCentralMode,
-  readCentralSessionId,
   readPersistedCentralMode,
 } from '../lib/centralModePreference';
+import { CENTRAL_SESSION_ID } from '../lib/centralSession';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {
@@ -1226,7 +1225,10 @@ export const useStore = create<AppState>((set, get) => ({
       }
       const prev = get();
       const activeSessionId = prev.activeSessionId;
+      // 中枢对话不在普通会话列表（单独存储），激活期间不算失效，
+      // 不得触发自动迁移（切到列表首个会话）。
       const activeSessionInvalid = !!activeSessionId
+        && activeSessionId !== CENTRAL_SESSION_ID
         && !sessions.some((session) => session.id === activeSessionId);
       let newConversationId = prev.newConversationId;
       // 普通加载时为尚未初始化的新对话预生成 ID。active 失效由下方完整迁移处理。
@@ -1465,42 +1467,59 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // 中枢对话（POC 阶段 1）：中枢对话复用现有 Session 持久化——绑定 ID 记录在
-  // localStorage，首次发送时按该 ID 创建 Session，之后进入中枢按绑定恢复。
+  // 中枢对话（POC 阶段 1）：中枢对话单独存储（后端独立 storage_root，见
+  // lib/centralSession），固定 Session ID、单一对话；进入时成为当前对话，
+  // 尚未创建（从未发过消息）按空对话处理，退出时恢复普通模式上下文。
   ensureCentralConversation: async () => {
+    // 作废在途的恢复（快速来回切换模式时旧恢复不再生效）
     const version = ++centralConversationRequestVersion;
-    // 重启直入等场景 sessions 可能尚未加载：先刷新一次，否则无法判定
-    // 中枢对话是否已创建（避免把已创建的中枢对话误当成新对话，历史丢失展示）。
-    await get().loadSessions();
-    if (version !== centralConversationRequestVersion) return;
     const cur = get();
-    // 会话列表加载失败时无法确认绑定状态：放弃本次，保持现状（下次进入再试）
-    if (cur.sessionsLoadError) return;
-    // 记录进入前的普通模式上下文（幂等；退出中枢时恢复）
-    if (!cur.preCentralContext) {
-      set({
-        preCentralContext: {
-          activeSessionId: cur.activeSessionId,
-          newConversationId: cur.newConversationId,
-        },
-      });
-    }
-    const savedId = readCentralSessionId();
-    // 已创建的中枢对话：切换过去（幂等，已在其中则不动）
-    if (savedId && cur.sessions.some((session) => session.id === savedId)) {
-      if (cur.activeSessionId !== savedId) {
-        await get().switchSession(savedId);
+    // 已在中枢对话（含 turn 进行中重复进入）：仅确保上下文已记录（幂等）
+    if (cur.activeSessionId === CENTRAL_SESSION_ID) {
+      if (!cur.preCentralContext) {
+        set({
+          preCentralContext: {
+            activeSessionId: null,
+            newConversationId: null,
+          },
+        });
       }
       return;
     }
-    // 尚未创建，或绑定已失效（如会话被删入回收站）：以新 ID 进入新对话态，
-    // 首次发送时创建。已处于绑定 ID 的新对话态（未发送草稿）则直接沿用，
-    // 不换 ID；失效 ID 不复用，避免与回收站同 ID 数据冲突。
-    if (savedId && cur.isNewConversation && cur.newConversationId === savedId) return;
-    await get().startNewConversation(undefined, { keepCurrentDraft: true });
+    // 记录进入前的普通模式上下文（退出中枢时恢复）
+    set({
+      preCentralContext: {
+        activeSessionId: cur.activeSessionId,
+        newConversationId: cur.newConversationId,
+      },
+    });
+    // 中枢对话历史从中枢存储加载；尚未创建（首次进入）按空对话处理。
+    const loaded = await api
+      .loadSession(CENTRAL_SESSION_ID)
+      .catch(() => null);
+    // 加载期间模式被来回切换：放弃本次写入
     if (version !== centralConversationRequestVersion) return;
-    const boundId = get().newConversationId;
-    if (boundId) persistCentralSessionId(boundId);
+    const knownRunStatus = get().sessionRunStatuses[CENTRAL_SESSION_ID];
+    set({
+      isNewConversation: false,
+      activeSessionId: CENTRAL_SESSION_ID,
+      newConversationId: null,
+      messages: loaded?.messages ?? [],
+      historyStart: 0,
+      userOutline: null,
+      runStatus: knownRunStatus || 'idle',
+      runSummary: knownRunStatus ? '正在处理' : '',
+      lastDurationMs: null,
+      toolCallStartedAt: {},
+      toolCallFinished: {},
+      lastUsage: null,
+      tokenStats: null,
+      streamingMessageId: null,
+      streamingContent: '',
+      streamingReasoningContent: '',
+      sessionCwd: get().workspaceDir,
+      agents: [],
+    });
   },
 
   restoreFromCentralConversation: async () => {
@@ -2606,6 +2625,9 @@ export const useStore = create<AppState>((set, get) => ({
           void get().dequeueNextQueuedInput(sessionId);
         }
         if (sessionId !== nextState.activeSessionId || !appIsForeground) {
+          // 中枢对话不发系统完成通知：中枢的反馈在自身对话里呈现（§9），
+          // 系统通知留给普通后台会话。
+          if (sessionId === CENTRAL_SESSION_ID) continue;
           const session = nextState.sessions.find((item) => item.id === sessionId);
           notifyBackgroundSessionCompleted(session?.title || '对话', sessionId).catch(console.warn);
         }

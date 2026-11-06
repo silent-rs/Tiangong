@@ -28,39 +28,3 @@ export function persistCentralMode(on: boolean): void {
     // 忽略：见上
   }
 }
-
-/** 中枢对话绑定的 Session ID 键名（POC 阶段 1：中枢对话复用现有 Session 持久化）。 */
-const SESSION_STORAGE_KEY = 'tiangong-central-session-id';
-
-/** localStorage 键名（导出供测试断言）。 */
-export const CENTRAL_SESSION_STORAGE_KEY = SESSION_STORAGE_KEY;
-
-/** 读取持久化的中枢对话 Session ID；缺失或空白返回 null。 */
-export function readCentralSessionId(): string | null {
-  try {
-    const id = localStorage.getItem(SESSION_STORAGE_KEY);
-    return id && id.trim() ? id : null;
-  } catch {
-    // localStorage 不可用（极端环境）时视为无记录，进入中枢按新对话处理
-    return null;
-  }
-}
-
-/** 持久化中枢对话 Session ID；写入失败静默忽略（仅影响下次进入的会话定位）。 */
-export function persistCentralSessionId(id: string): void {
-  try {
-    localStorage.setItem(SESSION_STORAGE_KEY, id);
-  } catch {
-    // 忽略：见上
-  }
-}
-
-/** 判定给定会话 ID 是否绑定中枢对话（供普通模式侧栏过滤显示）。 */
-export function isCentralSessionId(id: string | null | undefined): boolean {
-  if (!id) return false;
-  try {
-    return localStorage.getItem(SESSION_STORAGE_KEY) === id;
-  } catch {
-    return false;
-  }
-}

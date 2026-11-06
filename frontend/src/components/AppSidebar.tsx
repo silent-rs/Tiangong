@@ -15,7 +15,6 @@ import { SettingsDialog } from './SettingsDialog';
 import { isRemoteHost } from '@/api/host';
 import { useToast } from './Toast';
 import type { Session } from '@/api/tauri';
-import { isCentralSessionId } from '@/lib/centralModePreference';
 
 /** 默认分组 key：与全局 workspace 一致（或 cwd 为空）的会话归入此分组，平铺不显示分组头 */
 const DEFAULT_GROUP_KEY = '__default__';
@@ -120,14 +119,11 @@ export function AppSidebar() {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   // 仅展示有消息的会话或当前活跃会话；有过滤词时再按标题与 workspace 路径过滤（不区分大小写）。
-  // 中枢对话（绑定 ID 见 centralModePreference）不在普通模式列表展示——
-  // 「隐藏 Session，不删除 Session」（设计稿 §16），数据仍完整保留。
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterText, setFilterText] = useState('');
   const filterQuery = filterText.trim().toLowerCase();
   const visibleSessions = useMemo(
     () => sessions.filter((s) => {
-      if (isCentralSessionId(s.id)) return false;
       if (!(s.message_count > 0 || s.id === activeSessionId)) return false;
       if (!filterQuery) return true;
       return (s.title || '新对话').toLowerCase().includes(filterQuery)
