@@ -6,20 +6,14 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use semver::Version;
 use serde::Serialize;
-use sha2::Digest;
 use tiangong_core::core::Plugin;
 
-use crate::events::PluginChangeKind;
-use crate::interpreter_env::{self, InterpreterKind};
-use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
-use crate::sidecar::{
-    CONTENT_MANIFEST_FILE, EphemeralCommandConnection, InterpreterLaunch, ProcessSidecarConnection,
-    SidecarConfig, SidecarConnection, StdioSidecarConnection,
-};
+use self::events::PluginChangeKind;
+use crate::manifest::{MANIFEST_FILE, PluginManifest};
+use crate::plugin::PluginAdapter;
+use crate::sidecar::SidecarConnection;
 use crate::signature::{SignedPluginRelease, verify_signed_release};
-use crate::ts_plugin::TsPluginAdapter;
 
 // ── 子模块划分 ──
 //
@@ -28,36 +22,39 @@ use crate::ts_plugin::TsPluginAdapter;
 // `pub use` 重导出，外部路径 `crate::registry::*` 保持不变。
 //
 // - `inventory`：自制插件判据、对话内清单与能力指纹
-// - `legacy`：旧插件 ID 迁移（合并保留目录、归档旧目录）
 // - `discovery`：磁盘发现、预加载与插件记录构建
 // - `loader`：查询视图与 Core 适配器创建
 // - `views`：slots/贡献/扩展页等 manifest 级视图
-// - `migrations`：安装/启停/回滚/卸载与文件系统事务
-// - `connections`：sidecar 连接池（复用/换代/临时连接）与停机清理
+// - `events`：插件变化事件发布与运行时资源收尾
+// - `tool_icons`/`tool_titles`：清单声明的展示投影
+//（安装事务在 `crate::distribution`，连接池在 `crate::transport::connections`，
+//  二者的公开入口经本模块重导出保持 `registry::` 路径稳定）
 
-mod connections;
 mod discovery;
+pub mod events;
 mod inventory;
 mod keepalive;
-mod legacy;
 mod loader;
-mod migrations;
+pub(crate) mod reverify;
+pub mod tool_icons;
+pub mod tool_titles;
 mod views;
 
-use connections::stop_loaded_sidecar;
-pub(crate) use connections::{
+pub use crate::distribution::legacy::*;
+pub use crate::distribution::migrations::*;
+use crate::transport::connections::stop_loaded_sidecar;
+pub(crate) use crate::transport::connections::{
     ephemeral_sidecar_connection, ephemeral_sidecar_connection_with_workspace, sidecar_connection,
     sidecar_connection_with_workspace, stop_connection_for_directory,
 };
 pub use discovery::*;
 pub use inventory::*;
-pub use legacy::*;
 pub use loader::*;
-pub use migrations::*;
+pub use reverify::*;
 pub use views::*;
 
 /// 本地信任标记（安装时原生确认后由宿主写入插件目录）。
-const LOCAL_TRUST_FILE: &str = "local-trust.json";
+pub(crate) const LOCAL_TRUST_FILE: &str = "local-trust.json";
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
@@ -66,17 +63,13 @@ static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new
 static SIDECAR_CONNECTIONS: OnceLock<
     Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>,
 > = OnceLock::new();
-static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
+pub(crate) static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 按插件持久化的整套授权记录（常驻 sidecar 使用）。
 #[cfg(windows)]
 pub(crate) fn persistent_grants_path(storage_root: &Path, plugin_id: &str) -> PathBuf {
-    let key = hex::encode(sha2::Sha256::digest(plugin_id.as_bytes()));
-    storage_root
-        .join("sandbox")
-        .join("grants")
-        .join(format!("{key}.json"))
+    crate::storage_layout::StorageLayout::new(storage_root).grant_record(plugin_id)
 }
 
 /// 配置撤权时先停用旧连接，再撤销已登记的文件身份并按新配置重建。
@@ -144,9 +137,9 @@ pub(crate) fn background_sidecar_operation() -> Option<std::sync::RwLockWriteGua
 /// 按需启动 sidecar 的沙箱策略在进程启动后不可扩权，因此连接缓存必须
 /// 同时按安装目录和会话工作区区分，不能让默认连接遮蔽当前对话的可写域。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SidecarConnectionKey {
-    directory: PathBuf,
-    workspace: Option<PathBuf>,
+pub(crate) struct SidecarConnectionKey {
+    pub(crate) directory: PathBuf,
+    pub(crate) workspace: Option<PathBuf>,
 }
 
 /// 全局 server 连接信息（可覆盖更新），spawn 时注入所有 sidecar。
@@ -194,7 +187,7 @@ fn storage_root_of(directory: &Path) -> Option<PathBuf> {
 }
 
 /// 取当前已设置的 server 连接信息（未设置返回 None）。
-fn current_server_endpoint() -> Option<(String, Option<String>)> {
+pub(crate) fn current_server_endpoint() -> Option<(String, Option<String>)> {
     SERVER_ENDPOINT.lock().ok().and_then(|guard| guard.clone())
 }
 
@@ -236,8 +229,8 @@ fn restart_sidecars_for_server_change() {
     }
 }
 
-const DISABLED_MARKER: &str = ".disabled";
-const ROLLBACK_DIR: &str = ".rollback";
+pub(crate) const DISABLED_MARKER: &str = ".disabled";
+pub(crate) const ROLLBACK_DIR: &str = ".rollback";
 
 /// 天工运行入口类型。
 ///
@@ -298,37 +291,37 @@ pub(crate) struct InstalledPlugin {
     pub(crate) signed_release: Option<SignedPluginRelease>,
 }
 
-struct LoadedPlugin {
-    directory: PathBuf,
-    manifest: PluginManifest,
+pub(crate) struct LoadedPlugin {
+    pub(crate) directory: PathBuf,
+    pub(crate) manifest: PluginManifest,
     /// 安装时验定的签名发布信息（None=未签名/本地信任）。
     /// `publisher == local` 是自制插件动态调用通道的分流判据，
     /// 安装时确定、终身不变。
-    signed_release: Option<SignedPluginRelease>,
-    generation: u64,
-    ts_instances: Vec<Weak<TsPluginAdapter>>,
-    sidecar: Option<Arc<dyn SidecarConnection>>,
+    pub(crate) signed_release: Option<SignedPluginRelease>,
+    pub(crate) generation: u64,
+    pub(crate) plugin_instances: Vec<Weak<PluginAdapter>>,
+    pub(crate) sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
-    verified_sidecar: Option<Vec<String>>,
+    pub(crate) verified_sidecar: Option<Vec<String>>,
     /// **装载时组装**的动态 prompt 段落（清单声明 + 握手验证通过时经
     /// [`PROMPT_SECTIONS_OPERATION`] 读取一次）。None=未声明或未获取；
     /// Some(段落)（可为空数组）。sidecar 经 [`PROMPT_UPDATED_CHANNEL`]
     /// 通知变更时重取；内容变化计入能力指纹，触发上下文交接。
-    prompt_sections: Option<Vec<String>>,
+    pub(crate) prompt_sections: Option<Vec<String>>,
     /// **装载时拉取**的 sidecar 动态工具规格快照（清单 `tools` 声明
     /// `{"type":"sidecar"}` 条目 + 握手 `tools` 能力时经
     /// [`TOOL_SPECS_OPERATION`] 读取一次）。None=未声明或未获取；
     /// Some(规格)（可为空数组）。sidecar 经 [`TOOLS_UPDATED_CHANNEL`]
     /// 通知变更时重取；core 每轮经适配器 `tool_specs()` 读取，快照
     /// 更新后下一轮工具装配自动生效。
-    dynamic_tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
+    pub(crate) dynamic_tool_specs: Option<Vec<crate::manifest::ToolDecl>>,
     /// 数据/制品/逻辑层加载错误（解释器不可发现等）：
     /// 插件不满足安装条件，安装路径据此回滚。
-    load_error: Option<String>,
+    pub(crate) load_error: Option<String>,
     /// 启动/握手/运行检查错误（常驻 sidecar 起不来、验证失败、记录保存
     /// 失败等）：插件保留安装，插件管理显示启动异常，重试验证成功后清除。
-    runtime_error: Option<String>,
-    enabled: bool,
+    pub(crate) runtime_error: Option<String>,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -366,7 +359,7 @@ pub struct InvalidPluginEntry {
     pub reason: String,
 }
 
-fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
+pub(crate) fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
     LOADED_PLUGINS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -399,8 +392,8 @@ fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
     INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn sidecar_connections() -> &'static Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>
-{
+pub(crate) fn sidecar_connections()
+-> &'static Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>> {
     SIDECAR_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -424,7 +417,7 @@ pub fn on_sandbox_setting_changed() {
 pub fn shutdown_all_sidecars() {
     begin_sidecar_shutdown();
     let _operation = LOAD_OPERATION.write().ok();
-    crate::ts_tools::cancel_all_calls();
+    crate::tools::cancel_all_calls();
     let connections = sidecar_connections()
         .lock()
         .map(|connections| connections.values().cloned().collect::<Vec<_>>())
@@ -483,6 +476,109 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
         sidecars = connections.len(),
         "沙箱开关已切换：按需 sidecar 当前进程已停止，后续调用将按新策略重建"
     );
+}
+/// 传输层运行时事实的注册表实现：把状态机的全局开关与存储布局翻译成
+/// 传输层可读的只读事实（沙箱开关、退出标志、持久授权路径）。
+#[derive(Debug)]
+pub(crate) struct RegistryRuntimeEnv {
+    /// 持久授权记录所在的存储根（仅 Windows AppContainer 使用）。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    storage_root: PathBuf,
+}
+impl RegistryRuntimeEnv {
+    pub(crate) fn new(storage_root: impl Into<PathBuf>) -> Self {
+        Self {
+            storage_root: storage_root.into(),
+        }
+    }
+}
+impl crate::sidecar::RuntimeEnv for RegistryRuntimeEnv {
+    fn sandbox_disabled(&self) -> bool {
+        sandbox_disabled()
+    }
+    fn shutting_down(&self) -> bool {
+        sidecars_shutting_down()
+    }
+    fn persistent_grants_path(&self, plugin_id: &str) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            Some(persistent_grants_path(&self.storage_root, plugin_id))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = plugin_id;
+            None
+        }
+    }
+}
+/// 调用层插件运行态访问的注册表实现：安装目录 → 存储根 → 共享/按需连接
+/// 由状态机决定，调用层不重复这套解析。
+#[derive(Debug)]
+pub(crate) struct RegistrySidecarAccess;
+impl crate::sidecar::SidecarAccess for RegistrySidecarAccess {
+    fn connection(
+        &self,
+        plugin_id: &str,
+        session_workspace: Option<&Path>,
+    ) -> Result<crate::sidecar::PluginConnection> {
+        let directory = plugin_install_directory(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let storage_root = directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+        let installed = find_installed_plugin(storage_root, plugin_id)?;
+        // 按需形态：每次调用独立临时连接——进程完全归属本次调用，超时/取消
+        // 只终止自己，并发调用互不可见；常驻形态：共享缓存连接（进程内多路
+        // 复用），守卫取消当前共享进程（换代重启，常驻语义的单进程权衡）。
+        let ephemeral =
+            installed.manifest.sidecar_lifecycle() == crate::manifest::SidecarLifecycle::OnDemand;
+        // 预加载常驻服务不接受会话工作区：保持宿主强制沙箱的共享连接。
+        let session_workspace = if installed.manifest.should_preload_sidecar() {
+            None
+        } else {
+            session_workspace
+        };
+        let connection = if ephemeral {
+            ephemeral_sidecar_connection_with_workspace(storage_root, &installed, session_workspace)
+        } else if session_workspace.is_some() {
+            sidecar_connection_with_workspace(storage_root, &installed, false, session_workspace)
+        } else {
+            sidecar_connection(storage_root, &installed, false)
+        }?;
+        Ok(crate::sidecar::PluginConnection {
+            connection,
+            ephemeral,
+        })
+    }
+    fn invoke(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        payload: serde_json::Value,
+        workspace: Option<&Path>,
+    ) -> Result<serde_json::Value> {
+        let storage_root = plugin_install_directory(plugin_id)
+            .and_then(|directory| directory.parent().map(Path::to_path_buf))
+            .and_then(|plugins_dir| plugins_dir.parent().map(Path::to_path_buf))
+            .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+        invoke_sidecar_with_workspace(&storage_root, plugin_id, operation, payload, workspace)
+    }
+}
+/// 传输层通知事件的注册表实现：工具恢复直接分发，prompt 与工具规格变更
+/// 走重取流程（阻塞 I/O，由传输层在读循环外另起线程调用）。
+#[derive(Debug)]
+pub(crate) struct RegistrySidecarEvents;
+impl crate::sidecar::SidecarEvents for RegistrySidecarEvents {
+    fn tools_recovered(&self, plugin_id: &str, payload: &str) {
+        dispatch_tools_recovered(plugin_id, payload);
+    }
+    fn prompt_updated(&self, plugin_id: &str) {
+        refresh_prompt_sections(plugin_id);
+    }
+    fn tools_updated(&self, plugin_id: &str) {
+        refresh_tool_specs(plugin_id);
+    }
 }
 #[cfg(test)]
 mod tests;

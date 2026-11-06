@@ -8,8 +8,8 @@ use base64::Engine;
 use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest, Sha256};
 
+use crate::content_manifest::CONTENT_MANIFEST_FILE;
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
-use crate::sidecar::CONTENT_MANIFEST_FILE;
 
 pub use tiangong_plugin_update::{
     OFFICIAL_PUBKEY_B64, SIGNATURE_FILE, SIGNED_RELEASE_FILE, SIGNED_RELEASE_SCHEMA_VERSION,
@@ -143,7 +143,7 @@ impl ValidateSignedRelease for SignedPluginRelease {
                 // 发布约定检查兜底）。
                 if let Some(signed_manifest) = self.content_manifest.as_ref() {
                     signed_manifest.verify(directory, Path::new(CONTENT_MANIFEST_FILE))?;
-                    crate::sidecar::SidecarConfig::verify_integrity_manifest(
+                    crate::content_manifest::verify(
                         &directory.join(CONTENT_MANIFEST_FILE),
                         directory,
                     )?;
@@ -156,10 +156,7 @@ impl ValidateSignedRelease for SignedPluginRelease {
                     anyhow::anyhow!("官方解释器插件缺少 content_manifest 签名条目")
                 })?;
                 signed_manifest.verify(directory, Path::new(CONTENT_MANIFEST_FILE))?;
-                crate::sidecar::SidecarConfig::verify_integrity_manifest(
-                    &directory.join(CONTENT_MANIFEST_FILE),
-                    directory,
-                )?;
+                crate::content_manifest::verify(&directory.join(CONTENT_MANIFEST_FILE), directory)?;
             }
             _ => bail!("插件签名清单与 plugin.json 的 sidecar 声明不一致"),
         }

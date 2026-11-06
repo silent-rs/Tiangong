@@ -11,7 +11,7 @@ use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use tiangong_core::tools::result::ToolResult;
+use tiangong_core::tools::result::ToolResult as CoreToolResult;
 use tiangong_llm::tool::ToolCall;
 
 const MAX_RESULT_FIELD_BYTES: usize = 2_000_000;
@@ -43,7 +43,11 @@ fn request_plugin_ui(plugin_id: &str, session_id: &str) {
     last_by_plugin.insert(cooldown_key, now);
     drop(last_by_plugin);
     let payload = serde_json::json!({ "session_id": session_id, "mode": "background" }).to_string();
-    match crate::bridge::open_app_for_plugin(plugin_id, &payload) {
+    let opened = match crate::runtime_feedback::runtime_feedback() {
+        Some(feedback) => feedback.open_app(plugin_id, &payload),
+        None => Err(anyhow::anyhow!("宿主尚未接入 app 原生服务")),
+    };
+    match opened {
         Ok(_) => tracing::info!(
             plugin_id,
             session_id,
@@ -56,7 +60,7 @@ fn request_plugin_ui(plugin_id: &str, session_id: &str) {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TsToolInvocation {
+pub struct ToolInvocation {
     pub invocation_id: String,
     pub session_id: String,
     pub tool_call_id: String,
@@ -72,16 +76,16 @@ pub struct TsToolInvocation {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TsToolResolution {
+pub struct ToolResolution {
     pub invocation_id: String,
     #[serde(default)]
-    pub status: TsToolCloseStatus,
-    pub result: TsToolResult,
+    pub status: ToolCloseStatus,
+    pub result: ToolResult,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TsToolResult {
+pub struct ToolResult {
     pub ok: bool,
     pub summary: String,
     #[serde(default)]
@@ -99,7 +103,7 @@ pub struct TsToolResult {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TsToolCloseStatus {
+pub enum ToolCloseStatus {
     #[default]
     Answered,
     Expired,
@@ -107,15 +111,15 @@ pub enum TsToolCloseStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct TsToolClosed {
+struct ToolClosed {
     invocation_id: String,
-    status: TsToolCloseStatus,
+    status: ToolCloseStatus,
 }
 
 struct PendingCall {
-    invocation: TsToolInvocation,
+    invocation: ToolInvocation,
     plugin_id: String,
-    sender: oneshot::Sender<TsToolResolution>,
+    sender: oneshot::Sender<ToolResolution>,
 }
 
 static PENDING: OnceLock<Mutex<HashMap<String, PendingCall>>> = OnceLock::new();
@@ -138,18 +142,21 @@ impl Drop for PendingGuard {
             emit_closed(
                 &call.plugin_id,
                 &self.invocation_id,
-                TsToolCloseStatus::Cancelled,
+                ToolCloseStatus::Cancelled,
             );
         }
     }
 }
 
+/// 执行一次 TS 工具调用。`has_extension_tab` 由适配器按清单快照传入：
+/// 插件是否声明了 `extension.tab` 贡献（决定无订阅者时能否靠拉起页面接应）。
 pub async fn execute(
     plugin_id: String,
     call: ToolCall,
     _timeout_ms: u64,
     runtime_invocation: Option<crate::invocation::RuntimeInvocation>,
-) -> ToolResult {
+    has_extension_tab: bool,
+) -> CoreToolResult {
     let context = runtime_invocation
         .as_ref()
         .map(|invocation| invocation.context());
@@ -166,7 +173,7 @@ pub async fn execute(
         .map(|context| context.actor_id.clone())
         .unwrap_or_default();
     let created_at = Local::now().naive_local();
-    let invocation = TsToolInvocation {
+    let invocation = ToolInvocation {
         invocation_id: invocation_id.clone(),
         session_id: session_id.clone(),
         tool_call_id: call.id,
@@ -197,7 +204,8 @@ pub async fn execute(
     // 无人接应时请求宿主后台挂载插件实例（通用能力，不区分官方与三方
     // 插件）：实例挂载后 shell 订阅 tool.requested，bridge_subscribe 会
     // 重放本调用。
-    let subscribed = crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested");
+    let subscribed = crate::runtime_feedback::runtime_feedback()
+        .is_some_and(|feedback| feedback.has_subscriber(&plugin_id, "tool.requested"));
     tracing::info!(
         plugin_id = %plugin_id,
         invocation_id = %invocation_id,
@@ -207,18 +215,13 @@ pub async fn execute(
     );
     // 全局已有订阅者不代表本会话已有匹配实例。始终按「插件 + 会话」
     // 请求执行壳，前端会对同会话实例去重；挂载后的订阅重放本调用。
-    let has_ui = crate::registry::plugin_manifest(&plugin_id).is_some_and(|manifest| {
-        manifest
-            .ui_contributions()
-            .iter()
-            .any(|contribution| contribution.slot == "extension.tab")
-    });
+    let has_ui = has_extension_tab;
     if !has_ui && !subscribed {
         let _ = pending_calls()
             .lock()
             .ok()
             .and_then(|mut pending| pending.remove(&invocation_id));
-        emit_closed(&plugin_id, &invocation_id, TsToolCloseStatus::Cancelled);
+        emit_closed(&plugin_id, &invocation_id, ToolCloseStatus::Cancelled);
         return failure_result(format!(
             "插件 {plugin_id} 的工具 {} 无接应：插件未声明 extension.tab 界面，\
              也没有可供直连的 sidecar；请补齐界面贡献或 sidecar 声明",
@@ -241,7 +244,7 @@ pub async fn execute(
 }
 
 pub fn resolve(plugin_id: &str, payload: &str) -> Result<String> {
-    let resolution: TsToolResolution = serde_json::from_str(payload)
+    let resolution: ToolResolution = serde_json::from_str(payload)
         .map_err(|error| anyhow::anyhow!("TS 工具结果格式无效：{error}"))?;
     validate_result(&resolution.result)?;
 
@@ -264,7 +267,7 @@ pub fn resolve(plugin_id: &str, payload: &str) -> Result<String> {
         emit_closed(
             &pending.plugin_id,
             &pending.invocation.invocation_id,
-            TsToolCloseStatus::Cancelled,
+            ToolCloseStatus::Cancelled,
         );
         bail!("TS 工具调用等待端已关闭");
     }
@@ -301,7 +304,7 @@ fn cancel_invocation(invocation_id: &str) {
         .ok()
         .and_then(|mut pending| pending.remove(invocation_id));
     if let Some(call) = removed {
-        emit_closed(&call.plugin_id, invocation_id, TsToolCloseStatus::Cancelled);
+        emit_closed(&call.plugin_id, invocation_id, ToolCloseStatus::Cancelled);
     }
 }
 
@@ -320,11 +323,7 @@ pub fn cancel_plugin_calls(plugin_id: &str) {
         })
         .unwrap_or_default();
     for (invocation_id, call) in removed {
-        emit_closed(
-            &call.plugin_id,
-            &invocation_id,
-            TsToolCloseStatus::Cancelled,
-        );
+        emit_closed(&call.plugin_id, &invocation_id, ToolCloseStatus::Cancelled);
     }
 }
 
@@ -343,7 +342,7 @@ pub fn cancel_all_calls() {
     }
 }
 
-fn validate_result(result: &TsToolResult) -> Result<()> {
+fn validate_result(result: &ToolResult) -> Result<()> {
     for (name, value) in [
         ("summary", &result.summary),
         ("stdout", &result.stdout),
@@ -360,7 +359,7 @@ fn validate_result(result: &TsToolResult) -> Result<()> {
 /// 所有闭合路径都是「持锁移除表项、随后发出 tool.closed」，本函数把
 /// 复查与发出放进同一临界区后，同一调用只可能出现 requested → closed
 /// 顺序，绝不会在 closed 之后补发重放快照里的迟到 requested。
-fn emit_requested(plugin_id: &str, invocation: &TsToolInvocation) {
+fn emit_requested(plugin_id: &str, invocation: &ToolInvocation) {
     let Ok(payload) = serde_json::to_string(invocation) else {
         tracing::warn!(plugin_id, "序列化 TS 工具调用事件失败");
         return;
@@ -379,24 +378,28 @@ fn emit_requested(plugin_id: &str, invocation: &TsToolInvocation) {
         );
         return;
     }
-    crate::bridge::bridge_emit_to(plugin_id, "tool.requested", &payload);
+    if let Some(feedback) = crate::runtime_feedback::runtime_feedback() {
+        feedback.emit_to_plugin(plugin_id, "tool.requested", &payload);
+    }
 }
 
-fn emit_closed(plugin_id: &str, invocation_id: &str, status: TsToolCloseStatus) {
-    let event = TsToolClosed {
+fn emit_closed(plugin_id: &str, invocation_id: &str, status: ToolCloseStatus) {
+    let event = ToolClosed {
         invocation_id: invocation_id.to_string(),
         status,
     };
     if let Ok(payload) = serde_json::to_string(&event) {
-        crate::bridge::bridge_emit_to(plugin_id, "tool.closed", &payload);
+        if let Some(feedback) = crate::runtime_feedback::runtime_feedback() {
+            feedback.emit_to_plugin(plugin_id, "tool.closed", &payload);
+        }
     } else {
         tracing::warn!(plugin_id, invocation_id, "序列化 TS 工具闭合事件失败");
     }
 }
 
-fn failure_result(message: impl Into<String>) -> ToolResult {
+fn failure_result(message: impl Into<String>) -> CoreToolResult {
     let message = message.into();
-    ToolResult {
+    CoreToolResult {
         ok: false,
         summary: message.clone(),
         stdout: String::new(),
@@ -412,9 +415,9 @@ fn format_time(value: NaiveDateTime) -> String {
     value.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
 }
 
-impl TsToolResult {
-    fn into_tool_result(self) -> ToolResult {
-        ToolResult {
+impl ToolResult {
+    fn into_tool_result(self) -> CoreToolResult {
+        CoreToolResult {
             ok: self.ok,
             summary: self.summary,
             stdout: self.stdout,

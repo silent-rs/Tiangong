@@ -1,11 +1,23 @@
 //! 安装/启停/回滚/卸载与文件系统事务（staged 校验、换代交换、
 //! 数据保留目录、禁用标记、IO 重试工具）。
 
-use super::connections::{
+use super::legacy::PRESERVED_ENTRIES;
+use crate::events::PluginChangeKind;
+use crate::manifest::{MANIFEST_FILE, PluginManifest};
+use crate::registry::reverify;
+use crate::registry::*;
+use crate::signature::verify_signed_release;
+use crate::transport::connections::{
     kill_sidecar_orphans, remove_sidecar_connection, sidecar_binary_path,
     stop_connection_for_directory, stop_loaded_sidecar, unload_plugin_adapters,
 };
-use super::*;
+use anyhow::{Context, Result, bail};
+use semver::Version;
+use std::path::{Path, PathBuf};
+use std::sync::Weak;
+use std::time::{Duration, Instant};
+
+use crate::artifacts::{PluginRepository, ProgressFn};
 
 pub fn install_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<PluginStatus> {
     install_staged_plugin_inner(storage_root, staged_path, false)
@@ -113,7 +125,7 @@ fn install_staged_plugin_inner(
     } else {
         PluginChangeKind::Installed
     };
-    crate::events::announced(kind, &plugin_id, status)
+    crate::events::announced(kind, &plugin_id, Some(storage_root), status)
 }
 
 /// 安装/升级成功后的 sidecar 运行检查（尽力而为）：临时启动进程完成
@@ -127,14 +139,14 @@ fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
     };
     post_install_sidecar_check_with(
         plugin_id,
-        || crate::verification::verify_installed_sidecar(storage_root, &installed),
+        || reverify::verify_installed_sidecar(storage_root, &installed),
         |record| crate::verification::save_verification(&installed.directory, record),
     );
 }
 
 // 验证和保存是两个外部操作，状态处理只依赖它们的结果。
 // 单元测试可分别注入失败，无需启动真实 sidecar 或改变目录权限。
-pub(super) fn post_install_sidecar_check_with(
+pub(crate) fn post_install_sidecar_check_with(
     plugin_id: &str,
     verify: impl FnOnce() -> Result<crate::verification::SidecarVerification>,
     save: impl FnOnce(&crate::verification::SidecarVerification) -> Result<()>,
@@ -221,7 +233,7 @@ pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
     }
 }
 
-pub(super) fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) -> Result<()> {
+pub(crate) fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) -> Result<()> {
     let _operation = LOAD_OPERATION
         .read()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -271,7 +283,7 @@ pub fn set_plugin_enabled(
     } else {
         PluginChangeKind::Disabled
     };
-    crate::events::announced(kind, plugin_id, result)
+    crate::events::announced(kind, plugin_id, Some(storage_root), result)
 }
 
 fn set_plugin_enabled_inner(
@@ -296,8 +308,6 @@ fn set_plugin_enabled_inner(
             remove_file_if_exists(&marker)?;
         } else {
             create_disabled_marker(&marker)?;
-            crate::ts_tools::cancel_plugin_calls(plugin_id);
-            crate::bridge::clear_plugin_subscriptions(plugin_id);
         }
         let mut plugins = loaded_plugins()
             .lock()
@@ -305,8 +315,8 @@ fn set_plugin_enabled_inner(
         let loaded = plugins
             .get_mut(plugin_id)
             .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 尚未加载"))?;
-        let ts_instances = loaded
-            .ts_instances
+        let plugin_instances = loaded
+            .plugin_instances
             .iter()
             .filter_map(Weak::upgrade)
             .collect::<Vec<_>>();
@@ -314,7 +324,7 @@ fn set_plugin_enabled_inner(
         loaded.load_error = None;
         loaded.runtime_error = None;
         drop(plugins);
-        for adapter in ts_instances {
+        for adapter in plugin_instances {
             adapter.set_enabled(enabled);
         }
         return list_plugin_status_without_preload(&installed.manifest)
@@ -332,7 +342,7 @@ fn set_plugin_enabled_inner(
         }
     } else {
         create_disabled_marker(&marker)?;
-        let ts_instances = {
+        let plugin_instances = {
             let mut plugins = loaded_plugins()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
@@ -343,18 +353,16 @@ fn set_plugin_enabled_inner(
             loaded.load_error = None;
             loaded.runtime_error = None;
             loaded
-                .ts_instances
+                .plugin_instances
                 .iter()
                 .filter_map(Weak::upgrade)
                 .collect::<Vec<_>>()
         };
-        for adapter in &ts_instances {
+        for adapter in &plugin_instances {
             adapter.set_enabled(false);
         }
-        crate::ts_tools::cancel_plugin_calls(plugin_id);
-        crate::bridge::clear_plugin_subscriptions(plugin_id);
         if let Err(error) = stop_connection_for_directory(&installed.directory) {
-            for adapter in &ts_instances {
+            for adapter in &plugin_instances {
                 adapter.set_enabled(true);
             }
             if let Ok(mut plugins) = loaded_plugins().lock()
@@ -374,73 +382,6 @@ fn set_plugin_enabled_inner(
         .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"))
 }
 
-/// 后台补验证/重新验证成功后，同步刷新注册表与存活 TS 适配器的验证能力
-///（已构建的 Core 实例立即按新能力路由，无需等待下一次 Core 构建）。
-pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String>) {
-    let (manifest, enabled, directory, ts_instances) = {
-        let Ok(mut plugins) = loaded_plugins().lock() else {
-            return;
-        };
-        let Some(loaded) = plugins.get_mut(plugin_id) else {
-            return;
-        };
-        loaded.verified_sidecar = Some(capabilities.clone());
-        // 运行检查重新成功：sidecar 已可真实握手，清除此前登记的启动
-        // 异常（load_error 属安装前提类，不受影响）。
-        loaded.runtime_error = None;
-        (
-            loaded.manifest.clone(),
-            loaded.enabled,
-            loaded.directory.clone(),
-            loaded
-                .ts_instances
-                .iter()
-                .filter_map(|weak| weak.upgrade())
-                .collect::<Vec<_>>(),
-        )
-    };
-    // 能力变化可能改变段落门控（sidecar 条目）：按新能力在锁外重新组装
-    // （组装含阻塞 I/O，不得持锁），记录与适配器共用同一份结果。
-    let storage_root = directory
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf);
-    let sections = storage_root
-        .as_deref()
-        .and_then(|root| {
-            crate::registry::assemble_prompt_sections(
-                root,
-                &directory,
-                &manifest,
-                Some(capabilities.as_slice()),
-            )
-        })
-        .unwrap_or_default();
-    // 工具规格快照同样按新能力重取（声明 sidecar 工具条目的插件）。
-    let tool_specs = storage_root.as_deref().and_then(|root| {
-        crate::registry::assemble_dynamic_tool_specs(root, &manifest, Some(capabilities.as_slice()))
-    });
-    for adapter in &ts_instances {
-        adapter.reconfigure(
-            &manifest,
-            enabled,
-            Some(capabilities.clone()),
-            sections.clone(),
-            tool_specs.clone().unwrap_or_default(),
-        );
-    }
-    if let Ok(mut plugins) = loaded_plugins().lock()
-        && let Some(loaded) = plugins.get_mut(plugin_id)
-    {
-        loaded.prompt_sections = if manifest.prompt.is_some() {
-            Some(sections)
-        } else {
-            None
-        };
-        loaded.dynamic_tool_specs = tool_specs;
-    }
-}
-
 /// 重新验证插件 sidecar 并保存记录（后台补验证失败后的重试入口）。
 ///
 /// 同步执行完整验证（有限时限），成功后立即刷新运行时能力；失败返回
@@ -450,7 +391,7 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
     if installed.manifest.sidecar.is_none() {
         anyhow::bail!("插件 {plugin_id} 未声明 sidecar，无需验证");
     }
-    let record = crate::verification::verify_installed_sidecar(storage_root, &installed)?;
+    let record = reverify::verify_installed_sidecar(storage_root, &installed)?;
     crate::verification::save_verification(&installed.directory, &record)?;
     refresh_verified_sidecar(plugin_id, record.capabilities);
     prewarm_plugin_sidecar(storage_root, plugin_id);
@@ -461,7 +402,12 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let result = rollback_plugin_inner(storage_root, plugin_id);
-    crate::events::announced(PluginChangeKind::Upgraded, plugin_id, result)
+    crate::events::announced(
+        PluginChangeKind::Upgraded,
+        plugin_id,
+        Some(storage_root),
+        result,
+    )
 }
 
 fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
@@ -475,14 +421,13 @@ fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginS
     }
 
     stop_loaded_sidecar(plugin_id)?;
-    crate::ts_tools::cancel_plugin_calls(plugin_id);
     let transaction = transaction_directory(storage_root, "rollback")?;
     swap_with_rollback(&current.directory, &rollback, &transaction, current.enabled)?;
 
     // 回滚后制品变化，现有验证记录（摘要锚定新制品）随之失效；删除记录
     // 并触发补验证，为回滚版本重建能力快照。
     crate::verification::remove_verification(&current.directory);
-    crate::verification::reverify_installed_sidecars(storage_root);
+    reverify::reverify_installed_sidecars(storage_root);
 
     let rolled_back = find_installed_plugin(storage_root, plugin_id)?;
     if let Err(error) = reload_plugin_inner(storage_root, &rolled_back) {
@@ -512,22 +457,18 @@ fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginS
 /// 校验，先查无效插件登记表，命中则直接走同一删除路径后返回。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let result = uninstall_plugin_inner(storage_root, plugin_id, keep_data);
-    crate::events::announced(PluginChangeKind::Uninstalled, plugin_id, result)
+    crate::events::announced(
+        PluginChangeKind::Uninstalled,
+        plugin_id,
+        Some(storage_root),
+        result,
+    )
 }
 
 fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let _operation = LOAD_OPERATION
         .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
-    #[cfg(windows)]
-    {
-        let cache = persistent_grants_path(storage_root, plugin_id);
-        if cache.is_file() {
-            stop_loaded_sidecar(plugin_id)?;
-            stop_connection_for_directory(&plugin_directory(storage_root, plugin_id))?;
-            crate::launcher_update::revoke_persistent_grants(storage_root, &cache)?;
-        }
-    }
     if remove_invalid_plugin_if_registered(storage_root, plugin_id, keep_data)? {
         return Ok(());
     }
@@ -540,8 +481,6 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
         );
     }
     stop_loaded_sidecar(plugin_id)?;
-    crate::ts_tools::cancel_plugin_calls(plugin_id);
-    crate::bridge::clear_plugin_subscriptions(plugin_id);
     // 补齐连接表兜底：插件不在 loaded_plugins 时，仍可能保留在 sidecar 连接表中，
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
@@ -579,7 +518,7 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
         && let Some(loaded) = plugins.remove(plugin_id)
     {
         for adapter in loaded
-            .ts_instances
+            .plugin_instances
             .into_iter()
             .filter_map(|item| item.upgrade())
         {
@@ -746,7 +685,6 @@ fn replace_installed_plugin(
     // 避免 Windows 上旧进程占用导致目录切换或旧文件清理失败。
     stop_connection_for_directory(&current.directory)?;
     kill_sidecar_orphans(current);
-    crate::ts_tools::cancel_plugin_calls(&current.manifest.id);
     unload_plugin_adapters(&current.manifest.id);
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {
@@ -864,7 +802,7 @@ fn swap_with_rollback(
     Ok(())
 }
 
-pub(super) fn preserve_only_data(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn preserve_only_data(source: &Path, destination: &Path) -> Result<()> {
     let data = source.join("data");
     std::fs::create_dir_all(destination)?;
     if data.exists() {
@@ -987,7 +925,7 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn ensure_directory(path: &Path) -> Result<()> {
+pub(crate) fn ensure_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("读取目录失败: {}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1036,12 +974,12 @@ where
 }
 
 /// 重命名文件/目录，遇到暂时性占用时重试。
-pub(super) fn rename_with_retry(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename_with_retry(from: &Path, to: &Path) -> Result<()> {
     retry_io(|| std::fs::rename(from, to))
         .with_context(|| format!("重命名失败: {} -> {}", from.display(), to.display()))
 }
 
-pub(super) fn remove_directory_if_exists(path: &Path) -> Result<()> {
+pub(crate) fn remove_directory_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             bail!("拒绝删除符号链接目录: {}", path.display())
@@ -1053,24 +991,60 @@ pub(super) fn remove_directory_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn transaction_directory(storage_root: &Path, label: &str) -> Result<PathBuf> {
+pub(crate) fn transaction_directory(storage_root: &Path, label: &str) -> Result<PathBuf> {
     let root = plugins_directory(storage_root).join(".transactions");
     std::fs::create_dir_all(&root)?;
     Ok(root.join(format!("{}-{label}", scru128::new())))
 }
 
-pub(super) fn plugins_directory(storage_root: &Path) -> PathBuf {
+pub(crate) fn plugins_directory(storage_root: &Path) -> PathBuf {
     storage_root.join("plugins")
 }
 
-pub(super) fn plugin_directory(storage_root: &Path, plugin_id: &str) -> PathBuf {
+pub(crate) fn plugin_directory(storage_root: &Path, plugin_id: &str) -> PathBuf {
     plugins_directory(storage_root).join(plugin_id)
 }
 
-pub(super) fn rollback_directory(directory: &Path, plugin_id: &str) -> PathBuf {
+pub(crate) fn rollback_directory(directory: &Path, plugin_id: &str) -> PathBuf {
     directory
         .parent()
         .unwrap_or(directory)
         .join(ROLLBACK_DIR)
         .join(plugin_id)
+}
+
+/// 从 OSS 仓库下载并安装插件（宿主命令层的完整下沉实现）。
+///
+/// 流程：目录检索 → 下载暂存（progress 可选回调）→ 阻塞线程安装事务。
+/// 安装成功由 [`install_staged_plugin`] 广播插件变化事件（含指纹），
+/// 宿主订阅者自行响应；本函数不承担任何通知扇出。计时日志与原
+/// `download_and_install_plugin` 对齐，便于排障对照。
+pub async fn install_plugin_from_repository(
+    storage_root: &Path,
+    plugin_id: &str,
+    progress: Option<ProgressFn>,
+) -> Result<PluginStatus> {
+    let total_started = std::time::Instant::now();
+    let repository = PluginRepository::new()?;
+    let download_started = std::time::Instant::now();
+    let staged = repository
+        .download(storage_root, plugin_id, progress)
+        .await
+        .with_context(|| format!("下载插件 {plugin_id} 失败"))?;
+    let download_ms = download_started.elapsed().as_millis() as u64;
+
+    let install_started = std::time::Instant::now();
+    let (staged_root, staged_path) = (storage_root.to_path_buf(), staged.path().to_path_buf());
+    let status =
+        tokio::task::spawn_blocking(move || install_staged_plugin(&staged_root, &staged_path))
+            .await
+            .with_context(|| format!("安装插件 {plugin_id} 任务失败"))??;
+    tracing::info!(
+        plugin_id,
+        download_ms,
+        install_ms = install_started.elapsed().as_millis() as u64,
+        total_ms = total_started.elapsed().as_millis() as u64,
+        "插件下载安装完成"
+    );
+    Ok(status)
 }

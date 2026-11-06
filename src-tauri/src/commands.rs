@@ -4012,7 +4012,7 @@ pub async fn plugin_read_icon(
     Ok(PluginEntryResource { data, mime })
 }
 
-/// 工具图标查询表（工具行图标：插件声明优先，其次 runtime 内置表；
+/// 工具图标查询表（工具行图标只认插件 tool_icons 声明；
 /// 查不到的工具不在表中，前端用默认图标）。
 #[tauri::command]
 pub async fn list_tool_icons(
@@ -4023,6 +4023,40 @@ pub async fn list_tool_icons(
         .map_err(|error| error.to_string())
 }
 
+/// 工具参数摘要的展示提示。
+///
+/// 纯宿主渲染规则（lead/skip/hidden 参数名），runtime 不消费也不加工，
+/// 直接由 App 层本地提供；前端经命令查询，参数名不写死在前端。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ToolArgsPresentation {
+    /// 摘要中排在最前、只显示取值的参数（如按 action 分派的工具）。
+    pub lead_args: &'static [&'static str],
+    /// 摘要跳过的环境 / 配置类参数（不构成「这次调用做了什么」）。
+    pub skip_args: &'static [&'static str],
+    /// 位置参数中不展示的取值前缀（宿主混入的内部参数）。
+    pub hidden_value_prefixes: &'static [&'static str],
+}
+#[tauri::command]
+pub fn tool_args_presentation() -> ToolArgsPresentation {
+    ToolArgsPresentation {
+        lead_args: &["action"],
+        skip_args: &[
+            "cwd",
+            "workdir",
+            "working_dir",
+            "timeout",
+            "timeout_secs",
+            "interactive",
+            "encoding",
+            "offset",
+            "limit",
+            "append",
+            "dry_run",
+            "force",
+        ],
+        hidden_value_prefixes: &["__tiangong_cwd="],
+    }
+}
 /// 工具行标题查询表（插件在 `tool_titles` 中声明；查不到的工具不在表中，
 /// 前端显示通用标题）。
 #[tauri::command]
@@ -4033,13 +4067,6 @@ pub async fn list_tool_titles() -> Result<
     tauri::async_runtime::spawn_blocking(tiangong_plugin_runtime::registry::list_tool_titles)
         .await
         .map_err(|error| error.to_string())
-}
-
-/// 工具参数摘要的展示提示（过渡期由运行时内置表提供，见
-/// `tiangong_plugin_runtime::builtin_tables`）。
-#[tauri::command]
-pub fn tool_args_presentation() -> tiangong_plugin_runtime::builtin_tables::ToolArgsPresentation {
-    tiangong_plugin_runtime::builtin_tables::tool_args_presentation()
 }
 
 /// 读取插件声明的工具图标资源（仅限 `tool_icons` 中声明过的路径）。
@@ -4167,7 +4194,7 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
 
 // 插件装卸/启停成功后的宿主响应（前端刷新、上下文交接打标）已改为
 // runtime 插件变化事件的订阅者（见 main.rs setup 注册）；命令层不再扇出。
-// 下载/安装编排同样下沉 runtime（artifacts::install_plugin_from_repository），
+// 下载/安装编排同样下沉 runtime（registry::install_plugin_from_repository），
 // 宿主仅注入进度回调转发到前端事件。
 
 /// 下载并安装：runtime 编排 + 宿主进度事件转发。
@@ -4186,7 +4213,7 @@ pub(crate) async fn download_and_install_plugin(
             );
         }
     });
-    tiangong_plugin_runtime::artifacts::install_plugin_from_repository(
+    tiangong_plugin_runtime::registry::install_plugin_from_repository(
         &storage_root,
         &plugin_id,
         Some(progress),

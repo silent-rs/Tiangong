@@ -51,8 +51,8 @@ impl EphemeralCommandConnection {
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
         let started = Instant::now();
-        if self.template.plugin_id != "command" {
-            bail!("一次性 command 连接的插件身份无效");
+        if !self.template.ephemeral_sidecar {
+            bail!("一次性 sidecar 连接未声明 ephemeral 形态");
         }
         // 提前解析并校验工作区：一是给下方 cwd 解析提供真实路径基准，
         // 二是在启动进程前给出 command 专属错误。安全边界不依赖此处——

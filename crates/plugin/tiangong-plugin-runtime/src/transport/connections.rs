@@ -1,8 +1,19 @@
 //! sidecar 连接池：按目录复用、换代刷新、按需/临时连接与停机清理。
 
-use super::*;
+use crate::interpreter_env::{self, InterpreterKind};
+use crate::manifest::SidecarRuntime;
+use crate::registry::*;
+use crate::sidecar::{
+    CONTENT_MANIFEST_FILE, EphemeralCommandConnection, InterpreterLaunch, ProcessSidecarConnection,
+    SidecarConfig, SidecarConnection, StdioSidecarConnection,
+};
+use anyhow::{Context, Result, bail};
+use sha2::Digest;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
-pub(super) fn sidecar_binary_path(directory: &Path, binary: &Path) -> Result<PathBuf> {
+pub(crate) fn sidecar_binary_path(directory: &Path, binary: &Path) -> Result<PathBuf> {
     let mut path = directory.join(binary);
     if !std::env::consts::EXE_SUFFIX.is_empty() {
         let file_name = path
@@ -16,7 +27,7 @@ pub(super) fn sidecar_binary_path(directory: &Path, binary: &Path) -> Result<Pat
     Ok(path)
 }
 
-pub(super) fn stop_loaded_sidecar(plugin_id: &str) -> Result<()> {
+pub(crate) fn stop_loaded_sidecar(plugin_id: &str) -> Result<()> {
     let sidecar = loaded_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
@@ -65,7 +76,7 @@ pub(crate) fn stop_connection_for_directory(directory: &Path) -> Result<()> {
 /// 注册表里的连接未必覆盖全部进程——热加载覆盖连接时旧 sidecar 进程可能成为
 /// 孤儿，持续占用二进制文件。升级/卸载改写二进制前按 image 名再清一遍，避免
 /// 目录改名/删除因文件被占用而失败。
-pub(super) fn kill_sidecar_orphans(installed: &InstalledPlugin) {
+pub(crate) fn kill_sidecar_orphans(installed: &InstalledPlugin) {
     let Some(sidecar) = installed.manifest.sidecar.as_ref() else {
         return;
     };
@@ -89,7 +100,7 @@ pub(super) fn kill_sidecar_orphans(installed: &InstalledPlugin) {
 ///
 /// 适配器不持有进程资源，但在切换窗口内必须停用，避免并发工具调用
 /// 重新取得旧 sidecar/目录资源。
-pub(super) fn unload_plugin_adapters(plugin_id: &str) {
+pub(crate) fn unload_plugin_adapters(plugin_id: &str) {
     let mut plugins = match loaded_plugins().lock() {
         Ok(plugins) => plugins,
         Err(error) => {
@@ -100,7 +111,7 @@ pub(super) fn unload_plugin_adapters(plugin_id: &str) {
     let Some(loaded) = plugins.get_mut(plugin_id) else {
         return;
     };
-    for adapter in loaded.ts_instances.iter().filter_map(Weak::upgrade) {
+    for adapter in loaded.plugin_instances.iter().filter_map(Weak::upgrade) {
         adapter.set_enabled(false);
     }
 }
@@ -226,10 +237,11 @@ fn sidecar_connection_inner(
     // 不读 manifest 的 sandbox / sandbox_network（插件自声明是提权通道）。
     let official_signed =
         signed_release.is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
-    if installed.manifest.id == "command" && !official_signed {
-        bail!("command 插件必须由官方发布者签名");
-    }
     let host_policy = crate::host_policy::resolve(&installed.manifest.id, official_signed);
+    // 宿主对特定执行位（命令执行位）的硬要求：必须官方签名。
+    if host_policy.require_official_signature && !official_signed {
+        bail!("插件 {} 必须由官方发布者签名", installed.manifest.id);
+    }
     // 用户全局沙箱开关只控制首次实际使用才启动的 sidecar：terminal、
     // command、解释器和清单声明的按需插件。随 App 启动的预加载常驻服务
     // 继续执行宿主强制沙箱；配置读取失败按开启处理（fail-safe）。
@@ -277,7 +289,12 @@ fn sidecar_connection_inner(
     .with_user_credential_reads(host_policy.user_credential_reads)
     .with_sandbox_user_cache_write(host_policy.allow_user_cache_write)
     .with_sandbox_capabilities(host_policy.capabilities.clone())
-    .with_sandbox_user_policy(&tiangong_config::registry::try_sandbox_policy());
+    .with_sandbox_user_policy(&tiangong_config::registry::try_sandbox_policy())
+    // 传输层不读全局状态：沙箱开关、退出标志与授权路径由状态机注入。
+    .with_runtime_env(std::sync::Arc::new(
+        crate::registry::RegistryRuntimeEnv::new(storage_root),
+    ))
+    .with_sidecar_events(std::sync::Arc::new(crate::registry::RegistrySidecarEvents));
     // 统一写域：宿主会话工作区 + 存储根（敏感清单双禁由传输层施加）。
     // 没有会话上下文的全局调用才使用应用默认工作区；带会话上下文时
     // 不采信插件 payload，也不允许默认工作区覆盖当前对话。
@@ -292,9 +309,13 @@ fn sidecar_connection_inner(
         if let Some(workspace) = workspace {
             config = config.with_sandbox_workspace(Some(workspace));
         }
-        // 插件开发目录写域：仅翻译 host_policy 判定，目录汇入与保障在
-        // 沙箱策略组装层（stdio 组装块 + ensured_writable_root）。
-        config = config.with_sandbox_plugin_dev_write(host_policy.plugin_dev_write);
+        // 插件开发目录写域：策略判定在此翻译成具体目录，目录保障与汇入
+        // 在沙箱策略组装层（stdio 组装块 + ensured_writable_root）。
+        if host_policy.plugin_dev_write {
+            config = config.with_sandbox_ensured_writable(
+                crate::storage_layout::StorageLayout::new(storage_root).dev_writable_roots(),
+            );
+        }
     }
     if let Some(signed_release) = signed_release {
         // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。
@@ -310,10 +331,12 @@ fn sidecar_connection_inner(
             .with_interpreter(launch)
             .with_integrity_manifest(installed.directory.join(CONTENT_MANIFEST_FILE));
     }
-    config = config.with_lifecycle(installed.manifest.sidecar_lifecycle());
+    config = config
+        .with_lifecycle(installed.manifest.sidecar_lifecycle())
+        .with_ephemeral_sidecar(host_policy.ephemeral_sidecar);
 
     if ephemeral {
-        return Ok(if installed.manifest.id == "command" {
+        return Ok(if host_policy.ephemeral_sidecar {
             Arc::new(EphemeralCommandConnection::new(config)) as Arc<dyn SidecarConnection>
         } else if use_stdio {
             Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>
@@ -339,7 +362,7 @@ fn sidecar_connection_inner(
     if !connections.contains_key(&connection_key) {
         // 通信通道由宿主策略表权威决定（插件不声明）：spawn 时注入的
         // 环境变量即通道选择，sidecar 通用库自动适配。
-        let connection: Arc<dyn SidecarConnection> = if installed.manifest.id == "command" {
+        let connection: Arc<dyn SidecarConnection> = if host_policy.ephemeral_sidecar {
             Arc::new(EphemeralCommandConnection::new(config))
         } else if use_stdio {
             Arc::new(StdioSidecarConnection::new(config))
@@ -423,11 +446,11 @@ fn verify_local_trust(directory: &Path) -> Result<bool> {
             directory.display()
         );
     }
-    crate::sidecar::SidecarConfig::verify_integrity_manifest(&manifest_path, directory)?;
+    crate::content_manifest::verify(&manifest_path, directory)?;
     Ok(true)
 }
 
-pub(super) fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
+pub(crate) fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
     let plugins = loaded_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;

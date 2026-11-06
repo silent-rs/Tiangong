@@ -43,6 +43,11 @@ fn wait_for_pid_file(path: &Path, timeout: std::time::Duration, context: &str) -
 
 /// 按需 sidecar 的沙箱写域随新版统一调用上下文的工作区构造：真实
 /// 插件写会话工作区成功，写存储根之外的路径被沙箱拒绝。
+/// 测试用的运行态访问入口：与宿主注入的实现相同（真实直连路径）。
+fn test_sidecar_access() -> std::sync::Arc<dyn crate::sidecar::SidecarAccess> {
+    std::sync::Arc::new(crate::registry::RegistrySidecarAccess)
+}
+
 #[test]
 #[serial_test::serial]
 fn integration_按需sidecar_新版上下文工作区成为沙箱写域() {
@@ -114,13 +119,12 @@ await runSidecar({
             .enable_all()
             .build()
             .unwrap()
-            .block_on(
-                crate::ts_plugin::invoke_sidecar_tool_with_invocation_for_test(
-                    id,
-                    invocation.call().clone(),
-                    invocation,
-                ),
-            )
+            .block_on(crate::plugin::invoke_sidecar_tool_with_invocation_for_test(
+                test_sidecar_access(),
+                id,
+                invocation.call().clone(),
+                invocation,
+            ))
     };
 
     let result = invoke_probe(probe_call(&workspace.join("in-session.txt")));
@@ -456,7 +460,8 @@ await runSidecar({
         .build()
         .unwrap()
         .block_on(async {
-            crate::ts_plugin::invoke_sidecar_tool_for_test(
+            crate::plugin::invoke_sidecar_tool_for_test(
+                test_sidecar_access(),
                 id,
                 tiangong_llm::tool::ToolCall {
                     id: "test-call".to_string(),
@@ -567,7 +572,8 @@ await runSidecar({
         .block_on(async {
             tokio::join!(
                 async {
-                    let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    let result = crate::plugin::invoke_sidecar_tool_for_test(
+                        test_sidecar_access(),
                         id,
                         call("quick_job", json!({"tag": "并发一"})),
                         60000,
@@ -577,7 +583,8 @@ await runSidecar({
                     assert_eq!(result.summary, "完成 并发一");
                 },
                 async {
-                    let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    let result = crate::plugin::invoke_sidecar_tool_for_test(
+                        test_sidecar_access(),
                         id,
                         call("quick_job", json!({"tag": "并发二"})),
                         60000,
@@ -587,7 +594,8 @@ await runSidecar({
                     assert_eq!(result.summary, "完成 并发二");
                 },
                 async {
-                    let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    let result = crate::plugin::invoke_sidecar_tool_for_test(
+                        test_sidecar_access(),
                         id,
                         call("slow_job", json!({"pid_file": &pid_file})),
                         30000,

@@ -1,7 +1,8 @@
 //! registry 的注册表级单元测试（原文件级测试模块整体迁移）。
 
-use super::connections::remove_sidecar_connection;
-use super::migrations::post_install_sidecar_check_with;
+use crate::distribution::migrations::post_install_sidecar_check_with;
+use crate::transport::connections::remove_sidecar_connection;
+use sha2::Digest;
 
 use super::*;
 
@@ -156,7 +157,7 @@ fn reload_clears_stale_connections_even_without_sidecar_declaration() {
             manifest: parse_manifest(),
             signed_release: None,
             generation: 0,
-            ts_instances: Vec::new(),
+            plugin_instances: Vec::new(),
             sidecar: Some(
                 std::sync::Arc::clone(&loaded_stub) as std::sync::Arc<dyn SidecarConnection>
             ),
@@ -405,7 +406,7 @@ fn refresh_verified_sidecar_clears_only_runtime_error() {
         manifest,
         signed_release: None,
         generation: 1,
-        ts_instances: Vec::new(),
+        plugin_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
         prompt_sections: None,
@@ -457,7 +458,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
             manifest,
             signed_release: None,
             generation: 1,
-            ts_instances: Vec::new(),
+            plugin_instances: Vec::new(),
             sidecar: None,
             verified_sidecar: None,
             prompt_sections: None,
@@ -554,7 +555,7 @@ fn mention_sources_are_reachable_without_any_session_core() {
         manifest: manifest(id),
         signed_release: None,
         generation: 1,
-        ts_instances: Vec::new(),
+        plugin_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
         prompt_sections: None,
@@ -572,7 +573,7 @@ fn mention_sources_are_reachable_without_any_session_core() {
     // #550：来源由注册表持有，没有任何 TiangongCore、也不依赖适配器弱引用
     // 即可查询。提及内容自 v2 起由 sidecar 的 candidates_op 提供，测试装置
     // 没有安装 sidecar，因而启用插件返回空候选而非报错——这里断言的是可达
-    // 性与停用/卸载行为，内容链路由 loader 与 ts_plugin 的单测覆盖。
+    // 性与停用/卸载行为，内容链路由 loader 与 plugin 的单测覆盖。
     let source_ids: Vec<String> = mention_sources()
         .into_iter()
         .map(|source| source.id().to_string())
@@ -791,7 +792,7 @@ fn 静态mention声明生成入口候选() {
     .expect("静态清单应合法");
     manifest.validate().unwrap();
     let mention = manifest.mention.as_ref().unwrap();
-    let candidate = crate::ts_plugin::mention_entry_candidate(
+    let candidate = crate::plugin::mention_entry_candidate(
         &manifest,
         None,
         &super::loader::static_mention_entry(mention),
@@ -804,7 +805,7 @@ fn 静态mention声明生成入口候选() {
     // 缺 hint（空值视为没写）：不合成——与 op entry 缺 hint 同语义。
     let broken = serde_json::json!({ "hint": "   ", "mark": "老" });
     assert!(
-        crate::ts_plugin::mention_entry_candidate(&manifest, None, &broken).is_none(),
+        crate::plugin::mention_entry_candidate(&manifest, None, &broken).is_none(),
         "空 hint 不合成入口"
     );
 }
@@ -825,7 +826,7 @@ fn 动态prompt段落变化改变能力指纹() {
         manifest: manifest.clone(),
         signed_release: None,
         generation: 1,
-        ts_instances: Vec::new(),
+        plugin_instances: Vec::new(),
         sidecar: None,
         verified_sidecar: None,
         prompt_sections,
@@ -886,7 +887,7 @@ fn 通知重取用插件目录组装并发布事件() {
                 manifest,
                 signed_release: None,
                 generation: 1,
-                ts_instances: Vec::new(),
+                plugin_instances: Vec::new(),
                 sidecar: None,
                 verified_sidecar: None,
                 prompt_sections: Some(vec!["旧快照".to_string()]),
@@ -927,7 +928,7 @@ fn 补验证刷新保留段落快照() {
         r#"{"schema_version":2,"id":"reverify-prompt-demo","version":"1.0.0","entrypoints":["desktop"],"permissions":["sidecar.invoke"],"prompt":[{"type":"file","file":"guide.md"}]}"#,
     )
     .unwrap();
-    let adapter = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+    let adapter = std::sync::Arc::new(crate::plugin::PluginAdapter::from_manifest(
         &manifest,
         true,
         None,
@@ -943,7 +944,7 @@ fn 补验证刷新保留段落快照() {
                 manifest,
                 signed_release: None,
                 generation: 1,
-                ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
+                plugin_instances: vec![std::sync::Arc::downgrade(&adapter)],
                 sidecar: None,
                 verified_sidecar: None,
                 prompt_sections: Some(vec!["旧段落".to_string()]),
@@ -992,14 +993,14 @@ fn 无wasm重载只读取一次装载快照且内容一致() {
         r#"{"schema_version":2,"id":"snapshot-demo","version":"0.1.0","entrypoints":["desktop"],"prompt":["内联",{"type":"file","file":"prompts/guide.md"}]}"#,
     )
     .unwrap();
-    let adapter_a = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+    let adapter_a = std::sync::Arc::new(crate::plugin::PluginAdapter::from_manifest(
         &manifest,
         true,
         None,
         Vec::new(),
         Vec::new(),
     ));
-    let adapter_b = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+    let adapter_b = std::sync::Arc::new(crate::plugin::PluginAdapter::from_manifest(
         &manifest,
         true,
         None,
@@ -1015,7 +1016,7 @@ fn 无wasm重载只读取一次装载快照且内容一致() {
                 manifest: manifest.clone(),
                 signed_release: None,
                 generation: 1,
-                ts_instances: vec![
+                plugin_instances: vec![
                     std::sync::Arc::downgrade(&adapter_a),
                     std::sync::Arc::downgrade(&adapter_b),
                 ],
@@ -1087,7 +1088,7 @@ fn 无wasm重载保留prompt未声明的none语义() {
         r#"{"schema_version":2,"id":"none-demo","version":"0.1.0","entrypoints":["desktop"],"ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","title":"设置","entry":"app/s.html"}]}}"#,
     )
     .unwrap();
-    let adapter = std::sync::Arc::new(crate::ts_plugin::TsPluginAdapter::from_manifest(
+    let adapter = std::sync::Arc::new(crate::plugin::PluginAdapter::from_manifest(
         &manifest,
         true,
         None,
@@ -1103,7 +1104,7 @@ fn 无wasm重载保留prompt未声明的none语义() {
                 manifest: manifest.clone(),
                 signed_release: None,
                 generation: 1,
-                ts_instances: vec![std::sync::Arc::downgrade(&adapter)],
+                plugin_instances: vec![std::sync::Arc::downgrade(&adapter)],
                 sidecar: None,
                 verified_sidecar: None,
                 // 重载前错误地持有 Some：装载快照应回归 None

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type ToolArgsPresentation } from "@/api/tauri";
 
 /**
- * 工具参数摘要的展示提示：由插件运行时提供（过渡期内置表），前端不写死
+ * 工具参数摘要的展示提示：由宿主 App 层命令提供，前端不写死
  * 参数名。未加载或读取失败时为空提示，摘要按全部参数通用拼接。
  */
 export const EMPTY_ARGS_PRESENTATION: ToolArgsPresentation = {

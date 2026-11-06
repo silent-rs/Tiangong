@@ -267,7 +267,8 @@ fn sandbox_fixture_configured(
     .with_sandbox(sandbox)
     .with_sandbox_program_root(Some(plugin_root))
     .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()])
-    .with_sandbox_resource_limits(limits);
+    .with_sandbox_resource_limits(limits)
+    .with_ephemeral_sidecar(true);
     let connection = Arc::new(EphemeralCommandConnection::new(config));
     connection.update_exec_env(BTreeMap::from([(
         "HOME".to_string(),
@@ -680,7 +681,8 @@ fn execution_without_invocation_context_is_rejected() {
         root.path().join("sidecar.log"),
         root.path().join("data"),
         root.path(),
-    );
+    )
+    .with_ephemeral_sidecar(true);
     let connection = EphemeralCommandConnection::new(config);
     let error = connection
         .invoke(RUN_SHELL_OPERATION, r#"{"script":"echo x"}"#)
@@ -702,7 +704,8 @@ fn blank_workspace_in_invocation_context_is_rejected() {
         root.path().join("sidecar.log"),
         root.path().join("data"),
         root.path(),
-    );
+    )
+    .with_ephemeral_sidecar(true);
     let connection = EphemeralCommandConnection::new(config);
     let error = connection
         .invoke_with_invocation_context_and_progress(

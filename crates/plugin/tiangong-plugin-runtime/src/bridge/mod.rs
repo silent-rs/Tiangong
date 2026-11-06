@@ -8,6 +8,8 @@
 //! `plugin_call` 通道）；其余命名空间完成白名单与权限定形，宿主服务路由在
 //! 对应接缝任务中接入。事件订阅当前只提供登记骨架，事件源在事件接缝任务接入。
 
+pub mod core_bridge;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -70,11 +72,6 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         description: "本插件 sidecar 原生逻辑层",
     },
     BridgeNamespace {
-        prefix: "plugin-dev.",
-        permission: "plugin-dev.use",
-        description: "插件开发受限通道（写范围锁定 plugins-dev 开发目录，RFC 0017 D23）",
-    },
-    BridgeNamespace {
         prefix: "dialog.",
         permission: "dialog.use",
         description: "系统对话框原语（保存文件：原生目录选择 + 宿主落盘）",
@@ -96,11 +93,91 @@ pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
     "webview.",
 ];
 
-/// 查找 method 所属的桥接命名空间。
-pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
+/// 查找 method 所属的桥接命名空间（内置白名单优先，其次宿主注册）。
+pub fn namespace_of(method: &str) -> Option<BridgeNamespace> {
     BRIDGE_NAMESPACES
         .iter()
         .find(|namespace| method.starts_with(namespace.prefix))
+        .cloned()
+        .or_else(|| {
+            host_namespaces().lock().ok().and_then(|namespaces| {
+                namespaces
+                    .iter()
+                    .find(|entry| method.starts_with(entry.namespace.prefix))
+                    .map(|entry| entry.namespace.clone())
+            })
+        })
+}
+/// 宿主注册的命名空间处理器：`(plugin_id, method, payload) -> 结果 JSON`。
+pub type BridgeNamespaceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
+struct HostNamespace {
+    namespace: BridgeNamespace,
+    handler: BridgeNamespaceHandler,
+}
+fn host_namespaces() -> &'static Mutex<Vec<HostNamespace>> {
+    static SLOT: OnceLock<Mutex<Vec<HostNamespace>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(Vec::new()))
+}
+/// 注册宿主命名空间：前缀、所需权限与处理器都由宿主提供。
+///
+/// 运行时只保留与产品无关的机制型命名空间（`storage.` / `tool.resolve` 等）；
+/// 面向具体产品流程的命名空间（如插件创作链）由宿主在启动时注册，运行时
+/// 不引用其实现模块。重复注册同一前缀以后者为准；与内置命名空间重叠的
+/// 前缀拒绝注册（避免宿主 handler 静默遮蔽内置路由与权限）。
+pub fn register_bridge_namespace(
+    namespace: BridgeNamespace,
+    handler: BridgeNamespaceHandler,
+) -> Result<()> {
+    // 双向前缀检测：宿主注册 "tool.resolve"（内置 "tool." 的扩展）或 "tool"
+    // （父串）都会因内置优先解析而永不触发宿主 handler，一并拒绝。
+    if let Some(builtin) = BRIDGE_NAMESPACES.iter().find(|builtin| {
+        builtin.prefix == namespace.prefix
+            || builtin.prefix.starts_with(namespace.prefix)
+            || namespace.prefix.starts_with(builtin.prefix)
+    }) {
+        let message = format!(
+            "宿主命名空间前缀 {} 与内置命名空间 {} 重叠，拒绝注册",
+            namespace.prefix, builtin.prefix
+        );
+        tracing::warn!(
+            prefix = namespace.prefix,
+            builtin = builtin.prefix,
+            "{message}"
+        );
+        return Err(anyhow::anyhow!("{message}"));
+    }
+    let mut namespaces = host_namespaces()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    namespaces.retain(|entry| entry.namespace.prefix != namespace.prefix);
+    namespaces.push(HostNamespace { namespace, handler });
+    Ok(())
+}
+/// 注销宿主命名空间（宿主热重载与测试隔离使用）。
+pub fn unregister_bridge_namespace(prefix: &str) {
+    let mut namespaces = host_namespaces()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    namespaces.retain(|entry| entry.namespace.prefix != prefix);
+}
+fn host_namespace_handler(prefix: &str) -> Option<BridgeNamespaceHandler> {
+    host_namespaces().lock().ok().and_then(|namespaces| {
+        namespaces
+            .iter()
+            .find(|entry| entry.namespace.prefix == prefix)
+            .map(|entry| Arc::clone(&entry.handler))
+    })
+}
+/// 当前可用的全部命名空间前缀（内置 + 宿主注册），用于错误信息。
+fn available_namespace_prefixes() -> Vec<&'static str> {
+    let mut prefixes = BRIDGE_NAMESPACES
+        .iter()
+        .map(|namespace| namespace.prefix)
+        .collect::<Vec<_>>();
+    if let Ok(namespaces) = host_namespaces().lock() {
+        prefixes.extend(namespaces.iter().map(|entry| entry.namespace.prefix));
+    }
+    prefixes
 }
 
 fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'static str {
@@ -168,17 +245,13 @@ pub fn bridge_call_with_workspace(
         tracing::warn!(plugin_id, method, "bridge.call 拒绝未知 method");
         bail!(
             "bridge.call 拒绝未知 method {method}（插件 {plugin_id}），可命名空间：{}",
-            BRIDGE_NAMESPACES
-                .iter()
-                .map(|ns| ns.prefix)
-                .collect::<Vec<_>>()
-                .join(" ")
+            available_namespace_prefixes().join(" ")
         );
     };
 
     let manifest = crate::registry::plugin_manifest(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 未加载"))?;
-    let permission = required_bridge_permission(method, namespace);
+    let permission = required_bridge_permission(method, &namespace);
     if !has_bridge_permission(&manifest, permission) {
         tracing::warn!(plugin_id, method, permission, "bridge.call 权限不足");
         bail!(
@@ -186,12 +259,16 @@ pub fn bridge_call_with_workspace(
             namespace.prefix
         );
     }
+    // 宿主注册的命名空间由宿主处理器接管，运行时不含其实现代码。
+    if let Some(handler) = host_namespace_handler(namespace.prefix) {
+        return handler(plugin_id, method, payload);
+    }
 
     match namespace.prefix {
         // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
         "storage." => storage_call(plugin_id, method, payload),
         // tool.resolve：Desktop TS 工具插件提交自己声明的工具结果。
-        "tool." if method == "tool.resolve" => crate::ts_tools::resolve(plugin_id, payload),
+        "tool." if method == "tool.resolve" => crate::tools::resolve(plugin_id, payload),
         // session.input.*：由桌面宿主注入输入草稿处理器，运行时仅负责权限与路由。
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
@@ -228,9 +305,6 @@ pub fn bridge_call_with_workspace(
         "tool." if method.starts_with("browser.") => {
             native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload)
         }
-        // plugin-dev.*：插件开发受限通道（模板 init/构建/安装/校验/日志），
-        // 服务实现见 plugin_dev 模块；写范围锁定开发目录（RFC 0017 D23）。
-        "plugin-dev." => crate::plugin_dev::call(plugin_id, method, payload),
         // dialog.*：系统对话框原语（保存文件）。宿主 webview 是 WebKit，
         // 无 File System Access API——文件保存必须经宿主原生对话框。
         "dialog." => native_service_call(&DIALOG_HANDLER, "dialog", plugin_id, method, payload),
@@ -467,6 +541,55 @@ pub(crate) fn handle_runtime_feedback(plugin_id: &str, message: &str) -> bool {
     true
 }
 
+/// 桥接层作为调用层反馈出口的实现：控制反馈、页面事件与 App 原语都经桥接路由。
+#[derive(Debug)]
+struct BridgeRuntimeFeedback;
+impl crate::runtime_feedback::RuntimeFeedback for BridgeRuntimeFeedback {
+    fn handle_progress(&self, plugin_id: &str, message: &str) -> bool {
+        handle_runtime_feedback(plugin_id, message)
+    }
+    fn has_subscriber(&self, plugin_id: &str, channel: &str) -> bool {
+        plugin_has_subscriber(plugin_id, channel)
+    }
+    fn emit_to_plugin(&self, plugin_id: &str, channel: &str, payload: &str) {
+        bridge_emit_to(plugin_id, channel, payload);
+    }
+    fn open_app(&self, plugin_id: &str, payload: &str) -> Result<String> {
+        open_app_for_plugin(plugin_id, payload)
+    }
+}
+/// 把桥接层安装为调用层的反馈出口（宿主启动时调用一次，重复调用无副作用）。
+///
+/// 未安装时调用层按「宿主未接入」退化：控制反馈不消费、页面事件不推送、
+/// App 实例不拉起——与未注入对应原生服务时的行为一致。
+pub fn install_runtime_feedback() {
+    crate::runtime_feedback::set_runtime_feedback(Arc::new(BridgeRuntimeFeedback));
+    // 插件集变更也要推给订阅了 `plugins.changed` 的插件页面：主前端的宿主
+    // 事件到达不了插件沙箱，页面经桥接订阅后自行刷新。
+    crate::events::set_plugin_change_broadcaster(Arc::new(emit_plugins_changed));
+    register_lifecycle_cleanup();
+}
+
+/// 订阅生命周期事件，在插件停用/卸载/换代后清空它的桥接订阅。
+///
+/// 卸载路径原先由安装事务直接调用 [`clear_plugin_subscriptions`]；改成
+/// 本域按事件收尾后，安装代码不再反向依赖桥接层（D7 订阅 D4）。
+/// 只注册一次：宿主重复调用 [`install_runtime_feedback`] 不会重复清理。
+fn register_lifecycle_cleanup() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        crate::events::add_plugins_changed_listener(Arc::new(|event| {
+            if matches!(
+                event.kind,
+                crate::events::PluginChangeKind::Disabled
+                    | crate::events::PluginChangeKind::Uninstalled
+                    | crate::events::PluginChangeKind::Upgraded
+            ) {
+                clear_plugin_subscriptions(&event.plugin_id);
+            }
+        }));
+    });
+}
 fn native_service_call(
     handler: &OnceLock<NativeServiceHandler>,
     service: &str,
@@ -581,7 +704,7 @@ pub fn bridge_subscribe(plugin_id: &str, channel: &str) -> Result<()> {
 
     // 工具调用可能早于插件页面完成订阅。订阅生效后重放仍在等待的调用；
     // invocation_id 保持不变，插件可据此幂等处理并忽略重复投递。
-    crate::ts_tools::replay_pending(plugin_id, channel);
+    crate::tools::replay_pending(plugin_id, channel);
     Ok(())
 }
 
@@ -608,7 +731,7 @@ pub fn bridge_unsubscribe(plugin_id: &str, channel: &str) -> Result<()> {
     // 最后一个工具提供页面退出后，已无人能够处理挂起调用，立即取消而不是
     // 一直占用 Agent 工具任务到宿主超时。
     if channel_removed && channel == "tool.requested" {
-        crate::ts_tools::cancel_plugin_calls(plugin_id);
+        crate::tools::cancel_plugin_calls(plugin_id);
     }
     Ok(())
 }
@@ -684,6 +807,22 @@ pub fn plugin_has_subscriber(plugin_id: &str, channel: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime反馈只识别受控app原语() {
+        assert!(!handle_runtime_feedback("demo", "普通进度"));
+        assert!(!handle_runtime_feedback(
+            "demo",
+            r#"{"type":"progress","message":"50%"}"#,
+        ));
+        assert!(handle_runtime_feedback(
+            "demo",
+            r#"{"type":"app.open","payload":{"instance_id":"a"}}"#,
+        ));
+        assert!(handle_runtime_feedback(
+            "demo",
+            r#"{"host_action":{"method":"app.close","payload":{"instance_id":"a"}}}"#,
+        ));
+    }
 
     #[test]
     fn 命名空间识别正确() {
@@ -792,6 +931,43 @@ mod tests {
         assert!(has_bridge_permission(&declared, "session.read"));
         assert!(!has_bridge_permission(&declared, "storage.private"));
         let _ = session_ns;
+    }
+    #[test]
+    #[serial_test::serial]
+    fn 生命周期事件清空插件订阅() {
+        const PLUGIN_ID: &str = "bridge-lifecycle-cleanup";
+        register_lifecycle_cleanup();
+        event_subscriptions()
+            .lock()
+            .unwrap()
+            .entry(PLUGIN_ID.to_string())
+            .or_default()
+            .insert("plugins.changed".to_string(), 1);
+        // 安装类事件与资源释放无关，订阅必须保留。
+        crate::events::announce_plugin_change(
+            crate::events::PluginChangeKind::Installed,
+            PLUGIN_ID,
+            None,
+        );
+        assert!(
+            event_subscriptions()
+                .lock()
+                .unwrap()
+                .contains_key(PLUGIN_ID),
+            "安装事件不应清空订阅"
+        );
+        crate::events::announce_plugin_change(
+            crate::events::PluginChangeKind::Uninstalled,
+            PLUGIN_ID,
+            None,
+        );
+        assert!(
+            !event_subscriptions()
+                .lock()
+                .unwrap()
+                .contains_key(PLUGIN_ID),
+            "卸载事件应清空该插件订阅"
+        );
     }
 }
 

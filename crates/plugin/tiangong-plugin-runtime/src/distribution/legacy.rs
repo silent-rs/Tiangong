@@ -1,6 +1,10 @@
 //! 旧插件 ID 迁移：合并保留目录（runtime/logs/data）、归档旧目录。
 
-use super::*;
+use super::migrations::plugin_directory;
+use crate::manifest::MANIFEST_FILE;
+use crate::registry::*;
+use anyhow::{Context, Result};
+use std::path::Path;
 
 pub(super) const PRESERVED_ENTRIES: [&str; 3] = ["runtime", "logs", "data"];
 

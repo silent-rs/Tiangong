@@ -489,10 +489,7 @@ impl StdioSidecarConnection {
                             .parent()
                             .ok_or_else(|| anyhow!("内容清单缺少父目录")),
                     )?;
-                    preparation(SidecarConfig::verify_integrity_manifest(
-                        manifest_path,
-                        root,
-                    ))?;
+                    preparation(crate::content_manifest::verify(manifest_path, root))?;
                 }
                 let program =
                     preparation(crate::interpreter_env::resolve_interpreter(launch.kind))?;
@@ -531,7 +528,7 @@ impl StdioSidecarConnection {
         // 用户开关仅作用于宿主标记为“首次实际使用才启动”的 sidecar。
         // 每次 spawn 都读取最新配置，关闭与重新开启无需重建连接对象；配置
         // 尚未初始化时按开启处理（fail-safe 向保护方向）。
-        let sandbox_disabled = crate::registry::sandbox_disabled();
+        let sandbox_disabled = self.config.runtime_env.sandbox_disabled();
         let sandbox_enabled = self.config.sandbox_enabled_for_spawn(sandbox_disabled);
         if self.config.sandbox_follows_user_switch && sandbox_disabled {
             tracing::warn!(
@@ -597,25 +594,15 @@ impl StdioSidecarConnection {
                 &self.config.plugin_id,
                 &self.config.data_dir,
             ));
-            // 插件开发目录写域（host_policy 按已验证官方身份授予 terminal /
-            // plugin-creator，经连接配置传入）：devkit 项目目录与导入收件箱。
-            // 收件箱以 `.` 前缀避免 discovery 扫描；正式安装目录 plugins/
-            // 不在授权之列（安装经宿主指纹核验或用户确认把关）。
-            if self.config.sandbox_plugin_dev_write {
-                policy.extra_writable.extend(
-                    [
-                        self.config
-                            .storage_root
-                            .join(crate::plugin_dev::PLUGIN_DEV_DIR),
-                        self.config
-                            .storage_root
-                            .join("plugins")
-                            .join(crate::plugin_dev::PLUGIN_INBOX_DIR),
-                    ]
-                    .into_iter()
+            // 宿主授予的固定写域（目录清单由连接构造层按策略判定后传入，
+            // 传输层只做保障与汇入）：缺失则创建，符号链接一律丢弃。
+            policy.extra_writable.extend(
+                self.config
+                    .sandbox_ensured_writable
+                    .iter()
+                    .cloned()
                     .filter_map(sandbox_exemptions::ensured_writable_root),
-                );
-            }
+            );
             // 工具链缓存（npm 等）是功能基础设施而非用户数据：npx/uvx
             // 启动 MCP server 需要写包缓存。
             if let Some(home) = crate::interpreter_env::user_home_dir() {
@@ -774,11 +761,11 @@ impl StdioSidecarConnection {
                     if !self.config.sandbox_follows_user_switch
                         && self.config.lifecycle == crate::manifest::SidecarLifecycle::Resident
                     {
-                        request["grant_cache"] =
-                            serde_json::json!(crate::registry::persistent_grants_path(
-                                &self.config.storage_root,
-                                &self.config.plugin_id
-                            ));
+                        request["grant_cache"] = serde_json::json!(
+                            self.config
+                                .runtime_env
+                                .persistent_grants_path(&self.config.plugin_id)
+                        );
                     }
                     request
                 };
@@ -873,7 +860,7 @@ impl StdioSidecarConnection {
                 WindowsJob::new(None).context("创建 sidecar Job Object 失败"),
             )?),
         };
-        if crate::registry::sidecars_shutting_down() {
+        if self.config.runtime_env.shutting_down() {
             return Err(SpawnAttemptError::Preparation(anyhow!(
                 "应用正在退出，取消插件启动"
             )));
@@ -917,6 +904,7 @@ impl StdioSidecarConnection {
             Arc::clone(&pending),
             Arc::clone(&child),
             Arc::clone(&closed),
+            Arc::clone(&self.config.events),
         );
         Ok(StdioProcess {
             child,
@@ -1266,6 +1254,7 @@ fn spawn_stdio_reader(
     pending: Arc<Mutex<HashMap<String, PendingWaiter>>>,
     child: Arc<Mutex<Child>>,
     closed: Arc<AtomicBool>,
+    events: Arc<dyn crate::sidecar::SidecarEvents>,
 ) {
     std::thread::Builder::new()
         .name(format!("plugin-sidecar-stdio-reader-{plugin_id}"))
@@ -1307,20 +1296,22 @@ fn spawn_stdio_reader(
                     }
                     IpcFrame::Notification { channel, payload } => {
                         if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
-                            crate::registry::dispatch_tools_recovered(&plugin_id, &payload);
+                            events.tools_recovered(&plugin_id, &payload);
                         }
                         if channel == tiangong_plugin_sidecar::protocol::PROMPT_UPDATED_CHANNEL {
                             // 段落重取是阻塞 I/O：通知读循环只投递，不等待完成。
                             let plugin_id = plugin_id.clone();
+                            let events = Arc::clone(&events);
                             std::thread::spawn(move || {
-                                crate::registry::refresh_prompt_sections(&plugin_id);
+                                events.prompt_updated(&plugin_id);
                             });
                         }
                         if channel == tiangong_plugin_sidecar::protocol::TOOLS_UPDATED_CHANNEL {
                             // 工具规格重取同样是阻塞 I/O：只投递，不等待完成。
                             let plugin_id = plugin_id.clone();
+                            let events = Arc::clone(&events);
                             std::thread::spawn(move || {
-                                crate::registry::refresh_tool_specs(&plugin_id);
+                                events.tools_updated(&plugin_id);
                             });
                         }
                         if let Some(forwarder) = crate::sidecar::sidecar_notification_forwarder() {

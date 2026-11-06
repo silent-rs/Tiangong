@@ -2,10 +2,10 @@
 
 use serde_json::Value;
 
-use super::connections::{
+use super::*;
+use crate::transport::connections::{
     loaded_plugin_matches, stop_connection_for_directory, stop_loaded_sidecar,
 };
-use super::*;
 
 /// 当前应进入 Core 的插件 id 列表（按 `load_installed_plugins` 同一套
 /// 可用性过滤与排序：入口声明、`model_requirements` 能力、prompt 置顶）。
@@ -144,7 +144,12 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
 /// 迁移成功（含制品未变化的幂等短路）即广播插件变化事件。
 pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let result = reload_plugin_entry(storage_root, plugin_id);
-    crate::events::announced(PluginChangeKind::Upgraded, plugin_id, result)
+    crate::events::announced(
+        PluginChangeKind::Upgraded,
+        plugin_id,
+        Some(storage_root),
+        result,
+    )
 }
 
 fn reload_plugin_entry(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
@@ -167,11 +172,11 @@ fn reload_plugin_entry(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
         .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 热加载后状态丢失"))
 }
 
-pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
+pub(crate) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
     // 清单插件可能仅提供 UI，也可能通过 Desktop TS 工具适配器接入 Core。
     // UI 记录直接替换；存活 Core 中的 TS 适配器原位更新，下一轮立即使用新清单。
     {
-        crate::ts_tools::cancel_plugin_calls(&installed.manifest.id);
+        crate::tools::cancel_plugin_calls(&installed.manifest.id);
         // 停掉旧 sidecar（进程 + 该安装目录的连接缓存）：热加载的前提是
         // 插件目录可能已被整体替换，残留会让工具继续打到旧二进制；新清
         // 单即使去掉 sidecar 声明也照清（此时旧连接/旧进程正是要清除的
@@ -194,13 +199,13 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
                 "热加载清理 sidecar 连接缓存失败，下次调用可能复用旧连接"
             );
         }
-        let ts_instances = loaded_plugins()
+        let plugin_instances = loaded_plugins()
             .lock()
             .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
             .get(&installed.manifest.id)
             .map(|loaded| {
                 loaded
-                    .ts_instances
+                    .plugin_instances
                     .iter()
                     .filter_map(Weak::upgrade)
                     .collect::<Vec<_>>()
@@ -212,7 +217,7 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
         // reconfigure 消费 Vec<String>；None 只在注册表中表示「未声明」。
         let adapter_sections = snapshot.prompt_sections.clone().unwrap_or_default();
         let adapter_tools = snapshot.tool_specs.clone().unwrap_or_default();
-        for adapter in &ts_instances {
+        for adapter in &plugin_instances {
             adapter.reconfigure(
                 &installed.manifest,
                 installed.enabled,
@@ -223,7 +228,7 @@ pub(super) fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlug
         }
         let mut loaded =
             load_plugin_record_with_snapshot(storage_root, installed.clone(), snapshot);
-        loaded.ts_instances = ts_instances.iter().map(Arc::downgrade).collect();
+        loaded.plugin_instances = plugin_instances.iter().map(Arc::downgrade).collect();
         loaded_plugins()
             .lock()
             .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
@@ -402,7 +407,7 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
         } else if let Some(mention) = manifest.mention.as_ref() {
             // v0.17.6 静态入口（仅存量插件兼容）：静态 hint/mark 走同一条入口
             // 合成路径，完备性（hint 非空）由 mention_entry_candidate 兜底。
-            if let Some(candidate) = crate::ts_plugin::mention_entry_candidate(
+            if let Some(candidate) = crate::plugin::mention_entry_candidate(
                 &manifest,
                 None,
                 &static_mention_entry(mention),
@@ -455,7 +460,7 @@ fn dynamic_mention_candidate(item: &serde_json::Value) -> Option<tiangong_types:
 }
 
 /// v0.17.6 静态 mention 声明转入口 entry：hint/mark 透传，完备性（hint
-/// 非空、mark 1-4 字符）由 {@link crate::ts_plugin::mention_entry_candidate}
+/// 非空、mark 1-4 字符）由 {@link crate::plugin::mention_entry_candidate}
 /// 兜底——与 op 响应的 entry 走同一条合成路径，行为一致。
 pub(crate) fn static_mention_entry(
     mention: &crate::manifest::MentionManifest,
@@ -468,7 +473,7 @@ pub(crate) fn static_mention_entry(
 
 /// 解析 `candidates_op` 响应 `{ entry?, candidates }`。///
 /// - `entry` 可选：有则合成入口候选（宿主约定 value/label/kind + op 的
-///   hint/mark，见 {@link crate::ts_plugin::mention_entry_candidate}），
+///   hint/mark，见 {@link crate::plugin::mention_entry_candidate}），
 ///   缺 hint 跳过并告警；内容提供方（如 index）不返回 entry，插件本身
 ///   不作为被提及对象。
 /// - `candidates` 逐项完备性过滤，残缺项跳过并计数告警。
@@ -482,7 +487,7 @@ pub(crate) fn parse_mention_op_response(
 ) -> Vec<tiangong_types::MentionCandidate> {
     let mut candidates = Vec::new();
     if let Some(entry) = value.get("entry") {
-        match crate::ts_plugin::mention_entry_candidate(manifest, descriptor_name, entry) {
+        match crate::plugin::mention_entry_candidate(manifest, descriptor_name, entry) {
             Some(candidate) => candidates.push(candidate),
             None => tracing::warn!(plugin_id, op, "mention entry 缺少 hint，入口候选已跳过"),
         }
@@ -512,6 +517,16 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     let plugins = loaded_plugins().lock().ok()?;
     let loaded = plugins.get(plugin_id)?;
     loaded.enabled.then(|| loaded.directory.clone())
+}
+
+/// 已安装插件的已验证发布者 ID（签名清单的 `publisher`；`None` 表示未签名或本地信任）。
+///
+/// 创作域用它判定调用方是否官方签名，不必接触 `InstalledPlugin` 的内部结构。
+pub fn plugin_publisher(storage_root: &Path, plugin_id: &str) -> Option<String> {
+    find_installed_plugin(storage_root, plugin_id)
+        .ok()
+        .and_then(|installed| installed.signed_release)
+        .map(|release| release.publisher)
 }
 
 /// 清单声明的工具是否全部由 sidecar 承接（无需桌面前端页面执行）。
@@ -691,7 +706,7 @@ pub(crate) fn assemble_dynamic_tool_specs(
     storage_root: &Path,
     manifest: &PluginManifest,
     verified_capabilities: Option<&[String]>,
-) -> Option<Vec<crate::manifest::TsToolDecl>> {
+) -> Option<Vec<crate::manifest::ToolDecl>> {
     let wildcard = verified_capabilities
         .is_some_and(|capabilities| capabilities.iter().any(|capability| capability == "tool:*"));
     if !wildcard {
@@ -733,7 +748,7 @@ pub(crate) fn assemble_dynamic_tool_specs(
 /// `input_schema` 缺省回退；非法项整体失败（fail-honest 空快照）。
 fn parse_tool_specs_response(
     value: serde_json::Value,
-) -> anyhow::Result<Vec<crate::manifest::TsToolDecl>> {
+) -> anyhow::Result<Vec<crate::manifest::ToolDecl>> {
     let raw = value
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tool_specs 响应必须是数组"))?;
@@ -772,7 +787,7 @@ fn parse_tool_specs_response(
             .get("title")
             .and_then(|value| value.as_str())
             .map(str::to_string);
-        specs.push(crate::manifest::TsToolDecl {
+        specs.push(crate::manifest::ToolDecl {
             name,
             description,
             input_schema,
@@ -800,7 +815,7 @@ pub(crate) fn refresh_tool_specs(plugin_id: &str) {
     else {
         return;
     };
-    let (manifest, verified, enabled, generation, adapter_sections, ts_instances) = {
+    let (manifest, verified, enabled, generation, adapter_sections, plugin_instances) = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return;
         };
@@ -814,7 +829,7 @@ pub(crate) fn refresh_tool_specs(plugin_id: &str) {
             loaded.generation,
             loaded.prompt_sections.clone().unwrap_or_default(),
             loaded
-                .ts_instances
+                .plugin_instances
                 .iter()
                 .filter_map(std::sync::Weak::upgrade)
                 .collect::<Vec<_>>(),
@@ -844,7 +859,7 @@ pub(crate) fn refresh_tool_specs(plugin_id: &str) {
     // 存活适配器同步同一份结果（裸写 state 会漏 sidecar_direct 等派生项，
     // reconfigure 正是干这个的）。
     let adapter_specs = specs.unwrap_or_default();
-    for adapter in &ts_instances {
+    for adapter in &plugin_instances {
         adapter.reconfigure(
             &manifest,
             enabled,
@@ -854,7 +869,11 @@ pub(crate) fn refresh_tool_specs(plugin_id: &str) {
         );
     }
     // 工具清单变化即插件能力变化：与升级/启停同一事件通道。
-    crate::events::announce_plugin_change(crate::events::PluginChangeKind::ToolsChanged, plugin_id);
+    crate::events::announce_plugin_change(
+        crate::events::PluginChangeKind::ToolsChanged,
+        plugin_id,
+        None,
+    );
 }
 
 /// sidecar 经 [`PROMPT_UPDATED_CHANNEL`] 通知段落变更时重取并更新注册表；
@@ -873,7 +892,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
     else {
         return;
     };
-    let (manifest, verified, enabled, generation, ts_instances) = {
+    let (manifest, verified, enabled, generation, plugin_instances) = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return;
         };
@@ -886,7 +905,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
             loaded.enabled,
             loaded.generation,
             loaded
-                .ts_instances
+                .plugin_instances
                 .iter()
                 .filter_map(std::sync::Weak::upgrade)
                 .collect::<Vec<_>>(),
@@ -926,7 +945,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
             .map(|loaded| loaded.dynamic_tool_specs.clone().unwrap_or_default())
             .unwrap_or_default()
     };
-    for adapter in &ts_instances {
+    for adapter in &plugin_instances {
         adapter.reconfigure(
             &manifest,
             enabled,
@@ -940,6 +959,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
     crate::events::announce_plugin_change(
         crate::events::PluginChangeKind::PromptSectionsChanged,
         plugin_id,
+        None,
     );
 }
 
@@ -952,7 +972,7 @@ pub(crate) fn refresh_prompt_sections(plugin_id: &str) {
 ///    工具全部覆盖，或无工具的纯动态 prompt 插件由握手声明 `prompt`
 ///    能力的 sidecar 提供段落（sidecar 自行多报不能扩大 manifest 接缝；
 ///    纯动态 prompt 插件即使带设置页等 UI 也可用，页面只负责交互展示）。
-fn ts_adapter_serves(
+fn adapter_serves(
     manifest: &PluginManifest,
     runtime: RuntimeKind,
     verified_capabilities: Option<&[String]>,
@@ -1005,11 +1025,11 @@ pub fn load_core_plugin(
         )
     };
 
-    if ts_adapter_serves(&manifest, runtime, verified_sidecar.as_deref()) {
+    if adapter_serves(&manifest, runtime, verified_sidecar.as_deref()) {
         // 段落装载时已组装（内联文本 / 文件 / sidecar 统一快照），此处只读。
         let prompt_sections = dynamic_prompt_sections.unwrap_or_default();
         let dynamic_tools = dynamic_tool_specs.unwrap_or_default();
-        let adapter = Arc::new(TsPluginAdapter::from_manifest(
+        let adapter = Arc::new(PluginAdapter::from_manifest(
             &manifest,
             enabled,
             verified_sidecar,
@@ -1017,13 +1037,14 @@ pub fn load_core_plugin(
             dynamic_tools,
         ));
         adapter.set_session_id(session_id);
+        adapter.set_sidecar_access(std::sync::Arc::new(super::RegistrySidecarAccess));
         if let Ok(mut plugins) = loaded_plugins().lock()
             && let Some(loaded) = plugins.get_mut(plugin_id)
         {
             loaded
-                .ts_instances
+                .plugin_instances
                 .retain(|instance| instance.strong_count() > 0);
-            loaded.ts_instances.push(Arc::downgrade(&adapter));
+            loaded.plugin_instances.push(Arc::downgrade(&adapter));
         }
         return Some(adapter);
     }
@@ -1043,7 +1064,7 @@ pub(crate) fn dispatch_tools_recovered(plugin_id: &str, payload: &str) {
             return;
         };
         loaded
-            .ts_instances
+            .plugin_instances
             .iter()
             .filter_map(Weak::upgrade)
             .collect::<Vec<_>>()
@@ -1085,7 +1106,7 @@ fn plugin_state(enabled: bool, error: Option<&str>) -> &'static str {
         "loaded"
     }
 }
-pub(super) fn list_plugin_status_without_preload(
+pub(crate) fn list_plugin_status_without_preload(
     manifest: &PluginManifest,
 ) -> Option<PluginStatus> {
     let (generation, sidecar, load_error, runtime_error, enabled, directory) = {
@@ -1171,18 +1192,18 @@ mod tests {
         .unwrap();
         // 无静态 tools/prompt：仅 `tool:*` 通配时适配器承接（动态形态），
         // 否则不是 TS 贡献插件。
-        assert!(ts_adapter_serves(
+        assert!(adapter_serves(
             &manifest,
             RuntimeKind::Desktop,
             Some(&["tool:*".to_string()])
         ));
-        assert!(ts_adapter_serves(
+        assert!(adapter_serves(
             &manifest,
             RuntimeKind::Server,
             Some(&["tool:*".to_string()])
         ));
-        assert!(!ts_adapter_serves(&manifest, RuntimeKind::Desktop, None));
-        assert!(!ts_adapter_serves(
+        assert!(!adapter_serves(&manifest, RuntimeKind::Desktop, None));
+        assert!(!adapter_serves(
             &manifest,
             RuntimeKind::Desktop,
             Some(&["tool:demo".to_string()])
@@ -1316,28 +1337,20 @@ mod dynamic_prompt_loader_tests {
         let manifest = prompt_manifest();
         let verified = vec![tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY.to_string()];
         assert!(!tools_served_by_sidecar(&manifest, Some(&verified)));
-        assert!(ts_adapter_serves(
+        assert!(adapter_serves(
             &manifest,
             RuntimeKind::Server,
             Some(&verified)
         ));
-        assert!(ts_adapter_serves(
-            &manifest,
-            RuntimeKind::Cli,
-            Some(&verified)
-        ));
+        assert!(adapter_serves(&manifest, RuntimeKind::Cli, Some(&verified)));
     }
 
     #[test]
     fn 无头动态prompt必须有已验证的sidecar能力() {
         let manifest = prompt_manifest();
-        assert!(!ts_adapter_serves(&manifest, RuntimeKind::Server, None));
-        assert!(!ts_adapter_serves(
-            &manifest,
-            RuntimeKind::Server,
-            Some(&[])
-        ));
-        assert!(ts_adapter_serves(&manifest, RuntimeKind::Desktop, None));
+        assert!(!adapter_serves(&manifest, RuntimeKind::Server, None));
+        assert!(!adapter_serves(&manifest, RuntimeKind::Server, Some(&[])));
+        assert!(adapter_serves(&manifest, RuntimeKind::Desktop, None));
     }
 
     #[test]
@@ -1355,8 +1368,8 @@ mod dynamic_prompt_loader_tests {
             }]}
         }))
         .expect("纯 UI 测试清单");
-        assert!(!ts_adapter_serves(&manifest, RuntimeKind::Desktop, None));
-        assert!(!ts_adapter_serves(
+        assert!(!adapter_serves(&manifest, RuntimeKind::Desktop, None));
+        assert!(!adapter_serves(
             &manifest,
             RuntimeKind::Server,
             Some(&[tiangong_plugin_sidecar::protocol::PROMPT_CAPABILITY.to_string()])
@@ -1438,5 +1451,72 @@ mod dynamic_prompt_loader_tests {
             assemble_prompt_sections(std::path::Path::new("/tmp"), dir.path(), &manifest, None),
             None
         );
+    }
+}
+
+/// 后台补验证/重新验证成功后，同步刷新注册表与存活 TS 适配器的验证能力
+///（已构建的 Core 实例立即按新能力路由，无需等待下一次 Core 构建）。
+pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String>) {
+    let (manifest, enabled, directory, plugin_instances) = {
+        let Ok(mut plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get_mut(plugin_id) else {
+            return;
+        };
+        loaded.verified_sidecar = Some(capabilities.clone());
+        // 运行检查重新成功：sidecar 已可真实握手，清除此前登记的启动
+        // 异常（load_error 属安装前提类，不受影响）。
+        loaded.runtime_error = None;
+        (
+            loaded.manifest.clone(),
+            loaded.enabled,
+            loaded.directory.clone(),
+            loaded
+                .plugin_instances
+                .iter()
+                .filter_map(|weak| weak.upgrade())
+                .collect::<Vec<_>>(),
+        )
+    };
+    // 能力变化可能改变段落门控（sidecar 条目）：按新能力在锁外重新组装
+    // （组装含阻塞 I/O，不得持锁），记录与适配器共用同一份结果。
+    let storage_root = directory
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf);
+    let sections = storage_root
+        .as_deref()
+        .and_then(|root| {
+            crate::registry::assemble_prompt_sections(
+                root,
+                &directory,
+                &manifest,
+                Some(capabilities.as_slice()),
+            )
+        })
+        .unwrap_or_default();
+    // 工具规格快照同样按新能力重取（声明 sidecar 工具条目的插件）。
+    let tool_specs = storage_root.as_deref().and_then(|root| {
+        crate::registry::assemble_dynamic_tool_specs(root, &manifest, Some(capabilities.as_slice()))
+    });
+    for adapter in &plugin_instances {
+        adapter.reconfigure(
+            &manifest,
+            enabled,
+            Some(capabilities.clone()),
+            sections.clone(),
+            tool_specs.clone().unwrap_or_default(),
+        );
+    }
+    if let Ok(mut plugins) = loaded_plugins().lock()
+        && let Some(loaded) = plugins.get_mut(plugin_id)
+    {
+        loaded.prompt_sections = if manifest.prompt.is_some() {
+            Some(sections)
+        } else {
+            None
+        };
+        loaded.dynamic_tool_specs = tool_specs;
     }
 }

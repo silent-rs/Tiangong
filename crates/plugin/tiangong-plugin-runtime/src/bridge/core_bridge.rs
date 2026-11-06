@@ -31,24 +31,12 @@ use tiangong_types::PluginSession;
 
 use crate::registry::{self, RuntimeKind};
 
-/// 工具结果抬头的状态词。
-fn result_status_text(ok: bool) -> &'static str {
-    if ok { "成功" } else { "失败" }
-}
-
-/// 插件工具结果的抬头：带上实际处理的插件 id 与插件声明的原工具名。
-///
-/// 抬头由插件侧（runtime 适配器）提供，core 只原样放在结果首行。
-pub fn plugin_result_header(plugin_id: &str, tool_name: &str, ok: bool) -> String {
-    format!(
-        "调用插件 {plugin_id} 的 {tool_name}：{}",
-        result_status_text(ok)
-    )
-}
-
 /// 无法定位到具体插件时的抬头（如自制插件通道缺少参数）。
 fn tool_result_header(tool_name: &str, ok: bool) -> String {
-    format!("调用工具 {tool_name}：{}", result_status_text(ok))
+    format!(
+        "调用工具 {tool_name}：{}",
+        crate::plugin::result_status_text(ok)
+    )
 }
 
 /// 自制插件动态调用工具名（description 恒定，不含任何插件信息——
@@ -551,7 +539,9 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                 let plugin = arguments.get("plugin_name").and_then(|v| v.as_str());
                 let function = arguments.get("function_name").and_then(|v| v.as_str());
                 Some(match (plugin, function) {
-                    (Some(plugin), Some(function)) => plugin_result_header(plugin, function, ok),
+                    (Some(plugin), Some(function)) => {
+                        crate::plugin::plugin_result_header(plugin, function, ok)
+                    }
                     _ => tool_result_header(&call.name, ok),
                 })
             }
@@ -566,7 +556,7 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                     .adapter
                     .result_header(&route.inner_call(call), ok)
                     .or_else(|| {
-                        Some(plugin_result_header(
+                        Some(crate::plugin::plugin_result_header(
                             route.adapter.id(),
                             &route.original,
                             ok,

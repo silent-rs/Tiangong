@@ -165,7 +165,7 @@ mod tests {
             manifest,
             signed_release: None,
             generation: 0,
-            ts_instances: Vec::new(),
+            plugin_instances: Vec::new(),
             sidecar: None,
             verified_sidecar: Some(Vec::new()),
             prompt_sections: None,

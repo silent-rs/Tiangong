@@ -295,6 +295,24 @@ fn checked_launcher(launcher: &Path, storage_root: &Path) -> Result<LauncherInfo
 #[cfg(windows)]
 const REVOKE_GRANTS_ERROR_PREFIX: &str = "撤销持久授权失败";
 
+/// 撤销某个插件在沙箱侧登记的持久授权（记录不存在时静默跳过）。
+///
+/// 卸载收尾由生命周期事件触发：安装事务只发事实，撤销动作归传输域。
+#[cfg(windows)]
+pub(crate) fn revoke_plugin_grants(storage_root: &Path, plugin_id: &str) {
+    let record = crate::storage_layout::StorageLayout::new(storage_root).grant_record(plugin_id);
+    if !record.exists() {
+        return;
+    }
+    if let Err(error) = revoke_persistent_grants(storage_root, &record) {
+        tracing::warn!(plugin_id, %error, "撤销插件持久授权失败");
+    }
+}
+
+/// 非 Windows 平台没有 AppContainer 授权记录，空实现让调用点无需分支。
+#[cfg(not(windows))]
+pub(crate) fn revoke_plugin_grants(_storage_root: &Path, _plugin_id: &str) {}
+
 /// 撤销 Launcher 为插件登记的 Windows 持久授权（ACL 与身份）。
 ///
 /// 授权的创建与撤销都由 Launcher 完成，宿主不链接 AppContainer 实现：

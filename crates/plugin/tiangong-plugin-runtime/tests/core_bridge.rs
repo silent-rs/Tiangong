@@ -712,9 +712,9 @@ fn 工具图标_插件声明优先_不合法声明不影响装载() {
         table["icon-rich__read_file"].icon, "flame",
         "不合法条目被忽略，落到插件默认图标"
     );
-    assert_eq!(
-        table["icon-plain__run_shell"].icon, "square-terminal",
-        "未声明时用内置表"
+    assert!(
+        !table.contains_key("icon-plain__run_shell"),
+        "未声明即不在表中，前端用默认图标"
     );
     assert_eq!(
         table["icon-rich__run_shell"].icon, "flame",

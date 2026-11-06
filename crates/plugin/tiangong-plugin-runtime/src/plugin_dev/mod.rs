@@ -32,12 +32,8 @@ pub(crate) use trust::{
     clear_plugin_dev_import_confirm_for_test, clear_plugin_dev_trusted_installer_for_test,
 };
 
-/// 开发目录名（位于存储根下，与 plugins/ 平级）。
-pub const PLUGIN_DEV_DIR: &str = "plugins-dev";
-/// 插件导入收件箱子目录名（位于 plugins/ 下，`.` 前缀使 discovery 的
-/// 目录扫描天然跳过——收件箱内容不参与加载，只有经宿主确认导入并
-/// 签名落锚后才会进入正式安装目录）。
-pub const PLUGIN_INBOX_DIR: &str = ".inbox";
+/// 开发目录名（目录契约见 [`crate::storage_layout`]；此处保留公开路径）。
+pub use crate::storage_layout::{DEV_DIR as PLUGIN_DEV_DIR, INBOX_DIR as PLUGIN_INBOX_DIR};
 /// 项目元数据文件名（位于项目目录根部）。
 pub(crate) const PROJECT_META_FILE: &str = ".plugin-dev.json";
 
@@ -135,7 +131,7 @@ struct StatusResult {
 // ── list ──
 
 fn list(storage_root: &Path) -> Result<Vec<ProjectEntry>> {
-    let dev_root = storage_root.join(PLUGIN_DEV_DIR);
+    let dev_root = crate::storage_layout::StorageLayout::new(storage_root).dev_root();
     let mut entries = Vec::new();
     let Ok(read_dir) = std::fs::read_dir(&dev_root) else {
         return Ok(entries);
@@ -279,10 +275,10 @@ fn sign_staged_with_user_key(
     manifest: &PluginManifest,
 ) -> Result<()> {
     let manifest_path = staged_path.join(crate::manifest::MANIFEST_FILE);
-    let content_manifest_path = staged_path.join(crate::sidecar::CONTENT_MANIFEST_FILE);
+    let content_manifest_path = staged_path.join(crate::content_manifest::CONTENT_MANIFEST_FILE);
     // 签名前先双向校验内容清单（与旧本地信任落锚同款前置），不完整清单
     // 在安装时即拒绝。
-    crate::sidecar::SidecarConfig::verify_integrity_manifest(&content_manifest_path, staged_path)?;
+    crate::content_manifest::verify(&content_manifest_path, staged_path)?;
     let artifact = |path: &Path| -> Result<crate::signature::SignedArtifact> {
         Ok(crate::signature::SignedArtifact {
             path: path
@@ -342,10 +338,7 @@ fn import_from_inbox(
     ) {
         bail!("插件 ID 不能作为收件箱目录名: {plugin_id}");
     }
-    let inbox_dir = storage_root
-        .join("plugins")
-        .join(PLUGIN_INBOX_DIR)
-        .join(plugin_id);
+    let inbox_dir = crate::storage_layout::StorageLayout::new(storage_root).inbox_plugin(plugin_id);
     if !inbox_dir.join("plugin.json").is_file() {
         bail!(
             "收件箱中没有插件 {plugin_id} 的产物（{} 不含 plugin.json）",
@@ -469,10 +462,11 @@ fn validate_project_id(id: &str) -> Result<()> {
 /// 开发项目目录（canonicalize 校验仍在 plugins-dev 内）。
 fn dev_project_dir(storage_root: &Path, project_id: &str) -> Result<PathBuf> {
     validate_project_id(project_id)?;
-    let dev_root = storage_root.join(PLUGIN_DEV_DIR);
+    let dev_root = crate::storage_layout::StorageLayout::new(storage_root).dev_root();
     std::fs::create_dir_all(&dev_root)
         .with_context(|| format!("创建开发根目录失败: {}", dev_root.display()))?;
-    let project_dir = dev_root.join(project_id);
+    let project_dir =
+        crate::storage_layout::StorageLayout::new(storage_root).dev_project(project_id);
     let canonical_root = dev_root.canonicalize().context("开发根目录规范化失败")?;
     if let Ok(canonical) = project_dir.canonicalize()
         && !canonical.starts_with(&canonical_root)

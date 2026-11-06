@@ -210,6 +210,77 @@ impl SensitiveStorageAccess {
     }
 }
 
+/// 传输层需要的宿主运行时事实：沙箱开关、退出状态、持久授权路径。
+///
+/// 由连接构造层（注册表状态机）实现并注入 [`SidecarConfig`]。传输层只在真正
+/// 需要时调用（例如每次 spawn 重新读取用户开关），不自行读取全局状态，因此
+/// 不反向依赖状态机模块。
+pub trait RuntimeEnv: Send + Sync + std::fmt::Debug {
+    /// 用户全局沙箱开关是否关闭。
+    fn sandbox_disabled(&self) -> bool;
+    /// 宿主是否正在退出：退出期间拒绝启动新的 sidecar。
+    fn shutting_down(&self) -> bool;
+    /// 常驻 sidecar 的持久授权记录路径（Windows AppContainer）；不适用返回 `None`。
+    fn persistent_grants_path(&self, _plugin_id: &str) -> Option<PathBuf> {
+        None
+    }
+}
+/// sidecar 主动通知的响应出口（工具恢复、prompt 段落与工具规格变更）。
+///
+/// 传输层只负责识别帧并投递；重取与刷新语义属于注册表状态机。实现方若需要
+/// 阻塞 I/O，必须自行切换到独立线程——读循环所在线程不做阻塞等待。
+pub trait SidecarEvents: Send + Sync + std::fmt::Debug {
+    /// sidecar 声明工具已恢复，`payload` 为原始通知载荷。
+    fn tools_recovered(&self, _plugin_id: &str, _payload: &str) {}
+    /// prompt 段落需要重新获取。
+    fn prompt_updated(&self, _plugin_id: &str) {}
+    /// 工具规格需要重新获取。
+    fn tools_updated(&self, _plugin_id: &str) {}
+}
+/// 一次插件调用拿到的连接及其形态。
+pub struct PluginConnection {
+    /// 连接（共享常驻或本次调用独占）。
+    pub connection: Arc<dyn SidecarConnection>,
+    /// 一次性进程形态：调用结束或取消即终止，与其他调用互不共享。
+    pub ephemeral: bool,
+}
+/// 调用层需要的插件运行态访问：取连接、旁路调用。
+///
+/// 安装目录 → 存储根 → 按需/常驻连接的选择属于状态机（清单声明的生命
+/// 周期、是否预加载、会话工作区是否参与），调用层只依赖本 trait；未注入
+/// 时工具调用返回「运行环境未初始化」，生命周期钩子等旁路调用跳过。
+pub trait SidecarAccess: Send + Sync + std::fmt::Debug {
+    /// 为一次工具调用取连接。`session_workspace` 是宿主权威会话工作区；
+    /// 预加载形态的常驻插件忽略它（保持宿主强制沙箱的共享连接）。
+    fn connection(
+        &self,
+        plugin_id: &str,
+        session_workspace: Option<&Path>,
+    ) -> Result<PluginConnection>;
+    /// 调用指定插件 sidecar 的一个操作（生命周期钩子等旁路调用）。
+    fn invoke(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        payload: serde_json::Value,
+        workspace: Option<&Path>,
+    ) -> Result<serde_json::Value>;
+}
+/// 未注入宿主实现时的默认环境：沙箱开启、不退出、无持久授权。
+#[derive(Debug)]
+struct DefaultRuntimeEnv;
+impl RuntimeEnv for DefaultRuntimeEnv {
+    fn sandbox_disabled(&self) -> bool {
+        false
+    }
+    fn shutting_down(&self) -> bool {
+        false
+    }
+}
+/// 未注入宿主实现时的默认事件出口：忽略全部通知。
+#[derive(Debug)]
+struct DefaultSidecarEvents;
+impl SidecarEvents for DefaultSidecarEvents {}
 /// 一个插件 sidecar 的本地运行配置。
 #[derive(Debug, Clone)]
 pub struct SidecarConfig {
@@ -225,10 +296,10 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
-    /// 插件开发目录写域（plugins-dev 与收件箱 plugins/.inbox；仅宿主按
-    /// 已验证官方身份授予 terminal / plugin-creator）。目录保障与汇入
-    /// 在沙箱策略组装层处理（stdio 组装块）。
-    pub sandbox_plugin_dev_write: bool,
+    /// spawn 前保障存在且非符号链接的额外可写根（宿主授予的固定写域，
+    /// 如插件开发目录与导入收件箱）。具体是哪些目录由宿主判定并传入，
+    /// 传输层只负责目录保障与汇入。
+    pub sandbox_ensured_writable: Vec<PathBuf>,
     /// 宿主授予的沙箱特殊能力；原样写入 Launcher 策略。
     pub sandbox_capabilities: std::collections::BTreeSet<String>,
     pub start_timeout: Duration,
@@ -243,6 +314,9 @@ pub struct SidecarConfig {
     pub lifecycle: crate::manifest::SidecarLifecycle,
     /// 是否为注册表共享连接的主进程（见 [`INSTANCE_ROLE_ENV`]）。
     pub primary_instance: bool,
+    /// 每请求一次性进程形态（命令执行位）：连接构造层按宿主策略声明，
+    /// 一次性连接据此校验自身形态，避免被误用为常驻连接。
+    pub ephemeral_sidecar: bool,
     /// 内容哈希清单（本地信任解释器 sidecar 的 spawn 前复核锚）。
     pub integrity_manifest: Option<PathBuf>,
     // OS 沙箱字段为沙箱覆盖分支预留的配置面（本分支仅传输层，无消费方）。
@@ -275,6 +349,10 @@ pub struct SidecarConfig {
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     #[allow(dead_code)]
     pub sandbox_network: bool,
+    /// 宿主运行时事实（沙箱开关/退出状态/持久授权路径），由连接构造层注入。
+    pub runtime_env: Arc<dyn RuntimeEnv>,
+    /// sidecar 主动通知的事件出口，由连接构造层注入。
+    pub events: Arc<dyn SidecarEvents>,
 }
 
 impl SidecarConfig {
@@ -298,7 +376,7 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
-            sandbox_plugin_dev_write: false,
+            sandbox_ensured_writable: Vec::new(),
             sandbox_capabilities: std::collections::BTreeSet::new(),
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -307,6 +385,7 @@ impl SidecarConfig {
             interpreter: None,
             lifecycle: crate::manifest::SidecarLifecycle::OnDemand,
             primary_instance: false,
+            ephemeral_sidecar: false,
             integrity_manifest: None,
             sandbox: false,
             sandbox_follows_user_switch: false,
@@ -319,7 +398,19 @@ impl SidecarConfig {
             sandbox_program_root: None,
             sandbox_program_sha256: None,
             sandbox_network: false,
+            runtime_env: Arc::new(DefaultRuntimeEnv),
+            events: Arc::new(DefaultSidecarEvents),
         }
+    }
+    /// 注入宿主运行时事实（沙箱开关、退出状态、持久授权路径）。
+    pub fn with_runtime_env(mut self, env: Arc<dyn RuntimeEnv>) -> Self {
+        self.runtime_env = env;
+        self
+    }
+    /// 注入 sidecar 通知事件出口（工具恢复、prompt 与工具规格刷新）。
+    pub fn with_sidecar_events(mut self, events: Arc<dyn SidecarEvents>) -> Self {
+        self.events = events;
+        self
     }
 
     pub fn with_sensitive_storage(mut self, access: SensitiveStorageAccess) -> Self {
@@ -340,9 +431,9 @@ impl SidecarConfig {
         self
     }
 
-    /// 授予插件开发目录写域（plugins-dev 与收件箱）。
-    pub fn with_sandbox_plugin_dev_write(mut self, granted: bool) -> Self {
-        self.sandbox_plugin_dev_write = granted;
+    /// 设置 spawn 前需保障的额外可写根（目录不存在则创建，符号链接则丢弃）。
+    pub fn with_sandbox_ensured_writable(mut self, roots: Vec<PathBuf>) -> Self {
+        self.sandbox_ensured_writable = roots;
         self
     }
 
@@ -373,6 +464,12 @@ impl SidecarConfig {
         self
     }
 
+    /// 声明每请求一次性进程形态（命令执行位；由宿主策略决定）。
+    pub fn with_ephemeral_sidecar(mut self, ephemeral: bool) -> Self {
+        self.ephemeral_sidecar = ephemeral;
+        self
+    }
+
     /// spawn 时注入的实例角色值。
     pub(crate) fn instance_role(&self) -> &'static str {
         if self.primary_instance {
@@ -388,107 +485,10 @@ impl SidecarConfig {
         self
     }
 
-    /// 按 devkit 内容清单（路径 + sha256）复核插件目录文件树，任一文件缺失、
-    /// 路径逃逸或哈希不一致即报错。本地信任解释器 sidecar 的启动前与安装时
-    /// 校验共用本函数。
+    /// 按 devkit 内容清单复核插件目录文件树（信任域实现，见
+    /// [`crate::content_manifest::verify`]）。保留为兼容入口。
     pub fn verify_integrity_manifest(manifest_path: &Path, root: &Path) -> Result<()> {
-        #[derive(serde::Deserialize)]
-        struct ContentFile {
-            path: String,
-            sha256: String,
-        }
-        #[derive(serde::Deserialize)]
-        struct ContentManifest {
-            files: Vec<ContentFile>,
-        }
-        use sha2::{Digest, Sha256};
-        let raw = std::fs::read(manifest_path)
-            .with_context(|| format!("读取内容清单失败: {}", manifest_path.display()))?;
-        let content: ContentManifest = serde_json::from_slice(&raw)
-            .with_context(|| format!("解析内容清单失败: {}", manifest_path.display()))?;
-        // 路径唯一性：清单不允许重复条目。
-        let mut listed = std::collections::BTreeSet::new();
-        for file in &content.files {
-            let relative = Path::new(&file.path);
-            if relative.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            }) {
-                bail!("内容清单包含不安全路径: {}", file.path);
-            }
-            if !listed.insert(file.path.clone()) {
-                bail!("内容清单包含重复路径: {}", file.path);
-            }
-            let path = root.join(relative);
-            let metadata = std::fs::symlink_metadata(&path)
-                .with_context(|| format!("内容清单文件缺失: {}", path.display()))?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("内容清单条目不是普通文件: {}", file.path);
-            }
-            let raw = std::fs::read(&path)
-                .with_context(|| format!("内容清单文件缺失: {}", path.display()))?;
-            let actual = hex::encode(Sha256::digest(&raw));
-            if !actual.eq_ignore_ascii_case(&file.sha256) {
-                bail!(
-                    "插件文件 {} 与内容清单不一致（可能被篡改），拒绝启动",
-                    file.path
-                );
-            }
-        }
-        // 反向遍历受管文件树：清单必须完整覆盖——未列出的受管文件视为
-        // 篡改（绕过哈希锁定的替换/新增通道）。运行时自管目录与信任标记除外。
-        // 运行时自管目录、信任标记与官方签名文件（验签产物，非内容清单
-        // 管辖——签名锚定的是清单本身）。
-        const UNMANAGED: [&str; 7] = [
-            "runtime",
-            "logs",
-            "data",
-            "local-trust.json",
-            "content-manifest.json",
-            "release.json",
-            "release.json.sig",
-        ];
-        let mut actual_files = std::collections::BTreeSet::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(directory) = stack.pop() {
-            for entry in std::fs::read_dir(&directory)
-                .with_context(|| format!("读取插件目录失败: {}", directory.display()))?
-            {
-                let entry = entry?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if directory == root && UNMANAGED.contains(&name.as_ref()) {
-                    continue;
-                }
-                let path = entry.path();
-                if entry.file_type()?.is_dir() {
-                    stack.push(path);
-                } else {
-                    let relative = path
-                        .strip_prefix(root)
-                        .context("插件文件相对路径推算失败")?
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    actual_files.insert(relative);
-                }
-            }
-        }
-        let unexpected: Vec<&String> = actual_files.difference(&listed).collect();
-        if !unexpected.is_empty() {
-            bail!(
-                "插件目录存在内容清单未覆盖的文件（可能被篡改），拒绝启动: {}",
-                unexpected
-                    .iter()
-                    .map(|path| path.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        Ok(())
+        crate::content_manifest::verify(manifest_path, root)
     }
 
     /// 旧调用方兼容入口。通用传输版本与插件内部业务版本不再由 Runtime
@@ -716,6 +716,7 @@ impl ProcessSidecarConnection {
             self.config.endpoint.clone(),
             token.clone(),
             Arc::clone(&self.notification_token),
+            Arc::clone(&self.config.events),
         ) {
             return;
         }
@@ -1361,6 +1362,7 @@ fn spawn_sidecar_notification_listener(
     endpoint_path: std::path::PathBuf,
     token: String,
     listener_token: Arc<Mutex<Option<String>>>,
+    events: Arc<dyn SidecarEvents>,
 ) -> bool {
     let forwarder = SIDECAR_NOTIFICATION_FORWARDER.get().cloned();
     // 常驻任务需要 tokio reactor；无 runtime 上下文（同步宿主/测试环境）时
@@ -1380,6 +1382,7 @@ fn spawn_sidecar_notification_listener(
                 &endpoint_path,
                 &token,
                 forwarder.as_ref(),
+                &events,
             )
             .await
             {
@@ -1420,6 +1423,7 @@ async fn run_notification_connection(
     endpoint_path: &std::path::Path,
     token: &str,
     forwarder: Option<&SidecarNotificationForwarder>,
+    events: &Arc<dyn SidecarEvents>,
 ) -> Result<()> {
     let endpoint_json = tokio::fs::read_to_string(endpoint_path)
         .await
@@ -1462,20 +1466,22 @@ async fn run_notification_connection(
         match serde_json::from_str::<crate::protocol::IpcFrame>(line.trim_end()) {
             Ok(crate::protocol::IpcFrame::Notification { channel, payload }) => {
                 if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
-                    crate::registry::dispatch_tools_recovered(plugin_id, &payload);
+                    events.tools_recovered(plugin_id, &payload);
                 }
                 if channel == tiangong_plugin_sidecar::protocol::PROMPT_UPDATED_CHANNEL {
                     // 段落重取是阻塞 I/O：通知读循环只投递，不等待完成。
                     let plugin_id = plugin_id.to_string();
+                    let events = Arc::clone(events);
                     std::thread::spawn(move || {
-                        crate::registry::refresh_prompt_sections(&plugin_id);
+                        events.prompt_updated(&plugin_id);
                     });
                 }
                 if channel == tiangong_plugin_sidecar::protocol::TOOLS_UPDATED_CHANNEL {
                     // 工具规格重取同样是阻塞 I/O：只投递，不等待完成。
                     let plugin_id = plugin_id.to_string();
+                    let events = Arc::clone(events);
                     std::thread::spawn(move || {
-                        crate::registry::refresh_tool_specs(&plugin_id);
+                        events.tools_updated(&plugin_id);
                     });
                 }
                 if let Some(forwarder) = forwarder {

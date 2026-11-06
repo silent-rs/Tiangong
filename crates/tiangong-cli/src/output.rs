@@ -70,15 +70,13 @@ pub fn delta_end() {
 pub fn tool_calls(names: &[String]) {
     println!();
     for name in names {
-        let icon = tool_icon(name);
-        println!("{BLUE}  {icon} {name}{RESET}");
+        println!("{BLUE}  {name}{RESET}");
     }
 }
 
 /// 打印工具开始执行
 pub fn tool_start(name: &str) {
-    let icon = tool_icon(name);
-    print!("{DIM}  {icon} {name}...{RESET}");
+    print!("{DIM}  {name}...{RESET}");
     let _ = std::io::stdout().flush();
 }
 
@@ -88,13 +86,12 @@ pub fn tool_result(name: &str, ok: bool, output: &str) {
     print!("\r\x1b[2K");
     let _ = std::io::stdout().flush();
 
-    let icon = tool_icon(name);
     if ok {
         let preview = output_preview(output);
-        println!("{GREEN_BOLD}  {icon} {name}{RESET} {DIM}{preview}{RESET}");
+        println!("{GREEN_BOLD}  {name}{RESET} {DIM}{preview}{RESET}");
     } else {
         let preview = output_preview(output);
-        println!("{RED}  {icon} {name} 失败{RESET} {DIM}{preview}{RESET}");
+        println!("{RED}  {name} 失败{RESET} {DIM}{preview}{RESET}");
     }
 }
 
@@ -117,13 +114,6 @@ pub fn warn(msg: &str) {
 pub fn welcome() {
     println!("{CYAN}天工 CLI{RESET} — {DIM}/help 查看命令，Ctrl+C 清空/退出{RESET}");
     println!();
-}
-
-/// 工具字形：图标与字形映射统一由插件运行时提供（插件声明优先，其次运行时
-/// 内置表），CLI 不写死工具名。
-fn tool_icon(name: &str) -> &'static str {
-    let table = tiangong_plugin_runtime::registry::list_tool_icons();
-    tiangong_plugin_runtime::tool_icons::terminal_glyph_for(&table, name)
 }
 
 /// 输出预览（单行，截断）

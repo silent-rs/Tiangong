@@ -3,8 +3,10 @@
 //! 优先级（高 → 低）：
 //! 1. 插件在 `plugin.json` 的 `tool_icons` 中为该工具声明的图标；
 //! 2. 插件在 `tool_icons` 中用 `*` 声明的默认图标；
-//! 3. runtime 内置表（按工具原名，集中在 [`crate::builtin_tables`]，插件普遍声明后整体删除）；
-//! 4. 都没有时不给出，前端使用默认图标（工具交叉）。
+//! 3. 都没有时不给出，前端使用默认图标（工具交叉）。
+//!
+//! 图标已全线由插件提供：runtime 不再按工具名维护内置回落表，未声明的
+//! 工具一律走前端默认图标。
 //!
 //! 通用 + 特指：键 `工具名` 为该工具的通用图标；键 `工具名:参数=取值`
 //! （如 `file_read:action=list`）为调用参数取该值时的特指图标，前端按调用
@@ -20,16 +22,8 @@ use std::path::{Component, Path};
 use serde::Serialize;
 use tiangong_core::tools::extension::namespaced_tool_name;
 
-use crate::builtin_tables::{BUILTIN_TOOL_ICONS, builtin_tool_icon};
-
-/// `tool_icons` 中表示「本插件其余工具」的键。
-pub const PLUGIN_DEFAULT_ICON_KEY: &str = "*";
-
-/// 特指键中工具名与参数条件的分隔符（`工具名:参数=取值`）。
-const ARG_KEY_SEPARATOR: char = ':';
-
-/// 特指键中参数名的长度上限。
-const MAX_ARG_NAME_LEN: usize = 64;
+/// 工具键解析归契约层（[`crate::tool_key`]），此处重导出保持公开路径稳定。
+pub use crate::tool_key::{PLUGIN_DEFAULT_ICON_KEY, parse_tool_key};
 
 /// 图标资源扩展名白名单（与 UI 贡献图标一致）。
 const ICON_RESOURCE_EXTENSIONS: &[&str] = &["png", "svg", "jpg", "jpeg"];
@@ -40,7 +34,7 @@ pub struct ToolIcon {
     /// 通用图标：图标名，或插件目录内的图标资源相对路径。只声明了特指
     /// 图标、无通用图标可用时为空串（前端用默认图标）。
     pub icon: String,
-    /// 图标来自的插件；资源图标据此读取文件，内置表条目为 None。
+    /// 图标来自的插件；资源图标据此读取文件（只声明特指图标时为 None）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
     /// 特指图标：参数名 → 参数取值 → 图标（均来自 `plugin_id` 插件的声明）。
@@ -68,23 +62,6 @@ impl ToolIcon {
             })
             .map_or(self.icon.as_str(), String::as_str)
     }
-}
-
-/// 解析工具键（`tool_icons` 的键与工具视图贡献的 `tools` 项共用）：通用键
-/// 返回 `(工具名, None)`，特指键返回 `(工具名, Some((参数名, 取值)))`；
-/// 特指键格式不合法时返回 None。
-pub fn parse_tool_key(key: &str) -> Option<(&str, Option<(&str, &str)>)> {
-    let Some((tool, condition)) = key.split_once(ARG_KEY_SEPARATOR) else {
-        return Some((key, None));
-    };
-    let (arg, value) = condition.split_once('=')?;
-    let valid_arg = !arg.is_empty()
-        && arg.len() <= MAX_ARG_NAME_LEN
-        && arg
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
-    (!tool.is_empty() && tool != PLUGIN_DEFAULT_ICON_KEY && valid_arg && !value.is_empty())
-        .then_some((tool, Some((arg, value))))
 }
 
 /// 参与建表的插件信息：插件 id、`tool_icons` 声明与插件声明的工具原名。
@@ -148,7 +125,7 @@ fn declared_variants(
 ) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut variants: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for key in declared.into_iter().flat_map(BTreeMap::keys) {
-        if !key.contains(ARG_KEY_SEPARATOR) {
+        if !crate::tool_key::is_specific_key(key) {
             continue;
         }
         let Some((name, Some((arg, value)))) = parse_tool_key(key) else {
@@ -168,7 +145,7 @@ fn declared_variants(
     variants
 }
 
-/// 解析单个插件工具的图标（插件声明优先，其次内置表）；特指图标只来自插件声明。
+/// 解析单个插件工具的图标（只认插件声明）；特指图标只来自插件声明。
 pub fn resolve_plugin_tool_icon(
     plugin_id: &str,
     declared: Option<&BTreeMap<String, String>>,
@@ -179,16 +156,13 @@ pub fn resolve_plugin_tool_icon(
         .or_else(|| declared_icon(plugin_id, declared, PLUGIN_DEFAULT_ICON_KEY))
     {
         ToolIcon::fixed(icon, Some(plugin_id))
-    } else if let Some(icon) = builtin_tool_icon(tool) {
-        ToolIcon::fixed(icon, None)
     } else if !variants.is_empty() {
         ToolIcon::fixed("", None)
     } else {
         return None;
     };
     if !variants.is_empty() {
-        // 特指图标均为本插件声明：资源图标按本插件读取（内置表通用图标是
-        // 图标名，不受 plugin_id 影响）。
+        // 特指图标均为本插件声明：资源图标按本插件读取。
         icon.plugin_id = Some(plugin_id.to_string());
         icon.variants = variants;
     }
@@ -197,15 +171,11 @@ pub fn resolve_plugin_tool_icon(
 
 /// 建立工具图标查询表：键为工具对外名 `{插件id}__{工具名}` 与原名（旧会话历史）。
 ///
-/// 先放入内置表（覆盖无插件归属的工具，如 core 内置注入工具），再按插件
-/// 覆盖；查不到的工具不在表中，由前端使用默认图标。
+/// 只收录插件声明过的工具；查不到的工具不在表中，由前端使用默认图标。
 pub fn build_tool_icon_table<'a>(
     plugins: impl IntoIterator<Item = PluginToolIcons<'a>>,
 ) -> BTreeMap<String, ToolIcon> {
-    let mut table: BTreeMap<String, ToolIcon> = BUILTIN_TOOL_ICONS
-        .iter()
-        .map(|(name, icon)| ((*name).to_string(), ToolIcon::fixed(*icon, None)))
-        .collect();
+    let mut table: BTreeMap<String, ToolIcon> = BTreeMap::new();
     for plugin in plugins {
         for tool in &plugin.tools {
             let Some(icon) = resolve_plugin_tool_icon(plugin.plugin_id, plugin.declared, tool)
@@ -219,21 +189,6 @@ pub fn build_tool_icon_table<'a>(
         }
     }
     table
-}
-
-/// 工具在终端（CLI）中的字形：按查询表取图标（对外名优先，其次原名），
-/// 再经 [`crate::builtin_tables::terminal_glyph`] 换成字形；查不到或为资源
-/// 图标时用默认字形。
-pub fn terminal_glyph_for(table: &BTreeMap<String, ToolIcon>, tool_name: &str) -> &'static str {
-    let base = tool_name
-        .split_once("__")
-        .filter(|_| !tool_name.starts_with("mcp__"))
-        .map_or(tool_name, |(_, base)| base);
-    table
-        .get(tool_name)
-        .or_else(|| table.get(base))
-        .and_then(|entry| crate::builtin_tables::terminal_glyph(&entry.icon))
-        .unwrap_or(crate::builtin_tables::DEFAULT_TERMINAL_GLYPH)
 }
 
 /// 资源图标是否确为该插件 `tool_icons` 中声明的值（读取文件前的校验；
@@ -256,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn 插件声明优先于内置表() {
+    fn 插件声明提供图标() {
         let icons = declared(&[("generate_image", "palette")]);
         let icon = resolve_plugin_tool_icon("volcengine", Some(&icons), "generate_image").unwrap();
         assert_eq!(icon.icon, "palette");
@@ -264,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn 插件默认图标优先于内置表_未声明时回落内置表() {
+    fn 插件默认图标生效_未声明时无图标() {
         let icons = declared(&[("*", "flame")]);
         assert_eq!(
             resolve_plugin_tool_icon("volcengine", Some(&icons), "generate_image")
@@ -272,9 +227,11 @@ mod tests {
                 .icon,
             "flame"
         );
-        let builtin = resolve_plugin_tool_icon("terminal", None, "run_shell").unwrap();
-        assert_eq!(builtin.icon, "square-terminal");
-        assert_eq!(builtin.plugin_id, None);
+        assert_eq!(
+            resolve_plugin_tool_icon("terminal", None, "run_shell"),
+            None,
+            "未声明即无图标，前端用默认图标"
+        );
         assert_eq!(resolve_plugin_tool_icon("demo", None, "unknown_tool"), None);
     }
 
@@ -287,17 +244,13 @@ mod tests {
             ("*", ""),
         ]);
         assert_eq!(
-            resolve_plugin_tool_icon("p", Some(&icons), "generate_image")
-                .unwrap()
-                .icon,
-            "image",
-            "逃逸路径被忽略，回落内置表"
+            resolve_plugin_tool_icon("p", Some(&icons), "generate_image"),
+            None,
+            "逃逸路径被忽略，且无内置回落"
         );
         assert_eq!(
-            resolve_plugin_tool_icon("p", Some(&icons), "generate_video")
-                .unwrap()
-                .icon,
-            "video"
+            resolve_plugin_tool_icon("p", Some(&icons), "generate_video"),
+            None
         );
         assert_eq!(
             resolve_plugin_tool_icon("p", Some(&icons), "speak"),
@@ -332,9 +285,9 @@ mod tests {
                 tools: vec!["generate_image".to_string(), "generate_video".to_string()],
             },
         ]);
-        assert_eq!(
-            table["generate-image-openai__generate_image"].icon, "image",
-            "未声明的插件回落内置表"
+        assert!(
+            !table.contains_key("generate-image-openai__generate_image"),
+            "未声明图标的工具不在表中（前端用默认图标）"
         );
         assert_eq!(
             table["volcengine__generate_image"].icon,
@@ -344,44 +297,9 @@ mod tests {
             table["volcengine__generate_image"].plugin_id.as_deref(),
             Some("volcengine")
         );
-        assert_eq!(table["generate_video"].icon, "video");
-        assert_eq!(
-            table["plugin_injection"].icon, "plug",
-            "无插件归属的工具用内置表"
-        );
+        assert!(!table.contains_key("generate_video"));
+        assert!(!table.contains_key("plugin_injection"));
         assert!(!table.contains_key("unknown_tool"));
-    }
-
-    #[test]
-    fn 终端字形按查询表取_资源图标与未知工具用默认字形() {
-        let volc = declared(&[("generate_image", "icons/seedream.svg")]);
-        let table = build_tool_icon_table([
-            PluginToolIcons {
-                plugin_id: "terminal",
-                declared: None,
-                tools: vec!["run_shell".to_string()],
-            },
-            PluginToolIcons {
-                plugin_id: "volcengine",
-                declared: Some(&volc),
-                tools: vec!["generate_image".to_string()],
-            },
-        ]);
-        assert_eq!(terminal_glyph_for(&table, "terminal__run_shell"), "⚡");
-        assert_eq!(
-            terminal_glyph_for(&table, "other__run_shell"),
-            "⚡",
-            "按原名回落"
-        );
-        assert_eq!(
-            terminal_glyph_for(&table, "volcengine__generate_image"),
-            crate::builtin_tables::DEFAULT_TERMINAL_GLYPH,
-            "资源图标无终端字形"
-        );
-        assert_eq!(
-            terminal_glyph_for(&table, "unknown"),
-            crate::builtin_tables::DEFAULT_TERMINAL_GLYPH
-        );
     }
 
     #[test]
@@ -454,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn 只有特指图标时通用图标回落插件默认与内置表() {
+    fn 只有特指图标时通用图标回落插件默认() {
         let icons = declared(&[
             ("file_read:action=image", "assets/image.svg"),
             ("*", "flame"),
@@ -465,7 +383,7 @@ mod tests {
 
         let icons = declared(&[("run_shell:mode=image", "assets/image.svg")]);
         let icon = resolve_plugin_tool_icon("terminal", Some(&icons), "run_shell").unwrap();
-        assert_eq!(icon.icon, "square-terminal", "回落内置表");
+        assert_eq!(icon.icon, "", "无通用图标时为空串");
         assert_eq!(
             icon.plugin_id.as_deref(),
             Some("terminal"),

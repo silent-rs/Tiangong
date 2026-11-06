@@ -540,7 +540,7 @@ export interface ToolTitleEntry {
   variants?: Record<string, Record<string, string>> | null;
 }
 
-/** 工具参数摘要的展示提示（运行时提供）。 */
+/** 工具参数摘要的展示提示（宿主 App 层命令提供）。 */
 export interface ToolArgsPresentation {
   /** 摘要中排在最前、只显示取值的参数。 */
   lead_args: string[];

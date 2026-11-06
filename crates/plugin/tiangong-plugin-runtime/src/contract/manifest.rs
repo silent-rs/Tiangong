@@ -55,7 +55,7 @@ pub struct PluginManifest {
     /// 声明 `tool:*` 通配即动态形态，装载时经固定操作 `tool_specs`
     /// 拉取快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<TsToolDecl>>,
+    pub tools: Option<Vec<ToolDecl>>,
     /// 系统提示注入条目（见 [`PromptSectionDecl`]）：内联文本、随包文件
     /// 或 sidecar 动态提供，三种形态装载时统一解析为段落快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,14 +198,14 @@ pub struct CapabilitiesManifest {
     pub events: Vec<String>,
 }
 
-fn default_ts_tool_timeout_ms() -> u64 {
+fn default_tool_timeout_ms() -> u64 {
     20_000
 }
 
 /// Desktop 纯 TypeScript 插件工具声明。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TsToolDecl {
+pub struct ToolDecl {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
@@ -213,7 +213,7 @@ pub struct TsToolDecl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// 前端插件崩溃或未响应时的宿主兜底上限。
-    #[serde(default = "default_ts_tool_timeout_ms")]
+    #[serde(default = "default_tool_timeout_ms")]
     pub timeout_ms: u64,
     /// 非幂等声明：该工具有副作用（构建、安装、发布等），相同参数的
     /// 重复调用可能因外部世界变化而结果不同。core 的工具去重（防模型
@@ -696,8 +696,8 @@ impl PluginManifest {
                 if let Some(key) = decl.tools.iter().find(|key| {
                     let key = key.trim();
                     key.is_empty()
-                        || key == crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
-                        || crate::tool_icons::parse_tool_key(key).is_none()
+                        || key == crate::tool_key::PLUGIN_DEFAULT_ICON_KEY
+                        || crate::tool_key::parse_tool_key(key).is_none()
                 }) {
                     bail!(
                         "插件 {} 贡献 {} 的 tools 项 {key} 不合法（应为工具名或 工具名:参数=取值）",
@@ -713,8 +713,8 @@ impl PluginManifest {
                 for (key, title) in &decl.titles {
                     let key = key.trim();
                     let valid_key = !key.is_empty()
-                        && key != crate::tool_icons::PLUGIN_DEFAULT_ICON_KEY
-                        && crate::tool_icons::parse_tool_key(key).is_some();
+                        && key != crate::tool_key::PLUGIN_DEFAULT_ICON_KEY
+                        && crate::tool_key::parse_tool_key(key).is_some();
                     if !valid_key || !covered.contains(&tool_of(key)) {
                         bail!(
                             "插件 {} 贡献 {} 的 titles 键 {key} 不合法（须为 tools 中工具的 工具名 或 工具名:参数=取值）",

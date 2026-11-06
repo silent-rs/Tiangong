@@ -1,7 +1,7 @@
 //! 磁盘发现、预加载与插件记录构建（含 WASM 预编译与 prewarm）。
 
-use super::connections::remove_sidecar_connection;
 use super::*;
+use crate::transport::connections::remove_sidecar_connection;
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
@@ -106,11 +106,9 @@ fn preload_installed_plugins_inner(
     // 都由运行时在后台重新拉起，各入口无需单独处理。
     super::keepalive::ensure_keepalive_started();
     if wait_for_ready {
-        if let Err(error) = crate::verification::reverify_installed_sidecars_blocking(
-            storage_root,
-            false,
-            Some("desktop"),
-        ) {
+        if let Err(error) =
+            reverify::reverify_installed_sidecars_blocking(storage_root, false, Some("desktop"))
+        {
             failures.push(format!("{error:#}"));
         }
         for installed in installed_plugins
@@ -149,7 +147,7 @@ fn preload_installed_plugins_inner(
     }
     // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
     // 不阻塞应用启动，也不在工具调用热路径同步执行。
-    crate::verification::reverify_installed_sidecars(storage_root);
+    reverify::reverify_installed_sidecars(storage_root);
     #[cfg(windows)]
     prewarm_resident_sidecars(storage_root);
 
@@ -164,7 +162,7 @@ fn preload_installed_plugins_inner(
 /// 无效插件从未进入注册表，没有 sidecar 或 WASM 实例需要停止；但删除路径
 /// 与正常卸载一致（事务目录暂存、可选保留 data）。登记表中的 id 均来自
 /// 实际扫描到的目录名，天然不含路径分隔符，不会越出插件根目录。
-pub(super) fn remove_invalid_plugin_if_registered(
+pub(crate) fn remove_invalid_plugin_if_registered(
     storage_root: &Path,
     plugin_id: &str,
     keep_data: bool,
@@ -216,7 +214,7 @@ pub(super) fn remove_invalid_plugin_if_registered(
 pub(crate) struct PluginLoadSnapshot {
     pub(crate) verified_sidecar: Option<Vec<String>>,
     pub(crate) prompt_sections: Option<Vec<String>>,
-    pub(crate) tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
+    pub(crate) tool_specs: Option<Vec<crate::manifest::ToolDecl>>,
 }
 
 impl PluginLoadSnapshot {
@@ -249,7 +247,7 @@ impl PluginLoadSnapshot {
     }
 }
 
-pub(super) fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> LoadedPlugin {
+pub(crate) fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> LoadedPlugin {
     load_plugin_record_with_prewarm(storage_root, installed, true)
 }
 fn load_plugin_record_with_prewarm(
@@ -308,7 +306,7 @@ fn load_plugin_record_from_snapshot(
         manifest: installed.manifest,
         signed_release,
         generation: 1,
-        ts_instances: Vec::new(),
+        plugin_instances: Vec::new(),
         sidecar,
         verified_sidecar,
         prompt_sections,
@@ -477,7 +475,7 @@ pub(crate) fn find_installed_plugin(
     })
 }
 
-pub(super) fn resolve_sidecar(
+pub(crate) fn resolve_sidecar(
     storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,

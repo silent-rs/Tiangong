@@ -35,6 +35,26 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     // 与桌面端/CLI 一致：已安装插件由 runtime 统一预加载（后台进行，不阻塞
     // 监听）。会话 Core 的 runtime 聚合桥每次调用都按注册表取插件，加载
     // 完成后的请求即可用到全部插件工具。
+    //
+    // 预加载前先安装宿主权威策略表（runtime 不含插件 ID，未注入即全沙箱
+    // 零特权，命令类插件会失去 Git 工作流与命令执行位能力）。
+    tiangong_plugin_runtime::host_policy::install();
+    // 宿主注册的桥接命名空间：插件创作链（plugin-dev.*）属产品流程，
+    // 由宿主注册处理器，runtime 不含其实现。
+    tiangong_plugin_runtime::register_bridge_namespace(
+        tiangong_plugin_runtime::BridgeNamespace {
+            prefix: "plugin-dev.",
+            permission: "plugin-dev.use",
+            description: "插件开发受限通道（写范围锁定开发目录）",
+        },
+        std::sync::Arc::new(|plugin_id, method, payload| {
+            tiangong_plugin_runtime::plugin_dev::call(plugin_id, method, payload)
+        }),
+    )
+    .map_err(|error| error.context("注册 plugin-dev 桥接命名空间失败"))?;
+    // 桥接层作为调用层反馈出口：进度里的 app 原语、页面事件与订阅查询
+    // 都由桥接路由（未安装时调用层按宿主未接入退化）。
+    tiangong_plugin_runtime::bridge::install_runtime_feedback();
     {
         let storage_root = storage_root.clone();
         std::thread::spawn(move || {
