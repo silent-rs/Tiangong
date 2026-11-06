@@ -128,18 +128,23 @@ pub fn register_bridge_namespace(
     namespace: BridgeNamespace,
     handler: BridgeNamespaceHandler,
 ) -> Result<()> {
-    if BRIDGE_NAMESPACES
-        .iter()
-        .any(|builtin| builtin.prefix == namespace.prefix)
-    {
+    // 双向前缀检测：宿主注册 "tool.resolve"（内置 "tool." 的扩展）或 "tool"
+    // （父串）都会因内置优先解析而永不触发宿主 handler，一并拒绝。
+    if let Some(builtin) = BRIDGE_NAMESPACES.iter().find(|builtin| {
+        builtin.prefix == namespace.prefix
+            || builtin.prefix.starts_with(namespace.prefix)
+            || namespace.prefix.starts_with(builtin.prefix)
+    }) {
+        let message = format!(
+            "宿主命名空间前缀 {} 与内置命名空间 {} 重叠，拒绝注册",
+            namespace.prefix, builtin.prefix
+        );
         tracing::warn!(
             prefix = namespace.prefix,
-            "宿主命名空间与内置命名空间重叠，拒绝注册"
+            builtin = builtin.prefix,
+            "{message}"
         );
-        return Err(anyhow::anyhow!(
-            "宿主命名空间前缀 {} 与内置命名空间重叠",
-            namespace.prefix
-        ));
+        return Err(anyhow::anyhow!("{message}"));
     }
     let mut namespaces = host_namespaces()
         .lock()

@@ -157,7 +157,7 @@ fn main() {
     tiangong_plugin_runtime::host_policy::install();
     // 宿主注册的桥接命名空间：插件创作链（plugin-dev.*）属产品流程，
     // 由宿主注册处理器，runtime 不含其实现。
-    let _ = tiangong_plugin_runtime::register_bridge_namespace(
+    if let Err(error) = tiangong_plugin_runtime::register_bridge_namespace(
         tiangong_plugin_runtime::BridgeNamespace {
             prefix: "plugin-dev.",
             permission: "plugin-dev.use",
@@ -166,7 +166,11 @@ fn main() {
         std::sync::Arc::new(|plugin_id, method, payload| {
             tiangong_plugin_runtime::plugin_dev::call(plugin_id, method, payload)
         }),
-    );
+    ) {
+        // 注册失败则插件创作链（plugin-dev.*）整体不可用：完整记录错误链，
+        // 不中断桌面启动（其余能力不受影响），界面侧按调用失败呈现。
+        tracing::error!(error = %error, "注册 plugin-dev 桥接命名空间失败");
+    }
     // 桥接层作为调用层反馈出口：进度里的 app 原语、页面事件与订阅查询
     // 都由桥接路由（未安装时调用层按宿主未接入退化）。
     tiangong_plugin_runtime::bridge::install_runtime_feedback();

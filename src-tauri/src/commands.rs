@@ -4012,7 +4012,7 @@ pub async fn plugin_read_icon(
     Ok(PluginEntryResource { data, mime })
 }
 
-/// 工具图标查询表（工具行图标：插件声明优先，其次 runtime 内置表；
+/// 工具图标查询表（工具行图标只认插件 tool_icons 声明；
 /// 查不到的工具不在表中，前端用默认图标）。
 #[tauri::command]
 pub async fn list_tool_icons(

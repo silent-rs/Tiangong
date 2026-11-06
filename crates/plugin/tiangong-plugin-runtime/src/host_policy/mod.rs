@@ -133,6 +133,8 @@ pub fn clear_host_policy_provider() {
     if let Ok(mut current) = HOST_POLICY_PROVIDER.write() {
         *current = None;
     }
+    // 同步复位漏注入告警标志：下个未注入场景仍应可见（测试隔离亦然）。
+    PROVIDER_MISSING_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 解析插件的宿主执行策略：有注入则用宿主表，否则 fail-closed 默认。
@@ -151,7 +153,7 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
             if !PROVIDER_MISSING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 tracing::warn!(
                     plugin_id,
-                    "宿主策略提供者未注入：按 fail-closed 全沙箱零特权处理，                     受限能力（桌面控制等）将不可用；生产入口应在启动时调用                     host_policy::install()"
+                    "宿主策略提供者未注入：按 fail-closed 全沙箱零特权处理，受限能力（桌面控制等）将不可用；生产入口应在启动时调用 host_policy::install()"
                 );
             }
             HostExecutionPolicy::sandboxed_default()

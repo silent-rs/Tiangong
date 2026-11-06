@@ -29,7 +29,7 @@
 | 17 | **目录按九域重组**：36 个文件移入 9 个域目录（contract/trust/distribution/registry/transport/invocation/bridge/host_policy/plugin_dev），旧公开路径全部经 lib.rs/registry 重导出保持稳定；杂居文件的 `use super::*` 全部显式化 | 目录=域，物理布局与域划分一致；度量盲区消除（见下方度量修正） |
 | 18 | **删除 `builtin_tables` 展示内置表**：工具图标全线由插件在 `tool_icons` 清单声明（未声明走前端默认图标）；终端字形表移除，CLI 工具行不再显示字形 | runtime 不再按工具名维护图标回落。**注**：本次同时删除的 `tool_args_presentation` 属误删——它是交互必需的参数摘要规则（非插件回落数据），第 20 步已恢复 |
 | 19 | **ts 前缀正名**：`ts_plugin`→`plugin`、`ts_tools`→`tools`（含 `TsPluginAdapter`→`PluginAdapter`、`TsToolDecl`→`ToolDecl`、`ts_instances`→`plugin_instances` 等）；core `ToolResult` 在 invocation 域内别名 `CoreToolResult` | 命名去特殊化前缀，调用域符号与域语义一致（纯重命名，零行为改动） |
-| 20 | **Review 修复（P0/P2）**：① `tool_args_presentation` 恢复——数据归宿主 App 层本地（纯渲染规则，runtime 不消费、纯转发无意义，保持公共中立）；src-tauri 命令/注册/远程白名单恢复，前端原状不动；② `host_policy::resolve` 漏注入时一次性 `warn`（fail-closed 不再静默）；③ `register_bridge_namespace` 拒绝与内置命名空间重叠的前缀，返回 `Result` | P0 断链修复（前端此前每次渲染工具行都触发失败 IPC）；宿主漏配可见化与命名空间劫持防护 |
+| 20 | **Review 修复（P0/P2）**：① `tool_args_presentation` 恢复——数据归宿主 App 层本地（纯渲染规则，runtime 不消费、纯转发无意义，保持公共中立）；src-tauri 命令/注册/远程白名单恢复，前端原状不动；② `host_policy::resolve` 漏注入时一次性 `warn`（fail-closed 不再静默）；③ `register_bridge_namespace` 拒绝与内置命名空间重叠的前缀（双向 starts_with，防宿主 handler 注册成功却永不触发），返回 `Result`；CLI/Server 入口失败上抛、桌面入口完整记录 error 日志 | P0 断链修复（前端此前每次渲染工具行都触发失败 IPC）；宿主漏配可见化与命名空间劫持防护 |
 度量（两口径，附录 B 可复核）：显式 `crate::` 路径口径下，跨域边 34 → 21、违规边 15 → 0；
 第 17 步目录重组把杂居文件的 `use super::*` 显式化并改用目录判域后，**真实口径**为
 跨域边 24 / 引用 192 / 违规边 3（D3→D4 三处、D3→D5 一处、D5→D4 三处，共 7 处引用）——
