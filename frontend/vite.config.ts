@@ -36,7 +36,6 @@ export default defineConfig({
       },
       output: {
         manualChunks(id) {
-          if (id.includes('html2canvas')) return 'html2canvas'
           if (id.includes('react-dom') || id.includes('/react/')) return 'react-core'
           // lucide-react/dynamic 的按需图标（dynamicIconImports 与各 icons/*）保持独立分包，
           // 否则约 1600 个图标会被全部并入 ui-components，失去按需加载并超出体积阈值。

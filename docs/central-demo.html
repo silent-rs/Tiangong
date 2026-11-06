@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>中枢模式切换动画调试台</title>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js"
+  }
+}
+</script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0b0d12; color: #e2e8f0;
+  }
+  /* ── 模拟普通模式界面 ─────────────────────────────── */
+  #app { display: flex; flex-direction: column; height: 100%; }
+  .titlebar {
+    height: 48px; display: flex; align-items: center; gap: 8px;
+    padding: 0 16px 0 80px; border-bottom: 1px solid #1e2430;
+    background: #10131a; flex-shrink: 0;
+  }
+  .traffic { display: flex; gap: 8px; position: absolute; left: 14px; }
+  .traffic span { width: 12px; height: 12px; border-radius: 50%; }
+  .traffic span:nth-child(1) { background: #ff5f57; }
+  .traffic span:nth-child(2) { background: #febc2e; }
+  .traffic span:nth-child(3) { background: #28c840; }
+  .icon-btn {
+    width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; color: #8b93a3; cursor: pointer; font-size: 14px; user-select: none;
+  }
+  .icon-btn:hover { background: #1c2230; color: #e2e8f0; }
+  .title-sep { width: 1px; height: 16px; background: #2a3242; margin: 0 8px 0 0; }
+  /* 激光扫描 title */
+  #title-wrap { position: relative; display: inline-flex; align-items: center; min-width: 240px; height: 100%; }
+  .title-text { font-size: 14px; color: #cdd5e0; white-space: nowrap; }
+  .title-old-layer { position: absolute; inset: 0; display: flex; align-items: center; color: #8b93a3; }
+  .title-new-layer { position: absolute; inset: 0; display: flex; align-items: center; font-weight: 600; color: #22d3ee;
+    text-shadow: 0 0 12px rgba(34,211,238,.85), 0 0 30px rgba(167,139,250,.45); }
+  .laser-beam {
+    position: absolute; top: 50%; transform: translateY(-50%); width: 2px; height: 26px; border-radius: 2px;
+    background: linear-gradient(180deg, transparent, #22d3ee 28%, #f0f9ff 50%, #22d3ee 72%, transparent);
+    box-shadow: 0 0 10px rgba(34,211,238,.95), 0 0 26px rgba(34,211,238,.6), 0 0 44px rgba(167,139,250,.35);
+  }
+  .laser-trail { position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(90deg, rgba(34,211,238,0), rgba(34,211,238,.13) 70%, rgba(34,211,238,.26)); }
+  .titlebar .spacer-actions { margin-left: auto; display: flex; gap: 12px; align-items: center; color: #8b93a3; }
+  .body-row { display: flex; flex: 1; min-height: 0; }
+  .sidebar {
+    width: 230px; border-right: 1px solid #1e2430; padding: 14px 10px; background: #0d1017;
+    display: flex; flex-direction: column; gap: 4px; flex-shrink: 0;
+  }
+  .side-item { padding: 8px 10px; border-radius: 8px; font-size: 13px; color: #aeb7c6; cursor: default; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side-item.active { background: #182234; color: #e2e8f0; }
+  .side-group { font-size: 11px; color: #5b6474; padding: 12px 10px 4px; }
+  .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #0b0d12; }
+  .messages { flex: 1; overflow: hidden; padding: 26px 10%; display: flex; flex-direction: column; gap: 18px; }
+  .bubble { max-width: 76%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.65; }
+  .bubble.user { align-self: flex-end; background: #1d4ed8aa; }
+  .bubble.ai { align-self: flex-start; background: #161b26; border: 1px solid #232a38; }
+  .input-bar { margin: 0 10% 22px; border: 1px solid #232a38; border-radius: 12px; padding: 12px 16px;
+    color: #5b6474; font-size: 13px; background: #10131a; }
+  /* ── 中枢模式 UI ─────────────────────────────────── */
+  #central-ui {
+    position: fixed; inset: 48px 0 0 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 22px; opacity: 0;
+    transition: opacity .5s ease; z-index: 5;
+  }
+  #central-ui .card {
+    max-width: 560px; padding: 34px 40px; border-radius: 18px; text-align: center;
+    border: 1px solid rgba(34,211,238,.22); background: rgba(13,16,23,.82);
+    box-shadow: 0 0 60px rgba(34,211,238,.08) inset;
+  }
+  #central-ui h2 { font-size: 17px; font-weight: 600; margin-bottom: 12px; color: #cfe9f5; }
+  #central-ui p { font-size: 13.5px; line-height: 1.9; color: #8b93a3; }
+  #central-ui .exit {
+    margin-top: 4px; border: 1px solid #2a3242; background: transparent; color: #aeb7c6;
+    padding: 8px 18px; border-radius: 9px; cursor: pointer; font-size: 13px;
+  }
+  #central-ui .exit:hover { border-color: #22d3eeaa; color: #22d3ee; }
+  /* ── three.js 叠加层与暗幕 ────────────────────────── */
+  #gl { position: fixed; inset: 0; z-index: 40; pointer-events: none; }
+  #dim { position: fixed; inset: 0; z-index: 30; pointer-events: none; background: #05070d; opacity: 0; }
+  #header-glow {
+    position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 45; overflow: hidden; pointer-events: none; opacity: 0;
+  }
+  #header-glow .band {
+    position: absolute; inset: 0 auto 0 0; width: 36%;
+    background: linear-gradient(90deg, transparent, rgba(34,211,238,.10) 20%, rgba(34,211,238,.34) 55%, rgba(167,139,250,.22) 80%, transparent);
+    box-shadow: 0 8px 32px rgba(34,211,238,.30);
+  }
+  @keyframes sweep { 0% { transform: translateX(-110%); opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { transform: translateX(110%); opacity: 0; } }
+  .sweeping { animation: sweep 820ms cubic-bezier(.4,.05,.3,1) 2 both; }
+  /* ── 控制台 ───────────────────────────────────────── */
+  #hud { position: fixed; right: 12px; bottom: 12px; z-index: 60; display: flex; gap: 8px; }
+  #hud button {
+    border: 1px solid #2a3242; background: #12161fdd; color: #cdd5e0; padding: 8px 14px;
+    border-radius: 9px; cursor: pointer; font-size: 13px; backdrop-filter: blur(6px);
+  }
+  #hud button:hover { border-color: #22d3ee88; color: #22d3ee; }
+  #hud button.primary { background: #0e7490; border-color: #22d3ee; color: #f0fdff; }
+  .hint { position: fixed; left: 14px; bottom: 12px; z-index: 60; font-size: 12px; color: #5b6474; }
+</style>
+</head>
+<body>
+
+<!-- 模拟普通模式界面（粒子采样源） -->
+<div id="app">
+  <header class="titlebar">
+    <div class="traffic"><span></span><span></span><span></span></div>
+    <div class="icon-btn" id="btn-sidebar">▤</div>
+    <div class="icon-btn" title="新对话">✎</div>
+    <div class="title-sep"></div>
+    <div id="title-wrap">
+      <span class="title-text" id="title-anchor">新对话</span>
+    </div>
+    <div class="spacer-actions">
+      <span class="icon-btn" id="btn-central" title="进入中枢模式（Cmd/Ctrl+Shift+J）" style="color:#22d3ee">✦</span>
+      <span class="icon-btn" title="搜索消息">⌕</span>
+      <span class="icon-btn" title="插件管理">⬡</span>
+      <span class="icon-btn" title="主题">◐</span>
+    </div>
+  </header>
+  <div class="body-row" id="main-area">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-item active">支付服务超时排查</div>
+      <div class="side-item">桌面客户端构建失败分析</div>
+      <div class="side-item">数据库迁移方案评估</div>
+      <div class="side-group">payment-service</div>
+      <div class="side-item">慢查询日志整理</div>
+      <div class="side-item">连接池指标汇总</div>
+      <div class="side-group">client-app</div>
+      <div class="side-item">构建脚本修复</div>
+    </aside>
+    <main class="chat">
+      <div class="messages">
+        <div class="bubble user">帮我看看支付服务最近为什么这么慢，先不要改代码。</div>
+        <div class="bubble ai">好的，我先安排一次只读分析：检查最近三天的超时日志、请求链路和数据库慢查询。如果找到明确原因，我会给你修复建议和可复核的证据。</div>
+        <div class="bubble ai">初步结论：超时集中在数据库连接池等待，staging 日志显示高峰期等待数持续超过池上限。</div>
+        <div class="bubble user">那修复方案呢？风险怎么控制？</div>
+      </div>
+      <div class="input-bar">你想让我做什么？</div>
+    </main>
+  </div>
+</div>
+
+<!-- 中枢模式 UI -->
+<div id="central-ui">
+  <div class="card">
+    <h2>你好，我是天工中枢</h2>
+    <p>你可以直接告诉我目标，我会判断需要哪个 Workspace、<br>安排后台工作、跟踪进展，并在关键节点向你汇报。</p>
+  </div>
+  <button class="exit" id="btn-exit">← 退出中枢模式（回到普通视图）</button>
+</div>
+
+<div id="dim"></div>
+<canvas id="gl"></canvas>
+<div id="header-glow"><div class="band"></div></div>
+
+<div id="hud">
+  <button class="primary" id="btn-play">▶ 播放进入动画</button>
+  <button id="btn-exit-play">◀ 播放退出动画</button>
+  <button id="btn-reset">重置</button>
+</div>
+<div class="hint">右侧 lil-gui 面板实时调参（银河参数 / 时序 / 相机） · 满意后把参数告诉我移植回 app</div>
+
+<script type="module">
+import * as THREE from 'three';
+import GUI from 'lil-gui';
+
+/* ═══════════════════ 参数（可调） ═══════════════════ */
+const P = {
+  // 银河（Three.js Galaxy Generator 方案）
+  count: 60000,
+  galaxyRadius: 5.2,
+  branches: 4,
+  spin: 1.05,
+  randomness: 0.24,
+  randomnessPower: 3.0,
+  insideColor: '#ff6030',
+  outsideColor: '#1b3984',
+  pointSize: 0.028,
+  cameraTilt: 0.42,        // 弧度，盘面倾角（0=正俯视）
+  cameraDist: 8.6,
+  // 时序（ms）
+  tTitleScan: 2000,
+  tBurst: 800,
+  tGalaxyIn: 500,
+  tSpin: 2600,             // 银河期（外圈整 1 圈）
+  tAssemble: 1500,
+  tHold: 600,
+  tFade: 500,
+};
+
+/* ═══════════════════ three 基础 ═══════════════════ */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 100);
+
+function applyCamera() {
+  const d = P.cameraDist;
+  camera.position.set(0, Math.sin(P.cameraTilt) * d, Math.cos(P.cameraTilt) * d);
+  camera.lookAt(0, 0, 0);
+}
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize(); applyCamera();
+
+/* 屏幕 → 世界坐标（拼字与采样源定位，按相机 fov/距离换算） */
+function screenToWorld(sx, sy, zPlane = 0) {
+  const dist = camera.position.z - zPlane;
+  const vFov = (camera.fov * Math.PI) / 180;
+  const worldH = 2 * Math.tan(vFov / 2) * dist;
+  const k = worldH / innerHeight;
+  return new THREE.Vector3((sx - innerWidth / 2) * k, -(sy - innerHeight / 2) * k, zPlane);
+}
+
+/* ═══════════════════ 粒子系统（morph 三态） ═══════════════════ */
+const MAX = 200000;
+let geometry = null, material = null, points = null;
+const buf = {
+  start: new Float32Array(MAX * 3), velocity: new Float32Array(MAX * 3),
+  galaxy: new Float32Array(MAX * 3), target: new Float32Array(MAX * 3),
+  cStart: new Float32Array(MAX * 3), cGalaxy: new Float32Array(MAX * 3), cTarget: new Float32Array(MAX * 3),
+  scale: new Float32Array(MAX), delay: new Float32Array(MAX), twinkle: new Float32Array(MAX),
+};
+
+/** 界面像素采样（html2canvas，失败回退随机网格） */
+async function captureSeeds(target) {
+  try {
+    const shot = await html2canvas(document.getElementById('main-area'), {
+      logging: false, useCORS: true, backgroundColor: null,
+      scale: Math.min(devicePixelRatio, 1.5),
+    });
+    const ctx = shot.getContext('2d');
+    const rect = document.getElementById('main-area').getBoundingClientRect();
+    const kx = rect.width / shot.width, ky = rect.height / shot.height;
+    const data = ctx.getImageData(0, 0, shot.width, shot.height).data;
+    const list = [];
+    for (let y = 0; y < shot.height; y += 3) {
+      for (let x = 0; x < shot.width; x += 3) {
+        const i = (y * shot.width + x) * 4;
+        if (data[i + 3] < 40) continue;
+        list.push([rect.left + x * kx, rect.top + y * ky, data[i], data[i + 1], data[i + 2]]);
+      }
+    }
+    if (!list.length) return null;
+    const out = [];
+    for (let i = 0; i < target; i++) out.push(list[(Math.random() * list.length) | 0]);
+    return out;
+  } catch (e) { console.warn('截图采样失败，回退网格', e); return null; }
+}
+
+/** 「中枢」文字点阵（拼字目标） */
+function glyphPoints(text, fontSize, target) {
+  const c = document.createElement('canvas');
+  const font = `600 ${fontSize}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+  const m = c.getContext('2d');
+  m.font = font;
+  const w = Math.ceil(m.measureText(text).width + 40), h = Math.ceil(fontSize * 1.5);
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.font = font; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, w / 2, h / 2);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const list = [];
+  for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) {
+    if (data[(y * w + x) * 4 + 3] > 96) list.push([x - w / 2, y - h / 2]);
+  }
+  if (!list.length) return [];
+  const out = [];
+  for (let i = 0; i < target; i++) out.push(list[(i / target * list.length) | 0]);
+  return out;
+}
+
+const colorIn = new THREE.Color(), colorOut = new THREE.Color();
+function buildParticles(seeds) {
+  if (points) { scene.remove(points); geometry.dispose(); material.dispose(); }
+  const n = P.count;
+  colorIn.set(P.insideColor); colorOut.set(P.outsideColor);
+  // 拼字点阵（世界坐标，放在相机前方平面）
+  const gl = glyphPoints('中枢', Math.min(innerWidth * 0.16, 170), Math.floor(n * 0.92));
+  const glyphWorld = gl.map(([gx, gy]) => {
+    const world = screenToWorld(innerWidth / 2 + gx * 1.6, innerHeight * 0.46 + gy * 1.6, 3.2);
+    return world;
+  });
+  const fallback = [];
+  for (let i = 0; i < n; i++) {
+    fallback.push([innerWidth * 0.12 + Math.random() * innerWidth * 0.76,
+                   innerHeight * 0.1 + Math.random() * innerHeight * 0.82,
+                   138, 148, 162]);
+  }
+  const src = seeds && seeds.length ? seeds : fallback;
+  const tmp = new THREE.Color();
+  for (let i = 0; i < n; i++) {
+    const i3 = i * 3;
+    const s = src[i % src.length];
+    // 起点：界面像素（世界坐标，z 随机小深度）
+    const wpos = screenToWorld(s[0], s[1], 0);
+    buf.start[i3] = wpos.x; buf.start[i3 + 1] = wpos.y; buf.start[i3 + 2] = wpos.z;
+    // 爆散速度（世界单位）
+    buf.velocity[i3] = (Math.random() - 0.5) * 3.4;
+    buf.velocity[i3 + 1] = (Math.random() - 0.5) * 3.4;
+    buf.velocity[i3 + 2] = (Math.random() - 0.5) * 2.4;
+    // 银河位置：Galaxy Generator 公式
+    const radius = Math.pow(Math.random(), 0.68) * P.galaxyRadius;
+    const branchAngle = ((i % P.branches) / P.branches) * Math.PI * 2;
+    const spinAngle = P.spin * radius;
+    const rnd = () => Math.pow(Math.random(), P.randomnessPower) * (Math.random() < 0.5 ? 1 : -1) * P.randomness * (radius + 0.3);
+    buf.galaxy[i3] = Math.cos(branchAngle + spinAngle) * radius + rnd();
+    buf.galaxy[i3 + 1] = rnd() * 0.55;
+    buf.galaxy[i3 + 2] = Math.sin(branchAngle + spinAngle) * radius + rnd();
+    // 拼字目标
+    const g = glyphWorld.length ? glyphWorld[i % glyphWorld.length] : new THREE.Vector3(0, 0, 3.2);
+    buf.target[i3] = g.x; buf.target[i3 + 1] = g.y; buf.target[i3 + 2] = g.z;
+    // 颜色三态
+    buf.cStart[i3] = s[2] / 255; buf.cStart[i3 + 1] = s[3] / 255; buf.cStart[i3 + 2] = s[4] / 255;
+    tmp.copy(colorIn).lerp(colorOut, Math.min(1, radius / P.galaxyRadius));
+    buf.cGalaxy[i3] = tmp.r; buf.cGalaxy[i3 + 1] = tmp.g; buf.cGalaxy[i3 + 2] = tmp.b;
+    const cyan = Math.random() < 0.82;
+    buf.cTarget[i3] = cyan ? 0.85 : 0.72; buf.cTarget[i3 + 1] = cyan ? 0.96 : 0.62; buf.cTarget[i3 + 2] = 1.0;
+    // 尺寸 / 错峰（拼字按列序）/ 闪烁相位
+    buf.scale[i] = 0.6 + Math.random() * 1.3;
+    const col = glyphWorld.length
+      ? Math.min(1, Math.max(0, (buf.target[i3] + 3) / 6)) : Math.random();
+    buf.delay[i] = Math.min(0.45, Math.max(0, (col - 0.02) * 0.5 + Math.random() * 0.05));
+    buf.twinkle[i] = Math.random() * Math.PI * 2;
+  }
+  geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(buf.start.slice(0, n * 3), 3));
+  geometry.setAttribute('aStart', new THREE.BufferAttribute(buf.start.slice(0, n * 3), 3));
+  geometry.setAttribute('aVelocity', new THREE.BufferAttribute(buf.velocity.slice(0, n * 3), 3));
+  geometry.setAttribute('aGalaxy', new THREE.BufferAttribute(buf.galaxy.slice(0, n * 3), 3));
+  geometry.setAttribute('aTarget', new THREE.BufferAttribute(buf.target.slice(0, n * 3), 3));
+  geometry.setAttribute('aColorStart', new THREE.BufferAttribute(buf.cStart.slice(0, n * 3), 3));
+  geometry.setAttribute('aColorGalaxy', new THREE.BufferAttribute(buf.cGalaxy.slice(0, n * 3), 3));
+  geometry.setAttribute('aColorTarget', new THREE.BufferAttribute(buf.cTarget.slice(0, n * 3), 3));
+  geometry.setAttribute('aScale', new THREE.BufferAttribute(buf.scale.slice(0, n), 1));
+  geometry.setAttribute('aDelay', new THREE.BufferAttribute(buf.delay.slice(0, n), 1));
+  geometry.setAttribute('aTwinkle', new THREE.BufferAttribute(buf.twinkle.slice(0, n), 1));
+  material = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 }, uSize: { value: P.pointSize },
+      uBurstT: { value: 0 }, uGalaxyInT: { value: 0 },
+      uSpinAngle: { value: 0 }, uAssembleT: { value: -1 },
+      uOpacity: { value: 1 }, uBurstDist: { value: 2.2 },
+    },
+    vertexShader: /* glsl */`
+      uniform float uTime, uSize, uBurstT, uGalaxyInT, uSpinAngle, uAssembleT, uBurstDist;
+      attribute vec3 aStart, aVelocity, aGalaxy, aTarget, aColorStart, aColorGalaxy, aColorTarget;
+      attribute float aScale, aDelay, aTwinkle;
+      varying vec3 vColor; varying float vAlpha;
+      vec3 rotY(vec3 p, float a) {
+        float c = cos(a), s = sin(a);
+        return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+      }
+      void main() {
+        vec3 pos; vec3 color;
+        float ease = 0.0;
+        if (uAssembleT >= 0.0) {
+          // 拼字：错峰出发，二次贝塞尔飞向文字点阵
+          float t = clamp((uAssembleT - aDelay) / 0.55, 0.0, 1.0);
+          t = t * t * (3.0 - 2.0 * t);
+          vec3 gpos = rotY(aGalaxy, uSpinAngle);
+          vec3 mid = mix(gpos, aTarget, 0.5);
+          mid.y += length(aTarget - gpos) * 0.06;
+          pos = mix(mix(gpos, mid, t), mix(mid, aTarget, t), t);
+          color = mix(aColorGalaxy, aColorTarget, t);
+        } else if (uGalaxyInT > 0.0) {
+          // 爆散终点 → 银河轨道
+          float t = uGalaxyInT; t = t * t * (3.0 - 2.0 * t);
+          vec3 burst = aStart + aVelocity * uBurstDist;
+          pos = mix(burst, rotY(aGalaxy, uSpinAngle), t);
+          color = mix(aColorStart, aColorGalaxy, t);
+        } else {
+          // 打碎：界面像素位置爆散
+          float t = uBurstT;
+          float d = 1.0 - pow(1.0 - t, 3.0);
+          pos = aStart + aVelocity * d * uBurstDist;
+          color = aColorStart;
+        }
+        float tw = 0.78 + 0.22 * sin(uTime * 2.6 + aTwinkle);
+        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+        gl_PointSize = uSize * aScale * (320.0 / -mv.z);
+        gl_Position = projectionMatrix * mv;
+        vColor = color; vAlpha = tw;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uOpacity;
+      varying vec3 vColor; varying float vAlpha;
+      void main() {
+        float d = length(gl_PointCoord - vec2(0.5));
+        float a = smoothstep(0.5, 0.02, d);
+        a = pow(a, 1.6);
+        gl_FragColor = vec4(vColor, a * vAlpha * uOpacity);
+      }`,
+  });
+  points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+  scene.add(points);
+}
+
+/* 中心核光晕（银河期） */
+const coreMat = new THREE.SpriteMaterial({
+  map: (() => {
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grad.addColorStop(0, 'rgba(255,214,170,.95)');
+    grad.addColorStop(0.25, 'rgba(255,120,64,.42)');
+    grad.addColorStop(0.6, 'rgba(255,96,48,.14)');
+    grad.addColorStop(1, 'rgba(255,96,48,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 256, 256);
+    return new THREE.CanvasTexture(c);
+  })(),
+  blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0,
+});
+const core = new THREE.Sprite(coreMat);
+core.scale.setScalar(3.4);
+scene.add(core);
+
+/* ═══════════════════ 激光 title 扫描 ═══════════════════ */
+const titleWrap = document.getElementById('title-wrap');
+const OLD = '新对话', NEW = '中枢';
+function mountScanLayers() {
+  titleWrap.innerHTML = `
+    <span class="title-text" style="visibility:hidden">${OLD.length >= NEW.length ? OLD : NEW}</span>
+    <span class="title-old-layer"><span class="title-text" id="scan-old"></span></span>
+    <span class="title-new-layer"><span class="title-text" id="scan-new"></span></span>
+    <span class="laser-trail" id="scan-trail"></span>
+    <span class="laser-beam" id="scan-beam"></span>`;
+}
+function setTitleCentral(on) {
+  titleWrap.innerHTML = `<span class="title-text" style="${on ? 'color:#22d3ee;font-weight:600;text-shadow:0 0 10px rgba(34,211,238,.6)' : ''}">${on ? NEW : OLD}</span>`;
+}
+function playTitleScan(toCentral, duration) {
+  return new Promise((resolve) => {
+    mountScanLayers();
+    const oldL = document.getElementById('scan-old');
+    const newL = document.getElementById('scan-new');
+    const beam = document.getElementById('scan-beam');
+    const trail = document.getElementById('scan-trail');
+    const from = toCentral ? OLD : NEW, to = toCentral ? NEW : OLD;
+    oldL.textContent = from; newL.textContent = to;
+    if (!toCentral) newL.style.cssText = '';
+    const t0 = performance.now();
+    (function tick(now) {
+      const t = Math.min(1, (now - t0) / duration);
+      const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      newL.parentElement.style.clipPath = `inset(0 ${(1 - e) * 100}% 0 0)`;
+      oldL.parentElement.style.clipPath = `inset(0 0 0 ${e * 100}%)`;
+      beam.style.left = `${e * 100}%`;
+      trail.style.clipPath = `inset(0 ${(1 - e) * 100}% 0 0)`;
+      if (t < 1) requestAnimationFrame(tick);
+      else resolve();
+    })(t0);
+  });
+}
+
+/* ═══════════════════ 序列控制 ═══════════════════ */
+const dim = document.getElementById('dim');
+const headerGlow = document.getElementById('header-glow');
+const centralUI = document.getElementById('central-ui');
+const btnCentral = document.getElementById('btn-central');
+const btnSidebar = document.getElementById('btn-sidebar');
+let seedsCache = null;
+let playing = false;
+let mode = 'normal';
+
+const u = () => material.uniforms;
+const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+
+function setChromeCentral(on) {
+  document.getElementById('sidebar').style.display = on ? 'none' : '';
+  btnSidebar.style.visibility = on ? 'hidden' : '';
+  btnCentral.title = on ? '退出中枢模式' : '进入中枢模式';
+}
+
+async function playEnter() {
+  if (playing) return; playing = true;
+  mode = 'entering';
+  setChromeCentral(true);          // 顶栏即时切换（按钮/侧栏收起）
+  centralUI.style.display = 'none';
+  // ① 阶段一：激光扫 title（2s），期间预热截图采样
+  const scanP = playTitleScan(true, Math.min(750, P.tTitleScan * 0.4));
+  const seedP = captureSeeds(Math.min(P.count, 80000)).then((s) => { seedsCache = s; });
+  headerGlow.style.opacity = '1';
+  headerGlow.firstElementChild.classList.remove('sweeping');
+  void headerGlow.firstElementChild.offsetWidth; // 重启动画
+  headerGlow.firstElementChild.classList.add('sweeping');
+  await scanP;
+  await seedP;
+  await sleep(Math.max(0, P.tTitleScan - 750));
+  setTitleCentral(true);
+  headerGlow.style.opacity = '0';
+  // ② 阶段二：粒子（打碎 → 银河 1 圈 → 拼字）
+  buildParticles(seedsCache);
+  dim.style.transition = `opacity ${P.tBurst + P.tGalaxyIn}ms ease-in`;
+  dim.style.opacity = '0.92';
+  const t0 = performance.now();
+  const T1 = P.tBurst, T2 = T1 + P.tGalaxyIn, T3 = T2 + P.tSpin, T4 = T3 + P.tAssemble, T5 = T4 + P.tHold, T6 = T5 + P.tFade;
+  const total = T6;
+  await new Promise((resolve) => {
+    (function frame(now) {
+      const t = now - t0;
+      const uu = u();
+      uu.uTime.value = t / 1000;
+      if (t < T1) { uu.uBurstT.value = t / T1; uu.uGalaxyInT.value = 0; uu.uSpinAngle.value = 0; uu.uAssembleT.value = -1; coreMat.opacity = 0; }
+      else if (t < T2) { uu.uBurstT.value = 1; uu.uGalaxyInT.value = (t - T1) / P.tGalaxyIn; uu.uSpinAngle.value = 0; coreMat.opacity = easeInOut((t - T1) / P.tGalaxyIn); }
+      else if (t < T3) { uu.uGalaxyInT.value = 1; uu.uSpinAngle.value = easeInOut((t - T2) / P.tSpin) * Math.PI * 2; coreMat.opacity = 1; dim.style.opacity = '0.96'; }
+      else if (t < T4) { uu.uAssembleT.value = (t - T3) / P.tAssemble; coreMat.opacity = 1 - (t - T3) / P.tAssemble; dim.style.transition = `opacity ${P.tAssemble + P.tHold}ms ease`; dim.style.opacity = '0.30'; }
+      else if (t < T5) { uu.uAssembleT.value = 1; coreMat.opacity = 0; }
+      else { uu.uAssembleT.value = 1; uu.uOpacity.value = Math.max(0, 1 - (t - T5) / P.tFade); }
+      if (t < total) requestAnimationFrame(frame); else resolve();
+    })(t0);
+  });
+  // 中枢 UI 就位
+  centralUI.style.display = 'flex';
+  requestAnimationFrame(() => { centralUI.style.opacity = '1'; });
+  dim.style.opacity = '0';
+  scene.remove(points); points = null;
+  playing = false; mode = 'central';
+}
+
+async function playExit() {
+  if (playing || mode !== 'central') return; playing = true;
+  centralUI.style.opacity = '0';
+  await sleep(300);
+  centralUI.style.display = 'none';
+  // title 反向扫描 + 粒子快速消散
+  const scanP = playTitleScan(false, 500);
+  buildParticles(null);
+  dim.style.transition = 'opacity 300ms ease';
+  dim.style.opacity = '0.5';
+  const t0 = performance.now();
+  await new Promise((resolve) => {
+    (function frame(now) {
+      const t = (now - t0) / 1000;
+      const uu = u();
+      uu.uTime.value = t;
+      uu.uBurstT.value = Math.min(1, t / 0.8);
+      uu.uOpacity.value = Math.max(0, 1 - t / 1.0);
+      if (t < 1.0) requestAnimationFrame(frame); else resolve();
+    })(t0);
+  });
+  await scanP;
+  setTitleCentral(false);
+  setChromeCentral(false);
+  dim.style.opacity = '0';
+  scene.remove(points); points = null;
+  playing = false; mode = 'normal';
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+document.getElementById('btn-play').onclick = playEnter;
+document.getElementById('btn-exit-play').onclick = playExit;
+btnCentral.onclick = () => (mode === 'normal' ? playEnter() : playExit());
+document.getElementById('btn-exit').onclick = playExit;
+document.getElementById('btn-reset').onclick = () => {
+  playing = false; mode = 'normal';
+  if (points) { scene.remove(points); points = null; }
+  centralUI.style.display = 'none'; centralUI.style.opacity = '0';
+  dim.style.opacity = '0'; headerGlow.style.opacity = '0';
+  setTitleCentral(false); setChromeCentral(false);
+};
+addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); btnCentral.onclick(); }
+});
+
+/* ═══════════════════ lil-gui 参数面板 ═══════════════════ */
+const gui = new GUI({ title: '中枢切换动画 · 调参台' });
+const fG = gui.addFolder('银河（Galaxy Generator）');
+fG.add(P, 'count', 5000, 200000, 5000).name('粒子数');
+fG.add(P, 'galaxyRadius', 2, 10, 0.1).name('半径');
+fG.add(P, 'branches', 2, 10, 1).name('旋臂数');
+fG.add(P, 'spin', 0, 3, 0.05).name('旋臂缠绕');
+fG.add(P, 'randomness', 0, 1, 0.02).name('臂上散布');
+fG.add(P, 'randomnessPower', 1, 6, 0.1).name('散布幂次');
+fG.addColor(P, 'insideColor').name('内圈色');
+fG.addColor(P, 'outsideColor').name('外圈色');
+fG.add(P, 'pointSize', 0.005, 0.08, 0.001).name('粒子大小');
+const fC = gui.addFolder('相机');
+fC.add(P, 'cameraTilt', 0, 1.4, 0.02).name('盘面倾角').onChange(applyCamera);
+fC.add(P, 'cameraDist', 4, 16, 0.2).name('相机距离').onChange(applyCamera);
+const fT = gui.addFolder('时序 (ms)');
+fT.add(P, 'tTitleScan', 800, 4000, 100).name('①激光扫描');
+fT.add(P, 'tBurst', 300, 2000, 50).name('②打碎');
+fT.add(P, 'tGalaxyIn', 200, 1500, 50).name('③入轨');
+fT.add(P, 'tSpin', 1000, 6000, 100).name('④银河1圈');
+fT.add(P, 'tAssemble', 600, 3000, 50).name('⑤拼字');
+fT.add(P, 'tHold', 200, 1500, 50).name('⑥驻留');
+fT.add(P, 'tFade', 200, 1500, 50).name('⑦淡出');
+
+/* 渲染循环（空场时也保持呼吸） */
+renderer.setAnimationLoop(() => {
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

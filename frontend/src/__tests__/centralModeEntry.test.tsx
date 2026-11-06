@@ -32,12 +32,6 @@ const mocks = vi.hoisted(() => {
   return { api, appWindow, listen };
 });
 
-// jsdom 不支持 html2canvas 所需的布局能力：mock 为 reject，
-// captureSeeds 会 catch 并回退象征网格（真机行为由 Tauri WebView 覆盖）
-vi.mock('html2canvas', () => ({
-  default: vi.fn(() => Promise.reject(new Error('html2canvas unavailable in jsdom'))),
-}));
-
 vi.mock('@/api/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/tauri')>();
   return { ...actual, api: { ...actual.api, ...mocks.api } };
@@ -195,19 +189,13 @@ describe('中枢模式布局分支', () => {
     expect(textIncludes('天工中枢')).toBe(false);
   });
 
-  it('开启 centralMode：title 扫描期布局保持普通，粒子阶段切换为中枢视图', async () => {
-    vi.useFakeTimers();
+  it('开启 centralMode 后隐藏侧栏并进入中枢视图', async () => {
     cleanup = await mountMainApp();
     act(() => {
       useStore.getState().setCentralMode(true);
     });
-    // 阶段一（2s）：顶部已切换（按钮隐藏、title 扫描），主区域仍是普通视图
-    expect(textIncludes('app-sidebar')).toBe(true);
-    act(() => {
-      vi.advanceTimersByTime(2010);
-    });
-    // 阶段二起：布局切换，无上下文默认问候（设计稿 §4.2 原文）
     expect(textIncludes('app-sidebar')).toBe(false);
+    // 无上下文默认问候（设计稿 §4.2 原文）
     expect(textIncludes('我是天工中枢')).toBe(true);
   });
 
@@ -222,13 +210,9 @@ describe('中枢模式布局分支', () => {
   });
 
   it('退出复用顶栏进入按钮（toggle）：点击后恢复普通模式', async () => {
-    vi.useFakeTimers();
     cleanup = await mountMainApp();
     act(() => {
       useStore.getState().setCentralMode(true);
-    });
-    act(() => {
-      vi.advanceTimersByTime(2010);
     });
     expect(textIncludes('app-sidebar')).toBe(false);
     // 顶栏中枢按钮（进入后语义变为退出）
@@ -238,7 +222,6 @@ describe('中枢模式布局分支', () => {
       exitButton?.click();
     });
     expect(useStore.getState().centralMode).toBe(false);
-    // 退出方向布局立即恢复（粒子消散层仅遮盖，不阻塞切换）
     expect(textIncludes('app-sidebar')).toBe(true);
   });
 });
@@ -252,24 +235,14 @@ describe('中枢模式顶栏（StatusPanel）', () => {
     vi.useRealTimers();
   });
 
-  it('进入时激光扫 title 切换为「中枢」，扫描维持约 2s 后静止', async () => {
-    vi.useFakeTimers();
+  it('中枢模式下标题显示「中枢」，普通模式显示会话标题', async () => {
     cleanup = await mountMainApp();
     expect(textIncludes('新对话')).toBe(true); // 普通模式默认标题
     act(() => {
       useStore.getState().setCentralMode(true);
     });
-    // 扫描期：title 激光层在（旧标题铺底 + 新标题按进度揭示）
-    expect(document.querySelector('[data-testid="central-title-scan"]')).not.toBeNull();
-    act(() => {
-      vi.advanceTimersByTime(100);
-    });
-    act(() => {
-      vi.advanceTimersByTime(2200);
-    });
-    // 扫描结束：静止的「中枢」标题（带 glow 呼吸）
-    expect(document.querySelector('[data-testid="central-title-scan"]')).toBeNull();
     expect(document.querySelector('[data-testid="central-title"]')).not.toBeNull();
+    expect(textIncludes('中枢')).toBe(true);
     expect(textIncludes('新对话')).toBe(false);
   });
 
@@ -337,66 +310,6 @@ describe('中枢模式状态持久化', () => {
     expect(readPersistedCentralMode()).toBe(true);
     localStorage.removeItem(CENTRAL_MODE_STORAGE_KEY);
     expect(readPersistedCentralMode()).toBe(false);
-  });
-});
-
-describe('中枢模式两阶段切换过渡', () => {
-  let cleanup: (() => void) | undefined;
-
-  afterEach(() => {
-    cleanup?.();
-    cleanup = undefined;
-    vi.useRealTimers();
-  });
-
-  it('阶段一（2s）激光扫 title 布局不变；阶段二粒子层接管并切换布局，4.3s 后结束', async () => {
-    vi.useFakeTimers();
-    cleanup = await mountMainApp();
-
-    act(() => {
-      useStore.getState().setCentralMode(true);
-    });
-    // 阶段一：顶栏光带过渡层 + title 激光在，主区域保持普通视图
-    expect(document.querySelector('[data-testid="central-transition"]')).not.toBeNull();
-    expect(document.querySelector('[data-testid="central-title-scan"]')).not.toBeNull();
-    expect(textIncludes('app-sidebar')).toBe(true);
-
-    act(() => {
-      vi.advanceTimersByTime(2010);
-    });
-    // 阶段二：粒子层（打碎 → 银河轮转 2 圈 → 重组），布局已切换为中枢
-    expect(document.querySelector('[data-testid="central-particle-field"]')).not.toBeNull();
-    expect(textIncludes('app-sidebar')).toBe(false);
-    expect(textIncludes('我是天工中枢')).toBe(true);
-
-    // 粒子结束（entering 4300ms）自动卸载
-    act(() => {
-      vi.advanceTimersByTime(4300);
-    });
-    expect(document.querySelector('[data-testid="central-particle-field"]')).toBeNull();
-  });
-
-  it('退出：粒子快速消散 1s，普通视图即时回归', async () => {
-    vi.useFakeTimers();
-    cleanup = await mountMainApp();
-    act(() => {
-      useStore.getState().setCentralMode(true);
-    });
-    act(() => {
-      vi.advanceTimersByTime(2010);
-    }); // 进入粒子阶段（中枢布局）
-
-    act(() => {
-      useStore.getState().setCentralMode(false);
-    });
-    // 退出方向：布局立即恢复普通（粒子层仅遮盖）
-    expect(textIncludes('app-sidebar')).toBe(true);
-    expect(document.querySelector('[data-testid="central-particle-field"]')).not.toBeNull();
-
-    act(() => {
-      vi.advanceTimersByTime(1050);
-    });
-    expect(document.querySelector('[data-testid="central-particle-field"]')).toBeNull();
   });
 });
 
