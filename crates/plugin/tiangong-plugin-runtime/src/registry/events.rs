@@ -152,7 +152,7 @@ fn release_plugin_resources(event: &PluginChangeEvent) {
         event.kind,
         PluginChangeKind::Disabled | PluginChangeKind::Uninstalled | PluginChangeKind::Upgraded
     ) {
-        crate::ts_tools::cancel_plugin_calls(&event.plugin_id);
+        crate::tools::cancel_plugin_calls(&event.plugin_id);
     }
     // 卸载后撤销该插件的沙箱持久授权（Windows AppContainer 记录）。
     if event.kind == PluginChangeKind::Uninstalled

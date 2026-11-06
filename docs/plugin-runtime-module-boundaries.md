@@ -28,6 +28,7 @@
 | 16 | Windows 卸载撤销 launcher 授权改走事件路径（`PluginChangeEvent` 携带 `storage_root`，`StorageLayout` 新增 `grants()/grant_record()`） | 消除 D3→D5（显式路径口径下最后一条违规边）；本步含一处有意的小语义变化：撤销失败降级为警告、不再中止卸载 |
 | 17 | **目录按九域重组**：36 个文件移入 9 个域目录（contract/trust/distribution/registry/transport/invocation/bridge/host_policy/plugin_dev），旧公开路径全部经 lib.rs/registry 重导出保持稳定；杂居文件的 `use super::*` 全部显式化 | 目录=域，物理布局与域划分一致；度量盲区消除（见下方度量修正） |
 | 18 | **删除 `builtin_tables` 展示内置表**：工具图标全线由插件在 `tool_icons` 清单声明（未声明走前端默认图标）；终端字形表与 `tool_args_presentation` 命令一并移除（前端与远程白名单已无消费者，CLI 工具行不再显示字形） | runtime 不再按工具名维护展示映射，公共中立约束的过渡期例外清零 |
+| 19 | **ts 前缀正名**：`ts_plugin`→`plugin`、`ts_tools`→`tools`（含 `TsPluginAdapter`→`PluginAdapter`、`TsToolDecl`→`ToolDecl`、`ts_instances`→`plugin_instances` 等）；core `ToolResult` 在 invocation 域内别名 `CoreToolResult` | 命名去特殊化前缀，调用域符号与域语义一致（纯重命名，零行为改动） |
 度量（两口径，附录 B 可复核）：显式 `crate::` 路径口径下，跨域边 34 → 21、违规边 15 → 0；
 第 17 步目录重组把杂居文件的 `use super::*` 显式化并改用目录判域后，**真实口径**为
 跨域边 24 / 引用 192 / 违规边 3（D3→D4 三处、D3→D5 一处、D5→D4 三处，共 7 处引用）——
@@ -68,7 +69,7 @@
 | — | crate 根与测试支撑 | 2 | 518 | `lib.rs` / `test_support` |
 | — | 测试文件 | 3 | 2024 | 不参与域划分 |
 
-合计 26272 行（域目录 26039 + 根 `lib.rs` 99 + `test_support.rs` 406），与 `wc -l` 全量一致（可复核）。
+合计 26248 行（域目录 26039 + 根 `lib.rs` 99 + `test_support.rs` 406），与 `wc -l` 全量一致（可复核）。
 
 ### D1 契约（Contract）
 
@@ -100,7 +101,7 @@
   真正需要外移的是「插件 ID → 执行特权」这类策略（已由 D8 承载）。
 - **已修复**：安装事务不再摆布别人的运行时资源。停用/卸载/换代后，挂起的工具调用由
   `events::release_plugin_resources` 取消（D4→D6，矩阵允许），桥接订阅由 `bridge` 注册的
-  内部订阅者清理（D7→D4）——原先 5 处 `ts_tools::cancel_plugin_calls` 与 3 处
+  内部订阅者清理（D7→D4）——原先 5 处 `tools::cancel_plugin_calls` 与 3 处
   `bridge::clear_plugin_subscriptions` 已从本域移除。
 - **已修复**：`refresh_verified_sidecar`（重验后刷新适配器与段落，调 `assemble_*`）归 `loader`；
   `install_plugin_from_repository`（下载 + 安装编排）从 `artifacts` 移入本域事务文件，
@@ -273,7 +274,7 @@ pub trait SidecarAccess: Send + Sync + Debug {
     fn connection(&self, plugin_id: &str, session_workspace: Option<&Path>) -> Result<PluginConnection>; // { connection, ephemeral }
     fn invoke(&self, plugin_id: &str, operation: &str, payload: Value, workspace: Option<&Path>) -> Result<Value>;
 }
-// 消除：ts_plugin 对 registry::{sidecar_connection, ephemeral_sidecar_connection...} 的 4 处调用
+// 消除：plugin 对 registry::{sidecar_connection, ephemeral_sidecar_connection...} 的 4 处调用
 
 // 6) 宿主服务集合（D7）
 pub struct HostServices {
@@ -354,8 +355,8 @@ crate 内相对引用已全部显式化，目录判域口径即真实口径。
 | `registry/events.rs` | D4 状态机 | 180 |
 | `registry/inventory.rs` | D4 状态机 | 193 |
 | `registry/keepalive.rs` | D4 状态机 | 269 |
-| `registry/loader.rs` | D4 状态机 | 1530 |
-| `registry/mod.rs` | D4 状态机 | 585 |
+| `registry/loader.rs` | D4 状态机 | 1522 |
+| `registry/mod.rs` | D4 状态机 | 584 |
 | `registry/reverify.rs` | D4 状态机 | 166 |
 | `registry/tests.rs` | 测试 | 1136 |
 | `registry/tool_icons.rs` | D4 状态机 | 428 |
@@ -375,19 +376,19 @@ crate 内相对引用已全部显式化，目录判域口径即真实口径。
 | `transport/launcher_update/windows_cache.rs` | D5 传输 | 152 |
 | `invocation/execution.rs` | D6 调用 | 42 |
 | `invocation/mod.rs` | D6 调用 | 340 |
+| `invocation/plugin.rs` | D6 调用 | 977 |
 | `invocation/runtime_feedback.rs` | D6 调用 | 34 |
-| `invocation/ts_plugin.rs` | D6 调用 | 987 |
-| `invocation/ts_tools.rs` | D6 调用 | 435 |
+| `invocation/tools.rs` | D6 调用 | 431 |
 | `bridge/core_bridge.rs` | D7 宿主集成 | 610 |
 | `bridge/mod.rs` | D7 宿主集成 | 1064 |
 | `host_policy/mod.rs` | D8 策略 | 228 |
 | `host_policy/table.rs` | D8 策略 | 233 |
 | `plugin_dev/mod.rs` | D9 创作 | 480 |
-| `plugin_dev/tests.rs` | 测试 | 626 |
+| `plugin_dev/tests.rs` | 测试 | 624 |
 | `plugin_dev/trust.rs` | D9 创作 | 192 |
-| `lib.rs` | 根 | 99 |
+| `lib.rs` | 根 | 98 |
 | `test_support.rs` | 测试支撑 | 406 |
-合计 26544 行，与 `wc -l` 全量一致（可复核）。
+合计 26248 行，与 `wc -l` 全量一致（可复核）。
 
 ## 附录 B：复核脚本（目录判域 + re-export 别名映射）
 
@@ -418,8 +419,8 @@ MOD2DOM = {
   # D5 transport（connections 移入 transport/；别名经 lib.rs）
   'sidecar':'D5','interpreter_env':'D5','launcher_update':'D5','platform':'D5',
   'transport':'D5',
-  # D6 invocation（ts_plugin 等移入 invocation/；别名经 lib.rs）
-  'invocation':'D6','ts_plugin':'D6','ts_tools':'D6','execution':'D6','runtime_feedback':'D6',
+  # D6 invocation（plugin 等移入 invocation/；别名经 lib.rs）
+  'invocation':'D6','plugin':'D6','tools':'D6','execution':'D6','runtime_feedback':'D6',
   # D7 bridge
   'bridge':'D7','core_bridge':'D7',
   # D8 / D9

@@ -214,7 +214,7 @@ pub(crate) fn remove_invalid_plugin_if_registered(
 pub(crate) struct PluginLoadSnapshot {
     pub(crate) verified_sidecar: Option<Vec<String>>,
     pub(crate) prompt_sections: Option<Vec<String>>,
-    pub(crate) tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
+    pub(crate) tool_specs: Option<Vec<crate::manifest::ToolDecl>>,
 }
 
 impl PluginLoadSnapshot {
@@ -306,7 +306,7 @@ fn load_plugin_record_from_snapshot(
         manifest: installed.manifest,
         signed_release,
         generation: 1,
-        ts_instances: Vec::new(),
+        plugin_instances: Vec::new(),
         sidecar,
         verified_sidecar,
         prompt_sections,

@@ -111,7 +111,7 @@ pub(crate) fn unload_plugin_adapters(plugin_id: &str) {
     let Some(loaded) = plugins.get_mut(plugin_id) else {
         return;
     };
-    for adapter in loaded.ts_instances.iter().filter_map(Weak::upgrade) {
+    for adapter in loaded.plugin_instances.iter().filter_map(Weak::upgrade) {
         adapter.set_enabled(false);
     }
 }

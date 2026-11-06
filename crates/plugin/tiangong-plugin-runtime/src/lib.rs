@@ -44,7 +44,7 @@ pub use events::{
 };
 pub use interpreter_env::ensure_interpreter_env;
 pub use invocation::runtime_feedback;
-pub(crate) use invocation::{execution, ts_plugin, ts_tools};
+pub(crate) use invocation::{execution, plugin, tools};
 pub use plugin_dev::{
     ImportSummary, InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint,
     note_trusted_build, set_plugin_dev_import_confirm, set_plugin_dev_trusted_installer,

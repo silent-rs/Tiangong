@@ -4,16 +4,16 @@
 //! Adapter 进入 Runtime 后，都用本对象统一身份、上下文、取消、进度和闭合。
 
 pub(crate) mod execution;
+pub(crate) mod plugin;
 pub mod runtime_feedback;
-pub(crate) mod ts_plugin;
-pub(crate) mod ts_tools;
+pub(crate) mod tools;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::tools::result::ToolResult;
+use tiangong_core::tools::result::ToolResult as CoreToolResult;
 use tiangong_llm::tool::ToolCall;
 use tiangong_types::StreamEvent;
 
@@ -34,7 +34,7 @@ struct InvocationInner {
     context: crate::protocol::RequestInvocationContext,
     feedback: Option<PluginFeedbackTx>,
     state: AtomicU8,
-    result: Mutex<Option<ToolResult>>,
+    result: Mutex<Option<CoreToolResult>>,
     cancel_hooks: Mutex<Vec<CancelHook>>,
 }
 
@@ -120,7 +120,7 @@ impl RuntimeInvocation {
     }
 
     #[cfg(test)]
-    fn result(&self) -> Option<ToolResult> {
+    fn result(&self) -> Option<CoreToolResult> {
         self.inner
             .result
             .lock()
@@ -128,7 +128,7 @@ impl RuntimeInvocation {
             .and_then(|result| result.clone())
     }
 
-    fn complete(&self, result: Option<&ToolResult>) {
+    fn complete(&self, result: Option<&CoreToolResult>) {
         if let Some(result) = result
             && let Ok(mut stored) = self.inner.result.lock()
         {
@@ -220,9 +220,9 @@ pub(crate) fn select_ts_handler(
 
 /// Runtime 所有 Adapter 的共同闭合点。future 被 Core 丢弃即触发统一取消；
 /// Handler 返回（含业务失败）均视为一次完整闭合。
-pub(crate) async fn dispatch<F>(invocation: RuntimeInvocation, future: F) -> Option<ToolResult>
+pub(crate) async fn dispatch<F>(invocation: RuntimeInvocation, future: F) -> Option<CoreToolResult>
 where
-    F: Future<Output = Option<ToolResult>>,
+    F: Future<Output = Option<CoreToolResult>>,
 {
     let mut guard = InvocationGuard {
         invocation: invocation.clone(),
@@ -262,7 +262,7 @@ mod tests {
         invocation.on_cancel(move || {
             target.fetch_add(1, Ordering::SeqCst);
         });
-        let expected = ToolResult {
+        let expected = CoreToolResult {
             ok: true,
             summary: "done".into(),
             stdout: String::new(),

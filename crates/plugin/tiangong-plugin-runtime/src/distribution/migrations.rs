@@ -315,8 +315,8 @@ fn set_plugin_enabled_inner(
         let loaded = plugins
             .get_mut(plugin_id)
             .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 尚未加载"))?;
-        let ts_instances = loaded
-            .ts_instances
+        let plugin_instances = loaded
+            .plugin_instances
             .iter()
             .filter_map(Weak::upgrade)
             .collect::<Vec<_>>();
@@ -324,7 +324,7 @@ fn set_plugin_enabled_inner(
         loaded.load_error = None;
         loaded.runtime_error = None;
         drop(plugins);
-        for adapter in ts_instances {
+        for adapter in plugin_instances {
             adapter.set_enabled(enabled);
         }
         return list_plugin_status_without_preload(&installed.manifest)
@@ -342,7 +342,7 @@ fn set_plugin_enabled_inner(
         }
     } else {
         create_disabled_marker(&marker)?;
-        let ts_instances = {
+        let plugin_instances = {
             let mut plugins = loaded_plugins()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
@@ -353,16 +353,16 @@ fn set_plugin_enabled_inner(
             loaded.load_error = None;
             loaded.runtime_error = None;
             loaded
-                .ts_instances
+                .plugin_instances
                 .iter()
                 .filter_map(Weak::upgrade)
                 .collect::<Vec<_>>()
         };
-        for adapter in &ts_instances {
+        for adapter in &plugin_instances {
             adapter.set_enabled(false);
         }
         if let Err(error) = stop_connection_for_directory(&installed.directory) {
-            for adapter in &ts_instances {
+            for adapter in &plugin_instances {
                 adapter.set_enabled(true);
             }
             if let Ok(mut plugins) = loaded_plugins().lock()
@@ -518,7 +518,7 @@ fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool)
         && let Some(loaded) = plugins.remove(plugin_id)
     {
         for adapter in loaded
-            .ts_instances
+            .plugin_instances
             .into_iter()
             .filter_map(|item| item.upgrade())
         {

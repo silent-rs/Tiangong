@@ -347,7 +347,7 @@ fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
         String,
         PluginManifest,
         std::collections::BTreeMap<String, String>,
-        Vec<Arc<TsPluginAdapter>>,
+        Vec<Arc<PluginAdapter>>,
     );
     let snapshot: Vec<PluginSnapshot> = {
         let Ok(plugins) = loaded_plugins().lock() else {
@@ -375,7 +375,7 @@ fn tool_declaring_plugins() -> Vec<ToolDeclaringPlugin> {
                     loaded.manifest.clone(),
                     dynamic_titles,
                     loaded
-                        .ts_instances
+                        .plugin_instances
                         .iter()
                         .filter_map(Weak::upgrade)
                         .collect(),

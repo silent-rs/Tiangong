@@ -119,14 +119,12 @@ await runSidecar({
             .enable_all()
             .build()
             .unwrap()
-            .block_on(
-                crate::ts_plugin::invoke_sidecar_tool_with_invocation_for_test(
-                    test_sidecar_access(),
-                    id,
-                    invocation.call().clone(),
-                    invocation,
-                ),
-            )
+            .block_on(crate::plugin::invoke_sidecar_tool_with_invocation_for_test(
+                test_sidecar_access(),
+                id,
+                invocation.call().clone(),
+                invocation,
+            ))
     };
 
     let result = invoke_probe(probe_call(&workspace.join("in-session.txt")));
@@ -462,7 +460,7 @@ await runSidecar({
         .build()
         .unwrap()
         .block_on(async {
-            crate::ts_plugin::invoke_sidecar_tool_for_test(
+            crate::plugin::invoke_sidecar_tool_for_test(
                 test_sidecar_access(),
                 id,
                 tiangong_llm::tool::ToolCall {
@@ -574,7 +572,7 @@ await runSidecar({
         .block_on(async {
             tokio::join!(
                 async {
-                    let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    let result = crate::plugin::invoke_sidecar_tool_for_test(
                         test_sidecar_access(),
                         id,
                         call("quick_job", json!({"tag": "并发一"})),
@@ -585,7 +583,7 @@ await runSidecar({
                     assert_eq!(result.summary, "完成 并发一");
                 },
                 async {
-                    let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    let result = crate::plugin::invoke_sidecar_tool_for_test(
                         test_sidecar_access(),
                         id,
                         call("quick_job", json!({"tag": "并发二"})),
@@ -596,7 +594,7 @@ await runSidecar({
                     assert_eq!(result.summary, "完成 并发二");
                 },
                 async {
-                    let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    let result = crate::plugin::invoke_sidecar_tool_for_test(
                         test_sidecar_access(),
                         id,
                         call("slow_job", json!({"pid_file": &pid_file})),

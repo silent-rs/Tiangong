@@ -35,7 +35,7 @@ use crate::registry::{self, RuntimeKind};
 fn tool_result_header(tool_name: &str, ok: bool) -> String {
     format!(
         "调用工具 {tool_name}：{}",
-        crate::ts_plugin::result_status_text(ok)
+        crate::plugin::result_status_text(ok)
     )
 }
 
@@ -540,7 +540,7 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                 let function = arguments.get("function_name").and_then(|v| v.as_str());
                 Some(match (plugin, function) {
                     (Some(plugin), Some(function)) => {
-                        crate::ts_plugin::plugin_result_header(plugin, function, ok)
+                        crate::plugin::plugin_result_header(plugin, function, ok)
                     }
                     _ => tool_result_header(&call.name, ok),
                 })
@@ -556,7 +556,7 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
                     .adapter
                     .result_header(&route.inner_call(call), ok)
                     .or_else(|| {
-                        Some(crate::ts_plugin::plugin_result_header(
+                        Some(crate::plugin::plugin_result_header(
                             route.adapter.id(),
                             &route.original,
                             ok,

@@ -11,9 +11,9 @@ use tiangong_core::core::Plugin;
 
 use self::events::PluginChangeKind;
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
+use crate::plugin::PluginAdapter;
 use crate::sidecar::SidecarConnection;
 use crate::signature::{SignedPluginRelease, verify_signed_release};
-use crate::ts_plugin::TsPluginAdapter;
 
 // ── 子模块划分 ──
 //
@@ -299,7 +299,7 @@ pub(crate) struct LoadedPlugin {
     /// 安装时确定、终身不变。
     pub(crate) signed_release: Option<SignedPluginRelease>,
     pub(crate) generation: u64,
-    pub(crate) ts_instances: Vec<Weak<TsPluginAdapter>>,
+    pub(crate) plugin_instances: Vec<Weak<PluginAdapter>>,
     pub(crate) sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
     pub(crate) verified_sidecar: Option<Vec<String>>,
@@ -314,7 +314,7 @@ pub(crate) struct LoadedPlugin {
     /// Some(规格)（可为空数组）。sidecar 经 [`TOOLS_UPDATED_CHANNEL`]
     /// 通知变更时重取；core 每轮经适配器 `tool_specs()` 读取，快照
     /// 更新后下一轮工具装配自动生效。
-    pub(crate) dynamic_tool_specs: Option<Vec<crate::manifest::TsToolDecl>>,
+    pub(crate) dynamic_tool_specs: Option<Vec<crate::manifest::ToolDecl>>,
     /// 数据/制品/逻辑层加载错误（解释器不可发现等）：
     /// 插件不满足安装条件，安装路径据此回滚。
     pub(crate) load_error: Option<String>,
@@ -417,7 +417,7 @@ pub fn on_sandbox_setting_changed() {
 pub fn shutdown_all_sidecars() {
     begin_sidecar_shutdown();
     let _operation = LOAD_OPERATION.write().ok();
-    crate::ts_tools::cancel_all_calls();
+    crate::tools::cancel_all_calls();
     let connections = sidecar_connections()
         .lock()
         .map(|connections| connections.values().cloned().collect::<Vec<_>>())

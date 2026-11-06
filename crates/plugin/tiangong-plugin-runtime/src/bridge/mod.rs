@@ -245,7 +245,7 @@ pub fn bridge_call_with_workspace(
         // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
         "storage." => storage_call(plugin_id, method, payload),
         // tool.resolve：Desktop TS 工具插件提交自己声明的工具结果。
-        "tool." if method == "tool.resolve" => crate::ts_tools::resolve(plugin_id, payload),
+        "tool." if method == "tool.resolve" => crate::tools::resolve(plugin_id, payload),
         // session.input.*：由桌面宿主注入输入草稿处理器，运行时仅负责权限与路由。
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
@@ -681,7 +681,7 @@ pub fn bridge_subscribe(plugin_id: &str, channel: &str) -> Result<()> {
 
     // 工具调用可能早于插件页面完成订阅。订阅生效后重放仍在等待的调用；
     // invocation_id 保持不变，插件可据此幂等处理并忽略重复投递。
-    crate::ts_tools::replay_pending(plugin_id, channel);
+    crate::tools::replay_pending(plugin_id, channel);
     Ok(())
 }
 
@@ -708,7 +708,7 @@ pub fn bridge_unsubscribe(plugin_id: &str, channel: &str) -> Result<()> {
     // 最后一个工具提供页面退出后，已无人能够处理挂起调用，立即取消而不是
     // 一直占用 Agent 工具任务到宿主超时。
     if channel_removed && channel == "tool.requested" {
-        crate::ts_tools::cancel_plugin_calls(plugin_id);
+        crate::tools::cancel_plugin_calls(plugin_id);
     }
     Ok(())
 }
