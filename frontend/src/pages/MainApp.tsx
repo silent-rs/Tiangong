@@ -15,18 +15,17 @@ import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/component
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';
 import { SidebarProvider } from '@/components/ui/sidebar';
-import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
+import { LazyStatusPanel } from '@/components/LazyComponents';
+import { ChatPanel } from '@/components/ChatPanel';
 import {
   TabsContainer,
   type AppTabCommand,
 } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
-import { InteractionPluginHost } from '@/components/InteractionPluginHost';
-import { InputOverlayPluginHost } from '@/components/InputOverlayPluginHost';
 import { useToast } from '@/components/Toast';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
-import { isRemoteHost, listen as hostListen } from '@/api/host';
+import { isRemoteHost, isDesktopHost, listen as hostListen } from '@/api/host';
 import { RemoteStatusBanner } from '@/components/RemoteStatusBanner';
 import { getRemoteStatus, onRemoteStatus } from '@/api/remote';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -100,15 +99,21 @@ export function MainApp() {
   const newConversationId = useStore((state) => state.newConversationId);
   const currentSessionId = activeSessionId ?? newConversationId;
   useUpdateCheck();
+
+  // 中枢模式对话绑定（POC 阶段 1）：进入时确保中枢对话成为当前对话（复用
+  // Session 持久化，绑定 ID 见 centralModePreference），退出时恢复进入前的
+  // 普通模式会话。mount 时按当前状态初始化（重启直入中枢也会建立绑定）。
+  const prevCentralActiveRef = useRef(false);
+  useEffect(() => {
+    if (centralActive === prevCentralActiveRef.current) return;
+    prevCentralActiveRef.current = centralActive;
+    if (centralActive) {
+      void useStore.getState().ensureCentralConversation();
+    } else {
+      void useStore.getState().restoreFromCentralConversation();
+    }
+  }, [centralActive]);
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
-  const [interactionVisible, setInteractionVisible] = useState(false);
-  const [inputOverlayVisible, setInputOverlayVisible] = useState(false);
-  const [inputOverlayHint, setInputOverlayHint] = useState<string | null>(null);
-  const handleInputOverlayVisibility = useCallback((visible: boolean, hint: string | null) => {
-    setInputOverlayVisible(visible);
-    setInputOverlayHint(visible ? hint : null);
-  }, []);
-  const [messageInputHeight, setMessageInputHeight] = useState(0);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   // 拓展区三态（设计文档 6.7.2）：面板展开时区分矩阵态（App 矩阵）与 App 态
@@ -661,6 +666,14 @@ export function MainApp() {
         window.open(url, '_blank', 'noopener,noreferrer');
         return;
       }
+      // 中枢模式没有拓展区面板（POC）：外链交给系统浏览器打开，避免打开
+      // 一个不可见面板；后续片接入中枢模式自己的内嵌浏览入口。
+      if (useStore.getState().centralMode && isDesktopHost()) {
+        import('@tauri-apps/plugin-shell')
+          .then(({ open }) => open(url))
+          .catch((error) => console.error('打开链接失败:', error));
+        return;
+      }
       const store = useStore.getState();
       const sessionId = store.activeSessionId || store.newConversationId;
       if (!sessionId) {
@@ -758,26 +771,7 @@ export function MainApp() {
                 className={`relative isolate flex flex-col min-w-0 ${showWorkspacePanel ? 'shrink-0' : 'flex-1'}`}
                 style={showWorkspacePanel ? { width: chatPanelWidth } : undefined}
               >
-                <div className="flex-1 overflow-hidden">
-                  <LazyMessageList />
-                </div>
-
-                <LazyMessageInput
-                  interactionVisible={interactionVisible}
-                  inputOverlayVisible={inputOverlayVisible}
-                  inputOverlayHint={inputOverlayHint}
-                  inputOverlay={(
-                    <InputOverlayPluginHost
-                      suppressed={interactionVisible}
-                      onVisibilityChange={handleInputOverlayVisibility}
-                    />
-                  )}
-                  onHeightChange={setMessageInputHeight}
-                />
-                <InteractionPluginHost
-                  inputHeight={messageInputHeight}
-                  onVisibilityChange={setInteractionVisible}
-                />
+                <ChatPanel />
               </div>
 
               {workspacePanelMounted && showWorkspacePanel && (

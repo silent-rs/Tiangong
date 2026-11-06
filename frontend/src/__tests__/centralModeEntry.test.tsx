@@ -23,6 +23,13 @@ const mocks = vi.hoisted(() => {
   const api = {
     getSessions: vi.fn(() => Promise.resolve([])),
     getReasoningEffort: vi.fn(() => Promise.resolve('medium')),
+    getDefaultReasoningEffort: vi.fn(() => Promise.resolve('medium')),
+    newSessionId: vi.fn(() => Promise.resolve('central-entry-1')),
+    loadSession: vi.fn(() => Promise.reject(new Error('no session'))),
+    getInputCache: vi.fn(() => Promise.resolve(null)),
+    setInputCache: vi.fn(() => Promise.resolve()),
+    removeInputCache: vi.fn(() => Promise.resolve()),
+    prewarmWorkspaceIndex: vi.fn(() => Promise.resolve()),
     getWorkspaceDir: vi.fn(() => Promise.resolve('/workspace')),
     pluginOpenEntry: vi.fn(() => Promise.resolve('<div>stub-plugin-page</div>')),
     onStreamEvent: vi.fn(() => Promise.resolve(() => {})),
@@ -101,6 +108,7 @@ const { isDesktopHost } = await import('@/api/host');
 const { useCentralMode, useCentralModeHotkey } = await import('@/hooks/useCentralMode');
 const {
   CENTRAL_MODE_STORAGE_KEY,
+  CENTRAL_SESSION_STORAGE_KEY,
   readPersistedCentralMode,
 } = await import('@/lib/centralModePreference');
 const { useStore } = await import('@/store/useStore');
@@ -150,7 +158,16 @@ function queryByTitle(title: string): HTMLElement | null {
 beforeEach(() => {
   setHost('desktop');
   localStorage.removeItem(CENTRAL_MODE_STORAGE_KEY);
-  useStore.setState({ centralMode: false });
+  localStorage.removeItem(CENTRAL_SESSION_STORAGE_KEY);
+  useStore.setState({
+    centralMode: false,
+    preCentralContext: null,
+    activeSessionId: null,
+    newConversationId: null,
+    isNewConversation: true,
+    messages: [],
+    sessions: [],
+  });
 });
 
 afterEach(() => {
@@ -186,7 +203,7 @@ describe('中枢模式布局分支', () => {
   it('默认渲染普通模式：侧栏在，中枢视图不在', async () => {
     cleanup = await mountMainApp();
     expect(textIncludes('app-sidebar')).toBe(true);
-    expect(textIncludes('天工中枢')).toBe(false);
+    expect(document.querySelector('[data-testid="central-mode-view"]')).toBeNull();
   });
 
   it('开启 centralMode 后隐藏侧栏并进入中枢视图', async () => {
@@ -195,8 +212,14 @@ describe('中枢模式布局分支', () => {
       useStore.getState().setCentralMode(true);
     });
     expect(textIncludes('app-sidebar')).toBe(false);
-    // 无上下文默认问候（设计稿 §4.2 原文）
-    expect(textIncludes('我是天工中枢')).toBe(true);
+    // 中枢视图挂载（对话链路复用 ChatPanel，空态问候由 MessageList 呈现）
+    expect(document.querySelector('[data-testid="central-mode-view"]')).not.toBeNull();
+    // 进入即建立中枢对话绑定（新对话态，绑定 ID 写入 localStorage）
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(useStore.getState().newConversationId).toBe('central-entry-1');
+    expect(localStorage.getItem(CENTRAL_SESSION_STORAGE_KEY)).toBe('central-entry-1');
   });
 
   it('非 desktop 宿主下置位 centralMode 不切换视图（双保险）', async () => {
@@ -206,7 +229,7 @@ describe('中枢模式布局分支', () => {
       useStore.getState().setCentralMode(true);
     });
     expect(textIncludes('app-sidebar')).toBe(true);
-    expect(textIncludes('我是天工中枢')).toBe(false);
+    expect(document.querySelector('[data-testid="central-mode-view"]')).toBeNull();
   });
 
   it('退出复用顶栏进入按钮（toggle）：点击后恢复普通模式', async () => {

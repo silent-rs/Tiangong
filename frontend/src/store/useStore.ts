@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
-import { persistCentralMode, readPersistedCentralMode } from '../lib/centralModePreference';
+import {
+  persistCentralSessionId,
+  persistCentralMode,
+  readCentralSessionId,
+  readPersistedCentralMode,
+} from '../lib/centralModePreference';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {
@@ -37,6 +42,9 @@ const inputCacheSyncRequestVersions = new Map<string, number>();
 let switchCommitQueue: Promise<void> = Promise.resolve();
 // loadSessions 的请求版本：旧请求晚到时放弃写入，避免覆盖较新的权威结果。
 let loadSessionsRequestVersion = 0;
+// 中枢对话切换（ensure/restore）的请求版本：快速来回切换模式时，
+// 在途的旧切换在任何 await 之后被作废，避免旧恢复覆盖新的中枢对话绑定。
+let centralConversationRequestVersion = 0;
 // 普通刷新的 in-flight 计数：任一普通请求未结束时保持 loading，
 // protective 刷新不参与计数，避免它提前清除普通刷新持有的 loading。
 let ordinaryLoadInFlight = 0;
@@ -1023,6 +1031,13 @@ export interface AppState {
    *  仅 desktop 宿主真正切换视图（布局守卫见 useCentralMode）。 */
   centralMode: boolean;
   setCentralMode: (on: boolean) => void;
+  /** 进入中枢模式前的普通模式会话上下文（内存态，不持久化）；退出中枢时恢复。 */
+  preCentralContext: { activeSessionId: string | null; newConversationId: string | null } | null;
+  /** 进入中枢模式：确保「中枢对话」（持久化绑定的 Session 或新建绑定）成为当前对话。
+   *  中枢对话复用现有 Session 持久化：首次发送创建，之后按绑定 ID 恢复。 */
+  ensureCentralConversation: () => Promise<void>;
+  /** 退出中枢模式：恢复进入前的普通模式会话（原会话或原新对话草稿）。 */
+  restoreFromCentralConversation: () => Promise<void>;
   setPendingSettingsTab: (tab: string | null) => void;
 
   // 操作
@@ -1032,7 +1047,12 @@ export interface AppState {
   // 前端在 getSessions 失败时保留旧列表，避免瞬时请求错误清空侧栏。
   loadSessions: (options?: { protective?: boolean }) => Promise<void>;
   updateSessionMeta: (sessionId: string) => Promise<void>;
-  startNewConversation: (targetCwd?: string) => Promise<void>;
+  startNewConversation: (
+    targetCwd?: string,
+    /** reuseId：不生成新 ID，直接以该 ID 进入新对话（中枢对话绑定与恢复）；
+     *  keepCurrentDraft：保留当前新对话草稿缓存（切换上下文而非丢弃）。 */
+    options?: { reuseId?: string; keepCurrentDraft?: boolean },
+  ) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   /** 向前加载一段更早的历史；返回是否加载到了新消息。 */
   loadOlderMessages: () => Promise<boolean>;
@@ -1141,6 +1161,7 @@ export const useStore = create<AppState>((set, get) => ({
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   centralMode: readPersistedCentralMode(),
+  preCentralContext: null,
   setCentralMode: (on) => {
     set({ centralMode: on });
     // 记录停留偏好：重启直接回到上次的模式（见 lib/centralModePreference）
@@ -1287,7 +1308,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 开始新对话：只预留 ID 并初始化输入缓存，首次发送时才由 Core 创建 Session。
   // targetCwd 用于在指定 workspace 分组下创建对话；不传则用全局 workspace。
-  startNewConversation: async (targetCwd?: string) => {
+  startNewConversation: async (
+    targetCwd?: string,
+    options?: { reuseId?: string; keepCurrentDraft?: boolean },
+  ) => {
     switchRequestVersion += 1;
     const requestVersion = ++newConversationRequestVersion;
     // 进行中的会话切换被新对话取代：撤下其加载提示。
@@ -1302,13 +1326,21 @@ export const useStore = create<AppState>((set, get) => ({
       set({ defaultReasoningEffort: fallbackEffort });
     }
     try {
-      const newConversationId = await api.newSessionId();
+      // reuseId：以绑定 ID 直接进入新对话（中枢对话绑定 / 恢复原草稿），不生成新 ID
+      const newConversationId = options?.reuseId ?? await api.newSessionId();
       if (requestVersion !== newConversationRequestVersion) return;
       const previousCacheId = get().newConversationId;
       const previousCacheIsSending = previousCacheId
         ? get().inputCaches[previousCacheId]?.is_sending === true
         : false;
-      if (previousCacheId && previousCacheId !== newConversationId && !previousCacheIsSending) {
+      // keepCurrentDraft：保留当前新对话草稿（中枢切换上下文，而非丢弃）
+      const dropPreviousCache = options?.keepCurrentDraft !== true;
+      if (
+        previousCacheId
+        && previousCacheId !== newConversationId
+        && !previousCacheIsSending
+        && dropPreviousCache
+      ) {
         discardInputCacheSyncQueue(previousCacheId);
         api.removeInputCache(previousCacheId).catch((error) =>
           console.error('清理旧输入缓存失败:', error),
@@ -1321,7 +1353,9 @@ export const useStore = create<AppState>((set, get) => ({
         get().reasoningEffortPerSession['__new_conversation__'] || fallbackEffort;
       set((state) => {
         const inputCaches = { ...state.inputCaches };
-        if (previousCacheId && !previousCacheIsSending) delete inputCaches[previousCacheId];
+        if (previousCacheId && !previousCacheIsSending && dropPreviousCache) {
+          delete inputCaches[previousCacheId];
+        }
         inputCaches[newConversationId] = initialCache;
         return {
           isNewConversation: true,
@@ -1429,6 +1463,74 @@ export const useStore = create<AppState>((set, get) => ({
     } finally {
       clearSwitching();
     }
+  },
+
+  // 中枢对话（POC 阶段 1）：中枢对话复用现有 Session 持久化——绑定 ID 记录在
+  // localStorage，首次发送时按该 ID 创建 Session，之后进入中枢按绑定恢复。
+  ensureCentralConversation: async () => {
+    const version = ++centralConversationRequestVersion;
+    // 重启直入等场景 sessions 可能尚未加载：先刷新一次，否则无法判定
+    // 中枢对话是否已创建（避免把已创建的中枢对话误当成新对话，历史丢失展示）。
+    await get().loadSessions();
+    if (version !== centralConversationRequestVersion) return;
+    const cur = get();
+    // 会话列表加载失败时无法确认绑定状态：放弃本次，保持现状（下次进入再试）
+    if (cur.sessionsLoadError) return;
+    // 记录进入前的普通模式上下文（幂等；退出中枢时恢复）
+    if (!cur.preCentralContext) {
+      set({
+        preCentralContext: {
+          activeSessionId: cur.activeSessionId,
+          newConversationId: cur.newConversationId,
+        },
+      });
+    }
+    const savedId = readCentralSessionId();
+    // 已创建的中枢对话：切换过去（幂等，已在其中则不动）
+    if (savedId && cur.sessions.some((session) => session.id === savedId)) {
+      if (cur.activeSessionId !== savedId) {
+        await get().switchSession(savedId);
+      }
+      return;
+    }
+    // 尚未创建，或绑定已失效（如会话被删入回收站）：以新 ID 进入新对话态，
+    // 首次发送时创建。已处于绑定 ID 的新对话态（未发送草稿）则直接沿用，
+    // 不换 ID；失效 ID 不复用，避免与回收站同 ID 数据冲突。
+    if (savedId && cur.isNewConversation && cur.newConversationId === savedId) return;
+    await get().startNewConversation(undefined, { keepCurrentDraft: true });
+    if (version !== centralConversationRequestVersion) return;
+    const boundId = get().newConversationId;
+    if (boundId) persistCentralSessionId(boundId);
+  },
+
+  restoreFromCentralConversation: async () => {
+    // 作废在途的 ensure（快速来回切换模式时旧切换不再生效）；后续切回动作
+    // 由 switchSession / startNewConversation 各自的版本控制保证时序正确。
+    ++centralConversationRequestVersion;
+    const context = get().preCentralContext;
+    set({ preCentralContext: null });
+    if (!context) return;
+    if (context.activeSessionId) {
+      const cur = get();
+      if (cur.activeSessionId === context.activeSessionId) return;
+      // 原会话仍存在（或列表未变）则切回；已被删除则回新对话
+      const exists = cur.sessions.some((session) => session.id === context.activeSessionId);
+      if (exists) {
+        await get().switchSession(context.activeSessionId);
+      } else {
+        await get().startNewConversation();
+      }
+      return;
+    }
+    if (context.newConversationId) {
+      // 进入前是新对话：恢复原草稿 ID（keepCurrentDraft 保留中枢对话自身草稿）
+      await get().startNewConversation(undefined, {
+        reuseId: context.newConversationId,
+        keepCurrentDraft: true,
+      });
+      return;
+    }
+    await get().startNewConversation();
   },
 
   loadOlderMessages: async () => {
