@@ -3,613 +3,952 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>中枢模式切换动画调试台</title>
-<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js"
-  }
-}
-</script>
+<title>中枢模式 · 转场调参台 v2</title>
+<!--
+  中枢模式切换效果 · 完全重新设计（v2）
+
+  与 v1 的区别：
+  - v1：DOM 截图像素爆散 → Three.js 粒子银河 → 拼字。多 CDN、割裂的特效拼接、截图环节不稳定。
+  - v2：单一连续时间轴 t，0 = 普通模式 / T = 中枢模式，所有视觉都是 t 的解析函数。
+        因此进入、退出、逐帧 scrub、实时调参全部复用同一套渲染，没有隐藏状态、没有异步阶段。
+  - 视觉语言从「爆炸」改为「收束」：界面失焦 → 光尘析出并沿弧线汇入中心 → 星盘展开 →
+        核心脉冲 → 中枢空间浮现。零外部依赖（纯 Canvas 2D + CSS），离线双击即可运行。
+  - 内置三套可切换的设计预设：轨道 / 极光 / 网格，各自有独立背景绘制与推荐参数。
+
+  调好后把 params 快照交给主代理，即可按同一套时间轴移植回 app。
+
+  v2.1（按用户反馈收敛，方向 B）：
+  - 两端界面 1:1 还原 app：顶栏常驻并按 StatusPanel 的隐藏规则切换（中枢态标题「中枢」、
+    隐藏侧栏开关/新对话/搜索/插件/拓展区，保留更新提示、中枢按钮、主题）；中枢主体按
+    CentralModeView 只保留默认问候 + 虚线占位框。
+  - 移除居中大标题 / CENTRAL MODE 徽标 / chips / 输入框 / 独立退出按钮；退出复用顶栏中枢按钮。
+  - 配色固化为 #b15400（主光）/ #e6beb6（辅光）/ #070a12（底色）；默认转场压到约 1.7s。
+  - v1 的激光扫 title、DOM 像素爆散、银河 1 圈、粒子拼字按用户决定不再保留；
+    旧版规格见 git HEAD:docs/central-demo.html，其 IndexSizeError 由本版零依赖引擎规避。
+-->
 <style>
+  :root {
+    --accent: #b15400;
+    --accent2: #e6beb6;
+    --bg: #070a12;
+    --ink: #e6edf6;
+    --muted: #7d8798;
+    --panel: rgba(9, 13, 22, .88);
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { height: 100%; overflow: hidden; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
   body {
-    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    background: #0b0d12; color: #e2e8f0;
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
   }
-  /* ── 模拟普通模式界面 ─────────────────────────────── */
-  #app { display: flex; flex-direction: column; height: 100%; }
-  .titlebar {
-    height: 48px; display: flex; align-items: center; gap: 8px;
-    padding: 0 16px 0 80px; border-bottom: 1px solid #1e2430;
-    background: #10131a; flex-shrink: 0;
+  canvas { position: fixed; inset: 0; display: block; pointer-events: none; }
+  #bg { z-index: 1; }
+  #fx { z-index: 3; }
+
+  /* ── 顶栏（常驻）：按 app StatusPanel 1:1 还原 ─────────── */
+  #chrome {
+    position: fixed; inset: 0 0 auto 0; height: 48px; z-index: 6;
+    display: flex; align-items: center; padding: 0 16px 0 80px;
+    border-bottom: 1px solid rgba(140,160,190,.10); background: rgba(10,13,20,.94);
   }
-  .traffic { display: flex; gap: 8px; position: absolute; left: 14px; }
-  .traffic span { width: 12px; height: 12px; border-radius: 50%; }
-  .traffic span:nth-child(1) { background: #ff5f57; }
-  .traffic span:nth-child(2) { background: #febc2e; }
-  .traffic span:nth-child(3) { background: #28c840; }
-  .icon-btn {
-    width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
-    border-radius: 6px; color: #8b93a3; cursor: pointer; font-size: 14px; user-select: none;
+  .lights { position: absolute; left: 16px; display: flex; gap: 8px; }
+  .lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+  .ic {
+    width: 26px; height: 26px; flex: 0 0 26px; border: 0; border-radius: 6px; background: transparent;
+    color: #8a94a6; font-size: 14px; display: grid; place-items: center; cursor: default;
   }
-  .icon-btn:hover { background: #1c2230; color: #e2e8f0; }
-  .title-sep { width: 1px; height: 16px; background: #2a3242; margin: 0 8px 0 0; }
-  /* 激光扫描 title */
-  #title-wrap { position: relative; display: inline-flex; align-items: center; min-width: 240px; height: 100%; }
-  .title-text { font-size: 14px; color: #cdd5e0; white-space: nowrap; }
-  .title-old-layer { position: absolute; inset: 0; display: flex; align-items: center; color: #8b93a3; }
-  .title-new-layer { position: absolute; inset: 0; display: flex; align-items: center; font-weight: 600; color: #22d3ee;
-    text-shadow: 0 0 12px rgba(34,211,238,.85), 0 0 30px rgba(167,139,250,.45); }
-  .laser-beam {
-    position: absolute; top: 50%; transform: translateY(-50%); width: 2px; height: 26px; border-radius: 2px;
-    background: linear-gradient(180deg, transparent, #22d3ee 28%, #f0f9ff 50%, #22d3ee 72%, transparent);
-    box-shadow: 0 0 10px rgba(34,211,238,.95), 0 0 26px rgba(34,211,238,.6), 0 0 44px rgba(167,139,250,.35);
+  .vr { width: 1px; height: 15px; background: rgba(140,160,190,.16); margin-right: 4px; }
+  /* 普通态控件组与中枢态 45px 占位叠放，保证标题起点始终对齐（app 的对齐规则） */
+  .bar-left { position: relative; width: 45px; flex: 0 0 45px; height: 48px; margin-right: 8px; }
+  .bar-left > div { position: absolute; inset: 0; display: flex; align-items: center; gap: 8px; }
+  .title-wrap { position: relative; min-width: 220px; height: 48px; display: flex; align-items: center; }
+  .title-wrap > span { position: absolute; left: 0; white-space: nowrap; font-size: 13px; }
+  #title-normal { color: #c8d2e0; }
+  #title-central { color: var(--accent2); font-weight: 500; opacity: 0; }
+  .bar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .normal-only { display: flex; align-items: center; gap: 8px; }
+  .update-pill { font-size: 10.5px; color: #fff; background: #0ea5e9; border-radius: 5px; padding: 2px 6px; }
+  #btn-central { font-size: 15px; cursor: pointer; }
+
+  /* ── 普通模式主体（app：侧栏 16rem + 消息区 + 输入区） ──── */
+  #app-body { position: fixed; inset: 48px 0 0 0; z-index: 2; display: flex; transform-origin: 50% 50%; }
+  .side {
+    width: 256px; flex: 0 0 256px; padding: 14px 10px; background: rgba(11,14,21,.94);
+    border-right: 1px solid rgba(140,160,190,.09); display: flex; flex-direction: column; gap: 3px;
   }
-  .laser-trail { position: absolute; inset: 0; pointer-events: none;
-    background: linear-gradient(90deg, rgba(34,211,238,0), rgba(34,211,238,.13) 70%, rgba(34,211,238,.26)); }
-  .titlebar .spacer-actions { margin-left: auto; display: flex; gap: 12px; align-items: center; color: #8b93a3; }
-  .body-row { display: flex; flex: 1; min-height: 0; }
-  .sidebar {
-    width: 230px; border-right: 1px solid #1e2430; padding: 14px 10px; background: #0d1017;
-    display: flex; flex-direction: column; gap: 4px; flex-shrink: 0;
+  .search {
+    height: 32px; border: 1px solid rgba(140,160,190,.11); border-radius: 7px; margin-bottom: 10px;
+    display: flex; align-items: center; padding: 0 10px; font-size: 12px; color: #626c7d;
   }
-  .side-item { padding: 8px 10px; border-radius: 8px; font-size: 13px; color: #aeb7c6; cursor: default; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .side-item.active { background: #182234; color: #e2e8f0; }
-  .side-group { font-size: 11px; color: #5b6474; padding: 12px 10px 4px; }
-  .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #0b0d12; }
-  .messages { flex: 1; overflow: hidden; padding: 26px 10%; display: flex; flex-direction: column; gap: 18px; }
-  .bubble { max-width: 76%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.65; }
-  .bubble.user { align-self: flex-end; background: #1d4ed8aa; }
-  .bubble.ai { align-self: flex-start; background: #161b26; border: 1px solid #232a38; }
-  .input-bar { margin: 0 10% 22px; border: 1px solid #232a38; border-radius: 12px; padding: 12px 16px;
-    color: #5b6474; font-size: 13px; background: #10131a; }
-  /* ── 中枢模式 UI ─────────────────────────────────── */
-  #central-ui {
-    position: fixed; inset: 48px 0 0 0; display: none; flex-direction: column;
-    align-items: center; justify-content: center; gap: 22px; opacity: 0;
-    transition: opacity .5s ease; z-index: 5;
+  .grp { font-size: 10.5px; color: #5c6575; padding: 8px 10px 5px; letter-spacing: .09em; }
+  .item {
+    height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 10px; border-radius: 7px;
+    font-size: 12.5px; color: #96a1b2; white-space: nowrap; overflow: hidden;
   }
-  #central-ui .card {
-    max-width: 560px; padding: 34px 40px; border-radius: 18px; text-align: center;
-    border: 1px solid rgba(34,211,238,.22); background: rgba(13,16,23,.82);
-    box-shadow: 0 0 60px rgba(34,211,238,.08) inset;
+  .item.on { background: rgba(59,130,246,.13); color: #dbe5f2; }
+  .item .ava, .ava2 {
+    width: 20px; height: 20px; flex: 0 0 20px; border-radius: 5px; display: grid; place-items: center;
+    font-size: 10px; background: rgba(140,160,190,.13); color: #aab6c6;
   }
-  #central-ui h2 { font-size: 17px; font-weight: 600; margin-bottom: 12px; color: #cfe9f5; }
-  #central-ui p { font-size: 13.5px; line-height: 1.9; color: #8b93a3; }
-  #central-ui .exit {
-    margin-top: 4px; border: 1px solid #2a3242; background: transparent; color: #aeb7c6;
-    padding: 8px 18px; border-radius: 9px; cursor: pointer; font-size: 13px;
+  .item .tick { margin-left: auto; color: #5c6575; }
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; background: rgba(9,11,17,.72); }
+  .stream { flex: 1; padding: 6vh 9% 2vh; display: flex; flex-direction: column; gap: 22px; overflow: hidden; }
+  .msg { max-width: 68%; padding: 11px 15px; border-radius: 12px; font-size: 13.5px; line-height: 1.7; }
+  .msg.me { align-self: flex-end; background: rgba(37,99,235,.34); border: 1px solid rgba(96,165,250,.16); color: #dbe8fb; }
+  .row.ai { display: flex; gap: 11px; align-items: flex-start; }
+  .ava2 { margin-top: 3px; background: rgba(34,211,238,.12); color: #7fe3f5; }
+  .bubble { max-width: 74%; padding: 13px 16px; border-radius: 12px; border: 1px solid rgba(140,160,190,.12); background: rgba(21,26,36,.9); }
+  .bubble p { font-size: 13.5px; color: #c3cede; margin-bottom: 12px; }
+  .line { height: 8px; border-radius: 4px; background: rgba(140,160,190,.11); margin-bottom: 8px; }
+  .composer {
+    margin: 0 9% 26px; height: 48px; border: 1px solid rgba(140,160,190,.14); border-radius: 11px;
+    background: rgba(16,20,29,.9); display: flex; align-items: center; padding: 0 10px 0 16px;
+    font-size: 13px; color: #5f697a;
   }
-  #central-ui .exit:hover { border-color: #22d3eeaa; color: #22d3ee; }
-  /* ── three.js 叠加层与暗幕 ────────────────────────── */
-  #gl { position: fixed; inset: 0; z-index: 40; pointer-events: none; }
-  #dim { position: fixed; inset: 0; z-index: 30; pointer-events: none; background: #05070d; opacity: 0; }
-  #header-glow {
-    position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 45; overflow: hidden; pointer-events: none; opacity: 0;
+  .composer button { margin-left: auto; width: 28px; height: 28px; border: 0; border-radius: 7px; background: rgba(140,160,190,.12); color: #94a0b2; }
+
+  /* ── 中枢模式主体：按 app CentralModeView 1:1 还原 ─────── */
+  #central-body {
+    position: fixed; inset: 48px 0 0 0; z-index: 4;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 24px; padding: 0 32px; opacity: 0; pointer-events: none; transform-origin: 50% 50%;
   }
-  #header-glow .band {
-    position: absolute; inset: 0 auto 0 0; width: 36%;
-    background: linear-gradient(90deg, transparent, rgba(34,211,238,.10) 20%, rgba(34,211,238,.34) 55%, rgba(167,139,250,.22) 80%, transparent);
-    box-shadow: 0 8px 32px rgba(34,211,238,.30);
+  .c-greet { max-width: 560px; text-align: center; font-size: 13.5px; line-height: 1.9; color: #9aa8bb; white-space: pre-line; }
+  .c-placeholder {
+    width: min(640px, 84vw); padding: 16px; border: 1px dashed rgba(140,160,190,.22);
+    border-radius: 8px; text-align: center; font-size: 13px; color: #6f7d92;
   }
-  @keyframes sweep { 0% { transform: translateX(-110%); opacity: 0; } 12% { opacity: 1; } 88% { opacity: 1; } 100% { transform: translateX(110%); opacity: 0; } }
-  .sweeping { animation: sweep 820ms cubic-bezier(.4,.05,.3,1) 2 both; }
-  /* ── 控制台 ───────────────────────────────────────── */
-  #hud { position: fixed; right: 12px; bottom: 12px; z-index: 60; display: flex; gap: 8px; }
-  #hud button {
-    border: 1px solid #2a3242; background: #12161fdd; color: #cdd5e0; padding: 8px 14px;
-    border-radius: 9px; cursor: pointer; font-size: 13px; backdrop-filter: blur(6px);
+
+  /* ── 调参台 ───────────────────────────────────────────── */
+  #panel {
+    position: fixed; right: 14px; top: 14px; bottom: 14px; width: 296px; z-index: 30;
+    background: var(--panel); border: 1px solid rgba(140,160,190,.14); border-radius: 14px;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 24px 70px rgba(0,0,0,.48);
+    display: flex; flex-direction: column; overflow: hidden; font-size: 11.5px;
+    transition: transform .28s cubic-bezier(.2,.7,.3,1), opacity .28s;
   }
-  #hud button:hover { border-color: #22d3ee88; color: #22d3ee; }
-  #hud button.primary { background: #0e7490; border-color: #22d3ee; color: #f0fdff; }
-  .hint { position: fixed; left: 14px; bottom: 12px; z-index: 60; font-size: 12px; color: #5b6474; }
+  #panel.hidden { transform: translateX(calc(100% + 24px)); opacity: 0; pointer-events: none; }
+  .p-head { padding: 14px 15px 11px; border-bottom: 1px solid rgba(140,160,190,.10); display: flex; align-items: center; }
+  .p-head .brand { font-size: 12.5px; letter-spacing: .06em; color: #dce6f2; }
+  .p-head .brand small { font-size: 9.5px; color: var(--accent); border: 1px solid rgba(34,211,238,.3); border-radius: 4px; padding: 1px 5px; margin-left: 7px; letter-spacing: .04em; }
+  .p-head button { margin-left: auto; background: transparent; border: 0; color: #6f7d92; cursor: pointer; font-size: 14px; }
+  .p-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 12px 15px 16px; scrollbar-width: thin; scrollbar-color: rgba(140,160,190,.22) transparent; }
+  .p-body::-webkit-scrollbar { width: 6px; } .p-body::-webkit-scrollbar-thumb { background: rgba(140,160,190,.22); border-radius: 3px; }
+  .sec-label { font-size: 9.5px; letter-spacing: .16em; color: #5e6a7d; margin: 4px 0 8px; }
+  .presets { display: flex; gap: 6px; margin-bottom: 13px; }
+  .presets button {
+    flex: 1; padding: 8px 2px 7px; border-radius: 8px; cursor: pointer; text-align: center;
+    border: 1px solid rgba(140,160,190,.14); background: rgba(255,255,255,.02); color: #93a0b3;
+    font-size: 11px; line-height: 1.5;
+  }
+  .presets button b { display: block; font-size: 12px; font-weight: 500; color: #c9d5e4; }
+  .presets button span { font-size: 8.5px; letter-spacing: .1em; opacity: .7; }
+  .presets button.on { border-color: var(--accent); background: rgba(34,211,238,.09); color: var(--accent); }
+  .presets button.on b { color: #e6fbff; }
+  .transport { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 12px; }
+  .transport button {
+    padding: 7px 0; border: 1px solid rgba(140,160,190,.14); border-radius: 7px; cursor: pointer;
+    background: rgba(255,255,255,.02); color: #a8b4c5; font-size: 10.5px;
+  }
+  .transport button:hover { border-color: var(--accent); color: var(--accent); }
+  .transport button.on { background: rgba(34,211,238,.14); border-color: var(--accent); color: #dcfbff; }
+  .extra { display: flex; gap: 6px; margin-bottom: 12px; }
+  .extra button {
+    flex: 1; padding: 6px 0; border: 1px dashed rgba(140,160,190,.22); border-radius: 7px;
+    background: transparent; color: #8b99ad; cursor: pointer; font-size: 10.5px;
+  }
+  .extra button:hover { border-style: solid; border-color: var(--accent); color: var(--accent); }
+  .timeline { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .timeline label { color: #7e8b9e; white-space: nowrap; }
+  .timeline b { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 500; min-width: 58px; text-align: right; }
+  details { border-top: 1px solid rgba(140,160,190,.09); padding: 9px 0 10px; }
+  details:first-of-type { border-top: 0; }
+  summary { cursor: pointer; list-style: none; font-size: 9.5px; letter-spacing: .14em; color: #6b7a8e; padding: 3px 0 9px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸ "; color: var(--accent); }
+  details[open] summary::before { content: "▾ "; }
+  .ctl { display: grid; grid-template-columns: 88px 1fr 44px; align-items: center; gap: 8px; margin: 7px 0; }
+  .ctl > span { color: #9aa7b9; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ctl > b { font-size: 10.5px; font-weight: 400; color: #7f8da1; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 3px; border-radius: 3px;
+    background: rgba(140,160,190,.2); outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 8px var(--accent); cursor: pointer;
+  }
+  input[type=range]::-moz-range-thumb { width: 11px; height: 11px; border: 0; border-radius: 50%; background: var(--accent); }
+  input[type=color] { width: 100%; height: 20px; padding: 0; border: 1px solid rgba(140,160,190,.2); border-radius: 4px; background: transparent; cursor: pointer; }
+  .p-foot { flex: 0 0 auto; padding: 9px 15px 11px; border-top: 1px solid rgba(140,160,190,.10); color: #69778b; font-size: 10px; line-height: 1.7; }
+  .p-foot .stats { display: flex; gap: 10px; color: #90a0b4; font-variant-numeric: tabular-nums; margin-bottom: 3px; }
+  .p-foot .stats i { font-style: normal; color: var(--accent); }
+  .about { font-size: 10.5px; line-height: 1.75; color: #7d8b9f; padding: 2px 0 4px; }
+  .about em { color: var(--accent); font-style: normal; }
+  #show-panel {
+    position: fixed; right: 14px; bottom: 14px; z-index: 30; display: none;
+    padding: 9px 14px; border: 1px solid rgba(140,160,190,.2); border-radius: 9px;
+    background: var(--panel); color: #b8c5d6; cursor: pointer; font-size: 11.5px;
+    backdrop-filter: blur(14px);
+  }
+  #show-panel.show { display: block; }
+  #hud {
+    position: fixed; left: 16px; bottom: 14px; z-index: 20; font-size: 10.5px;
+    color: #5d6a7d; letter-spacing: .03em; line-height: 1.7; pointer-events: none;
+  }
+  #hud kbd { color: #8d9cb0; border: 1px solid rgba(140,160,190,.18); border-radius: 4px; padding: 1px 5px; font: inherit; }
+  #toast {
+    position: fixed; left: 50%; top: 26px; transform: translate(-50%, -14px); z-index: 40;
+    padding: 8px 16px; border: 1px solid rgba(34,211,238,.3); border-radius: 8px;
+    background: rgba(9,13,22,.9); color: #b6ecf7; font-size: 11.5px; letter-spacing: .04em;
+    opacity: 0; transition: opacity .22s, transform .22s; pointer-events: none;
+  }
+  #toast.on { opacity: 1; transform: translate(-50%, 0); }
 </style>
 </head>
 <body>
 
-<!-- 模拟普通模式界面（粒子采样源） -->
-<div id="app">
-  <header class="titlebar">
-    <div class="traffic"><span></span><span></span><span></span></div>
-    <div class="icon-btn" id="btn-sidebar">▤</div>
-    <div class="icon-btn" title="新对话">✎</div>
-    <div class="title-sep"></div>
-    <div id="title-wrap">
-      <span class="title-text" id="title-anchor">新对话</span>
+<canvas id="bg"></canvas>
+<canvas id="fx"></canvas>
+
+<!-- 普通模式 -->
+<!-- 顶栏：常驻，普通/中枢模式共用（对应 app StatusPanel） -->
+<header id="chrome">
+  <div class="lights"><i></i><i></i><i></i></div>
+  <div class="bar-left">
+    <div id="bar-left-normal">
+      <button class="ic" title="切换侧边栏">▤</button>
+      <span class="vr"></span>
     </div>
-    <div class="spacer-actions">
-      <span class="icon-btn" id="btn-central" title="进入中枢模式（Cmd/Ctrl+Shift+J）" style="color:#22d3ee">✦</span>
-      <span class="icon-btn" title="搜索消息">⌕</span>
-      <span class="icon-btn" title="插件管理">⬡</span>
-      <span class="icon-btn" title="主题">◐</span>
+    <div id="bar-spacer" aria-hidden="true"></div>
+  </div>
+  <div class="title-wrap">
+    <span id="title-normal">产品周报 · 会话</span>
+    <span id="title-central">中枢</span>
+  </div>
+  <div class="bar-right">
+    <span class="update-pill">v0.10.2</span>
+    <button class="ic" id="btn-central" title="进入中枢模式 (Cmd/Ctrl+Shift+J)">✦</button>
+    <div class="normal-only" id="bar-right-normal">
+      <button class="ic" title="搜索消息">⌕</button>
+      <button class="ic" title="插件管理">▦</button>
+      <button class="ic" title="拓展区">⊞</button>
     </div>
-  </header>
-  <div class="body-row" id="main-area">
-    <aside class="sidebar" id="sidebar">
-      <div class="side-item active">支付服务超时排查</div>
-      <div class="side-item">桌面客户端构建失败分析</div>
-      <div class="side-item">数据库迁移方案评估</div>
-      <div class="side-group">payment-service</div>
-      <div class="side-item">慢查询日志整理</div>
-      <div class="side-item">连接池指标汇总</div>
-      <div class="side-group">client-app</div>
-      <div class="side-item">构建脚本修复</div>
-    </aside>
-    <main class="chat">
-      <div class="messages">
-        <div class="bubble user">帮我看看支付服务最近为什么这么慢，先不要改代码。</div>
-        <div class="bubble ai">好的，我先安排一次只读分析：检查最近三天的超时日志、请求链路和数据库慢查询。如果找到明确原因，我会给你修复建议和可复核的证据。</div>
-        <div class="bubble ai">初步结论：超时集中在数据库连接池等待，staging 日志显示高峰期等待数持续超过池上限。</div>
-        <div class="bubble user">那修复方案呢？风险怎么控制？</div>
-      </div>
-      <div class="input-bar">你想让我做什么？</div>
-    </main>
+    <button class="ic" title="主题">◐</button>
   </div>
+</header>
+
+<!-- 普通模式主体 -->
+<div id="app-body">
+  <aside class="side">
+    <div class="search">⌕ &nbsp;搜索会话</div>
+    <div class="grp">今天</div>
+    <div class="item on"><span class="ava">周</span>产品周报整理<span class="tick">·</span></div>
+    <div class="item"><span class="ava">接</span>接口联调记录</div>
+    <div class="item"><span class="ava">设</span>设计稿评审</div>
+    <div class="grp">更早</div>
+    <div class="item"><span class="ava">迁</span>数据库迁移方案</div>
+    <div class="item"><span class="ava">发</span>发布清单 v2.3</div>
+    <div class="item"><span class="ava">周</span>上周复盘</div>
+  </aside>
+  <section class="chat">
+    <div class="stream">
+      <div class="msg me">帮我整理一下这周的进展，按项目分组。</div>
+      <div class="row ai"><div class="ava2">天</div><div class="bubble">
+        <p>好的，已汇总 3 个项目的进展：</p>
+        <div class="line" style="width: 88%"></div><div class="line" style="width: 72%"></div><div class="line" style="width: 81%"></div>
+      </div></div>
+      <div class="msg me">再加一版给管理层的摘要，简短一点。</div>
+    </div>
+    <div class="composer"><span>输入消息…</span><button>↑</button></div>
+  </section>
 </div>
 
-<!-- 中枢模式 UI -->
-<div id="central-ui">
-  <div class="card">
-    <h2>你好，我是天工中枢</h2>
-    <p>你可以直接告诉我目标，我会判断需要哪个 Workspace、<br>安排后台工作、跟踪进展，并在关键节点向你汇报。</p>
+<!-- 中枢模式主体（对应 app CentralModeView：默认问候 + 虚线占位） -->
+<div id="central-body">
+  <p class="c-greet">你好，我是天工中枢。<br>你可以直接告诉我目标，我会判断需要哪个 Workspace、安排后台工作、跟踪进展，并在关键节点向你汇报。</p>
+  <div class="c-placeholder">中枢对话（POC 骨架）——消息链路与后台工作随后续片接入</div>
+</div>
+
+<!-- 调参台 -->
+<aside id="panel">
+  <div class="p-head">
+    <div class="brand">中枢 · 转场调参台 <small>v2</small></div>
+    <button id="hide-panel" title="收起 (H)">⤢</button>
   </div>
-  <button class="exit" id="btn-exit">← 退出中枢模式（回到普通视图）</button>
-</div>
+  <div class="p-body">
+    <div class="sec-label">设计预设 / PRESET</div>
+    <div class="presets" id="presets"></div>
+    <div class="sec-label">播放 / TRANSPORT</div>
+    <div class="transport" id="transport">
+      <button data-act="play">▶ 进入</button><button data-act="exit">↩ 退出</button>
+      <button data-act="loop">⟳ 循环</button><button data-act="replay">⇄ 重播</button>
+    </div>
+    <div class="extra">
+      <button id="copy-link" title="把当前预设、时刻与全部参数编码进链接">⧉ 复制参数链接</button>
+      <button id="reset-params" title="还原当前预设的推荐参数">↺ 还原预设</button>
+    </div>
+    <div class="timeline">
+      <label>时间轴</label><input type="range" id="scrub" min="0" max="3" step="0.01" value="0"><b id="scrub-val">0.00s</b>
+    </div>
+    <div class="about" style="margin-bottom:6px">拖动时间轴可<em>逐帧查看</em>任意时刻；所有效果都是时间的解析函数，调参立即生效、无需重播。</div>
+    <div id="controls"></div>
+    <details><summary>设计说明 / ABOUT</summary><div class="about">
+      <em>轨道</em>：精密星盘，光尘沿弧线汇入中心，同心轨道逐环展开。<br>
+      <em>极光</em>：无硬线条，柔和光带缓慢流动，光尘像雪一样上浮收束。<br>
+      <em>网格</em>：等距细线从中心生长，粒子沿直线折线归位，最克制。<br>
+      三套预设共用一条时间轴：失焦 → 展开 → 汇聚 → 脉冲 → 浮现；退出即时间倒放。<br>
+      两端界面按 app 现版还原：顶栏常驻（中枢态标题「中枢」、隐藏侧栏/搜索/插件/拓展区），
+      中枢主体为默认问候 + 虚线占位框，退出复用顶栏中枢按钮；默认转场约 1.7s。
+    </div></details>
+  </div>
+  <div class="p-foot">
+    <div class="stats"><span>状态 <i id="st-phase">idle</i></span><span><i id="st-t">0.00</i>s / <i id="st-T">0.00</i>s</span><span><i id="st-fps">60</i> fps</span><span>粒子 <i id="st-n">0</i></span><span>错误 <i id="st-err">0</i></span></div>
+    <div><kbd>Space</kbd> 进入/退出 · <kbd>R</kbd> 重播 · <kbd>1/2/3</kbd> 预设 · <kbd>←/→</kbd> 逐帧 · <kbd>G</kbd> 换粒子种子 · <kbd>H</kbd> 收起</div>
+  </div>
+</aside>
+<button id="show-panel">调参台 · 展开</button>
 
-<div id="dim"></div>
-<canvas id="gl"></canvas>
-<div id="header-glow"><div class="band"></div></div>
+<div id="hud">中枢模式切换 · 界面按 app 现版还原　|　顶栏中枢按钮进入/退出　|　Space 播放</div>
+<div id="toast"></div>
 
-<div id="hud">
-  <button class="primary" id="btn-play">▶ 播放进入动画</button>
-  <button id="btn-exit-play">◀ 播放退出动画</button>
-  <button id="btn-reset">重置</button>
-</div>
-<div class="hint">右侧 lil-gui 面板实时调参（银河参数 / 时序 / 相机） · 满意后把参数告诉我移植回 app</div>
+<script>
+(() => {
+  'use strict';
+  const $ = s => document.querySelector(s);
+  const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+  const E = {
+    soft: x => x * x * (3 - 2 * x),
+    out: x => 1 - Math.pow(1 - x, 3),
+    inOut: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  };
+  const TAU = Math.PI * 2;
 
-<script type="module">
-import * as THREE from 'three';
-import GUI from 'lil-gui';
+  /* ── 颜色 ────────────────────────────────────────────── */
+  function rgb(hex) {
+    const h = String(hex).replace('#', '');
+    const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function rgba(hex, a) { const [r, g, b] = rgb(hex); return `rgba(${r},${g},${b},${clamp(a)})`; }
+  function mixHex(a, b, t) {
+    const A = rgb(a), B = rgb(b);
+    return `rgb(${Math.round(lerp(A[0], B[0], t))},${Math.round(lerp(A[1], B[1], t))},${Math.round(lerp(A[2], B[2], t))})`;
+  }
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
 
-/* ═══════════════════ 参数（可调） ═══════════════════ */
-const P = {
-  // 银河（Three.js Galaxy Generator 方案）
-  count: 60000,
-  galaxyRadius: 5.2,
-  branches: 4,
-  spin: 1.05,
-  randomness: 0.24,
-  randomnessPower: 3.0,
-  insideColor: '#ff6030',
-  outsideColor: '#1b3984',
-  pointSize: 0.028,
-  cameraTilt: 0.42,        // 弧度，盘面倾角（0=正俯视）
-  cameraDist: 8.6,
-  // 时序（ms）
-  tTitleScan: 2000,
-  tBurst: 800,
-  tGalaxyIn: 500,
-  tSpin: 2600,             // 银河期（外圈整 1 圈）
-  tAssemble: 1500,
-  tHold: 600,
-  tFade: 500,
-};
+  /* ── 三套设计预设（完整推荐参数） ──────────────────────── */
+  const PRESETS = {
+    orbit: {
+      name: '轨道', en: 'ORBIT', desc: '精密星盘 · 光尘弧线收束',
+      params: {
+        bg: '#070a12', accent: '#b15400', accent2: '#e6beb6',
+        out: .45, open: .82, flow: 1.05, pulse: .38, inD: .52, lag: .55, exitRatio: .62, speed: 1,
+        particles: 520, curvature: .34, tail: .085, size: 1.5, stagger: .34,
+        coreRadius: 70, glow: .82, ripple: 170, breath: .55, stars: 150,
+        orbits: 4, tilt: .42, orbitRadius: 330, orbitSpeed: .28, arc: .55, orbitDots: 5,
+        bands: 4, amplitude: 42, wavelength: 190, flowSpeed: .5, blur: 26,
+        gridGap: 46, gridLine: 1, persp: .35, growth: 1,
+      },
+    },
+    aurora: {
+      name: '极光', en: 'AURORA', desc: '柔光流动 · 雪花上浮',
+      params: {
+        bg: '#070a12', accent: '#b15400', accent2: '#e6beb6',
+        out: .52, open: .95, flow: 1.22, pulse: .46, inD: .60, lag: .55, exitRatio: .7, speed: 1,
+        particles: 380, curvature: .14, tail: .14, size: 1.9, stagger: .46,
+        coreRadius: 82, glow: .95, ripple: 140, breath: .8, stars: 90,
+        orbits: 3, tilt: .42, orbitRadius: 330, orbitSpeed: .2, arc: .5, orbitDots: 4,
+        bands: 5, amplitude: 58, wavelength: 240, flowSpeed: .38, blur: 42,
+        gridGap: 46, gridLine: 1, persp: .35, growth: 1,
+      },
+    },
+    lattice: {
+      name: '网格', en: 'LATTICE', desc: '细线生长 · 直线归位',
+      params: {
+        bg: '#070a12', accent: '#b15400', accent2: '#e6beb6',
+        out: .38, open: .70, flow: .90, pulse: .32, inD: .46, lag: .50, exitRatio: .55, speed: 1,
+        particles: 640, curvature: .05, tail: .05, size: 1.2, stagger: .28,
+        coreRadius: 60, glow: .6, ripple: 200, breath: .25, stars: 60,
+        orbits: 3, tilt: .42, orbitRadius: 330, orbitSpeed: .2, arc: .5, orbitDots: 4,
+        bands: 3, amplitude: 30, wavelength: 190, flowSpeed: .4, blur: 20,
+        gridGap: 44, gridLine: 1, persp: .5, growth: 1,
+      },
+    },
+  };
 
-/* ═══════════════════ three 基础 ═══════════════════ */
-const canvas = document.getElementById('gl');
-const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 100);
+  /* ── 控件 schema ──────────────────────────────────────── */
+  const G = (group, items) => ({ group, items });
+  const R = (k, l, min, max, step, unit = '') => ({ k, l, min, max, step, unit });
+  const C = (k, l) => ({ k, l, type: 'color' });
+  const COMMON = [
+    G('时序 / TIMING (s)', [
+      R('out', '失焦退场', .2, 2, .01, 's'), R('open', '空间展开', .3, 3, .01, 's'),
+      R('flow', '光尘汇聚', .4, 3.5, .01, 's'), R('pulse', '核心脉冲', .2, 2, .01, 's'),
+      R('inD', '中枢浮现', .3, 2.5, .01, 's'), R('lag', '阶段重叠', 0, .8, .01),
+      R('exitRatio', '退出时长比', .25, 1, .01), R('speed', '播放速度', .25, 2, .01, '×'),
+    ]),
+    G('光尘 / PARTICLES', [
+      R('particles', '数量', 60, 2000, 10), R('curvature', '轨迹曲率', 0, 1, .01),
+      R('tail', '尾迹长度', 0, .3, .005), R('size', '粒径', .4, 4, .1),
+      R('stagger', '错峰', 0, .8, .01), R('stars', '星点数量', 0, 400, 10),
+    ]),
+    G('核心 / CORE', [
+      R('coreRadius', '半径', 30, 160, 1), R('glow', '辉光', 0, 1.6, .01),
+      R('ripple', '涟漪范围', 0, 500, 5), R('breath', '呼吸幅度', 0, 1.5, .01),
+    ]),
+    G('配色 / PALETTE', [C('bg', '底色'), C('accent', '主光'), C('accent2', '辅光')]),
+  ];
+  const SPECIFIC = {
+    orbit: G('轨道 / ORBIT', [
+      R('orbits', '轨道数', 1, 8, 1), R('tilt', '盘面倾角', .1, .9, .01),
+      R('orbitRadius', '最外半径', 120, 620, 5), R('orbitSpeed', '公转速度', 0, 1.5, .01),
+      R('arc', '亮弧长度', .05, 1, .01), R('orbitDots', '每轨光点', 0, 14, 1),
+    ]),
+    aurora: G('极光 / AURORA', [
+      R('bands', '光带数', 1, 9, 1), R('amplitude', '波幅', 5, 140, 1),
+      R('wavelength', '波长', 60, 520, 5), R('flowSpeed', '流动速度', 0, 2, .01),
+      R('blur', '柔化', 0, 80, 1),
+    ]),
+    lattice: G('网格 / LATTICE', [
+      R('gridGap', '间距', 18, 110, 1), R('gridLine', '线宽', .4, 3, .1),
+      R('persp', '透视强度', 0, 1.5, .01), R('growth', '生长密度', .4, 2, .01),
+    ]),
+  };
 
-function applyCamera() {
-  const d = P.cameraDist;
-  camera.position.set(0, Math.sin(P.cameraTilt) * d, Math.cos(P.cameraTilt) * d);
-  camera.lookAt(0, 0, 0);
-}
-function resize() {
-  const w = innerWidth, h = innerHeight;
-  renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}
-addEventListener('resize', resize); resize(); applyCamera();
+  /* ── 状态 ────────────────────────────────────────────── */
+  let params = { ...PRESETS.orbit.params };
+  const state = { preset: 'orbit', t: 0, dir: 1, phase: 'idle', loop: false, hold: 0, seed: 20241106, hidden: false };
+  const errors = [];
+  // 只统计本页脚本异常：宿主/浏览器注入脚本在 file:// 下产生的 rejection
+  // （例如跨域 fetch）不属于 demo 自身错误，避免状态栏「错误」计数误报。
+  window.addEventListener('error', e => {
+    if (e.filename && !/central-demo\.html/.test(e.filename)) return;
+    errors.push(String(e.message));
+  });
+  window.addEventListener('unhandledrejection', e => {
+    const msg = String((e.reason && e.reason.message) || e.reason);
+    if (/__centralDemo|central-demo\.html/.test(msg)) errors.push('rejection: ' + msg);
+  });
 
-/* 屏幕 → 世界坐标（拼字与采样源定位，按相机 fov/距离换算） */
-function screenToWorld(sx, sy, zPlane = 0) {
-  const dist = camera.position.z - zPlane;
-  const vFov = (camera.fov * Math.PI) / 180;
-  const worldH = 2 * Math.tan(vFov / 2) * dist;
-  const k = worldH / innerHeight;
-  return new THREE.Vector3((sx - innerWidth / 2) * k, -(sy - innerHeight / 2) * k, zPlane);
-}
+  const bg = $('#bg'), fx = $('#fx');
+  let B = { ctx: null, w: 1, h: 1 }, F = { ctx: null, w: 1, h: 1 };
+  function fit(cv, obj) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+    cv.width = Math.max(1, Math.round(w * dpr)); cv.height = Math.max(1, Math.round(h * dpr));
+    cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    obj.ctx = cv.getContext('2d'); obj.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    obj.w = w; obj.h = h;
+  }
+  function resize() { fit(bg, B); fit(fx, F); buildParticles(); }
 
-/* ═══════════════════ 粒子系统（morph 三态） ═══════════════════ */
-const MAX = 200000;
-let geometry = null, material = null, points = null;
-const buf = {
-  start: new Float32Array(MAX * 3), velocity: new Float32Array(MAX * 3),
-  galaxy: new Float32Array(MAX * 3), target: new Float32Array(MAX * 3),
-  cStart: new Float32Array(MAX * 3), cGalaxy: new Float32Array(MAX * 3), cTarget: new Float32Array(MAX * 3),
-  scale: new Float32Array(MAX), delay: new Float32Array(MAX), twinkle: new Float32Array(MAX),
-};
+  /* ── 时间轴：5 段带重叠，T = 最晚一段结束 ─────────────── */
+  function segments() {
+    const defs = [['out', params.out], ['open', params.open], ['flow', params.flow], ['pulse', params.pulse], ['in', params.inD]];
+    let cursor = 0; const s = {};
+    for (const [k, len] of defs) { s[k] = { start: cursor, len: Math.max(.01, len) }; cursor += s[k].len * (1 - params.lag); }
+    const T = Math.max(...Object.values(s).map(v => v.start + v.len));
+    return { s, T: Math.max(.1, T) };
+  }
+  function u(key, t, info) { const seg = info.s[key]; return clamp((t - seg.start) / seg.len); }
 
-/** 界面像素采样（html2canvas，失败回退随机网格） */
-async function captureSeeds(target) {
-  try {
-    const shot = await html2canvas(document.getElementById('main-area'), {
-      logging: false, useCORS: true, backgroundColor: null,
-      scale: Math.min(devicePixelRatio, 1.5),
+  /* ── 粒子与星点（归一化坐标，resize 自动适配） ────────── */
+  let particles = [], stars = [];
+  const SOURCES = [
+    { x: .01, y: .07, w: .19, h: .87 },    // 侧栏（app 16rem）
+    { x: .24, y: .10, w: .70, h: .66 },    // 消息区
+    { x: .24, y: .80, w: .70, h: .14 },    // 输入区
+    { x: .02, y: .055, w: .96, h: .02 },   // 顶栏下缘（顶栏常驻，粒子从其下缘析出）
+  ];
+  function sampleStart(rnd, preset) {
+    let r;
+    if (preset === 'aurora') r = rnd() < .7 ? SOURCES[1] : SOURCES[2];
+    else if (preset === 'lattice') r = SOURCES[Math.floor(rnd() * 3)];
+    else r = SOURCES[Math.floor(rnd() * SOURCES.length)];
+    let x = r.x + rnd() * r.w, y = r.y + rnd() * r.h;
+    if (preset === 'lattice') { const g = params.gridGap / Math.max(1, B.w); x = Math.round(x / g) * g; y = Math.round(y / g) * g; }
+    return [x, y];
+  }
+  function buildParticles() {
+    const rnd = mulberry32(state.seed);
+    const n = Math.max(0, Math.round(params.particles));
+    particles = Array.from({ length: n }, () => {
+      const [sx, sy] = sampleStart(rnd, state.preset);
+      return {
+        sx, sy, dir: rnd() < .5 ? -1 : 1, delay: rnd() * params.stagger,
+        size: (.55 + rnd() * .9) * params.size, bright: .35 + rnd() * .65,
+        alt: rnd() < .24, wobble: rnd() * TAU, speed: .82 + rnd() * .36,
+      };
     });
-    const ctx = shot.getContext('2d');
-    const rect = document.getElementById('main-area').getBoundingClientRect();
-    const kx = rect.width / shot.width, ky = rect.height / shot.height;
-    const data = ctx.getImageData(0, 0, shot.width, shot.height).data;
-    const list = [];
-    for (let y = 0; y < shot.height; y += 3) {
-      for (let x = 0; x < shot.width; x += 3) {
-        const i = (y * shot.width + x) * 4;
-        if (data[i + 3] < 40) continue;
-        list.push([rect.left + x * kx, rect.top + y * ky, data[i], data[i + 1], data[i + 2]]);
+    stars = Array.from({ length: Math.round(params.stars) }, () => ({ x: rnd(), y: rnd(), r: .5 + rnd() * 1.3, ph: rnd() * TAU, b: .3 + rnd() * .7 }));
+    $('#st-n').textContent = String(n);
+  }
+
+  /* ── 背景绘制：星场 / 预设空间 / 核心 ─────────────────── */
+  function drawStarfield(ctx, w, h, clock, ambient) {
+    ctx.save();
+    for (const s of stars) {
+      const a = (.10 + .42 * Math.abs(Math.sin(clock * .55 + s.ph))) * s.b * ambient;
+      if (a < .008) continue;
+      ctx.fillStyle = rgba(params.accent, a);
+      ctx.fillRect(s.x * w, s.y * h, s.r, s.r);
+    }
+    ctx.restore();
+  }
+
+  function drawOrbit(ctx, cx, cy, vis, ambient, clock) {
+    const n = Math.max(1, Math.round(params.orbits));
+    ctx.save(); ctx.translate(cx, cy);
+    for (let i = 0; i < n; i++) {
+      const f = n === 1 ? 1 : i / (n - 1);
+      const open = E.out(clamp(vis * 1.35 - i * .07));
+      const R = params.orbitRadius * (.32 + .68 * f) * open;
+      if (R < 2) continue;
+      const ry = Math.max(1, R * params.tilt);
+      const a = (.115 + .065 * (1 - f)) * ambient * open;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = rgba(params.accent, a);
+      ctx.beginPath(); ctx.ellipse(0, 0, R, ry, 0, 0, TAU); ctx.stroke();
+      // 亮弧段（扫描指针）
+      const a0 = clock * params.orbitSpeed * (1 + i * .18) + i * 1.7;
+      ctx.strokeStyle = rgba(i % 2 ? params.accent2 : params.accent, .6 * ambient * open);
+      ctx.lineWidth = 1.6;
+      ctx.shadowBlur = 12; ctx.shadowColor = rgba(params.accent, .5);
+      ctx.beginPath(); ctx.ellipse(0, 0, R, ry, 0, a0, a0 + TAU * params.arc * .18); ctx.stroke();
+      ctx.shadowBlur = 0;
+      // 沿轨运行的光点 + 切向拖尾
+      const dots = Math.round(params.orbitDots);
+      for (let j = 0; j < dots; j++) {
+        const ang = a0 * .6 + j * TAU / dots + i * .9;
+        const x = Math.cos(ang) * R, y = Math.sin(ang) * ry;
+        const tx = -Math.sin(ang) * R, ty = Math.cos(ang) * ry;
+        const tl = Math.hypot(tx, ty) || 1;
+        const len = 10 + 16 * params.orbitSpeed;
+        ctx.strokeStyle = rgba(j % 3 === 0 ? params.accent2 : params.accent, .46 * ambient * open);
+        ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.moveTo(x - tx / tl * len, y - ty / tl * len); ctx.lineTo(x, y); ctx.stroke();
+        ctx.fillStyle = rgba(params.accent, .95 * ambient * open);
+        ctx.beginPath(); ctx.arc(x, y, 1.5, 0, TAU); ctx.fill();
       }
     }
-    if (!list.length) return null;
-    const out = [];
-    for (let i = 0; i < target; i++) out.push(list[(Math.random() * list.length) | 0]);
-    return out;
-  } catch (e) { console.warn('截图采样失败，回退网格', e); return null; }
-}
+    ctx.restore();
+  }
 
-/** 「中枢」文字点阵（拼字目标） */
-function glyphPoints(text, fontSize, target) {
-  const c = document.createElement('canvas');
-  const font = `600 ${fontSize}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
-  const m = c.getContext('2d');
-  m.font = font;
-  const w = Math.ceil(m.measureText(text).width + 40), h = Math.ceil(fontSize * 1.5);
-  c.width = w; c.height = h;
-  const ctx = c.getContext('2d');
-  ctx.font = font; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(text, w / 2, h / 2);
-  const data = ctx.getImageData(0, 0, w, h).data;
-  const list = [];
-  for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) {
-    if (data[(y * w + x) * 4 + 3] > 96) list.push([x - w / 2, y - h / 2]);
-  }
-  if (!list.length) return [];
-  const out = [];
-  for (let i = 0; i < target; i++) out.push(list[(i / target * list.length) | 0]);
-  return out;
-}
-
-const colorIn = new THREE.Color(), colorOut = new THREE.Color();
-function buildParticles(seeds) {
-  if (points) { scene.remove(points); geometry.dispose(); material.dispose(); }
-  const n = P.count;
-  colorIn.set(P.insideColor); colorOut.set(P.outsideColor);
-  // 拼字点阵（世界坐标，放在相机前方平面）
-  const gl = glyphPoints('中枢', Math.min(innerWidth * 0.16, 170), Math.floor(n * 0.92));
-  const glyphWorld = gl.map(([gx, gy]) => {
-    const world = screenToWorld(innerWidth / 2 + gx * 1.6, innerHeight * 0.46 + gy * 1.6, 3.2);
-    return world;
-  });
-  const fallback = [];
-  for (let i = 0; i < n; i++) {
-    fallback.push([innerWidth * 0.12 + Math.random() * innerWidth * 0.76,
-                   innerHeight * 0.1 + Math.random() * innerHeight * 0.82,
-                   138, 148, 162]);
-  }
-  const src = seeds && seeds.length ? seeds : fallback;
-  const tmp = new THREE.Color();
-  for (let i = 0; i < n; i++) {
-    const i3 = i * 3;
-    const s = src[i % src.length];
-    // 起点：界面像素（世界坐标，z 随机小深度）
-    const wpos = screenToWorld(s[0], s[1], 0);
-    buf.start[i3] = wpos.x; buf.start[i3 + 1] = wpos.y; buf.start[i3 + 2] = wpos.z;
-    // 爆散速度（世界单位）
-    buf.velocity[i3] = (Math.random() - 0.5) * 3.4;
-    buf.velocity[i3 + 1] = (Math.random() - 0.5) * 3.4;
-    buf.velocity[i3 + 2] = (Math.random() - 0.5) * 2.4;
-    // 银河位置：Galaxy Generator 公式
-    const radius = Math.pow(Math.random(), 0.68) * P.galaxyRadius;
-    const branchAngle = ((i % P.branches) / P.branches) * Math.PI * 2;
-    const spinAngle = P.spin * radius;
-    const rnd = () => Math.pow(Math.random(), P.randomnessPower) * (Math.random() < 0.5 ? 1 : -1) * P.randomness * (radius + 0.3);
-    buf.galaxy[i3] = Math.cos(branchAngle + spinAngle) * radius + rnd();
-    buf.galaxy[i3 + 1] = rnd() * 0.55;
-    buf.galaxy[i3 + 2] = Math.sin(branchAngle + spinAngle) * radius + rnd();
-    // 拼字目标
-    const g = glyphWorld.length ? glyphWorld[i % glyphWorld.length] : new THREE.Vector3(0, 0, 3.2);
-    buf.target[i3] = g.x; buf.target[i3 + 1] = g.y; buf.target[i3 + 2] = g.z;
-    // 颜色三态
-    buf.cStart[i3] = s[2] / 255; buf.cStart[i3 + 1] = s[3] / 255; buf.cStart[i3 + 2] = s[4] / 255;
-    tmp.copy(colorIn).lerp(colorOut, Math.min(1, radius / P.galaxyRadius));
-    buf.cGalaxy[i3] = tmp.r; buf.cGalaxy[i3 + 1] = tmp.g; buf.cGalaxy[i3 + 2] = tmp.b;
-    const cyan = Math.random() < 0.82;
-    buf.cTarget[i3] = cyan ? 0.85 : 0.72; buf.cTarget[i3 + 1] = cyan ? 0.96 : 0.62; buf.cTarget[i3 + 2] = 1.0;
-    // 尺寸 / 错峰（拼字按列序）/ 闪烁相位
-    buf.scale[i] = 0.6 + Math.random() * 1.3;
-    const col = glyphWorld.length
-      ? Math.min(1, Math.max(0, (buf.target[i3] + 3) / 6)) : Math.random();
-    buf.delay[i] = Math.min(0.45, Math.max(0, (col - 0.02) * 0.5 + Math.random() * 0.05));
-    buf.twinkle[i] = Math.random() * Math.PI * 2;
-  }
-  geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(buf.start.slice(0, n * 3), 3));
-  geometry.setAttribute('aStart', new THREE.BufferAttribute(buf.start.slice(0, n * 3), 3));
-  geometry.setAttribute('aVelocity', new THREE.BufferAttribute(buf.velocity.slice(0, n * 3), 3));
-  geometry.setAttribute('aGalaxy', new THREE.BufferAttribute(buf.galaxy.slice(0, n * 3), 3));
-  geometry.setAttribute('aTarget', new THREE.BufferAttribute(buf.target.slice(0, n * 3), 3));
-  geometry.setAttribute('aColorStart', new THREE.BufferAttribute(buf.cStart.slice(0, n * 3), 3));
-  geometry.setAttribute('aColorGalaxy', new THREE.BufferAttribute(buf.cGalaxy.slice(0, n * 3), 3));
-  geometry.setAttribute('aColorTarget', new THREE.BufferAttribute(buf.cTarget.slice(0, n * 3), 3));
-  geometry.setAttribute('aScale', new THREE.BufferAttribute(buf.scale.slice(0, n), 1));
-  geometry.setAttribute('aDelay', new THREE.BufferAttribute(buf.delay.slice(0, n), 1));
-  geometry.setAttribute('aTwinkle', new THREE.BufferAttribute(buf.twinkle.slice(0, n), 1));
-  material = new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    uniforms: {
-      uTime: { value: 0 }, uSize: { value: P.pointSize },
-      uBurstT: { value: 0 }, uGalaxyInT: { value: 0 },
-      uSpinAngle: { value: 0 }, uAssembleT: { value: -1 },
-      uOpacity: { value: 1 }, uBurstDist: { value: 2.2 },
-    },
-    vertexShader: /* glsl */`
-      uniform float uTime, uSize, uBurstT, uGalaxyInT, uSpinAngle, uAssembleT, uBurstDist;
-      attribute vec3 aStart, aVelocity, aGalaxy, aTarget, aColorStart, aColorGalaxy, aColorTarget;
-      attribute float aScale, aDelay, aTwinkle;
-      varying vec3 vColor; varying float vAlpha;
-      vec3 rotY(vec3 p, float a) {
-        float c = cos(a), s = sin(a);
-        return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+  function drawAurora(ctx, w, h, cx, cy, vis, ambient, clock) {
+    const n = Math.max(1, Math.round(params.bands));
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < n; k++) {
+      const open = E.out(clamp(vis * 1.4 - k * .06));
+      if (open < .01) continue;
+      const yBase = cy + (k - (n - 1) / 2) * (h * .115);
+      const grad = ctx.createLinearGradient(0, 0, w, 0);
+      const col = k % 2 ? params.accent2 : params.accent;
+      grad.addColorStop(0, rgba(col, 0));
+      grad.addColorStop(.28, rgba(col, .10 * ambient * open));
+      grad.addColorStop(.52, rgba(col, .20 * ambient * open));
+      grad.addColorStop(.76, rgba(col, .09 * ambient * open));
+      grad.addColorStop(1, rgba(col, 0));
+      ctx.strokeStyle = grad; ctx.lineWidth = 16 + k * 4;
+      ctx.shadowBlur = params.blur; ctx.shadowColor = rgba(col, .5);
+      ctx.beginPath();
+      for (let x = -20; x <= w + 20; x += 12) {
+        const ph = x / params.wavelength + clock * params.flowSpeed + k * .85;
+        const y = yBase + Math.sin(ph) * params.amplitude * open + Math.sin(ph * .43 - clock * .22 + k) * params.amplitude * .45 * open;
+        x === -20 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
-      void main() {
-        vec3 pos; vec3 color;
-        float ease = 0.0;
-        if (uAssembleT >= 0.0) {
-          // 拼字：错峰出发，二次贝塞尔飞向文字点阵
-          float t = clamp((uAssembleT - aDelay) / 0.55, 0.0, 1.0);
-          t = t * t * (3.0 - 2.0 * t);
-          vec3 gpos = rotY(aGalaxy, uSpinAngle);
-          vec3 mid = mix(gpos, aTarget, 0.5);
-          mid.y += length(aTarget - gpos) * 0.06;
-          pos = mix(mix(gpos, mid, t), mix(mid, aTarget, t), t);
-          color = mix(aColorGalaxy, aColorTarget, t);
-        } else if (uGalaxyInT > 0.0) {
-          // 爆散终点 → 银河轨道
-          float t = uGalaxyInT; t = t * t * (3.0 - 2.0 * t);
-          vec3 burst = aStart + aVelocity * uBurstDist;
-          pos = mix(burst, rotY(aGalaxy, uSpinAngle), t);
-          color = mix(aColorStart, aColorGalaxy, t);
-        } else {
-          // 打碎：界面像素位置爆散
-          float t = uBurstT;
-          float d = 1.0 - pow(1.0 - t, 3.0);
-          pos = aStart + aVelocity * d * uBurstDist;
-          color = aColorStart;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawLattice(ctx, w, h, cx, cy, vis, ambient, clock) {
+    const gap = params.gridGap, grow = E.out(vis) * Math.max(w, h) * .78 * params.growth;
+    ctx.save(); ctx.lineWidth = params.gridLine;
+    for (let i = -40; i <= 40; i++) {
+      const off = i * gap * (1 + Math.abs(i) * params.persp * .006);
+      const xs = cx + off, ys = cy + off;
+      const ax = clamp(1 - Math.abs(off) / Math.max(1, grow));
+      if (ax <= 0) continue;
+      const a = .085 * ambient * ax * vis;
+      ctx.strokeStyle = rgba(params.accent, a);
+      ctx.beginPath(); ctx.moveTo(xs, 0); ctx.lineTo(xs, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, ys); ctx.lineTo(w, ys); ctx.stroke();
+    }
+    // 中心十字准星
+    const q = 22 * vis;
+    ctx.strokeStyle = rgba(params.accent2, .34 * ambient * vis);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx - q, cy); ctx.lineTo(cx - 7, cy); ctx.moveTo(cx + 7, cy); ctx.lineTo(cx + q, cy);
+    ctx.moveTo(cx, cy - q); ctx.lineTo(cx, cy - 7); ctx.moveTo(cx, cy + 7); ctx.lineTo(cx, cy + q);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCore(ctx, cx, cy, t, info, clock) {
+    const open = E.out(u('open', t, info));
+    const reveal = E.soft(u('in', t, info));
+    const coreVis = open * (1 - .55 * reveal);
+    const pu = u('pulse', t, info);
+    const pulse = Math.exp(-Math.pow((pu - .5) / .34, 2)) * (pu > 0 && pu < 1 ? 1 : 0);
+    const breath = 1 + .022 * params.breath * Math.sin(clock * 1.7);
+    const R = params.coreRadius * breath;
+    const glow = params.glow * (coreVis * .55 + pulse * .9);
+
+    // 柔光（多层径向渐变）
+    if (glow > .002) {
+      const gr = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * (2.6 + pulse * 1.2));
+      gr.addColorStop(0, rgba(params.accent, .22 * glow));
+      gr.addColorStop(.32, rgba(params.accent, .10 * glow));
+      gr.addColorStop(.7, rgba(params.accent2, .022 * glow));
+      gr.addColorStop(1, rgba(params.accent2, 0));
+      ctx.fillStyle = gr;
+      ctx.fillRect(cx - R * 4, cy - R * 4, R * 8, R * 8);
+    }
+    if (coreVis < .01) return;
+
+    ctx.save(); ctx.translate(cx, cy);
+    // 细环
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = rgba(params.accent, .55 * coreVis);
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = rgba(params.accent2, .22 * coreVis);
+    ctx.beginPath(); ctx.arc(0, 0, R * 1.28, 0, TAU); ctx.stroke();
+    // 刻度环（缓慢旋转）
+    ctx.rotate(clock * .12);
+    const ticks = 36;
+    for (let i = 0; i < ticks; i++) {
+      const a = i * TAU / ticks;
+      const long = i % 6 === 0;
+      const r0 = R * 1.12, r1 = R * (long ? 1.24 : 1.18);
+      ctx.strokeStyle = rgba(params.accent, (long ? .42 : .18) * coreVis);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+      ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+      ctx.stroke();
+    }
+    ctx.rotate(-clock * .12);
+    // 中心符号：菱形（网格预设改为方框）
+    const q = R * .16 * (1 + pulse * .5);
+    ctx.strokeStyle = rgba('#ffffff', .7 * coreVis);
+    if (state.preset === 'lattice') ctx.strokeRect(-q, -q, q * 2, q * 2);
+    else { ctx.beginPath(); ctx.moveTo(0, -q); ctx.lineTo(q, 0); ctx.lineTo(0, q); ctx.lineTo(-q, 0); ctx.closePath(); ctx.stroke(); }
+    ctx.restore();
+
+    // 涟漪：由脉冲段进度驱动，一圈向外扫过
+    if (params.ripple > 0 && pu > 0 && pu < 1) {
+      const rr = R + E.out(pu) * params.ripple;
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = rgba(params.accent, .42 * (1 - pu) * coreVis);
+      ctx.beginPath(); ctx.arc(cx, cy, rr, 0, TAU); ctx.stroke();
+    }
+  }
+
+  /* ── 前景：光尘收束 + 暗幕 ───────────────────────────── */
+  function particlePos(p, e, w, h, cx, cy) {
+    const dx = p.sx * w - cx, dy = p.sy * h - cy;
+    const dist = Math.hypot(dx, dy) || 1;
+    const swirl = Math.sin(Math.PI * e) * params.curvature * dist * .34 * p.dir;
+    const wob = Math.sin(e * 9 + p.wobble) * 3 * (1 - e);
+    return [
+      cx + dx * (1 - e) + (-dy / dist) * swirl + wob,
+      cy + dy * (1 - e) + (dx / dist) * swirl + wob * .6,
+    ];
+  }
+  function drawParticles(ctx, w, h, cx, cy, uf, clock) {
+    if (uf <= 0 || uf >= 1) return;
+    const win = smooth(0, .12, uf) * (1 - smooth(.80, 1, uf));
+    if (win < .005) return;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const p of particles) {
+      const d = Math.min(.95, params.stagger) * p.delay / Math.max(.001, params.stagger);
+      const local = clamp((uf - d) / (1 - d));
+      if (local <= 0 || local >= 1) continue;
+      const e = E.inOut(local) * p.speed;
+      if (e >= 1) continue;
+      const [x, y] = particlePos(p, e, w, h, cx, cy);
+      const [tx, ty] = particlePos(p, Math.max(0, e - params.tail), w, h, cx, cy);
+      const col = p.alt ? params.accent2 : params.accent;
+      const a = .78 * win * p.bright * (1 - .3 * local);
+      ctx.strokeStyle = rgba(col, a);
+      ctx.lineWidth = p.size * (.7 + .5 * e);
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(x, y); ctx.stroke();
+      ctx.fillStyle = rgba(col, a * .95);
+      ctx.beginPath(); ctx.arc(x, y, Math.max(.6, p.size * .5), 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /* ── 主渲染：给定 t 就能算出全部视觉 ─────────────────── */
+  function render(t, clock) {
+    const info = segments();
+    const w = B.w, h = B.h, cx = w / 2, cy = h / 2;
+    const uOut = u('out', t, info), uOpen = u('open', t, info);
+    const uFlow = u('flow', t, info), uIn = u('in', t, info);
+    const globalP = clamp(t / info.T);
+
+    /* DOM 层状态：顶栏常驻，仅主体切换（对应 app StatusPanel / CentralModeView） */
+    const away = E.soft(uOut), come = E.out(uIn);
+    const body = $('#app-body');
+    // 失焦后保留极淡残影，直到中枢视图完全浮现才彻底退场
+    body.style.opacity = String(lerp(1, .12, away) * (1 - E.soft(uIn)));
+    body.style.filter = `blur(${(11 * away).toFixed(2)}px) saturate(${String(1 - .55 * away)})`;
+    body.style.transform = `scale(${(1 - .035 * away).toFixed(4)})`;
+    body.style.pointerEvents = away > .5 ? 'none' : 'auto';
+    const central = $('#central-body');
+    central.style.opacity = String(come);
+    central.style.transform = `translateY(${((1 - come) * 6).toFixed(2)}px) scale(${(.985 + .015 * come).toFixed(4)})`;
+    central.style.filter = `blur(${((1 - come) * 4).toFixed(2)}px)`;
+    central.style.pointerEvents = come > .92 ? 'auto' : 'none';
+    // 顶栏按「失焦」即时切换（贴近 app 的条件渲染）：普通态控件与标题退场，
+    // 中枢标题/按钮高亮同时入场；主体收束与中枢视图浮现由时间轴后半段驱动。
+    $('#bar-left-normal').style.opacity = String(1 - away);
+    $('#bar-right-normal').style.opacity = String(1 - away);
+    $('#title-normal').style.opacity = String(1 - away);
+    $('#title-central').style.opacity = String(away);
+    // 标题呼吸微光：对应 app 的 animate-central-title-glow
+    const glowBreath = .55 + .45 * Math.abs(Math.sin(clock * 1.6));
+    $('#title-central').style.textShadow = `0 0 ${(8 + 10 * away * glowBreath).toFixed(0)}px ${rgba(params.accent, .55 * away * glowBreath)}`;
+    const btn = $('#btn-central');
+    btn.style.color = mixHex('#8a94a6', params.accent2, away);
+    btn.style.textShadow = away > .01 ? `0 0 ${(10 * away).toFixed(0)}px ${rgba(params.accent, .7 * away)}` : 'none';
+    btn.title = away > .5 ? '退出中枢模式 (Cmd/Ctrl+Shift+J)' : '进入中枢模式 (Cmd/Ctrl+Shift+J)';
+
+    /* 背景层 */
+    const ctxB = B.ctx;
+    ctxB.clearRect(0, 0, w, h);
+    const base = ctxB.createRadialGradient(cx, cy, 0, cx, cy, Math.max(w, h) * .78);
+    base.addColorStop(0, mixHex(params.bg, params.accent, .035 + .05 * globalP));
+    base.addColorStop(.55, params.bg);
+    base.addColorStop(1, mixHex(params.bg, '#000000', .45));
+    ctxB.fillStyle = base; ctxB.fillRect(0, 0, w, h);
+
+    const vis = E.out(uOpen);
+    const ambient = .32 + .68 * (1 - E.soft(uIn));   // 中枢 UI 浮现后空间降为背景
+    const env = .3 + .7 * globalP;
+    drawStarfield(ctxB, w, h, clock, env);
+    if (state.preset === 'orbit') drawOrbit(ctxB, cx, cy, vis, ambient, clock);
+    else if (state.preset === 'aurora') drawAurora(ctxB, w, h, cx, cy, vis, ambient, clock);
+    else drawLattice(ctxB, w, h, cx, cy, vis, ambient, clock);
+    drawCore(ctxB, cx, cy, t, info, clock);
+
+    /* 前景层：暗幕 + 光尘 */
+    const ctxF = F.ctx;
+    ctxF.clearRect(0, 0, w, h);
+    const pu = u('pulse', t, info);
+    const veil = .30 * Math.sin(Math.PI * clamp((t / info.T) * 1.05)) * (1 - .55 * come);
+    if (veil > .002) { ctxF.fillStyle = `rgba(3,6,12,${veil.toFixed(3)})`; ctxF.fillRect(0, 0, w, h); }
+    drawParticles(ctxF, w, h, cx, cy, uFlow, clock);
+
+    /* 状态栏 */
+    $('#st-phase').textContent = state.phase + (state.dir < 0 ? '−' : '');
+    $('#st-t').textContent = t.toFixed(2);
+    $('#st-T').textContent = info.T.toFixed(2);
+    $('#st-err').textContent = String(errors.length);
+    const scrub = $('#scrub');
+    scrub.max = info.T.toFixed(2);
+    if (document.activeElement !== scrub) scrub.value = String(t);
+    $('#scrub-val').textContent = t.toFixed(2) + 's';
+  }
+
+  /* ── 播放控制 ────────────────────────────────────────── */
+  function play() { const T = segments().T; if (state.t >= T - .001) state.t = 0; state.dir = 1; state.phase = 'entering'; state.hold = 0; }
+  function exit() { const T = segments().T; if (state.t <= .001) state.t = T; state.dir = -1; state.phase = 'exiting'; state.hold = 0; }
+  function replay() { state.t = 0; play(); }
+  function toast(msg) {
+    const el = $('#toast'); el.textContent = msg; el.classList.add('on');
+    clearTimeout(toast._timer); toast._timer = setTimeout(() => el.classList.remove('on'), 1700);
+  }
+
+  let last = performance.now(), idleClock = 0, fps = 60, frames = 0, fpsClock = 0;
+  function loop(now) {
+    const dt = Math.min((now - last) / 1000, .05); last = now;
+    if (!document.hidden) {
+      const T = segments().T;
+      if (state.phase === 'entering' || state.phase === 'exiting') {
+        const mul = state.dir < 0 ? 1 / Math.max(.2, params.exitRatio) : 1;
+        state.t = clamp(state.t + state.dir * dt * params.speed * mul, 0, T);
+        if (state.t >= T - .0005) {
+          state.phase = 'central';
+          if (state.loop) state.hold = 1.1;
+        } else if (state.t <= .0005) {
+          state.phase = state.loop ? 'idle' : 'idle';
+          if (state.loop) state.hold = .45;
         }
-        float tw = 0.78 + 0.22 * sin(uTime * 2.6 + aTwinkle);
-        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
-        gl_PointSize = uSize * aScale * (320.0 / -mv.z);
-        gl_Position = projectionMatrix * mv;
-        vColor = color; vAlpha = tw;
-      }`,
-    fragmentShader: /* glsl */`
-      uniform float uOpacity;
-      varying vec3 vColor; varying float vAlpha;
-      void main() {
-        float d = length(gl_PointCoord - vec2(0.5));
-        float a = smoothstep(0.5, 0.02, d);
-        a = pow(a, 1.6);
-        gl_FragColor = vec4(vColor, a * vAlpha * uOpacity);
-      }`,
+      } else if (state.hold > 0) {
+        state.hold -= dt;
+        if (state.hold <= 0) { state.hold = 0; state.phase === 'central' ? exit() : play(); }
+      } else idleClock += dt;
+
+      const clock = state.t + idleClock * .22;
+      render(state.t, clock);
+
+      frames++; fpsClock += dt;
+      if (fpsClock >= .5) { fps = Math.round(frames / fpsClock); frames = 0; fpsClock = 0; $('#st-fps').textContent = String(fps); }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  /* ── 面板 ────────────────────────────────────────────── */
+  function fmt(v, it) {
+    if (it.unit === 's') return Number(v).toFixed(2) + 's';
+    if (it.unit === '×') return Number(v).toFixed(2) + '×';
+    if (it.step >= 1) return String(Math.round(v));
+    return Number(v).toFixed(2);
+  }
+  function buildControls() {
+    const root = $('#controls'); root.innerHTML = '';
+    const groups = [...COMMON, SPECIFIC[state.preset]];
+    for (const g of groups) {
+      const det = document.createElement('details'); det.open = true;
+      const sum = document.createElement('summary'); sum.textContent = g.group; det.appendChild(sum);
+      for (const it of g.items) {
+        const row = document.createElement('label'); row.className = 'ctl';
+        const name = document.createElement('span'); name.textContent = it.l;
+        const input = document.createElement('input');
+        input.type = it.type === 'color' ? 'color' : 'range';
+        if (it.type !== 'color') { input.min = it.min; input.max = it.max; input.step = it.step; }
+        input.value = params[it.k];
+        const val = document.createElement('b'); val.textContent = it.type === 'color' ? params[it.k] : fmt(params[it.k], it);
+        input.addEventListener('input', () => {
+          params[it.k] = it.type === 'color' ? input.value : parseFloat(input.value);
+          if (it.type === 'color') {
+            val.textContent = input.value;
+            document.documentElement.style.setProperty('--' + (it.k === 'bg' ? 'bg' : it.k), input.value);
+          } else val.textContent = fmt(params[it.k], it);
+          if (it.k === 'particles' || it.k === 'stars' || it.k === 'stagger' || it.k === 'gridGap') buildParticles();
+          render(state.t, state.t);
+        });
+        row.append(name, input, val); det.appendChild(row);
+      }
+      root.appendChild(det);
+    }
+  }
+  function buildPresets() {
+    const root = $('#presets'); root.innerHTML = '';
+    for (const [key, p] of Object.entries(PRESETS)) {
+      const b = document.createElement('button');
+      b.dataset.key = key; b.title = p.desc;
+      b.innerHTML = `<b>${p.name}</b><span>${p.en}</span>`;
+      if (key === state.preset) b.classList.add('on');
+      b.addEventListener('click', () => setPreset(key));
+      root.appendChild(b);
+    }
+  }
+  function syncPalette() {
+    const root = document.documentElement.style;
+    root.setProperty('--accent', params.accent); root.setProperty('--accent2', params.accent2); root.setProperty('--bg', params.bg);
+  }
+  function setPreset(key) {
+    if (!PRESETS[key]) return;
+    state.preset = key;
+    params = { ...PRESETS[key].params };
+    syncPalette(); buildPresets(); buildControls(); buildParticles();
+    render(state.t, state.t);
+    toast(`已载入「${PRESETS[key].name}」预设 · ${PRESETS[key].desc}`);
+  }
+  function togglePanel(force) {
+    state.hidden = typeof force === 'boolean' ? force : !state.hidden;
+    $('#panel').classList.toggle('hidden', state.hidden);
+    $('#show-panel').classList.toggle('show', state.hidden);
+  }
+  function scrubTo(t) { state.phase = 'idle'; state.hold = 0; state.t = clamp(t, 0, segments().T); render(state.t, state.t); }
+
+  $('#transport').addEventListener('click', e => {
+    const act = e.target.dataset.act; if (!act) return;
+    if (act === 'play') play();
+    else if (act === 'exit') exit();
+    else if (act === 'replay') replay();
+    else { state.loop = !state.loop; e.target.classList.toggle('on', state.loop); toast(state.loop ? '循环播放已开启' : '循环播放已关闭'); }
   });
-  points = new THREE.Points(geometry, material);
-  points.frustumCulled = false;
-  scene.add(points);
-}
-
-/* 中心核光晕（银河期） */
-const coreMat = new THREE.SpriteMaterial({
-  map: (() => {
-    const c = document.createElement('canvas'); c.width = c.height = 256;
-    const g = c.getContext('2d');
-    const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
-    grad.addColorStop(0, 'rgba(255,214,170,.95)');
-    grad.addColorStop(0.25, 'rgba(255,120,64,.42)');
-    grad.addColorStop(0.6, 'rgba(255,96,48,.14)');
-    grad.addColorStop(1, 'rgba(255,96,48,0)');
-    g.fillStyle = grad; g.fillRect(0, 0, 256, 256);
-    return new THREE.CanvasTexture(c);
-  })(),
-  blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0,
-});
-const core = new THREE.Sprite(coreMat);
-core.scale.setScalar(3.4);
-scene.add(core);
-
-/* ═══════════════════ 激光 title 扫描 ═══════════════════ */
-const titleWrap = document.getElementById('title-wrap');
-const OLD = '新对话', NEW = '中枢';
-function mountScanLayers() {
-  titleWrap.innerHTML = `
-    <span class="title-text" style="visibility:hidden">${OLD.length >= NEW.length ? OLD : NEW}</span>
-    <span class="title-old-layer"><span class="title-text" id="scan-old"></span></span>
-    <span class="title-new-layer"><span class="title-text" id="scan-new"></span></span>
-    <span class="laser-trail" id="scan-trail"></span>
-    <span class="laser-beam" id="scan-beam"></span>`;
-}
-function setTitleCentral(on) {
-  titleWrap.innerHTML = `<span class="title-text" style="${on ? 'color:#22d3ee;font-weight:600;text-shadow:0 0 10px rgba(34,211,238,.6)' : ''}">${on ? NEW : OLD}</span>`;
-}
-function playTitleScan(toCentral, duration) {
-  return new Promise((resolve) => {
-    mountScanLayers();
-    const oldL = document.getElementById('scan-old');
-    const newL = document.getElementById('scan-new');
-    const beam = document.getElementById('scan-beam');
-    const trail = document.getElementById('scan-trail');
-    const from = toCentral ? OLD : NEW, to = toCentral ? NEW : OLD;
-    oldL.textContent = from; newL.textContent = to;
-    if (!toCentral) newL.style.cssText = '';
-    const t0 = performance.now();
-    (function tick(now) {
-      const t = Math.min(1, (now - t0) / duration);
-      const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-      newL.parentElement.style.clipPath = `inset(0 ${(1 - e) * 100}% 0 0)`;
-      oldL.parentElement.style.clipPath = `inset(0 0 0 ${e * 100}%)`;
-      beam.style.left = `${e * 100}%`;
-      trail.style.clipPath = `inset(0 ${(1 - e) * 100}% 0 0)`;
-      if (t < 1) requestAnimationFrame(tick);
-      else resolve();
-    })(t0);
+  $('#scrub').addEventListener('input', e => scrubTo(parseFloat(e.target.value)));
+  $('#hide-panel').addEventListener('click', () => togglePanel(true));
+  $('#show-panel').addEventListener('click', () => togglePanel(false));
+  // 顶栏中枢按钮即 app 的 toggle 入口：进入与退出复用同一个按钮
+  $('#btn-central').addEventListener('click', () => state.t > segments().T * .5 ? exit() : play());
+  window.addEventListener('resize', () => { resize(); render(state.t, state.t); });
+  window.addEventListener('keydown', e => {
+    if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    const k = e.key.toLowerCase();
+    if (e.code === 'Space') { e.preventDefault(); state.t > segments().T * .5 ? exit() : play(); }
+    else if (k === 'r') replay();
+    else if (k === '1') setPreset('orbit');
+    else if (k === '2') setPreset('aurora');
+    else if (k === '3') setPreset('lattice');
+    else if (k === 'g') { state.seed = Math.floor(Math.random() * 1e9); buildParticles(); toast('已重新生成光尘种子'); render(state.t, state.t); }
+    else if (k === 'h') togglePanel();
+    else if (k === 'arrowleft') { e.preventDefault(); scrubTo(state.t - .05); $('#scrub').value = String(state.t); }
+    else if (k === 'arrowright') { e.preventDefault(); scrubTo(state.t + .05); $('#scrub').value = String(state.t); }
   });
-}
 
-/* ═══════════════════ 序列控制 ═══════════════════ */
-const dim = document.getElementById('dim');
-const headerGlow = document.getElementById('header-glow');
-const centralUI = document.getElementById('central-ui');
-const btnCentral = document.getElementById('btn-central');
-const btnSidebar = document.getElementById('btn-sidebar');
-let seedsCache = null;
-let playing = false;
-let mode = 'normal';
+  /* ── 调试接口（供自动化验证与参数导出） ──────────────── */
+  window.__centralDemo = {
+    get state() { return { ...state, T: segments().T, fps, errors: errors.slice(), particleCount: particles.length }; },
+    get params() { return { ...params }; },
+    get presets() { return Object.keys(PRESETS); },
+    play, exit, replay, setPreset, scrub: scrubTo,
+    render: () => render(state.t, state.t),
+    snapshot: () => ({ preset: state.preset, params: { ...params }, T: segments().T }),
+    errors,
+  };
 
-const u = () => material.uniforms;
-const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-
-function setChromeCentral(on) {
-  document.getElementById('sidebar').style.display = on ? 'none' : '';
-  btnSidebar.style.visibility = on ? 'hidden' : '';
-  btnCentral.title = on ? '退出中枢模式' : '进入中枢模式';
-}
-
-async function playEnter() {
-  if (playing) return; playing = true;
-  mode = 'entering';
-  setChromeCentral(true);          // 顶栏即时切换（按钮/侧栏收起）
-  centralUI.style.display = 'none';
-  // ① 阶段一：激光扫 title（2s），期间预热截图采样
-  const scanP = playTitleScan(true, Math.min(750, P.tTitleScan * 0.4));
-  const seedP = captureSeeds(Math.min(P.count, 80000)).then((s) => { seedsCache = s; });
-  headerGlow.style.opacity = '1';
-  headerGlow.firstElementChild.classList.remove('sweeping');
-  void headerGlow.firstElementChild.offsetWidth; // 重启动画
-  headerGlow.firstElementChild.classList.add('sweeping');
-  await scanP;
-  await seedP;
-  await sleep(Math.max(0, P.tTitleScan - 750));
-  setTitleCentral(true);
-  headerGlow.style.opacity = '0';
-  // ② 阶段二：粒子（打碎 → 银河 1 圈 → 拼字）
-  buildParticles(seedsCache);
-  dim.style.transition = `opacity ${P.tBurst + P.tGalaxyIn}ms ease-in`;
-  dim.style.opacity = '0.92';
-  const t0 = performance.now();
-  const T1 = P.tBurst, T2 = T1 + P.tGalaxyIn, T3 = T2 + P.tSpin, T4 = T3 + P.tAssemble, T5 = T4 + P.tHold, T6 = T5 + P.tFade;
-  const total = T6;
-  await new Promise((resolve) => {
-    (function frame(now) {
-      const t = now - t0;
-      const uu = u();
-      uu.uTime.value = t / 1000;
-      if (t < T1) { uu.uBurstT.value = t / T1; uu.uGalaxyInT.value = 0; uu.uSpinAngle.value = 0; uu.uAssembleT.value = -1; coreMat.opacity = 0; }
-      else if (t < T2) { uu.uBurstT.value = 1; uu.uGalaxyInT.value = (t - T1) / P.tGalaxyIn; uu.uSpinAngle.value = 0; coreMat.opacity = easeInOut((t - T1) / P.tGalaxyIn); }
-      else if (t < T3) { uu.uGalaxyInT.value = 1; uu.uSpinAngle.value = easeInOut((t - T2) / P.tSpin) * Math.PI * 2; coreMat.opacity = 1; dim.style.opacity = '0.96'; }
-      else if (t < T4) { uu.uAssembleT.value = (t - T3) / P.tAssemble; coreMat.opacity = 1 - (t - T3) / P.tAssemble; dim.style.transition = `opacity ${P.tAssemble + P.tHold}ms ease`; dim.style.opacity = '0.30'; }
-      else if (t < T5) { uu.uAssembleT.value = 1; coreMat.opacity = 0; }
-      else { uu.uAssembleT.value = 1; uu.uOpacity.value = Math.max(0, 1 - (t - T5) / P.tFade); }
-      if (t < total) requestAnimationFrame(frame); else resolve();
-    })(t0);
+  /* ── URL 参数：?preset=&t=&play=1&loop=1&panel=0&p=<参数JSON> ── */
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; }
+    } catch (e) { /* file:// 下可能无剪贴板权限，回退到 execCommand */ }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove(); return ok;
+  }
+  function applyQuery() {
+    const q = new URLSearchParams(location.search);
+    const preset = q.get('preset');
+    if (preset && PRESETS[preset]) { state.preset = preset; params = { ...PRESETS[preset].params }; }
+    const raw = q.get('p');
+    if (raw) {
+      try { const loaded = JSON.parse(raw); if (loaded && typeof loaded === 'object') params = { ...params, ...loaded }; }
+      catch (e) { toast('参数链接解析失败，已使用预设默认值'); }
+    }
+    const t = parseFloat(q.get('t'));
+    if (Number.isFinite(t)) state.t = clamp(t, 0, segments().T);
+    if (q.get('loop') === '1') state.loop = true;
+    if (q.get('panel') === '0') togglePanel(true);
+    if (q.get('play') === '1' || q.get('loop') === '1') play();
+  }
+  $('#copy-link').addEventListener('click', async () => {
+    const q = new URLSearchParams();
+    q.set('preset', state.preset); q.set('t', state.t.toFixed(2)); q.set('p', JSON.stringify(params));
+    const url = location.href.split('?')[0] + '?' + q.toString();
+    const ok = await copyText(url);
+    toast(ok ? '参数链接已复制 · 可直接发给主代理' : '复制失败，可在控制台执行 __centralDemo.snapshot()');
   });
-  // 中枢 UI 就位
-  centralUI.style.display = 'flex';
-  requestAnimationFrame(() => { centralUI.style.opacity = '1'; });
-  dim.style.opacity = '0';
-  scene.remove(points); points = null;
-  playing = false; mode = 'central';
-}
+  $('#reset-params').addEventListener('click', () => setPreset(state.preset));
 
-async function playExit() {
-  if (playing || mode !== 'central') return; playing = true;
-  centralUI.style.opacity = '0';
-  await sleep(300);
-  centralUI.style.display = 'none';
-  // title 反向扫描 + 粒子快速消散
-  const scanP = playTitleScan(false, 500);
-  buildParticles(null);
-  dim.style.transition = 'opacity 300ms ease';
-  dim.style.opacity = '0.5';
-  const t0 = performance.now();
-  await new Promise((resolve) => {
-    (function frame(now) {
-      const t = (now - t0) / 1000;
-      const uu = u();
-      uu.uTime.value = t;
-      uu.uBurstT.value = Math.min(1, t / 0.8);
-      uu.uOpacity.value = Math.max(0, 1 - t / 1.0);
-      if (t < 1.0) requestAnimationFrame(frame); else resolve();
-    })(t0);
-  });
-  await scanP;
-  setTitleCentral(false);
-  setChromeCentral(false);
-  dim.style.opacity = '0';
-  scene.remove(points); points = null;
-  playing = false; mode = 'normal';
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-document.getElementById('btn-play').onclick = playEnter;
-document.getElementById('btn-exit-play').onclick = playExit;
-btnCentral.onclick = () => (mode === 'normal' ? playEnter() : playExit());
-document.getElementById('btn-exit').onclick = playExit;
-document.getElementById('btn-reset').onclick = () => {
-  playing = false; mode = 'normal';
-  if (points) { scene.remove(points); points = null; }
-  centralUI.style.display = 'none'; centralUI.style.opacity = '0';
-  dim.style.opacity = '0'; headerGlow.style.opacity = '0';
-  setTitleCentral(false); setChromeCentral(false);
-};
-addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); btnCentral.onclick(); }
-});
-
-/* ═══════════════════ lil-gui 参数面板 ═══════════════════ */
-const gui = new GUI({ title: '中枢切换动画 · 调参台' });
-const fG = gui.addFolder('银河（Galaxy Generator）');
-fG.add(P, 'count', 5000, 200000, 5000).name('粒子数');
-fG.add(P, 'galaxyRadius', 2, 10, 0.1).name('半径');
-fG.add(P, 'branches', 2, 10, 1).name('旋臂数');
-fG.add(P, 'spin', 0, 3, 0.05).name('旋臂缠绕');
-fG.add(P, 'randomness', 0, 1, 0.02).name('臂上散布');
-fG.add(P, 'randomnessPower', 1, 6, 0.1).name('散布幂次');
-fG.addColor(P, 'insideColor').name('内圈色');
-fG.addColor(P, 'outsideColor').name('外圈色');
-fG.add(P, 'pointSize', 0.005, 0.08, 0.001).name('粒子大小');
-const fC = gui.addFolder('相机');
-fC.add(P, 'cameraTilt', 0, 1.4, 0.02).name('盘面倾角').onChange(applyCamera);
-fC.add(P, 'cameraDist', 4, 16, 0.2).name('相机距离').onChange(applyCamera);
-const fT = gui.addFolder('时序 (ms)');
-fT.add(P, 'tTitleScan', 800, 4000, 100).name('①激光扫描');
-fT.add(P, 'tBurst', 300, 2000, 50).name('②打碎');
-fT.add(P, 'tGalaxyIn', 200, 1500, 50).name('③入轨');
-fT.add(P, 'tSpin', 1000, 6000, 100).name('④银河1圈');
-fT.add(P, 'tAssemble', 600, 3000, 50).name('⑤拼字');
-fT.add(P, 'tHold', 200, 1500, 50).name('⑥驻留');
-fT.add(P, 'tFade', 200, 1500, 50).name('⑦淡出');
-
-/* 渲染循环（空场时也保持呼吸） */
-renderer.setAnimationLoop(() => {
-  renderer.render(scene, camera);
-});
+  resize();
+  applyQuery();
+  syncPalette(); buildPresets(); buildControls(); buildParticles();
+  $('#transport button[data-act="loop"]').classList.toggle('on', state.loop);
+  render(state.t, state.t);
+  requestAnimationFrame(loop);
+})();
 </script>
 </body>
 </html>

@@ -9,6 +9,7 @@ import {
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { CentralModeView } from '@/components/central/CentralModeView';
+import { CentralTransition } from '@/components/central/CentralTransition';
 import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
@@ -741,9 +742,10 @@ export function MainApp() {
           onToggleExtension={remote ? undefined : handleToggleExtension}
         />
 
-        <div className="flex flex-1 min-h-0">
+        <div className="flex flex-1 min-h-0" data-central-body>
           {/* centralActive 已含 desktop 宿主判定，非 desktop 即使 store 被置位也不切换。
-              高级切换动画已移至 docs/central-demo.html 调参台，定型后按参数移植。 */}
+              切换转场见 CentralTransition：仅叠加视觉层，布局仍由 React 立即切换，
+              参数来自 docs/central-demo.html 调参台定型的 orbit 预设。 */}
           {centralActive ? (
             <CentralModeView />
           ) : (
@@ -834,6 +836,7 @@ export function MainApp() {
           </>
           )}
         </div>
+        <CentralTransition />
       </div>
 
       {!remote && (
