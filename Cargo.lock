@@ -10590,6 +10590,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-central"
+version = "0.17.14"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "tiangong-cli"
 version = "0.17.14"
 dependencies = [

@@ -9,6 +9,7 @@ members = [
     "crates/tiangong-core",
     "crates/tiangong-core-manager",
     "crates/tiangong-cli",
+    "crates/tiangong-central",
     "crates/tiangong-entry",
     "crates/tiangong-server",
     "crates/tiangong-toolkit",
@@ -70,6 +71,7 @@ version = "0.17.14"
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
 tiangong-app-state = { path = "crates/tiangong-app-state" }
 tiangong-cli = { path = "crates/tiangong-cli" }
+tiangong-central = { path = "crates/tiangong-central" }
 tiangong-deepseek = { path = "crates/tiangong-deepseek" }
 tiangong-config = { path = "crates/tiangong-config" }
 tiangong-core = { path = "crates/tiangong-core" }
