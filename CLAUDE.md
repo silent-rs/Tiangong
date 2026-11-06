@@ -117,10 +117,11 @@ fn load_session(&self, id: &str) -> Result<Session> {
 
 ## 当前开发阶段
 
-当前分支聚焦统一插件形态（Plugin Harness）。Agent Core 的现行架构以以下文档为准：
+当前开发聚焦「中枢模式」（基础分支 `develop/central-mode`，跟踪 Issue #773）；此前统一插件形态（Plugin Harness）已合入 main。Agent Core 的现行架构以以下文档为准：
 
 - `PLAN.md` - 项目总体规划和当前里程碑
 - `TODO.md` - 当前任务列表
+- `docs/central-mode-design-draft.md` - 中枢模式设计基线（职责边界、状态机、事件与模型接力硬约束）
 - `docs/requirements.md` - 需求边界与非目标
 - `docs/core-architecture.md` - 当前 Core 执行模型与消息路由
 - `docs/agent-loop-refactor/design.md` - 当前 Agent Core 专题说明
