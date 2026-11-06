@@ -4023,10 +4023,39 @@ pub async fn list_tool_icons(
         .map_err(|error| error.to_string())
 }
 
-/// 工具参数摘要的展示提示（运行时提供的宿主渲染规则，前端不写死参数名）。
+/// 工具参数摘要的展示提示。
+///
+/// 纯宿主渲染规则（lead/skip/hidden 参数名），runtime 不消费也不加工，
+/// 直接由 App 层本地提供；前端经命令查询，参数名不写死在前端。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ToolArgsPresentation {
+    /// 摘要中排在最前、只显示取值的参数（如按 action 分派的工具）。
+    pub lead_args: &'static [&'static str],
+    /// 摘要跳过的环境 / 配置类参数（不构成「这次调用做了什么」）。
+    pub skip_args: &'static [&'static str],
+    /// 位置参数中不展示的取值前缀（宿主混入的内部参数）。
+    pub hidden_value_prefixes: &'static [&'static str],
+}
 #[tauri::command]
-pub fn tool_args_presentation() -> tiangong_plugin_runtime::tool_titles::ToolArgsPresentation {
-    tiangong_plugin_runtime::tool_titles::tool_args_presentation()
+pub fn tool_args_presentation() -> ToolArgsPresentation {
+    ToolArgsPresentation {
+        lead_args: &["action"],
+        skip_args: &[
+            "cwd",
+            "workdir",
+            "working_dir",
+            "timeout",
+            "timeout_secs",
+            "interactive",
+            "encoding",
+            "offset",
+            "limit",
+            "append",
+            "dry_run",
+            "force",
+        ],
+        hidden_value_prefixes: &["__tiangong_cwd="],
+    }
 }
 /// 工具行标题查询表（插件在 `tool_titles` 中声明；查不到的工具不在表中，
 /// 前端显示通用标题）。

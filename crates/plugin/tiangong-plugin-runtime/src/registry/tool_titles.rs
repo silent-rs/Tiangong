@@ -127,42 +127,6 @@ pub fn build_tool_title_table<'a>(
     }
     table
 }
-/// 通用参数摘要的展示提示（工具行「工具名 + 参数摘要」使用）。
-///
-/// 这是宿主渲染规则而非插件回落数据：`lead_args` 把分派参数提到最前且
-/// 只显示取值、`skip_args` 隐藏环境类参数、`hidden_value_prefixes` 隐藏
-/// 宿主混入的内部参数。App 各端（前端、CLI、远程）经运行时统一查询，
-/// 不在前端写死参数名——与工具行标题同属工具行展示规则，随本模块提供。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ToolArgsPresentation {
-    /// 摘要中排在最前、且只显示取值的参数（如按 action 分派的工具）。
-    pub lead_args: &'static [&'static str],
-    /// 摘要跳过的环境 / 配置类参数（不构成「这次调用做了什么」）。
-    pub skip_args: &'static [&'static str],
-    /// 位置参数中不展示的取值前缀（宿主混入的内部参数）。
-    pub hidden_value_prefixes: &'static [&'static str],
-}
-/// 当前的参数摘要展示提示。
-pub fn tool_args_presentation() -> ToolArgsPresentation {
-    ToolArgsPresentation {
-        lead_args: &["action"],
-        skip_args: &[
-            "cwd",
-            "workdir",
-            "working_dir",
-            "timeout",
-            "timeout_secs",
-            "interactive",
-            "encoding",
-            "offset",
-            "limit",
-            "append",
-            "dry_run",
-            "force",
-        ],
-        hidden_value_prefixes: &["__tiangong_cwd="],
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
