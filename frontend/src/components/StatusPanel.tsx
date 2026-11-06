@@ -3,8 +3,9 @@ import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { isRemoteHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle, Sparkles } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
+import { useCentralMode } from '@/hooks/useCentralMode';
 import { useSearchStore } from '@/store/useSearchStore';
 import { Separator } from './ui/separator';
 import { GlobalStatusPluginHost } from './GlobalStatusPluginHost';
@@ -55,6 +56,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   const savingRef = useRef(false);
 
   const { theme, setTheme } = useTheme();
+  const { centralMode, canUseCentral, toggleCentral } = useCentralMode();
   const remote = isRemoteHost();
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
   const activeSession = isNewConversation ? null : sessions.find((s) => s.id === activeSessionId);
@@ -194,6 +196,22 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
           >
             <ArrowUpCircle className="w-3.5 h-3.5" />
             <span>v{updateAvailable.version}</span>
+          </button>
+        )}
+        {/* 中枢模式入口：仅 desktop 宿主提供（设计稿 §4.1；浏览器配置页与远程 H5 不提供） */}
+        {canUseCentral && (
+          <button
+            data-no-drag
+            onClick={toggleCentral}
+            className={`transition-colors ${
+              centralMode
+                ? 'text-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            title={centralMode ? '退出中枢模式（Cmd/Ctrl+Shift+J）' : '进入中枢模式（Cmd/Ctrl+Shift+J）'}
+            aria-label={centralMode ? '退出中枢模式' : '进入中枢模式'}
+          >
+            <Sparkles className="w-4 h-4" />
           </button>
         )}
         {!remote && <SearchButton />}

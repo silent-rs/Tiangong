@@ -1018,6 +1018,9 @@ export interface AppState {
 
   // 从外部触发打开设置页到指定 tab
   pendingSettingsTab: string | null;
+  /** 中枢模式开关（POC）：仅 desktop 宿主可进入，视图分支切换、不影响会话数据。 */
+  centralMode: boolean;
+  setCentralMode: (on: boolean) => void;
   setPendingSettingsTab: (tab: string | null) => void;
 
   // 操作
@@ -1135,6 +1138,8 @@ export const useStore = create<AppState>((set, get) => ({
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
+  centralMode: false,
+  setCentralMode: (on) => set({ centralMode: on }),
   sandboxDisabled: null,
   autoUpdate: null,
   sandboxState: null,

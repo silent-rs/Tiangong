@@ -84,3 +84,14 @@ export function isBrowserHost(): boolean {
 }
 
 export { isRemoteHost };
+
+/**
+ * 当前是否运行在 Tauri 桌面窗口（desktop 宿主）。
+ *
+ * 三种宿主形态中排除浏览器配置页（web host）与远程访问页（remote host）。
+ * 桌面专属能力的入口判定（如中枢模式，设计稿 §4.1 / §5.4：`request_user`
+ * 等依赖仅 Desktop 可用）以此为准，浏览器与远程页面一律不提供入口。
+ */
+export function isDesktopHost(): boolean {
+  return !isWebHost() && !isRemoteHost();
+}

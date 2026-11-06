@@ -8,6 +8,8 @@ import {
   type TabKind,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
+import { CentralModeView } from '@/components/central/CentralModeView';
+import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';
@@ -88,6 +90,9 @@ function browserPluginSessionId(sessionId?: string | null): string {
 
 export function MainApp() {
   const remote = isRemoteHost();
+  // 中枢模式：注册 Cmd/Ctrl+Shift+J 快捷键（仅 desktop），centralActive 驱动布局分支
+  useCentralModeHotkey();
+  const { centralActive } = useCentralMode();
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const { showWarning } = useToast();
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -737,6 +742,10 @@ export function MainApp() {
         />
 
         <div className="flex flex-1 min-h-0">
+          {centralActive ? (
+            <CentralModeView />
+          ) : (
+          <>
           <AppSidebar />
 
           <main className="flex flex-1 flex-col min-w-0 bg-background">
@@ -820,6 +829,8 @@ export function MainApp() {
               )}
             </div>
           </main>
+          </>
+          )}
         </div>
       </div>
 
