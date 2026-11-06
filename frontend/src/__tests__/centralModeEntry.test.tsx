@@ -32,6 +32,12 @@ const mocks = vi.hoisted(() => {
   return { api, appWindow, listen };
 });
 
+// jsdom 不支持 html2canvas 所需的布局能力：mock 为 reject，
+// captureSeeds 会 catch 并回退象征网格（真机行为由 Tauri WebView 覆盖）
+vi.mock('html2canvas', () => ({
+  default: vi.fn(() => Promise.reject(new Error('html2canvas unavailable in jsdom'))),
+}));
+
 vi.mock('@/api/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/tauri')>();
   return { ...actual, api: { ...actual.api, ...mocks.api } };

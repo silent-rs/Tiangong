@@ -204,14 +204,24 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
           </Button>
         )}
         {!centralMode && <Separator orientation="vertical" className="mr-2 h-4" />}
+        {/* 中枢模式：标题与普通模式（含侧栏按钮 + 分隔线）的标题起点对齐，
+            避免紧贴 macOS 红绿灯。宽度 = 按钮 28 + gap 8 + 分隔线 1 + mr 8。 */}
+        {centralMode && <span aria-hidden className="inline-block h-7 w-[45px]" />}
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
               {titleScan?.active ? (
-                // 激光扫描期：旧标题暗态铺底，新标题随激光从左向右揭示，
-                // 激光束（青芯白热）+ 尾迹光带同步推进（进入维持至 2s 再静止）
+                // 激光扫描期：激光线为新旧分界——左侧已扫过显示新标题、
+                // 右侧未扫显示旧标题（双向裁剪，扫过即替换），束芯白热
+                // 青晕、尾迹光带随进度推进（进入维持至 2s 再静止）。
                 <span className="relative inline-flex items-center" data-testid="central-title-scan">
-                  <span className="opacity-40">{titleScan.toCentral ? currentTitle : '中枢'}</span>
+                  <span
+                    aria-hidden
+                    className="absolute inset-0 opacity-55"
+                    style={{ clipPath: `inset(0 0 0 ${titleScan.x * 100}%)` }}
+                  >
+                    {titleScan.toCentral ? currentTitle : '中枢'}
+                  </span>
                   <span
                     aria-hidden
                     className={`absolute inset-0 ${titleScan.toCentral ? 'font-medium text-primary' : ''}`}
@@ -222,6 +232,8 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
                   >
                     {titleScan.toCentral ? '中枢' : currentTitle}
                   </span>
+                  {/* 尺寸锚：取较宽一侧，避免扫描中容器宽度跳动 */}
+                  <span className="invisible">{currentTitle.length >= 2 ? currentTitle : '中枢'}</span>
                   {titleScan.x < 1 ? (
                     <>
                       <span
