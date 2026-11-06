@@ -117,6 +117,9 @@ impl HostExecutionPolicy {
 pub type HostPolicyProvider = Arc<dyn Fn(&str, bool) -> HostExecutionPolicy + Send + Sync>;
 
 static HOST_POLICY_PROVIDER: RwLock<Option<HostPolicyProvider>> = RwLock::new(None);
+/// 漏注入告警只发一次：避免每次 resolve 都刷日志。
+static PROVIDER_MISSING_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 注入宿主权威策略提供者（覆盖语义；缺失时全沙箱零特权）。
 pub fn set_host_policy_provider(provider: HostPolicyProvider) {
@@ -141,9 +144,19 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     let policy = HOST_POLICY_PROVIDER
         .read()
         .ok()
-        .and_then(|current| current.clone())
-        .map(|provider| provider(plugin_id, official_signed))
-        .unwrap_or_else(HostExecutionPolicy::sandboxed_default);
+        .and_then(|current| current.clone());
+    let policy = match policy {
+        Some(provider) => provider(plugin_id, official_signed),
+        None => {
+            if !PROVIDER_MISSING_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    plugin_id,
+                    "宿主策略提供者未注入：按 fail-closed 全沙箱零特权处理，                     受限能力（桌面控制等）将不可用；生产入口应在启动时调用                     host_policy::install()"
+                );
+            }
+            HostExecutionPolicy::sandboxed_default()
+        }
+    };
     normalize(policy)
 }
 

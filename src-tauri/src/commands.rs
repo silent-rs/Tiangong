@@ -4023,6 +4023,11 @@ pub async fn list_tool_icons(
         .map_err(|error| error.to_string())
 }
 
+/// 工具参数摘要的展示提示（运行时提供的宿主渲染规则，前端不写死参数名）。
+#[tauri::command]
+pub fn tool_args_presentation() -> tiangong_plugin_runtime::tool_titles::ToolArgsPresentation {
+    tiangong_plugin_runtime::tool_titles::tool_args_presentation()
+}
 /// 工具行标题查询表（插件在 `tool_titles` 中声明；查不到的工具不在表中，
 /// 前端显示通用标题）。
 #[tauri::command]

@@ -56,6 +56,7 @@ const ALLOWED: &[&str] = &[
     "reset_context",
     "list_tool_icons",
     "list_tool_titles",
+    "tool_args_presentation",
     "plugin_read_tool_icon",
     "get_sandbox_disabled",
     "get_sandbox_update_state",

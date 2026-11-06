@@ -1,6 +1,6 @@
 # 插件运行时职责边界
 
-> 状态：设计稿（未实施，供拆分前评审）
+> 状态：第一轮已实施（§0 第 1–20 步，PR #772）；§5 拆分顺序与后续违规边收敛供下一轮评审
 > 关联：`docs/plugin-runtime-lifecycle.md`（生命周期所有权）、`docs/plugin-harness-design.md`（插件形态）、`docs/plugin-development.md`（公共中立约束）
 > 适用：`crates/plugin/tiangong-plugin-runtime`
 
@@ -27,8 +27,9 @@
 | 15 | 创作域决定保留在 runtime，依赖收窄为公开入口（新增 `plugin_publisher`） | D9→D4 只剩 seam 调用（不再读 `InstalledPlugin` 内部结构） |
 | 16 | Windows 卸载撤销 launcher 授权改走事件路径（`PluginChangeEvent` 携带 `storage_root`，`StorageLayout` 新增 `grants()/grant_record()`） | 消除 D3→D5（显式路径口径下最后一条违规边）；本步含一处有意的小语义变化：撤销失败降级为警告、不再中止卸载 |
 | 17 | **目录按九域重组**：36 个文件移入 9 个域目录（contract/trust/distribution/registry/transport/invocation/bridge/host_policy/plugin_dev），旧公开路径全部经 lib.rs/registry 重导出保持稳定；杂居文件的 `use super::*` 全部显式化 | 目录=域，物理布局与域划分一致；度量盲区消除（见下方度量修正） |
-| 18 | **删除 `builtin_tables` 展示内置表**：工具图标全线由插件在 `tool_icons` 清单声明（未声明走前端默认图标）；终端字形表与 `tool_args_presentation` 命令一并移除（前端与远程白名单已无消费者，CLI 工具行不再显示字形） | runtime 不再按工具名维护展示映射，公共中立约束的过渡期例外清零 |
+| 18 | **删除 `builtin_tables` 展示内置表**：工具图标全线由插件在 `tool_icons` 清单声明（未声明走前端默认图标）；终端字形表移除，CLI 工具行不再显示字形 | runtime 不再按工具名维护图标回落。**注**：本次同时删除的 `tool_args_presentation` 属误删——它是交互必需的参数摘要规则（非插件回落数据），第 20 步已恢复 |
 | 19 | **ts 前缀正名**：`ts_plugin`→`plugin`、`ts_tools`→`tools`（含 `TsPluginAdapter`→`PluginAdapter`、`TsToolDecl`→`ToolDecl`、`ts_instances`→`plugin_instances` 等）；core `ToolResult` 在 invocation 域内别名 `CoreToolResult` | 命名去特殊化前缀，调用域符号与域语义一致（纯重命名，零行为改动） |
+| 20 | **Review 修复（P0/P2）**：① `tool_args_presentation` 恢复——数据归位 runtime `registry/tool_titles.rs`（宿主渲染规则与工具行标题同处），src-tauri 命令/注册/远程白名单恢复，前端原状不动；② `host_policy::resolve` 漏注入时一次性 `warn`（fail-closed 不再静默）；③ `register_bridge_namespace` 拒绝与内置命名空间重叠的前缀，返回 `Result` | P0 断链修复（前端此前每次渲染工具行都触发失败 IPC）；宿主漏配可见化与命名空间劫持防护 |
 度量（两口径，附录 B 可复核）：显式 `crate::` 路径口径下，跨域边 34 → 21、违规边 15 → 0；
 第 17 步目录重组把杂居文件的 `use super::*` 显式化并改用目录判域后，**真实口径**为
 跨域边 24 / 引用 192 / 违规边 3（D3→D4 三处、D3→D5 一处、D5→D4 三处，共 7 处引用）——
@@ -320,16 +321,25 @@ pub struct HostServices {
 | 顶层模块 2-循环 | 10 组 | 10 组 | 0 |
 | 全局 `static` | 24 | 24 | 仅保留进程级单例（如 shutdown 标志） |
 | 回调注入点 | 12（`set_*` 共 14，另 2 个是普通 API） | 12 | 由 `HostServices` 一处构造替代 |
-| `use super::*` | 36 处（生产代码） | 36 处 | 0（隐式耦合无法审计） |
+| `use super::*` | 36 处（生产代码） | 34 处（第 17 步清理三个跨域杂居文件；剩余为域内子模块的同域 glob，不遮蔽跨域度量） | 0（隐式耦合无法审计） |
 | runtime 内插件 ID 字面量 | 5 个 ID / 多处**策略分支** | 策略分支 0（策略表在 D8 的 `host_policy/table.rs`）；目录默认集合仍留 D3（`DEFAULT_PLUGIN_IDS`、分类表）；展示内置表已删除（第 18 步） | 策略分支恒为 0；数据表按产品需要保留 |
 
 复核脚本见附录 B，可在任意提交上重跑，得到同样口径的数字。两口径差异全部来自
 `use super::*` 相对路径：旧口径只解析显式 `crate::` 前缀，目录重组（第 17 步）后
 crate 内相对引用已全部显式化，目录判域口径即真实口径。
 
-## 7. 非目标
+## 7. 非目标与已知行为/API 变化
 
-- 不改变任何对外行为与公开 API（拆 crate 时以 re-export 保持路径稳定）。
+- 原则上不改对外行为与公开 API（拆 crate 时以 re-export 保持路径稳定）。本轮**实际发生**的
+  变化（均已核实，列入发布说明）：
+  - 展示：未声明 `tool_icons` 的工具与 Core 注入工具（`call_local_plugin` 等）回落前端默认
+    图标（10 个官方插件尚未声明，待补）；CLI 工具行不再显示字形；参数摘要提示保留 runtime（`tool_titles`），命令链路恢复。
+  - 策略：runtime 未注入策略提供者时按全沙箱零特权处理（fail-closed，漏注入会 warn）。
+  - Windows：卸载撤销授权从「删目录前、失败中止卸载」移到「事务成功后事件收尾、失败仅告警」。
+  - 公开 API：`namespace_of` 返回 `Option<BridgeNamespace>`（原 `&'static`）；`TsToolDecl`→
+    `ToolDecl`（无别名）；`catalog_snapshot()` 删除；`HostExecutionPolicy`/`PluginChangeEvent`
+    新增 `pub` 字段（外部 struct literal 构造会破坏）；`seams`/`builtin_tables` 模块删除；
+    `register_bridge_namespace` 返回 `Result`。
 - 不引入除 §4 七个接缝以外的新抽象；接缝未落地前不做「顺便重构」。
 - 不追求把 D4/D5/D6 拆成三个 crate——它们共享 `SidecarConfig` 与调用上下文，先做模块级边界，观察一两个版本再决定。
 - 不重写 sidecar 协议、沙箱策略语义与安装事务逻辑。

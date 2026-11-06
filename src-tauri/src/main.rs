@@ -157,7 +157,7 @@ fn main() {
     tiangong_plugin_runtime::host_policy::install();
     // 宿主注册的桥接命名空间：插件创作链（plugin-dev.*）属产品流程，
     // 由宿主注册处理器，runtime 不含其实现。
-    tiangong_plugin_runtime::register_bridge_namespace(
+    let _ = tiangong_plugin_runtime::register_bridge_namespace(
         tiangong_plugin_runtime::BridgeNamespace {
             prefix: "plugin-dev.",
             permission: "plugin-dev.use",
@@ -944,6 +944,7 @@ fn run_gui() {
             tiangong_app::commands::plugin_read_icon,
             tiangong_app::commands::list_tool_icons,
             tiangong_app::commands::list_tool_titles,
+            tiangong_app::commands::tool_args_presentation,
             tiangong_app::commands::plugin_read_tool_icon,
             tiangong_app::commands::plugin_list_trusted_publishers,
             tiangong_app::commands::plugin_import_trusted_publisher,

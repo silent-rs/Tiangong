@@ -122,13 +122,31 @@ fn host_namespaces() -> &'static Mutex<Vec<HostNamespace>> {
 ///
 /// 运行时只保留与产品无关的机制型命名空间（`storage.` / `tool.resolve` 等）；
 /// 面向具体产品流程的命名空间（如插件创作链）由宿主在启动时注册，运行时
-/// 不引用其实现模块。重复注册同一前缀以后者为准。
-pub fn register_bridge_namespace(namespace: BridgeNamespace, handler: BridgeNamespaceHandler) {
+/// 不引用其实现模块。重复注册同一前缀以后者为准；与内置命名空间重叠的
+/// 前缀拒绝注册（避免宿主 handler 静默遮蔽内置路由与权限）。
+pub fn register_bridge_namespace(
+    namespace: BridgeNamespace,
+    handler: BridgeNamespaceHandler,
+) -> Result<()> {
+    if BRIDGE_NAMESPACES
+        .iter()
+        .any(|builtin| builtin.prefix == namespace.prefix)
+    {
+        tracing::warn!(
+            prefix = namespace.prefix,
+            "宿主命名空间与内置命名空间重叠，拒绝注册"
+        );
+        return Err(anyhow::anyhow!(
+            "宿主命名空间前缀 {} 与内置命名空间重叠",
+            namespace.prefix
+        ));
+    }
     let mut namespaces = host_namespaces()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     namespaces.retain(|entry| entry.namespace.prefix != namespace.prefix);
     namespaces.push(HostNamespace { namespace, handler });
+    Ok(())
 }
 /// 注销宿主命名空间（宿主热重载与测试隔离使用）。
 pub fn unregister_bridge_namespace(prefix: &str) {

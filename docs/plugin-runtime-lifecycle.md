@@ -33,7 +33,7 @@
 
 `crates/plugin/tiangong-plugin-runtime/src/events.rs`：
 
-- `PluginChangeEvent { kind, plugin_id, fingerprint }`——`fingerprint` 为发布时刻
+- `PluginChangeEvent { kind, plugin_id, fingerprint, storage_root }`——`fingerprint` 为发布时刻
   的启用插件指纹（id@version），订阅者免重算（回调内再取注册表锁有锁序风险）。
 - `PluginChangeKind`：`Installed` / `Upgraded`（升级、导入替换、回滚、重载同 ID
   换代）/ `Enabled` / `Disabled` / `Uninstalled`。
