@@ -201,7 +201,7 @@ pub async fn get_session_meta(
     session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Option<SessionListItem>, String> {
-    let manager = state.manager_for(&session_id).clone();
+    let manager = state.core_manager.clone();
     tokio::task::spawn_blocking(move || {
         let meta = tiangong_core_manager::SessionMetadata::load_from_storage(
             manager.storage_root(),
@@ -263,12 +263,12 @@ pub async fn load_session(
     // token 统计的分母跟随会话实际模型：有活跃 Core 时取其当前端点的窗口，
     // 否则按会话的模型选择解析；都拿不到才回落默认窗口。
     let context_limit = state
-        .manager_for(&session_id)
+        .core_manager
         .session_context_limit(&session_id)
         .filter(|limit| *limit > 0)
         .unwrap_or_else(tiangong_core::config::core::default_context_limit);
     let default_reasoning_effort = config.reasoning_effort;
-    let manager = state.manager_for(&session_id).clone();
+    let manager = state.core_manager.clone();
     let session_id_for_load = session_id.clone();
     let session = tokio::task::spawn_blocking(move || manager.load_session(&session_id_for_load))
         .await
@@ -302,7 +302,7 @@ pub async fn load_session_messages(
     before_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<crate::view::SessionMessagesPage, String> {
-    let manager = state.manager_for(&session_id).clone();
+    let manager = state.core_manager.clone();
     let session_id_for_load = session_id.clone();
     let session = tokio::task::spawn_blocking(move || manager.load_session(&session_id_for_load))
         .await
@@ -471,11 +471,7 @@ pub async fn delete_sessions_by_cwd(
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
 /// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
 pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_id: &str) {
-    if let Err(error) = state
-        .manager_for(session_id)
-        .retire_core(session_id, false)
-        .await
-    {
+    if let Err(error) = state.core_manager.retire_core(session_id, false).await {
         tracing::warn!(%session_id, %error, "失败回滚时关闭 Core 失败");
     }
 }
@@ -740,7 +736,7 @@ async fn send_message_inner(
     // 获取或创建 TiangongCore(Core 的 deliver 负责 load session + 追加消息 +
     // persist,host 不再预写——issue #245 整改方案)。
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-    let workspace_dir = if state.manager_for(&session_id).session_exists(&session_id) {
+    let workspace_dir = if state.core_manager.session_exists(&session_id) {
         None
     } else {
         let cwd = match workspace_dir {
@@ -863,7 +859,7 @@ pub(crate) async fn restore_failed_user_message_state(
     session_id: &str,
     message_id: &str,
 ) -> Result<(), String> {
-    let manager = state.manager_for(session_id).clone();
+    let manager = state.core_manager.clone();
     state
         .with_state(|core_state| {
             if manager
@@ -946,10 +942,7 @@ pub(crate) fn start_stream_consumer(
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
-                if app_state
-                    .manager_for(&session_id)
-                    .has_live_core(&session_id)
-                {
+                if app_state.core_manager.has_live_core(&session_id) {
                     emit_session_stream_event(&app, &session_id, &session_event);
                 }
                 continue;
@@ -976,10 +969,7 @@ pub(crate) fn start_stream_consumer(
                     | StreamEvent::ModelSwitchStarted { .. }
                     | StreamEvent::ModelSwitched { .. }
             ) {
-                if app_state
-                    .manager_for(&session_id)
-                    .has_live_core(&session_id)
-                {
+                if app_state.core_manager.has_live_core(&session_id) {
                     emit_session_stream_event(&app, &session_id, &session_event);
                 }
                 continue;
@@ -987,10 +977,7 @@ pub(crate) fn start_stream_consumer(
 
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
-            if !app_state
-                .manager_for(&session_id)
-                .has_live_core(&session_id)
-            {
+            if !app_state.core_manager.has_live_core(&session_id) {
                 // 已退役 Core 的缓冲事件不得修改同会话新实例的 pending、消息或 UI。
                 continue;
             }
@@ -1052,10 +1039,7 @@ pub(crate) fn start_stream_consumer(
         let _eof_guard = rt.block_on(eof_lock.lock_owned());
         // 通道关闭说明持有该发送端的 Core 已被显式移除。若同会话已经创建了新 Core，
         // 这是旧消费者的正常退出，不能按 session_id 清理新实例或覆盖新一轮状态。
-        if !app_state
-            .manager_for(&session_id)
-            .has_live_core(&session_id)
-        {
+        if !app_state.core_manager.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 crate::state_ops::clear_pending_turn(core_state, &session_id);
                 Ok(())
@@ -1115,7 +1099,7 @@ pub async fn edit_and_resend(
     // 无需在此全量加载所有 session metadata（与 send_message 同理）。
 
     // 第一遍只读校验发生在任何附件 IO 之前。
-    let edit_manager = state.manager_for(&session_id).clone();
+    let edit_manager = state.core_manager.clone();
     state
         .with_state_read(|core_state| {
             // 会话存在性用单文件存在性判定（O(1)），避免遍历解析全部会话文件；
@@ -1130,7 +1114,7 @@ pub async fn edit_and_resend(
         })
         .await?;
     // 从磁盘 load 校验（不在 app-state 锁内做文件 IO）。
-    let session_for_validation = state.manager_for(&session_id).load_session(&session_id)?;
+    let session_for_validation = state.inner().core_manager.load_session(&session_id)?;
     validate_editable_message(&session_for_validation, &message_id, &base_content)
         .map_err(|error| error.to_string())?;
 
@@ -1306,12 +1290,12 @@ pub async fn cancel_turn(
     if session_id.trim().is_empty() {
         return Err("取消目标会话 ID 不能为空".to_string());
     }
-    if state.manager_for(&session_id).cancel_core(&session_id) {
+    if state.inner().core_manager.cancel_core(&session_id) {
         return Ok(true);
     }
     let session_lock = state.session_send_lock(&session_id);
     Ok(cancel_after_session_send_boundary(session_lock, || {
-        state.manager_for(&session_id).cancel_core(&session_id)
+        state.inner().core_manager.cancel_core(&session_id)
     })
     .await)
 }

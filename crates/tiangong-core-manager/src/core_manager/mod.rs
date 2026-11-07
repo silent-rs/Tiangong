@@ -91,9 +91,6 @@ pub struct CoreManager {
     exempt_session: Arc<Mutex<Option<String>>>,
     config: tiangong_core::config::core::CoreConfigProvider,
     storage_root: PathBuf,
-    /// 模型配置读取根（模型注册表所在目录）。默认与 `storage_root` 一致；
-    /// 会话存储独立于普通目录的 manager（如中枢对话）把它指向共享配置根。
-    models_config_root: PathBuf,
 }
 
 impl CoreManager {
@@ -101,23 +98,12 @@ impl CoreManager {
     ///
     /// - `config`：全局配置模板 provider，用于 `ensure_core` 的 base 快照与
     ///   `sync_config` 的模板替换
-    /// - `storage_root`：session 文件根（形如 `~/.tiangong`）
+    /// - `storage_root`：session 文件根（形如 `~/.tiangong`）；中枢对话等
+    ///   特殊 Core 的单独存储规则内建于 `Session::session_file_path`，
+    ///   由同一管理器统一托管
     pub fn new(
         config: tiangong_core::config::core::CoreConfigProvider,
         storage_root: impl Into<PathBuf>,
-    ) -> Self {
-        let storage_root = storage_root.into();
-        Self::with_models_config_root(config, storage_root.clone(), storage_root)
-    }
-
-    /// 构造管理器，会话存储根与模型配置根分离。
-    ///
-    /// 中枢对话等独立执行域：session 文件独立存储（物理隔离），但模型
-    /// 注册表与全局设置共享同一份（`models_config_root` 为主配置根）。
-    pub fn with_models_config_root(
-        config: tiangong_core::config::core::CoreConfigProvider,
-        storage_root: impl Into<PathBuf>,
-        models_config_root: impl Into<PathBuf>,
     ) -> Self {
         let manager = Self {
             cores: Arc::new(Mutex::new(HashMap::new())),
@@ -128,7 +114,6 @@ impl CoreManager {
             exempt_session: Arc::new(Mutex::new(None)),
             config,
             storage_root: storage_root.into(),
-            models_config_root: models_config_root.into(),
         };
         // 空闲回收：turn 结束后无交互达到保留时长即销毁实例（暂定 1 小时）。
         manager.spawn_idle_reaper();

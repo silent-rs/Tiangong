@@ -55,11 +55,10 @@ pub struct TiangongApp {
     /// 插件变化上下文交接的状态容器（标记 / 首检 / 定档指纹）。
     pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
+    /// 中枢对话（`crate::central`）也是本管理器托管的特殊 Core：统一生命周期
+    /// 与编排，特殊性只在会话文件路径（单独存储，见
+    /// `Session::session_file_path`）与插件集（ensure_core 白名单分支）。
     pub core_manager: tiangong_core_manager::CoreManager,
-    /// 中枢对话专用 CoreManager：storage_root 独立（`{storage_root}/central`），
-    /// 普通会话链路（列表/删除/回收/元数据）不触达；模型等全局配置与普通
-    /// manager 共享同一 provider。见 `crate::central`。
-    pub central_core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -152,14 +151,6 @@ impl TiangongApp {
         let config = core_state.core_manager.config().clone();
         let storage_root = core_state.config.storage_root.clone();
         let core_manager = core_state.core_manager.clone();
-        // 中枢对话独立执行域：storage_root 独立（与普通会话物理隔离），
-        // 模型等全局配置共享同一 provider（Arc 语义，设置变更两侧同步）；
-        // 模型注册表等磁盘配置仍从主配置根读取（models_config_root）。
-        let central_core_manager = tiangong_core_manager::CoreManager::with_models_config_root(
-            config.clone(),
-            crate::central::central_storage_root(&storage_root),
-            storage_root.clone(),
-        );
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
 
         let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
@@ -189,7 +180,6 @@ impl TiangongApp {
                 storage_root.clone(),
             ),
             core_manager,
-            central_core_manager,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -797,12 +787,12 @@ impl TiangongApp {
             .await
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
-        // 中枢对话固定路由到独立 manager（单独存储，见 crate::central）；
-        // workspace 不由调用方指定：中枢是控制面，不绑定工作区（§6），
-        // Core 构造统一用全局默认目录（无工作型工具，仅作路径兜底）。
-        let is_central = crate::central::is_central_session(session_id);
-        let manager = self.manager_for(session_id);
-        let existing_session = manager.load_session(session_id).ok();
+        // 中枢对话（crate::central）由同一管理器托管：会话文件单独存储
+        // （路径规则内建于 Session::session_file_path），workspace 不由调用方
+        // 指定——中枢是控制面，不绑定工作区（设计稿 §6），统一用全局默认
+        // 目录（无工作型工具，仅作路径兜底）。
+        let is_central = tiangong_types::central_session::is_central_session(session_id);
+        let existing_session = self.core_manager.load_session(session_id).ok();
         let workspace_dir = if is_central { None } else { workspace_dir }
             .filter(|cwd| !cwd.trim().is_empty())
             .unwrap_or(default_workspace_dir);
@@ -826,7 +816,7 @@ impl TiangongApp {
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
         let central_plugins = Vec::new();
-        manager
+        self.core_manager
             .ensure_core(
                 session_id,
                 session_config,
@@ -842,16 +832,6 @@ impl TiangongApp {
                 },
             )
             .await
-    }
-
-    /// 按 session_id 选择 CoreManager：中枢对话固定路由到独立 manager，
-    /// 其余走普通 manager。所有按会话操作 Core 的入口都应经由此方法路由。
-    pub(crate) fn manager_for(&self, session_id: &str) -> &tiangong_core_manager::CoreManager {
-        if crate::central::is_central_session(session_id) {
-            &self.central_core_manager
-        } else {
-            &self.core_manager
-        }
     }
 
     /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：
@@ -982,7 +962,7 @@ impl TiangongApp {
         }
         self.handoff_before_deliver(session_id).await;
         self.flush_pending_snapshot(session_id);
-        self.manager_for(session_id)
+        self.core_manager
             .deliver_user_message(
                 session_id,
                 AgentInputKind::prepared_with_id(message_id, prepared)

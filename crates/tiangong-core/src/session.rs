@@ -227,16 +227,7 @@ impl Session {
 
     /// 从指定存储根加载 Session，并保留该根作为后续持久化位置。
     pub fn load_from_storage(storage_root: &Path, session_id: &str) -> Result<Self, String> {
-        let mut components = Path::new(session_id).components();
-        let valid_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
-            && components.next().is_none();
-        if !valid_id {
-            return Err("会话 ID 必须是单个安全路径片段".to_string());
-        }
-
-        let path = storage_root
-            .join("sessions")
-            .join(format!("{session_id}.json"));
+        let path = Self::session_file_path(storage_root, session_id)?;
         let content = std::fs::read_to_string(&path)
             .map_err(|error| format!("session 读取失败（{}）：{error}", path.display()))?;
         let mut session: Self = serde_json::from_str(&content)
@@ -249,6 +240,31 @@ impl Session {
         }
         session.bind_storage_root(storage_root.to_path_buf());
         Ok(session)
+    }
+
+    /// 会话文件路径：`{storage_root}/sessions/{id}.json`。
+    ///
+    /// **中枢对话单独存储**（设计稿 §13.1）：中枢是同一 CoreManager 管理下的
+    /// 特殊 Core，但会话文件位于 `{storage_root}/central/sessions/`，不与普通
+    /// 会话混存——会话列表、按组删除、回收站等普通链路（只扫 `sessions/`）
+    /// 天然不触达。读取（load）、持久化（persist）与 CoreManager 侧的
+    /// 元数据 / 回收站操作共用本函数，路径规则单点维护。
+    pub fn session_file_path(storage_root: &Path, session_id: &str) -> Result<PathBuf, String> {
+        let mut components = Path::new(session_id).components();
+        let valid_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none();
+        if !valid_id {
+            return Err("会话 ID 必须是单个安全路径片段".to_string());
+        }
+        if tiangong_types::central_session::is_central_session(session_id) {
+            return Ok(storage_root
+                .join("central")
+                .join("sessions")
+                .join(format!("{session_id}.json")));
+        }
+        Ok(storage_root
+            .join("sessions")
+            .join(format!("{session_id}.json")))
     }
 
     /// 将 session 持久化到 `~/.tiangong/sessions/{id}.json`
@@ -273,9 +289,7 @@ impl Session {
         let storage_root = self.storage_root.as_ref().ok_or_else(|| {
             "session 未绑定 storage_root（创建或加载 Session 时必须绑定）".to_string()
         })?;
-        let path = storage_root
-            .join("sessions")
-            .join(format!("{}.json", self.id));
+        let path = Self::session_file_path(storage_root, &self.id)?;
         let content = serde_json::to_string_pretty(self)
             .map_err(|err| format!("session 序列化失败：{err}"))?;
         atomic_replace_file(&path, content.as_bytes())
