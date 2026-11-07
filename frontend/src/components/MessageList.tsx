@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
-import { isDesktopHost, isRemoteHost, listen } from '@/api/host';
+import { isRemoteHost, listen } from '@/api/host';
 import { hasMediaBlocks, textContent, type ContentBlock, type Message } from "@/api/tauri";
 import { elapsedMsOf, finalReplyOf, isCompact, messageKind, turnAnchorIds, turnStatusOf } from "@/api/message";
 import {
@@ -38,8 +38,6 @@ import {
 } from "./message";
 import { blankViewportRecovery, shouldCompensateItemResize } from "./message/virtualScrollAdjust";
 import { type MentionEditorHandle } from "./MentionEditor";
-import { CENTRAL_DEFAULT_GREETING } from "@/components/central/centralGreeting";
-import { CENTRAL_TRANSITION_PARAMS } from "@/components/central/centralTransitionParams";
 
 /** 每个会话的阅读位置锚点：视口顶部对齐的分组索引 + 离开时是否贴底。
  * 切换会话时按锚点恢复阅读位置（贴底则回到底部保持跟随语义）；
@@ -95,8 +93,6 @@ export function MessageList() {
   const loadingOlderMessages = useStore(s => s.loadingOlderMessages);
   const switchingSessionId = useStore(s => s.switchingSessionId);
   const remoteHost = isRemoteHost();
-  // 中枢模式空对话：呈现中枢默认问候（设计稿 §4.2）；desktop 守卫与布局分支一致
-  const centralActive = useStore(s => s.centralMode) && isDesktopHost();
   const searchActive = useSearchStore(s => s.searchActive);
 
   // 用 ref 持有搜索 query 和 matchIndex，避免每次按键导致 MessageList 重渲染
@@ -1254,20 +1250,6 @@ export function MessageList() {
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
           {messages.length === 0 && !isThinking && !(remoteHost && switchingSessionId) ? (
-            centralActive ? (
-              <div className="flex flex-col items-center justify-center h-full text-center py-20">
-                <div
-                  className="flex h-16 w-16 items-center justify-center rounded-full mb-4 text-2xl"
-                  style={{ backgroundColor: CENTRAL_TRANSITION_PARAMS.accent, color: CENTRAL_TRANSITION_PARAMS.accent2 }}
-                  aria-hidden="true"
-                >
-                  ✦
-                </div>
-                <p className="max-w-xl text-balance whitespace-pre-line text-sm leading-relaxed text-muted-foreground">
-                  {CENTRAL_DEFAULT_GREETING}
-                </p>
-              </div>
-            ) : (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
                 <Cpu className="w-8 h-8 text-primary-foreground" />
@@ -1286,7 +1268,6 @@ export function MessageList() {
                 {' '}中完成各种任务
               </p>
             </div>
-            )
           ) : (
             <>
               {searchActive && <SearchBar />}

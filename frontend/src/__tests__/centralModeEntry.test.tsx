@@ -160,7 +160,6 @@ beforeEach(() => {
   localStorage.removeItem(CENTRAL_MODE_STORAGE_KEY);
   useStore.setState({
     centralMode: false,
-    preCentralContext: null,
     activeSessionId: null,
     newConversationId: null,
     isNewConversation: true,

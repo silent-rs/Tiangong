@@ -11,17 +11,22 @@ import { AppSidebar } from '@/components/AppSidebar';
 import { CentralModeView } from '@/components/central/CentralModeView';
 import { CentralTransition } from '@/components/central/CentralTransition';
 import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
+import {
+  ensureCentralConversation,
+  restoreFromCentralConversation,
+} from '@/lib/centralConversation';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';
 import { SidebarProvider } from '@/components/ui/sidebar';
-import { LazyStatusPanel } from '@/components/LazyComponents';
-import { ChatPanel } from '@/components/ChatPanel';
+import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import {
   TabsContainer,
   type AppTabCommand,
 } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
+import { InteractionPluginHost } from '@/components/InteractionPluginHost';
+import { InputOverlayPluginHost } from '@/components/InputOverlayPluginHost';
 import { useToast } from '@/components/Toast';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
@@ -100,20 +105,28 @@ export function MainApp() {
   const currentSessionId = activeSessionId ?? newConversationId;
   useUpdateCheck();
 
-  // 中枢模式对话绑定（POC 阶段 1）：进入时确保中枢对话成为当前对话（复用
-  // Session 持久化，绑定 ID 见 centralModePreference），退出时恢复进入前的
-  // 普通模式会话。mount 时按当前状态初始化（重启直入中枢也会建立绑定）。
+  // 中枢模式对话绑定（POC 阶段 1）：进入/退出时切换中枢对话与普通模式上下文
+  // （逻辑独立于共用 store，见 lib/centralConversation）。mount 时按当前状态
+  // 初始化（重启直入中枢也会建立绑定）。
   const prevCentralActiveRef = useRef(false);
   useEffect(() => {
     if (centralActive === prevCentralActiveRef.current) return;
     prevCentralActiveRef.current = centralActive;
     if (centralActive) {
-      void useStore.getState().ensureCentralConversation();
+      void ensureCentralConversation();
     } else {
-      void useStore.getState().restoreFromCentralConversation();
+      void restoreFromCentralConversation();
     }
   }, [centralActive]);
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
+  const [interactionVisible, setInteractionVisible] = useState(false);
+  const [inputOverlayVisible, setInputOverlayVisible] = useState(false);
+  const [inputOverlayHint, setInputOverlayHint] = useState<string | null>(null);
+  const handleInputOverlayVisibility = useCallback((visible: boolean, hint: string | null) => {
+    setInputOverlayVisible(visible);
+    setInputOverlayHint(visible ? hint : null);
+  }, []);
+  const [messageInputHeight, setMessageInputHeight] = useState(0);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   // 拓展区三态（设计文档 6.7.2）：面板展开时区分矩阵态（App 矩阵）与 App 态
@@ -771,7 +784,25 @@ export function MainApp() {
                 className={`relative isolate flex flex-col min-w-0 ${showWorkspacePanel ? 'shrink-0' : 'flex-1'}`}
                 style={showWorkspacePanel ? { width: chatPanelWidth } : undefined}
               >
-                <ChatPanel />
+                <div className="flex-1 overflow-hidden">
+                  <LazyMessageList />
+                </div>
+                <LazyMessageInput
+                  interactionVisible={interactionVisible}
+                  inputOverlayVisible={inputOverlayVisible}
+                  inputOverlayHint={inputOverlayHint}
+                  inputOverlay={(
+                    <InputOverlayPluginHost
+                      suppressed={interactionVisible}
+                      onVisibilityChange={handleInputOverlayVisibility}
+                    />
+                  )}
+                  onHeightChange={setMessageInputHeight}
+                />
+                <InteractionPluginHost
+                  inputHeight={messageInputHeight}
+                  onVisibilityChange={setInteractionVisible}
+                />
               </div>
 
               {workspacePanelMounted && showWorkspacePanel && (
