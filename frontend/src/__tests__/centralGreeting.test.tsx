@@ -1,8 +1,9 @@
 /**
- * 中枢消息列表测试：空态问候（§4.2）、消息渲染（用户/助手）、流式增量。
- * 中枢 UI 独立于普通模式 MessageList，本文件只测 CentralMessageList。
+ * 中枢视图测试：空态呈现中枢默认问候（§4.2），有消息/生成中复用基础
+ * 组件 MessageList（经 LazyComponents，测试中以标记 mock）。中枢输入区
+ * 与征询宿主的挂载一并覆盖。
  */
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,37 +21,27 @@ vi.mock('@/api/tauri', async (importOriginal) => {
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(() => Promise.resolve(() => {})),
 }));
+vi.mock('@/components/LazyComponents', () => ({
+  LazyMessageList: () => <div data-testid="central-message-list">message-list</div>,
+}));
+vi.mock('@/components/InteractionPluginHost', () => ({
+  InteractionPluginHost: () => null,
+}));
+vi.mock('@/components/central/CentralChatInput', () => ({
+  CentralChatInput: () => <div data-testid="central-chat-input">chat-input</div>,
+}));
 
-const { CentralMessageList } = await import('@/components/central/CentralMessageList');
+const { CentralModeView } = await import('@/components/central/CentralModeView');
 const { useStore } = await import('@/store/useStore');
 const { CENTRAL_SESSION_ID } = await import('@/lib/centralSession');
 
-function userMessage(id: string, text: string) {
-  return {
-    id,
-    role: 'user',
-    content: [{ type: 'text', text }],
-    created_at: '2026-11-20 12:00:00',
-  };
-}
-
-function assistantMessage(id: string, text: string) {
-  return {
-    id,
-    role: 'assistant',
-    content: [{ type: 'text', text }],
-    reasoning_content: '',
-    created_at: '2026-11-20 12:00:01',
-  };
-}
-
-function mountList(): () => void {
+function mountView(): () => void {
   const container = document.createElement('div');
   document.body.appendChild(container);
   let root!: Root;
   act(() => {
     root = createRoot(container);
-    root.render(<CentralMessageList />);
+    root.render(<CentralModeView />);
   });
   return () => {
     act(() => root.unmount());
@@ -62,12 +53,12 @@ let cleanup: (() => void) | undefined;
 
 beforeEach(() => {
   useStore.setState({
+    activeSessionId: CENTRAL_SESSION_ID,
     messages: [],
     streamingMessageId: null,
     streamingContent: '',
     streamingReasoningContent: '',
     runStatus: 'idle',
-    activeSessionId: CENTRAL_SESSION_ID,
   });
 });
 
@@ -76,39 +67,37 @@ afterEach(() => {
   cleanup = undefined;
 });
 
-describe('CentralMessageList', () => {
-  it('空对话：显示中枢默认问候', () => {
-    cleanup = mountList();
+describe('CentralModeView', () => {
+  it('空对话：显示中枢默认问候，不挂消息列表', () => {
+    cleanup = mountView();
     expect(document.body.textContent).toContain('我是天工中枢');
+    expect(document.querySelector('[data-testid="central-message-list"]')).toBeNull();
+    // 专属输入区挂载
+    expect(document.querySelector('[data-testid="central-chat-input"]')).not.toBeNull();
   });
 
-  it('有消息：渲染用户与助手消息', () => {
+  it('有消息：复用 MessageList 渲染，问候不出现', () => {
     act(() => {
       useStore.setState({
-        messages: [
-          userMessage('u1', '帮我看看这个问题'),
-          assistantMessage('a1', '好的，我先了解一下情况。'),
-        ],
+        messages: [{
+          id: 'm1',
+          role: 'user',
+          content: [{ type: 'text', text: '帮我看看这个问题' }],
+          created_at: '2026-11-20 12:00:00',
+        }],
       });
     });
-    cleanup = mountList();
-    expect(document.body.textContent).toContain('帮我看看这个问题');
-    expect(document.body.textContent).toContain('好的，我先了解一下情况。');
+    cleanup = mountView();
+    expect(document.querySelector('[data-testid="central-message-list"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain('我是天工中枢');
   });
 
-  it('生成中：流式增量与思考过程可见', () => {
+  it('生成中（首条已投递）：交给 MessageList 的 typing 态，不显示问候', () => {
     act(() => {
-      useStore.setState({
-        messages: [userMessage('u1', '继续')],
-        streamingMessageId: 'a-streaming',
-        streamingContent: '正在生成的部分回复',
-        streamingReasoningContent: '思考片段',
-        runStatus: 'executing',
-      });
+      useStore.setState({ runStatus: 'executing' });
     });
-    cleanup = mountList();
-    expect(document.body.textContent).toContain('思考过程');
-    expect(document.body.textContent).toContain('思考片段');
-    expect(document.body.textContent).toContain('正在生成的部分回复');
+    cleanup = mountView();
+    expect(document.querySelector('[data-testid="central-message-list"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain('我是天工中枢');
   });
 });
