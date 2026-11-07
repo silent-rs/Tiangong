@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
@@ -55,10 +55,11 @@ pub struct TiangongApp {
     /// 插件变化上下文交接的状态容器（标记 / 首检 / 定档指纹）。
     pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
-    /// 中枢对话（`crate::central`）也是本管理器托管的特殊 Core：统一生命周期
-    /// 与编排，特殊性只在会话文件路径（单独存储，见
-    /// `Session::session_file_path`）与插件集（ensure_core 白名单分支）。
     pub core_manager: tiangong_core_manager::CoreManager,
+    /// 中枢对话 Core（**直接持有，不经 CoreManager**）：中枢需要内置且唯一的
+    /// 中枢插件（`crate::central::CentralPlugin`），CoreManager 的 runtime 聚合
+    /// 桥插件构造与编排不适用；中枢的构造/投递/取消/关闭见下方方法组。
+    central_core: Mutex<Option<tiangong_core::core::TiangongCore>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -180,6 +181,7 @@ impl TiangongApp {
                 storage_root.clone(),
             ),
             core_manager,
+            central_core: Mutex::new(None),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -787,13 +789,8 @@ impl TiangongApp {
             .await
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
-        // 中枢对话（crate::central）由同一管理器托管：会话文件单独存储
-        // （路径规则内建于 Session::session_file_path），workspace 不由调用方
-        // 指定——中枢是控制面，不绑定工作区（设计稿 §6），统一用全局默认
-        // 目录（无工作型工具，仅作路径兜底）。
-        let is_central = tiangong_types::central_session::is_central_session(session_id);
         let existing_session = self.core_manager.load_session(session_id).ok();
-        let workspace_dir = if is_central { None } else { workspace_dir }
+        let workspace_dir = workspace_dir
             .filter(|cwd| !cwd.trim().is_empty())
             .unwrap_or(default_workspace_dir);
         if let Some(session) = existing_session {
@@ -810,12 +807,10 @@ impl TiangongApp {
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
         // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
         //
-        // 中枢对话插件集为空（§5.2/§5.3 权限隔离由宿主在 Core 构造点强制，
-        // 不靠提示词；§5.3 白名单工具集随中枢编排后续片接入）：中枢助手
-        // 不携带任何工作型工具，聚合桥（runtime 全量插件）不挂载。
+        // 中枢对话不经此入口：中枢 Core 由 `ensure_central_core` 直接构造
+        // （内置且唯一的中枢插件，见 `crate::central`）。
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
-        let central_plugins = Vec::new();
         self.core_manager
             .ensure_core(
                 session_id,
@@ -823,15 +818,131 @@ impl TiangongApp {
                 workspace_dir,
                 initial_model_ref,
                 stream_tx,
-                move || {
-                    if is_central {
-                        central_plugins
-                    } else {
-                        factory.build_plugins_sync(session_id, models)
-                    }
-                },
+                || factory.build_plugins_sync(session_id, models),
             )
             .await
+    }
+
+    // =========================================================================
+    // 中枢对话 Core：直接构造与管理（不经 CoreManager）
+    //
+    // 中枢需要内置且唯一的中枢插件（crate::central::CentralPlugin：人设 +
+    // §5.3 白名单工具集），CoreManager 的 runtime 聚合桥插件构造与会话
+    // 编排不适用。中枢 Core 单实例常驻（进程生命周期），模型直接使用设置
+    // 的主对话模型（§15.12；中枢 session.model_ref 优先）；压缩由 Core
+    // 内部自治。
+    // =========================================================================
+
+    /// 确保中枢 Core 存在：已存在则刷新配置复用，否则直接构造（挂中枢插件）。
+    /// 返回是否新建（调用方据此启动流事件消费者）。
+    pub(crate) async fn ensure_central_core(
+        &self,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
+    ) -> Result<bool, String> {
+        let (app_config, agent_config, workspace_dir) = self
+            .with_state_read(|state| {
+                Ok((
+                    state.config.clone(),
+                    state.agent_config.clone(),
+                    state.workspace_dir.clone(),
+                ))
+            })
+            .await
+            .unwrap_or_default();
+        let mut session_config = app_config.to_core_config();
+        let existing_session = self
+            .core_manager
+            .load_session(crate::central::CENTRAL_SESSION_ID)
+            .ok();
+        if let Some(session) = &existing_session {
+            session_config.trust_mode = session.trust_mode;
+            session_config.reasoning_effort = session
+                .reasoning_effort
+                .unwrap_or(agent_config.reasoning_effort);
+        }
+        // 复用：刷新会话级运行配置（同 CoreManager ensure 命中分支语义）。
+        {
+            let guard = self.central_core.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(core) = guard.as_ref() {
+                let _ = core.replace_config(session_config.clone());
+                core.set_trust_mode(session_config.trust_mode);
+                core.set_reasoning_effort(session_config.reasoning_effort);
+                return Ok(false);
+            }
+        }
+        // 新建：模型 = 中枢 session.model_ref ?? 设置的主对话模型（§15.12）。
+        let session_model_ref = existing_session.and_then(|session| session.model_ref);
+        let model_endpoint = self
+            .core_manager
+            .resolve_turn_model(session_model_ref.as_deref())?;
+        let core = tiangong_core::core::TiangongCore::builder()
+            .session_id(crate::central::CENTRAL_SESSION_ID.to_string())
+            .config(CoreConfigProvider::new(session_config.clone()))
+            .trust_mode(session_config.trust_mode)
+            .storage_root(self.core_manager.storage_root().to_path_buf())
+            .workspace_dir(workspace_dir)
+            .stream_tx(stream_tx)
+            .plugins(vec![Arc::new(crate::central::CentralPlugin)])
+            .model_endpoint(model_endpoint)
+            .build();
+        let mut guard = self.central_core.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            // 并发双检：另一路径已创建，丢弃本次实例（其 stream_tx 消费者由先建者负责）。
+            return Ok(false);
+        }
+        *guard = Some(core);
+        Ok(true)
+    }
+
+    /// 向中枢 Core 投递用户消息（prepared blocks）。
+    pub(crate) fn deliver_central_message(
+        &self,
+        message_id: String,
+        prepared: Vec<tiangong_types::ContentBlock>,
+        render: Option<tiangong_types::MessageRender>,
+    ) -> Result<(), String> {
+        use tiangong_core::agent_input::AgentInput;
+        let core = self
+            .central_core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| "中枢 Core 不存在（先 ensure_central_core）".to_string())?;
+        core.deliver(AgentInputKind::prepared_with_id(message_id, prepared).with_render(render))
+            .map_err(|error| format!("中枢消息投递失败：{error}"))
+    }
+
+    /// 取消中枢当前 turn。返回是否送达。
+    pub(crate) fn cancel_central_turn(&self) -> bool {
+        use tiangong_core::agent_input::{AgentInput, CommandInput};
+        self.central_core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|core| {
+                core.deliver(AgentInputKind::Command(CommandInput::Cancel))
+                    .is_ok()
+            })
+    }
+
+    /// 中枢 Core 是否存活（流事件消费者的存活判定用）。
+    pub(crate) fn central_core_alive(&self) -> bool {
+        self.central_core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// 关闭并等待中枢 Core 写盘结束（发送失败回滚 / 进程退出）。
+    pub(crate) async fn shutdown_join_central_core(&self) {
+        let core = self
+            .central_core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(core) = core {
+            let _ = tokio::task::spawn_blocking(|| core.shutdown_join()).await;
+        }
     }
 
     /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：
