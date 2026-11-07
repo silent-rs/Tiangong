@@ -113,7 +113,7 @@ impl CoreManager {
         match session_ref {
             Some(key) => self.resolve_turn_model(Some(&key)).unwrap_or_default(),
             None => tiangong_config::default_chat_endpoint_at(
-                &tiangong_config::io::load_models_config_at(&self.storage_root),
+                &tiangong_config::io::load_models_config_at(&self.models_config_root),
             )
             .unwrap_or_default(),
         }
@@ -149,7 +149,7 @@ impl CoreManager {
     /// `None` 只是选择策略，不能直接与 Core 当前模型比较——默认模型本身
     /// 会变化。必须先解析成实际目标再比较。
     pub fn resolve_turn_model(&self, model_ref: Option<&str>) -> Result<ModelEndpoint, String> {
-        let models = tiangong_config::io::load_models_config_at(&self.storage_root);
+        let models = tiangong_config::io::load_models_config_at(&self.models_config_root);
         match model_ref.map(str::trim).filter(|key| !key.is_empty()) {
             Some(key) => {
                 let entry = models.models.get(key).ok_or_else(|| {
@@ -442,7 +442,7 @@ impl CoreManager {
 
     /// 会话当前模型是否支持多模态（按 `Session.model_ref` 查模型注册表）。
     fn session_model_is_multimodal(&self, session_id: &str) -> bool {
-        let models = tiangong_config::io::load_models_config_at(&self.storage_root);
+        let models = tiangong_config::io::load_models_config_at(&self.models_config_root);
         let model_ref = self
             .load_session(session_id)
             .ok()

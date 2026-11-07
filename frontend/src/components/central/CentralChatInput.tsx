@@ -29,6 +29,7 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
   const sendMessage = useStore((state) => state.sendMessage);
   const isSending = inputCache?.is_sending === true;
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // 高度自适应：内容变化时重算（上限 MAX_INPUT_HEIGHT，超出滚动）
@@ -50,13 +51,27 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
     if (!text) return;
     const revision = inputCache?.revision ?? 0;
     setSending(true);
+    setSendError(null);
     try {
       // 中枢对话固定 session：无新对话语义（cwd/trust/effort/model 均不携带），
-      // 后端按中枢存储路由并使用设置的主对话模型。
-      await sendMessage(CENTRAL_SESSION_ID, text, [], revision, undefined, undefined);
-      setInputCacheText(CENTRAL_SESSION_ID, '');
+      // 后端按中枢存储路由并使用设置的主对话模型。返回 false 表示投递失败
+      // （错误已在 store 内记录），草稿保留供重试。
+      const delivered = await sendMessage(
+        CENTRAL_SESSION_ID,
+        text,
+        [],
+        revision,
+        undefined,
+        undefined,
+      );
+      if (delivered) {
+        setInputCacheText(CENTRAL_SESSION_ID, '');
+      } else {
+        setSendError('发送失败，请重试（详情见控制台）');
+      }
     } catch (error) {
       console.error('中枢消息发送失败:', error);
+      setSendError('发送失败，请重试');
     } finally {
       setSending(false);
     }
@@ -113,7 +128,11 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
         )}
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-2 text-[11px] text-muted-foreground/70">
-        Enter 发送 · Shift+Enter 换行
+        {sendError ? (
+          <span className="text-destructive">{sendError}</span>
+        ) : (
+          'Enter 发送 · Shift+Enter 换行'
+        )}
       </p>
     </div>
   );

@@ -153,10 +153,12 @@ impl TiangongApp {
         let storage_root = core_state.config.storage_root.clone();
         let core_manager = core_state.core_manager.clone();
         // 中枢对话独立执行域：storage_root 独立（与普通会话物理隔离），
-        // 模型等全局配置共享同一 provider（Arc 语义，设置变更两侧同步）。
-        let central_core_manager = tiangong_core_manager::CoreManager::new(
+        // 模型等全局配置共享同一 provider（Arc 语义，设置变更两侧同步）；
+        // 模型注册表等磁盘配置仍从主配置根读取（models_config_root）。
+        let central_core_manager = tiangong_core_manager::CoreManager::with_models_config_root(
             config.clone(),
             crate::central::central_storage_root(&storage_root),
+            storage_root.clone(),
         );
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
 
