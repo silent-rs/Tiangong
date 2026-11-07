@@ -1532,8 +1532,14 @@ export const useStore = create<AppState>((set, get) => ({
     if (context.activeSessionId) {
       const cur = get();
       if (cur.activeSessionId === context.activeSessionId) return;
-      // 原会话仍存在（或列表未变）则切回；已被删除则回新对话
-      const exists = cur.sessions.some((session) => session.id === context.activeSessionId);
+      // 列表尚未加载（空）时不能断定原会话已被删除：先刷新一次再判定，
+      // 否则会误丢用户原会话、落到无关的新对话。
+      let sessions = cur.sessions;
+      if (!sessions.length) {
+        await get().loadSessions();
+        sessions = get().sessions;
+      }
+      const exists = sessions.some((session) => session.id === context.activeSessionId);
       if (exists) {
         await get().switchSession(context.activeSessionId);
       } else {

@@ -216,12 +216,25 @@ describe('restoreFromCentralConversation', () => {
   it('进入前会话已被删除：回新对话', async () => {
     resetStore({
       activeSessionId: CENTRAL_SESSION_ID,
-      sessions: [],
+      sessions: [session('other-1')],
       preCentralContext: { activeSessionId: 'work-deleted', newConversationId: null },
     });
+    getSessionsMock.mockResolvedValue([session('other-1')]);
     newSessionIdMock.mockResolvedValue('fresh-after-restore');
     await useStore.getState().restoreFromCentralConversation();
     expect(useStore.getState().newConversationId).toBe('fresh-after-restore');
+  });
+
+  it('列表尚未加载（空）时不误判原会话已删除：刷新后切回', async () => {
+    resetStore({
+      activeSessionId: CENTRAL_SESSION_ID,
+      sessions: [],
+      preCentralContext: { activeSessionId: 'work-1', newConversationId: null },
+    });
+    getSessionsMock.mockResolvedValue([session('work-1')]);
+    await useStore.getState().restoreFromCentralConversation();
+    expect(useStore.getState().activeSessionId).toBe('work-1');
+    expect(newSessionIdMock).not.toHaveBeenCalled();
   });
 });
 
