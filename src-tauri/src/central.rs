@@ -38,9 +38,10 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - 理解用户的目标与约束，必要时澄清，给出简洁的计划或建议；
 - 组织回答与汇总，明确区分「已确认的事实」「你的推测」「你的建议」；
 - 用户提到天工自身、开发仓库、工作区或后台工作时，**先调用工具了解情况再回答**
-  （`central__get_context`：中枢与天工的当前状态；`central__inspect_workspace`：
-  指定工作区的只读元信息——路径、git 分支、worktree 清单），不要让用户
-  粘贴你可以自己查到的信息。
+  （`central__get_context`：中枢与天工的当前状态；`central__list_workspaces`：
+  本机已知工作区清单及各 git 分支——天工开发仓库通常在这里能找到；
+  `central__inspect_workspace`：指定工作区的只读元信息——worktree 清单等），
+  不要让用户粘贴你可以自己查到的信息。
 
 你的边界（由系统强制，不依赖你的自觉）：
 - 你不直接执行工作型任务：不读写项目文件内容、不运行命令、不操作浏览器
@@ -54,18 +55,26 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 ///
 /// POC 提供三个只读工具（§5.3 白名单前三项）：
 /// - `get_context`：中枢与天工的当前状态（版本、POC 阶段、能力边界、后台工作）；
-/// - `list_workspaces`：已知工作区清单（POC：全局默认工作区）；
-/// - `inspect_workspace`：工作区只读元信息（git 分支、worktree 清单）。
+/// - `list_workspaces`：本机已知工作区清单——全局默认工作区 + 各会话工作
+///   目录聚合（只读会话元数据的 cwd 字段，不读对话内容），附各工作区的
+///   git 分支与 worktree 元信息；
+/// - `inspect_workspace`：指定工作区的只读元信息（git 分支、worktree 清单）。
 ///
 /// 其余白名单工具（后台工作协调、征询、通知等）随中枢编排后续片扩展。
 pub struct CentralPlugin {
     /// 全局默认工作区（构造时注入的快照；中枢不绑定具体工作区，§6）。
     workspace_dir: String,
+    /// 只读元数据源（工作区聚合）：与普通会话管理器共享同一实例，仅使用
+    /// `list_session_metadata`（带缓存），不触碰会话内容或 Core 生命周期。
+    sessions: tiangong_core_manager::CoreManager,
 }
 
 impl CentralPlugin {
-    pub fn new(workspace_dir: String) -> Self {
-        Self { workspace_dir }
+    pub fn new(workspace_dir: String, sessions: tiangong_core_manager::CoreManager) -> Self {
+        Self {
+            workspace_dir,
+            sessions,
+        }
     }
 
     fn text_result(&self, summary: &str, body: String) -> Option<ToolResult> {
@@ -95,6 +104,7 @@ impl CentralPlugin {
     }
 
     fn handle_get_context(&self) -> Option<ToolResult> {
+        let workspace_count = self.known_workspace_paths().len();
         let body = format!(
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话已接入；后台工作派发、事件回报与主动汇报为后续阶段）\n\
@@ -102,21 +112,46 @@ impl CentralPlugin {
              可用工具: get_context / list_workspaces / inspect_workspace（均为只读元信息）\n\
              后台工作: 当前无（Worker 派发为阶段 2，尚未接入）\n\
              默认工作区: {workspace}\n\
+             已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
              当前时间: {now}",
             version = env!("CARGO_PKG_VERSION"),
             workspace = self.workspace_dir,
+            count = workspace_count,
             now = chrono::Local::now().format("%Y-%m-%d %H:%M"),
         );
         self.text_result("中枢上下文", body)
     }
 
+    /// 聚合本机已知工作区路径：全局默认 + 各会话工作目录（元数据 cwd 去重）。
+    fn known_workspace_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = vec![self.workspace_dir.clone()];
+        let mut seen: std::collections::HashSet<String> = paths.iter().cloned().collect();
+        for cwd in self
+            .sessions
+            .list_session_metadata()
+            .into_iter()
+            .map(|meta| meta.cwd.trim().to_string())
+        {
+            if cwd.is_empty() || !seen.insert(cwd.clone()) {
+                continue;
+            }
+            paths.push(cwd);
+        }
+        paths
+    }
+
     fn handle_list_workspaces(&self) -> Option<ToolResult> {
-        let body = format!(
-            "当前已知工作区（POC：全局默认工作区，工作区注册表为后续阶段）：\n\
-             - {}",
-            self.workspace_dir,
-        );
-        self.text_result("工作区清单", body)
+        let mut lines =
+            vec!["本机已知工作区（全局默认 + 各会话工作目录聚合；元信息只读）：".to_string()];
+        for path in self.known_workspace_paths() {
+            let is_default = path == self.workspace_dir;
+            let git_info = workspace_git_summary(std::path::Path::new(&path));
+            lines.push(format!(
+                "- {path}{default_tag}{git_info}",
+                default_tag = if is_default { "（默认）" } else { "" },
+            ));
+        }
+        self.text_result("工作区清单", lines.join("\n"))
     }
 
     /// 工作区只读元信息：存在性、git 当前分支、worktree 清单。
@@ -162,6 +197,28 @@ impl CentralPlugin {
             lines.extend(list_worktrees(&dot_git));
         }
         self.text_result("工作区元信息", lines.join("\n"))
+    }
+}
+
+/// 工作区的 git 概要（一行）：主仓库当前分支或非 git 标记。
+fn workspace_git_summary(path: &std::path::Path) -> String {
+    if !path.join(".git").exists() {
+        return "｜非 git 仓库".to_string();
+    }
+    let git_dir = if path.join(".git").is_file() {
+        // worktree：回溯到主仓库 .git
+        std::fs::read_to_string(path.join(".git"))
+            .ok()
+            .and_then(|content| {
+                let meta = std::path::PathBuf::from(content.trim());
+                meta.ancestors().nth(2).map(|p| p.to_path_buf())
+            })
+    } else {
+        Some(path.join(".git"))
+    };
+    match git_dir.as_deref().and_then(read_head_branch) {
+        Some(branch) => format!("｜git 分支 {branch}"),
+        None => "｜git 仓库（HEAD 无法解析）".to_string(),
     }
 }
 
@@ -323,9 +380,38 @@ mod tests {
     }
 
     /// 人设注入 + 白名单工具声明（§5.3 前三项）。
+    /// 测试辅助：构造带独立 sessions 目录的 manager，并写入指定 cwd 的会话元数据。
+    fn manager_with_session_cwds(
+        root: &std::path::Path,
+        cwds: &[&str],
+    ) -> tiangong_core_manager::CoreManager {
+        use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
+        let sessions_dir = root.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        for (index, cwd) in cwds.iter().enumerate() {
+            let id = format!("s{index}");
+            let session = serde_json::json!({
+                "id": id,
+                "title": format!("会话 {index}"),
+                "created_at": "2026-11-08 10:00:00",
+                "updated_at": "2026-11-08 10:00:00",
+                "trust_mode": "Supervised",
+                "cwd": cwd,
+                "messages": []
+            });
+            std::fs::write(sessions_dir.join(format!("{id}.json")), session.to_string()).unwrap();
+        }
+        tiangong_core_manager::CoreManager::new(
+            CoreConfigProvider::new(CoreConfig::default()),
+            root.to_path_buf(),
+        )
+    }
+
     #[test]
     fn central_plugin_persona_and_tool_specs() {
-        let plugin = CentralPlugin::new("/tmp/ws".to_string());
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let plugin = CentralPlugin::new("/tmp/ws".to_string(), manager);
         assert_eq!(plugin.id(), "central");
         let sections = plugin.prompt_sections();
         assert_eq!(sections.len(), 1);
@@ -375,7 +461,9 @@ mod tests {
 
     #[test]
     fn get_context_reports_central_state() {
-        let plugin = CentralPlugin::new("/tmp/ws".to_string());
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let plugin = CentralPlugin::new("/tmp/ws".to_string(), manager);
         let result = call_tool(&plugin, "get_context", serde_json::json!({}));
         assert!(result.ok);
         assert!(result.stdout.contains("POC 阶段 1"));
@@ -408,7 +496,10 @@ mod tests {
         )
         .unwrap();
 
-        let plugin = CentralPlugin::new(main.path().display().to_string());
+        let plugin = CentralPlugin::new(
+            main.path().display().to_string(),
+            manager_with_session_cwds(main.path(), &[]),
+        );
         let result = call_tool(
             &plugin,
             "inspect_workspace",
@@ -421,7 +512,9 @@ mod tests {
 
     #[test]
     fn inspect_workspace_rejects_missing_path() {
-        let plugin = CentralPlugin::new("/tmp/ws".to_string());
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let plugin = CentralPlugin::new("/tmp/ws".to_string(), manager);
         let result = call_tool(
             &plugin,
             "inspect_workspace",
@@ -429,5 +522,24 @@ mod tests {
         );
         assert!(!result.ok);
         assert_eq!(result.error_kind.as_deref(), Some("argument_error"));
+    }
+    #[test]
+    fn list_workspaces_aggregates_session_cwds_with_git_branch() {
+        let root = tempfile::tempdir().unwrap();
+        // 两个会话 cwd，其中一个重复
+        let repo = root.path().join("dev/tiangong");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/poc/central-mode\n").unwrap();
+        let manager = manager_with_session_cwds(
+            root.path(),
+            &[repo.to_str().unwrap(), repo.to_str().unwrap()],
+        );
+        let plugin = CentralPlugin::new(root.path().display().to_string(), manager);
+        let result = call_tool(&plugin, "list_workspaces", serde_json::json!({}));
+        assert!(result.ok);
+        // 默认工作区在列（去重后仅一次 dev/tiangong）
+        assert!(result.stdout.contains("（默认）"));
+        assert_eq!(result.stdout.matches("dev/tiangong").count(), 1);
+        assert!(result.stdout.contains("git 分支 poc/central-mode"));
     }
 }

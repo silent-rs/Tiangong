@@ -884,6 +884,7 @@ impl TiangongApp {
             .stream_tx(stream_tx)
             .plugins(vec![Arc::new(crate::central::CentralPlugin::new(
                 workspace_dir,
+                self.core_manager.clone(),
             ))])
             .model_endpoint(model_endpoint)
             .build();
