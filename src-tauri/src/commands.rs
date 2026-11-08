@@ -755,7 +755,7 @@ async fn send_message_inner(
     // 中枢对话（crate::central）不经 CoreManager：中枢 Core 由 app 直接构造
     // 与投递（内置且唯一的中枢插件），模型 = 设置的主对话模型（§15.12）。
     if crate::central::is_central_session(&session_id) {
-        let is_new = match state.ensure_central_core(stream_tx).await {
+        let is_new = match state.ensure_central_core(&app, stream_tx).await {
             Ok(is_new) => is_new,
             Err(error) => {
                 let _ =
@@ -1235,7 +1235,7 @@ pub async fn edit_and_resend(
         .and_then(|session| session.model_ref);
     // 中枢对话（crate::central）：编辑重发走中枢 Core 直接投递，不经 CoreManager。
     if crate::central::is_central_session(&session_id) {
-        let is_new = match state.ensure_central_core(stream_tx).await {
+        let is_new = match state.ensure_central_core(&app, stream_tx).await {
             Ok(is_new) => is_new,
             Err(error) => {
                 restore_edited_session(state.inner(), &session_id, original_session).await;

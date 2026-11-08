@@ -60,6 +60,10 @@ pub struct TiangongApp {
     /// 中枢插件（`crate::central::CentralPlugin`），CoreManager 的 runtime 聚合
     /// 桥插件构造与编排不适用；中枢的构造/投递/取消/关闭见下方方法组。
     central_core: Mutex<Option<tiangong_core::core::TiangongCore>>,
+    /// 中枢派发执行器的请求通道（惰性启动；中枢插件经它派发后台工作）。
+    central_dispatch_tx: std::sync::OnceLock<
+        tokio::sync::mpsc::UnboundedSender<crate::central::CentralDispatchRequest>,
+    >,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -182,6 +186,7 @@ impl TiangongApp {
             ),
             core_manager,
             central_core: Mutex::new(None),
+            central_dispatch_tx: std::sync::OnceLock::new(),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -837,6 +842,7 @@ impl TiangongApp {
     /// 返回是否新建（调用方据此启动流事件消费者）。
     pub(crate) async fn ensure_central_core(
         &self,
+        app: &tauri::AppHandle,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> Result<bool, String> {
         let (app_config, agent_config, workspace_dir) = self
@@ -885,6 +891,7 @@ impl TiangongApp {
             .plugins(vec![Arc::new(crate::central::CentralPlugin::new(
                 workspace_dir,
                 self.core_manager.clone(),
+                central_dispatch_sender(app),
             ))])
             .model_endpoint(model_endpoint)
             .build();
@@ -945,6 +952,29 @@ impl TiangongApp {
             .take();
         if let Some(core) = core {
             let _ = tokio::task::spawn_blocking(|| core.shutdown_join()).await;
+        }
+    }
+
+    /// 向中枢对话注入一条后台工作回报消息（完成/失败），触发中枢自动
+    /// 转述（事件驱动汇报的最小闭环）。中枢空闲时开启新 turn；执行中
+    /// 作为引导消息排队。
+    pub(crate) fn notify_central_of_work(&self, notice: String) {
+        use tiangong_core::agent_input::AgentInput;
+        let Some(core) = self
+            .central_core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            tracing::warn!("中枢 Core 不存在，后台工作回报被丢弃");
+            return;
+        };
+        let prepared = vec![tiangong_types::ContentBlock::text(notice)];
+        if let Err(error) = core.deliver(AgentInputKind::prepared_with_id(
+            scru128::new().to_string(),
+            prepared,
+        )) {
+            tracing::warn!(%error, "后台工作回报注入中枢失败");
         }
     }
 
@@ -1222,6 +1252,174 @@ async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
             // 离线、清单不可达或替换失败：静默跳过，下次启动再试。
             tracing::warn!(error = %format!("{error:#}"), "沙箱自动更新失败，下次启动重试");
         }
+    }
+}
+
+// =========================================================================
+// 中枢派发执行器（自由函数）：中枢插件经 unbounded channel 提交后台工作
+// 请求；执行器创建 Worker 会话（普通能力、全插件、指定模型）投递任务，
+// 并在终态把结果注入中枢对话（事件驱动汇报的最小闭环）。
+// =========================================================================
+
+/// 中枢派发执行器通道（惰性启动消费循环）。
+fn central_dispatch_sender(
+    app: &tauri::AppHandle,
+) -> tokio::sync::mpsc::UnboundedSender<crate::central::CentralDispatchRequest> {
+    use tauri::Manager;
+    let state = app.state::<TiangongApp>();
+    state
+        .inner()
+        .central_dispatch_tx
+        .get_or_init(|| {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::central::CentralDispatchRequest>();
+            let app = app.clone();
+            tokio::spawn(async move {
+                while let Some(request) = rx.recv().await {
+                    let state = app.state::<TiangongApp>();
+                    if let Err(error) =
+                        handle_central_dispatch(state.inner(), &app, request.clone()).await
+                    {
+                        tracing::warn!(%error, work_id = %request.work_id, "中枢派发执行失败");
+                        let notice = format!(
+                            "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{error}",
+                            request.work_id,
+                            request.model.as_deref().unwrap_or("（默认）"),
+                            request.task
+                        );
+                        app.state::<TiangongApp>()
+                            .inner()
+                            .notify_central_of_work(notice);
+                    }
+                }
+            });
+            tx
+        })
+        .clone()
+}
+
+/// 执行中枢派发：创建 Worker 会话（普通能力、全插件、指定模型）投递任务，
+/// 并挂终态 watcher 把结果注入中枢对话。
+async fn handle_central_dispatch(
+    state: &TiangongApp,
+    app: &tauri::AppHandle,
+    request: crate::central::CentralDispatchRequest,
+) -> Result<(), String> {
+    let default_cwd = state
+        .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
+        .await
+        .unwrap_or_default();
+    let cwd = request
+        .cwd
+        .clone()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(default_cwd);
+    if !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!("工作目录不存在或不是目录：{cwd}"));
+    }
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+    let ensured = state
+        .ensure_core(
+            &request.session_id,
+            Some(cwd),
+            None,
+            None,
+            request.model.as_deref(),
+            stream_tx,
+        )
+        .await?;
+    let sid = ensured.session_id.clone();
+    let instruction = format!(
+        "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n任务：\n{}",
+        request.work_id, request.task
+    );
+    let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
+    state
+        .deliver_prepared_if_live(
+            &sid,
+            scru128::new().to_string(),
+            prepared,
+            request.model.as_deref(),
+            None,
+        )
+        .await?;
+    tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
+
+    // 终态 watcher：独立线程消费事件流，Done/Error 后把结果注入中枢。
+    let watch_app = app.clone();
+    let work = request;
+    std::thread::spawn(move || {
+        let mut failed_reason = String::from("事件流关闭且未收到终态");
+        let mut done = false;
+        for event in stream_rx.iter() {
+            match event {
+                tiangong_types::StreamEvent::Done { .. } => {
+                    done = true;
+                    break;
+                }
+                tiangong_types::StreamEvent::Error { message } => {
+                    failed_reason = message;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let state = watch_app.state::<TiangongApp>();
+        let notice = build_work_notice(state.inner(), &work, done, &failed_reason);
+        state.inner().notify_central_of_work(notice);
+    });
+    Ok(())
+}
+
+/// 组装后台工作回报（读 Worker 会话最终答复，截断保底）。
+fn build_work_notice(
+    state: &TiangongApp,
+    work: &crate::central::CentralDispatchRequest,
+    done: bool,
+    failed_reason: &str,
+) -> String {
+    const MAX_SUMMARY_CHARS: usize = 4000;
+    let model_note = work.model.as_deref().unwrap_or("（默认）");
+    if done {
+        let summary = state
+            .core_manager
+            .load_session(&work.session_id)
+            .ok()
+            .and_then(|session| {
+                session
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == tiangong_types::MessageRole::Assistant)
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                tiangong_types::ContentBlock::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect::<String>()
+                    })
+            })
+            .unwrap_or_else(|| "（未能读取到执行结果）".to_string());
+        let summary = if summary.chars().count() > MAX_SUMMARY_CHARS {
+            format!(
+                "{}…（已截断）",
+                summary.chars().take(MAX_SUMMARY_CHARS).collect::<String>()
+            )
+        } else {
+            summary
+        };
+        format!(
+            "[后台工作完成] {}（模型 {}）\n任务：{}\n\n执行结果：\n{}",
+            work.work_id, model_note, work.task, summary
+        )
+    } else {
+        format!(
+            "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{}",
+            work.work_id, model_note, work.task, failed_reason
+        )
     }
 }
 
