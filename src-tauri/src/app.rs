@@ -880,9 +880,11 @@ impl TiangongApp {
             .config(CoreConfigProvider::new(session_config.clone()))
             .trust_mode(session_config.trust_mode)
             .storage_root(self.core_manager.storage_root().to_path_buf())
-            .workspace_dir(workspace_dir)
+            .workspace_dir(workspace_dir.clone())
             .stream_tx(stream_tx)
-            .plugins(vec![Arc::new(crate::central::CentralPlugin)])
+            .plugins(vec![Arc::new(crate::central::CentralPlugin::new(
+                workspace_dir,
+            ))])
             .model_endpoint(model_endpoint)
             .build();
         let mut guard = self.central_core.lock().unwrap_or_else(|e| e.into_inner());
