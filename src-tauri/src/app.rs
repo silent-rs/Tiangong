@@ -68,6 +68,10 @@ pub struct TiangongApp {
     /// 下一条消息一并注入，或由中枢经 collect_work_reports 主动收集；
     /// 与中枢插件共享同一实例）。
     central_work_reports: std::sync::Arc<Mutex<Vec<String>>>,
+    /// 在执行中的后台工作会话（dispatch 投递成功插入，终态移除）——
+    /// 回报时机判定的依据：失败必达；成功且仍有任务在跑则暂存，
+    /// 全部结束后汇总一轮（设计稿 §9「关键节点必达 / 适时沉默」）。
+    central_running_works: Mutex<HashSet<String>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -192,6 +196,7 @@ impl TiangongApp {
             central_core: Mutex::new(None),
             central_dispatch_tx: std::sync::OnceLock::new(),
             central_work_reports: std::sync::Arc::new(Mutex::new(Vec::new())),
+            central_running_works: Mutex::new(HashSet::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -964,14 +969,60 @@ impl TiangongApp {
     /// 向中枢对话注入一条后台工作回报消息（完成/失败），触发中枢自动
     /// 转述（事件驱动汇报的最小闭环）。中枢空闲时开启新 turn；执行中
     /// 作为引导消息排队。
-    pub(crate) fn notify_central_of_work(&self, notice: String) {
-        // 暂存批量模式：回报不即时触发中枢 turn（避免逐条打断），而是
-        // 随用户下一条消息一并注入（消费点：发送链路 flush 与中枢
-        // collect_work_reports 工具，见 take_central_work_reports）。
+    /// 后台工作终态到达：登记移除 + 回报暂存 + **汇报时机判定**。
+    ///
+    /// 时机规则（设计稿 §9「关键节点必达 / 适时沉默」，意义与轻重的
+    /// 区分由中枢模型在汇报轮内判断）：
+    /// - **失败必达**：立即注入全部暂存并触发汇报轮（失败常需用户知晓）；
+    /// - **成功且仍有任务在执行**：仅暂存——与后续任务汇总；
+    /// - **成功且是最后一个（无在执行任务）**：注入全部暂存，触发一次
+    ///   汇总轮，由中枢区分轻重统一回复。
+    pub(crate) fn on_central_work_finished(&self, session_id: &str, done: bool, notice: String) {
+        self.central_running_works
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
         self.central_work_reports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(notice);
+        let has_running = !self
+            .central_running_works
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty();
+        if should_deliver_work_reports_now(done, has_running) {
+            self.deliver_pending_work_reports();
+        }
+    }
+
+    /// 注入全部暂存回报（第一条开启汇报轮，其余按 Core 原生引导排队）。
+    pub(crate) fn deliver_pending_work_reports(&self) {
+        use tiangong_core::agent_input::AgentInput;
+        let notices = self.take_central_work_reports();
+        let Some(core) = self
+            .central_core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            tracing::warn!("中枢 Core 不存在，后台工作回报暂存待用户下一条消息");
+            // 回报放回队列（保序），由发送链路 flush 或 collect 兜底
+            self.central_work_reports
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(notices);
+            return;
+        };
+        for notice in notices {
+            let prepared = vec![tiangong_types::ContentBlock::text(notice)];
+            if let Err(error) = core.deliver(AgentInputKind::prepared_with_id(
+                scru128::new().to_string(),
+                prepared,
+            )) {
+                tracing::warn!(%error, "后台工作回报注入中枢失败");
+            }
+        }
     }
 
     /// 取走全部暂存的后台工作回报（先进先出）。
@@ -1292,9 +1343,11 @@ fn central_dispatch_sender(
                             request.model.as_deref().unwrap_or("（默认）"),
                             request.task
                         );
-                        app.state::<TiangongApp>()
+                        // 派发即失败：无在执行登记，直接走失败必达路径
+                        let state = app.state::<TiangongApp>();
+                        state
                             .inner()
-                            .notify_central_of_work(notice);
+                            .on_central_work_finished(&request.session_id, false, notice);
                     }
                 }
             });
@@ -1380,9 +1433,17 @@ async fn handle_central_dispatch(
         }
         let state = watch_app.state::<TiangongApp>();
         let notice = build_work_notice(state.inner(), &work, done, &failed_reason);
-        state.inner().notify_central_of_work(notice);
+        state
+            .inner()
+            .on_central_work_finished(&work.session_id, done, notice);
     });
     Ok(())
+}
+
+/// 回报是否应立即注入汇报：失败必达；成功仅在无其他在执行任务时
+/// 触发汇总轮（否则暂存等待汇总，或用户消息/询问兜底消费）。
+fn should_deliver_work_reports_now(done: bool, has_running_work: bool) -> bool {
+    !done || !has_running_work
 }
 
 /// 组装后台工作回报（读 Worker 会话最终答复，**不截断**）。
@@ -1436,6 +1497,18 @@ fn build_work_notice(
 
 #[cfg(test)]
 mod tests {
+    /// 回报时机判定：失败必达；成功仅在无其他在执行任务时触发汇总轮。
+    #[test]
+    fn work_report_timing_follows_design() {
+        // 失败：无论是否还有任务在跑，立即汇报（关键节点必达）
+        assert!(should_deliver_work_reports_now(false, true));
+        assert!(should_deliver_work_reports_now(false, false));
+        // 成功且仍有任务在执行：暂存等待汇总
+        assert!(!should_deliver_work_reports_now(true, true));
+        // 成功且是最后一个：触发汇总轮
+        assert!(should_deliver_work_reports_now(true, false));
+    }
+
     use super::*;
     use std::sync::atomic::Ordering;
 
