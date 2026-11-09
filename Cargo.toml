@@ -162,7 +162,10 @@ rmcp = { version = "3", default-features = false }
 # Codex WS 直连（tiangong-llm）：纯 WS 帧层 + rustls，与 silent/bot/relay 同版本；
 # 不用 wreq（BoringSSL 与 SQLCipher vendored OpenSSL 符号冲突，且 TLS 指纹实测
 # 并非上游分桶的决定性信号，见 docs/codex-direct-cache-analysis.md 勘误）。
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "__rustls-tls"] }
+# rustls-tls-native-roots 必须显式启用：tokio-tungstenite 的默认 rustls connector
+# 在未启用任何 roots feature 时用空 RootCertStore 构建 ClientConfig，任何服务器
+# 证书都会报 `invalid peer certificate: UnknownIssuer`（曾致 Codex WS 全量握手失败）。
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "__rustls-tls", "rustls-tls-native-roots"] }
 rusqlite = "0.40"
 scraper = "0.27"
 scru128 = "4"
