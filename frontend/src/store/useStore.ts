@@ -1272,6 +1272,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 精确更新单条会话的元数据（消息数/更新时间），替代全量 loadSessions。
   updateSessionMeta: async (sessionId: string) => {
+    // 中枢对话不属于普通会话列表（单独存储），不追加、不更新列表条目
+    if (sessionId === CENTRAL_SESSION_ID) return;
     try {
       const meta = await api.getSessionMeta(sessionId);
       if (!meta) return;

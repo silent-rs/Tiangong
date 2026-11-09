@@ -1344,6 +1344,15 @@ async fn handle_central_dispatch(
         )
         .await?;
     tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
+    // 给 Worker 会话写可识别标题（显式覆盖：自动标题生成 only_if_default 不会
+    // 再覆盖非默认标题），普通模式列表一眼可辨，避免被当成无名的中枢消息。
+    {
+        let title_preview: String = request.task.chars().take(24).collect();
+        let title = format!("[后台工作] {title_preview}");
+        if let Some(core) = state.core_manager.registry().get(&sid) {
+            let _ = core.set_title(title, false);
+        }
+    }
 
     // 终态 watcher：独立线程消费事件流，Done/Error 后把结果注入中枢。
     let watch_app = app.clone();
@@ -1378,7 +1387,7 @@ fn build_work_notice(
     done: bool,
     failed_reason: &str,
 ) -> String {
-    const MAX_SUMMARY_CHARS: usize = 4000;
+    const MAX_SUMMARY_CHARS: usize = 16000;
     let model_note = work.model.as_deref().unwrap_or("（默认）");
     if done {
         let summary = state
@@ -1411,9 +1420,17 @@ fn build_work_notice(
         } else {
             summary
         };
+        let truncation_note = if summary.contains("…（已截断）") {
+            format!(
+                "\n\n（结果过长已截断，完整内容见工作会话 {}，可在普通模式会话列表查看）",
+                work.session_id
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "[后台工作完成] {}（模型 {}）\n任务：{}\n\n执行结果：\n{}",
-            work.work_id, model_note, work.task, summary
+            "[后台工作完成] {}（模型 {}）\n任务：{}\n\n执行结果：\n{}\n\n（请向用户完整转述上述结果的关键结论与依据，不要过度省略；如需细节可指引查看工作会话 {}）{}",
+            work.work_id, model_note, work.task, summary, work.session_id, truncation_note
         )
     } else {
         format!(

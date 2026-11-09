@@ -243,4 +243,12 @@ describe('普通会话链路隔离', () => {
     await useStore.getState().loadSessions();
     expect(useStore.getState().activeSessionId).toBe('other-1');
   });
+
+  it('updateSessionMeta 跳过中枢对话（不追加进普通列表）', async () => {
+    const list = [session('work-1')];
+    resetStore({ sessions: list });
+    await useStore.getState().updateSessionMeta(CENTRAL_SESSION_ID);
+    // 短路：不发 meta 请求，列表不变
+    expect(useStore.getState().sessions).toEqual(list);
+  });
 });

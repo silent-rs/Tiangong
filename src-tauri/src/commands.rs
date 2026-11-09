@@ -201,6 +201,11 @@ pub async fn get_session_meta(
     session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Option<SessionListItem>, String> {
+    // 中枢对话不属于普通会话列表（单独存储）：无列表元数据可更新，
+    // 返回 None 防止前端把中枢条目追加进普通列表。
+    if crate::central::is_central_session(&session_id) {
+        return Ok(None);
+    }
     let manager = state.core_manager.clone();
     tokio::task::spawn_blocking(move || {
         let meta = tiangong_core_manager::SessionMetadata::load_from_storage(
