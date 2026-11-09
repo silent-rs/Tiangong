@@ -777,6 +777,17 @@ async fn send_message_inner(
         if is_new {
             start_stream_consumer(app, session_id.clone(), stream_rx);
         }
+        // 暂存的后台工作回报随用户消息一并进入对话（批量汇报模式）：
+        // 先逐条注入回报，再投用户消息——中枢空闲时回报开启汇报 turn、
+        // 用户消息按 Core 原生引导语义并入同一轮；执行中则按序排队。
+        for notice in state.take_central_work_reports() {
+            let notice_prepared = vec![tiangong_types::ContentBlock::text(notice)];
+            if let Err(error) =
+                state.deliver_central_message(scru128::new().to_string(), notice_prepared, None)
+            {
+                tracing::warn!(%error, "后台工作回报注入中枢失败（继续投递用户消息）");
+            }
+        }
         if let Err(error) =
             state.deliver_central_message(user_message_id.clone(), prepared.clone(), render)
         {

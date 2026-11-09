@@ -64,6 +64,10 @@ pub struct TiangongApp {
     central_dispatch_tx: std::sync::OnceLock<
         tokio::sync::mpsc::UnboundedSender<crate::central::CentralDispatchRequest>,
     >,
+    /// 已到达、尚未进入中枢对话的后台工作回报（暂存批量模式：随用户
+    /// 下一条消息一并注入，或由中枢经 collect_work_reports 主动收集；
+    /// 与中枢插件共享同一实例）。
+    central_work_reports: std::sync::Arc<Mutex<Vec<String>>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -187,6 +191,7 @@ impl TiangongApp {
             core_manager,
             central_core: Mutex::new(None),
             central_dispatch_tx: std::sync::OnceLock::new(),
+            central_work_reports: std::sync::Arc::new(Mutex::new(Vec::new())),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -892,6 +897,7 @@ impl TiangongApp {
                 workspace_dir,
                 self.core_manager.clone(),
                 central_dispatch_sender(app),
+                std::sync::Arc::clone(&self.central_work_reports),
             ))])
             .model_endpoint(model_endpoint)
             .build();
@@ -959,23 +965,22 @@ impl TiangongApp {
     /// 转述（事件驱动汇报的最小闭环）。中枢空闲时开启新 turn；执行中
     /// 作为引导消息排队。
     pub(crate) fn notify_central_of_work(&self, notice: String) {
-        use tiangong_core::agent_input::AgentInput;
-        let Some(core) = self
-            .central_core
+        // 暂存批量模式：回报不即时触发中枢 turn（避免逐条打断），而是
+        // 随用户下一条消息一并注入（消费点：发送链路 flush 与中枢
+        // collect_work_reports 工具，见 take_central_work_reports）。
+        self.central_work_reports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        else {
-            tracing::warn!("中枢 Core 不存在，后台工作回报被丢弃");
-            return;
-        };
-        let prepared = vec![tiangong_types::ContentBlock::text(notice)];
-        if let Err(error) = core.deliver(AgentInputKind::prepared_with_id(
-            scru128::new().to_string(),
-            prepared,
-        )) {
-            tracing::warn!(%error, "后台工作回报注入中枢失败");
-        }
+            .push(notice);
+    }
+
+    /// 取走全部暂存的后台工作回报（先进先出）。
+    pub(crate) fn take_central_work_reports(&self) -> Vec<String> {
+        let mut reports = self
+            .central_work_reports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *reports)
     }
 
     /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：

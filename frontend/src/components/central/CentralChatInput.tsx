@@ -27,6 +27,7 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
   const inputCache = useStore((state) => state.inputCaches[CENTRAL_SESSION_ID]);
   const setInputCacheText = useStore((state) => state.setInputCacheText);
   const sendMessage = useStore((state) => state.sendMessage);
+  const appendMessage = useStore((state) => state.appendMessage);
   const isSending = inputCache?.is_sending === true;
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -53,17 +54,19 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
     setSending(true);
     setSendError(null);
     try {
-      // 中枢对话固定 session：无新对话语义（cwd/trust/effort/model 均不携带），
-      // 后端按中枢存储路由并使用设置的主对话模型。返回 false 表示投递失败
-      // （错误已在 store 内记录），草稿保留供重试。
-      const delivered = await sendMessage(
-        CENTRAL_SESSION_ID,
-        text,
-        [],
-        revision,
-        undefined,
-        undefined,
-      );
+      // 中枢支持连续对话：执行中的新消息走 Core 原生引导（appendMessage
+      // 随当前 turn 处理），空闲时正常开新轮。返回 false/undefined 表示
+      // 投递失败（错误已在 store 内记录），草稿保留供重试。
+      const delivered = isSending
+        ? (await appendMessage(CENTRAL_SESSION_ID, text, [], revision)) === true
+        : await sendMessage(
+            CENTRAL_SESSION_ID,
+            text,
+            [],
+            revision,
+            undefined,
+            undefined,
+          );
       if (delivered) {
         setInputCacheText(CENTRAL_SESSION_ID, '');
       } else {
@@ -75,7 +78,16 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
     } finally {
       setSending(false);
     }
-  }, [disabled, inputCache?.text, inputCache?.revision, isSending, sending, sendMessage, setInputCacheText]);
+  }, [
+    appendMessage,
+    disabled,
+    inputCache?.text,
+    inputCache?.revision,
+    isSending,
+    sending,
+    sendMessage,
+    setInputCacheText,
+  ]);
 
   const handleCancel = useCallback(() => {
     api.cancelTurn(CENTRAL_SESSION_ID).catch((error) => console.error('取消失败:', error));

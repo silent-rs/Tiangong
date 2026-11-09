@@ -49,9 +49,11 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - 深入分析代码、修改文件、运行测试等实际工作由后台工作会话执行：
   用户表达此类目标（包括「让某模型做某事」）时，用 `central__dispatch_work`
   派发（模型 key 用 `central__list_models` 确认），派发后告知用户已安排；
-  结果以「[后台工作完成]」消息回到本对话，届时向用户**完整转述关键结论
-  与依据**（不要过度省略，重要数据/文件/命令逐条保留；用户要细节时指引
-  查看工作会话）；
+  后台工作回报采用**批量模式**：结果到达后先进入待汇报队列，随用户的
+  下一条消息一并进入对话——届时**统一、完整**地转述关键结论与依据
+  （不要过度省略，重要数据/文件/命令逐条保留）；用户主动询问结果或
+  get_context 显示有待汇报条目时，调 `central__collect_work_reports`
+  收集后在当前回复中一并转述；用户要细节时指引查看工作会话；
   不要代替用户虚构执行结果；
 - 回答使用中文，保持简洁。";
 
@@ -91,6 +93,10 @@ pub struct CentralPlugin {
     sessions: tiangong_core_manager::CoreManager,
     /// 派发通道：把后台工作请求交给 app 执行器（见 app.rs）。
     dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralDispatchRequest>,
+    /// 已到达、尚未进入对话的后台工作回报（与 app 共享同一实例；
+    /// 暂存批量模式：随用户下一条消息一并注入，或经 collect_work_reports
+    /// 由中枢在当前 turn 主动收集）。
+    work_reports: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// 派发登记表（work_id → 派发事实；状态汇报经注入消息回到对话）。
     work_items: std::sync::Mutex<Vec<WorkItemRecord>>,
 }
@@ -106,15 +112,18 @@ pub struct WorkItemRecord {
 }
 
 impl CentralPlugin {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         workspace_dir: String,
         sessions: tiangong_core_manager::CoreManager,
         dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralDispatchRequest>,
+        work_reports: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Self {
         Self {
             workspace_dir,
             sessions,
             dispatch_tx,
+            work_reports,
             work_items: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -147,18 +156,25 @@ impl CentralPlugin {
 
     fn handle_get_context(&self) -> Option<ToolResult> {
         let workspace_count = self.known_workspace_paths().len();
+        let pending_reports = self
+            .work_reports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
         let body = format!(
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
              可用工具: get_context / list_workspaces / inspect_workspace（均为只读元信息）\n\
-             后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成自动回报本对话）\n\
+             后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
+             待汇报的后台工作回报: {pending} 条（可调 collect_work_reports 收集后转述）\n\
              当前时间: {now}",
             version = env!("CARGO_PKG_VERSION"),
             workspace = self.workspace_dir,
             count = workspace_count,
+            pending = pending_reports,
             now = chrono::Local::now().format("%Y-%m-%d %H:%M"),
         );
         self.text_result("中枢上下文", body)
@@ -331,6 +347,25 @@ impl CentralPlugin {
         self.text_result("已派发", body)
     }
 
+    /// 收集全部已到达的后台工作回报（取走语义：收集后清空暂存）。
+    fn handle_collect_work_reports(&self) -> Option<ToolResult> {
+        let reports = std::mem::take(
+            &mut *self
+                .work_reports
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        if reports.is_empty() {
+            return self.text_result("后台工作回报", "当前没有待汇报的后台工作回报。".to_string());
+        }
+        let count = reports.len();
+        let body = format!(
+            "共 {count} 条后台工作回报（已全部收集，请向用户统一转述）：\n\n{}",
+            reports.join("\n\n---\n\n")
+        );
+        self.text_result("后台工作回报", body)
+    }
+
     /// 派发登记表（中枢视角的派发事实）。
     fn handle_list_work_items(&self) -> Option<ToolResult> {
         let items = self
@@ -477,6 +512,11 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
+                name: "collect_work_reports".to_string(),
+                description: "收集全部已到达的后台工作回报（取走语义）。用户询问                    后台工作结果/进展时、或 get_context 显示有待汇报条目时调用，                    在当前回复中统一转述。".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolSpec {
                 name: "list_work_items".to_string(),
                 description: "列出已派发的后台工作登记（work_id、模型、会话、任务、时间）。"
                     .to_string(),
@@ -515,6 +555,7 @@ impl ToolOverrideHandler for CentralPlugin {
                 let cwd = call.arguments.get("cwd").and_then(|value| value.as_str());
                 self.handle_dispatch_work(task, model, cwd)
             }
+            "collect_work_reports" => self.handle_collect_work_reports(),
             "list_work_items" => self.handle_list_work_items(),
             _ => None,
         };
@@ -587,9 +628,16 @@ mod tests {
     ) -> (
         CentralPlugin,
         tokio::sync::mpsc::UnboundedReceiver<CentralDispatchRequest>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (CentralPlugin::new(workspace_dir, manager, tx), rx)
+        let reports: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            CentralPlugin::new(workspace_dir, manager, tx, std::sync::Arc::clone(&reports)),
+            rx,
+            reports,
+        )
     }
 
     /// 测试辅助：构造带独立 sessions 目录的 manager，并写入指定 cwd 的会话元数据。
@@ -623,7 +671,7 @@ mod tests {
     fn central_plugin_persona_and_tool_specs() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
-        let (plugin, _dispatch_rx) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         assert_eq!(plugin.id(), "central");
         let sections = plugin.prompt_sections();
         assert_eq!(sections.len(), 1);
@@ -639,6 +687,7 @@ mod tests {
                 "inspect_workspace".to_string(),
                 "list_models".to_string(),
                 "dispatch_work".to_string(),
+                "collect_work_reports".to_string(),
                 "list_work_items".to_string(),
             ]
         );
@@ -678,7 +727,7 @@ mod tests {
     fn get_context_reports_central_state() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
-        let (plugin, _dispatch_rx) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(&plugin, "get_context", serde_json::json!({}));
         assert!(result.ok);
         assert!(result.stdout.contains("后台工作派发: 已接入"));
@@ -703,7 +752,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let (plugin, mut dispatch_rx) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(
             &plugin,
             "dispatch_work",
@@ -739,7 +789,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let (plugin, mut dispatch_rx) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(
             &plugin,
             "dispatch_work",
@@ -769,7 +820,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let (plugin, _dispatch_rx) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(&plugin, "list_models", serde_json::json!({}));
         assert!(result.ok);
         assert!(result.stdout.contains("k3"));
@@ -802,7 +853,7 @@ mod tests {
         )
         .unwrap();
 
-        let (plugin, _dispatch_rx) = plugin_with_channel(
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel(
             main.path().display().to_string(),
             manager_with_session_cwds(main.path(), &[]),
         );
@@ -820,7 +871,7 @@ mod tests {
     fn inspect_workspace_rejects_missing_path() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
-        let (plugin, _dispatch_rx) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(
             &plugin,
             "inspect_workspace",
@@ -840,7 +891,7 @@ mod tests {
             root.path(),
             &[repo.to_str().unwrap(), repo.to_str().unwrap()],
         );
-        let (plugin, _dispatch_rx) =
+        let (plugin, _dispatch_rx, _reports) =
             plugin_with_channel(root.path().display().to_string(), manager);
         let result = call_tool(&plugin, "list_workspaces", serde_json::json!({}));
         assert!(result.ok);
@@ -848,5 +899,30 @@ mod tests {
         assert!(result.stdout.contains("（默认）"));
         assert_eq!(result.stdout.matches("dev/tiangong").count(), 1);
         assert!(result.stdout.contains("git 分支 poc/central-mode"));
+    }
+    /// 回报批量模式：暂存 → collect 取走 → 再 collect 为空。
+    #[test]
+    fn collect_work_reports_takes_all_then_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        reports
+            .lock()
+            .unwrap()
+            .push("[后台工作完成] work-a：结果一".to_string());
+        reports
+            .lock()
+            .unwrap()
+            .push("[后台工作完成] work-b：结果二".to_string());
+
+        let first = call_tool(&plugin, "collect_work_reports", serde_json::json!({}));
+        assert!(first.ok);
+        assert!(first.stdout.contains("共 2 条"));
+        assert!(first.stdout.contains("work-a"));
+        assert!(first.stdout.contains("work-b"));
+
+        let second = call_tool(&plugin, "collect_work_reports", serde_json::json!({}));
+        assert!(second.ok);
+        assert!(second.stdout.contains("没有待汇报"));
     }
 }
