@@ -1380,14 +1380,19 @@ async fn handle_central_dispatch(
     Ok(())
 }
 
-/// 组装后台工作回报（读 Worker 会话最终答复，截断保底）。
+/// 组装后台工作回报（读 Worker 会话最终答复，**不截断**）。
+///
+/// 不做长度截断的依据：完成汇报必须基于真实完整结果（设计稿 §2.3 /
+/// §14.2「禁止推断完成」）——截断会制造残缺信息，转述反而误导；上下文
+/// 安全由系统机制兜底（Core 自动压缩、模型上下文窗口、Worker 自身输出
+/// 上限）。将来超长结果的正确形态是「结果落文件 + 注入摘要与引用」
+/// （阶段 2 报告机制），而非拦腰截断。
 fn build_work_notice(
     state: &TiangongApp,
     work: &crate::central::CentralDispatchRequest,
     done: bool,
     failed_reason: &str,
 ) -> String {
-    const MAX_SUMMARY_CHARS: usize = 16000;
     let model_note = work.model.as_deref().unwrap_or("（默认）");
     if done {
         let summary = state
@@ -1412,25 +1417,9 @@ fn build_work_notice(
                     })
             })
             .unwrap_or_else(|| "（未能读取到执行结果）".to_string());
-        let summary = if summary.chars().count() > MAX_SUMMARY_CHARS {
-            format!(
-                "{}…（已截断）",
-                summary.chars().take(MAX_SUMMARY_CHARS).collect::<String>()
-            )
-        } else {
-            summary
-        };
-        let truncation_note = if summary.contains("…（已截断）") {
-            format!(
-                "\n\n（结果过长已截断，完整内容见工作会话 {}，可在普通模式会话列表查看）",
-                work.session_id
-            )
-        } else {
-            String::new()
-        };
         format!(
-            "[后台工作完成] {}（模型 {}）\n任务：{}\n\n执行结果：\n{}\n\n（请向用户完整转述上述结果的关键结论与依据，不要过度省略；如需细节可指引查看工作会话 {}）{}",
-            work.work_id, model_note, work.task, summary, work.session_id, truncation_note
+            "[后台工作完成] {}（模型 {}）\n任务：{}\n\n执行结果：\n{}\n\n（请向用户完整转述上述结果的关键结论与依据，不要过度省略；如需细节可指引查看工作会话 {}）",
+            work.work_id, model_note, work.task, summary, work.session_id
         )
     } else {
         format!(
