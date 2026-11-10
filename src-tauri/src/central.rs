@@ -209,13 +209,22 @@ pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRec
         .collect()
 }
 
-/// 追加一条派发登记并落盘（原子写，失败仅记日志不阻断派发）。
-fn append_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
+/// 会话级 upsert 派发登记并落盘（同会话更新、保留最近 20 条）。
+fn upsert_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
     let mut items = load_work_items(storage_root);
+    // 会话维度记忆：同一会话的再次派发/引导更新原记录（反映该会话
+    // 最近一次工作），不堆积多条；尾部为最新。
+    if let Some(idx) = items
+        .iter()
+        .position(|item| item.session_id == record.session_id)
+    {
+        items.remove(idx);
+    }
     items.push(record.clone());
-    // 保留上限：登记表只服务「近期派发的记忆与复用」，旧记录裁剪
-    // （会话文件本身不受影响——那是复用与复核的真相源）。
-    const MAX_WORK_ITEMS: usize = 500;
+    // 保留上限：登记表只服务「近期派发会话的记忆与复用」（按用户
+    // 要求保留 20 个会话条目）；会话文件本身不受影响——那是复用与
+    // 复核的真相源。
+    const MAX_WORK_ITEMS: usize = 20;
     if items.len() > MAX_WORK_ITEMS {
         let overflow = items.len() - MAX_WORK_ITEMS;
         items.drain(..overflow);
@@ -494,11 +503,8 @@ impl CentralPlugin {
         {
             return self.error_result(format!("派发通道已关闭：{error}"));
         }
-        self.work_items
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(record.clone());
-        append_work_item(self.sessions.storage_root(), &record);
+        self.upsert_memory_work_item(record.clone());
+        upsert_work_item(self.sessions.storage_root(), &record);
         let model_note = record
             .model
             .as_deref()
@@ -736,6 +742,21 @@ impl CentralPlugin {
         })
     }
 
+    /// 内存登记 upsert（与持久化同语义：同会话更新，不堆积）。
+    fn upsert_memory_work_item(&self, record: WorkItemRecord) {
+        let mut items = self
+            .work_items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(idx) = items
+            .iter()
+            .position(|item| item.session_id == record.session_id)
+        {
+            items.remove(idx);
+        }
+        items.push(record);
+    }
+
     /// 收集全部已到达的后台工作回报（取走语义：收集后清空暂存）。
     fn handle_collect_work_reports(&self) -> Option<ToolResult> {
         let reports = std::mem::take(
@@ -806,11 +827,8 @@ impl CentralPlugin {
         if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Steer(request)) {
             return self.error_result(format!("派发通道已关闭：{error}"));
         }
-        self.work_items
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(record.clone());
-        append_work_item(self.sessions.storage_root(), &record);
+        self.upsert_memory_work_item(record.clone());
+        upsert_work_item(self.sessions.storage_root(), &record);
         let body = format!(
             "已发送引导消息：\n- 目标会话: {}\n- work_id: {}（终态同样回到本对话）\n- 内容: {}",
             record.session_id, record.work_id, record.task
@@ -1685,5 +1703,47 @@ mod tests {
             .expect("应有结果");
         assert!(result2.ok);
         assert!(result2.stdout.contains("未找到"));
+    }
+    /// 派发登记会话维度 upsert：同会话再派发更新而非堆积；上限 20 条。
+    #[test]
+    fn work_items_upsert_by_session_and_cap_20() {
+        let root = tempfile::tempdir().unwrap();
+        // 预置 25 条不同会话的记录
+        for i in 0..25 {
+            let record = WorkItemRecord {
+                work_id: format!("work-old-{i}"),
+                reused_session: false,
+                session_id: format!("sess-{i}"),
+                task: format!("旧任务 {i}"),
+                model: None,
+                dispatched_at: format!("2026-11-10 1{:02}:00:00", i % 10),
+                finished_at: Some("2026-11-10 12:00:00".to_string()),
+            };
+            upsert_work_item(root.path(), &record);
+        }
+        // 同一会话 sess-24 再派发 → 更新（不新增）
+        let again = WorkItemRecord {
+            work_id: "work-new-1".to_string(),
+            reused_session: true,
+            session_id: "sess-24".to_string(),
+            task: "继续上次的任务".to_string(),
+            model: Some("k3".to_string()),
+            dispatched_at: "2026-11-10 15:00:00".to_string(),
+            finished_at: None,
+        };
+        upsert_work_item(root.path(), &again);
+        let items = load_work_items(root.path());
+        assert_eq!(items.len(), 20, "上限 20：{}", items.len());
+        // sess-24 只有一条且是更新后的
+        let hits: Vec<_> = items
+            .iter()
+            .filter(|item| item.session_id == "sess-24")
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].work_id, "work-new-1");
+        assert_eq!(hits[0].task, "继续上次的任务");
+        assert!(hits[0].reused_session);
+        // 最旧的 sess-0 已被裁剪
+        assert!(!items.iter().any(|item| item.session_id == "sess-0"));
     }
 }
