@@ -19,6 +19,7 @@ import { useStore } from '@/store/useStore';
 import { LazyMessageList } from '@/components/LazyComponents';
 import { InteractionPluginHost } from '@/components/InteractionPluginHost';
 import { CentralChatInput } from '@/components/central/CentralChatInput';
+import { CentralWorkStatusBar } from '@/components/central/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/components/central/centralGreeting';
 import { CENTRAL_TRANSITION_PARAMS } from '@/components/central/centralTransitionParams';
 
@@ -64,6 +65,7 @@ export function CentralModeView() {
       <div className="min-h-0 flex-1">
         {showGreeting ? <CentralGreeting /> : <LazyMessageList />}
       </div>
+      <CentralWorkStatusBar />
       <CentralChatInput disabled={interactionVisible} onHeightChange={handleHeightChange} />
       <InteractionPluginHost
         inputHeight={inputHeight}

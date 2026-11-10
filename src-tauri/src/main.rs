@@ -882,6 +882,7 @@ fn run_gui() {
         })
         .invoke_handler(tauri::generate_handler![
             tiangong_app::commands::get_sessions,
+            tiangong_app::commands::get_central_work_status,
             tiangong_app::commands::get_session_meta,
             tiangong_app::commands::switch_session,
             tiangong_app::commands::load_session,

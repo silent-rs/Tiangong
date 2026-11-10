@@ -49,6 +49,10 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - 深入分析代码、修改文件、运行测试等实际工作由后台工作会话执行：
   用户表达此类目标（包括「让某模型做某事」）时，用 `central__dispatch_work`
   派发（模型 key 用 `central__list_models` 确认），派发后告知用户已安排；
+- **应用尽用**：派发前先 `central__list_sessions` 查近期会话——任务与某
+  既有会话相关（同工作区、同主题、先前工作的延续）时，用其 session_id
+  复用该会话派发（上下文连续，用户能追溯全过程），不要每次起新会话；
+  仅确认无相关会话时才新建；
   后台工作回报的呈现时机由系统控制（失败立即单独汇报；成功且仍有
   任务在执行时暂存；全部结束后触发一次汇总轮）。你在汇报/汇总轮里的
   职责是**区分轻重**：关键结论与依据完整呈现（不要过度省略，重要
@@ -59,23 +63,50 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   不要代替用户虚构执行结果；
 - 回答使用中文，保持简洁。";
 
-/// 中枢派发后台工作的请求（中枢插件 → app 执行器，经 unbounded channel）。
+/// 后台工作状态登记条目（前端「后台工作」状态条数据源，命令
+/// `get_central_work_status` 返回）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CentralWorkStatus {
+    pub work_id: String,
+    pub session_id: String,
+    pub task: String,
+    pub model: Option<String>,
+    pub dispatched_at: String,
+    /// `running`（在执行）/ `report_queued`（已完成，回报暂存待汇报）。
+    pub state: String,
+    /// 是否复用了已有会话（应用尽用）。
+    pub reused_session: bool,
+}
+
+/// 中枢插件 → app 执行器的消息（unbounded channel）。
+#[derive(Debug, Clone)]
+pub enum CentralPluginMessage {
+    /// 派发后台工作（见 [`CentralDispatchRequest`]）。
+    Dispatch(CentralDispatchRequest),
+    /// `collect_work_reports` 已取走全部暂存回报：同步清理状态登记。
+    ReportsCollected,
+}
+
+/// 中枢派发后台工作的请求。
 ///
-/// 插件侧只做校验与登记（同步返回工具结果），实际创建 Worker 会话与
-/// 投递由 app 侧异步执行（`TiangungApp` 的中枢派发执行器，见 app.rs）；
-/// 完成或失败以注入消息回到中枢对话（事件驱动汇报的最小闭环）。
+/// 插件侧只做校验与登记（同步返回工具结果），实际创建/复用 Worker 会话
+/// 与投递由 app 侧异步执行（`TiangungApp` 的中枢派发执行器，见 app.rs）；
+/// 完成或失败按时机规则回到中枢对话（§9：失败必达、成功汇总）。
 #[derive(Debug, Clone)]
 pub struct CentralDispatchRequest {
     /// 派发标识（中枢对话内引用用）。
     pub work_id: String,
-    /// Worker 会话 ID（插件侧生成，scru128）。
+    /// Worker 会话 ID：新建时为插件生成的 scru128；复用已有会话时为
+    /// `reuse_session_id` 校验通过后的同一 ID（应用尽用，保持上下文连续）。
     pub session_id: String,
     /// 任务描述（原文，作为 Worker 的执行指令）。
     pub task: String,
     /// 指定模型 key（已通过解析校验；None 用路由默认）。
     pub model: Option<String>,
-    /// 工作目录（None 用全局默认工作区）。
+    /// 工作目录（None：复用会话时用该会话自身 cwd，新建用全局默认）。
     pub cwd: Option<String>,
+    /// 是否复用已有会话（插件侧决定并携带；app 据此跳过新会话标题等）。
+    pub reused_session: bool,
 }
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
@@ -94,7 +125,7 @@ pub struct CentralPlugin {
     /// `list_session_metadata`（带缓存），不触碰会话内容或 Core 生命周期。
     sessions: tiangong_core_manager::CoreManager,
     /// 派发通道：把后台工作请求交给 app 执行器（见 app.rs）。
-    dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralDispatchRequest>,
+    dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralPluginMessage>,
     /// 已到达、尚未进入对话的后台工作回报（与 app 共享同一实例；
     /// 暂存批量模式：随用户下一条消息一并注入，或经 collect_work_reports
     /// 由中枢在当前 turn 主动收集）。
@@ -107,6 +138,8 @@ pub struct CentralPlugin {
 #[derive(Debug, Clone)]
 pub struct WorkItemRecord {
     pub work_id: String,
+    /// 是否复用了已有会话（应用尽用；true 时 session_id 是既有会话）。
+    pub reused_session: bool,
     pub session_id: String,
     pub task: String,
     pub model: Option<String>,
@@ -118,7 +151,7 @@ impl CentralPlugin {
     pub fn new(
         workspace_dir: String,
         sessions: tiangong_core_manager::CoreManager,
-        dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralDispatchRequest>,
+        dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralPluginMessage>,
         work_reports: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Self {
         Self {
@@ -284,12 +317,16 @@ impl CentralPlugin {
         self.text_result("可用模型", lines.join("\n"))
     }
 
-    /// 派发后台工作：校验模型 → 登记 → 经通道交给 app 执行器。
+    /// 派发后台工作：校验模型与复用会话 → 登记 → 经通道交给 app 执行器。
+    ///
+    /// `session_id` 提供时复用该已有会话（应用尽用：任务与既有会话相关时
+    /// 保持上下文连续，不新建）；省略时新建。
     fn handle_dispatch_work(
         &self,
         task: &str,
         model: Option<&str>,
         cwd: Option<&str>,
+        session_id: Option<&str>,
     ) -> Option<ToolResult> {
         let task = task.trim();
         if task.is_empty() {
@@ -304,9 +341,29 @@ impl CentralPlugin {
                 return self.error_result(format!("{error}\n可用模型：{}", available.join("、")));
             }
         }
+        // 复用已有会话（应用尽用）：校验会话存在，复用其 ID 保持上下文连续
+        let reuse_session = session_id
+            .filter(|id| !id.trim().is_empty())
+            .map(str::trim)
+            .map(str::to_string);
+        if let Some(existing) = reuse_session.as_ref() {
+            if tiangong_core_manager::SessionMetadata::load_from_storage(
+                self.sessions.storage_root(),
+                existing,
+            )
+            .is_err()
+            {
+                return self.error_result(format!(
+                    "复用的会话不存在：{existing}（可用 list_sessions 查询近期会话）"
+                ));
+            }
+        }
+        let reused = reuse_session.is_some();
+        let session_id = reuse_session.unwrap_or_else(|| scru128::new().to_string());
         let record = WorkItemRecord {
             work_id: format!("work-{}", &scru128::new().to_string()[..8]),
-            session_id: scru128::new().to_string(),
+            reused_session: reused,
+            session_id: session_id.clone(),
             task: task.to_string(),
             model: model
                 .filter(|key| !key.trim().is_empty())
@@ -316,15 +373,19 @@ impl CentralPlugin {
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),
-            session_id: record.session_id.clone(),
+            session_id: session_id.clone(),
             task: record.task.clone(),
             model: record.model.clone(),
             cwd: cwd
                 .filter(|path| !path.trim().is_empty())
                 .map(str::trim)
                 .map(str::to_string),
+            reused_session: reused,
         };
-        if let Err(error) = self.dispatch_tx.send(request) {
+        if let Err(error) = self
+            .dispatch_tx
+            .send(CentralPluginMessage::Dispatch(request))
+        {
             return self.error_result(format!("派发通道已关闭：{error}"));
         }
         self.work_items
@@ -336,17 +397,48 @@ impl CentralPlugin {
             .as_deref()
             .unwrap_or("路由默认模型")
             .to_string();
+        let session_note = if record.reused_session {
+            format!("{session_id}（复用已有会话，上下文连续）")
+        } else {
+            format!("{session_id}（新会话；普通模式会话列表可查看）")
+        };
         let body = format!(
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
-             - 工作会话: {session_id}（普通模式会话列表可查看）\n- 任务: {task}\n\n\
-             执行完成后结果会自动出现在本对话（以「[后台工作完成]」消息开始），\
-             由你向用户转述要点。执行中如需查看可调 list_work_items。",
+             - 工作会话: {session_note}\n- 任务: {task}\n\n\
+             结果按时机自动回到本对话（失败立即；成功待全部结束后汇总一轮），\
+             届时由你向用户转述。执行中如需查看可调 list_work_items。",
             work_id = record.work_id,
             model_note = model_note,
-            session_id = record.session_id,
+            session_note = session_note,
             task = record.task,
         );
         self.text_result("已派发", body)
+    }
+
+    /// 近期会话清单（派发复用的选择依据：应用尽用，§16 Worker 会话
+    /// 可在普通模式查看，同样可被中枢继续使用）。
+    fn handle_list_sessions(&self) -> Option<ToolResult> {
+        let mut items = self.sessions.list_session_metadata();
+        items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let lines: Vec<String> = items
+            .into_iter()
+            .take(20)
+            .map(|meta| {
+                format!(
+                    "- {}｜{}｜{} 条消息｜更新于 {}｜cwd {}",
+                    meta.id, meta.title, meta.message_count, meta.updated_at, meta.cwd
+                )
+            })
+            .collect();
+        let body = if lines.is_empty() {
+            "当前没有任何会话。".to_string()
+        } else {
+            format!(
+                "近期会话（按更新时间倒序，前 20 条）：\n{}",
+                lines.join("\n")
+            )
+        };
+        self.text_result("近期会话", body)
     }
 
     /// 收集全部已到达的后台工作回报（取走语义：收集后清空暂存）。
@@ -357,6 +449,12 @@ impl CentralPlugin {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+        if !reports.is_empty() {
+            // 通知 app 同步状态登记（待汇报条目清零）并向前端发刷新事件
+            let _ = self
+                .dispatch_tx
+                .send(CentralPluginMessage::ReportsCollected);
+        }
         if reports.is_empty() {
             return self.text_result("后台工作回报", "当前没有待汇报的后台工作回报。".to_string());
         }
@@ -547,6 +645,7 @@ impl ToolOverrideHandler for CentralPlugin {
                 self.handle_inspect_workspace(path)
             }
             "list_models" => self.handle_list_models(),
+            "list_sessions" => self.handle_list_sessions(),
             "dispatch_work" => {
                 let task = call
                     .arguments
@@ -555,7 +654,11 @@ impl ToolOverrideHandler for CentralPlugin {
                     .unwrap_or("");
                 let model = call.arguments.get("model").and_then(|value| value.as_str());
                 let cwd = call.arguments.get("cwd").and_then(|value| value.as_str());
-                self.handle_dispatch_work(task, model, cwd)
+                let session_id = call
+                    .arguments
+                    .get("session_id")
+                    .and_then(|value| value.as_str());
+                self.handle_dispatch_work(task, model, cwd, session_id)
             }
             "collect_work_reports" => self.handle_collect_work_reports(),
             "list_work_items" => self.handle_list_work_items(),
@@ -629,7 +732,7 @@ mod tests {
         manager: tiangong_core_manager::CoreManager,
     ) -> (
         CentralPlugin,
-        tokio::sync::mpsc::UnboundedReceiver<CentralDispatchRequest>,
+        tokio::sync::mpsc::UnboundedReceiver<CentralPluginMessage>,
         std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -763,7 +866,11 @@ mod tests {
         );
         assert!(result.ok, "stderr: {}", result.stderr);
         assert!(result.stdout.contains("已派发后台工作"));
-        let request = dispatch_rx.try_recv().expect("派发请求应经通道发出");
+        let message = dispatch_rx.try_recv().expect("派发请求应经通道发出");
+        let request = match message {
+            CentralPluginMessage::Dispatch(request) => request,
+            other => panic!("应收到 Dispatch 消息，实际 {other:?}"),
+        };
         assert_eq!(request.model.as_deref(), Some("k3"));
         assert_eq!(request.task, "审查仓库提交");
         assert_eq!(request.cwd.as_deref(), Some("/tmp"));

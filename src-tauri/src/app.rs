@@ -62,7 +62,7 @@ pub struct TiangongApp {
     central_core: Mutex<Option<tiangong_core::core::TiangongCore>>,
     /// 中枢派发执行器的请求通道（惰性启动；中枢插件经它派发后台工作）。
     central_dispatch_tx: std::sync::OnceLock<
-        tokio::sync::mpsc::UnboundedSender<crate::central::CentralDispatchRequest>,
+        tokio::sync::mpsc::UnboundedSender<crate::central::CentralPluginMessage>,
     >,
     /// 已到达、尚未进入中枢对话的后台工作回报（暂存批量模式：随用户
     /// 下一条消息一并注入，或由中枢经 collect_work_reports 主动收集；
@@ -72,6 +72,8 @@ pub struct TiangongApp {
     /// 回报时机判定的依据：失败必达；成功且仍有任务在跑则暂存，
     /// 全部结束后汇总一轮（设计稿 §9「关键节点必达 / 适时沉默」）。
     central_running_works: Mutex<HashSet<String>>,
+    /// 后台工作状态登记（前端「后台工作」状态条数据源；work_id 唯一）。
+    central_work_registry: Mutex<Vec<crate::central::CentralWorkStatus>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -197,6 +199,7 @@ impl TiangongApp {
             central_dispatch_tx: std::sync::OnceLock::new(),
             central_work_reports: std::sync::Arc::new(Mutex::new(Vec::new())),
             central_running_works: Mutex::new(HashSet::new()),
+            central_work_registry: Mutex::new(Vec::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -977,15 +980,34 @@ impl TiangongApp {
     /// - **成功且仍有任务在执行**：仅暂存——与后续任务汇总；
     /// - **成功且是最后一个（无在执行任务）**：注入全部暂存，触发一次
     ///   汇总轮，由中枢区分轻重统一回复。
-    pub(crate) fn on_central_work_finished(&self, session_id: &str, done: bool, notice: String) {
+    pub(crate) fn on_central_work_finished(
+        &self,
+        request: &crate::central::CentralDispatchRequest,
+        done: bool,
+        notice: &str,
+        app: &tauri::AppHandle,
+    ) {
         self.central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(session_id);
+            .remove(&request.work_id);
         self.central_work_reports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(notice);
+            .push(notice.to_string());
+        // 状态登记：running → report_queued（若本轮即注入汇报则随后清除）
+        {
+            let mut registry = self
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = registry
+                .iter_mut()
+                .find(|entry| entry.work_id == request.work_id)
+            {
+                entry.state = "report_queued".to_string();
+            }
+        }
         let has_running = !self
             .central_running_works
             .lock()
@@ -994,12 +1016,30 @@ impl TiangongApp {
         if should_deliver_work_reports_now(done, has_running) {
             self.deliver_pending_work_reports();
         }
+        emit_central_work_updated(app);
+    }
+
+    /// 汇报已消费（注入或收集）：清除全部 report_queued 登记。
+    pub(crate) fn clear_queued_work_reports(&self) {
+        self.central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|entry| entry.state != "report_queued");
+    }
+
+    /// 后台工作状态登记快照（前端状态条数据源）。
+    pub(crate) fn central_work_status(&self) -> Vec<crate::central::CentralWorkStatus> {
+        self.central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// 注入全部暂存回报（第一条开启汇报轮，其余按 Core 原生引导排队）。
     pub(crate) fn deliver_pending_work_reports(&self) {
         use tiangong_core::agent_input::AgentInput;
         let notices = self.take_central_work_reports();
+        self.clear_queued_work_reports();
         let Some(core) = self
             .central_core
             .lock()
@@ -1317,10 +1357,27 @@ async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
 // 并在终态把结果注入中枢对话（事件驱动汇报的最小闭环）。
 // =========================================================================
 
+/// 从 AppHandle 取 TiangongApp（派发执行器/插件的共享状态入口）。
+fn state_of(app: &tauri::AppHandle) -> &TiangongApp {
+    use tauri::Manager;
+    app.state::<TiangongApp>().inner()
+}
+
+/// 通知前端后台工作状态已变化（状态条刷新）。
+fn emit_central_work_updated(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit("central-work-updated", ());
+}
+
+/// emit_central_work_updated 的跨模块入口（commands 复用）。
+pub(crate) fn emit_central_work_updated_pub(app: &tauri::AppHandle) {
+    emit_central_work_updated(app);
+}
+
 /// 中枢派发执行器通道（惰性启动消费循环）。
 fn central_dispatch_sender(
     app: &tauri::AppHandle,
-) -> tokio::sync::mpsc::UnboundedSender<crate::central::CentralDispatchRequest> {
+) -> tokio::sync::mpsc::UnboundedSender<crate::central::CentralPluginMessage> {
     use tauri::Manager;
     let state = app.state::<TiangongApp>();
     state
@@ -1328,32 +1385,50 @@ fn central_dispatch_sender(
         .central_dispatch_tx
         .get_or_init(|| {
             let (tx, mut rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::central::CentralDispatchRequest>();
+                tokio::sync::mpsc::unbounded_channel::<crate::central::CentralPluginMessage>();
             let app = app.clone();
             tokio::spawn(async move {
-                while let Some(request) = rx.recv().await {
-                    let state = app.state::<TiangongApp>();
-                    if let Err(error) =
-                        handle_central_dispatch(state.inner(), &app, request.clone()).await
-                    {
-                        tracing::warn!(%error, work_id = %request.work_id, "中枢派发执行失败");
-                        let notice = format!(
-                            "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{error}",
-                            request.work_id,
-                            request.model.as_deref().unwrap_or("（默认）"),
-                            request.task
-                        );
-                        // 派发即失败：无在执行登记，直接走失败必达路径
-                        let state = app.state::<TiangongApp>();
-                        state
-                            .inner()
-                            .on_central_work_finished(&request.session_id, false, notice);
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        crate::central::CentralPluginMessage::Dispatch(request) => {
+                            if let Err(error) =
+                                handle_central_dispatch(state_of(&app), &app, request.clone()).await
+                            {
+                                tracing::warn!(%error, work_id = %request.work_id, "中枢派发执行失败");
+                                let notice = format!(
+                                    "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{error}",
+                                    request.work_id,
+                                    request.model.as_deref().unwrap_or("（默认）"),
+                                    request.task
+                                );
+                                // 派发即失败：无在执行登记，直接走失败必达路径
+                                state_of(&app)
+                                    .on_central_work_finished(&request, false, &notice, &app);
+                            }
+                        }
+                        crate::central::CentralPluginMessage::ReportsCollected => {
+                            // collect_work_reports 已取走全部暂存回报：
+                            // 清理状态登记并刷新前端。
+                            let state = state_of(&app);
+                            state.clear_queued_work_reports();
+                            emit_central_work_updated(&app);
+                        }
                     }
                 }
             });
             tx
         })
         .clone()
+}
+
+/// 会话自身的工作目录（复用派发时沿用；会话不存在返回 None）。
+fn self_session_cwd(state: &TiangongApp, session_id: &str) -> Option<String> {
+    state
+        .core_manager
+        .load_session(session_id)
+        .ok()
+        .map(|session| session.cwd)
+        .filter(|cwd| !cwd.trim().is_empty())
 }
 
 /// 执行中枢派发：创建 Worker 会话（普通能力、全插件、指定模型）投递任务，
@@ -1367,10 +1442,15 @@ async fn handle_central_dispatch(
         .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
         .await
         .unwrap_or_default();
+    // 工作目录：请求指定 > 复用会话自身的 cwd > 全局默认
     let cwd = request
         .cwd
         .clone()
         .filter(|path| !path.trim().is_empty())
+        .or_else(|| {
+            // 复用已有会话：沿用该会话的工作目录（上下文连续的一部分）
+            self_session_cwd(state, &request.session_id)
+        })
         .unwrap_or(default_cwd);
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("工作目录不存在或不是目录：{cwd}"));
@@ -1402,15 +1482,37 @@ async fn handle_central_dispatch(
         )
         .await?;
     tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
-    // 给 Worker 会话写可识别标题（显式覆盖：自动标题生成 only_if_default 不会
-    // 再覆盖非默认标题），普通模式列表一眼可辨，避免被当成无名的中枢消息。
-    {
+    // 给 Worker 会话写可识别标题（仅新建会话；复用会话保留原标题——
+    // 上下文连续的一部分）。显式覆盖后自动标题生成（only_if_default）不改写。
+    if !request.reused_session {
         let title_preview: String = request.task.chars().take(24).collect();
         let title = format!("[后台工作] {title_preview}");
         if let Some(core) = state.core_manager.registry().get(&sid) {
             let _ = core.set_title(title, false);
         }
     }
+    // 登记在执行集合与状态登记（running 按 work_id），并通知前端刷新
+    {
+        let mut running = state
+            .central_running_works
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        running.insert(request.work_id.clone());
+    }
+    state
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(crate::central::CentralWorkStatus {
+            work_id: request.work_id.clone(),
+            session_id: request.session_id.clone(),
+            task: request.task.clone(),
+            model: request.model.clone(),
+            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            state: "running".to_string(),
+            reused_session: request.reused_session,
+        });
+    emit_central_work_updated(app);
 
     // 终态 watcher：独立线程消费事件流，Done/Error 后把结果注入中枢。
     let watch_app = app.clone();
@@ -1435,7 +1537,7 @@ async fn handle_central_dispatch(
         let notice = build_work_notice(state.inner(), &work, done, &failed_reason);
         state
             .inner()
-            .on_central_work_finished(&work.session_id, done, notice);
+            .on_central_work_finished(&work, done, &notice, &watch_app);
     });
     Ok(())
 }

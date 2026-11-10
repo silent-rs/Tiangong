@@ -195,6 +195,14 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
     .map_err(|error| format!("等待会话列表加载失败：{error}"))
 }
 
+/// 中枢后台工作状态（前端「后台工作」状态条数据源）。
+#[tauri::command]
+pub async fn get_central_work_status(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<crate::central::CentralWorkStatus>, String> {
+    Ok(state.inner().central_work_status())
+}
+
 /// 获取单个会话的元数据（精确更新列表时使用，避免全量刷新）。
 #[tauri::command]
 pub async fn get_session_meta(
@@ -775,18 +783,24 @@ async fn send_message_inner(
             }
         };
         if is_new {
-            start_stream_consumer(app, session_id.clone(), stream_rx);
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
         }
         // 暂存的后台工作回报随用户消息一并进入对话（批量汇报模式）：
         // 先逐条注入回报，再投用户消息——中枢空闲时回报开启汇报 turn、
         // 用户消息按 Core 原生引导语义并入同一轮；执行中则按序排队。
-        for notice in state.take_central_work_reports() {
+        let flushed = state.take_central_work_reports();
+        let flushed_any = !flushed.is_empty();
+        for notice in flushed {
             let notice_prepared = vec![tiangong_types::ContentBlock::text(notice)];
             if let Err(error) =
                 state.deliver_central_message(scru128::new().to_string(), notice_prepared, None)
             {
                 tracing::warn!(%error, "后台工作回报注入中枢失败（继续投递用户消息）");
             }
+        }
+        if flushed_any {
+            state.clear_queued_work_reports();
+            crate::app::emit_central_work_updated_pub(&app);
         }
         if let Err(error) =
             state.deliver_central_message(user_message_id.clone(), prepared.clone(), render)
@@ -1264,7 +1278,7 @@ pub async fn edit_and_resend(
             }
         };
         if is_new {
-            start_stream_consumer(app, session_id.clone(), stream_rx);
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
         }
         if let Err(error) =
             state.deliver_central_message(message_id.clone(), prepared.clone(), None)
