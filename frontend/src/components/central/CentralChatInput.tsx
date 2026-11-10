@@ -52,27 +52,48 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
   }, [inputCache?.text, resize, onHeightChange]);
 
   const handleSend = useCallback(async () => {
-    // 执行中允许继续发送（走 Core 原生引导）；仅本地发送事务中防抖
+    // 中枢对话无限接收用户消息：执行状态不阻止发送（执行中走 Core
+    // 原生引导，空闲新开轮）；保留本地发送事务防抖（sending）——防止
+    // 双击/连按 Enter 把同一条消息重复投递。竞态窗口内双向回落，消息
+    // 一定落地：
+    // - append 时后端 turn 已结束 → 回落 sendMessage 新开轮
+    // - sendMessage 时 turn 已在后端开始（runStatus 尚未更新）→ 回落 append
     if (disabled || sending) return;
     const text = (inputCache?.text ?? '').trim();
     if (!text) return;
     const revision = inputCache?.revision ?? 0;
     setSending(true);
     setSendError(null);
+    let delivered = false;
     try {
-      // 中枢支持连续对话：执行中（runStatus=executing）的新消息走 Core 原生
-      // 引导（appendMessage 随当前 turn 处理），空闲时正常开新轮。返回
-      // false/undefined 表示投递失败（错误已在 store 内记录），草稿保留供重试。
-      const delivered = isExecuting
-        ? (await appendMessage(CENTRAL_SESSION_ID, text, [], revision)) === true
-        : await sendMessage(
+      if (isExecuting) {
+        delivered = (await appendMessage(CENTRAL_SESSION_ID, text, [], revision)) === true;
+        if (!delivered) {
+          delivered =
+            (await sendMessage(
+              CENTRAL_SESSION_ID,
+              text,
+              [],
+              revision,
+              undefined,
+              undefined,
+            )) === true;
+        }
+      } else {
+        delivered =
+          (await sendMessage(
             CENTRAL_SESSION_ID,
             text,
             [],
             revision,
             undefined,
             undefined,
-          );
+          )) === true;
+        if (!delivered && useStore.getState().runStatus === 'executing') {
+          delivered =
+            (await appendMessage(CENTRAL_SESSION_ID, text, [], revision)) === true;
+        }
+      }
       if (delivered) {
         setInputCacheText(CENTRAL_SESSION_ID, '');
       } else {

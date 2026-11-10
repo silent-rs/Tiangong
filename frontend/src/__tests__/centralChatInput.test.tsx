@@ -159,6 +159,42 @@ describe('CentralChatInput 发送链路', () => {
     view.unmount();
   });
 
+  it('append 落空（后端 turn 刚结束）回落新开轮，消息必达', async () => {
+    const view = mountInput();
+    const target = view.textarea();
+    await act(async () => {
+      target.focus();
+    });
+    const change = (value: string) => act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(target, value);
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await change('竞态窗口消息');
+    act(() => {
+      useStore.setState({ activeSessionId: CENTRAL_SESSION_ID, runStatus: 'executing' });
+    });
+    // 后端无活跃 turn：append 返回 false → 应回落 sendMessage
+    mocks.api.appendMessage.mockResolvedValueOnce(false);
+    await act(async () => {
+      target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.api.appendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.api.sendMessage.mock.calls[0][1]).toBe('竞态窗口消息');
+    view.unmount();
+  });
+
   it('Enter 触发发送，Shift+Enter 不发送', async () => {
     const view = mountInput();
     const target = view.textarea();
