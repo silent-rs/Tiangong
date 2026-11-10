@@ -171,52 +171,27 @@ fn work_items_path(storage_root: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 加载派发登记（损坏/缺失按空表处理）。
-/// 持久化容器（v2）。v1 是裸数组——终态记录机制上线前的旧数据，
-/// 无 finished_at 字段；加载时全部迁移为已结束（避免被中断恢复误判）。
-#[derive(serde::Serialize, serde::Deserialize)]
-struct WorkItemsFile {
-    version: u32,
-    items: Vec<WorkItemRecord>,
-}
-
-/// 加载派发登记（损坏/缺失按空表处理；v1 裸数组自动迁移）。
+/// 加载派发登记（损坏/缺失按空表处理）。
 fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
-    let Ok(content) = std::fs::read_to_string(work_items_path(storage_root)) else {
-        return Vec::new();
-    };
-    if let Ok(file) = serde_json::from_str::<WorkItemsFile>(&content) {
-        return file.items;
-    }
-    // v1（裸数组）迁移：旧数据的终态事实不可考，一律视为已结束
-    match serde_json::from_str::<Vec<WorkItemRecord>>(&content) {
-        Ok(mut legacy) => {
-            for item in &mut legacy {
-                if item.finished_at.is_none() {
-                    item.finished_at = Some(item.dispatched_at.clone());
-                }
-            }
-            let _ = save_work_items(storage_root, &legacy);
-            tracing::info!("派发登记 v1→v2 迁移：{} 条旧记录已标记结束", legacy.len());
-            legacy
-        }
-        Err(_) => Vec::new(),
-    }
+    std::fs::read_to_string(work_items_path(storage_root))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
 }
 
-/// 全表落盘（v2 格式，原子写）。
-fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) -> Result<(), String> {
-    let file = WorkItemsFile {
-        version: 2,
-        items: items.to_vec(),
+/// 全表落盘（原子写：tmp + rename）。
+fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) {
+    let Ok(content) = serde_json::to_string_pretty(items) else {
+        return;
     };
-    let content = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     let path = work_items_path(storage_root);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let _ = std::fs::create_dir_all(parent);
     }
     let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &content).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp_path, &path).map_err(|e| e.to_string())
+    if std::fs::write(&tmp_path, &content).is_ok() {
+        let _ = std::fs::rename(&tmp_path, &path);
+    }
 }
 
 /// 更新某条登记的终态时间并落盘。
@@ -227,7 +202,7 @@ pub fn mark_work_item_finished(storage_root: &std::path::Path, work_id: &str) {
     } else {
         return;
     }
-    let _ = save_work_items(storage_root, &items);
+    save_work_items(storage_root, &items);
 }
 
 /// 近期（48h）派发且未终态的登记——应用重启后按「已中断」恢复。
@@ -266,9 +241,7 @@ fn upsert_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
     if let Some(parent) = work_items_path(storage_root).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(error) = save_work_items(storage_root, &items) {
-        tracing::warn!(%error, "派发登记落盘失败");
-    }
+    save_work_items(storage_root, &items);
 }
 
 impl CentralPlugin {
@@ -1765,30 +1738,5 @@ mod tests {
         assert!(hits[0].reused_session);
         // 最旧的 sess-0 已被裁剪
         assert!(!items.iter().any(|item| item.session_id == "sess-0"));
-    }
-    /// v1 裸数组迁移：旧记录全部补终态（不再被中断恢复误判）。
-    #[test]
-    fn work_items_v1_array_migrates_to_finished() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(work_items_path(root.path()).parent().unwrap()).unwrap();
-        std::fs::write(
-            work_items_path(root.path()),
-            serde_json::json!([
-                {"work_id": "w1", "reused_session": false, "session_id": "s1",
-                 "task": "旧任务", "model": null,
-                 "dispatched_at": "2026-11-10 13:00:00"}
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        // 加载触发迁移
-        let items = load_work_items(root.path());
-        assert_eq!(items.len(), 1);
-        assert!(items[0].finished_at.is_some(), "旧记录应补终态");
-        // 磁盘已转 v2
-        let raw = std::fs::read_to_string(work_items_path(root.path())).unwrap();
-        assert!(raw.contains("\"version\": 2"), "落盘应为 v2 格式");
-        // 中断恢复不再命中
-        assert!(interrupted_work_items(root.path()).is_empty());
     }
 }
