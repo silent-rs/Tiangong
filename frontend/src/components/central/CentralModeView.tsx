@@ -52,8 +52,16 @@ export function CentralModeView() {
       className="relative flex flex-1 min-w-0 flex-col bg-background animate-central-view-in"
     >
       <CentralWorkStatusBar />
-      <div className="min-h-0 flex-1">
-        {showGreeting ? <CentralGreeting /> : <LazyMessageList />}
+      {/* 消息列表常挂载（空态由问候覆盖层遮盖）：避免「消息到达才挂载
+          列表」的虚拟化首帧定位竞态——中枢无会话切换信号，定位只能走
+          新消息路径，延迟挂载会让 scrollToIndex 早于测量完成而失效。 */}
+      <div className="relative min-h-0 flex-1">
+        <LazyMessageList />
+        {showGreeting ? (
+          <div className="absolute inset-0 z-10 bg-background">
+            <CentralGreeting />
+          </div>
+        ) : null}
       </div>
       <CentralChatInput />
     </main>

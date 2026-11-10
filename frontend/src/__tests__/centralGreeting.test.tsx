@@ -65,10 +65,11 @@ afterEach(() => {
 });
 
 describe('CentralModeView', () => {
-  it('空对话：显示中枢默认问候，不挂消息列表', () => {
+  it('空对话：问候覆盖层显示（消息列表常挂被遮盖）', () => {
     cleanup = mountView();
     expect(document.body.textContent).toContain('我是天工中枢');
-    expect(document.querySelector('[data-testid="central-message-list"]')).toBeNull();
+    // 消息列表常挂载（覆盖层遮盖），空态仍在 DOM
+    expect(document.querySelector('[data-testid="central-message-list"]')).not.toBeNull();
     // 专属输入区挂载
     expect(document.querySelector('[data-testid="central-chat-input"]')).not.toBeNull();
   });

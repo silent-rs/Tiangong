@@ -563,21 +563,30 @@ export function MessageList() {
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
         // 滚动到虚拟列表最后一项
+        const scrollToLast = () => virtualizer.scrollToIndex(completedGroups.length - 1, {
+          behavior: "auto",
+          align: "end",
+        });
         requestAnimationFrame(() => {
           // 帧执行前重跑的 effect 已作废本次定位（如回复在排队期间完成），
           // 回复完成后不再拉底
           if (cancelled) return;
           // 跟随滚动用瞬时定位：平滑动画期间内容持续增长会让滚动事件
           // 误判"离开底部"而中断跟随
-          virtualizer.scrollToIndex(completedGroups.length - 1, {
-            behavior: "auto",
-            align: "end",
+          scrollToLast();
+          // 挂载即有批量消息的场景（如中枢模式进入）：虚拟化首帧测量可能
+          // 晚于本帧，补一帧幂等定位兜底
+          requestAnimationFrame(() => {
+            if (!cancelled) scrollToLast();
           });
         });
       } else if (streamingGroup) {
         requestAnimationFrame(() => {
           if (cancelled) return;
           scrollRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+          requestAnimationFrame(() => {
+            if (!cancelled) scrollRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+          });
         });
       }
     }
