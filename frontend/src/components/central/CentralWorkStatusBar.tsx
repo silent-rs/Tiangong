@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Loader2, Inbox, History, ChevronRight } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight, AlertTriangle } from 'lucide-react';
 
 interface CentralWorkStatus {
   work_id: string;
@@ -18,7 +18,7 @@ interface CentralWorkStatus {
   task: string;
   model: string | null;
   dispatched_at: string;
-  state: 'running' | 'report_queued';
+  state: 'running' | 'report_queued' | 'interrupted';
   reused_session: boolean;
 }
 
@@ -26,24 +26,36 @@ const PANEL_CLOSE_DELAY_MS = 250;
 
 function WorkItemRow({ item }: { item: CentralWorkStatus }) {
   const running = item.state === 'running';
+  const interrupted = item.state === 'interrupted';
   return (
     <div
       className={`group/row rounded-xl border p-3 transition-colors ${
         running
           ? 'border-primary/25 bg-primary/[0.04] hover:border-primary/40'
-          : 'border-amber-500/25 bg-amber-500/[0.05] hover:border-amber-500/45'
+          : interrupted
+            ? 'border-border/60 bg-muted/30 opacity-80'
+            : 'border-amber-500/25 bg-amber-500/[0.05] hover:border-amber-500/45'
       }`}
     >
       <div className="flex items-center justify-between gap-2">
         <span
           className={`inline-flex items-center gap-1.5 text-xs font-medium ${
-            running ? 'text-primary' : 'text-amber-600 dark:text-amber-400'
+            running
+              ? 'text-primary'
+              : interrupted
+                ? 'text-muted-foreground'
+                : 'text-amber-600 dark:text-amber-400'
           }`}
         >
           {running ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               执行中
+            </>
+          ) : interrupted ? (
+            <>
+              <AlertTriangle className="h-3.5 w-3.5" />
+              已中断
             </>
           ) : (
             <>
@@ -133,6 +145,7 @@ export function CentralWorkStatusBar() {
 
   const running = items.filter((item) => item.state === 'running');
   const queued = items.filter((item) => item.state === 'report_queued');
+  const interrupted = items.filter((item) => item.state === 'interrupted');
 
   return (
     <div
@@ -171,7 +184,11 @@ export function CentralWorkStatusBar() {
           )}
         </span>
         <span className="tabular-nums font-medium">
-          {running.length > 0 ? `${running.length} 个后台任务` : '后台任务已结束'}
+          {running.length > 0
+          ? `${running.length} 个后台任务`
+          : interrupted.length > 0
+            ? `${interrupted.length} 个任务已中断`
+            : '后台任务已结束'}
         </span>
         {queued.length > 0 ? (
           <span className="rounded-full bg-amber-500/15 px-1.5 py-px font-medium tabular-nums text-amber-600 dark:text-amber-400">
@@ -223,7 +240,29 @@ export function CentralWorkStatusBar() {
             </section>
           ) : null}
 
-          {running.length === 0 && queued.length === 0 ? (
+          {interrupted.length > 0 ? (
+            <section className="mt-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <AlertTriangle className="h-3.5 w-3.5 text-muted-foreground" />
+                  已中断（应用重启）
+                </h3>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                  {interrupted.length}
+                </span>
+              </header>
+              <p className="px-1 pb-2 text-[11px] leading-relaxed text-muted-foreground">
+                进程重启导致执行中断，结果未产出；可让中枢重派（复用原会话延续上下文）。
+              </p>
+              <div className="space-y-2 opacity-75">
+                {interrupted.map((item) => (
+                  <WorkItemRow key={item.work_id} item={{ ...item, state: 'interrupted' }} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {running.length === 0 && queued.length === 0 && interrupted.length === 0 ? (
             <p className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
           ) : null}
         </div>

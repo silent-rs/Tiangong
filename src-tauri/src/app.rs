@@ -1009,6 +1009,8 @@ impl TiangongApp {
                 entry.state = "report_queued".to_string();
             }
         }
+        // 持久化终态（重启恢复依据：无终态的近期登记按已中断处理）
+        crate::central::mark_work_item_finished(self.core_manager.storage_root(), &request.work_id);
         let has_running = !self
             .central_running_works
             .lock()
@@ -1404,6 +1406,28 @@ fn central_dispatch_sender(
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::central::CentralPluginMessage>();
             let app = app.clone();
+            // 重启恢复（§15.1 离开期间变化）：近 48h 派发且未终态的任务按
+            // 「已中断」恢复到状态登记（徽章可见、get_context 可提示）；
+            // 内容已随进程丢失，用户可让中枢重派（复用原会话续上下文）。
+            {
+                let state = app.state::<TiangongApp>();
+                let registry = &state.inner().central_work_registry;
+                let mut entries = registry.lock().unwrap_or_else(|e| e.into_inner());
+                for item in crate::central::interrupted_work_items(
+                    state.inner().core_manager.storage_root(),
+                ) {
+                    tracing::info!(work_id = %item.work_id, "后台工作因应用重启中断，恢复为 interrupted");
+                    entries.push(crate::central::CentralWorkStatus {
+                        work_id: item.work_id,
+                        session_id: item.session_id,
+                        task: item.task,
+                        model: item.model,
+                        dispatched_at: item.dispatched_at,
+                        state: "interrupted".to_string(),
+                        reused_session: item.reused_session,
+                    });
+                }
+            }
             tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
                     match message {

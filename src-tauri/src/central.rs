@@ -152,6 +152,10 @@ pub struct WorkItemRecord {
     #[serde(default)]
     pub model: Option<String>,
     pub dispatched_at: String,
+    /// 终态时间（完成/失败到达时刻）；None = 未终态——应用重启后仍为
+    /// None 的近期条目按「已中断」恢复到状态登记（§15.1 离开期间变化）。
+    #[serde(default)]
+    pub finished_at: Option<String>,
 }
 
 /// 派发登记持久化路径：`{storage_root}/central/work-items.json`。
@@ -165,6 +169,37 @@ fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
         .unwrap_or_default()
+}
+
+/// 更新某条登记的终态时间并落盘。
+pub fn mark_work_item_finished(storage_root: &std::path::Path, work_id: &str) {
+    let mut items = load_work_items(storage_root);
+    if let Some(item) = items.iter_mut().find(|item| item.work_id == work_id) {
+        item.finished_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    } else {
+        return;
+    }
+    let path = work_items_path(storage_root);
+    let Ok(content) = serde_json::to_string_pretty(&items) else {
+        return;
+    };
+    let tmp_path = path.with_extension("json.tmp");
+    if std::fs::write(&tmp_path, &content).is_ok() {
+        let _ = std::fs::rename(&tmp_path, &path);
+    }
+}
+
+/// 近期（48h）派发且未终态的登记——应用重启后按「已中断」恢复。
+pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
+    // dispatched_at 为「%Y-%m-%d %H:%M:%S」本地时间，字典序与时间序一致，
+    // 字符串比较近似近 48 小时窗口。
+    let cutoff = (chrono::Local::now() - chrono::Duration::hours(48))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    load_work_items(storage_root)
+        .into_iter()
+        .filter(|item| item.finished_at.is_none() && item.dispatched_at.as_str() > cutoff.as_str())
+        .collect()
 }
 
 /// 追加一条派发登记并落盘（原子写，失败仅记日志不阻断派发）。
@@ -244,20 +279,23 @@ impl CentralPlugin {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len();
+        let interrupted_reports = interrupted_work_items(self.sessions.storage_root()).len();
         let body = format!(
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace（均为只读元信息）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / collect_work_reports / list_work_items（查询类只读；dispatch_work 派发后台工作，支持 session_id 复用）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
              待汇报的后台工作回报: {pending} 条（可调 collect_work_reports 收集后转述）\n\
+             因应用重启中断的任务: {interrupted} 个（徽章可见；结果未产出，可重派复用原会话）\n\
              当前时间: {now}",
             version = env!("CARGO_PKG_VERSION"),
             workspace = self.workspace_dir,
             count = workspace_count,
             pending = pending_reports,
+            interrupted = interrupted_reports,
             now = chrono::Local::now().format("%Y-%m-%d %H:%M"),
         );
         self.text_result("中枢上下文", body)
@@ -423,6 +461,7 @@ impl CentralPlugin {
                 .map(str::trim)
                 .map(str::to_string),
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            finished_at: None,
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),
@@ -456,7 +495,37 @@ impl CentralPlugin {
         } else {
             format!("{session_id}（新会话；普通模式会话列表可查看）")
         };
-        // 机制兜底：未指定复用但存在既往派发时，附提示供模型自查——
+        // 机制兜底 1：高相似度自动检出——无 session_id 且历史派发中有任务
+        // 前缀高度一致（前 12 字符）的近期会话时，置顶强提示复用目标。
+        let similarity_hint = {
+            let items = self
+                .work_items
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let prefix: String = task.chars().take(12).collect();
+            items
+                .iter()
+                .rev()
+                .take(20)
+                .find(|item| {
+                    let item_prefix: String = item.task.chars().take(12).collect();
+                    item_prefix == prefix
+                })
+                .map(|item| {
+                    format!(
+                        "\n\n⚠⚠ 检测到高度相似的历史派发：会话 {}（{}，任务「{}」）。\
+                         本任务极可能是它的延续——若确认，应告知用户并向该会话重派\
+                         （dispatch_work 带 session_id={}?模型参数可换，上下文保留）；\
+                         仅当确属无关的新工作时才保留本次新建。",
+                        item.session_id,
+                        item.work_id,
+                        item.task.chars().take(40).collect::<String>(),
+                        item.session_id
+                    )
+                })
+                .unwrap_or_default()
+        };
+        // 机制兜底 2：未指定复用但存在既往派发时，附提示供模型自查——
         // 若本任务是其中某项的延续，应告知用户并向该会话重派。
         let prior_note = if record.reused_session {
             String::new()
@@ -492,12 +561,13 @@ impl CentralPlugin {
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
              - 工作会话: {session_note}\n- 任务: {task}\n\n\
              结果按时机自动回到本对话（失败立即；成功待全部结束后汇总一轮），\
-             届时由你向用户转述。执行中如需查看可调 list_work_items。{prior_note}",
+             届时由你向用户转述。执行中如需查看可调 list_work_items。{prior_note}{similarity_hint}",
             work_id = record.work_id,
             model_note = model_note,
             session_note = session_note,
             task = record.task,
             prior_note = prior_note,
+            similarity_hint = similarity_hint,
         );
         self.text_result("已派发", body)
     }
