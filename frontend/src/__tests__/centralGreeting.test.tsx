@@ -24,9 +24,6 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@/components/LazyComponents', () => ({
   LazyMessageList: () => <div data-testid="central-message-list">message-list</div>,
 }));
-vi.mock('@/components/InteractionPluginHost', () => ({
-  InteractionPluginHost: () => null,
-}));
 vi.mock('@/components/central/CentralChatInput', () => ({
   CentralChatInput: () => <div data-testid="central-chat-input">chat-input</div>,
 }));

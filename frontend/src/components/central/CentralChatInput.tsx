@@ -18,12 +18,10 @@ import { CENTRAL_SESSION_ID } from '@/lib/centralSession';
 const MAX_INPUT_HEIGHT = 200;
 
 export interface CentralChatInputProps {
-  /** 征询卡片出现时锁定输入区（interaction 插件覆盖期间）。 */
-  disabled?: boolean;
   onHeightChange?: (height: number) => void;
 }
 
-export function CentralChatInput({ disabled = false, onHeightChange }: CentralChatInputProps) {
+export function CentralChatInput({ onHeightChange }: CentralChatInputProps) {
   const inputCache = useStore((state) => state.inputCaches[CENTRAL_SESSION_ID]);
   const setInputCacheText = useStore((state) => state.setInputCacheText);
   const sendMessage = useStore((state) => state.sendMessage);
@@ -54,11 +52,11 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
   const handleSend = useCallback(async () => {
     // 中枢对话无限接收用户消息：执行状态不阻止发送（执行中走 Core
     // 原生引导，空闲新开轮）；保留本地发送事务防抖（sending）——防止
-    // 双击/连按 Enter 把同一条消息重复投递。竞态窗口内双向回落，消息
-    // 一定落地：
+    // 双击/连按 Enter 把同一条消息重复投递（无征询锁定：中枢插件零工具，
+    // 无 request_user 调用方）。竞态窗口内双向回落，消息一定落地：
     // - append 时后端 turn 已结束 → 回落 sendMessage 新开轮
     // - sendMessage 时 turn 已在后端开始（runStatus 尚未更新）→ 回落 append
-    if (disabled || sending) return;
+    if (sending) return;
     const text = (inputCache?.text ?? '').trim();
     if (!text) return;
     const revision = inputCache?.revision ?? 0;
@@ -107,7 +105,6 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
     }
   }, [
     appendMessage,
-    disabled,
     inputCache?.text,
     inputCache?.revision,
     isExecuting,
@@ -138,7 +135,6 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
           }}
           onKeyDown={handleKeyDown}
           rows={1}
-          disabled={disabled}
           placeholder="你想让我做什么？"
           aria-label="中枢对话输入"
           className="max-h-[200px] min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
@@ -157,7 +153,7 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
           <button
             type="button"
             onClick={() => void handleSend()}
-            disabled={disabled || sending || !(inputCache?.text ?? '').trim()}
+            disabled={sending || !(inputCache?.text ?? '').trim()}
             aria-label="发送"
             title="发送"
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
