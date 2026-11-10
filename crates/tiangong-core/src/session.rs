@@ -244,8 +244,9 @@ impl Session {
 
     /// 会话文件路径：`{storage_root}/sessions/{id}.json`。
     ///
-    /// **中枢对话单独存储**（设计稿 §13.1）：中枢是同一 CoreManager 管理下的
-    /// 特殊 Core，但会话文件位于 `{storage_root}/central/sessions/`，不与普通
+    /// **中枢对话单独存储**（设计稿 §13.1）：中枢 Core 由 app 直接持有
+    /// （不经 CoreManager，见 src-tauri/src/central.rs），会话文件位于
+    /// `{storage_root}/central/sessions/`，不与普通
     /// 会话混存——会话列表、按组删除、回收站等普通链路（只扫 `sessions/`）
     /// 天然不触达。读取（load）、持久化（persist）与 CoreManager 侧的
     /// 元数据 / 回收站操作共用本函数，路径规则单点维护。

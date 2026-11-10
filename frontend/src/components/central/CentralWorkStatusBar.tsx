@@ -113,6 +113,11 @@ export function CentralWorkStatusBar() {
     refresh();
   }, [runStatus, messagesLength, refresh]);
 
+  // 无任务时收起面板（否则下次任务出现时面板带着旧 open 状态自动展开）
+  useEffect(() => {
+    if (items.length === 0) setOpen(false);
+  }, [items.length]);
+
   const scheduleClose = useCallback(() => {
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => setOpen(false), PANEL_CLOSE_DELAY_MS);
@@ -141,6 +146,14 @@ export function CentralWorkStatusBar() {
       <button
         type="button"
         aria-label={`后台工作：${running.length} 个执行中，${queued.length} 条待汇报`}
+        aria-expanded={open}
+        // hover 之外的键盘/点击可达路径（无障碍 + 触屏）
+        onClick={() => setOpen((value) => !value)}
+        onFocus={() => {
+          cancelClose();
+          setOpen(true);
+        }}
+        onBlur={scheduleClose}
         className={`inline-flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-xs shadow-lg shadow-black/5 backdrop-blur-md transition-all ${
           running.length > 0
             ? 'border-primary/30 bg-primary/[0.08] text-foreground hover:border-primary/50'

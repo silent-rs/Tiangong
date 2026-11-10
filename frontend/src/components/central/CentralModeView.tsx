@@ -5,11 +5,10 @@
  * 能力与普通模式一致，组件本身零改动）；中枢的独立性体现在：
  * - **空态**：无消息且未在生成时呈现中枢默认问候（§4.2），由本视图判断；
  * - **输入区**：CentralChatInput（「你想让我做什么？」），不复用普通
- *   MessageInput；无征询锁定（中枢插件零工具，无 request_user 调用方；
- *   Worker 的待决事项按 §5.4 由中枢代决/事件回报，不占中枢输入区）；
+ *   MessageInput；征询（request_user）为后续片工具，接入时按 §5.4 在中枢对话内呈现；
  * - **后台状态**：CentralWorkStatusBar（执行中任务/待汇报条数）；
  * - **数据与执行**：中枢对话是同一 CoreManager 管理下的特殊 Core（单独
- *   存储 / 空插件白名单，见 `src-tauri/src/central.rs`），固定 Session ID
+ *   存储 / 中枢插件承载工具白名单，见 `src-tauri/src/central.rs`），固定 Session ID
  *   （lib/centralSession），切换逻辑独立于共用 store（lib/centralConversation）。
  */
 import { LazyMessageList } from '@/components/LazyComponents';

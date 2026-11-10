@@ -1074,6 +1074,14 @@ impl TiangongApp {
         }
     }
 
+    /// 追加回报到暂存队列（投递失败的放回路径）。
+    pub(crate) fn push_central_work_reports(&self, notices: Vec<String>) {
+        self.central_work_reports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(notices);
+    }
+
     /// 取走全部暂存的后台工作回报（先进先出）。
     pub(crate) fn take_central_work_reports(&self) -> Vec<String> {
         let mut reports = self
@@ -1480,6 +1488,13 @@ async fn handle_central_dispatch(
             .retire_core(&request.session_id, false)
             .await?;
     }
+    // 复用派发忽略 model 参数（review p 项）：透传会经 set_core_model_ref
+    // 静默永久改写该会话的模型选择；复用即沿用会话既有模型。
+    let effective_model = if request.reused_session {
+        None
+    } else {
+        request.model.as_deref()
+    };
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
         .ensure_core(
@@ -1487,10 +1502,19 @@ async fn handle_central_dispatch(
             Some(cwd),
             None,
             None,
-            request.model.as_deref(),
+            effective_model,
             stream_tx,
         )
         .await?;
+    // is_new 守卫（review 新风险 1）：前置 retire 后此处应恒为新建；命中复用
+    // 说明存在并发创建（会话被打开/另一派发），传入的流通道会被丢弃——
+    // 回调永不触发（静默失报 + running 集合永久污染）。显式报错而非静默。
+    if !ensured.is_new {
+        return Err(format!(
+            "会话 {} 的 Core 已被并发创建，本次流通道未绑定；请稍后重派",
+            request.session_id
+        ));
+    }
     let sid = ensured.session_id.clone();
     let instruction = format!(
         "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n任务：\n{}",
@@ -1502,7 +1526,7 @@ async fn handle_central_dispatch(
             &sid,
             scru128::new().to_string(),
             prepared,
-            request.model.as_deref(),
+            effective_model,
             None,
         )
         .await?;

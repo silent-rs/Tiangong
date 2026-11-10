@@ -52,8 +52,7 @@ export function CentralChatInput({ onHeightChange }: CentralChatInputProps) {
   const handleSend = useCallback(async () => {
     // 中枢对话无限接收用户消息：执行状态不阻止发送（执行中走 Core
     // 原生引导，空闲新开轮）；保留本地发送事务防抖（sending）——防止
-    // 双击/连按 Enter 把同一条消息重复投递（无征询锁定：中枢插件零工具，
-    // 无 request_user 调用方）。竞态窗口内双向回落，消息一定落地：
+    // 双击/连按 Enter 把同一条消息重复投递（征询锁定不存在：request_user 为后续片）。竞态窗口内双向回落，消息一定落地：
     // - append 时后端 turn 已结束 → 回落 sendMessage 新开轮
     // - sendMessage 时 turn 已在后端开始（runStatus 尚未更新）→ 回落 append
     if (sending) return;

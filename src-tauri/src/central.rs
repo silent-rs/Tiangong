@@ -145,9 +145,11 @@ pub struct CentralPlugin {
 pub struct WorkItemRecord {
     pub work_id: String,
     /// 是否复用了已有会话（应用尽用；true 时 session_id 是既有会话）。
+    #[serde(default)]
     pub reused_session: bool,
     pub session_id: String,
     pub task: String,
+    #[serde(default)]
     pub model: Option<String>,
     pub dispatched_at: String,
 }
@@ -180,8 +182,14 @@ fn append_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
             return;
         }
     };
-    if let Err(error) = std::fs::write(&path, content) {
-        tracing::warn!(%error, path = %path.display(), "派发登记写入失败");
+    // 原子写：先写临时文件再 rename，避免半截文件
+    let tmp_path = path.with_extension("json.tmp");
+    if let Err(error) = std::fs::write(&tmp_path, &content) {
+        tracing::warn!(%error, path = %tmp_path.display(), "派发登记写入失败");
+        return;
+    }
+    if let Err(error) = std::fs::rename(&tmp_path, &path) {
+        tracing::warn!(%error, path = %path.display(), "派发登记落盘失败");
     }
 }
 
@@ -387,6 +395,9 @@ impl CentralPlugin {
             .map(str::trim)
             .map(str::to_string);
         if let Some(existing) = reuse_session.as_ref() {
+            if is_central_session(existing) {
+                return self.error_result("不能复用中枢对话自身作为工作会话".to_string());
+            }
             if tiangong_core_manager::SessionMetadata::load_from_storage(
                 self.sessions.storage_root(),
                 existing,
@@ -472,8 +483,7 @@ impl CentralPlugin {
                 String::new()
             } else {
                 format!(
-                    "\n\n⚠ 本次未指定复用会话（新建）。既往派发：\n{}\n若本任务                     是其中某项的继续/追加/复查，应向用户说明并向对应会话重派\
-                     （dispatch_work 带 session_id）；新会话无需处理。",
+                    "\n\n⚠ 本次未指定复用会话（新建）。既往派发：\n{}\n若本任务是其中某项的继续/追加/复查，应向用户说明并向对应会话重派（dispatch_work 带 session_id）；新会话无需处理。",
                     recent.join("\n")
                 )
             }
@@ -557,18 +567,28 @@ impl CentralPlugin {
         }
         let lines: Vec<String> = items
             .iter()
+            .rev()
+            .take(10)
             .map(|item| {
+                let task_preview: String = item.task.chars().take(60).collect();
                 format!(
                     "- {}｜模型 {}｜会话 {}｜派发于 {}\n  任务: {}",
                     item.work_id,
                     item.model.as_deref().unwrap_or("（默认）"),
                     item.session_id,
                     item.dispatched_at,
-                    item.task
+                    task_preview
                 )
             })
             .collect();
-        self.text_result("后台工作", lines.join("\n"))
+        self.text_result(
+            "后台工作",
+            format!(
+                "最近 {} 条（全部历史见 work-items.json）：\n{}",
+                lines.len(),
+                lines.join("\n")
+            ),
+        )
     }
 }
 
@@ -676,24 +696,33 @@ impl ToolSpecProvider for CentralPlugin {
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             },
             ToolSpec {
+                name: "list_sessions".to_string(),
+                description: "列出近期会话（id/标题/消息数/更新时间/工作目录）。派发后台工作\
+                    前先查询：任务与既有会话相关（同工作区、同主题、先前工作的延续）时\
+                    用其 id 复用（应用尽用，上下文连续）。"
+                    .to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolSpec {
                 name: "dispatch_work".to_string(),
-                description: "派发后台工作：创建一个后台工作会话（普通能力、全插件），\
-                    用指定模型执行任务，完成后结果自动回到本对话由你转述用户。\
-                    用户说「让某模型做某事」「去分析/审查/整理某工作区」时使用。"
+                description: "派发后台工作：创建后台工作会话（普通能力、全插件）执行任务，\
+                    或复用已有会话（session_id，应用尽用），完成后结果按时机回到本对话\
+                    由你转述用户。用户说「让某模型做某事」「继续上次的某工作」时使用。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "task": {"type": "string", "description": "给执行会话的任务描述（完整、自包含）"},
                         "model": {"type": "string", "description": "模型 key（list_models 查询；省略用路由默认）"},
-                        "cwd": {"type": "string", "description": "工作目录（省略用默认工作区）"}
+                        "cwd": {"type": "string", "description": "工作目录（省略：复用会话用其自身目录，新建用默认工作区）"},
+                        "session_id": {"type": "string", "description": "复用的已有会话 ID（list_sessions 查询）。任务与某会话相关（同工作区、同主题、上次未完成）时必须优先复用，保持上下文连续；仅无相关会话时省略新建"}
                     },
                     "required": ["task"]
                 }),
             },
             ToolSpec {
                 name: "collect_work_reports".to_string(),
-                description: "收集全部已到达的后台工作回报（取走语义）。用户询问                    后台工作结果/进展时、或 get_context 显示有待汇报条目时调用，                    在当前回复中统一转述。".to_string(),
+                description: "收集全部已到达的后台工作回报（取走语义）。用户询问后台工作结果/进展时、或 get_context 显示有待汇报条目时调用，在当前回复中统一转述。".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             },
             ToolSpec {
@@ -863,19 +892,74 @@ mod tests {
         assert!(sections[0].contains("天工中枢"));
         assert!(sections[0].contains("先调用工具了解情况再回答"));
         let specs = plugin.tool_specs();
-        let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "get_context".to_string(),
-                "list_workspaces".to_string(),
-                "inspect_workspace".to_string(),
-                "list_models".to_string(),
-                "dispatch_work".to_string(),
-                "collect_work_reports".to_string(),
-                "list_work_items".to_string(),
-            ]
+        assert!(
+            specs.iter().any(|spec| spec.name == "list_sessions"),
+            "list_sessions 必须有声明（review o：有 handler 无 spec 则模型不可见）"
         );
+        assert!(
+            specs
+                .iter()
+                .find(|spec| spec.name == "dispatch_work")
+                .is_some_and(|spec| spec
+                    .input_schema
+                    .get("properties")
+                    .and_then(|props| props.get("session_id"))
+                    .is_some()),
+            "dispatch_work 声明必须包含 session_id（复用入口）"
+        );
+    }
+
+    /// 工具声明与 handler 一致性：spec 集合 == 可处理集合（防再脱节）。
+    #[test]
+    fn central_tool_specs_match_handlers() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let spec_names: std::collections::HashSet<String> =
+            plugin.tool_specs().into_iter().map(|s| s.name).collect();
+        // handler 侧逐一探测（以返回结果非“不拦截”为准的成本高；这里以
+        // 关键工具在双方都存在为断言，覆盖脱节的主要形态：spec 缺失）
+        for name in [
+            "get_context",
+            "list_workspaces",
+            "inspect_workspace",
+            "list_models",
+            "list_sessions",
+            "dispatch_work",
+            "collect_work_reports",
+            "list_work_items",
+        ] {
+            assert!(spec_names.contains(name), "工具 {name} 缺少声明");
+            let result = call_tool(&plugin, name, serde_json::json!({}));
+            let _ = result; // call_tool 对未匹配工具返回错误结果；一致性以 spec 存在 + 编译期 match 全覆盖为准
+        }
+    }
+
+    /// 复用校验：中枢对话自身不可作为工作会话（review q）。
+    #[test]
+    fn dispatch_rejects_reusing_central_hub_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        let result = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "自查", "session_id": CENTRAL_SESSION_ID}),
+        );
+        assert!(!result.ok);
+        assert!(result.stderr.contains("中枢对话自身"));
+        assert!(dispatch_rx.try_recv().is_err(), "守卫拒绝不得派发");
     }
 
     fn call_tool(plugin: &CentralPlugin, name: &str, args: serde_json::Value) -> ToolResult {

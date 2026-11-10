@@ -794,19 +794,24 @@ async fn send_message_inner(
         // 暂存的后台工作回报随用户消息一并进入对话（批量汇报模式）：
         // 先逐条注入回报，再投用户消息——中枢空闲时回报开启汇报 turn、
         // 用户消息按 Core 原生引导语义并入同一轮；执行中则按序排队。
+        // 与 deliver_pending_work_reports 同语义（review k 残余）：
+        // 投递失败的放回队列并保留待汇报登记；全部成功才清状态。
         let flushed = state.take_central_work_reports();
-        let flushed_any = !flushed.is_empty();
+        let mut flush_failed: Vec<String> = Vec::new();
         for notice in flushed {
-            let notice_prepared = vec![tiangong_types::ContentBlock::text(notice)];
+            let notice_prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
             if let Err(error) =
                 state.deliver_central_message(scru128::new().to_string(), notice_prepared, None)
             {
-                tracing::warn!(%error, "后台工作回报注入中枢失败（继续投递用户消息）");
+                tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列，继续投递用户消息）");
+                flush_failed.push(notice);
             }
         }
-        if flushed_any {
+        if flush_failed.is_empty() {
             state.clear_queued_work_reports();
             crate::app::emit_central_work_updated_pub(&app);
+        } else {
+            state.push_central_work_reports(flush_failed);
         }
         if let Err(error) =
             state.deliver_central_message(user_message_id.clone(), prepared.clone(), render)
