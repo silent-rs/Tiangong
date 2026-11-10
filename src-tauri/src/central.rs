@@ -135,11 +135,13 @@ pub struct CentralPlugin {
     /// 由中枢在当前 turn 主动收集）。
     work_reports: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// 派发登记表（work_id → 派发事实；状态汇报经注入消息回到对话）。
+    /// 持久化于 `{storage_root}/central/work-items.json`：应用重启后
+    /// `list_work_items` 仍可查到既往派发（应用尽用的判定依据之一）。
     work_items: std::sync::Mutex<Vec<WorkItemRecord>>,
 }
 
 /// 派发登记（中枢视角的最低事实：派发了什么、给谁、什么模型）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkItemRecord {
     pub work_id: String,
     /// 是否复用了已有会话（应用尽用；true 时 session_id 是既有会话）。
@@ -150,6 +152,39 @@ pub struct WorkItemRecord {
     pub dispatched_at: String,
 }
 
+/// 派发登记持久化路径：`{storage_root}/central/work-items.json`。
+fn work_items_path(storage_root: &std::path::Path) -> std::path::PathBuf {
+    storage_root.join("central").join("work-items.json")
+}
+
+/// 加载派发登记（损坏/缺失按空表处理）。
+fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
+    std::fs::read_to_string(work_items_path(storage_root))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// 追加一条派发登记并落盘（原子写，失败仅记日志不阻断派发）。
+fn append_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
+    let mut items = load_work_items(storage_root);
+    items.push(record.clone());
+    let path = work_items_path(storage_root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = match serde_json::to_string_pretty(&items) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(%error, "派发登记序列化失败");
+            return;
+        }
+    };
+    if let Err(error) = std::fs::write(&path, content) {
+        tracing::warn!(%error, path = %path.display(), "派发登记写入失败");
+    }
+}
+
 impl CentralPlugin {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -158,12 +193,13 @@ impl CentralPlugin {
         dispatch_tx: tokio::sync::mpsc::UnboundedSender<CentralPluginMessage>,
         work_reports: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Self {
+        let stored_work_items = load_work_items(sessions.storage_root());
         Self {
             workspace_dir,
             sessions,
             dispatch_tx,
             work_reports,
-            work_items: std::sync::Mutex::new(Vec::new()),
+            work_items: std::sync::Mutex::new(stored_work_items),
         }
     }
 
@@ -398,6 +434,7 @@ impl CentralPlugin {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(record.clone());
+        append_work_item(self.sessions.storage_root(), &record);
         let model_note = record
             .model
             .as_deref()
@@ -513,7 +550,10 @@ impl CentralPlugin {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if items.is_empty() {
-            return self.text_result("后台工作", "当前没有派发记录。".to_string());
+            return self.text_result(
+                "后台工作",
+                "当前没有派发记录（若应用刚重启，既往工作会话仍在——请用                  list_sessions 查询并按需复用）。".to_string(),
+            );
         }
         let lines: Vec<String> = items
             .iter()

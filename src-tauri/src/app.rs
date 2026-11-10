@@ -1455,6 +1455,22 @@ async fn handle_central_dispatch(
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("工作目录不存在或不是目录：{cwd}"));
     }
+    // 复用已有会话且其 Core 仍活跃时，必须先退役再重建：既有 Core 的
+    // 流通道在构造时绑定，ensure 命中复用会忽略本次 stream_tx——终态
+    // watcher 将永远收不到事件（回报丢失）。会话真相源在磁盘，重建后
+    // 上下文完整保留。忙（上一任务在跑）时拒绝，避免打断在途执行。
+    if request.reused_session && state.core_manager.has_live_core(&request.session_id) {
+        if state.core_manager.is_core_busy(&request.session_id) {
+            return Err(format!(
+                "会话 {} 有任务执行中，请等本轮结束后再向该会话派发",
+                request.session_id
+            ));
+        }
+        state
+            .core_manager
+            .retire_core(&request.session_id, false)
+            .await?;
+    }
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
         .ensure_core(

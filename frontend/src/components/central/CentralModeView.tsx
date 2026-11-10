@@ -50,12 +50,12 @@ export function CentralModeView() {
   return (
     <main
       data-testid="central-mode-view"
-      className="flex flex-1 min-w-0 flex-col bg-background animate-central-view-in"
+      className="relative flex flex-1 min-w-0 flex-col bg-background animate-central-view-in"
     >
+      <CentralWorkStatusBar />
       <div className="min-h-0 flex-1">
         {showGreeting ? <CentralGreeting /> : <LazyMessageList />}
       </div>
-      <CentralWorkStatusBar />
       <CentralChatInput />
     </main>
   );
