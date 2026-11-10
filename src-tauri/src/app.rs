@@ -74,6 +74,8 @@ pub struct TiangongApp {
     central_running_works: Mutex<HashSet<String>>,
     /// 后台工作状态登记（前端「后台工作」状态条数据源；work_id 唯一）。
     central_work_registry: Mutex<Vec<crate::central::CentralWorkStatus>>,
+    /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
+    central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -200,6 +202,7 @@ impl TiangongApp {
             central_work_reports: std::sync::Arc::new(Mutex::new(Vec::new())),
             central_running_works: Mutex::new(HashSet::new()),
             central_work_registry: Mutex::new(Vec::new()),
+            central_watch_slots: Mutex::new(HashMap::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -1447,6 +1450,23 @@ fn central_dispatch_sender(
                                     .on_central_work_finished(&request, false, &notice, &app);
                             }
                         }
+                        crate::central::CentralPluginMessage::Steer(request) => {
+                            // 引导消息与派发同路径（登记/回调/回报时机一致），
+                            // 仅语义不同：不新建会话、目标必须已存在（插件已校验）。
+                            if let Err(error) =
+                                handle_central_dispatch(state_of(&app), &app, request.clone()).await
+                            {
+                                tracing::warn!(%error, work_id = %request.work_id, "中枢引导执行失败");
+                                let notice = format!(
+                                    "[后台工作失败] {}（引导消息未送达）\n目标会话：{}\n内容：{}\n失败原因：{error}",
+                                    request.work_id,
+                                    request.session_id,
+                                    request.task
+                                );
+                                state_of(&app)
+                                    .on_central_work_finished(&request, false, &notice, &app);
+                            }
+                        }
                         crate::central::CentralPluginMessage::ReportsCollected => {
                             // collect_work_reports 已取走全部暂存回报：
                             // 清理状态登记并刷新前端。
@@ -1496,67 +1516,74 @@ async fn handle_central_dispatch(
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("工作目录不存在或不是目录：{cwd}"));
     }
-    // 复用已有会话且其 Core 仍活跃时，必须先退役再重建：既有 Core 的
-    // 流通道在构造时绑定，ensure 命中复用会忽略本次 stream_tx——终态
-    // watcher 将永远收不到事件（回报丢失）。会话真相源在磁盘，重建后
-    // 上下文完整保留。忙（上一任务在跑）时拒绝，避免打断在途执行。
-    if request.reused_session && state.core_manager.has_live_core(&request.session_id) {
-        if state.core_manager.is_core_busy(&request.session_id) {
-            return Err(format!(
-                "会话 {} 有任务执行中，请等本轮结束后再向该会话派发",
-                request.session_id
-            ));
-        }
-        state
-            .core_manager
-            .retire_core(&request.session_id, false)
-            .await?;
-    }
+    // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
+    // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
+    // prompt cache 失效；引导语义也要求保留在途执行）。
+    let slot = {
+        let mut slots = state
+            .central_watch_slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        slots
+            .entry(request.session_id.clone())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+            .clone()
+    };
     // 复用派发忽略 model 参数（review p 项）：透传会经 set_core_model_ref
-    // 静默永久改写该会话的模型选择；复用即沿用会话既有模型。
+    // 静默永久改写该会话的模型选择；复用/引导即沿用会话既有模型。
     let effective_model = if request.reused_session {
         None
     } else {
         request.model.as_deref()
     };
-    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
-    let ensured = state
-        .ensure_core(
-            &request.session_id,
-            Some(cwd),
-            None,
-            None,
-            effective_model,
-            stream_tx,
-        )
-        .await?;
-    // is_new 守卫（review 新风险 1）：前置 retire 后此处应恒为新建；命中复用
-    // 说明存在并发创建（会话被打开/另一派发），传入的流通道会被丢弃——
-    // 回调永不触发（静默失报 + running 集合永久污染）。显式报错而非静默。
-    if !ensured.is_new {
-        return Err(format!(
-            "会话 {} 的 Core 已被并发创建，本次流通道未绑定；请稍后重派",
-            request.session_id
-        ));
-    }
-    let sid = ensured.session_id.clone();
+
+    let sid = request.session_id.clone();
     let instruction = format!(
         "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n任务：\n{}",
         request.work_id, request.task
     );
     let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
-    state
-        .deliver_prepared_if_live(
-            &sid,
-            scru128::new().to_string(),
-            prepared,
-            effective_model,
-            None,
-        )
-        .await?;
+
+    if state.core_manager.has_live_core(&sid) {
+        // Core 活跃（复用/引导/并发派发）：不重建，直接挂回调到既有槽位，
+        // 投递消息（忙→引导并入当前 turn；空闲→开新 turn，消费者已在线）。
+        attach_work_finished_callback(&slot, app, request.clone());
+        state
+            .deliver_prepared_if_live(
+                &sid,
+                scru128::new().to_string(),
+                prepared,
+                effective_model,
+                None,
+            )
+            .await?;
+    } else {
+        // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
+        // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+        let ensured = state
+            .ensure_core(&sid, Some(cwd), None, None, effective_model, stream_tx)
+            .await?;
+        if !ensured.is_new {
+            return Err(format!(
+                "会话 {} 的 Core 已被并发创建，本次流通道未绑定；请稍后重派",
+                sid
+            ));
+        }
+        attach_work_finished_callback(&slot, app, request.clone());
+        crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx, Some(slot));
+        state
+            .deliver_prepared_if_live(
+                &sid,
+                scru128::new().to_string(),
+                prepared,
+                effective_model,
+                None,
+            )
+            .await?;
+    }
     tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
-    // 给 Worker 会话写可识别标题（仅新建会话；复用会话保留原标题——
-    // 上下文连续的一部分）。显式覆盖后自动标题生成（only_if_default）不改写。
+    // 给 Worker 会话写可识别标题（仅新建会话；复用/引导保留原标题）。
     if !request.reused_session {
         let title_preview: String = request.task.chars().take(24).collect();
         let title = format!("[后台工作] {title_preview}");
@@ -1586,22 +1613,23 @@ async fn handle_central_dispatch(
             reused_session: request.reused_session,
         });
     emit_central_work_updated(app);
-
-    // 终态监听改经标准流消费者（review b 项）：专用 watcher 会 break 丢弃
-    // receiver，令 Worker 会话的事件流从此无人消费（普通模式查看/继续
-    // 对话/运行态收尾全部失效）。consumer 持续消费并向前端转发，首个
-    // Done/Error/流关闭触发一次性回调，由回调组装回报并走时机判定。
-    let callback_app = app.clone();
-    let callback_work = request;
-    let on_finished: crate::commands::StreamFinishedCallback = std::sync::Arc::new(
-        std::sync::Mutex::new(Some(Box::new(move |done: bool, reason: String| {
-            let state = state_of(&callback_app);
-            let notice = build_work_notice(state, &callback_work, done, &reason);
-            state.on_central_work_finished(&callback_work, done, &notice, &callback_app);
-        }))),
-    );
-    crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx, Some(on_finished));
     Ok(())
+}
+
+/// 向回调槽挂载单个 work 的终态回报回调。
+fn attach_work_finished_callback(
+    slot: &crate::commands::StreamFinishedSlot,
+    app: &tauri::AppHandle,
+    work: crate::central::CentralDispatchRequest,
+) {
+    let callback_app = app.clone();
+    slot.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(Box::new(move |done: bool, reason: String| {
+            let state = state_of(&callback_app);
+            let notice = build_work_notice(state, &work, done, &reason);
+            state.on_central_work_finished(&work, done, &notice, &callback_app);
+        }));
 }
 
 /// 回报是否应立即注入汇报：失败必达；成功仅在无其他在执行任务时

@@ -1037,24 +1037,24 @@ fn forward_session_event_to_plugins(session_id: &str, event: &tiangong_types::St
 /// 流终态回调（一次性）：首个 Done/Error/流关闭时触发，done 表示是否
 /// 正常完成、reason 携带失败原因。中枢派发用它接收 Worker 终态（替代
 /// 此前的专用 watcher——其会 break 丢弃 receiver，令会话事件流无人消费）。
-pub type StreamFinishedCallback =
-    std::sync::Arc<std::sync::Mutex<Option<Box<dyn Fn(bool, String) + Send>>>>;
+pub type StreamFinishedHandler = Box<dyn Fn(bool, String) + Send>;
+/// 终态回调槽（每会话一个，可多挂载）：每次 turn 终态触发并清空全部
+/// 已挂回调——派发与引导共用同一消费者流，逐 work 挂载各自的回报回调。
+pub type StreamFinishedSlot = std::sync::Arc<std::sync::Mutex<Vec<StreamFinishedHandler>>>;
 
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
-    on_finished: Option<StreamFinishedCallback>,
+    on_finished: Option<StreamFinishedSlot>,
 ) {
     let on_finished = on_finished;
-    let fire_finished = move |done: bool, reason: String, slot: &Option<StreamFinishedCallback>| {
+    let fire_finished = move |done: bool, reason: String, slot: &Option<StreamFinishedSlot>| {
         if let Some(slot) = slot {
-            if let Some(callback) = slot
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-            {
-                callback(done, reason);
+            let handlers: Vec<StreamFinishedHandler> =
+                std::mem::take(&mut *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            for callback in handlers {
+                callback(done, reason.clone());
             }
         }
     };

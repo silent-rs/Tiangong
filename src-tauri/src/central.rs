@@ -57,6 +57,9 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   问题、结论），无需你在任务里复述背景，增量判断更准。仅当确认是**全新
   工作**（与任何既有会话都无关）时才省略 session_id 新建；不确定时先
   `central__list_sessions` 查证再决定；
+- **调整用引导，不用重派**：用户（或你自己发现）需要调整进行中/已完成
+  工作的方向、补充要求、追问细节时，用 `central__send_to_worker` 向
+  对应工作会话发引导消息（上下文与结果连续），不要重新派发一个新工作；
   后台工作回报的呈现时机由系统控制（失败立即单独汇报；成功且仍有
   任务在执行时暂存；全部结束后触发一次汇总轮）。你在汇报/汇总轮里的
   职责是**区分轻重**：关键结论与依据完整呈现（不要过度省略，重要
@@ -87,6 +90,10 @@ pub struct CentralWorkStatus {
 pub enum CentralPluginMessage {
     /// 派发后台工作（见 [`CentralDispatchRequest`]）。
     Dispatch(CentralDispatchRequest),
+    /// 向已有 Worker 会话发送引导消息（见 [`CentralDispatchRequest`]，
+    /// `task` 为引导内容；执行中作为引导消息并入当前 turn，空闲时开启
+    /// 新 turn——完成后与派发同样走回报时机规则）。
+    Steer(CentralDispatchRequest),
     /// `collect_work_reports` 已取走全部暂存回报：同步清理状态登记。
     ReportsCollected,
 }
@@ -284,7 +291,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / collect_work_reports / list_work_items（查询类只读；dispatch_work 派发后台工作，支持 session_id 复用）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 向工作会话发引导）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -623,6 +630,63 @@ impl CentralPlugin {
         self.text_result("后台工作回报", body)
     }
 
+    /// 向已有 Worker 会话发送引导消息：调整方向、补充要求、追问细节。
+    fn handle_send_to_worker(&self, session_id: &str, message: &str) -> Option<ToolResult> {
+        let message = message.trim();
+        if message.is_empty() {
+            return self.error_result("message 不能为空".to_string());
+        }
+        let target = session_id.trim().to_string();
+        if target.is_empty() {
+            return self.error_result(
+                "session_id 不能为空（list_work_items / list_sessions 查询）".to_string(),
+            );
+        }
+        if is_central_session(&target) {
+            return self.error_result("不能向中枢对话自身发送引导消息".to_string());
+        }
+        if tiangong_core_manager::SessionMetadata::load_from_storage(
+            self.sessions.storage_root(),
+            &target,
+        )
+        .is_err()
+        {
+            return self.error_result(format!(
+                "会话不存在：{target}（可用 list_work_items / list_sessions 查询）"
+            ));
+        }
+        let record = WorkItemRecord {
+            work_id: format!("steer-{}", scru128::new()),
+            reused_session: true,
+            session_id: target.clone(),
+            task: message.to_string(),
+            model: None,
+            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            finished_at: None,
+        };
+        let request = CentralDispatchRequest {
+            work_id: record.work_id.clone(),
+            session_id: target,
+            task: record.task.clone(),
+            model: None,
+            cwd: None,
+            reused_session: true,
+        };
+        if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Steer(request)) {
+            return self.error_result(format!("派发通道已关闭：{error}"));
+        }
+        self.work_items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(record.clone());
+        append_work_item(self.sessions.storage_root(), &record);
+        let body = format!(
+            "已发送引导消息：\n- 目标会话: {}\n- work_id: {}（终态同样回到本对话）\n- 内容: {}",
+            record.session_id, record.work_id, record.task
+        );
+        self.text_result("引导已发送", body)
+    }
+
     /// 派发登记表（中枢视角的派发事实）。
     fn handle_list_work_items(&self) -> Option<ToolResult> {
         let items = self
@@ -791,6 +855,22 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
+                name: "send_to_worker".to_string(),
+                description: "向已派发的后台工作会话发送引导消息：调整方向、补充要求、\
+                    追问细节。会话执行中作为引导消息并入当前任务；空闲时开启新任务。\
+                    完成后结果同样回到本对话。用户要求「调整/补充/追问某个后台工作」时\
+                    使用，不要为调整而重新派发。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "目标工作会话 ID（list_work_items / list_sessions 查询）"},
+                        "message": {"type": "string", "description": "引导消息内容（完整、明确的调整或补充指令）"}
+                    },
+                    "required": ["session_id", "message"]
+                }),
+            },
+            ToolSpec {
                 name: "collect_work_reports".to_string(),
                 description: "收集全部已到达的后台工作回报（取走语义）。用户询问后台工作结果/进展时、或 get_context 显示有待汇报条目时调用，在当前回复中统一转述。".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
@@ -825,6 +905,19 @@ impl ToolOverrideHandler for CentralPlugin {
             }
             "list_models" => self.handle_list_models(),
             "list_sessions" => self.handle_list_sessions(),
+            "send_to_worker" => {
+                let session_id = call
+                    .arguments
+                    .get("session_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let message = call
+                    .arguments
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_send_to_worker(session_id, message)
+            }
             "dispatch_work" => {
                 let task = call
                     .arguments
@@ -996,6 +1089,7 @@ mod tests {
             "list_models",
             "list_sessions",
             "dispatch_work",
+            "send_to_worker",
             "collect_work_reports",
             "list_work_items",
         ] {
@@ -1311,5 +1405,54 @@ mod tests {
         let second = call_tool(&plugin, "collect_work_reports", serde_json::json!({}));
         assert!(second.ok);
         assert!(second.stdout.contains("没有待汇报"));
+    }
+    /// 引导消息：校验 + 登记 + 通道消息类型。
+    #[test]
+    fn send_to_worker_validates_and_sends_steer() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 目标不存在 → 拒绝
+        let missing = call_tool(
+            &plugin,
+            "send_to_worker",
+            serde_json::json!({"session_id": "nope", "message": "调整"}),
+        );
+        assert!(!missing.ok);
+        assert!(missing.stderr.contains("会话不存在"));
+        // 建一个会话文件后 → 通过并发送 Steer
+        let target = root.path().join("sessions/worker-1.json");
+        std::fs::write(
+            &target,
+            serde_json::json!({
+                "id": "worker-1", "title": "w", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 10:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let ok = call_tool(
+            &plugin,
+            "send_to_worker",
+            serde_json::json!({"session_id": "worker-1", "message": "重点看事件流部分"}),
+        );
+        assert!(ok.ok, "stderr: {}", ok.stderr);
+        match dispatch_rx.try_recv().expect("应有通道消息") {
+            CentralPluginMessage::Steer(request) => {
+                assert_eq!(request.session_id, "worker-1");
+                assert_eq!(request.task, "重点看事件流部分");
+                assert!(request.work_id.starts_with("steer-"));
+            }
+            other => panic!("应收到 Steer，实际 {other:?}"),
+        }
+        // 中枢自身 → 拒绝
+        let self_send = call_tool(
+            &plugin,
+            "send_to_worker",
+            serde_json::json!({"session_id": CENTRAL_SESSION_ID, "message": "x"}),
+        );
+        assert!(!self_send.ok);
     }
 }
