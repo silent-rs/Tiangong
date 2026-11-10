@@ -49,10 +49,14 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - 深入分析代码、修改文件、运行测试等实际工作由后台工作会话执行：
   用户表达此类目标（包括「让某模型做某事」）时，用 `central__dispatch_work`
   派发（模型 key 用 `central__list_models` 确认），派发后告知用户已安排；
-- **应用尽用**：派发前先 `central__list_sessions` 查近期会话——任务与某
-  既有会话相关（同工作区、同主题、先前工作的延续）时，用其 session_id
-  复用该会话派发（上下文连续，用户能追溯全过程），不要每次起新会话；
-  仅确认无相关会话时才新建；
+- **应用尽用（硬规则）**：用户的请求是对**先前工作的继续/追加/复查/重做**
+  （如「继续 review」「再看看」「接着做」「上次的任务再加一条」）时，
+  **必须复用先前派发的工作会话**——先从本对话历史或
+  `central__list_work_items` 找到对应 session_id，`dispatch_work` 带
+  session_id 派发。复用的收益：执行会话保留上轮全部上下文（基线、已发现
+  问题、结论），无需你在任务里复述背景，增量判断更准。仅当确认是**全新
+  工作**（与任何既有会话都无关）时才省略 session_id 新建；不确定时先
+  `central__list_sessions` 查证再决定；
   后台工作回报的呈现时机由系统控制（失败立即单独汇报；成功且仍有
   任务在执行时暂存；全部结束后触发一次汇总轮）。你在汇报/汇总轮里的
   职责是**区分轻重**：关键结论与依据完整呈现（不要过度省略，重要
@@ -361,7 +365,9 @@ impl CentralPlugin {
         let reused = reuse_session.is_some();
         let session_id = reuse_session.unwrap_or_else(|| scru128::new().to_string());
         let record = WorkItemRecord {
-            work_id: format!("work-{}", &scru128::new().to_string()[..8]),
+            // work_id 取 scru128 尾部：高位是毫秒时间戳（同毫秒前缀相同会撞车），
+            // 尾部含计数器与随机位，短截断下仍然唯一。
+            work_id: format!("work-{}", &scru128::new().to_string()[20..]),
             reused_session: reused,
             session_id: session_id.clone(),
             task: task.to_string(),
@@ -402,15 +408,49 @@ impl CentralPlugin {
         } else {
             format!("{session_id}（新会话；普通模式会话列表可查看）")
         };
+        // 机制兜底：未指定复用但存在既往派发时，附提示供模型自查——
+        // 若本任务是其中某项的延续，应告知用户并向该会话重派。
+        let prior_note = if record.reused_session {
+            String::new()
+        } else {
+            let items = self
+                .work_items
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let recent: Vec<String> = items
+                .iter()
+                .filter(|item| item.work_id != record.work_id)
+                .rev()
+                .take(5)
+                .map(|item| {
+                    format!(
+                        "  · {} → 会话 {}｜{}",
+                        item.work_id,
+                        item.session_id,
+                        item.task.chars().take(30).collect::<String>()
+                    )
+                })
+                .collect();
+            if recent.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n⚠ 本次未指定复用会话（新建）。既往派发：\n{}\n若本任务                     是其中某项的继续/追加/复查，应向用户说明并向对应会话重派\
+                     （dispatch_work 带 session_id）；新会话无需处理。",
+                    recent.join("\n")
+                )
+            }
+        };
         let body = format!(
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
              - 工作会话: {session_note}\n- 任务: {task}\n\n\
              结果按时机自动回到本对话（失败立即；成功待全部结束后汇总一轮），\
-             届时由你向用户转述。执行中如需查看可调 list_work_items。",
+             届时由你向用户转述。执行中如需查看可调 list_work_items。{prior_note}",
             work_id = record.work_id,
             model_note = model_note,
             session_note = session_note,
             task = record.task,
+            prior_note = prior_note,
         );
         self.text_result("已派发", body)
     }
@@ -1009,6 +1049,50 @@ mod tests {
         assert_eq!(result.stdout.matches("dev/tiangong").count(), 1);
         assert!(result.stdout.contains("git 分支 poc/central-mode"));
     }
+    /// 应用尽用兜底：无 session_id 的后续派发，返回应附既往派发提示。
+    #[test]
+    fn dispatch_without_reuse_hints_prior_works() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {
+                    "k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}
+                },
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 第一次派发（新建）：无既往，无提示
+        let first = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "第一轮 review"}),
+        );
+        assert!(first.ok);
+        assert!(!first.stdout.contains("既往派发"));
+        // 第二次派发仍未指定 session_id：应提示既往派发供自查
+        let second = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "继续 review 新增内容"}),
+        );
+        assert!(second.ok);
+        assert!(second.stdout.contains("既往派发"));
+        assert!(second.stdout.contains(
+            "继续 review 新增内容"
+                .chars()
+                .take(30)
+                .collect::<String>()
+                .as_str()
+        ));
+        assert!(second.stdout.contains("向对应会话重派"));
+    }
+
     /// 回报批量模式：暂存 → collect 取走 → 再 collect 为空。
     #[test]
     fn collect_work_reports_takes_all_then_empty() {
