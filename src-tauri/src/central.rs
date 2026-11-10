@@ -213,6 +213,13 @@ pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRec
 fn append_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
     let mut items = load_work_items(storage_root);
     items.push(record.clone());
+    // 保留上限：登记表只服务「近期派发的记忆与复用」，旧记录裁剪
+    // （会话文件本身不受影响——那是复用与复核的真相源）。
+    const MAX_WORK_ITEMS: usize = 500;
+    if items.len() > MAX_WORK_ITEMS {
+        let overflow = items.len() - MAX_WORK_ITEMS;
+        items.drain(..overflow);
+    }
     let path = work_items_path(storage_root);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -291,7 +298,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 向工作会话发引导）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；search_history 跨会话搜消息）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -605,6 +612,130 @@ impl CentralPlugin {
         self.text_result("近期会话", body)
     }
 
+    /// 搜索历史会话消息：标题走元数据缓存，正文扫描近期会话（子串匹配，
+    /// spawn_blocking 避免阻塞运行时）。返回命中片段供定位。
+    fn handle_search_history(
+        &self,
+        query: &str,
+        limit: usize,
+        scope_all: bool,
+    ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+        const RECENT_SESSIONS: usize = 200;
+        const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+        const CONTEXT_CHARS: usize = 60;
+        let query = query.trim().to_string();
+        let limit = limit.clamp(1, 30);
+        // &self 的使用全部在构造 future 之前完成（async 块不借用 self）
+        let storage_root = self.sessions.storage_root().to_path_buf();
+        let mut metas = self.sessions.list_session_metadata();
+        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let candidates: Vec<_> = if scope_all {
+            metas
+        } else {
+            metas.into_iter().take(RECENT_SESSIONS).collect()
+        };
+        let empty_query = query.is_empty();
+        let scope_note = if scope_all {
+            "全部会话".to_string()
+        } else {
+            format!("最近 {RECENT_SESSIONS} 个会话")
+        };
+        let query_display = query.clone();
+        Box::pin(async move {
+            if empty_query {
+                return None;
+            }
+            let query_for_task = query.clone();
+            let hits = tokio::task::spawn_blocking(move || {
+                let mut hits: Vec<String> = Vec::new();
+                for meta in candidates {
+                    if hits.len() >= limit {
+                        break;
+                    }
+                    // 标题命中
+                    if meta.title.contains(&query) {
+                        hits.push(format!(
+                            "- 会话 {}（{}）｜标题命中｜更新于 {}",
+                            meta.id, meta.title, meta.updated_at
+                        ));
+                        continue;
+                    }
+                    let path = storage_root
+                        .join("sessions")
+                        .join(format!("{}.json", meta.id));
+                    let Ok(file_meta) = std::fs::metadata(&path) else {
+                        continue;
+                    };
+                    if file_meta.len() > MAX_FILE_BYTES {
+                        continue; // 超大文件跳过正文扫描（防内存峰值）
+                    }
+                    let Ok(content) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                        continue;
+                    };
+                    let Some(messages) = value.get("messages").and_then(|m| m.as_array()) else {
+                        continue;
+                    };
+                    for message in messages {
+                        if hits.len() >= limit {
+                            break;
+                        }
+                        let Some(blocks) = message.get("content").and_then(|c| c.as_array()) else {
+                            continue;
+                        };
+                        for block in blocks {
+                            let Some(text) = block.get("text").and_then(|t| t.as_str()) else {
+                                continue;
+                            };
+                            if let Some(pos) = text.find(&query_for_task) {
+                                let start = pos.saturating_sub(CONTEXT_CHARS);
+                                let end =
+                                    (pos + query_for_task.len() + CONTEXT_CHARS).min(text.len());
+                                let snippet: String = text[start..end].replace('\n', " ");
+                                let role =
+                                    message.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+                                let created = message
+                                    .get("created_at")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("");
+                                hits.push(format!(
+                                    "- 会话 {}（{}）｜{role}｜{created}\n  …{snippet}…",
+                                    meta.id, meta.title
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                hits
+            })
+            .await
+            .unwrap_or_default();
+            let body = if hits.is_empty() {
+                format!("在{scope_note}中未找到「{query_display}」。")
+            } else {
+                format!(
+                    "在{scope_note}中命中 {} 条（限 {limit}）：\n{}",
+                    hits.len(),
+                    hits.join("\n")
+                )
+            };
+            // text_result 是 &self 方法——这里在 async 块中重建结果
+            Some(ToolResult {
+                ok: true,
+                summary: "历史搜索".to_string(),
+                stdout: body,
+                stderr: String::new(),
+                exit_code: 0,
+                error_kind: None,
+                retryable: None,
+                execution: None,
+            })
+        })
+    }
+
     /// 收集全部已到达的后台工作回报（取走语义：收集后清空暂存）。
     fn handle_collect_work_reports(&self) -> Option<ToolResult> {
         let reports = std::mem::take(
@@ -855,6 +986,20 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
+                name: "search_history".to_string(),
+                description: "搜索历史会话消息（跨会话）：标题走元数据缓存，正文扫描                    近期会话（子串匹配），返回命中片段。用户问「之前谁说过什么/某结论                    在哪个会话/以前怎么处理的」时使用；也可用于派发前确认是否已有                    相关工作。scope=all 扫全部（较慢），默认近期 200 个会话。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "关键词（子串匹配）"},
+                        "limit": {"type": "number", "description": "命中条数上限（默认 10，最大 30）"},
+                        "scope": {"type": "string", "enum": ["recent", "all"], "description": "扫描范围：recent=最近 200 个会话（默认），all=全部（较慢）"}
+                    },
+                    "required": ["query"]
+                }),
+            },
+            ToolSpec {
                 name: "send_to_worker".to_string(),
                 description: "向已派发的后台工作会话发送引导消息：调整方向、补充要求、\
                     追问细节。会话执行中作为引导消息并入当前任务；空闲时开启新任务。\
@@ -892,6 +1037,25 @@ impl ToolOverrideHandler for CentralPlugin {
         _session: &mut Session,
         _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+        // search_history 返回异步 future（spawn_blocking 扫描），单独走
+        if call.name == "search_history" {
+            let query = call
+                .arguments
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let limit = call
+                .arguments
+                .get("limit")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(10) as usize;
+            let scope_all = call
+                .arguments
+                .get("scope")
+                .and_then(|value| value.as_str())
+                .is_some_and(|scope| scope == "all");
+            return self.handle_search_history(query, limit, scope_all);
+        }
         let result = match call.name.as_str() {
             "get_context" => self.handle_get_context(),
             "list_workspaces" => self.handle_list_workspaces(),
@@ -1090,12 +1254,16 @@ mod tests {
             "list_sessions",
             "dispatch_work",
             "send_to_worker",
+            "search_history",
             "collect_work_reports",
             "list_work_items",
         ] {
             assert!(spec_names.contains(name), "工具 {name} 缺少声明");
-            let result = call_tool(&plugin, name, serde_json::json!({}));
-            let _ = result; // call_tool 对未匹配工具返回错误结果；一致性以 spec 存在 + 编译期 match 全覆盖为准
+            if name != "search_history" {
+                // search_history 需要 tokio reactor（独立用例覆盖）
+                let result = call_tool(&plugin, name, serde_json::json!({}));
+                let _ = result;
+            }
         }
     }
 
@@ -1454,5 +1622,68 @@ mod tests {
             serde_json::json!({"session_id": CENTRAL_SESSION_ID, "message": "x"}),
         );
         assert!(!self_send.ok);
+    }
+    /// 跨会话历史搜索：标题与正文命中、片段返回。
+    #[tokio::test]
+    async fn search_history_finds_title_and_body() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        // 两个会话：一个标题命中，一个正文命中
+        std::fs::write(
+            root.path().join("sessions/s-title.json"),
+            serde_json::json!({
+                "id": "s-title", "title": "中枢模式开发准备", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 11:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("sessions/s-body.json"),
+            serde_json::json!({
+                "id": "s-body", "title": "其他", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 12:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp",
+                "messages": [
+                    {"id": "m1", "role": "assistant", "created_at": "2026-11-10 12:00:01",
+                     "content": [{"type": "text", "text": "中枢模式的设计模式调整已经完成"}]}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let call = ToolCall {
+            id: "t1".to_string(),
+            name: "search_history".to_string(),
+            arguments: serde_json::json!({"query": "中枢模式"}),
+        };
+        let mut session = Session::new("测试");
+        let result = ToolOverrideHandler::handle(&plugin, &call, &mut session, "test")
+            .await
+            .expect("应有结果");
+        assert!(result.ok);
+        assert!(
+            result.stdout.contains("s-title"),
+            "标题命中：{}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("设计模式调整"),
+            "正文片段：{}",
+            result.stdout
+        );
+        // 无命中
+        let call2 = ToolCall {
+            id: "t2".to_string(),
+            name: "search_history".to_string(),
+            arguments: serde_json::json!({"query": "绝不存在的关键词xyz"}),
+        };
+        let result2 = ToolOverrideHandler::handle(&plugin, &call2, &mut session, "test")
+            .await
+            .expect("应有结果");
+        assert!(result2.ok);
+        assert!(result2.stdout.contains("未找到"));
     }
 }
