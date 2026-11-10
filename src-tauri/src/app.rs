@@ -467,6 +467,7 @@ impl TiangongApp {
                         app_handle.clone(),
                         ensured.session_id.clone(),
                         stream_rx,
+                        None,
                     );
                     tracing::info!(session_id, "消费者自动恢复 core");
                 }
@@ -1038,8 +1039,8 @@ impl TiangongApp {
     /// 注入全部暂存回报（第一条开启汇报轮，其余按 Core 原生引导排队）。
     pub(crate) fn deliver_pending_work_reports(&self) {
         use tiangong_core::agent_input::AgentInput;
-        let notices = self.take_central_work_reports();
-        self.clear_queued_work_reports();
+        // 顺序（review k 项）：先确认 Core 存在再取走——Core 缺失时队列与
+        // 状态登记都保持原样，由发送链路 flush 或 collect 兜底。
         let Some(core) = self
             .central_core
             .lock()
@@ -1047,21 +1048,29 @@ impl TiangongApp {
             .clone()
         else {
             tracing::warn!("中枢 Core 不存在，后台工作回报暂存待用户下一条消息");
-            // 回报放回队列（保序），由发送链路 flush 或 collect 兜底
-            self.central_work_reports
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(notices);
             return;
         };
+        let notices = self.take_central_work_reports();
+        let mut failed: Vec<String> = Vec::new();
         for notice in notices {
-            let prepared = vec![tiangong_types::ContentBlock::text(notice)];
+            let prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
             if let Err(error) = core.deliver(AgentInputKind::prepared_with_id(
                 scru128::new().to_string(),
                 prepared,
             )) {
-                tracing::warn!(%error, "后台工作回报注入中枢失败");
+                tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列）");
+                failed.push(notice);
             }
+        }
+        // 投递失败的不丢弃：放回队列并保留待汇报登记（状态与队列一致）；
+        // 全部成功才清除 report_queued 状态。
+        if failed.is_empty() {
+            self.clear_queued_work_reports();
+        } else {
+            self.central_work_reports
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(failed);
         }
     }
 
@@ -1530,31 +1539,20 @@ async fn handle_central_dispatch(
         });
     emit_central_work_updated(app);
 
-    // 终态 watcher：独立线程消费事件流，Done/Error 后把结果注入中枢。
-    let watch_app = app.clone();
-    let work = request;
-    std::thread::spawn(move || {
-        let mut failed_reason = String::from("事件流关闭且未收到终态");
-        let mut done = false;
-        for event in stream_rx.iter() {
-            match event {
-                tiangong_types::StreamEvent::Done { .. } => {
-                    done = true;
-                    break;
-                }
-                tiangong_types::StreamEvent::Error { message } => {
-                    failed_reason = message;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let state = watch_app.state::<TiangongApp>();
-        let notice = build_work_notice(state.inner(), &work, done, &failed_reason);
-        state
-            .inner()
-            .on_central_work_finished(&work, done, &notice, &watch_app);
-    });
+    // 终态监听改经标准流消费者（review b 项）：专用 watcher 会 break 丢弃
+    // receiver，令 Worker 会话的事件流从此无人消费（普通模式查看/继续
+    // 对话/运行态收尾全部失效）。consumer 持续消费并向前端转发，首个
+    // Done/Error/流关闭触发一次性回调，由回调组装回报并走时机判定。
+    let callback_app = app.clone();
+    let callback_work = request;
+    let on_finished: crate::commands::StreamFinishedCallback = std::sync::Arc::new(
+        std::sync::Mutex::new(Some(Box::new(move |done: bool, reason: String| {
+            let state = state_of(&callback_app);
+            let notice = build_work_notice(state, &callback_work, done, &reason);
+            state.on_central_work_finished(&callback_work, done, &notice, &callback_app);
+        }))),
+    );
+    crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx, Some(on_finished));
     Ok(())
 }
 

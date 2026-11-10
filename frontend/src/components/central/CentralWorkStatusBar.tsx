@@ -1,17 +1,16 @@
 /**
  * 中枢「后台工作」浮动状态（设计稿 §4.4 轻量后台状态）。
  *
- * 右上角浮动徽章：执行中任务数 + 待汇报条数；点击弹出详情面板
- * （Dialog），列出每个后台工作的状态、任务、模型、会话与时间。
- * 数据源为后端状态登记（get_central_work_status），经
- * `central-work-updated` 事件驱动刷新，对话状态变化时兜底拉取。
+ * 右上角玻璃拟态徽章；hover 展开分组详情面板（按「执行中 / 待汇报」
+ * 多行分类展示，无点击弹窗），鼠标离开后短暂延迟收起。数据源为后端
+ * 状态登记（get_central_work_status），经 `central-work-updated` 事件
+ * 驱动刷新，对话状态变化时兜底拉取。
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Loader2, ScrollText } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight } from 'lucide-react';
 
 interface CentralWorkStatus {
   work_id: string;
@@ -23,26 +22,64 @@ interface CentralWorkStatus {
   reused_session: boolean;
 }
 
-function StateBadge({ state }: { state: CentralWorkStatus['state'] }) {
-  if (state === 'running') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
-        <Loader2 className="h-3 w-3 animate-spin" />
-        执行中
-      </span>
-    );
-  }
+const PANEL_CLOSE_DELAY_MS = 250;
+
+function WorkItemRow({ item }: { item: CentralWorkStatus }) {
+  const running = item.state === 'running';
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs text-amber-600 dark:text-amber-400">
-      <ScrollText className="h-3 w-3" />
-      待汇报
-    </span>
+    <div
+      className={`group/row rounded-xl border p-3 transition-colors ${
+        running
+          ? 'border-primary/25 bg-primary/[0.04] hover:border-primary/40'
+          : 'border-amber-500/25 bg-amber-500/[0.05] hover:border-amber-500/45'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className={`inline-flex items-center gap-1.5 text-xs font-medium ${
+            running ? 'text-primary' : 'text-amber-600 dark:text-amber-400'
+          }`}
+        >
+          {running ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              执行中
+            </>
+          ) : (
+            <>
+              <Inbox className="h-3.5 w-3.5" />
+              待汇报
+            </>
+          )}
+        </span>
+        <span className="text-[10px] tabular-nums text-muted-foreground/80">
+          {item.dispatched_at}
+        </span>
+      </div>
+      <p className="mt-1.5 line-clamp-2 text-[13px] leading-snug text-foreground/90">
+        {item.task}
+      </p>
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
+          {item.model ?? '默认模型'}
+        </span>
+        {item.reused_session ? (
+          <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600 dark:text-emerald-400">
+            复用会话
+          </span>
+        ) : null}
+        <span className="font-mono text-muted-foreground/70">
+          {item.session_id.slice(0, 8)}…/{item.work_id.slice(5, 13)}
+        </span>
+      </div>
+    </div>
   );
 }
 
 export function CentralWorkStatusBar() {
   const [items, setItems] = useState<CentralWorkStatus[]>([]);
   const [open, setOpen] = useState(false);
+  const closeTimer = useRef<number | null>(null);
   const runStatus = useStore((s) => s.runStatus);
   const messagesLength = useStore((s) => s.messages.length);
 
@@ -72,66 +109,112 @@ export function CentralWorkStatusBar() {
     };
   }, [refresh]);
 
-  // 对话状态变化（发送消费回报 / 汇总轮结束）时兜底刷新
   useEffect(() => {
     refresh();
   }, [runStatus, messagesLength, refresh]);
 
+  const scheduleClose = useCallback(() => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => setOpen(false), PANEL_CLOSE_DELAY_MS);
+  }, []);
+  const cancelClose = useCallback(() => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+
   if (items.length === 0) return null;
 
-  const running = items.filter((item) => item.state === 'running').length;
-  const queued = items.filter((item) => item.state === 'report_queued').length;
+  const running = items.filter((item) => item.state === 'running');
+  const queued = items.filter((item) => item.state === 'report_queued');
 
   return (
-    <>
+    <div
+      className="absolute right-4 top-3 z-20"
+      onMouseEnter={() => {
+        cancelClose();
+        setOpen(true);
+      }}
+      onMouseLeave={scheduleClose}
+    >
       <button
         type="button"
-        onClick={() => setOpen(true)}
-        aria-label={`后台工作：${running} 个执行中${queued > 0 ? `，${queued} 条待汇报` : ''}`}
-        className="absolute right-4 top-3 z-20 inline-flex items-center gap-2 rounded-full border border-border/70 bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur transition-colors hover:border-ring hover:text-foreground"
+        aria-label={`后台工作：${running.length} 个执行中，${queued.length} 条待汇报`}
+        className={`inline-flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-xs shadow-lg shadow-black/5 backdrop-blur-md transition-all ${
+          running.length > 0
+            ? 'border-primary/30 bg-primary/[0.08] text-foreground hover:border-primary/50'
+            : 'border-amber-500/30 bg-amber-500/[0.08] text-foreground hover:border-amber-500/50'
+        }`}
       >
         <span className="relative flex h-2 w-2">
-          {running > 0 ? (
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
-          ) : null}
-          <span
-            className={`relative inline-flex h-2 w-2 rounded-full ${running > 0 ? 'bg-primary' : 'bg-amber-500'}`}
-          />
+          {running.length > 0 ? (
+            <>
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-50" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+            </>
+          ) : (
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+          )}
         </span>
-        {running > 0 ? `${running} 个后台任务执行中` : '后台任务已结束'}
-        {queued > 0 ? (
-          <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-amber-600 dark:text-amber-400">
-            {queued} 待汇报
+        <span className="tabular-nums font-medium">
+          {running.length > 0 ? `${running.length} 个后台任务` : '后台任务已结束'}
+        </span>
+        {queued.length > 0 ? (
+          <span className="rounded-full bg-amber-500/15 px-1.5 py-px font-medium tabular-nums text-amber-600 dark:text-amber-400">
+            {queued.length} 待汇报
           </span>
         ) : null}
+        <ChevronRight
+          className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
+        />
       </button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>后台工作</DialogTitle>
-          </DialogHeader>
-          <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-            {items.map((item) => (
-              <div key={item.work_id} className="rounded-lg border border-border/60 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <StateBadge state={item.state} />
-                  <span className="font-mono text-[11px] text-muted-foreground">
-                    {item.dispatched_at}
-                  </span>
-                </div>
-                <p className="mt-2 line-clamp-2 text-sm text-foreground">{item.task}</p>
-                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                  <span className="font-mono">{item.work_id}</span>
-                  <span>模型 {item.model ?? '默认'}</span>
-                  {item.reused_session ? <span>复用会话</span> : null}
-                  <span className="font-mono">{item.session_id.slice(0, 10)}…</span>
-                </div>
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
+          {running.length > 0 ? (
+            <section className="mb-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                  执行中
+                </h3>
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium tabular-nums text-primary">
+                  {running.length}
+                </span>
+              </header>
+              <div className="space-y-2">
+                {running.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} />
+                ))}
               </div>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
-    </>
+            </section>
+          ) : null}
+
+          {queued.length > 0 ? (
+            <section>
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <History className="h-3.5 w-3.5 text-amber-500" />
+                  待汇报
+                </h3>
+                <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium tabular-nums text-amber-600 dark:text-amber-400">
+                  {queued.length}
+                </span>
+              </header>
+              <div className="space-y-2">
+                {queued.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {running.length === 0 && queued.length === 0 ? (
+            <p className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

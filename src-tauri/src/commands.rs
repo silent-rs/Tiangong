@@ -246,7 +246,7 @@ pub async fn switch_session(
             .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
-            start_stream_consumer(app, ensured.session_id, stream_rx);
+            start_stream_consumer(app, ensured.session_id, stream_rx, None);
         }
     }
 
@@ -670,6 +670,12 @@ async fn send_message_inner(
     }
 
     if let Some(command) = parse_context_slash_command(&content) {
+        // 中枢对话不支持上下文管理命令（review i 项）：经 run_context_slash_command
+        // 会无条件走普通 ensure_core，为 central-hub 创建带全插件的第二个 Core，
+        // 绕过 §5 权限边界并与中枢自身事件消费者双写。
+        if crate::central::is_central_session(&session_id) {
+            return Err("中枢对话不支持上下文管理命令".to_string());
+        }
         let active_id = state
             .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
             .await?;
@@ -783,7 +789,7 @@ async fn send_message_inner(
             }
         };
         if is_new {
-            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx, None);
         }
         // 暂存的后台工作回报随用户消息一并进入对话（批量汇报模式）：
         // 先逐条注入回报，再投用户消息——中枢空闲时回报开启汇报 turn、
@@ -815,6 +821,16 @@ async fn send_message_inner(
             return Err(error);
         }
         state.mark_input_revision_delivered(&session_id, revision);
+        // 与普通路径同口径的发送态收尾（review a 项）：缺它则 begin_input_send
+        // 里的 is_sending 永真，中枢第二条消息会被「已有消息正在准备发送」拒绝。
+        let finish_result = state
+            .with_state(|core_state| {
+                crate::state_ops::finish_input_send(core_state, &session_id, revision, true)
+            })
+            .await;
+        if let Err(error) = finish_result {
+            tracing::error!(session_id, revision, error = %error, "中枢消息已发送，但输入缓存终态更新失败");
+        }
         release_input_send_claim_and_cleanup(state, &session_id, revision).await;
         return Ok(());
     }
@@ -869,7 +885,7 @@ async fn send_message_inner(
     // 提前启动是安全的：消费者只处理已发生的事件；投递失败时下方回滚路径
     // 的 shutdown_join_core_if_current 会关闭 Core，消费者随通道关闭正常退出。
     if ensured.is_new {
-        start_stream_consumer(app, sid.clone(), stream_rx);
+        start_stream_consumer(app, sid.clone(), stream_rx, None);
     }
     // 用户的模型选择交给 Manager：记录选择 → 解析目标 → 必要时整理上下文
     // 并切换 → 投递。app 层不参与编排，避免切换失败牵连会话 Core。
@@ -1013,11 +1029,30 @@ fn forward_session_event_to_plugins(session_id: &str, event: &tiangong_types::St
 }
 
 /// 消费 StreamEvent：按会话转发给前端，并维护消息投递边界。
+/// 流终态回调（一次性）：首个 Done/Error/流关闭时触发，done 表示是否
+/// 正常完成、reason 携带失败原因。中枢派发用它接收 Worker 终态（替代
+/// 此前的专用 watcher——其会 break 丢弃 receiver，令会话事件流无人消费）。
+pub type StreamFinishedCallback =
+    std::sync::Arc<std::sync::Mutex<Option<Box<dyn Fn(bool, String) + Send>>>>;
+
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
+    on_finished: Option<StreamFinishedCallback>,
 ) {
+    let on_finished = on_finished;
+    let fire_finished = move |done: bool, reason: String, slot: &Option<StreamFinishedCallback>| {
+        if let Some(slot) = slot {
+            if let Some(callback) = slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                callback(done, reason);
+            }
+        }
+    };
     use tiangong_types::StreamEvent;
 
     let rt = tokio::runtime::Handle::current();
@@ -1096,6 +1131,12 @@ pub(crate) fn start_stream_consumer(
             }
 
             if is_done || is_error {
+                // 一次性终态回调（中枢派发监听 Worker 完成；普通会话为 None）
+                let callback_reason = match &event {
+                    StreamEvent::Error { message } => message.clone(),
+                    _ => String::new(),
+                };
+                fire_finished(is_done, callback_reason, &on_finished);
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
@@ -1128,6 +1169,7 @@ pub(crate) fn start_stream_consumer(
                 Ok(())
             }));
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
+            fire_finished(false, "Core 事件流已关闭".to_string(), &on_finished);
             emit_session_stream_event(
                 &app,
                 &session_id,
@@ -1278,7 +1320,7 @@ pub async fn edit_and_resend(
             }
         };
         if is_new {
-            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx, None);
         }
         if let Err(error) =
             state.deliver_central_message(message_id.clone(), prepared.clone(), None)
@@ -1344,7 +1386,7 @@ pub async fn edit_and_resend(
     )
     .await;
     if ensured.is_new {
-        start_stream_consumer(app, sid, stream_rx);
+        start_stream_consumer(app, sid, stream_rx, None);
     }
 
     Ok(())
@@ -1481,7 +1523,7 @@ async fn run_context_slash_command(
             .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
-            start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
+            start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx, None);
         }
         return match command {
             // 整理上下文与模型切换前的整理共用同一实现：等待压缩进入终态
@@ -2358,7 +2400,7 @@ pub async fn set_session_model(
         .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await?;
     if ensured.is_new {
-        start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
+        start_stream_consumer(app, ensured.session_id.clone(), stream_rx, None);
     }
     state
         .core_manager
