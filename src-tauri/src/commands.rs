@@ -246,7 +246,7 @@ pub async fn switch_session(
             .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
-            start_stream_consumer(app, ensured.session_id, stream_rx, None);
+            start_stream_consumer(app, ensured.session_id, stream_rx);
         }
     }
 
@@ -789,7 +789,7 @@ async fn send_message_inner(
             }
         };
         if is_new {
-            start_stream_consumer(app.clone(), session_id.clone(), stream_rx, None);
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
         }
         // 暂存的后台工作回报随用户消息一并进入对话（批量汇报模式）：
         // 先逐条注入回报，再投用户消息——中枢空闲时回报开启汇报 turn、
@@ -890,7 +890,7 @@ async fn send_message_inner(
     // 提前启动是安全的：消费者只处理已发生的事件；投递失败时下方回滚路径
     // 的 shutdown_join_core_if_current 会关闭 Core，消费者随通道关闭正常退出。
     if ensured.is_new {
-        start_stream_consumer(app, sid.clone(), stream_rx, None);
+        start_stream_consumer(app, sid.clone(), stream_rx);
     }
     // 用户的模型选择交给 Manager：记录选择 → 解析目标 → 必要时整理上下文
     // 并切换 → 投递。app 层不参与编排，避免切换失败牵连会话 Core。
@@ -1046,16 +1046,17 @@ pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
-    on_finished: Option<StreamFinishedSlot>,
 ) {
-    let on_finished = on_finished;
-    let fire_finished = move |done: bool, reason: String, slot: &Option<StreamFinishedSlot>| {
-        if let Some(slot) = slot {
-            let handlers: Vec<StreamFinishedHandler> =
-                std::mem::take(&mut *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-            for callback in handlers {
-                callback(done, reason.clone());
-            }
+    // 回调统一从 app 全局槽表现取（review N1）：不再依赖消费者创建时闭包
+    // 携带槽——否则只有派发新建分支启动的消费者能触发回调；会话被普通
+    // 模式激活（另起无槽消费者）后挂载的回调将无人读取（静默失报 +
+    // running 永久占用）。挂载见 app.rs central_watch_slots。
+    let fire_session_finished = |app: &AppHandle, session_id: &str, done: bool, reason: String| {
+        use tauri::Manager;
+        let state = app.state::<TiangongApp>();
+        let handlers = state.inner().take_finished_handlers(session_id);
+        for callback in handlers {
+            callback(done, reason.clone());
         }
     };
     use tiangong_types::StreamEvent;
@@ -1141,7 +1142,7 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::Error { message } => message.clone(),
                     _ => String::new(),
                 };
-                fire_finished(is_done, callback_reason, &on_finished);
+                fire_session_finished(&app, &session_id, is_done, callback_reason);
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
@@ -1174,7 +1175,7 @@ pub(crate) fn start_stream_consumer(
                 Ok(())
             }));
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
-            fire_finished(false, "Core 事件流已关闭".to_string(), &on_finished);
+            fire_session_finished(&app, &session_id, false, "Core 事件流已关闭".to_string());
             emit_session_stream_event(
                 &app,
                 &session_id,
@@ -1325,7 +1326,7 @@ pub async fn edit_and_resend(
             }
         };
         if is_new {
-            start_stream_consumer(app.clone(), session_id.clone(), stream_rx, None);
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
         }
         if let Err(error) =
             state.deliver_central_message(message_id.clone(), prepared.clone(), None)
@@ -1391,7 +1392,7 @@ pub async fn edit_and_resend(
     )
     .await;
     if ensured.is_new {
-        start_stream_consumer(app, sid, stream_rx, None);
+        start_stream_consumer(app, sid, stream_rx);
     }
 
     Ok(())
@@ -1528,7 +1529,7 @@ async fn run_context_slash_command(
             .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
-            start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx, None);
+            start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
         }
         return match command {
             // 整理上下文与模型切换前的整理共用同一实现：等待压缩进入终态
@@ -2405,7 +2406,7 @@ pub async fn set_session_model(
         .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await?;
     if ensured.is_new {
-        start_stream_consumer(app, ensured.session_id.clone(), stream_rx, None);
+        start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
     }
     state
         .core_manager

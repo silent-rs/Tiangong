@@ -1,10 +1,10 @@
 //! 中枢对话（central conversation）的跨 crate 契约。
 //!
-//! 中枢对话是**同一个 CoreManager 管理下的特殊 Core**：统一的生命周期
-//! （创建锁、空闲回收、投递、取消、模型编排），特殊性只有两点——
-//! 会话文件单独存储（`{storage_root}/central/sessions/`，路径规则内建于
+//! 中枢 Core 由 **app 直接持有**（不经 CoreManager：无创建锁/空闲回收，
+//! 见 src-tauri `central.rs`），特殊性只有两点——会话文件单独存储
+//! （`{storage_root}/central/sessions/`，路径规则内建于
 //! `tiangong_core::session::Session::session_file_path`），以及宿主在
-//! Core 构造点注入的白名单插件集（src-tauri `central.rs`）。
+//! Core 构造点注入的唯一中枢插件（承载工具白名单）。
 //!
 //! 前端使用同名常量（`frontend/src/lib/centralSession.ts`），两侧测试锁定一致。
 

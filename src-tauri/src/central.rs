@@ -122,11 +122,11 @@ pub struct CentralDispatchRequest {
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
 ///
-/// POC 工具集（§5.3 白名单）：
-/// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace`
-///   / `list_models`（可用模型清单）；
-/// - 后台工作：`dispatch_work`（指定模型派发 Worker 会话执行任务）、
-///   `list_work_items`（派发登记表）。
+/// 工具集（§5.3 白名单的 POC 落地，共 10 项）：
+/// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace` /
+///   `list_models` / `list_sessions` / `search_history`；
+/// - 后台工作：`dispatch_work`（新建/复用派发）、`send_to_worker`（引导）、
+///   `collect_work_reports`（收集回报）、`list_work_items`（派发登记）。
 ///
 /// 其余白名单工具（暂停/恢复/取消、征询、通知等）随中枢编排后续片扩展。
 pub struct CentralPlugin {
@@ -170,8 +170,7 @@ fn work_items_path(storage_root: &std::path::Path) -> std::path::PathBuf {
     storage_root.join("central").join("work-items.json")
 }
 
-/// 加载派发登记（损坏/缺失按空表处理）。
-/// 加载派发登记（损坏/缺失按空表处理）。
+/// 加载派发登记（损坏/缺失按空表处理；损坏时记日志便于排障）。
 fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
     std::fs::read_to_string(work_items_path(storage_root))
         .ok()
@@ -465,10 +464,37 @@ impl CentralPlugin {
         }
         let reused = reuse_session.is_some();
         let session_id = reuse_session.unwrap_or_else(|| scru128::new().to_string());
+        // 机制兜底 1：高相似度自动检出（review N2：在登记 upsert **之前**计算并
+        // 过滤自身，否则每次派发必命中自己，提示「向刚建的会话重派」）。
+        let pending_work_id = format!("work-{}", scru128::new());
+        let similarity_hint = {
+            let items = self
+                .work_items
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let prefix: String = task.chars().take(12).collect();
+            items
+                .iter()
+                .filter(|item| {
+                    let item_prefix: String = item.task.chars().take(12).collect();
+                    item_prefix == prefix
+                })
+                .rev()
+                .take(20)
+                .find(|item| item.work_id != pending_work_id)
+                .map(|item| {
+                    format!(
+                        "\n\n⚠⚠ 检测到高度相似的历史派发：会话 {}（{}，任务「{}」）。本任务极可能是它的延续——若确认，应告知用户并向该会话重派（dispatch_work 带 session_id={}?模型参数可换，上下文保留）；仅当确属无关的新工作时才保留本次新建。",
+                        item.session_id,
+                        item.work_id,
+                        item.task.chars().take(40).collect::<String>(),
+                        item.session_id
+                    )
+                })
+                .unwrap_or_default()
+        };
         let record = WorkItemRecord {
-            // work_id 用完整 scru128：与会话 ID 同风格，唯一性无妥协
-            // （此前截短曾在同毫秒内撞车）。
-            work_id: format!("work-{}", scru128::new()),
+            work_id: pending_work_id,
             reused_session: reused,
             session_id: session_id.clone(),
             task: task.to_string(),
@@ -496,50 +522,8 @@ impl CentralPlugin {
         {
             return self.error_result(format!("派发通道已关闭：{error}"));
         }
-        self.upsert_memory_work_item(record.clone());
-        upsert_work_item(self.sessions.storage_root(), &record);
-        let model_note = record
-            .model
-            .as_deref()
-            .unwrap_or("路由默认模型")
-            .to_string();
-        let session_note = if record.reused_session {
-            format!("{session_id}（复用已有会话，上下文连续）")
-        } else {
-            format!("{session_id}（新会话；普通模式会话列表可查看）")
-        };
-        // 机制兜底 1：高相似度自动检出——无 session_id 且历史派发中有任务
-        // 前缀高度一致（前 12 字符）的近期会话时，置顶强提示复用目标。
-        let similarity_hint = {
-            let items = self
-                .work_items
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let prefix: String = task.chars().take(12).collect();
-            items
-                .iter()
-                .rev()
-                .take(20)
-                .find(|item| {
-                    let item_prefix: String = item.task.chars().take(12).collect();
-                    item_prefix == prefix
-                })
-                .map(|item| {
-                    format!(
-                        "\n\n⚠⚠ 检测到高度相似的历史派发：会话 {}（{}，任务「{}」）。\
-                         本任务极可能是它的延续——若确认，应告知用户并向该会话重派\
-                         （dispatch_work 带 session_id={}?模型参数可换，上下文保留）；\
-                         仅当确属无关的新工作时才保留本次新建。",
-                        item.session_id,
-                        item.work_id,
-                        item.task.chars().take(40).collect::<String>(),
-                        item.session_id
-                    )
-                })
-                .unwrap_or_default()
-        };
-        // 机制兜底 2：未指定复用但存在既往派发时，附提示供模型自查——
-        // 若本任务是其中某项的延续，应告知用户并向该会话重派。
+        // 机制兜底 2：未指定复用但存在其他既往派发时，附提示供模型自查
+        // （排除本次 upsert 后的自己，review N2）。
         let prior_note = if record.reused_session {
             String::new()
         } else {
@@ -569,6 +553,24 @@ impl CentralPlugin {
                     recent.join("\n")
                 )
             }
+        };
+        self.upsert_memory_work_item(record.clone());
+        upsert_work_item(self.sessions.storage_root(), &record);
+        let model_note = record
+            .model
+            .as_deref()
+            .unwrap_or("路由默认模型")
+            .to_string();
+        let session_note = if record.reused_session {
+            // 复用实际沿用会话既有模型（review M5：明确告知忽略的请求模型）
+            match record.model.as_deref() {
+                Some(requested) => format!(
+                    "{session_id}（复用已有会话，沿用其既有模型；已忽略请求的 {requested}）"
+                ),
+                None => format!("{session_id}（复用已有会话，沿用其既有模型）"),
+            }
+        } else {
+            format!("{session_id}（新会话；普通模式会话列表可查看）")
         };
         let body = format!(
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
@@ -689,9 +691,17 @@ impl CentralPlugin {
                                 continue;
                             };
                             if let Some(pos) = text.find(&query_for_task) {
-                                let start = pos.saturating_sub(CONTEXT_CHARS);
-                                let end =
+                                // UTF-8 安全边界（review N7）：字节偏移回退/前进
+                                // 到字符边界，防止切片落在多字节字符中间 panic
+                                let mut start = pos.saturating_sub(CONTEXT_CHARS);
+                                while start < text.len() && !text.is_char_boundary(start) {
+                                    start += 1;
+                                }
+                                let mut end =
                                     (pos + query_for_task.len() + CONTEXT_CHARS).min(text.len());
+                                while end < text.len() && !text.is_char_boundary(end) {
+                                    end += 1;
+                                }
                                 let snippet: String = text[start..end].replace('\n', " ");
                                 let role =
                                     message.get("role").and_then(|r| r.as_str()).unwrap_or("?");
@@ -1738,5 +1748,46 @@ mod tests {
         assert!(hits[0].reused_session);
         // 最旧的 sess-0 已被裁剪
         assert!(!items.iter().any(|item| item.session_id == "sess-0"));
+    }
+    /// 相似度提示自匹配排除（review N2）：计算先于登记且过滤自身——
+    /// 首次派发不得出现「高度相似」提示；同前缀第二次（不带 session_id）
+    /// 才应出现。
+    #[test]
+    fn dispatch_similarity_hint_excludes_self() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let first = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "Review 天工仓库的分支开发情况"}),
+        );
+        assert!(first.ok, "stderr: {}", first.stderr);
+        assert!(
+            !first.stdout.contains("高度相似"),
+            "首次派发不得自匹配：{}",
+            first.stdout
+        );
+        let second = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "Review 天工仓库的分支开发情况（增量）"}),
+        );
+        assert!(second.ok);
+        assert!(
+            second.stdout.contains("高度相似"),
+            "同前缀第二次应提示：{}",
+            second.stdout
+        );
     }
 }

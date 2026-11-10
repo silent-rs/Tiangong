@@ -477,7 +477,7 @@ async fn send_message_and_wait(
     }
 
     if ensured.is_new {
-        crate::commands::start_stream_consumer(app, ensured.session_id.clone(), stream_rx, None);
+        crate::commands::start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
     }
     if !session_exists {
         let _ = state

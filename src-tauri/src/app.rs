@@ -470,7 +470,6 @@ impl TiangongApp {
                         app_handle.clone(),
                         ensured.session_id.clone(),
                         stream_rx,
-                        None,
                     );
                     tracing::info!(session_id, "消费者自动恢复 core");
                 }
@@ -1079,6 +1078,20 @@ impl TiangongApp {
         }
     }
 
+    /// 取走该会话全部已挂载的终态回调（消费者终态触发用；表取模式使
+    /// 任意消费者实例都能触发挂载的回调——见 commands.rs N1 注释）。
+    pub(crate) fn take_finished_handlers(
+        &self,
+        session_id: &str,
+    ) -> Vec<crate::commands::StreamFinishedHandler> {
+        self.central_watch_slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .map(|slot| std::mem::take(&mut *slot.lock().unwrap_or_else(|e| e.into_inner())))
+            .unwrap_or_default()
+    }
+
     /// 追加回报到暂存队列（投递失败的放回路径）。
     pub(crate) fn push_central_work_reports(&self, notices: Vec<String>) {
         self.central_work_reports
@@ -1414,6 +1427,7 @@ fn central_dispatch_sender(
             // 内容已随进程丢失，用户可让中枢重派（复用原会话续上下文）。
             {
                 let state = app.state::<TiangongApp>();
+                let mut recovered = false;
                 let registry = &state.inner().central_work_registry;
                 let mut entries = registry.lock().unwrap_or_else(|e| e.into_inner());
                 for item in crate::central::interrupted_work_items(
@@ -1429,6 +1443,10 @@ fn central_dispatch_sender(
                         state: "interrupted".to_string(),
                         reused_session: item.reused_session,
                     });
+                    recovered = true;
+                }
+                if recovered {
+                    emit_central_work_updated(&app);
                 }
             }
             tokio::spawn(async move {
@@ -1545,9 +1563,9 @@ async fn handle_central_dispatch(
     let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
 
     if state.core_manager.has_live_core(&sid) {
-        // Core 活跃（复用/引导/并发派发）：不重建，直接挂回调到既有槽位，
-        // 投递消息（忙→引导并入当前 turn；空闲→开新 turn，消费者已在线）。
-        attach_work_finished_callback(&slot, app, request.clone());
+        // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
+        // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
+        // （review N5：先挂后投会在投递失败时残留回调，下次终态重复回报）。
         state
             .deliver_prepared_if_live(
                 &sid,
@@ -1557,6 +1575,7 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
+        attach_work_finished_callback(&slot, app, request.clone());
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
@@ -1570,8 +1589,7 @@ async fn handle_central_dispatch(
                 sid
             ));
         }
-        attach_work_finished_callback(&slot, app, request.clone());
-        crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx, Some(slot));
+        crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx);
         state
             .deliver_prepared_if_live(
                 &sid,
@@ -1581,6 +1599,7 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
+        attach_work_finished_callback(&slot, app, request.clone());
     }
     tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
     // 给 Worker 会话写可识别标题（仅新建会话；复用/引导保留原标题）。
@@ -1607,7 +1626,18 @@ async fn handle_central_dispatch(
             work_id: request.work_id.clone(),
             session_id: request.session_id.clone(),
             task: request.task.clone(),
-            model: request.model.clone(),
+            model: if request.reused_session {
+                // 复用实际沿用会话既有模型（review M5：登记不得谎报请求模型）
+                Some(format!(
+                    "会话既有模型（已忽略 {}）",
+                    request.model.as_deref().unwrap_or("默认")
+                ))
+            } else {
+                request
+                    .model
+                    .clone()
+                    .or_else(|| Some("路由默认".to_string()))
+            },
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             state: "running".to_string(),
             reused_session: request.reused_session,
