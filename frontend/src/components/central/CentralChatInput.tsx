@@ -28,7 +28,12 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
   const setInputCacheText = useStore((state) => state.setInputCacheText);
   const sendMessage = useStore((state) => state.sendMessage);
   const appendMessage = useStore((state) => state.appendMessage);
-  const isSending = inputCache?.is_sending === true;
+  // 「执行中」判定与会话运行状态对齐（is_sending 只覆盖发送事务，投递成功
+  // 即清除——不能用它判定 turn 执行中，否则执行中续发会被当作新开轮而被
+  // 后端拒绝）。中枢激活时本会话即当前会话，runStatus 就是中枢运行状态。
+  const runStatus = useStore((state) => state.runStatus);
+  const isExecuting = runStatus === 'executing';
+  const isSending = isExecuting || inputCache?.is_sending === true;
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -47,17 +52,18 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
   }, [inputCache?.text, resize, onHeightChange]);
 
   const handleSend = useCallback(async () => {
-    if (disabled || isSending || sending) return;
+    // 执行中允许继续发送（走 Core 原生引导）；仅本地发送事务中防抖
+    if (disabled || sending) return;
     const text = (inputCache?.text ?? '').trim();
     if (!text) return;
     const revision = inputCache?.revision ?? 0;
     setSending(true);
     setSendError(null);
     try {
-      // 中枢支持连续对话：执行中的新消息走 Core 原生引导（appendMessage
-      // 随当前 turn 处理），空闲时正常开新轮。返回 false/undefined 表示
-      // 投递失败（错误已在 store 内记录），草稿保留供重试。
-      const delivered = isSending
+      // 中枢支持连续对话：执行中（runStatus=executing）的新消息走 Core 原生
+      // 引导（appendMessage 随当前 turn 处理），空闲时正常开新轮。返回
+      // false/undefined 表示投递失败（错误已在 store 内记录），草稿保留供重试。
+      const delivered = isExecuting
         ? (await appendMessage(CENTRAL_SESSION_ID, text, [], revision)) === true
         : await sendMessage(
             CENTRAL_SESSION_ID,
@@ -83,7 +89,7 @@ export function CentralChatInput({ disabled = false, onHeightChange }: CentralCh
     disabled,
     inputCache?.text,
     inputCache?.revision,
-    isSending,
+    isExecuting,
     sending,
     sendMessage,
     setInputCacheText,

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     )),
     removeInputCache: vi.fn(() => Promise.resolve()),
     sendMessage: vi.fn(() => Promise.resolve()),
+    appendMessage: vi.fn(() => Promise.resolve(true)),
     cancelTurn: vi.fn(() => Promise.resolve(true)),
     loadSession: vi.fn(() => Promise.reject(new Error('会话不存在'))),
     getSessions: vi.fn(() => Promise.resolve([])),
@@ -121,6 +122,40 @@ describe('CentralChatInput 发送链路', () => {
     expect(args[5]).toBeUndefined();
     // 发送成功后草稿清空
     expect(useStore.getState().inputCaches[CENTRAL_SESSION_ID]?.text).toBe('');
+    view.unmount();
+  });
+
+  it('执行中（runStatus=executing）继续发送走引导 appendMessage，不被拒', async () => {
+    const view = mountInput();
+    const target = view.textarea();
+    await act(async () => {
+      target.focus();
+    });
+    const change = (value: string) => act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(target, value);
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await change('执行中的补充');
+    act(() => {
+      useStore.setState({ activeSessionId: CENTRAL_SESSION_ID, runStatus: 'executing' });
+    });
+    await act(async () => {
+      // 执行中按钮区显示「停止」，发送走 Enter（与真实操作一致）
+      target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.api.appendMessage).toHaveBeenCalledTimes(1);
+    const args = mocks.api.appendMessage.mock.calls[0];
+    expect(args[0]).toBe(CENTRAL_SESSION_ID);
+    expect(args[1]).toBe('执行中的补充');
+    // 不得走新开轮（会被后端拒绝）
+    expect(mocks.api.sendMessage).not.toHaveBeenCalled();
     view.unmount();
   });
 
