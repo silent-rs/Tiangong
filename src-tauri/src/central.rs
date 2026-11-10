@@ -365,9 +365,9 @@ impl CentralPlugin {
         let reused = reuse_session.is_some();
         let session_id = reuse_session.unwrap_or_else(|| scru128::new().to_string());
         let record = WorkItemRecord {
-            // work_id 取 scru128 尾部：高位是毫秒时间戳（同毫秒前缀相同会撞车），
-            // 尾部含计数器与随机位，短截断下仍然唯一。
-            work_id: format!("work-{}", &scru128::new().to_string()[20..]),
+            // work_id 用完整 scru128：与会话 ID 同风格，唯一性无妥协
+            // （此前截短曾在同毫秒内撞车）。
+            work_id: format!("work-{}", scru128::new()),
             reused_session: reused,
             session_id: session_id.clone(),
             task: task.to_string(),
