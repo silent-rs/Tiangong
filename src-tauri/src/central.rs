@@ -299,7 +299,7 @@ fn load_confirmed_workspaces(storage_root: &std::path::Path) -> Vec<std::path::P
 /// 追加已确认工作区（去重、canonicalize）并落盘。
 fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path::Path) {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut list = load_confirmed_workspaces(storage_root);
+    let list = load_confirmed_workspaces(storage_root);
     let list: Vec<std::path::PathBuf> = std::iter::once(canonical)
         .chain(list)
         .filter(|item| item.is_absolute())
@@ -1913,10 +1913,6 @@ mod tests {
         // 最旧的 sess-0 已被裁剪
         assert!(!items.iter().any(|item| item.session_id == "sess-0"));
     }
-    /// 相似度提示自匹配排除（review N2）：计算先于登记且过滤自身——
-    /// 首次派发不得出现「高度相似」提示；同前缀第二次（不带 session_id）
-    /// 才应出现。
-    #[test]
     /// Workspace 确认交互：未确认的 cwd 拒绝 → confirm_workspace 登记 → 放行；
     /// 默认工作区与已确认目录无需确认。
     #[test]
@@ -1971,6 +1967,9 @@ mod tests {
         assert!(!allowed.stderr.contains("尚未经用户确认"));
     }
 
+    /// 相似任务强制复用：同前缀第二次（不带 session_id/【全新】）拒绝，
+    /// 带 session_id 与【全新】标记放行。
+    #[test]
     fn dispatch_similarity_hint_excludes_self() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
