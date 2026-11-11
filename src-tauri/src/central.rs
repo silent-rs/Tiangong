@@ -1969,6 +1969,78 @@ mod tests {
         // 最旧的 sess-0 已被裁剪
         assert!(!items.iter().any(|item| item.session_id == "sess-0"));
     }
+    /// confirm_workspace 参数边界：空路径拒绝，不得登记。
+    #[test]
+    fn confirm_workspace_rejects_empty_path() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let empty = call_tool(
+            &plugin,
+            "confirm_workspace",
+            serde_json::json!({"path": "   "}),
+        );
+        assert!(!empty.ok, "空白路径不得登记为已确认工作区");
+        assert!(
+            load_confirmed_workspaces(plugin.sessions.storage_root()).is_empty(),
+            "拒绝路径不得产生登记"
+        );
+    }
+
+    /// 终态登记兜底：work_id 未命中时按 session_id 找未终态条目——
+    /// 用户实测「执行完毕显示中断」的修复路径；双键都未命中时不落盘。
+    #[test]
+    fn mark_finished_falls_back_to_session() {
+        let root = tempfile::tempdir().unwrap();
+        let record = WorkItemRecord {
+            work_id: "work-real".to_string(),
+            reused_session: false,
+            session_id: "sess-1".to_string(),
+            task: "执行任务".to_string(),
+            model: None,
+            dispatched_at: "2026-11-11 12:00:00".to_string(),
+            finished_at: None,
+        };
+        upsert_work_item(root.path(), &record);
+        // 错误 work_id + 正确 session_id：兜底命中并写终态
+        mark_work_item_finished_with_session(root.path(), "work-wrong", Some("sess-1"));
+        let items = load_work_items(root.path());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].work_id, "work-real");
+        assert!(
+            items[0].finished_at.is_some(),
+            "session 兜底应写入终态：{items:?}"
+        );
+        // 双键都未命中：不新增不改动
+        mark_work_item_finished_with_session(root.path(), "work-none", Some("sess-none"));
+        let after = load_work_items(root.path());
+        assert_eq!(after.len(), 1, "未命中不得新增条目：{after:?}");
+    }
+
+    /// 登记文件损坏（坏 JSON）时按空表恢复，后续 upsert 修复文件。
+    #[test]
+    fn work_items_recover_from_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("central")).unwrap();
+        std::fs::write(work_items_path(root.path()), "{ not valid json !!").unwrap();
+        // 损坏 → 空表（不 panic）
+        assert!(load_work_items(root.path()).is_empty());
+        // upsert 以空表为基础写入 → 文件被合法内容覆盖
+        let record = WorkItemRecord {
+            work_id: "work-1".to_string(),
+            reused_session: false,
+            session_id: "sess-1".to_string(),
+            task: "任务".to_string(),
+            model: None,
+            dispatched_at: "2026-11-11 12:00:00".to_string(),
+            finished_at: None,
+        };
+        upsert_work_item(root.path(), &record);
+        let items = load_work_items(root.path());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].work_id, "work-1");
+    }
+
     /// 工作区确认判定：默认工作区子树按前缀放行（含子目录）；同级近名
     /// 目录不误放行；登记目录 canonicalize 精确匹配。
     #[test]
