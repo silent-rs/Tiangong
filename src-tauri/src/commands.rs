@@ -1059,6 +1059,39 @@ pub(crate) fn start_stream_consumer(
             callback(done, reason.clone());
         }
     };
+    // 中枢工作进度可见（§9.1）：中枢派发会话的 PhaseChanged / ToolStart /
+    // ToolFinished 事件更新 registry 最近动作（徽章实时显示 Worker 在干嘛）。
+    // 普通会话零成本：registry 无该 session 的 running 条目即返回。
+    let update_central_activity =
+        |app: &AppHandle, session_id: &str, event: &tiangong_types::StreamEvent| {
+            use tauri::Manager;
+            let note = match event {
+                tiangong_types::StreamEvent::PhaseChanged { phase, iteration } => {
+                    Some(format!("阶段 {phase}（第 {iteration} 轮）"))
+                }
+                tiangong_types::StreamEvent::ToolStart { name, .. } => Some(format!("执行 {name}")),
+                tiangong_types::StreamEvent::ToolFinished { name, ok, .. } => {
+                    Some(format!("{name} {}", if *ok { "完成" } else { "失败" }))
+                }
+                _ => None,
+            };
+            let Some(note) = note else { return };
+            let state = app.state::<crate::app::TiangongApp>();
+            let mut registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = registry
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.session_id == session_id && entry.state == "running")
+            {
+                entry.last_activity = Some(note);
+                drop(registry);
+                crate::app::emit_central_work_updated(app);
+            }
+        };
+
     use tiangong_types::StreamEvent;
 
     let rt = tokio::runtime::Handle::current();
@@ -1098,6 +1131,8 @@ pub(crate) fn start_stream_consumer(
                 }
                 continue;
             }
+
+            update_central_activity(&app, &session_id, &session_event);
 
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());

@@ -72,6 +72,15 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   对话中向用户确认（说明目录路径与任务概要），同意后调
   `confirm_workspace` 登记再派发——机制会拦截未确认的派发；已确认过的
   工作区不再重复打扰用户；
+- **等待用户决策的工作**：Worker 回报携带「【需要用户决策】」标记时，该
+  工作已挂起（徽章显示「等待用户」）。处理：**在回复中直接向用户转述
+  问题**（保留背景与选项，不替用户决定，不使用 request_user）；用户答复
+  后用 `central__send_to_worker` 把决定原文发给该工作会话（自动恢复执行）；
+- **工作控制**：用户要求停止/放弃某工作时用 `cancel_work`（终态，不恢复）；
+  要求暂停/先放一放用 `pause_work`（上下文保留）；要求继续/恢复用
+  `resume_work`（自动发送继续指令）。不要用重派代替控制指令；
+- **排队依赖**：用户要求「A 完成后再做 B」时，dispatch_work 派发 B 并带
+  `after_work_id=A 的 work_id`——系统会在 A 终态后自动投递 B；
 - **模型故障处置**：后台工作因模型/网络类原因失败（超时、限流、凭据、
   服务端错误）时，回报会附带处置建议——`list_models` 查询可用模型后用
   `dispatch_work` 带 session_id 与新 model 在**原会话重派**（上下文保留）；
@@ -91,6 +100,9 @@ pub struct CentralWorkStatus {
     pub state: String,
     /// 是否复用了已有会话（应用尽用）。
     pub reused_session: bool,
+    /// 最近执行动作（工具名/阶段，徽章实时显示；流消费者更新）。
+    #[serde(default)]
+    pub last_activity: Option<String>,
 }
 
 /// 中枢插件 → app 执行器的消息（unbounded channel）。
@@ -104,6 +116,17 @@ pub enum CentralPluginMessage {
     Steer(CentralDispatchRequest),
     /// `collect_work_reports` 已取走全部暂存回报：同步清理状态登记。
     ReportsCollected,
+    /// 工作控制（取消/暂停/恢复）——由执行器操作真实运行时。
+    Control(CentralControlRequest),
+}
+
+/// 中枢工作控制请求（cancel_work / pause_work / resume_work）。
+#[derive(Debug, Clone)]
+pub struct CentralControlRequest {
+    pub work_id: String,
+    pub session_id: String,
+    /// cancelled / paused / resume
+    pub action: String,
 }
 
 /// 中枢派发后台工作的请求。
@@ -124,6 +147,8 @@ pub struct CentralDispatchRequest {
     pub model: Option<String>,
     /// 工作目录（None：复用会话时用该会话自身 cwd，新建用全局默认）。
     pub cwd: Option<String>,
+    /// 排队依赖：等待该 work 终态后再投递本工作（None 立即派发）。
+    pub after_work_id: Option<String>,
     /// 是否复用已有会话（插件侧决定并携带；app 据此跳过新会话标题等）。
     pub reused_session: bool,
 }
@@ -261,6 +286,20 @@ pub fn mark_work_item_finished_with_session(
     save_work_items(storage_root, &items);
 }
 
+/// 显式改写某会话登记条目的 outcome（取消等特殊终态：finished_at 已由
+/// mark 写入，此函数只改 outcome 表达）。
+pub fn set_work_item_outcome(storage_root: &std::path::Path, session_id: &str, outcome: &str) {
+    let mut items = load_work_items(storage_root);
+    if let Some(entry) = items
+        .iter_mut()
+        .rev()
+        .find(|item| item.session_id == session_id)
+    {
+        entry.outcome = Some(outcome.to_string());
+        save_work_items(storage_root, &items);
+    }
+}
+
 /// 从中枢会话回报中提取失败工作的 work_id 集合（legacy 终态成败推断）。
 fn failed_work_ids_from_central_session(
     storage_root: &std::path::Path,
@@ -322,9 +361,9 @@ pub fn recover_registry_entries(
     for item in load_work_items(storage_root) {
         let state = if item.outcome.as_deref() == Some("failed") {
             "failed"
-        } else if item.outcome.as_deref() == Some("completed") {
-            "completed"
-        } else if item.finished_at.is_some() {
+        } else if item.outcome.as_deref() == Some("cancelled") {
+            "cancelled"
+        } else if item.outcome.as_deref() == Some("completed") || item.finished_at.is_some() {
             // legacy 终态：中枢会话回报标记失败 → failed；否则完成
             if failed_ids.contains(&item.work_id) {
                 "failed"
@@ -344,6 +383,7 @@ pub fn recover_registry_entries(
             dispatched_at: item.dispatched_at,
             state: state.to_string(),
             reused_session: item.reused_session,
+            last_activity: None,
         });
     }
     // 截断：completed/failed 各保留最近 10 条（尾部为最新，从头部移除）
@@ -563,7 +603,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；dispatch_work 支持 after_work_id 排队依赖；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -692,6 +732,7 @@ impl CentralPlugin {
         model: Option<&str>,
         cwd: Option<&str>,
         session_id: Option<&str>,
+        after_work_id: Option<&str>,
     ) -> Option<ToolResult> {
         let task = task.trim();
         if task.is_empty() {
@@ -823,6 +864,7 @@ impl CentralPlugin {
                 .filter(|path| !path.trim().is_empty())
                 .map(str::trim)
                 .map(str::to_string),
+            after_work_id: after_work_id.map(str::to_string),
             reused_session: reused,
         };
         if let Err(error) = self
@@ -1135,6 +1177,7 @@ impl CentralPlugin {
             task: record.task.clone(),
             model: None,
             cwd: None,
+            after_work_id: None,
             reused_session: true,
         };
         if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Steer(request)) {
@@ -1147,6 +1190,47 @@ impl CentralPlugin {
             record.session_id, record.work_id, record.task
         );
         self.text_result("引导已发送", body)
+    }
+
+    /// 工作控制（取消/暂停/恢复）共用：校验登记存在并发 Control 消息。
+    fn handle_work_control(&self, work_id: &str, action: &str) -> Option<ToolResult> {
+        let work_id = work_id.trim();
+        if work_id.is_empty() {
+            return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
+        }
+        let items = self
+            .work_items
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let found = items.iter().rev().find(|item| item.work_id == work_id);
+        let Some(entry) = found else {
+            return self.error_result(format!(
+                "未找到工作 {work_id}（list_work_items 查询登记；仅最近 20 个会话有记录）"
+            ));
+        };
+        let request = CentralControlRequest {
+            work_id: work_id.to_string(),
+            session_id: entry.session_id.clone(),
+            action: action.to_string(),
+        };
+        if let Err(error) = self
+            .dispatch_tx
+            .send(CentralPluginMessage::Control(request))
+        {
+            return self.error_result(format!("派发通道已关闭：{error}"));
+        }
+        let action_text = match action {
+            "cancelled" => "取消",
+            "paused" => "暂停",
+            _ => "恢复",
+        };
+        let summary = format!("工作{action_text}指令已发出");
+        self.text_result(
+            summary.as_str(),
+            format!(
+                "work_id: {work_id}\n系统将中断该工作的当前执行（如仍在运行）并标记为「已{action_text}」。取消：工作终止不再恢复；暂停：上下文保留在会话中，恢复时自动发送继续指令；恢复：向该会话发送继续指令，工作回到执行中。"
+            ),
+        )
     }
 
     /// 登记用户已确认的工作区（配合 Workspace 确认交互）。
@@ -1338,7 +1422,8 @@ impl ToolSpecProvider for CentralPlugin {
                         "cwd": {"type": "string", "description": "工作目录（省略：复用会话用其自身目录，新建用默认工作区）"},
                         "session_id": {"type": "string", "description": "复用的已有会话 ID（list_sessions 查询）。任务与某会话相关（同工作区、同主题、上次未完成）时必须优先复用，保持上下文连续；仅无相关会话时省略新建"}
                     },
-                    "required": ["task"]
+                    "required": ["task"],
+                        "after_work_id": {"type": "string", "description": "排队依赖：等待该工作终态（完成/失败/取消）后再自动投递本任务"}
                 }),
             },
             ToolSpec {
@@ -1353,6 +1438,42 @@ impl ToolSpecProvider for CentralPlugin {
                         "scope": {"type": "string", "enum": ["recent", "all"], "description": "扫描范围：recent=最近 200 个会话（默认），all=全部（较慢）"}
                     },
                     "required": ["query"]
+                }),
+            },
+            ToolSpec {
+                name: "cancel_work".to_string(),
+                description: "取消后台工作：中断该工作会话的当前执行并标记为已取消（终态，不再恢复）。\n                    用户明确要求停止/放弃某个工作时使用；取消后如需再做需重新派发。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "目标工作 ID（list_work_items 查询）"}
+                    },
+                    "required": ["work_id"]
+                }),
+            },
+            ToolSpec {
+                name: "pause_work".to_string(),
+                description: "暂停后台工作：中断当前执行但保留全部上下文（会话不删除），状态标记为已暂停。\n                    用户要求暂停/先放一放时使用；恢复用 resume_work。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "目标工作 ID（list_work_items 查询）"}
+                    },
+                    "required": ["work_id"]
+                }),
+            },
+            ToolSpec {
+                name: "resume_work".to_string(),
+                description: "恢复已暂停的后台工作：向该工作会话发送「继续之前暂停的任务」指令，\n                    工作回到执行中（上下文连续）。用户要求继续/恢复时使用。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "目标工作 ID（list_work_items 查询）"}
+                    },
+                    "required": ["work_id"]
                 }),
             },
             ToolSpec {
@@ -1439,6 +1560,19 @@ impl ToolOverrideHandler for CentralPlugin {
             }
             "list_models" => self.handle_list_models(),
             "list_sessions" => self.handle_list_sessions(),
+            "cancel_work" | "pause_work" | "resume_work" => {
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let action = match call.name.as_str() {
+                    "cancel_work" => "cancelled",
+                    "pause_work" => "paused",
+                    _ => "resume",
+                };
+                self.handle_work_control(work_id, action)
+            }
             "confirm_workspace" => {
                 let path = call
                     .arguments
@@ -1461,6 +1595,10 @@ impl ToolOverrideHandler for CentralPlugin {
                 self.handle_send_to_worker(session_id, message)
             }
             "dispatch_work" => {
+                let after_work_id = call
+                    .arguments
+                    .get("after_work_id")
+                    .and_then(|value| value.as_str());
                 let task = call
                     .arguments
                     .get("task")
@@ -1472,7 +1610,7 @@ impl ToolOverrideHandler for CentralPlugin {
                     .arguments
                     .get("session_id")
                     .and_then(|value| value.as_str());
-                self.handle_dispatch_work(task, model, cwd, session_id)
+                self.handle_dispatch_work(task, model, cwd, session_id, after_work_id)
             }
             "collect_work_reports" => self.handle_collect_work_reports(),
             "list_work_items" => self.handle_list_work_items(),
@@ -2371,6 +2509,68 @@ mod tests {
             &default,
             &outside_path.to_string_lossy()
         ));
+    }
+
+    /// 工作控制工具：work_id 校验 + Control 消息送达（通道层验证）。
+    #[test]
+    fn work_control_validates_and_sends() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 派发一个工作（登记存在）
+        let dispatch = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "长任务", "session_id": "s0"}),
+        );
+        assert!(dispatch.ok, "stderr: {}", dispatch.stderr);
+        let work_id = {
+            let items = plugin.work_items.lock().unwrap_or_else(|e| e.into_inner());
+            items
+                .iter()
+                .rev()
+                .find(|item| item.session_id == "s0")
+                .map(|item| item.work_id.clone())
+                .unwrap()
+        };
+        // 排空派发消息（dispatch 先于 control 到达）
+        let _ = dispatch_rx.try_recv();
+        // 取消：消息送达
+        let cancel = call_tool(
+            &plugin,
+            "cancel_work",
+            serde_json::json!({"work_id": work_id}),
+        );
+        assert!(cancel.ok, "stderr: {}", cancel.stderr);
+        match dispatch_rx.try_recv() {
+            Ok(crate::central::CentralPluginMessage::Control(control)) => {
+                assert_eq!(control.action, "cancelled");
+                assert_eq!(control.work_id, work_id);
+                assert_eq!(control.session_id, "s0");
+            }
+            other => panic!("应收到 Control 消息，实际 {other:?}"),
+        }
+        // 不存在的 work_id 拒绝
+        let ghost = call_tool(
+            &plugin,
+            "pause_work",
+            serde_json::json!({"work_id": "work-none"}),
+        );
+        assert!(!ghost.ok, "不存在的 work 必须拒绝");
+        // 空 work_id 拒绝
+        let empty = call_tool(&plugin, "resume_work", serde_json::json!({"work_id": "  "}));
+        assert!(!empty.ok, "空 work_id 必须拒绝");
     }
 
     /// Workspace 确认交互：未确认的 cwd 拒绝 → confirm_workspace 登记 → 放行；

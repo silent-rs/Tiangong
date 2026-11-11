@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
 import { restoreFromCentralConversation } from '@/lib/centralConversation';
 
 interface CentralWorkStatus {
@@ -19,8 +19,9 @@ interface CentralWorkStatus {
   task: string;
   model: string | null;
   dispatched_at: string;
-  state: 'running' | 'report_queued' | 'interrupted' | 'completed' | 'failed';
+  state: 'running' | 'report_queued' | 'interrupted' | 'completed' | 'failed' | 'waiting_user' | 'paused' | 'cancelled' | 'queued';
   reused_session: boolean;
+  last_activity?: string | null;
 }
 
 const PANEL_CLOSE_DELAY_MS = 250;
@@ -36,6 +37,10 @@ function WorkItemRow({
   const interrupted = item.state === 'interrupted';
   const completedState = item.state === 'completed';
   const failedState = item.state === 'failed';
+  const waitingUserState = item.state === 'waiting_user';
+  const pausedState = item.state === 'paused';
+  const cancelledState = item.state === 'cancelled';
+  const queuedState = item.state === 'queued';
   return (
     <div
       onClick={() => onOpen?.(item.session_id)}
@@ -93,6 +98,26 @@ function WorkItemRow({
               <XCircle className="h-3.5 w-3.5" />
               失败
             </>
+          ) : waitingUserState ? (
+            <>
+              <HelpCircle className="h-3.5 w-3.5" />
+              等用户
+            </>
+          ) : pausedState ? (
+            <>
+              <PauseCircle className="h-3.5 w-3.5" />
+              已暂停
+            </>
+          ) : cancelledState ? (
+            <>
+              <Ban className="h-3.5 w-3.5" />
+              已取消
+            </>
+          ) : queuedState ? (
+            <>
+              <Clock className="h-3.5 w-3.5" />
+              排队
+            </>
           ) : (
             <>
               <Inbox className="h-3.5 w-3.5" />
@@ -107,6 +132,11 @@ function WorkItemRow({
       <p className="mt-1.5 line-clamp-2 text-[13px] leading-snug text-foreground/90">
         {item.task}
       </p>
+      {running && item.last_activity ? (
+        <p className="mt-1 truncate text-[11px] text-muted-foreground/80">
+          {item.last_activity}
+        </p>
+      ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
         <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
           {item.model ?? '默认模型'}
@@ -229,6 +259,10 @@ export function CentralWorkStatusBar() {
   const interrupted = visible.filter((item) => item.state === 'interrupted');
   const completed = visible.filter((item) => item.state === 'completed');
   const failed = visible.filter((item) => item.state === 'failed');
+  const waitingUser = visible.filter((item) => item.state === 'waiting_user');
+  const paused = visible.filter((item) => item.state === 'paused');
+  const cancelled = visible.filter((item) => item.state === 'cancelled');
+  const queuedDep = visible.filter((item) => item.state === 'queued');
 
   const totalCount = visible.length;
   return (
@@ -304,6 +338,10 @@ export function CentralWorkStatusBar() {
           <WorkGroups
             running={running}
             failed={failed}
+            waitingUser={waitingUser}
+            paused={paused}
+            cancelled={cancelled}
+            queuedDep={queuedDep}
             queued={queued}
             interrupted={interrupted}
             completed={completed}
@@ -333,6 +371,10 @@ export function CentralWorkStatusBar() {
             <WorkGroups
               running={running}
               failed={failed}
+              waitingUser={waitingUser}
+              paused={paused}
+              cancelled={cancelled}
+              queuedDep={queuedDep}
               queued={queued}
               interrupted={interrupted}
               completed={completed}
@@ -349,6 +391,10 @@ export function CentralWorkStatusBar() {
 function WorkGroups({
   running,
   failed,
+  waitingUser,
+  paused,
+  cancelled,
+  queuedDep,
   queued,
   interrupted,
   completed,
@@ -356,6 +402,10 @@ function WorkGroups({
 }: {
   running: CentralWorkStatus[];
   failed: CentralWorkStatus[];
+  waitingUser: CentralWorkStatus[];
+  paused: CentralWorkStatus[];
+  cancelled: CentralWorkStatus[];
+  queuedDep: CentralWorkStatus[];
   queued: CentralWorkStatus[];
   interrupted: CentralWorkStatus[];
   completed: CentralWorkStatus[];
@@ -401,6 +451,69 @@ function WorkGroups({
             </section>
           ) : null}
 
+          {waitingUser.length > 0 ? (
+            <section className="mt-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <HelpCircle className="h-3.5 w-3.5 text-amber-500" />
+                  等待用户
+                </h3>
+                <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium tabular-nums text-amber-600 dark:text-amber-400">
+                  {waitingUser.length}
+                </span>
+              </header>
+              <p className="px-1 pb-2 text-[11px] leading-relaxed text-muted-foreground">
+                工作提出的问题已转述到中枢对话，请在对话中答复后自动继续。
+              </p>
+              <div className="space-y-2">
+                {waitingUser.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {paused.length > 0 ? (
+            <section className="mt-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <PauseCircle className="h-3.5 w-3.5 text-sky-500" />
+                  已暂停
+                </h3>
+                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium tabular-nums text-sky-600 dark:text-sky-400">
+                  {paused.length}
+                </span>
+              </header>
+              <p className="px-1 pb-2 text-[11px] leading-relaxed text-muted-foreground">
+                上下文保留在会话中，可让中枢恢复继续执行。
+              </p>
+              <div className="space-y-2">
+                {paused.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {queuedDep.length > 0 ? (
+            <section>
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                  排队中
+                </h3>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                  {queuedDep.length}
+                </span>
+              </header>
+              <div className="space-y-2 opacity-75">
+                {queuedDep.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           {failed.length > 0 ? (
             <section className="mt-3">
               <header className="mb-2 flex items-center justify-between px-1">
@@ -414,6 +527,25 @@ function WorkGroups({
               </header>
               <div className="space-y-2">
                 {failed.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {cancelled.length > 0 ? (
+            <section className="mt-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <Ban className="h-3.5 w-3.5 text-muted-foreground" />
+                  已取消
+                </h3>
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                  {cancelled.length}
+                </span>
+              </header>
+              <div className="space-y-2 opacity-60">
+                {cancelled.map((item) => (
                   <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
                 ))}
               </div>
@@ -465,7 +597,7 @@ function WorkGroups({
             </section>
           ) : null}
 
-          {running.length === 0 && queued.length === 0 && interrupted.length === 0 && completed.length === 0 && failed.length === 0 ? (
+          {running.length === 0 && queued.length === 0 && interrupted.length === 0 && completed.length === 0 && failed.length === 0 && waitingUser.length === 0 && paused.length === 0 && cancelled.length === 0 && queuedDep.length === 0 ? (
             <p role="status" className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
           ) : null}
           <p className="mt-2 px-1 text-[10px] text-muted-foreground/70">点击工作项可在普通模式打开对应会话</p>

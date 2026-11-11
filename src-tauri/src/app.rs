@@ -73,7 +73,9 @@ pub struct TiangongApp {
     /// 全部结束后汇总一轮（设计稿 §9「关键节点必达 / 适时沉默」）。
     central_running_works: Mutex<HashSet<String>>,
     /// 后台工作状态登记（前端「后台工作」状态条数据源；work_id 唯一）。
-    central_work_registry: Mutex<Vec<crate::central::CentralWorkStatus>>,
+    pub(crate) central_work_registry: Mutex<Vec<crate::central::CentralWorkStatus>>,
+    /// 排队依赖的挂起派发（after_work_id 未终态）：依赖终态回调 flush。
+    central_pending_dispatches: Mutex<Vec<crate::central::CentralDispatchRequest>>,
     /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
     central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -202,6 +204,7 @@ impl TiangongApp {
             central_work_reports: std::sync::Arc::new(Mutex::new(Vec::new())),
             central_running_works: Mutex::new(HashSet::new()),
             central_work_registry: Mutex::new(Vec::new()),
+            central_pending_dispatches: Mutex::new(Vec::new()),
             central_watch_slots: Mutex::new(HashMap::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -1023,16 +1026,39 @@ impl TiangongApp {
         notice: &str,
         app: &tauri::AppHandle,
     ) {
+        // 阻塞识别（用户决策协议）：回报含【需要用户决策】→ waiting_user
+        // （未终态），立即注入中枢（阻塞必达），中枢在对话中问用户；
+        let outcome = classify_work_outcome(notice);
         self.central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&request.work_id);
+        // 控制（取消/暂停）守卫：用户已显式取消/暂停的工作，随后的流终态
+        // （Cancel → Done）不得把状态改回 report_queued/failed，也不注入
+        // 「完成」回报（设计稿 §9.4 适时沉默——控制结果徽章可见即可）。
+        let current_state = {
+            let registry = self
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            registry
+                .iter()
+                .rev()
+                .find(|entry| entry.session_id == request.session_id)
+                .map(|entry| entry.state.clone())
+        };
+        if current_state.as_deref() == Some("cancelled")
+            || current_state.as_deref() == Some("paused")
+        {
+            emit_central_work_updated(app);
+            return;
+        }
         self.central_work_reports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(notice.to_string());
-        // 状态登记：失败 → failed（与完成严格分态——review P1：失败必须
-        // 如实呈现，不得混入 completed 绿色）；成功 → report_queued。
+        // 状态登记：等待用户 → waiting_user（未终态）；失败 → failed
+        // （与完成严格分态）；成功 → report_queued。
         {
             let mut registry = self
                 .central_work_registry
@@ -1050,12 +1076,20 @@ impl TiangongApp {
                         .position(|entry| entry.session_id == request.session_id)
                 });
             if let Some(position) = position {
-                registry[position].state = if done {
+                registry[position].state = if matches!(outcome, WorkOutcome::WaitingUser) {
+                    "waiting_user".to_string()
+                } else if done {
                     "report_queued".to_string()
                 } else {
                     "failed".to_string()
                 };
             }
+        }
+        if matches!(outcome, WorkOutcome::WaitingUser) {
+            // 阻塞必达 + 不落终态（等待用户答复后经引导恢复执行）
+            self.deliver_pending_work_reports();
+            emit_central_work_updated(app);
+            return;
         }
         // 持久化终态与成败（重启后徽章按 outcome 重建 completed/failed 分组）
         crate::central::mark_work_item_finished_with_session(
@@ -1073,6 +1107,39 @@ impl TiangongApp {
             self.deliver_pending_work_reports();
         }
         emit_central_work_updated(app);
+    }
+    /// 依赖终态后投递排队工作（在终态回调路径调用；递归走标准派发链）。
+    pub(crate) fn flush_pending_dispatches(&self, finished_work_id: &str, app: &tauri::AppHandle) {
+        let ready: Vec<crate::central::CentralDispatchRequest> = {
+            let mut pending = self
+                .central_pending_dispatches
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let (ready, waiting): (Vec<_>, Vec<_>) = pending
+                .drain(..)
+                .partition(|req| req.after_work_id.as_deref() == Some(finished_work_id));
+            *pending = waiting;
+            ready
+        };
+        for mut request in ready {
+            // 清除依赖标记，递归派发走标准链（不再排队）
+            request.after_work_id = None;
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    handle_central_dispatch(state_of(&app_handle), &app_handle, request.clone())
+                        .await
+                {
+                    tracing::warn!(%error, "排队工作投递失败");
+                    let state = state_of(&app_handle);
+                    let notice = format!(
+                        "[后台工作失败] {}（排队投递失败）\n任务：{}\n失败原因：{error}",
+                        request.work_id, request.task
+                    );
+                    state.on_central_work_finished(&request, false, &notice, &app_handle);
+                }
+            });
+        }
     }
 
     /// 汇报已消费（注入或收集）：report_queued 转为 completed 保留
@@ -1470,7 +1537,7 @@ fn state_of(app: &tauri::AppHandle) -> &TiangongApp {
 }
 
 /// 通知前端后台工作状态已变化（状态条刷新）。
-fn emit_central_work_updated(app: &tauri::AppHandle) {
+pub(crate) fn emit_central_work_updated(app: &tauri::AppHandle) {
     use tauri::Emitter;
     let _ = app.emit("central-work-updated", ());
 }
@@ -1603,6 +1670,9 @@ fn central_dispatch_sender(
                             state.clear_queued_work_reports();
                             emit_central_work_updated(&app);
                         }
+                        crate::central::CentralPluginMessage::Control(control) => {
+                            handle_central_control(state_of(&app), &app, control).await;
+                        }
                     }
                 }
             });
@@ -1623,13 +1693,89 @@ fn self_session_cwd(state: &TiangongApp, session_id: &str) -> Option<String> {
 
 /// 执行中枢派发：创建 Worker 会话（普通能力、全插件、指定模型）投递任务，
 /// 并挂终态 watcher 把结果注入中枢对话。
-/// Worker 派发指令：身份 + 自主决策要求（后台会话无 UI，不得依赖交互
-/// 工具；无法继续的关键阻塞如实写进最终结论，由中枢转述用户裁决）+ 任务。
+/// Worker 派发指令：身份 + 决策协议（对话式：后台无 UI，关键分叉以标记
+/// 上抛，中枢在对话文本中直接问用户——不依赖 request_user 弹层，用户
+/// 裁决暂缓征询功能）+ 任务。
 fn build_worker_instruction(work_id: &str, task: &str) -> String {
     format!(
-        "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n注意：你是后台会话，用户看不到你的界面——不要调用 request_user 等交互工具（无人应答，只会超时失败）。请自主决策完成任务；确因缺少用户决策无法继续时，在最终结论中如实说明阻塞点与建议选项，不要虚构结果。\n\n任务：\n{}",
+        "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n【用户决策协议】你是后台会话，用户看不到你的界面——不要调用 request_user 等交互工具（无人应答，只会超时失败）。请自主决策完成任务；确因必须由用户决策（审批/确认/选择/补充关键信息）才能继续时：1) 以「【需要用户决策】」开头单独一行，完整写出问题（含背景与选项，一次问全）；2) 写完问题立即结束本轮回复；3) 中枢会在对话中直接询问用户，答复会以下一条消息回到本会话，届时继续任务。除关键分叉外应自主决策，最小化打断用户；无法完成时如实说明，不要虚构结果。\n\n任务：\n{}",
         work_id, task
     )
+}
+
+/// 中枢工作控制执行：cancelled/paused 中断运行时，resume 发送继续指令。
+async fn handle_central_control(
+    state: &TiangongApp,
+    app: &tauri::AppHandle,
+    control: crate::central::CentralControlRequest,
+) {
+    let was_running = state
+        .central_running_works
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&control.work_id);
+    match control.action.as_str() {
+        "cancelled" | "paused" => {
+            // 中断当前执行（在跑才发命令；空闲会话只改状态）
+            if was_running {
+                tiangong_core::shared_runtime::send_command(
+                    &control.session_id,
+                    tiangong_core::core::command::Command::Cancel,
+                );
+            }
+            {
+                let mut registry = state
+                    .central_work_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(entry) = registry
+                    .iter_mut()
+                    .rev()
+                    .find(|e| e.session_id == control.session_id)
+                {
+                    entry.state = control.action.clone();
+                }
+            }
+            if control.action == "cancelled" {
+                // 取消是终态：落盘 outcome（重启恢复后显示已取消）
+                crate::central::mark_work_item_finished_with_session(
+                    state.core_manager.storage_root(),
+                    &control.work_id,
+                    Some(&control.session_id),
+                    false,
+                );
+                // outcome 目前只有 completed/failed——取消以显式改写 outcome 表达
+                crate::central::set_work_item_outcome(
+                    state.core_manager.storage_root(),
+                    &control.session_id,
+                    "cancelled",
+                );
+            }
+            tracing::info!(
+                work_id = %control.work_id,
+                action = %control.action,
+                "中枢工作控制已执行"
+            );
+        }
+        "resume" => {
+            // 恢复：向工作会话发送继续指令（复用 Steer 链路，挂回调走回报）
+            let request = crate::central::CentralDispatchRequest {
+                work_id: control.work_id.clone(),
+                session_id: control.session_id.clone(),
+                task: "继续之前暂停的任务：请从中断处继续执行并完成既定目标，已有进展无需重做。"
+                    .to_string(),
+                model: None,
+                cwd: None,
+                after_work_id: None,
+                reused_session: true,
+            };
+            if let Err(error) = handle_central_dispatch(state, app, request.clone()).await {
+                tracing::warn!(%error, work_id = %control.work_id, "恢复指令发送失败");
+            }
+        }
+        _ => {}
+    }
+    emit_central_work_updated(app);
 }
 
 async fn handle_central_dispatch(
@@ -1672,6 +1818,64 @@ async fn handle_central_dispatch(
             ));
         }
     }
+    // 排队依赖：依赖未终态 → 挂起（queued），登记后等依赖终态回调 flush。
+    if let Some(after) = request
+        .after_work_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        let dependency_done = {
+            let registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dep = registry
+                .iter()
+                .rev()
+                .find(|entry| entry.work_id == after || entry.session_id == after);
+            match dep {
+                Some(entry)
+                    if entry.state != "running"
+                        && entry.state != "waiting_user"
+                        && entry.state != "paused" =>
+                {
+                    true
+                }
+                Some(_) => false,
+                None => true,
+            }
+        };
+        if !dependency_done {
+            let mut pending = state
+                .central_pending_dispatches
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            pending.push(request.clone());
+            let mut registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            registry.retain(|entry| entry.session_id != request.session_id);
+            registry.push(crate::central::CentralWorkStatus {
+                work_id: request.work_id.clone(),
+                session_id: request.session_id.clone(),
+                task: format!("[排队] 依赖 {after} 终态后投递：{}", request.task),
+                model: request
+                    .model
+                    .clone()
+                    .or_else(|| Some("路由默认".to_string())),
+                dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                state: "queued".to_string(),
+                reused_session: request.reused_session,
+                last_activity: None,
+            });
+            drop(registry);
+            emit_central_work_updated(app);
+            tracing::info!(work_id = %request.work_id, after = %after, "后台工作已排队（等待依赖终态）");
+            return Ok(());
+        }
+    }
     // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
     // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
     // prompt cache 失效；引导语义也要求保留在途执行）。
@@ -1697,6 +1901,30 @@ async fn handle_central_dispatch(
     let instruction = build_worker_instruction(&request.work_id, &request.task);
     let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
 
+    // 用户答复/引导送达：目标会话存在 waiting_user（等用户决策）条目时，
+    // 本轮终态归属该主 work——恢复 running 并复用其 work_id/task 挂回调
+    // 与登记（不另立条目），回复链完整闭合到原工作。
+    let mut merged_work = request.clone();
+    if request.reused_session {
+        let mut registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(position) = registry
+            .iter()
+            .rposition(|entry| entry.session_id == sid && entry.state == "waiting_user")
+        {
+            registry[position].state = "running".to_string();
+            merged_work.work_id = registry[position].work_id.clone();
+            merged_work.task = registry[position].task.clone();
+            tracing::info!(
+                work_id = %merged_work.work_id,
+                session_id = %sid,
+                "等待用户决策的工作已收到答复，恢复执行"
+            );
+        }
+    }
+
     if state.core_manager.has_live_core(&sid) {
         // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
         // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
@@ -1710,7 +1938,7 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
-        attach_work_finished_callback(&slot, app, request.clone());
+        attach_work_finished_callback(&slot, app, merged_work.clone());
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
@@ -1734,7 +1962,7 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
-        attach_work_finished_callback(&slot, app, request.clone());
+        attach_work_finished_callback(&slot, app, merged_work.clone());
     }
     tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
     // 给 Worker 会话写可识别标题（仅新建会话；复用/引导保留原标题）。
@@ -1751,42 +1979,47 @@ async fn handle_central_dispatch(
             .central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        running.insert(request.work_id.clone());
+        running.insert(merged_work.work_id.clone());
     }
     // 状态登记按**会话维度 upsert**（用户实测：同会话重派后旧 interrupted
     // 条目残留、多轮派发显示多条）——一个工作会话在徽章中始终是一条，
     // 重派/引导覆盖更新（work_id/task/时间取最新），中断旧条目自然消失。
-    {
-        let mut registry = state
-            .central_work_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(position) = registry
-            .iter()
-            .position(|entry| entry.session_id == request.session_id)
+    // waiting_user 恢复（merged）时条目已在上方更新为 running，不重建。
+    let merged_into_existing = merged_work.work_id != request.work_id;
+    if !merged_into_existing {
         {
-            registry.remove(position);
+            let mut registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(position) = registry
+                .iter()
+                .position(|entry| entry.session_id == request.session_id)
+            {
+                registry.remove(position);
+            }
+            registry.push(crate::central::CentralWorkStatus {
+                work_id: request.work_id.clone(),
+                session_id: request.session_id.clone(),
+                task: request.task.clone(),
+                model: if request.reused_session {
+                    // 复用实际沿用会话既有模型（review M5：登记不得谎报请求模型）
+                    Some(format!(
+                        "会话既有模型（已忽略 {}）",
+                        request.model.as_deref().unwrap_or("默认")
+                    ))
+                } else {
+                    request
+                        .model
+                        .clone()
+                        .or_else(|| Some("路由默认".to_string()))
+                },
+                dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                state: "running".to_string(),
+                reused_session: request.reused_session,
+                last_activity: None,
+            });
         }
-        registry.push(crate::central::CentralWorkStatus {
-            work_id: request.work_id.clone(),
-            session_id: request.session_id.clone(),
-            task: request.task.clone(),
-            model: if request.reused_session {
-                // 复用实际沿用会话既有模型（review M5：登记不得谎报请求模型）
-                Some(format!(
-                    "会话既有模型（已忽略 {}）",
-                    request.model.as_deref().unwrap_or("默认")
-                ))
-            } else {
-                request
-                    .model
-                    .clone()
-                    .or_else(|| Some("路由默认".to_string()))
-            },
-            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            state: "running".to_string(),
-            reused_session: request.reused_session,
-        });
     }
     emit_central_work_updated(app);
     Ok(())
@@ -1805,9 +2038,29 @@ fn attach_work_finished_callback(
             let state = state_of(&callback_app);
             let notice = build_work_notice(state, &work, done, &reason);
             state.on_central_work_finished(&work, done, &notice, &callback_app);
+            // 依赖本工作的排队项：终态后自动投递
+            state.flush_pending_dispatches(&work.work_id, &callback_app);
         }));
 }
 
+/// 后台工作回报分类（Worker 用户决策协议，对话式）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkOutcome {
+    /// 正常终态（成功或失败）
+    Finished,
+    /// 等待用户决策：Worker 以【需要用户决策】标记结束本轮，由中枢在
+    /// 对话文本中直接询问用户（不依赖 request_user——用户裁决暂缓征询
+    /// 弹层），答复经 send_to_worker 回传后恢复执行。
+    WaitingUser,
+}
+/// 依据回报文本判定工作结局（可单测的纯函数）。
+fn classify_work_outcome(notice: &str) -> WorkOutcome {
+    if notice.contains("【需要用户决策】") {
+        WorkOutcome::WaitingUser
+    } else {
+        WorkOutcome::Finished
+    }
+}
 /// 回报是否应立即注入汇报：失败必达；成功仅在无其他在执行任务时
 /// 触发汇总轮（否则暂存等待汇总，或用户消息/询问兜底消费）。
 fn should_deliver_work_reports_now(done: bool, has_running_work: bool) -> bool {
@@ -2005,14 +2258,33 @@ mod tests {
         ));
     }
 
-    /// Worker 指令：禁用交互工具（后台无 UI）+ 阻塞如实说明，不虚构结果。
+    /// Worker 指令：决策协议（对话式）——禁交互工具 + 标记格式 + 答复回流。
     #[test]
-    fn worker_instruction_forbids_interaction_tools() {
+    fn worker_instruction_carries_decision_protocol() {
         let instruction = build_worker_instruction("work-abc", "执行数据库迁移");
         assert!(instruction.contains("work-abc"));
         assert!(instruction.contains("执行数据库迁移"));
         assert!(instruction.contains("不要调用 request_user"));
+        assert!(instruction.contains("【需要用户决策】"));
+        assert!(instruction.contains("以下一条消息回到本会话"));
         assert!(instruction.contains("不要虚构结果"));
+    }
+
+    /// 阻塞识别：含【需要用户决策】→ WaitingUser（未终态），其余终态。
+    #[test]
+    fn work_outcome_classifies_waiting_user() {
+        assert_eq!(
+            classify_work_outcome("[后台工作完成] work-1\n结论：一切正常"),
+            WorkOutcome::Finished
+        );
+        assert_eq!(
+            classify_work_outcome("[后台工作失败] work-2\n失败原因：超时"),
+            WorkOutcome::Finished
+        );
+        assert_eq!(
+            classify_work_outcome("[后台工作完成] work-3\n【需要用户决策】\n问题：是否继续？"),
+            WorkOutcome::WaitingUser
+        );
     }
 
     #[test]
