@@ -14,7 +14,7 @@ import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
 import {
   ensureCentralConversation,
   restoreFromCentralConversation,
-} from '@/lib/centralConversation';
+} from '@/lib/central/centralConversation';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';

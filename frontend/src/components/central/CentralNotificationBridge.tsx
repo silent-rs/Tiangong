@@ -4,7 +4,7 @@
  */
 import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { useToast } from './Toast';
+import { useToast } from '../Toast';
 
 interface CentralNotification {
   title: string;

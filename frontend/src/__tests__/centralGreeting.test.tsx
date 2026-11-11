@@ -30,7 +30,7 @@ vi.mock('@/components/central/CentralChatInput', () => ({
 
 const { CentralModeView } = await import('@/components/central/CentralModeView');
 const { useStore } = await import('@/store/useStore');
-const { CENTRAL_SESSION_ID } = await import('@/lib/centralSession');
+const { CENTRAL_SESSION_ID } = await import('@/lib/central/centralSession');
 
 function mountView(): () => void {
   const container = document.createElement('div');

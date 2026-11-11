@@ -20,7 +20,7 @@ vi.mock('@/api/tauri', () => ({
   },
 }));
 
-vi.mock('@/lib/centralConversation', () => ({
+vi.mock('@/lib/central/centralConversation', () => ({
   restoreFromCentralConversation: vi.fn(() => Promise.resolve()),
 }));
 

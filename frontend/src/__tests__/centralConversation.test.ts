@@ -28,12 +28,12 @@ vi.mock('@/api/tauri', () => {
 
 const { useStore } = await import('@/store/useStore');
 const { api } = await import('@/api/tauri');
-const { CENTRAL_SESSION_ID } = await import('@/lib/centralSession');
+const { CENTRAL_SESSION_ID } = await import('@/lib/central/centralSession');
 const {
   __resetCentralConversationForTests,
   ensureCentralConversation,
   restoreFromCentralConversation,
-} = await import('@/lib/centralConversation');
+} = await import('@/lib/central/centralConversation');
 const { CENTRAL_DEFAULT_GREETING } = await import('@/components/central/centralGreeting');
 const getSessionsMock = vi.mocked(api.getSessions);
 const getDefaultReasoningEffortMock = vi.mocked(api.getDefaultReasoningEffort);

@@ -1,6 +1,6 @@
 import { MainApp } from './pages/MainApp'
 import { ToastProvider } from './components/Toast'
-import { CentralNotificationBridge } from './components/CentralNotificationBridge'
+import { CentralNotificationBridge } from './components/central/CentralNotificationBridge'
 import { StartupPrepareGate } from './components/StartupPrepareGate'
 import { useTheme } from './hooks/useTheme'
 

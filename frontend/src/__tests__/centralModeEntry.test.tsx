@@ -109,8 +109,8 @@ const { useCentralMode, useCentralModeHotkey } = await import('@/hooks/useCentra
 const {
   CENTRAL_MODE_STORAGE_KEY,
   readPersistedCentralMode,
-} = await import('@/lib/centralModePreference');
-const { CENTRAL_SESSION_ID } = await import('@/lib/centralSession');
+} = await import('@/lib/central/centralModePreference');
+const { CENTRAL_SESSION_ID } = await import('@/lib/central/centralSession');
 const { useStore } = await import('@/store/useStore');
 
 /** 宿主形态注入：desktop（默认）/ web 配置页 / 远程 H5。 */

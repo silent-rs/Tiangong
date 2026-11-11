@@ -32,7 +32,7 @@ vi.mock('@/api/tauri', async (importOriginal) => {
 });
 
 const { CentralChatInput } = await import('@/components/central/CentralChatInput');
-const { CENTRAL_SESSION_ID } = await import('@/lib/centralSession');
+const { CENTRAL_SESSION_ID } = await import('@/lib/central/centralSession');
 const { useStore } = await import('@/store/useStore');
 
 function mountInput(): { unmount: () => void; textarea: () => HTMLTextAreaElement; send: () => void } {

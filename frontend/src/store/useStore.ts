@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
-import { persistCentralMode, readPersistedCentralMode } from '../lib/centralModePreference';
-import { CENTRAL_SESSION_ID } from '../lib/centralSession';
+import { persistCentralMode, readPersistedCentralMode } from '../lib/central/centralModePreference';
+import { CENTRAL_SESSION_ID } from '../lib/central/centralSession';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {

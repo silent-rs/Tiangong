@@ -83,7 +83,7 @@ vi.mock('@tauri-apps/api/webview', () => ({
 vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 
 const { useStore } = await import('@/store/useStore');
-const { CENTRAL_MODE_STORAGE_KEY } = await import('@/lib/centralModePreference');
+const { CENTRAL_MODE_STORAGE_KEY } = await import('@/lib/central/centralModePreference');
 
 let cleanup: (() => void) | undefined;
 

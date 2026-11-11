@@ -11,7 +11,7 @@ import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
 import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
-import { restoreFromCentralConversation } from '@/lib/centralConversation';
+import { restoreFromCentralConversation } from '@/lib/central/centralConversation';
 
 interface CentralWorkStatus {
   work_id: string;
