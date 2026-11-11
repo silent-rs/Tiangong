@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import { restoreFromCentralConversation } from '@/lib/centralConversation';
 
 interface CentralWorkStatus {
@@ -19,7 +19,7 @@ interface CentralWorkStatus {
   task: string;
   model: string | null;
   dispatched_at: string;
-  state: 'running' | 'report_queued' | 'interrupted' | 'completed';
+  state: 'running' | 'report_queued' | 'interrupted' | 'completed' | 'failed';
   reused_session: boolean;
 }
 
@@ -35,6 +35,7 @@ function WorkItemRow({
   const running = item.state === 'running';
   const interrupted = item.state === 'interrupted';
   const completedState = item.state === 'completed';
+  const failedState = item.state === 'failed';
   return (
     <div
       onClick={() => onOpen?.(item.session_id)}
@@ -53,7 +54,9 @@ function WorkItemRow({
             ? 'border-border/60 bg-muted/30 opacity-80'
             : completedState
               ? 'border-emerald-500/25 bg-emerald-500/[0.04] hover:border-emerald-500/40'
-              : 'border-amber-500/25 bg-amber-500/[0.05] hover:border-amber-500/45'
+              : failedState
+                ? 'border-red-500/30 bg-red-500/[0.05] hover:border-red-500/50'
+                : 'border-amber-500/25 bg-amber-500/[0.05] hover:border-amber-500/45'
       }`}
     >
       <div className="flex items-center justify-between gap-2">
@@ -65,7 +68,9 @@ function WorkItemRow({
                 ? 'text-muted-foreground'
                 : completedState
                   ? 'text-emerald-600 dark:text-emerald-400'
-                  : 'text-amber-600 dark:text-amber-400'
+                  : failedState
+                    ? 'text-red-600 dark:text-red-400'
+                    : 'text-amber-600 dark:text-amber-400'
           }`}
         >
           {running ? (
@@ -82,6 +87,11 @@ function WorkItemRow({
             <>
               <CheckCircle2 className="h-3.5 w-3.5" />
               已完成
+            </>
+          ) : failedState ? (
+            <>
+              <XCircle className="h-3.5 w-3.5" />
+              失败
             </>
           ) : (
             <>
@@ -192,10 +202,15 @@ export function CentralWorkStatusBar() {
       const store = useStore.getState();
       if (store.centralMode) {
         store.setCentralMode(false);
-        // 等 restore 完成再切目标会话（显式调用幂等，保证顺序）
-        await restoreFromCentralConversation().catch(() => undefined);
+        // 等 restore 完成再切目标会话（显式调用幂等，保证顺序）；
+        // 失败记录控制台（review：静默吞错掩盖跳转问题）
+        await restoreFromCentralConversation().catch((error: unknown) => {
+          console.error('[CentralWorkStatusBar] 恢复普通会话失败', error);
+        });
       }
-      await useStore.getState().switchSession(sessionId).catch(() => undefined);
+      await useStore.getState().switchSession(sessionId).catch((error: unknown) => {
+        console.error('[CentralWorkStatusBar] 切换工作会话失败', sessionId, error);
+      });
     },
     [],
   );
@@ -206,6 +221,7 @@ export function CentralWorkStatusBar() {
   const queued = items.filter((item) => item.state === 'report_queued');
   const interrupted = items.filter((item) => item.state === 'interrupted');
   const completed = items.filter((item) => item.state === 'completed');
+  const failed = items.filter((item) => item.state === 'failed');
 
   const totalCount = items.length;
   return (
@@ -270,6 +286,7 @@ export function CentralWorkStatusBar() {
         <div className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
           <WorkGroups
             running={running}
+            failed={failed}
             queued={queued}
             interrupted={interrupted}
             completed={completed}
@@ -298,6 +315,7 @@ export function CentralWorkStatusBar() {
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <WorkGroups
               running={running}
+              failed={failed}
               queued={queued}
               interrupted={interrupted}
               completed={completed}
@@ -313,12 +331,14 @@ export function CentralWorkStatusBar() {
 /// 分组渲染（浮层与抽屉共用）。
 function WorkGroups({
   running,
+  failed,
   queued,
   interrupted,
   completed,
   onOpen,
 }: {
   running: CentralWorkStatus[];
+  failed: CentralWorkStatus[];
   queued: CentralWorkStatus[];
   interrupted: CentralWorkStatus[];
   completed: CentralWorkStatus[];
@@ -358,6 +378,25 @@ function WorkGroups({
               </header>
               <div className="space-y-2">
                 {queued.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {failed.length > 0 ? (
+            <section className="mt-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <XCircle className="h-3.5 w-3.5 text-red-500" />
+                  失败
+                </h3>
+                <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-medium tabular-nums text-red-600 dark:text-red-400">
+                  {failed.length}
+                </span>
+              </header>
+              <div className="space-y-2">
+                {failed.map((item) => (
                   <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
                 ))}
               </div>
@@ -409,7 +448,7 @@ function WorkGroups({
             </section>
           ) : null}
 
-          {running.length === 0 && queued.length === 0 && interrupted.length === 0 && completed.length === 0 ? (
+          {running.length === 0 && queued.length === 0 && interrupted.length === 0 && completed.length === 0 && failed.length === 0 ? (
             <p role="status" className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
           ) : null}
           <p className="mt-2 px-1 text-[10px] text-muted-foreground/70">点击工作项可在普通模式打开对应会话</p>

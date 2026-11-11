@@ -907,11 +907,24 @@ impl TiangongApp {
                     %reason,
                     "中枢会话模型不可用，回退默认对话模型（§15.12 中枢不掉线）"
                 );
-                self.core_manager
-                    .resolve_turn_model(None)
-                    .map_err(|fallback_error| {
-                        format!("中枢模型不可用（{reason}），默认模型回退也失败：{fallback_error}")
-                    })?
+                let fallback =
+                    self.core_manager
+                        .resolve_turn_model(None)
+                        .map_err(|fallback_error| {
+                            format!(
+                                "中枢模型不可用（{reason}），默认模型回退也失败：{fallback_error}"
+                            )
+                        })?;
+                // 回退事实注入中枢回报队列：随下一条用户消息进入中枢对话，
+                // 由中枢向用户说明（不再是只写日志的「首个可用机会」空承诺）。
+                let model_note = format!(
+                    "[系统中枢] 配置的中枢模型不可用（{reason}），本轮已自动回退默认模型；如需更换请调整设置。"
+                );
+                self.central_work_reports
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(model_note);
+                fallback
             }
         };
         let core = tiangong_core::core::TiangongCore::builder()
@@ -1018,7 +1031,8 @@ impl TiangongApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(notice.to_string());
-        // 状态登记：running → report_queued（若本轮即注入汇报则随后清除）
+        // 状态登记：失败 → failed（与完成严格分态——review P1：失败必须
+        // 如实呈现，不得混入 completed 绿色）；成功 → report_queued。
         {
             let mut registry = self
                 .central_work_registry
@@ -1028,7 +1042,11 @@ impl TiangongApp {
                 .iter_mut()
                 .find(|entry| entry.work_id == request.work_id)
             {
-                entry.state = "report_queued".to_string();
+                entry.state = if done {
+                    "report_queued".to_string()
+                } else {
+                    "failed".to_string()
+                };
             }
         }
         // 持久化终态（重启恢复依据：无终态的近期登记按已中断处理）
@@ -1060,17 +1078,19 @@ impl TiangongApp {
                 entry.state = "completed".to_string();
             }
         }
-        let completed_count = registry.iter().filter(|e| e.state == "completed").count();
-        if completed_count > 10 {
-            let mut to_remove = completed_count - 10;
-            registry.retain(|entry| {
-                if entry.state == "completed" && to_remove > 0 {
-                    to_remove -= 1;
-                    false
-                } else {
-                    true
-                }
-            });
+        for state in ["completed", "failed"] {
+            let count = registry.iter().filter(|e| e.state == state).count();
+            if count > 10 {
+                let mut to_remove = count - 10;
+                registry.retain(|entry| {
+                    if entry.state == state && to_remove > 0 {
+                        to_remove -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
     }
 
@@ -1770,18 +1790,15 @@ fn build_work_notice(
     }
 }
 /// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
+/// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
+///
+/// 状态码按「词边界 + HTTP 语境窗口」匹配，避免「500 个文件」「401 行」
+/// 这类纯数字文本误判（review：判定过宽）；词形标记保持子串匹配。
 fn failure_looks_model_related(reason: &str) -> bool {
     let lower = reason.to_lowercase();
     const MARKERS: &[&str] = &[
         "timeout",
         "超时",
-        "429",
-        "401",
-        "403",
-        "500",
-        "502",
-        "503",
-        "504",
         "rate limit",
         "rate_limit",
         "限流",
@@ -1797,15 +1814,52 @@ fn failure_looks_model_related(reason: &str) -> bool {
         "tls",
         "ssl",
         "网络",
-        "provider",
         "provider error",
-        "模型",
         "model not",
         "context length",
         "上下文长度",
         "overloaded",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "too many requests",
+        "请求过于频繁",
+        "服务器错误",
     ];
-    MARKERS.iter().any(|marker| lower.contains(marker))
+    if MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    // 状态码：词边界（前后非数字）+ HTTP 语境（前后窗口含 http/api/status/
+    // code/error/错误/状态码/服务器/请求 之一）——「已扫描 500 个文件」
+    // 这类纯数字文本不再误判（review：判定过宽）。
+    const CODES: &[&str] = &["429", "401", "403", "500", "502", "503", "504"];
+    const CONTEXT: &[&str] = &[
+        "http",
+        "api",
+        "status",
+        "code",
+        "error",
+        "错误",
+        "状态码",
+        "服务器",
+        "请求",
+    ];
+    let bytes = lower.as_bytes();
+    CODES.iter().any(|code| {
+        lower.match_indices(code).any(|(idx, _)| {
+            let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_digit();
+            let end = idx + code.len();
+            let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+            if !(before_ok && after_ok) {
+                return false;
+            }
+            let window_start = idx.saturating_sub(16);
+            let window_end = (end + 16).min(lower.len());
+            let window = &lower[window_start..window_end];
+            CONTEXT.iter().any(|context| window.contains(context))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1834,8 +1888,14 @@ mod tests {
         assert!(failure_looks_model_related("429 Too Many Requests"));
         assert!(failure_looks_model_related("连接被对端重置"));
         assert!(failure_looks_model_related("API 返回 500"));
+        assert!(failure_looks_model_related("internal server error"));
         assert!(!failure_looks_model_related("工作目录不存在：/tmp/missing"));
         assert!(!failure_looks_model_related("任务要求删除文件被拒绝"));
+        // review：判定过宽——词边界收紧后的负例
+        assert!(!failure_looks_model_related("已扫描 500 个文件，全部通过"));
+        assert!(!failure_looks_model_related(
+            "文件共 40110 行，超出行数预算"
+        ));
     }
 
     /// Worker 指令：禁用交互工具（后台无 UI）+ 阻塞如实说明，不虚构结果。

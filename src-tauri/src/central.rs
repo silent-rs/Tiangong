@@ -303,37 +303,74 @@ fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path::Pat
         .into_iter()
         .filter(|item| seen.insert(item.clone()))
         .collect();
-    if let Some(parent) = confirmed_workspaces_path(storage_root).parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let path = confirmed_workspaces_path(storage_root);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!(%error, path = %path.display(), "已确认工作区目录创建失败");
+        }
     }
-    if let Ok(text) = serde_json::to_string_pretty(
+    let text = match serde_json::to_string_pretty(
         &list
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect::<Vec<String>>(),
     ) {
-        let _ = std::fs::write(confirmed_workspaces_path(storage_root), text);
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(%error, "已确认工作区序列化失败，未落盘");
+            return;
+        }
+    };
+    // 原子写：tmp + rename（与派发登记一致，失败记日志不吞错）
+    let tmp_path = path.with_extension("json.tmp");
+    if let Err(error) = std::fs::write(&tmp_path, text) {
+        tracing::warn!(%error, path = %tmp_path.display(), "已确认工作区临时文件写入失败");
+        return;
+    }
+    if let Err(error) = std::fs::rename(&tmp_path, &path) {
+        tracing::warn!(%error, from = %tmp_path.display(), to = %path.display(), "已确认工作区原子替换失败");
     }
 }
 
-/// 工作区是否已被用户确认可用（默认工作区天然已确认）。
+/// 路径规范化（canonicalize 失败退回原样，比较仍可进行）。
+fn canonical_path_string(path: &str) -> String {
+    std::path::Path::new(path.trim())
+        .canonicalize()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.trim().to_string())
+}
+
+/// 工作区是否已被用户确认可用。
+///
+/// 天然已确认：默认工作区**及其子目录**（应用级选择的根，其子树均属
+/// 既定授权范围，按前缀判定而非精确相等——review P1：精确比较会把
+/// 默认工作区内的子目录误拦为「新工作区」）。
+/// 其余目录：须在 confirmed-workspaces.json 登记（登记与判定双向
+/// canonicalize，符号链接/尾斜杠不产生绕过）。
 fn workspace_confirmed(
     storage_root: &std::path::Path,
     default_workspace: &str,
     target: &str,
 ) -> bool {
     let target = target.trim();
-    if target.is_empty() || target == default_workspace.trim() {
+    if target.is_empty() {
         return true;
     }
-    let canonical_target = std::path::Path::new(target)
-        .canonicalize()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| target.to_string());
+    let canonical_target = canonical_path_string(target);
+    let canonical_default = canonical_path_string(default_workspace);
+    // 默认工作区子树：canonical 前缀 + '/' 边界（防 /a-b 误匹配 /a）
+    if canonical_target == canonical_default
+        || canonical_target
+            .strip_prefix(&canonical_default)
+            .is_some_and(|rest| rest.starts_with('/'))
+    {
+        return true;
+    }
     load_confirmed_workspaces(storage_root)
         .iter()
         .any(|confirmed| {
-            confirmed.to_string_lossy() == canonical_target || confirmed.to_string_lossy() == target
+            let confirmed = confirmed.to_string_lossy();
+            confirmed == canonical_target || confirmed == target
         })
 }
 
@@ -529,18 +566,24 @@ impl CentralPlugin {
         }
         // Workspace 确认（§资源边界）：向非默认工作区派发前，该工作区必须
         // 已经用户确认（confirm_workspace 登记过）。机制级拦截——提示式
-        // 兜底会被模型忽略（强制复用同款教训）。
-        if let Some(cwd) = cwd
-            .map(str::trim)
-            .filter(|cwd| !cwd.is_empty() && *cwd != self.workspace_dir)
-        {
-            if !workspace_confirmed(self.sessions.storage_root(), &self.workspace_dir, cwd) {
-                return self.error_result(format!(
-                    "工作区 {cwd} 尚未经用户确认。请先在对话中向用户确认\n\
-                     （说明要在该目录执行后台工作及任务概要），用户同意后调用\n\
-                     confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
-                ));
+        // 兜底会被模型忽略（强制复用同款教训）。默认工作区及其子树按
+        // 前缀天然放行（workspace_confirmed 内判定）。
+        let unconfirmed = |dir: &str| -> Option<String> {
+            let dir = dir.trim();
+            if dir.is_empty() {
+                return None;
             }
+            if workspace_confirmed(self.sessions.storage_root(), &self.workspace_dir, dir) {
+                return None;
+            }
+            Some(dir.to_string())
+        };
+        if let Some(cwd) = cwd.and_then(unconfirmed) {
+            return self.error_result(format!(
+                "工作区 {cwd} 尚未经用户确认。请先在对话中向用户确认\n\
+                 （说明要在该目录执行后台工作及任务概要），用户同意后调用\n\
+                 confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
+            ));
         }
         // 模型校验（白名单 §5.3：派发前确认模型可用；失败时附可用清单）
         if let Some(model) = model.filter(|key| !key.trim().is_empty()) {
@@ -568,6 +611,23 @@ impl CentralPlugin {
             {
                 return self.error_result(format!(
                     "复用的会话不存在：{existing}（可用 list_sessions 查询近期会话）"
+                ));
+            }
+            // 复用路径的 Workspace 确认（review P1 补齐）：复用会话沿用其
+            // 自身 cwd 派发——该目录同样必须已确认，否则「被拒新目录派发
+            // →复用旧会话」成为绕过通道（强制复用把模型恰好赶向这条路）。
+            let session_cwd = tiangong_core_manager::SessionMetadata::load_from_storage(
+                self.sessions.storage_root(),
+                existing,
+            )
+            .ok()
+            .map(|meta| meta.cwd)
+            .unwrap_or_default();
+            if let Some(dir) = unconfirmed(&session_cwd) {
+                return self.error_result(format!(
+                    "复用会话 {existing} 的工作目录 {dir} 尚未经用户确认。请先在\n\
+                     对话中向用户确认（说明任务概要），同意后调用\n\
+                     confirm_workspace(path=\"{dir}\") 登记，再重新派发。"
                 ));
             }
         }
@@ -1909,12 +1969,64 @@ mod tests {
         // 最旧的 sess-0 已被裁剪
         assert!(!items.iter().any(|item| item.session_id == "sess-0"));
     }
+    /// 工作区确认判定：默认工作区子树按前缀放行（含子目录）；同级近名
+    /// 目录不误放行；登记目录 canonicalize 精确匹配。
+    #[test]
+    fn workspace_confirmation_prefix_and_canonical() {
+        let root = tempfile::tempdir().unwrap();
+        let default_ws = tempfile::tempdir().unwrap(); // 默认工作区（真实存在，canonicalize 生效）
+        let default = default_ws.path().to_string_lossy().to_string();
+        let inside = default_ws.path().join("sub").join("proj");
+        std::fs::create_dir_all(&inside).unwrap();
+        // 默认工作区与其子目录：天然已确认
+        assert!(workspace_confirmed(root.path(), &default, &default));
+        assert!(workspace_confirmed(
+            root.path(),
+            &default,
+            &inside.to_string_lossy()
+        ));
+        // 同级近名目录（/x-pro 不是 /x 子树）：不放行
+        let near = default_ws.path().parent().unwrap().join(format!(
+            "{}-near",
+            default_ws.path().file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!workspace_confirmed(
+            root.path(),
+            &default,
+            &near.to_string_lossy()
+        ));
+        // 未登记的无关目录：不放行
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().canonicalize().unwrap();
+        assert!(!workspace_confirmed(
+            root.path(),
+            &default,
+            &outside_path.to_string_lossy()
+        ));
+        // 登记（canonicalize 落盘）后：原样路径与带尾斜杠变体均放行
+        std::fs::create_dir_all(root.path().join("central")).unwrap();
+        std::fs::write(
+            confirmed_workspaces_path(root.path()),
+            serde_json::to_string(&vec![outside_path.to_string_lossy().to_string()]).unwrap(),
+        )
+        .unwrap();
+        assert!(workspace_confirmed(
+            root.path(),
+            &default,
+            &outside_path.to_string_lossy()
+        ));
+    }
+
     /// Workspace 确认交互：未确认的 cwd 拒绝 → confirm_workspace 登记 → 放行；
-    /// 默认工作区与已确认目录无需确认。
+    /// 默认工作区与已确认目录无需确认；复用会话的 cwd 同样校验；
+    /// 不存在的目录拒绝登记。
     #[test]
     fn dispatch_requires_workspace_confirmation() {
         let root = tempfile::tempdir().unwrap();
-        let manager = manager_with_session_cwds(root.path(), &[]);
+        // 预置会话 s0（cwd 指向未确认目录，供复用路径校验测试）
+        let pending = tempfile::tempdir().unwrap();
+        let pending_path = pending.path().to_string_lossy().to_string();
+        let manager = manager_with_session_cwds(root.path(), &[&pending_path]);
         std::fs::write(
             root.path().join("models.json"),
             serde_json::json!({
@@ -1961,6 +2073,30 @@ mod tests {
         );
         assert!(allowed.ok, "stderr: {}", allowed.stderr);
         assert!(!allowed.stderr.contains("尚未经用户确认"));
+        // 复用路径同样校验（review P1：强制复用把模型赶向复用，该路径
+        // 不得成为绕过通道）——会话 cwd 未确认时复用派发被拒
+        let reuse = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "扫描依赖并升级（复用）", "session_id": "s0"}),
+        );
+        assert!(
+            !reuse.ok,
+            "复用未确认 cwd 的会话必须被拒绝：{}",
+            reuse.stderr
+        );
+        assert!(
+            reuse.stderr.contains("未经用户确认"),
+            "复用拒绝须说明确认流程：{}",
+            reuse.stderr
+        );
+        // 不存在的目录拒绝登记
+        let ghost = call_tool(
+            &plugin,
+            "confirm_workspace",
+            serde_json::json!({"path": "/definitely/not/exist/xyz"}),
+        );
+        assert!(!ghost.ok, "不存在目录不得登记为已确认工作区");
     }
 
     /// 相似任务强制复用：同前缀第二次（不带 session_id/【全新】）拒绝，
@@ -1968,7 +2104,8 @@ mod tests {
     #[test]
     fn dispatch_similarity_hint_excludes_self() {
         let root = tempfile::tempdir().unwrap();
-        let manager = manager_with_session_cwds(root.path(), &[]);
+        // 预置会话 s0（cwd=默认工作区）：复用链路的真实目标
+        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
         std::fs::write(
             root.path().join("models.json"),
             serde_json::json!({
@@ -1980,33 +2117,20 @@ mod tests {
         )
         .unwrap();
         let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 首次派发（复用 s0）：无相似历史，不得自匹配拒绝
         let first = call_tool(
             &plugin,
             "dispatch_work",
-            serde_json::json!({"task": "Review 天工仓库的分支开发情况"}),
+            serde_json::json!({"task": "Review 天工仓库的分支开发情况", "session_id": "s0"}),
         );
         assert!(first.ok, "stderr: {}", first.stderr);
         assert!(
-            !first.stdout.contains("高度相似"),
+            !first.stderr.contains("高度相似"),
             "首次派发不得自匹配：{}",
-            first.stdout
+            first.stderr
         );
-        // 从首次派发结果中取会话 id，供后续复用断言使用
-        let first_session: Option<String> =
-            serde_json::from_str::<serde_json::Value>(&first.stdout)
-                .ok()
-                .and_then(|v| {
-                    v.get("session_id")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            v.get("work")
-                                .and_then(|w| w.get("session_id"))
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string())
-                        })
-                });
-        // 强制复用：同前缀任务且未带 session_id、未标【全新】时必须拒绝
+        // 强制复用：同前缀任务且未带 session_id、未标【全新】时必须拒绝，
+        // 且拒绝信息必须指向 s0（从登记取真相源，不做纯文本解析）
         let second = call_tool(
             &plugin,
             "dispatch_work",
@@ -2023,35 +2147,33 @@ mod tests {
             second.stderr
         );
         assert!(
-            second.stderr.contains("session_id"),
-            "拒绝信息必须指明带 session_id 重发：{}",
+            second.stderr.contains("session_id=s0"),
+            "拒绝信息必须指明带 session_id=s0 重发：{}",
             second.stderr
         );
-        // 带 session_id 重发同前缀任务：放行且标记复用
-        if let Some(session) = first_session.clone() {
-            let third = call_tool(
-                &plugin,
-                "dispatch_work",
-                serde_json::json!({"task": "Review 天工仓库的分支开发情况（增量）", "session_id": session}),
-            );
-            assert!(third.ok);
-            assert!(
-                !third.stdout.contains("高度相似"),
-                "显式指定 session_id 不得被拒绝：{}",
-                third.stdout
-            );
-        }
+        // 带 session_id 重发同前缀任务：放行（无条件执行，不可静默跳过）
+        let third = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "Review 天工仓库的分支开发情况（增量）", "session_id": "s0"}),
+        );
+        assert!(third.ok, "stderr: {}", third.stderr);
+        assert!(
+            !third.stderr.contains("高度相似"),
+            "显式指定 session_id 不得被拒绝：{}",
+            third.stderr
+        );
         // 【全新】标记：跳过相似拒绝，允许无关的全新工作
         let fourth = call_tool(
             &plugin,
             "dispatch_work",
             serde_json::json!({"task": "【全新】Review 天工仓库的分支开发情况"}),
         );
-        assert!(fourth.ok);
+        assert!(fourth.ok, "stderr: {}", fourth.stderr);
         assert!(
-            !fourth.stdout.contains("高度相似"),
+            !fourth.stderr.contains("高度相似"),
             "【全新】标记必须放行：{}",
-            fourth.stdout
+            fourth.stderr
         );
     }
 }
