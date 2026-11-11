@@ -1012,7 +1012,11 @@ impl TiangongApp {
             }
         }
         // 持久化终态（重启恢复依据：无终态的近期登记按已中断处理）
-        crate::central::mark_work_item_finished(self.core_manager.storage_root(), &request.work_id);
+        crate::central::mark_work_item_finished_with_session(
+            self.core_manager.storage_root(),
+            &request.work_id,
+            Some(&request.session_id),
+        );
         let has_running = !self
             .central_running_works
             .lock()
@@ -1024,12 +1028,30 @@ impl TiangongApp {
         emit_central_work_updated(app);
     }
 
-    /// 汇报已消费（注入或收集）：清除全部 report_queued 登记。
+    /// 汇报已消费（注入或收集）：report_queued 转为 completed 保留
+    /// （正常完成的工作留在清单可见），超出最近 10 个的旧 completed 移除。
     pub(crate) fn clear_queued_work_reports(&self) {
-        self.central_work_registry
+        let mut registry = self
+            .central_work_registry
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|entry| entry.state != "report_queued");
+            .unwrap_or_else(|e| e.into_inner());
+        for entry in registry.iter_mut() {
+            if entry.state == "report_queued" {
+                entry.state = "completed".to_string();
+            }
+        }
+        let completed_count = registry.iter().filter(|e| e.state == "completed").count();
+        if completed_count > 10 {
+            let mut to_remove = completed_count - 10;
+            registry.retain(|entry| {
+                if entry.state == "completed" && to_remove > 0 {
+                    to_remove -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 
     /// 后台工作状态登记快照（前端状态条数据源）。

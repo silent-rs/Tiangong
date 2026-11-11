@@ -195,20 +195,41 @@ fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) {
 
 /// 更新某条登记的终态时间并落盘。
 pub fn mark_work_item_finished(storage_root: &std::path::Path, work_id: &str) {
+    mark_work_item_finished_with_session(storage_root, work_id, None)
+}
+
+/// 终态落盘：优先按 work_id 匹配；找不到时按 session_id 兜底（同会话
+/// 记录可能已被后续派发/引导覆盖——终态事实仍应记录到该会话条目）。
+pub fn mark_work_item_finished_with_session(
+    storage_root: &std::path::Path,
+    work_id: &str,
+    session_id: Option<&str>,
+) {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut items = load_work_items(storage_root);
-    if let Some(item) = items.iter_mut().find(|item| item.work_id == work_id) {
-        item.finished_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    let idx_by_work = items.iter().position(|item| item.work_id == work_id);
+    let idx = idx_by_work.or_else(|| {
+        session_id.and_then(|sid| {
+            items
+                .iter()
+                .position(|item| item.session_id == sid && item.finished_at.is_none())
+        })
+    });
+    if let Some(idx) = idx {
+        items[idx].finished_at = Some(now);
     } else {
         return;
     }
     save_work_items(storage_root, &items);
 }
 
-/// 近期（48h）派发且未终态的登记——应用重启后按「已中断」恢复。
+/// 近期（6h）派发且未终态的登记——应用重启后按「已中断」恢复。
+/// 窗口收窄到 6 小时：dev 频繁重启场景下，跨天遗留的历史 None 记录
+/// （终态机制上线前写入）不再每次启动都误报中断。
 pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
     // dispatched_at 为「%Y-%m-%d %H:%M:%S」本地时间，字典序与时间序一致，
     // 字符串比较近似近 48 小时窗口。
-    let cutoff = (chrono::Local::now() - chrono::Duration::hours(48))
+    let cutoff = (chrono::Local::now() - chrono::Duration::hours(6))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
     load_work_items(storage_root)
@@ -467,13 +488,17 @@ impl CentralPlugin {
         // 机制兜底 1：高相似度自动检出（review N2：在登记 upsert **之前**计算并
         // 过滤自身，否则每次派发必命中自己，提示「向刚建的会话重派」）。
         let pending_work_id = format!("work-{}", scru128::new());
-        let similarity_hint = {
+        // 强制复用（用户实测：提示式兜底被模型忽略，仍新建会话）：高相似
+        // （任务前 12 字符一致）且未指定 session_id 且任务未标【全新】时
+        // 直接拒绝，要求带 session_id 重发——延续性工作必须复用。
+        let explicitly_new = task.contains("【全新】");
+        if !reused && !explicitly_new {
             let items = self
                 .work_items
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let prefix: String = task.chars().take(12).collect();
-            items
+            let similar = items
                 .iter()
                 .filter(|item| {
                     let item_prefix: String = item.task.chars().take(12).collect();
@@ -481,18 +506,20 @@ impl CentralPlugin {
                 })
                 .rev()
                 .take(20)
-                .find(|item| item.work_id != pending_work_id)
-                .map(|item| {
-                    format!(
-                        "\n\n⚠⚠ 检测到高度相似的历史派发：会话 {}（{}，任务「{}」）。本任务极可能是它的延续——若确认，应告知用户并向该会话重派（dispatch_work 带 session_id={}?模型参数可换，上下文保留）；仅当确属无关的新工作时才保留本次新建。",
-                        item.session_id,
-                        item.work_id,
-                        item.task.chars().take(40).collect::<String>(),
-                        item.session_id
-                    )
-                })
-                .unwrap_or_default()
-        };
+                .find(|item| item.work_id != pending_work_id);
+            if let Some(item) = similar {
+                return self.error_result(format!(
+                    "检测到高度相似的历史派发：会话 {}（{}，任务「{}」）。\
+                     本任务极可能是它的延续——请带 session_id={} 重新派发（上下文连续，\
+                     模型参数可换）；仅当确属无关的全新工作时，在任务描述前加【全新】标记后重发。",
+                    item.session_id,
+                    item.work_id,
+                    item.task.chars().take(40).collect::<String>(),
+                    item.session_id
+                ));
+            }
+        }
+        let similarity_hint = String::new(); // 强制拒绝已替代提示式兜底
         let record = WorkItemRecord {
             work_id: pending_work_id,
             reused_session: reused,
@@ -1778,16 +1805,67 @@ mod tests {
             "首次派发不得自匹配：{}",
             first.stdout
         );
+        // 从首次派发结果中取会话 id，供后续复用断言使用
+        let first_session: Option<String> =
+            serde_json::from_str::<serde_json::Value>(&first.stdout)
+                .ok()
+                .and_then(|v| {
+                    v.get("session_id")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            v.get("work")
+                                .and_then(|w| w.get("session_id"))
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string())
+                        })
+                });
+        // 强制复用：同前缀任务且未带 session_id、未标【全新】时必须拒绝
         let second = call_tool(
             &plugin,
             "dispatch_work",
             serde_json::json!({"task": "Review 天工仓库的分支开发情况（增量）"}),
         );
-        assert!(second.ok);
         assert!(
-            second.stdout.contains("高度相似"),
-            "同前缀第二次应提示：{}",
-            second.stdout
+            !second.ok,
+            "同前缀且未带 session_id/【全新】的派发必须被拒绝：{}",
+            second.stderr
+        );
+        assert!(
+            second.stderr.contains("高度相似"),
+            "拒绝信息必须说明相似来源：{}",
+            second.stderr
+        );
+        assert!(
+            second.stderr.contains("session_id"),
+            "拒绝信息必须指明带 session_id 重发：{}",
+            second.stderr
+        );
+        // 带 session_id 重发同前缀任务：放行且标记复用
+        if let Some(session) = first_session.clone() {
+            let third = call_tool(
+                &plugin,
+                "dispatch_work",
+                serde_json::json!({"task": "Review 天工仓库的分支开发情况（增量）", "session_id": session}),
+            );
+            assert!(third.ok);
+            assert!(
+                !third.stdout.contains("高度相似"),
+                "显式指定 session_id 不得被拒绝：{}",
+                third.stdout
+            );
+        }
+        // 【全新】标记：跳过相似拒绝，允许无关的全新工作
+        let fourth = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "【全新】Review 天工仓库的分支开发情况"}),
+        );
+        assert!(fourth.ok);
+        assert!(
+            !fourth.stdout.contains("高度相似"),
+            "【全新】标记必须放行：{}",
+            fourth.stdout
         );
     }
 }

@@ -10,7 +10,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Loader2, Inbox, History, ChevronRight, AlertTriangle } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { restoreFromCentralConversation } from '@/lib/centralConversation';
 
 interface CentralWorkStatus {
   work_id: string;
@@ -18,18 +19,34 @@ interface CentralWorkStatus {
   task: string;
   model: string | null;
   dispatched_at: string;
-  state: 'running' | 'report_queued' | 'interrupted';
+  state: 'running' | 'report_queued' | 'interrupted' | 'completed';
   reused_session: boolean;
 }
 
 const PANEL_CLOSE_DELAY_MS = 250;
 
-function WorkItemRow({ item }: { item: CentralWorkStatus }) {
+function WorkItemRow({
+  item,
+  onOpen,
+}: {
+  item: CentralWorkStatus;
+  onOpen?: (sessionId: string) => void;
+}) {
   const running = item.state === 'running';
   const interrupted = item.state === 'interrupted';
+  const completedState = item.state === 'completed';
   return (
     <div
-      className={`group/row rounded-xl border p-3 transition-colors ${
+      onClick={() => onOpen?.(item.session_id)}
+      role={onOpen ? 'button' : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (onOpen && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          onOpen(item.session_id);
+        }
+      }}
+      className={`group/row cursor-pointer rounded-xl border p-3 text-left transition-colors ${
         running
           ? 'border-primary/25 bg-primary/[0.04] hover:border-primary/40'
           : interrupted
@@ -44,7 +61,9 @@ function WorkItemRow({ item }: { item: CentralWorkStatus }) {
               ? 'text-primary'
               : interrupted
                 ? 'text-muted-foreground'
-                : 'text-amber-600 dark:text-amber-400'
+                : completedState
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-amber-600 dark:text-amber-400'
           }`}
         >
           {running ? (
@@ -56,6 +75,11 @@ function WorkItemRow({ item }: { item: CentralWorkStatus }) {
             <>
               <AlertTriangle className="h-3.5 w-3.5" />
               已中断
+            </>
+          ) : completedState ? (
+            <>
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              已完成
             </>
           ) : (
             <>
@@ -146,6 +170,21 @@ export function CentralWorkStatusBar() {
   const running = items.filter((item) => item.state === 'running');
   const queued = items.filter((item) => item.state === 'report_queued');
   const interrupted = items.filter((item) => item.state === 'interrupted');
+  const completed = items.filter((item) => item.state === 'completed');
+
+  // 点击工作项：退出中枢并在普通模式打开该工作会话（§4.4 可复核）
+  const openInNormalMode = useCallback(
+    async (sessionId: string) => {
+      const store = useStore.getState();
+      if (store.centralMode) {
+        store.setCentralMode(false);
+        // 等 restore 完成再切目标会话（显式调用幂等，保证顺序）
+        await restoreFromCentralConversation().catch(() => undefined);
+      }
+      await useStore.getState().switchSession(sessionId).catch(() => undefined);
+    },
+    [],
+  );
 
   return (
     <div
@@ -215,7 +254,7 @@ export function CentralWorkStatusBar() {
               </header>
               <div className="space-y-2">
                 {running.map((item) => (
-                  <WorkItemRow key={item.work_id} item={item} />
+                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
                 ))}
               </div>
             </section>
@@ -234,7 +273,7 @@ export function CentralWorkStatusBar() {
               </header>
               <div className="space-y-2">
                 {queued.map((item) => (
-                  <WorkItemRow key={item.work_id} item={item} />
+                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
                 ))}
               </div>
             </section>
@@ -256,15 +295,39 @@ export function CentralWorkStatusBar() {
               </p>
               <div className="space-y-2 opacity-75">
                 {interrupted.map((item) => (
-                  <WorkItemRow key={item.work_id} item={{ ...item, state: 'interrupted' }} />
+                  <WorkItemRow
+                    key={item.work_id}
+                    item={{ ...item, state: 'interrupted' }}
+                    onOpen={openInNormalMode}
+                  />
                 ))}
               </div>
             </section>
           ) : null}
 
-          {running.length === 0 && queued.length === 0 && interrupted.length === 0 ? (
+          {completed.length > 0 ? (
+            <section className="mt-3">
+              <header className="mb-2 flex items-center justify-between px-1">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                  已完成
+                </h3>
+                <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium tabular-nums text-emerald-600 dark:text-emerald-400">
+                  {completed.length}
+                </span>
+              </header>
+              <div className="space-y-2 opacity-80">
+                {completed.map((item) => (
+                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {running.length === 0 && queued.length === 0 && interrupted.length === 0 && completed.length === 0 ? (
             <p className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
           ) : null}
+          <p className="mt-2 px-1 text-[10px] text-muted-foreground/70">点击工作项可在普通模式打开对应会话</p>
         </div>
       ) : null}
     </div>
