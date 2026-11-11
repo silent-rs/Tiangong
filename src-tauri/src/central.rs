@@ -110,25 +110,7 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - 回答使用中文，保持简洁。";
 
 /// 后台工作状态登记条目（前端「后台工作」状态条数据源，命令
-/// `get_central_work_status` 返回）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CentralWorkStatus {
-    pub work_id: String,
-    pub session_id: String,
-    pub task: String,
-    pub model: Option<String>,
-    pub dispatched_at: String,
-    /// `running`（在执行）/ `report_queued`（已完成，回报暂存待汇报）。
-    pub state: String,
-    /// 是否复用了已有会话（应用尽用）。
-    pub reused_session: bool,
-    /// 最近执行动作（工具名/阶段，徽章实时显示；流消费者更新）。
-    #[serde(default)]
-    pub last_activity: Option<String>,
-    /// 工作目录（Workspace 写入锁判定：同目录串行保护）。
-    #[serde(default)]
-    pub cwd: Option<String>,
-}
+pub use central_state::WorkStatus as CentralWorkStatus;
 
 /// 中枢插件 → app 执行器的消息（unbounded channel）。
 #[derive(Debug, Clone)]

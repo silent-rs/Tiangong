@@ -1056,7 +1056,7 @@ impl TiangongApp {
                 .iter()
                 .rev()
                 .find(|entry| entry.session_id == request.session_id)
-                .and_then(|entry| central_state::WorkState::parse(&entry.state))
+                .map(|entry| entry.state)
         };
         // 转移决策统一走 central-state（取消/暂停守卫 + 等待用户分流 + 成败
         // 分态——行为锁定于 crate 测试，宿主不再自持规则）。
@@ -1090,7 +1090,7 @@ impl TiangongApp {
                         .position(|entry| entry.session_id == request.session_id)
                 });
             if let Some(position) = position {
-                registry[position].state = next_state.as_str().to_string();
+                registry[position].state = next_state;
             }
         }
         if matches!(outcome, WorkOutcome::WaitingUser) {
@@ -1171,23 +1171,14 @@ impl TiangongApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         for entry in registry.iter_mut() {
-            if entry.state == "report_queued" {
-                entry.state = "completed".to_string();
+            if entry.state == central_state::WorkState::ReportQueued {
+                entry.state = central_state::WorkState::Completed;
             }
         }
-        for state in ["completed", "failed"] {
-            let count = registry.iter().filter(|e| e.state == state).count();
-            if count > 10 {
-                let mut to_remove = count - 10;
-                registry.retain(|entry| {
-                    if entry.state == state && to_remove > 0 {
-                        to_remove -= 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
+        // 保留策略统一走 central-state（completed/failed 各留最近 10）
+        let removals = central_state::retention_removals(&registry, 10);
+        for index in removals.into_iter().rev() {
+            registry.remove(index);
         }
     }
 
@@ -1617,21 +1608,7 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
             "后台工作状态已从登记重建（重启恢复）"
         );
     }
-    registry.extend(
-        entries
-            .into_iter()
-            .map(|entry| crate::central::CentralWorkStatus {
-                work_id: entry.work_id,
-                session_id: entry.session_id,
-                task: entry.task,
-                model: entry.model,
-                dispatched_at: entry.dispatched_at,
-                state: entry.state.as_str().to_string(),
-                reused_session: entry.reused_session,
-                last_activity: entry.last_activity,
-                cwd: entry.cwd,
-            }),
-    );
+    registry.extend(entries);
     drop(registry);
     if !failed_names.is_empty() || interrupted_count > 0 {
         let failed_note = if failed_names.is_empty() {
@@ -1786,7 +1763,11 @@ async fn handle_central_control(
                     .rev()
                     .find(|e| e.session_id == control.session_id)
                 {
-                    entry.state = control.action.clone();
+                    entry.state = match control.action.as_str() {
+                        "cancelled" => central_state::WorkState::Cancelled,
+                        "paused" => central_state::WorkState::Paused,
+                        _ => central_state::WorkState::Running,
+                    };
                 }
             }
             if control.action == "cancelled" {
@@ -1875,7 +1856,7 @@ async fn enqueue_central_dispatch(
                 .clone()
                 .or_else(|| Some("路由默认".to_string())),
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            state: "queued".to_string(),
+            state: central_state::WorkState::Queued,
             reused_session: request.reused_session,
             last_activity: None,
             cwd: None,
@@ -1930,71 +1911,29 @@ async fn handle_central_dispatch(
             ));
         }
     }
-    // 排队依赖：依赖未终态 → 挂起（queued），等依赖终态回调 flush。
-    if let Some(after) = request
-        .after_work_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    // 排队决策统一走 central-state（依赖 in-flight × 写入锁 × parallel
+    // 豁免 × 同会话重派——行为锁定于 crate 测试，宿主不自持规则）。
     {
-        let dependency_done = {
+        let decision = {
             let registry = state
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let dep = registry
-                .iter()
-                .rev()
-                .find(|entry| entry.work_id == after || entry.session_id == after);
-            match dep {
-                Some(entry)
-                    if entry.state != "running"
-                        && entry.state != "waiting_user"
-                        && entry.state != "paused" =>
-                {
-                    true
-                }
-                Some(_) => false,
-                None => true,
-            }
+            central_state::queue_decision(
+                &registry,
+                request.after_work_id.as_deref(),
+                &request.session_id,
+                &cwd,
+                request.parallel,
+            )
         };
-        if !dependency_done {
-            enqueue_central_dispatch(state, app, request.clone(), after).await;
-            return Ok(());
-        }
-    }
-    // Workspace 写入锁（阶段 2）：同工作目录已有 running 工作时，新派发
-    // 自动排队（避免两个 Worker 同目录写冲突——机制级，不靠提示自觉）；
-    // 用户明确要求并行时 dispatch_work 带 parallel=true 豁免（只读任务）。
-    if !request.parallel {
-        let conflict = {
-            let registry = state
-                .central_work_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            registry
-                .iter()
-                .rev()
-                .find(|entry| {
-                    entry.state == "running"
-                        && entry.cwd.as_deref() == Some(cwd.as_str())
-                        && entry.session_id != request.session_id
-                })
-                .map(|entry| {
-                    (
-                        entry.work_id.clone(),
-                        entry.task.chars().take(24).collect::<String>(),
-                    )
-                })
-        };
-        if let Some((holder_id, holder_task)) = conflict {
-            let _holder_task = holder_task;
+        if let central_state::QueueDecision::QueueAfter(after) = decision {
             tracing::info!(
                 work_id = %request.work_id,
-                holder = %holder_id,
-                "同工作区已有工作执行，自动排队（Workspace 写入锁）"
+                after = %after,
+                "后台工作排队（依赖/写入锁），等待终态后自动投递"
             );
-            enqueue_central_dispatch(state, app, request.clone(), &holder_id).await;
+            enqueue_central_dispatch(state, app, request.clone(), &after).await;
             return Ok(());
         }
     }
@@ -2033,13 +1972,12 @@ async fn handle_central_dispatch(
             .central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(position) = registry
-            .iter()
-            .rposition(|entry| entry.session_id == sid && entry.state == "waiting_user")
+        // 恢复归属统一走 central-state（waiting_user → running + 主工作回传）
+        if let Some((owner_work_id, owner_task)) =
+            central_state::merge_waiting_user(&mut registry, &sid)
         {
-            registry[position].state = "running".to_string();
-            merged_work.work_id = registry[position].work_id.clone();
-            merged_work.task = registry[position].task.clone();
+            merged_work.work_id = owner_work_id;
+            merged_work.task = owner_task;
             crate::central::append_work_item_event(
                 state.core_manager.storage_root(),
                 &sid,
@@ -2151,7 +2089,7 @@ async fn handle_central_dispatch(
                         .or_else(|| Some("路由默认".to_string()))
                 },
                 dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                state: "running".to_string(),
+                state: central_state::WorkState::Running,
                 reused_session: request.reused_session,
                 last_activity: None,
                 cwd: Some(cwd.clone()),

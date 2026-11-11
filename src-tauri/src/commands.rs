@@ -1081,11 +1081,9 @@ pub(crate) fn start_stream_consumer(
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = registry
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.session_id == session_id && entry.state == "running")
-            {
+            if let Some(entry) = registry.iter_mut().rev().find(|entry| {
+                entry.session_id == session_id && entry.state == central_state::WorkState::Running
+            }) {
                 entry.last_activity = Some(note);
                 drop(registry);
                 crate::app::emit_central_work_updated(app);
