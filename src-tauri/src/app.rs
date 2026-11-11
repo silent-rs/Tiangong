@@ -76,6 +76,8 @@ pub struct TiangongApp {
     pub(crate) central_work_registry: Mutex<Vec<crate::central::CentralWorkStatus>>,
     /// 排队依赖的挂起派发（after_work_id 未终态）：依赖终态回调 flush。
     central_pending_dispatches: Mutex<Vec<crate::central::CentralDispatchRequest>>,
+    /// 中枢模型回退通知已发出（抖动控制：每进程一次）。
+    central_model_fallback_notified: std::sync::atomic::AtomicBool,
     /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
     central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -205,6 +207,7 @@ impl TiangongApp {
             central_running_works: Mutex::new(HashSet::new()),
             central_work_registry: Mutex::new(Vec::new()),
             central_pending_dispatches: Mutex::new(Vec::new()),
+            central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
             central_watch_slots: Mutex::new(HashMap::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -918,15 +921,20 @@ impl TiangongApp {
                                 "中枢模型不可用（{reason}），默认模型回退也失败：{fallback_error}"
                             )
                         })?;
-                // 回退事实注入中枢回报队列：随下一条用户消息进入中枢对话，
-                // 由中枢向用户说明（不再是只写日志的「首个可用机会」空承诺）。
-                let model_note = format!(
-                    "[系统中枢] 配置的中枢模型不可用（{reason}），本轮已自动回退默认模型；如需更换请调整设置。"
-                );
-                self.central_work_reports
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(model_note);
+                // 回退事实注入中枢回报队列（抖动控制：每进程只通知一次——反复
+                // ensure/命中复用路径不重复推送，阶段 2 要求）。
+                if !self
+                    .central_model_fallback_notified
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    let model_note = format!(
+                        "[系统中枢] 配置的中枢模型不可用（{reason}），已自动回退默认模型；如需更换请调整设置。"
+                    );
+                    self.central_work_reports
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(model_note);
+                }
                 fallback
             }
         };
@@ -1087,10 +1095,23 @@ impl TiangongApp {
         }
         if matches!(outcome, WorkOutcome::WaitingUser) {
             // 阻塞必达 + 不落终态（等待用户答复后经引导恢复执行）
+            crate::central::append_work_item_event(
+                self.core_manager.storage_root(),
+                &request.session_id,
+                "waiting_user",
+                "提出需要用户决策的问题，工作中挂起",
+            );
             self.deliver_pending_work_reports();
             emit_central_work_updated(app);
             return;
         }
+        // 终态事件（时间线）
+        crate::central::append_work_item_event(
+            self.core_manager.storage_root(),
+            &request.session_id,
+            "finished",
+            if done { "工作完成" } else { "工作失败" },
+        );
         // 持久化终态与成败（重启后徽章按 outcome 重建 completed/failed 分组）
         crate::central::mark_work_item_finished_with_session(
             self.core_manager.storage_root(),
@@ -1751,6 +1772,16 @@ async fn handle_central_control(
                     "cancelled",
                 );
             }
+            crate::central::append_work_item_event(
+                state.core_manager.storage_root(),
+                &control.session_id,
+                &control.action,
+                if control.action == "cancelled" {
+                    "用户取消：中断执行，工作终止"
+                } else {
+                    "用户暂停：中断执行，上下文保留"
+                },
+            );
             tracing::info!(
                 work_id = %control.work_id,
                 action = %control.action,
@@ -1759,6 +1790,12 @@ async fn handle_central_control(
         }
         "resume" => {
             // 恢复：向工作会话发送继续指令（复用 Steer 链路，挂回调走回报）
+            crate::central::append_work_item_event(
+                state.core_manager.storage_root(),
+                &control.session_id,
+                "resumed",
+                "用户恢复：发送继续指令，回到执行中",
+            );
             let request = crate::central::CentralDispatchRequest {
                 work_id: control.work_id.clone(),
                 session_id: control.session_id.clone(),
@@ -1767,6 +1804,7 @@ async fn handle_central_control(
                 model: None,
                 cwd: None,
                 after_work_id: None,
+                parallel: false,
                 reused_session: true,
             };
             if let Err(error) = handle_central_dispatch(state, app, request.clone()).await {
@@ -1775,6 +1813,48 @@ async fn handle_central_control(
         }
         _ => {}
     }
+    emit_central_work_updated(app);
+}
+
+/// 排队登记（依赖/写入锁共用）：挂起 pending + registry queued + 事件。
+async fn enqueue_central_dispatch(
+    state: &TiangongApp,
+    app: &tauri::AppHandle,
+    request: crate::central::CentralDispatchRequest,
+    after: &str,
+) {
+    state
+        .central_pending_dispatches
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(request.clone());
+    {
+        let mut registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        registry.retain(|entry| entry.session_id != request.session_id);
+        registry.push(crate::central::CentralWorkStatus {
+            work_id: request.work_id.clone(),
+            session_id: request.session_id.clone(),
+            task: format!("[排队] 依赖 {after} 终态后投递：{}", request.task),
+            model: request
+                .model
+                .clone()
+                .or_else(|| Some("路由默认".to_string())),
+            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            state: "queued".to_string(),
+            reused_session: request.reused_session,
+            last_activity: None,
+            cwd: None,
+        });
+    }
+    crate::central::append_work_item_event(
+        state.core_manager.storage_root(),
+        &request.session_id,
+        "queued",
+        &format!("排队等待依赖 {after} 终态"),
+    );
     emit_central_work_updated(app);
 }
 
@@ -1818,7 +1898,7 @@ async fn handle_central_dispatch(
             ));
         }
     }
-    // 排队依赖：依赖未终态 → 挂起（queued），登记后等依赖终态回调 flush。
+    // 排队依赖：依赖未终态 → 挂起（queued），等依赖终态回调 flush。
     if let Some(after) = request
         .after_work_id
         .as_deref()
@@ -1847,35 +1927,46 @@ async fn handle_central_dispatch(
             }
         };
         if !dependency_done {
-            let mut pending = state
-                .central_pending_dispatches
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            pending.push(request.clone());
-            let mut registry = state
-                .central_work_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            registry.retain(|entry| entry.session_id != request.session_id);
-            registry.push(crate::central::CentralWorkStatus {
-                work_id: request.work_id.clone(),
-                session_id: request.session_id.clone(),
-                task: format!("[排队] 依赖 {after} 终态后投递：{}", request.task),
-                model: request
-                    .model
-                    .clone()
-                    .or_else(|| Some("路由默认".to_string())),
-                dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                state: "queued".to_string(),
-                reused_session: request.reused_session,
-                last_activity: None,
-            });
-            drop(registry);
-            emit_central_work_updated(app);
-            tracing::info!(work_id = %request.work_id, after = %after, "后台工作已排队（等待依赖终态）");
+            enqueue_central_dispatch(state, app, request.clone(), after).await;
             return Ok(());
         }
     }
+    // Workspace 写入锁（阶段 2）：同工作目录已有 running 工作时，新派发
+    // 自动排队（避免两个 Worker 同目录写冲突——机制级，不靠提示自觉）；
+    // 用户明确要求并行时 dispatch_work 带 parallel=true 豁免（只读任务）。
+    if !request.parallel {
+        let conflict = {
+            let registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            registry
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.state == "running"
+                        && entry.cwd.as_deref() == Some(cwd.as_str())
+                        && entry.session_id != request.session_id
+                })
+                .map(|entry| {
+                    (
+                        entry.work_id.clone(),
+                        entry.task.chars().take(24).collect::<String>(),
+                    )
+                })
+        };
+        if let Some((holder_id, holder_task)) = conflict {
+            let _holder_task = holder_task;
+            tracing::info!(
+                work_id = %request.work_id,
+                holder = %holder_id,
+                "同工作区已有工作执行，自动排队（Workspace 写入锁）"
+            );
+            enqueue_central_dispatch(state, app, request.clone(), &holder_id).await;
+            return Ok(());
+        }
+    }
+
     // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
     // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
     // prompt cache 失效；引导语义也要求保留在途执行）。
@@ -1917,6 +2008,12 @@ async fn handle_central_dispatch(
             registry[position].state = "running".to_string();
             merged_work.work_id = registry[position].work_id.clone();
             merged_work.task = registry[position].task.clone();
+            crate::central::append_work_item_event(
+                state.core_manager.storage_root(),
+                &sid,
+                "resumed",
+                "收到用户答复，恢复执行",
+            );
             tracing::info!(
                 work_id = %merged_work.work_id,
                 session_id = %sid,
@@ -1944,7 +2041,14 @@ async fn handle_central_dispatch(
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&sid, Some(cwd), None, None, effective_model, stream_tx)
+            .ensure_core(
+                &sid,
+                Some(cwd.clone()),
+                None,
+                None,
+                effective_model,
+                stream_tx,
+            )
             .await?;
         if !ensured.is_new {
             return Err(format!(
@@ -2018,9 +2122,24 @@ async fn handle_central_dispatch(
                 state: "running".to_string(),
                 reused_session: request.reused_session,
                 last_activity: None,
+                cwd: Some(cwd.clone()),
             });
         }
     }
+    crate::central::append_work_item_event(
+        state.core_manager.storage_root(),
+        &request.session_id,
+        "dispatched",
+        &format!(
+            "派发执行（work_id {}，{}）",
+            merged_work.work_id,
+            if merged_into_existing {
+                "等待用户决策后恢复"
+            } else {
+                "新任务"
+            }
+        ),
+    );
     emit_central_work_updated(app);
     Ok(())
 }

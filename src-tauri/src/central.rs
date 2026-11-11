@@ -79,6 +79,10 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - **工作控制**：用户要求停止/放弃某工作时用 `cancel_work`（终态，不恢复）；
   要求暂停/先放一放用 `pause_work`（上下文保留）；要求继续/恢复用
   `resume_work`（自动发送继续指令）。不要用重派代替控制指令；
+- **失败归并**：多个工作因同类原因失败时，向用户合并转述（一次说明
+  根因与影响面），不逐条重复展开同类失败；
+- **代决留痕**：你替用户做的每个决定（代决）都要在对话中留下依据
+  （「代决：X，依据：Y，如不认可可要求撤销」），用户追问时能解释；
 - **排队依赖**：用户要求「A 完成后再做 B」时，dispatch_work 派发 B 并带
   `after_work_id=A 的 work_id`——系统会在 A 终态后自动投递 B；
 - **模型故障处置**：后台工作因模型/网络类原因失败（超时、限流、凭据、
@@ -103,6 +107,9 @@ pub struct CentralWorkStatus {
     /// 最近执行动作（工具名/阶段，徽章实时显示；流消费者更新）。
     #[serde(default)]
     pub last_activity: Option<String>,
+    /// 工作目录（Workspace 写入锁判定：同目录串行保护）。
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// 中枢插件 → app 执行器的消息（unbounded channel）。
@@ -149,6 +156,8 @@ pub struct CentralDispatchRequest {
     pub cwd: Option<String>,
     /// 排队依赖：等待该 work 终态后再投递本工作（None 立即派发）。
     pub after_work_id: Option<String>,
+    /// Workspace 写入锁豁免：true 时不因同目录冲突自动排队（只读并行）。
+    pub parallel: bool,
     /// 是否复用已有会话（插件侧决定并携带；app 据此跳过新会话标题等）。
     pub reused_session: bool,
 }
@@ -196,10 +205,53 @@ pub struct WorkItemRecord {
     /// None 的近期条目按「已中断」恢复到状态登记（§15.1 离开期间变化）。
     #[serde(default)]
     pub finished_at: Option<String>,
-    /// 终态成败（"completed" / "failed"）——重启后徽章按此重建分组；
-    /// None = 旧记录（字段上线前）或未终态。
+    /// 终态成败（"completed" / "failed" / "cancelled"）——重启后徽章按此
+    /// 重建分组；None = 旧记录（字段上线前）或未终态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// 事件时间线（派发/排队/阻塞/恢复/暂停/取消/终态等关键节点），
+    /// 持久化供回查（阶段 2「事件持久化」）；每工作上限 30 条。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<WorkItemEvent>,
+}
+
+/// 后台工作事件（时间线条目，§13.4 轻量版）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkItemEvent {
+    /// 本地时间 "%Y-%m-%d %H:%M:%S"
+    pub at: String,
+    /// dispatched / queued / waiting_user / resumed / paused / cancelled / finished
+    pub kind: String,
+    /// 人读说明
+    pub note: String,
+}
+
+/// 追加工作事件（按 session 定位条目——与登记 upsert 同维度；每工作
+/// 保留最近 30 条）。找不到条目时静默跳过（时间线是附加信息，不阻塞主链）。
+pub fn append_work_item_event(
+    storage_root: &std::path::Path,
+    session_id: &str,
+    kind: &str,
+    note: &str,
+) {
+    let mut items = load_work_items(storage_root);
+    let Some(entry) = items
+        .iter_mut()
+        .rev()
+        .find(|item| item.session_id == session_id)
+    else {
+        return;
+    };
+    entry.events.push(WorkItemEvent {
+        at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        kind: kind.to_string(),
+        note: note.to_string(),
+    });
+    let overflow = entry.events.len().saturating_sub(30);
+    if overflow > 0 {
+        entry.events.drain(..overflow);
+    }
+    save_work_items(storage_root, &items);
 }
 
 /// 派发登记持久化路径：`{storage_root}/central/work-items.json`。
@@ -384,6 +436,7 @@ pub fn recover_registry_entries(
             state: state.to_string(),
             reused_session: item.reused_session,
             last_activity: None,
+            cwd: None,
         });
     }
     // 截断：completed/failed 各保留最近 10 条（尾部为最新，从头部移除）
@@ -603,7 +656,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；dispatch_work 支持 after_work_id 排队依赖；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；get_work_timeline 查工作时间线；dispatch_work 支持 after_work_id 排队依赖；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -733,6 +786,7 @@ impl CentralPlugin {
         cwd: Option<&str>,
         session_id: Option<&str>,
         after_work_id: Option<&str>,
+        parallel: bool,
     ) -> Option<ToolResult> {
         let task = task.trim();
         if task.is_empty() {
@@ -853,6 +907,7 @@ impl CentralPlugin {
                 .map(str::to_string),
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             finished_at: None,
+            events: Vec::new(),
             outcome: None,
         };
         let request = CentralDispatchRequest {
@@ -865,6 +920,7 @@ impl CentralPlugin {
                 .map(str::trim)
                 .map(str::to_string),
             after_work_id: after_work_id.map(str::to_string),
+            parallel,
             reused_session: reused,
         };
         if let Err(error) = self
@@ -1169,6 +1225,7 @@ impl CentralPlugin {
             model: None,
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             finished_at: None,
+            events: Vec::new(),
             outcome: None,
         };
         let request = CentralDispatchRequest {
@@ -1178,6 +1235,7 @@ impl CentralPlugin {
             model: None,
             cwd: None,
             after_work_id: None,
+            parallel: false,
             reused_session: true,
         };
         if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Steer(request)) {
@@ -1229,6 +1287,51 @@ impl CentralPlugin {
             summary.as_str(),
             format!(
                 "work_id: {work_id}\n系统将中断该工作的当前执行（如仍在运行）并标记为「已{action_text}」。取消：工作终止不再恢复；暂停：上下文保留在会话中，恢复时自动发送继续指令；恢复：向该会话发送继续指令，工作回到执行中。"
+            ),
+        )
+    }
+
+    /// 工作时间线查询（事件持久化，§13.4）。
+    fn handle_work_timeline(&self, work_id: &str) -> Option<ToolResult> {
+        let work_id = work_id.trim();
+        if work_id.is_empty() {
+            return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
+        }
+        // 读磁盘（真相源）：事件由 app 执行器经 append_work_item_event 落盘，
+        // 插件内存登记不含 events——两份视图以磁盘为准。
+        let items = load_work_items(self.sessions.storage_root());
+        let Some(entry) = items.iter().rev().find(|item| item.work_id == work_id) else {
+            // 磁盘没有再看内存（可能尚未落盘）
+            let memory = self
+                .work_items
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if memory.iter().any(|item| item.work_id == work_id) {
+                return self.text_result(
+                    "工作时间线",
+                    format!("工作 {work_id} 暂无事件记录（可能为旧版本登记）。"),
+                );
+            }
+            return self.error_result(format!("未找到工作 {work_id}"));
+        };
+        if entry.events.is_empty() {
+            return self.text_result(
+                "工作时间线",
+                format!("工作 {work_id} 暂无事件记录（可能为旧版本登记）。"),
+            );
+        }
+        let lines: Vec<String> = entry
+            .events
+            .iter()
+            .map(|event| format!("- [{}] {}：{}", event.at, event.kind, event.note))
+            .collect();
+        self.text_result(
+            "工作时间线",
+            format!(
+                "工作 {}（会话 {}）事件时间线：\n{}",
+                work_id,
+                entry.session_id,
+                lines.join("\n")
             ),
         )
     }
@@ -1423,7 +1526,8 @@ impl ToolSpecProvider for CentralPlugin {
                         "session_id": {"type": "string", "description": "复用的已有会话 ID（list_sessions 查询）。任务与某会话相关（同工作区、同主题、上次未完成）时必须优先复用，保持上下文连续；仅无相关会话时省略新建"}
                     },
                     "required": ["task"],
-                        "after_work_id": {"type": "string", "description": "排队依赖：等待该工作终态（完成/失败/取消）后再自动投递本任务"}
+                        "after_work_id": {"type": "string", "description": "排队依赖：等待该工作终态（完成/失败/取消）后再自动投递本任务"},
+                        "parallel": {"type": "boolean", "description": "Workspace 写入锁豁免：仅只读任务且用户明确要求并行时 true（默认 false，同目录冲突自动排队）"}
                 }),
             },
             ToolSpec {
@@ -1438,6 +1542,18 @@ impl ToolSpecProvider for CentralPlugin {
                         "scope": {"type": "string", "enum": ["recent", "all"], "description": "扫描范围：recent=最近 200 个会话（默认），all=全部（较慢）"}
                     },
                     "required": ["query"]
+                }),
+            },
+            ToolSpec {
+                name: "get_work_timeline".to_string(),
+                description: "查询后台工作的事件时间线（派发/排队/阻塞/恢复/暂停/取消/终态等\n                    关键节点，持久化可回查）。用户想了解某工作经历了什么/为何中断/\n                    何时完成时使用。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "目标工作 ID（list_work_items 查询）"}
+                    },
+                    "required": ["work_id"]
                 }),
             },
             ToolSpec {
@@ -1573,6 +1689,14 @@ impl ToolOverrideHandler for CentralPlugin {
                 };
                 self.handle_work_control(work_id, action)
             }
+            "get_work_timeline" => {
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_work_timeline(work_id)
+            }
             "confirm_workspace" => {
                 let path = call
                     .arguments
@@ -1599,6 +1723,11 @@ impl ToolOverrideHandler for CentralPlugin {
                     .arguments
                     .get("after_work_id")
                     .and_then(|value| value.as_str());
+                let parallel = call
+                    .arguments
+                    .get("parallel")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
                 let task = call
                     .arguments
                     .get("task")
@@ -1610,7 +1739,7 @@ impl ToolOverrideHandler for CentralPlugin {
                     .arguments
                     .get("session_id")
                     .and_then(|value| value.as_str());
-                self.handle_dispatch_work(task, model, cwd, session_id, after_work_id)
+                self.handle_dispatch_work(task, model, cwd, session_id, after_work_id, parallel)
             }
             "collect_work_reports" => self.handle_collect_work_reports(),
             "list_work_items" => self.handle_list_work_items(),
@@ -2224,6 +2353,7 @@ mod tests {
                 dispatched_at: format!("2026-11-10 1{:02}:00:00", i % 10),
                 finished_at: Some("2026-11-10 12:00:00".to_string()),
                 outcome: None,
+                events: Vec::new(),
             };
             upsert_work_item(root.path(), &record);
         }
@@ -2236,6 +2366,7 @@ mod tests {
             model: Some("k3".to_string()),
             dispatched_at: "2026-11-10 15:00:00".to_string(),
             finished_at: None,
+            events: Vec::new(),
             outcome: None,
         };
         upsert_work_item(root.path(), &again);
@@ -2284,6 +2415,7 @@ mod tests {
             model: None,
             dispatched_at: "2026-11-11 12:00:00".to_string(),
             finished_at: None,
+            events: Vec::new(),
             outcome: None,
         };
         upsert_work_item(root.path(), &record);
@@ -2343,6 +2475,7 @@ mod tests {
                     dispatched_at: now.clone(),
                     finished_at: Some(now.clone()),
                     outcome: None, // legacy：字段上线前的终态记录
+                    events: Vec::new(),
                 },
             );
         }
@@ -2374,6 +2507,7 @@ mod tests {
                 dispatched_at: recent.clone(),
                 finished_at: Some(recent.clone()),
                 outcome: Some("completed".to_string()),
+                events: Vec::new(),
             });
         }
         records.push(WorkItemRecord {
@@ -2385,6 +2519,7 @@ mod tests {
             dispatched_at: stale.clone(),
             finished_at: Some(stale.clone()),
             outcome: None,
+            events: Vec::new(),
         });
         records.push(WorkItemRecord {
             work_id: "work-fail".to_string(),
@@ -2395,6 +2530,7 @@ mod tests {
             dispatched_at: recent.clone(),
             finished_at: Some(recent.clone()),
             outcome: Some("failed".to_string()),
+            events: Vec::new(),
         });
         records.push(WorkItemRecord {
             work_id: "work-recent-open".to_string(),
@@ -2405,6 +2541,7 @@ mod tests {
             dispatched_at: recent.clone(),
             finished_at: None,
             outcome: None,
+            events: Vec::new(),
         });
         records.push(WorkItemRecord {
             work_id: "work-stale-open".to_string(),
@@ -2415,6 +2552,7 @@ mod tests {
             dispatched_at: stale.clone(),
             finished_at: None,
             outcome: None,
+            events: Vec::new(),
         });
         for record in &records {
             upsert_work_item(root.path(), record);
@@ -2455,6 +2593,7 @@ mod tests {
             model: None,
             dispatched_at: "2026-11-11 12:00:00".to_string(),
             finished_at: None,
+            events: Vec::new(),
             outcome: None,
         };
         upsert_work_item(root.path(), &record);
@@ -2509,6 +2648,67 @@ mod tests {
             &default,
             &outside_path.to_string_lossy()
         ));
+    }
+
+    /// 时间线：事件追加持久化 + get_work_timeline 工具查询往返。
+    #[test]
+    fn work_timeline_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let dispatch = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "时间线任务", "session_id": "s0"}),
+        );
+        assert!(dispatch.ok, "stderr: {}", dispatch.stderr);
+        // 追加事件（模拟 app 侧写入）
+        append_work_item_event(root.path(), "s0", "waiting_user", "提出问题，工作中挂起");
+        append_work_item_event(root.path(), "s0", "resumed", "收到答复恢复");
+        // 查询往返
+        let work_id = {
+            let items = plugin.work_items.lock().unwrap_or_else(|e| e.into_inner());
+            items
+                .iter()
+                .rev()
+                .find(|item| item.session_id == "s0")
+                .map(|item| item.work_id.clone())
+                .unwrap()
+        };
+        let timeline = call_tool(
+            &plugin,
+            "get_work_timeline",
+            serde_json::json!({"work_id": work_id}),
+        );
+        assert!(timeline.ok, "stderr: {}", timeline.stderr);
+        assert!(
+            timeline.stdout.contains("waiting_user"),
+            "{}",
+            timeline.stdout
+        );
+        assert!(
+            timeline.stdout.contains("提出问题，工作中挂起"),
+            "{}",
+            timeline.stdout
+        );
+        assert!(timeline.stdout.contains("resumed"), "{}", timeline.stdout);
+        // 未知的 work_id 拒绝
+        let ghost = call_tool(
+            &plugin,
+            "get_work_timeline",
+            serde_json::json!({"work_id": "work-none"}),
+        );
+        assert!(!ghost.ok);
     }
 
     /// 工作控制工具：work_id 校验 + Control 消息送达（通道层验证）。
