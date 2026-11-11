@@ -1049,11 +1049,12 @@ impl TiangongApp {
                 };
             }
         }
-        // 持久化终态（重启恢复依据：无终态的近期登记按已中断处理）
+        // 持久化终态与成败（重启后徽章按 outcome 重建 completed/failed 分组）
         crate::central::mark_work_item_finished_with_session(
             self.core_manager.storage_root(),
             &request.work_id,
             Some(&request.session_id),
+            !done,
         );
         let has_running = !self
             .central_running_works
@@ -1484,33 +1485,31 @@ fn central_dispatch_sender(
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::central::CentralPluginMessage>();
             let app = app.clone();
-            // 重启恢复（§15.1 离开期间变化）：近 48h 派发且未终态的任务按
-            // 「已中断」恢复到状态登记（徽章可见、get_context 可提示）；
-            // 内容已随进程丢失，用户可让中枢重派（复用原会话续上下文）。
+            // 重启恢复（§15.1 离开期间变化 + 徽章「永不消失」）：
+            // 从 work-items.json 全量重建状态登记——completed/failed 按
+            // 落盘 outcome 重建（用户实测：完成的任务重启后不显示——
+            // 终态此前只存内存），未终态近期任务按「已中断」恢复。
             {
                 let state = app.state::<TiangongApp>();
                 let mut recovered = false;
                 let registry = &state.inner().central_work_registry;
                 let mut entries = registry.lock().unwrap_or_else(|e| e.into_inner());
-                for item in crate::central::interrupted_work_items(
+                for entry in crate::central::recover_registry_entries(
                     state.inner().core_manager.storage_root(),
                 ) {
-                    tracing::info!(work_id = %item.work_id, "后台工作因应用重启中断，恢复为 interrupted");
-                    entries.push(crate::central::CentralWorkStatus {
-                        work_id: item.work_id,
-                        session_id: item.session_id,
-                        task: item.task,
-                        model: item.model,
-                        dispatched_at: item.dispatched_at,
-                        state: "interrupted".to_string(),
-                        reused_session: item.reused_session,
-                    });
+                    tracing::info!(
+                        work_id = %entry.work_id,
+                        state = %entry.state,
+                        "后台工作状态已从登记重建（重启恢复）"
+                    );
+                    entries.push(entry);
                     recovered = true;
                 }
                 if recovered {
                     emit_central_work_updated(&app);
                 }
             }
+
             tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
                     match message {

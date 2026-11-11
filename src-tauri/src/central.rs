@@ -171,6 +171,10 @@ pub struct WorkItemRecord {
     /// None 的近期条目按「已中断」恢复到状态登记（§15.1 离开期间变化）。
     #[serde(default)]
     pub finished_at: Option<String>,
+    /// 终态成败（"completed" / "failed"）——重启后徽章按此重建分组；
+    /// None = 旧记录（字段上线前）或未终态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// 派发登记持久化路径：`{storage_root}/central/work-items.json`。
@@ -201,19 +205,23 @@ fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) {
     }
 }
 
-/// 更新某条登记的终态时间并落盘。
+/// 更新某条登记的终态时间并落盘（完成语义）。
 pub fn mark_work_item_finished(storage_root: &std::path::Path, work_id: &str) {
-    mark_work_item_finished_with_session(storage_root, work_id, None)
+    mark_work_item_finished_with_session(storage_root, work_id, None, false)
 }
 
 /// 终态落盘：优先按 work_id 匹配；找不到时按 session_id 兜底（同会话
 /// 记录可能已被后续派发/引导覆盖——终态事实仍应记录到该会话条目）。
+/// `failed` 记录终态成败——重启后徽章按 outcome 重建 completed/failed
+/// 分组（用户实测：完成的任务重启后不显示——终态此前只存内存）。
 pub fn mark_work_item_finished_with_session(
     storage_root: &std::path::Path,
     work_id: &str,
     session_id: Option<&str>,
+    failed: bool,
 ) {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let outcome = if failed { "failed" } else { "completed" };
     let mut items = load_work_items(storage_root);
     let idx_by_work = items.iter().position(|item| item.work_id == work_id);
     let idx = idx_by_work.or_else(|| {
@@ -225,10 +233,62 @@ pub fn mark_work_item_finished_with_session(
     });
     if let Some(idx) = idx {
         items[idx].finished_at = Some(now);
+        items[idx].outcome = Some(outcome.to_string());
     } else {
         return;
     }
     save_work_items(storage_root, &items);
+}
+
+/// 重启重建状态登记（徽章「永不消失」的持久化闭环）：
+/// - outcome=failed → failed；outcome=completed → completed
+/// - 旧终态记录（无 outcome 但 finished_at 有值）→ completed（近似）
+/// - 未终态且 6h 内 → interrupted（进程重启中断）；过期未终态不恢复
+/// - completed/failed 各保留最近 10 条（与运行时清理上限一致）
+pub fn recover_registry_entries(
+    storage_root: &std::path::Path,
+) -> Vec<crate::central::CentralWorkStatus> {
+    let cutoff = (chrono::Local::now() - chrono::Duration::hours(6))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let mut entries: Vec<crate::central::CentralWorkStatus> = Vec::new();
+    for item in load_work_items(storage_root) {
+        let state = if item.outcome.as_deref() == Some("failed") {
+            "failed"
+        } else if item.finished_at.is_some() {
+            // outcome=completed 或旧终态记录（字段上线前无 outcome）→ 完成
+            "completed"
+        } else if item.dispatched_at.as_str() > cutoff.as_str() {
+            "interrupted"
+        } else {
+            continue;
+        };
+        entries.push(crate::central::CentralWorkStatus {
+            work_id: item.work_id,
+            session_id: item.session_id,
+            task: item.task,
+            model: item.model,
+            dispatched_at: item.dispatched_at,
+            state: state.to_string(),
+            reused_session: item.reused_session,
+        });
+    }
+    // 截断：completed/failed 各保留最近 10 条（尾部为最新，从头部移除）
+    for state in ["completed", "failed"] {
+        let count = entries.iter().filter(|e| e.state == state).count();
+        if count > 10 {
+            let mut to_remove = count - 10;
+            entries.retain(|entry| {
+                if entry.state == state && to_remove > 0 {
+                    to_remove -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+    entries
 }
 
 /// 近期（6h）派发且未终态的登记——应用重启后按「已中断」恢复。
@@ -679,6 +739,7 @@ impl CentralPlugin {
                 .map(str::to_string),
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             finished_at: None,
+            outcome: None,
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),
@@ -993,6 +1054,7 @@ impl CentralPlugin {
             model: None,
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             finished_at: None,
+            outcome: None,
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),
@@ -1941,6 +2003,7 @@ mod tests {
                 model: None,
                 dispatched_at: format!("2026-11-10 1{:02}:00:00", i % 10),
                 finished_at: Some("2026-11-10 12:00:00".to_string()),
+                outcome: None,
             };
             upsert_work_item(root.path(), &record);
         }
@@ -1953,6 +2016,7 @@ mod tests {
             model: Some("k3".to_string()),
             dispatched_at: "2026-11-10 15:00:00".to_string(),
             finished_at: None,
+            outcome: None,
         };
         upsert_work_item(root.path(), &again);
         let items = load_work_items(root.path());
@@ -2000,10 +2064,11 @@ mod tests {
             model: None,
             dispatched_at: "2026-11-11 12:00:00".to_string(),
             finished_at: None,
+            outcome: None,
         };
         upsert_work_item(root.path(), &record);
         // 错误 work_id + 正确 session_id：兜底命中并写终态
-        mark_work_item_finished_with_session(root.path(), "work-wrong", Some("sess-1"));
+        mark_work_item_finished_with_session(root.path(), "work-wrong", Some("sess-1"), false);
         let items = load_work_items(root.path());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].work_id, "work-real");
@@ -2012,9 +2077,100 @@ mod tests {
             "session 兜底应写入终态：{items:?}"
         );
         // 双键都未命中：不新增不改动
-        mark_work_item_finished_with_session(root.path(), "work-none", Some("sess-none"));
+        mark_work_item_finished_with_session(root.path(), "work-none", Some("sess-none"), true);
         let after = load_work_items(root.path());
         assert_eq!(after.len(), 1, "未命中不得新增条目：{after:?}");
+        // 成败落盘：成功 → completed；失败 → failed
+        let finished = &after[0];
+        assert_eq!(finished.outcome.as_deref(), Some("completed"));
+        mark_work_item_finished_with_session(root.path(), "work-x", Some("sess-9"), true);
+        // sess-9 无未终态条目（sess-1 已终态）→ 不改动
+        assert_eq!(load_work_items(root.path()).len(), 1);
+    }
+
+    /// 重启重建：outcome 分态、旧终态近似 completed、未终态近期
+    /// interrupted、过期未终态跳过、completed/failed 各截 10。
+    #[test]
+    fn recover_registry_rebuilds_all_states() {
+        let root = tempfile::tempdir().unwrap();
+        let now = chrono::Local::now();
+        let recent = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let stale = (now - chrono::Duration::hours(12))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let mut records = Vec::new();
+        for i in 0..12 {
+            records.push(WorkItemRecord {
+                work_id: format!("work-c{i}"),
+                reused_session: false,
+                session_id: format!("sc{i}"),
+                task: format!("完成 {i}"),
+                model: None,
+                dispatched_at: recent.clone(),
+                finished_at: Some(recent.clone()),
+                outcome: Some("completed".to_string()),
+            });
+        }
+        records.push(WorkItemRecord {
+            work_id: "work-old-done".to_string(),
+            reused_session: false,
+            session_id: "s-old".to_string(),
+            task: "旧终态（无 outcome）".to_string(),
+            model: None,
+            dispatched_at: stale.clone(),
+            finished_at: Some(stale.clone()),
+            outcome: None,
+        });
+        records.push(WorkItemRecord {
+            work_id: "work-fail".to_string(),
+            reused_session: false,
+            session_id: "s-f".to_string(),
+            task: "失败任务".to_string(),
+            model: None,
+            dispatched_at: recent.clone(),
+            finished_at: Some(recent.clone()),
+            outcome: Some("failed".to_string()),
+        });
+        records.push(WorkItemRecord {
+            work_id: "work-recent-open".to_string(),
+            reused_session: false,
+            session_id: "s-ro".to_string(),
+            task: "近期未终态".to_string(),
+            model: None,
+            dispatched_at: recent.clone(),
+            finished_at: None,
+            outcome: None,
+        });
+        records.push(WorkItemRecord {
+            work_id: "work-stale-open".to_string(),
+            reused_session: false,
+            session_id: "s-so".to_string(),
+            task: "过期未终态".to_string(),
+            model: None,
+            dispatched_at: stale.clone(),
+            finished_at: None,
+            outcome: None,
+        });
+        for record in &records {
+            upsert_work_item(root.path(), record);
+        }
+        let entries = recover_registry_entries(root.path());
+        let count = |state: &str| entries.iter().filter(|e| e.state == state).count();
+        // completed = 12 条 outcome + 1 条旧终态近似 → 截断为 10
+        assert_eq!(count("completed"), 10, "completed 截断 10：{entries:?}");
+        // 截断保留最新的（work-c11 在，work-c0 被移除）
+        assert!(entries.iter().any(|e| e.work_id == "work-c11"));
+        assert!(!entries.iter().any(|e| e.work_id == "work-c0"));
+        assert_eq!(count("failed"), 1);
+        assert!(entries
+            .iter()
+            .any(|e| e.work_id == "work-fail" && e.state == "failed"));
+        // 近期未终态 → interrupted；过期未终态跳过
+        assert_eq!(count("interrupted"), 1);
+        assert!(entries
+            .iter()
+            .any(|e| e.work_id == "work-recent-open" && e.state == "interrupted"));
+        assert!(!entries.iter().any(|e| e.work_id == "work-stale-open"));
     }
 
     /// 登记文件损坏（坏 JSON）时按空表恢复，后续 upsert 修复文件。
@@ -2034,6 +2190,7 @@ mod tests {
             model: None,
             dispatched_at: "2026-11-11 12:00:00".to_string(),
             finished_at: None,
+            outcome: None,
         };
         upsert_work_item(root.path(), &record);
         let items = load_work_items(root.path());
