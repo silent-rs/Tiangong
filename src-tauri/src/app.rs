@@ -1789,6 +1789,24 @@ fn build_work_notice(
         )
     }
 }
+/// 字节偏移回退到最近的 UTF-8 字符边界（不越过 0）。
+fn char_safe_start(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// 字节偏移前进到最近的 UTF-8 字符边界（不超过文本长度）。
+fn char_safe_end(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset < text.len() && !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}
+
 /// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
 /// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
 ///
@@ -1845,17 +1863,20 @@ fn failure_looks_model_related(reason: &str) -> bool {
         "服务器",
         "请求",
     ];
-    let bytes = lower.as_bytes();
     CODES.iter().any(|code| {
-        lower.match_indices(code).any(|(idx, _)| {
-            let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_digit();
-            let end = idx + code.len();
-            let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+        lower.match_indices(code).any(|(idx, matched)| {
+            let before_ok = idx == 0 || !lower[..idx].ends_with(|c: char| c.is_ascii_digit());
+            let end = idx + matched.len();
+            let after_ok =
+                end >= lower.len() || !lower[end..].starts_with(|c: char| c.is_ascii_digit());
             if !(before_ok && after_ok) {
                 return false;
             }
-            let window_start = idx.saturating_sub(16);
-            let window_end = (end + 16).min(lower.len());
+            // UTF-8 安全窗口：字节偏移回退到最近字符边界再切片——
+            // `&s[a..b]` 的 a/b 落在多字节字符中间会 panic（review P1：
+            // 中文失败原因 + 状态码是常态输入，如「接口超时错误码429」）。
+            let window_start = char_safe_start(&lower, idx.saturating_sub(16));
+            let window_end = char_safe_end(&lower, (end + 16).min(lower.len()));
             let window = &lower[window_start..window_end];
             CONTEXT.iter().any(|context| window.contains(context))
         })
@@ -1895,6 +1916,14 @@ mod tests {
         assert!(!failure_looks_model_related("已扫描 500 个文件，全部通过"));
         assert!(!failure_looks_model_related(
             "文件共 40110 行，超出行数预算"
+        ));
+        // UTF-8 安全（review P1：中文语境 + 状态码不得 panic，语境词命中）
+        assert!(failure_looks_model_related("接口超时错误码429请稍后重试"));
+        assert!(failure_looks_model_related(
+            "上游服务器错误：500 服务不可用，任务终止"
+        ));
+        assert!(!failure_looks_model_related(
+            "仓库共 500 个模块，已全部索引完成"
         ));
     }
 

@@ -215,8 +215,8 @@ export function CentralWorkStatusBar() {
     [],
   );
 
-  if (items.length === 0) return null;
-
+  // 徽章常驻（用户设计裁决 2026-11-11）：无任务也显示（空态弱化样式），
+  // 不因列表清空而消失——用户始终能找到后台工作入口。
   const running = items.filter((item) => item.state === 'running');
   const queued = items.filter((item) => item.state === 'report_queued');
   const interrupted = items.filter((item) => item.state === 'interrupted');
@@ -236,7 +236,11 @@ export function CentralWorkStatusBar() {
     >
       <button
         type="button"
-        aria-label={`后台工作：${running.length} 个执行中，${queued.length} 条待汇报，共 ${totalCount} 项`}
+        aria-label={
+          totalCount === 0
+            ? '后台工作：暂无任务'
+            : `后台工作：${running.length} 个执行中，${queued.length} 条待汇报，共 ${totalCount} 项`
+        }
         aria-expanded={pinned || hoverOpen}
         // hover 之外的键盘/点击可达路径（无障碍 + 触屏）；点击固定为抽屉
         onClick={() => {
@@ -252,7 +256,9 @@ export function CentralWorkStatusBar() {
         className={`inline-flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-xs shadow-lg shadow-black/5 backdrop-blur-md transition-all ${
           running.length > 0
             ? 'border-primary/30 bg-primary/[0.08] text-foreground hover:border-primary/50'
-            : 'border-amber-500/30 bg-amber-500/[0.08] text-foreground hover:border-amber-500/50'
+            : totalCount > 0
+              ? 'border-amber-500/30 bg-amber-500/[0.08] text-foreground hover:border-amber-500/50'
+              : 'border-border/60 bg-background/80 text-muted-foreground hover:border-border hover:text-foreground'
         }`}
       >
         <span className="relative flex h-2 w-2">
@@ -261,8 +267,10 @@ export function CentralWorkStatusBar() {
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-50" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
             </>
-          ) : (
+          ) : totalCount > 0 ? (
             <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+          ) : (
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-muted-foreground/40" />
           )}
         </span>
         <span className="tabular-nums font-medium">
@@ -270,7 +278,9 @@ export function CentralWorkStatusBar() {
           ? `${running.length} 个后台任务`
           : interrupted.length > 0
             ? `${interrupted.length} 个任务已中断`
-            : '后台任务已结束'}
+            : totalCount > 0
+              ? '后台任务已结束'
+              : '无后台任务'}
         </span>
         {queued.length > 0 ? (
           <span className="rounded-full bg-amber-500/15 px-1.5 py-px font-medium tabular-nums text-amber-600 dark:text-amber-400">

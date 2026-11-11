@@ -101,9 +101,19 @@ describe('CentralWorkStatusBar', () => {
     container = undefined;
   });
 
-  it('无后台工作时徽章不渲染', async () => {
+  it('无后台工作时徽章常驻显示空态（用户设计：始终显示）', async () => {
     container = await mountWithItems([]);
-    expect(container.querySelector('button')).toBeNull();
+    const badge = container.querySelector('button');
+    expect(badge).not.toBeNull('徽章必须常驻，无任务也不消失');
+    expect(badge!.getAttribute('aria-label')).toBe('后台工作：暂无任务');
+    expect(badge!.textContent).toContain('无后台任务');
+    // 空态面板可打开，展示空态文案
+    act(() => {
+      badge!.click();
+    });
+    const drawer = container.querySelector('[role="dialog"]');
+    expect(drawer).not.toBeNull();
+    expect(drawer!.textContent).toContain('暂无后台工作');
   });
 
   it('hover 打开轻量浮层，鼠标移出后收起', async () => {
