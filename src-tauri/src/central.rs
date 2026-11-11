@@ -68,20 +68,14 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   `central__collect_work_reports` 收集后统一转述；用户要细节时指引
   查看工作会话；
   不要代替用户虚构执行结果；
-- **Workspace 确认**：向默认工作区之外的目录派发后台工作前，必须先用
-  `request_user` 向用户确认（说明目录路径与任务概要），同意后调
+- **Workspace 确认**：向默认工作区之外的目录派发后台工作前，必须先在
+  对话中向用户确认（说明目录路径与任务概要），同意后调
   `confirm_workspace` 登记再派发——机制会拦截未确认的派发；已确认过的
   工作区不再重复打扰用户；
 - **模型故障处置**：后台工作因模型/网络类原因失败（超时、限流、凭据、
   服务端错误）时，回报会附带处置建议——`list_models` 查询可用模型后用
   `dispatch_work` 带 session_id 与新 model 在**原会话重派**（上下文保留）；
   任务本身的错误（路径不存在、需求矛盾等）才向用户转述并等待指示；
-- **你是唯一征询方**：后台工作看不到用户界面，遇到需要用户决策的分叉时
-  会回报「【需要用户决策】」标记并把工作挂起（状态条显示「等待用户决策」）。
-  收到这种回报后：1) 用 `request_user` 工具向用户**完整转述**问题（保留
-  背景、选项与后果说明，不要自行简化或替用户决定）；2) 拿到答复后用
-  `central__send_to_worker` 把用户的决定原文发给该工作会话（工作随即恢复
-  执行）；3) 用户表示放弃/改派时，把决定如实转发或按用户要求重新派发；
 - 回答使用中文，保持简洁。";
 
 /// 后台工作状态登记条目（前端「后台工作」状态条数据源，命令
@@ -399,7 +393,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先 request_user 征询并 confirm_workspace；search_history 跨会话搜消息）+ request_user（征询用户决策——你是唯一征询方，后台工作挂起等待用户决策时用它转述问题）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -542,7 +536,9 @@ impl CentralPlugin {
         {
             if !workspace_confirmed(self.sessions.storage_root(), &self.workspace_dir, cwd) {
                 return self.error_result(format!(
-                    "工作区 {cwd} 尚未经用户确认。请先用 request_user 向用户确认\n                     （说明要在该目录执行后台工作及任务概要），用户同意后调用\n                     confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
+                    "工作区 {cwd} 尚未经用户确认。请先在对话中向用户确认\n\
+                     （说明要在该目录执行后台工作及任务概要），用户同意后调用\n\
+                     confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
                 ));
             }
         }
@@ -1158,7 +1154,7 @@ impl ToolSpecProvider for CentralPlugin {
             ToolSpec {
                 name: "confirm_workspace".to_string(),
                 description: "登记用户已确认可用的后台工作区。向非默认工作区的目录派发
-                    后台工作前必须先经用户同意（request_user 征询），同意后调用本工具
+                    后台工作前必须先在对话中征得用户同意，同意后调用本工具
                     登记该目录（一次确认长期有效），然后才能 dispatch_work 指定该 cwd。"
                     .to_string(),
                 input_schema: serde_json::json!({

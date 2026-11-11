@@ -921,25 +921,15 @@ impl TiangongApp {
             .storage_root(self.core_manager.storage_root().to_path_buf())
             .workspace_dir(workspace_dir.clone())
             .stream_tx(stream_tx)
-            .plugins({
-                // 中枢插件（编排工具）+ 桌面运行时桥（宿主 TS 插件，含
-                // interaction 的 request_user——中枢是**唯一征询方**：
-                // Worker 在后台看不到用户，需要用户决策时把问题上抛，
-                // 由中枢在前台征询后回传）。
-                vec![
-                    Arc::new(crate::central::CentralPlugin::new(
-                        workspace_dir.clone(),
-                        self.core_manager.clone(),
-                        central_dispatch_sender(app),
-                        std::sync::Arc::clone(&self.central_work_reports),
-                    )),
-                    tiangong_plugin_runtime::RuntimeCorePlugin::new(
-                        tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
-                        self.core_manager.storage_root().to_path_buf(),
-                        crate::central::CENTRAL_SESSION_ID.to_string(),
-                    ),
-                ]
-            })
+            // 征询功能暂缓（用户裁决 2026-11-11）：只挂中枢插件，不加
+            // RuntimeCorePlugin（request_user 通道随之移除）。中枢需要用户
+            // 决策时在对话文本中直接询问用户。
+            .plugins(vec![Arc::new(crate::central::CentralPlugin::new(
+                workspace_dir,
+                self.core_manager.clone(),
+                central_dispatch_sender(app),
+                std::sync::Arc::clone(&self.central_work_reports),
+            ))])
             .model_endpoint(model_endpoint)
             .build();
         let mut guard = self.central_core.lock().unwrap_or_else(|e| e.into_inner());
@@ -1020,11 +1010,6 @@ impl TiangongApp {
         notice: &str,
         app: &tauri::AppHandle,
     ) {
-        // 阻塞识别（Worker 决策征询协议）：回报携带【需要用户决策】标记时
-        // 工作未终态——置 blocked（中枢征询用户后经引导恢复），立即注入
-        // 中枢（阻塞必达，不受汇总轮时机限制），且**不落终态**（重启恢复
-        // 时该工作仍按在执行/中断处理，不会被误标完成）。
-        let blocked = classify_work_outcome(notice).is_blocked();
         self.central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1033,7 +1018,7 @@ impl TiangongApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(notice.to_string());
-        // 状态登记：阻塞 → blocked（等待用户决策）；正常 → report_queued
+        // 状态登记：running → report_queued（若本轮即注入汇报则随后清除）
         {
             let mut registry = self
                 .central_work_registry
@@ -1043,18 +1028,8 @@ impl TiangongApp {
                 .iter_mut()
                 .find(|entry| entry.work_id == request.work_id)
             {
-                entry.state = if blocked {
-                    "blocked".to_string()
-                } else {
-                    "report_queued".to_string()
-                };
+                entry.state = "report_queued".to_string();
             }
-        }
-        if blocked {
-            // 阻塞必达：立即注入中枢（中枢征询用户），其余暂存回报一并带出
-            self.deliver_pending_work_reports();
-            emit_central_work_updated(app);
-            return;
         }
         // 持久化终态（重启恢复依据：无终态的近期登记按已中断处理）
         crate::central::mark_work_item_finished_with_session(
@@ -1579,11 +1554,11 @@ fn self_session_cwd(state: &TiangongApp, session_id: &str) -> Option<String> {
 
 /// 执行中枢派发：创建 Worker 会话（普通能力、全插件、指定模型）投递任务，
 /// 并挂终态 watcher 把结果注入中枢对话。
-/// Worker 派发指令：身份 + 决策征询协议（后台会话无 UI，不能调交互工具，
-/// 关键分叉以【需要用户决策】标记上抛，由中枢在前台征询后回传）+ 任务。
+/// Worker 派发指令：身份 + 自主决策要求（后台会话无 UI，不得依赖交互
+/// 工具；无法继续的关键阻塞如实写进最终结论，由中枢转述用户裁决）+ 任务。
 fn build_worker_instruction(work_id: &str, task: &str) -> String {
     format!(
-        "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n【用户决策征询协议】你是后台会话，用户看不到你的界面——不要调用 request_user 等交互工具（无人应答，只会超时失败）。任务中遇到必须由用户决策（审批/确认/选择/补充关键信息）才能继续的分叉时：1) 以「【需要用户决策】」开头单独一行，完整写出问题（含背景与选项，一次问全）；2) 写完问题立即结束本轮回复，不要继续其他动作；3) 系统会把问题转交中枢，由中枢征询用户，答复会以下一条消息回到本会话，届时继续任务。除关键分叉外应自主决策，最小化打断用户。\n\n任务：\n{}",
+        "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n注意：你是后台会话，用户看不到你的界面——不要调用 request_user 等交互工具（无人应答，只会超时失败）。请自主决策完成任务；确因缺少用户决策无法继续时，在最终结论中如实说明阻塞点与建议选项，不要虚构结果。\n\n任务：\n{}",
         work_id, task
     )
 }
@@ -1635,29 +1610,6 @@ async fn handle_central_dispatch(
     let instruction = build_worker_instruction(&request.work_id, &request.task);
     let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
 
-    // 引导/答复送达时的 blocked 归并：目标会话存在 blocked（等待用户决策）
-    // 条目时，本轮（通常是中枢回传的用户答复）的终态归属该主 work——
-    // 恢复 running、复用其 work_id/task 挂回调与登记，不另立条目。
-    let mut merged_work = request.clone();
-    if request.reused_session {
-        let mut registry = state
-            .central_work_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(position) = registry
-            .iter()
-            .rposition(|entry| entry.session_id == sid && entry.state == "blocked")
-        {
-            registry[position].state = "running".to_string();
-            merged_work.work_id = registry[position].work_id.clone();
-            merged_work.task = registry[position].task.clone();
-            tracing::info!(
-                work_id = %merged_work.work_id,
-                session_id = %sid,
-                "阻塞工作已收到答复/引导，恢复执行"
-            );
-        }
-    }
     if state.core_manager.has_live_core(&sid) {
         // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
         // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
@@ -1671,7 +1623,7 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
-        attach_work_finished_callback(&slot, app, merged_work.clone());
+        attach_work_finished_callback(&slot, app, request.clone());
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
@@ -1695,7 +1647,7 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
-        attach_work_finished_callback(&slot, app, merged_work.clone());
+        attach_work_finished_callback(&slot, app, request.clone());
     }
     tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
     // 给 Worker 会话写可识别标题（仅新建会话；复用/引导保留原标题）。
@@ -1712,35 +1664,32 @@ async fn handle_central_dispatch(
             .central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        running.insert(merged_work.work_id.clone());
+        running.insert(request.work_id.clone());
     }
-    let merged_into_existing = merged_work.work_id != request.work_id;
-    if !merged_into_existing {
-        state
-            .central_work_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(crate::central::CentralWorkStatus {
-                work_id: request.work_id.clone(),
-                session_id: request.session_id.clone(),
-                task: request.task.clone(),
-                model: if request.reused_session {
-                    // 复用实际沿用会话既有模型（review M5：登记不得谎报请求模型）
-                    Some(format!(
-                        "会话既有模型（已忽略 {}）",
-                        request.model.as_deref().unwrap_or("默认")
-                    ))
-                } else {
-                    request
-                        .model
-                        .clone()
-                        .or_else(|| Some("路由默认".to_string()))
-                },
-                dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                state: "running".to_string(),
-                reused_session: request.reused_session,
-            });
-    }
+    state
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(crate::central::CentralWorkStatus {
+            work_id: request.work_id.clone(),
+            session_id: request.session_id.clone(),
+            task: request.task.clone(),
+            model: if request.reused_session {
+                // 复用实际沿用会话既有模型（review M5：登记不得谎报请求模型）
+                Some(format!(
+                    "会话既有模型（已忽略 {}）",
+                    request.model.as_deref().unwrap_or("默认")
+                ))
+            } else {
+                request
+                    .model
+                    .clone()
+                    .or_else(|| Some("路由默认".to_string()))
+            },
+            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            state: "running".to_string(),
+            reused_session: request.reused_session,
+        });
     emit_central_work_updated(app);
     Ok(())
 }
@@ -1761,28 +1710,6 @@ fn attach_work_finished_callback(
         }));
 }
 
-/// 后台工作回报分类（Worker 决策征询协议）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkOutcome {
-    /// 正常终态（成功或失败）
-    Finished,
-    /// 等待用户决策：Worker 输出【需要用户决策】标记后结束本轮，
-    /// 由中枢征询用户并经引导消息回传答复。
-    Blocked,
-}
-impl WorkOutcome {
-    fn is_blocked(self) -> bool {
-        matches!(self, WorkOutcome::Blocked)
-    }
-}
-/// 依据回报文本判定工作结局（可单测的纯函数）。
-fn classify_work_outcome(notice: &str) -> WorkOutcome {
-    if notice.contains("【需要用户决策】") {
-        WorkOutcome::Blocked
-    } else {
-        WorkOutcome::Finished
-    }
-}
 /// 回报是否应立即注入汇报：失败必达；成功仅在无其他在执行任务时
 /// 触发汇总轮（否则暂存等待汇总，或用户消息/询问兜底消费）。
 fn should_deliver_work_reports_now(done: bool, has_running_work: bool) -> bool {
@@ -1911,39 +1838,14 @@ mod tests {
         assert!(!failure_looks_model_related("任务要求删除文件被拒绝"));
     }
 
-    /// Worker 指令必须包含决策征询协议（后台会话无 UI）与任务正文。
+    /// Worker 指令：禁用交互工具（后台无 UI）+ 阻塞如实说明，不虚构结果。
     #[test]
-    fn worker_instruction_carries_decision_protocol() {
+    fn worker_instruction_forbids_interaction_tools() {
         let instruction = build_worker_instruction("work-abc", "执行数据库迁移");
         assert!(instruction.contains("work-abc"));
         assert!(instruction.contains("执行数据库迁移"));
-        assert!(instruction.contains("【用户决策征询协议】"));
-        // 协议三要素：禁用交互工具、标记格式、答复回流方式
         assert!(instruction.contains("不要调用 request_user"));
-        assert!(instruction.contains("【需要用户决策】"));
-        assert!(instruction.contains("以下一条消息回到本会话"));
-    }
-
-    /// 阻塞识别（Worker 决策征询协议）：携带【需要用户决策】标记的回报
-    /// 判为 Blocked，其余为正常终态。
-    #[test]
-    fn work_outcome_classifies_blocked_marker() {
-        assert_eq!(
-            classify_work_outcome("[后台工作完成] work-1\n结论：一切正常"),
-            WorkOutcome::Finished
-        );
-        assert_eq!(
-            classify_work_outcome("[后台工作失败] work-2\n失败原因：超时"),
-            WorkOutcome::Finished
-        );
-        assert_eq!(
-            classify_work_outcome(
-                "[后台工作完成] work-3\n【需要用户决策】\n问题：是否继续执行迁移？"
-            ),
-            WorkOutcome::Blocked
-        );
-        assert!(classify_work_outcome("【需要用户决策】是否删除旧目录？").is_blocked());
-        assert!(!classify_work_outcome("任务已完成，无待决事项").is_blocked());
+        assert!(instruction.contains("不要虚构结果"));
     }
 
     #[test]
