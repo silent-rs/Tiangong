@@ -1038,11 +1038,19 @@ impl TiangongApp {
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = registry
-                .iter_mut()
-                .find(|entry| entry.work_id == request.work_id)
-            {
-                entry.state = if done {
+            // 查找与落盘同款兜底：优先 work_id，找不到按 session_id——
+            // 会话聚合 upsert 后，同会话先派发 work 的条目可能已被覆盖，
+            // 终态仍应更新到该会话现有条目（状态不得因聚合丢失）。
+            let position = registry
+                .iter()
+                .position(|entry| entry.work_id == request.work_id)
+                .or_else(|| {
+                    registry
+                        .iter()
+                        .position(|entry| entry.session_id == request.session_id)
+                });
+            if let Some(position) = position {
+                registry[position].state = if done {
                     "report_queued".to_string()
                 } else {
                     "failed".to_string()
@@ -1494,9 +1502,23 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
     if !registry.is_empty() {
         return; // 已恢复过（双触发幂等）
     }
-    let completed = entries.iter().filter(|e| e.state == "completed").count();
-    let failed = entries.iter().filter(|e| e.state == "failed").count();
-    let interrupted = entries.iter().filter(|e| e.state == "interrupted").count();
+    // 汇总只在有「需要用户处理/知晓的新事实」时注入：interrupted（结果
+    // 未产出，可重派）与 failed（可换模型重派）。completed 不注入——
+    // 每次重启都注入全量历史完成数会重复刷屏且数字并非「离开期间」
+    // （work-items.json 是滚动 20 条，无法区分本次离开新增）。
+    // 先提取 owned 数据（避免与 extend 的所有权冲突）
+    let failed_names: Vec<String> = entries
+        .iter()
+        .filter(|e| e.state == "failed")
+        .map(|e| {
+            format!(
+                "{}（{}）",
+                e.work_id,
+                e.task.chars().take(24).collect::<String>()
+            )
+        })
+        .collect();
+    let interrupted_count = entries.iter().filter(|e| e.state == "interrupted").count();
     for entry in &entries {
         tracing::info!(
             work_id = %entry.work_id,
@@ -1506,15 +1528,22 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
     }
     registry.extend(entries);
     drop(registry);
-    let summary = format!(
-        "[系统中枢] 应用重启恢复（离开期间）：{completed} 个后台工作已完成、{failed} 个失败、{interrupted} 个中断。\n完成与失败工作的结果在其各自会话中；中断的工作可重派（复用原会话延续上下文）。收到用户消息后请按需转述本汇总。"
-    );
-    state
-        .inner()
-        .central_work_reports
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(summary);
+    if !failed_names.is_empty() || interrupted_count > 0 {
+        let failed_note = if failed_names.is_empty() {
+            String::new()
+        } else {
+            format!("失败：{}。", failed_names.join("、"))
+        };
+        let summary = format!(
+            "[系统中枢] 应用重启恢复：{interrupted_count} 个后台工作中断（结果未产出，可复用原会话重派）。{failed_note}请向用户转述并根据指示处理。"
+        );
+        state
+            .inner()
+            .central_work_reports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(summary);
+    }
     emit_central_work_updated(app);
 }
 
