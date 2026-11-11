@@ -68,6 +68,10 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   `central__collect_work_reports` 收集后统一转述；用户要细节时指引
   查看工作会话；
   不要代替用户虚构执行结果；
+- **Workspace 确认**：向默认工作区之外的目录派发后台工作前，必须先用
+  `request_user` 向用户确认（说明目录路径与任务概要），同意后调
+  `confirm_workspace` 登记再派发——机制会拦截未确认的派发；已确认过的
+  工作区不再重复打扰用户；
 - **模型故障处置**：后台工作因模型/网络类原因失败（超时、限流、凭据、
   服务端错误）时，回报会附带处置建议——`list_models` 查询可用模型后用
   `dispatch_work` 带 session_id 与新 model 在**原会话重派**（上下文保留）；
@@ -274,6 +278,71 @@ fn upsert_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
     save_work_items(storage_root, &items);
 }
 
+/// 已确认工作区持久化路径：`{storage_root}/central/confirmed-workspaces.json`。
+fn confirmed_workspaces_path(storage_root: &std::path::Path) -> std::path::PathBuf {
+    storage_root
+        .join("central")
+        .join("confirmed-workspaces.json")
+}
+
+/// 读取已确认工作区列表（canonicalize 后比较，容错符号链接/尾斜杠）。
+fn load_confirmed_workspaces(storage_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_to_string(confirmed_workspaces_path(storage_root))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+/// 追加已确认工作区（去重、canonicalize）并落盘。
+fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path::Path) {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut list = load_confirmed_workspaces(storage_root);
+    let list: Vec<std::path::PathBuf> = std::iter::once(canonical)
+        .chain(list)
+        .filter(|item| item.is_absolute())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let list: Vec<std::path::PathBuf> = list
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect();
+    if let Some(parent) = confirmed_workspaces_path(storage_root).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(
+        &list
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<String>>(),
+    ) {
+        let _ = std::fs::write(confirmed_workspaces_path(storage_root), text);
+    }
+}
+
+/// 工作区是否已被用户确认可用（默认工作区天然已确认）。
+fn workspace_confirmed(
+    storage_root: &std::path::Path,
+    default_workspace: &str,
+    target: &str,
+) -> bool {
+    let target = target.trim();
+    if target.is_empty() || target == default_workspace.trim() {
+        return true;
+    }
+    let canonical_target = std::path::Path::new(target)
+        .canonicalize()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| target.to_string());
+    load_confirmed_workspaces(storage_root)
+        .iter()
+        .any(|confirmed| {
+            confirmed.to_string_lossy() == canonical_target || confirmed.to_string_lossy() == target
+        })
+}
+
 impl CentralPlugin {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -330,7 +399,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；search_history 跨会话搜消息）+ request_user（征询用户决策——你是唯一征询方，后台工作挂起等待用户决策时用它转述问题）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先 request_user 征询并 confirm_workspace；search_history 跨会话搜消息）+ request_user（征询用户决策——你是唯一征询方，后台工作挂起等待用户决策时用它转述问题）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -463,6 +532,19 @@ impl CentralPlugin {
         let task = task.trim();
         if task.is_empty() {
             return self.error_result("task 不能为空".to_string());
+        }
+        // Workspace 确认（§资源边界）：向非默认工作区派发前，该工作区必须
+        // 已经用户确认（confirm_workspace 登记过）。机制级拦截——提示式
+        // 兜底会被模型忽略（强制复用同款教训）。
+        if let Some(cwd) = cwd
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty() && *cwd != self.workspace_dir)
+        {
+            if !workspace_confirmed(self.sessions.storage_root(), &self.workspace_dir, cwd) {
+                return self.error_result(format!(
+                    "工作区 {cwd} 尚未经用户确认。请先用 request_user 向用户确认\n                     （说明要在该目录执行后台工作及任务概要），用户同意后调用\n                     confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
+                ));
+            }
         }
         // 模型校验（白名单 §5.3：派发前确认模型可用；失败时附可用清单）
         if let Some(model) = model.filter(|key| !key.trim().is_empty()) {
@@ -876,6 +958,22 @@ impl CentralPlugin {
         self.text_result("引导已发送", body)
     }
 
+    /// 登记用户已确认的工作区（配合 Workspace 确认交互）。
+    fn handle_confirm_workspace(&self, path: &str) -> Option<ToolResult> {
+        let path = path.trim();
+        if path.is_empty() {
+            return self.error_result("path 不能为空".to_string());
+        }
+        let target = std::path::Path::new(path);
+        if !target.is_dir() {
+            return self.error_result(format!("路径不存在或不是目录：{path}"));
+        }
+        add_confirmed_workspace(self.sessions.storage_root(), target);
+        self.text_result(
+            "工作区已确认",
+            format!("已登记用户确认的工作区：{path}\n后续向该目录派发后台工作不再需要重复确认。"),
+        )
+    }
     /// 派发登记表（中枢视角的派发事实）。
     fn handle_list_work_items(&self) -> Option<ToolResult> {
         let items = self
@@ -1058,6 +1156,20 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
+                name: "confirm_workspace".to_string(),
+                description: "登记用户已确认可用的后台工作区。向非默认工作区的目录派发
+                    后台工作前必须先经用户同意（request_user 征询），同意后调用本工具
+                    登记该目录（一次确认长期有效），然后才能 dispatch_work 指定该 cwd。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区绝对路径（必须存在的目录）"}
+                    },
+                    "required": ["path"]
+                }),
+            },
+            ToolSpec {
                 name: "send_to_worker".to_string(),
                 description: "向已派发的后台工作会话发送引导消息：调整方向、补充要求、\
                     追问细节。会话执行中作为引导消息并入当前任务；空闲时开启新任务。\
@@ -1127,6 +1239,14 @@ impl ToolOverrideHandler for CentralPlugin {
             }
             "list_models" => self.handle_list_models(),
             "list_sessions" => self.handle_list_sessions(),
+            "confirm_workspace" => {
+                let path = call
+                    .arguments
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_confirm_workspace(path)
+            }
             "send_to_worker" => {
                 let session_id = call
                     .arguments
@@ -1413,6 +1533,13 @@ mod tests {
         .unwrap();
         let (plugin, mut dispatch_rx, _reports) =
             plugin_with_channel("/tmp/ws".to_string(), manager);
+        // /tmp 非默认工作区：预先登记用户确认（Workspace 确认交互）
+        let confirm = call_tool(
+            &plugin,
+            "confirm_workspace",
+            serde_json::json!({"path": "/tmp"}),
+        );
+        assert!(confirm.ok, "stderr: {}", confirm.stderr);
         let result = call_tool(
             &plugin,
             "dispatch_work",
@@ -1790,6 +1917,60 @@ mod tests {
     /// 首次派发不得出现「高度相似」提示；同前缀第二次（不带 session_id）
     /// 才应出现。
     #[test]
+    /// Workspace 确认交互：未确认的 cwd 拒绝 → confirm_workspace 登记 → 放行；
+    /// 默认工作区与已确认目录无需确认。
+    #[test]
+    fn dispatch_requires_workspace_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        let extra_path = extra.path().to_string_lossy().to_string();
+        // 默认工作区设为另一目录：extra 才是「未确认的新工作区」
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 未确认：拒绝并给出征询指引
+        let denied = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "扫描依赖并升级", "cwd": extra_path}),
+        );
+        assert!(!denied.ok, "未确认工作区必须拒绝：{}", denied.stderr);
+        assert!(
+            denied.stderr.contains("尚未经用户确认"),
+            "拒绝信息须说明确认流程：{}",
+            denied.stderr
+        );
+        assert!(
+            denied.stderr.contains("confirm_workspace"),
+            "拒绝信息须指引 confirm_workspace：{}",
+            denied.stderr
+        );
+        // 登记确认
+        let confirmed = call_tool(
+            &plugin,
+            "confirm_workspace",
+            serde_json::json!({"path": extra_path}),
+        );
+        assert!(confirmed.ok, "stderr: {}", confirmed.stderr);
+        // 确认后放行
+        let allowed = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "扫描依赖并升级", "cwd": extra_path}),
+        );
+        assert!(allowed.ok, "stderr: {}", allowed.stderr);
+        assert!(!allowed.stderr.contains("尚未经用户确认"));
+    }
+
     fn dispatch_similarity_hint_excludes_self() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
