@@ -1,5 +1,6 @@
 import { MainApp } from './pages/MainApp'
 import { ToastProvider } from './components/Toast'
+import { CentralNotificationBridge } from './components/CentralNotificationBridge'
 import { StartupPrepareGate } from './components/StartupPrepareGate'
 import { useTheme } from './hooks/useTheme'
 
@@ -9,6 +10,7 @@ function App() {
 
   return (
     <ToastProvider>
+      <CentralNotificationBridge />
       <StartupPrepareGate>
         <MainApp />
       </StartupPrepareGate>

@@ -1694,6 +1694,21 @@ fn central_dispatch_sender(
                         crate::central::CentralPluginMessage::Control(control) => {
                             handle_central_control(state_of(&app), &app, control).await;
                         }
+                        crate::central::CentralPluginMessage::Notification {
+                            title,
+                            message,
+                            level,
+                        } => {
+                            use tauri::Emitter;
+                            let _ = app.emit(
+                                "central-notification",
+                                serde_json::json!({
+                                    "title": title,
+                                    "message": message,
+                                    "level": level,
+                                }),
+                            );
+                        }
                     }
                 }
             });

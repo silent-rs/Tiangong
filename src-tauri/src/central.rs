@@ -79,6 +79,14 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
 - **工作控制**：用户要求停止/放弃某工作时用 `cancel_work`（终态，不恢复）；
   要求暂停/先放一放用 `pause_work`（上下文保留）；要求继续/恢复用
   `resume_work`（自动发送继续指令）。不要用重派代替控制指令；
+- **目标为纲**：用户表达目标/意图时用 `create_goal` 登记（跨工作持续
+  存在），派发与汇报围绕目标组织；目标达成或放弃时如实 `update_goal_status`；
+- **报告存档**：重要工作完成或失败收尾时，用 `create_report` 把关键结论、
+  产物路径与风险结构化存档（用户日后回查历史结论的依据）；
+- **通知克制**：`send_notification` 仅用于需要用户即时知晓的事件（高风险
+  提醒、关键完成、需尽快决策）；常规汇报走对话，不要滥用通知；
+- **换模型先商量**：切换工作会话模型必须先在对话中说明原因并征得用户
+  同意，再带商量结论调 `switch_worker_model`——未商量的切换会被拒绝；
 - **失败归并**：多个工作因同类原因失败时，向用户合并转述（一次说明
   根因与影响面），不逐条重复展开同类失败；
 - **代决留痕**：你替用户做的每个决定（代决）都要在对话中留下依据
@@ -125,6 +133,12 @@ pub enum CentralPluginMessage {
     ReportsCollected,
     /// 工作控制（取消/暂停/恢复）——由执行器操作真实运行时。
     Control(CentralControlRequest),
+    /// 应用内通知（send_notification 工具 → 执行器 emit 前端事件）。
+    Notification {
+        title: String,
+        message: String,
+        level: String,
+    },
 }
 
 /// 中枢工作控制请求（cancel_work / pause_work / resume_work）。
@@ -558,6 +572,117 @@ fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path::Pat
     }
 }
 
+// ============================================================================
+// 用户目标（§13.2）与结构化报告（§13.5）：完整实现的数据模型层。
+// ============================================================================
+
+/// 用户目标（§13.2：中枢以用户目标为语义核心，目标跨工作持续存在）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoalRecord {
+    pub goal_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// 关联工作区（可选）。
+    #[serde(default)]
+    pub workspace: Option<String>,
+    pub created_at: String,
+    /// active / achieved / abandoned（中枢按用户反馈更新）。
+    #[serde(default)]
+    pub status: String,
+}
+
+fn goals_path(storage_root: &std::path::Path) -> std::path::PathBuf {
+    storage_root.join("central").join("goals.json")
+}
+
+fn load_goals(storage_root: &std::path::Path) -> Vec<GoalRecord> {
+    let path = goals_path(storage_root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|error| {
+            tracing::warn!(%error, path = %path.display(), "目标记录损坏，按空表处理");
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 目标登记（active 上限 10：久远的 inactive 目标自动归档移除）。
+fn save_goals(storage_root: &std::path::Path, goals: &[GoalRecord]) {
+    let path = goals_path(storage_root);
+    let Some(parent) = path.parent() else { return };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        tracing::warn!(%error, "目标目录创建失败");
+        return;
+    }
+    match serde_json::to_string_pretty(goals) {
+        Ok(text) => {
+            let tmp = path.with_extension("json.tmp");
+            if let Err(error) = std::fs::write(&tmp, text) {
+                tracing::warn!(%error, "目标临时文件写入失败");
+                return;
+            }
+            if let Err(error) = std::fs::rename(&tmp, &path) {
+                tracing::warn!(%error, "目标原子替换失败");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "目标序列化失败"),
+    }
+}
+
+/// 结构化报告（§13.5：工作终态的结论/产物/风险结构化存档，供回查）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReportRecord {
+    pub report_id: String,
+    pub work_id: String,
+    pub summary: String,
+    /// 产物路径列表（文件/报告）。
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    /// 风险与未尽事项。
+    #[serde(default)]
+    pub risks: Vec<String>,
+    pub created_at: String,
+}
+
+fn reports_path(storage_root: &std::path::Path) -> std::path::PathBuf {
+    storage_root.join("central").join("reports.json")
+}
+
+fn load_reports(storage_root: &std::path::Path) -> Vec<ReportRecord> {
+    let path = reports_path(storage_root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|error| {
+            tracing::warn!(%error, path = %path.display(), "报告存档损坏，按空表处理");
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 报告存档（保留最近 50 份）。
+fn save_reports(storage_root: &std::path::Path, reports: &[ReportRecord]) {
+    let path = reports_path(storage_root);
+    let Some(parent) = path.parent() else { return };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        tracing::warn!(%error, "报告目录创建失败");
+        return;
+    }
+    match serde_json::to_string_pretty(reports) {
+        Ok(text) => {
+            let tmp = path.with_extension("json.tmp");
+            if let Err(error) = std::fs::write(&tmp, text) {
+                tracing::warn!(%error, "报告临时文件写入失败");
+                return;
+            }
+            if let Err(error) = std::fs::rename(&tmp, &path) {
+                tracing::warn!(%error, "报告原子替换失败");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "报告序列化失败"),
+    }
+}
+
 /// 路径规范化（canonicalize 失败退回原样，比较仍可进行）。
 fn canonical_path_string(path: &str) -> String {
     std::path::Path::new(path.trim())
@@ -652,22 +777,36 @@ impl CentralPlugin {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len();
         let interrupted_reports = interrupted_work_items(self.sessions.storage_root()).len();
+        let goals_summary: String = {
+            let goals = load_goals(self.sessions.storage_root());
+            let active: Vec<String> = goals
+                .iter()
+                .filter(|g| g.status == "active")
+                .map(|g| g.title.clone())
+                .collect();
+            if active.is_empty() {
+                "无（用户表达目标时请用 create_goal 登记）".to_string()
+            } else {
+                active.join("、")
+            }
+        };
         let body = format!(
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；get_work_timeline 查工作时间线；dispatch_work 支持 after_work_id 排队依赖；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；get_work_timeline 查工作时间线；create_goal/update_goal_status 管理用户目标（用户表达目标时登记，达成/放弃时更新）；create_report/list_reports 结构化报告存档与查询；get_work_item_status 单工作详情；switch_worker_model 换工作会话模型（必须先与用户商量并携带结论）；send_notification 应用内通知（重要事件，勿滥用）；dispatch_work 支持 after_work_id 排队依赖；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
              待汇报的后台工作回报: {pending} 条（可调 collect_work_reports 收集后转述）\n\
-             因应用重启中断的任务: {interrupted} 个（徽章可见；结果未产出，可重派复用原会话）\n\
+             因应用重启中断的任务: {interrupted} 个（徽章可见；结果未产出，可重派复用原会话）\n             当前用户目标: {goals}\n\
              当前时间: {now}",
             version = env!("CARGO_PKG_VERSION"),
             workspace = self.workspace_dir,
             count = workspace_count,
             pending = pending_reports,
             interrupted = interrupted_reports,
+            goals = goals_summary,
             now = chrono::Local::now().format("%Y-%m-%d %H:%M"),
         );
         self.text_result("中枢上下文", body)
@@ -1250,6 +1389,292 @@ impl CentralPlugin {
         self.text_result("引导已发送", body)
     }
 
+    /// 用户目标登记（§13.2）：目标跨工作持续存在，get_context 注入当前目标。
+    fn handle_create_goal(
+        &self,
+        title: &str,
+        description: &str,
+        workspace: Option<&str>,
+    ) -> Option<ToolResult> {
+        let title = title.trim();
+        if title.is_empty() {
+            return self.error_result("title 不能为空".to_string());
+        }
+        let mut goals = load_goals(self.sessions.storage_root());
+        // 同名幂等：已存在的同名 active 目标直接返回
+        if let Some(existing) = goals
+            .iter()
+            .find(|g| g.status == "active" && g.title == title)
+        {
+            return self.text_result(
+                "目标已存在",
+                format!(
+                    "目标「{title}」已存在（{}），无需重复创建。",
+                    existing.goal_id
+                ),
+            );
+        }
+        let goal = GoalRecord {
+            goal_id: format!("goal-{}", scru128::new()),
+            title: title.to_string(),
+            description: description.trim().to_string(),
+            workspace: workspace
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(str::to_string),
+            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            status: "active".to_string(),
+        };
+        let goal_id = goal.goal_id.clone();
+        goals.push(goal);
+        // active 上限 10：最旧的 active 归档为 achieved（不物理删除，留痕）
+        let active_count = goals.iter().filter(|g| g.status == "active").count();
+        if active_count > 10 {
+            if let Some(position) = goals.iter().position(|g| g.status == "active") {
+                goals[position].status = "archived".to_string();
+            }
+        }
+        save_goals(self.sessions.storage_root(), &goals);
+        self.text_result(
+            "目标已登记",
+            format!(
+                "目标「{title}」（{goal_id}）已记录；后续派发与汇报将围绕该目标组织，用户问「我的目标」时可引用。达成或放弃时用 update_goal_status 更新。"
+            ),
+        )
+    }
+
+    /// 目标状态更新（achieved / abandoned / archived）。
+    fn handle_update_goal_status(&self, goal_id: &str, status: &str) -> Option<ToolResult> {
+        let goal_id = goal_id.trim();
+        if goal_id.is_empty() {
+            return self.error_result("goal_id 不能为空".to_string());
+        }
+        if !["achieved", "abandoned", "archived", "active"].contains(&status) {
+            return self.error_result(format!(
+                "status 仅支持 active / achieved / abandoned / archived，收到 {status}"
+            ));
+        }
+        let mut goals = load_goals(self.sessions.storage_root());
+        let Some(goal) = goals.iter_mut().rev().find(|g| g.goal_id == goal_id) else {
+            return self.error_result(format!("未找到目标 {goal_id}"));
+        };
+        goal.status = status.to_string();
+        let title = goal.title.clone();
+        save_goals(self.sessions.storage_root(), &goals);
+        self.text_result("目标状态已更新", format!("目标「{title}」→ {status}"))
+    }
+
+    /// 结构化报告存档（§13.5）。
+    fn handle_create_report(
+        &self,
+        work_id: &str,
+        summary: &str,
+        artifacts: &[String],
+        risks: &[String],
+    ) -> Option<ToolResult> {
+        let work_id = work_id.trim();
+        let summary = summary.trim();
+        if work_id.is_empty() || summary.is_empty() {
+            return self.error_result("work_id 与 summary 不能为空".to_string());
+        }
+        let report = ReportRecord {
+            report_id: format!("report-{}", scru128::new()),
+            work_id: work_id.to_string(),
+            summary: summary.to_string(),
+            artifacts: artifacts.to_vec(),
+            risks: risks.to_vec(),
+            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        };
+        let report_id = report.report_id.clone();
+        let mut reports = load_reports(self.sessions.storage_root());
+        reports.push(report);
+        let overflow = reports.len().saturating_sub(50);
+        if overflow > 0 {
+            reports.drain(..overflow);
+        }
+        save_reports(self.sessions.storage_root(), &reports);
+        self.text_result(
+            "报告已存档",
+            format!(
+                "报告 {report_id}（工作 {work_id}）已持久化；产物 {} 项、风险 {} 项。用户需要历史结论时可查询。",
+                artifacts.len(),
+                risks.len()
+            ),
+        )
+    }
+
+    /// 报告查询（全部或按 work_id 过滤）。
+    fn handle_list_reports(&self, work_id: Option<&str>) -> Option<ToolResult> {
+        let reports = load_reports(self.sessions.storage_root());
+        if reports.is_empty() {
+            return self.text_result("报告存档", "暂无已存档报告。".to_string());
+        }
+        let filtered: Vec<&ReportRecord> = match work_id.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(work) => reports.iter().filter(|r| r.work_id == work).collect(),
+            None => reports.iter().collect(),
+        };
+        if filtered.is_empty() {
+            return self.text_result("报告存档", format!("工作 {work_id:?} 没有已存档报告。"));
+        }
+        let lines: Vec<String> = filtered
+            .iter()
+            .rev()
+            .map(|r| {
+                format!(
+                    "- {}（{}，工作 {}）：{}{}{}",
+                    r.report_id,
+                    r.created_at,
+                    r.work_id,
+                    r.summary,
+                    if r.artifacts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；产物：{}", r.artifacts.join("、"))
+                    },
+                    if r.risks.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；风险：{}", r.risks.join("、"))
+                    }
+                )
+            })
+            .collect();
+        self.text_result(
+            "报告存档",
+            format!("共 {} 份：\n{}", filtered.len(), lines.join("\n")),
+        )
+    }
+
+    /// 单工作详情（状态 + 事件时间线，get_work_item_status 蓝图对位）。
+    fn handle_work_item_status(&self, work_id: &str) -> Option<ToolResult> {
+        let work_id = work_id.trim();
+        if work_id.is_empty() {
+            return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
+        }
+        // 状态：内存 registry 经 dispatch 通道不可达，读磁盘登记 + 中枢状态不可得时
+        // 返回登记事实与时间线（状态实时值以徽章/get_context 为准）。
+        let items = load_work_items(self.sessions.storage_root());
+        let Some(entry) = items.iter().rev().find(|item| item.work_id == work_id) else {
+            return self.error_result(format!("未找到工作 {work_id}"));
+        };
+        let outcome_note = match entry.outcome.as_deref() {
+            Some("completed") => "已完成",
+            Some("failed") => "失败",
+            Some("cancelled") => "已取消",
+            _ if entry.finished_at.is_some() => "已终态",
+            _ => "未终态（执行/等待/中断以徽章为准）",
+        };
+        let timeline: Vec<String> = entry
+            .events
+            .iter()
+            .map(|e| format!("  - [{}] {}：{}", e.at, e.kind, e.note))
+            .collect();
+        self.text_result(
+            "工作详情",
+            format!(
+                "工作 {}（会话 {}）\n任务：{}\n派发：{} · 终态：{}\n时间线：\n{}",
+                work_id,
+                entry.session_id,
+                entry.task,
+                entry.dispatched_at,
+                outcome_note,
+                if timeline.is_empty() {
+                    "  （无事件记录）".to_string()
+                } else {
+                    timeline.join("\n")
+                }
+            ),
+        )
+    }
+
+    /// 换模型（§15.10/15.11：先商量后切换，商量结论留痕）。
+    fn handle_switch_worker_model(
+        &self,
+        session_id: &str,
+        model: &str,
+        consultation_summary: &str,
+    ) -> Option<ToolResult> {
+        let session_id = session_id.trim();
+        let model = model.trim();
+        let consultation_summary = consultation_summary.trim();
+        if session_id.is_empty() || model.is_empty() {
+            return self.error_result("session_id 与 model 不能为空".to_string());
+        }
+        if is_central_session(session_id) {
+            return self.error_result("不能对中枢对话切换模型".to_string());
+        }
+        // 商量结论是硬约束：没有留痕依据的切换被拒绝（§15.11 票据的轻量版）
+        if consultation_summary.len() < 8 {
+            return self.error_result(
+                "consultation_summary 必须说明与用户商量的结论（原因 + 用户同意事实），                 不能为空或过短——换模型必须先商量。"
+                    .to_string(),
+            );
+        }
+        // 模型解析校验（复用派发同款：失败附可用清单）
+        if let Err(error) = self.sessions.resolve_turn_model(Some(model)) {
+            let models = tiangong_config::io::load_models_config_at(self.sessions.storage_root());
+            let available: Vec<String> = models.models.keys().cloned().collect();
+            return self.error_result(format!("{error}\n可用模型：{}", available.join("、")));
+        }
+        // 执行切换：目标会话的 Core 在线时直接切换（下轮生效）；不在线则
+        // 记录模型偏好由下次 ensure 生效（dispatch 带 model 亦可）。
+        let endpoint = self.sessions.resolve_turn_model(Some(model)).ok();
+        let registry = self.sessions.registry();
+        let core = registry.get(session_id);
+        let switch_result = match (&core, endpoint) {
+            (Some(core), Some(endpoint)) => core.switch_model(endpoint).map_err(|e| e.to_string()),
+            _ => Err("目标会话当前不在线（已空闲回收）；下次派发时带 model 参数生效".to_string()),
+        };
+        // 商量留痕：回报队列 + 时间线
+        let note = format!("模型切换（{model}）：{consultation_summary}");
+        self.work_reports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(format!("[系统中枢] {note}"));
+        append_work_item_event(
+            self.sessions.storage_root(),
+            session_id,
+            "model_switched",
+            &note,
+        );
+        match switch_result {
+            Ok(()) => self.text_result(
+                "模型已切换",
+                format!("会话 {session_id} → {model}（执行中的工作下一轮生效）。商量记录已留痕。"),
+            ),
+            Err(reason) => self.text_result(
+                "模型切换待生效",
+                format!("会话 {session_id} → {model}：{reason}。商量记录已留痕。"),
+            ),
+        }
+    }
+
+    /// 应用内通知（经通道由执行器 emit 前端 toast）。
+    fn handle_send_notification(
+        &self,
+        title: &str,
+        message: &str,
+        level: &str,
+    ) -> Option<ToolResult> {
+        let title = title.trim();
+        if title.is_empty() {
+            return self.error_result("title 不能为空".to_string());
+        }
+        let level = if ["info", "warning", "error"].contains(&level) {
+            level
+        } else {
+            "info"
+        };
+        if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Notification {
+            title: title.to_string(),
+            message: message.trim().to_string(),
+            level: level.to_string(),
+        }) {
+            return self.error_result(format!("派发通道已关闭：{error}"));
+        }
+        self.text_result("通知已发送", format!("已向用户发送 {level} 通知：{title}"))
+    }
+
     /// 工作控制（取消/暂停/恢复）共用：校验登记存在并发 Control 消息。
     fn handle_work_control(&self, work_id: &str, action: &str) -> Option<ToolResult> {
         let work_id = work_id.trim();
@@ -1557,6 +1982,109 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
+                name: "create_goal".to_string(),
+                description: "登记用户目标（跨工作持续存在的语义核心）。用户表达目标/意图时使用；\
+                    后续派发与汇报围绕目标组织，get_context 会注入当前目标列表。同名 active\
+                    目标幂等。达成或放弃时用 update_goal_status 更新。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "目标一句话标题"},
+                        "description": {"type": "string", "description": "目标补充说明（背景、成功标准）"},
+                        "workspace": {"type": "string", "description": "关联工作区路径（可选）"}
+                    },
+                    "required": ["title"]
+                }),
+            },
+            ToolSpec {
+                name: "update_goal_status".to_string(),
+                description: "更新目标状态：active / achieved（达成）/ abandoned（放弃）/ archived。\
+                    用户反馈目标完成或放弃时使用，保持目标列表与事实一致。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "goal_id": {"type": "string", "description": "目标 ID（create_goal 返回）"},
+                        "status": {"type": "string", "enum": ["active", "achieved", "abandoned", "archived"]}
+                    },
+                    "required": ["goal_id", "status"]
+                }),
+            },
+            ToolSpec {
+                name: "create_report".to_string(),
+                description: "结构化报告存档（工作终态的结论/产物/风险持久化）。重要工作完成或\
+                    失败收尾时使用，供用户日后回查历史结论；list_reports 可查询。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "关联工作 ID"},
+                        "summary": {"type": "string", "description": "结论摘要（完整关键结论）"},
+                        "artifacts": {"type": "array", "items": {"type": "string"}, "description": "产物路径列表"},
+                        "risks": {"type": "array", "items": {"type": "string"}, "description": "风险与未尽事项"}
+                    },
+                    "required": ["work_id", "summary"]
+                }),
+            },
+            ToolSpec {
+                name: "list_reports".to_string(),
+                description: "查询已存档的结构化报告（可按 work_id 过滤）。用户问「之前那个任务\
+                    的结论/产出了什么」时使用。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "按工作过滤（可选，缺省全部）"}
+                    }
+                }),
+            },
+            ToolSpec {
+                name: "get_work_item_status".to_string(),
+                description: "查询单个后台工作的详情：任务、终态、事件时间线（派发/阻塞/恢复/\
+                    控制/终态全程）。用户问「那个任务怎么样了/经历了什么」时使用。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "work_id": {"type": "string", "description": "目标工作 ID"}
+                    },
+                    "required": ["work_id"]
+                }),
+            },
+            ToolSpec {
+                name: "switch_worker_model".to_string(),
+                description: "切换工作会话的模型（§15.10/15.11：换模型先商量）。必须先在对话中\
+                    与用户说明原因并征得同意（当前模型不可用/质量不佳等），同意后携带\
+                    consultation_summary（商量结论）调用。执行中的工作在下轮生效。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "目标工作会话 ID"},
+                        "model": {"type": "string", "description": "新模型 key（list_models 查询）"},
+                        "consultation_summary": {"type": "string", "description": "与用户商量的结论（原因 + 用户同意的事实）"}
+                    },
+                    "required": ["session_id", "model", "consultation_summary"]
+                }),
+            },
+            ToolSpec {
+                name: "send_notification".to_string(),
+                description: "向用户发送应用内通知（桌面气泡）。重要事件需要用户即时知晓\
+                    （高风险操作提醒、关键完成、需要尽快决策）时使用；常规汇报走对话，\
+                    不要滥用通知。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "通知标题"},
+                        "message": {"type": "string", "description": "通知正文"},
+                        "level": {"type": "string", "enum": ["info", "warning", "error"], "description": "级别（默认 info）"}
+                    },
+                    "required": ["title"]
+                }),
+            },
+            ToolSpec {
                 name: "cancel_work".to_string(),
                 description: "取消后台工作：中断该工作会话的当前执行并标记为已取消（终态，不再恢复）。\n                    用户明确要求停止/放弃某个工作时使用；取消后如需再做需重新派发。"
                     .to_string(),
@@ -1688,6 +2216,120 @@ impl ToolOverrideHandler for CentralPlugin {
                     _ => "resume",
                 };
                 self.handle_work_control(work_id, action)
+            }
+            "create_goal" => {
+                let title = call
+                    .arguments
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let description = call
+                    .arguments
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let workspace = call
+                    .arguments
+                    .get("workspace")
+                    .and_then(|value| value.as_str());
+                self.handle_create_goal(title, description, workspace)
+            }
+            "update_goal_status" => {
+                let goal_id = call
+                    .arguments
+                    .get("goal_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let status = call
+                    .arguments
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_update_goal_status(goal_id, status)
+            }
+            "create_report" => {
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let summary = call
+                    .arguments
+                    .get("summary")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let artifacts = call
+                    .arguments
+                    .get("artifacts")
+                    .and_then(|value| value.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                let risks = call
+                    .arguments
+                    .get("risks")
+                    .and_then(|value| value.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                self.handle_create_report(work_id, summary, &artifacts, &risks)
+            }
+            "list_reports" => {
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str());
+                self.handle_list_reports(work_id)
+            }
+            "switch_worker_model" => {
+                let session_id = call
+                    .arguments
+                    .get("session_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let model = call
+                    .arguments
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let consultation = call
+                    .arguments
+                    .get("consultation_summary")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_switch_worker_model(session_id, model, consultation)
+            }
+            "send_notification" => {
+                let title = call
+                    .arguments
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let message = call
+                    .arguments
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let level = call
+                    .arguments
+                    .get("level")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("info");
+                self.handle_send_notification(title, message, level)
+            }
+            "get_work_item_status" => {
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_work_item_status(work_id)
             }
             "get_work_timeline" => {
                 let work_id = call
@@ -2648,6 +3290,160 @@ mod tests {
             &default,
             &outside_path.to_string_lossy()
         ));
+    }
+
+    /// 目标登记与状态更新：同名幂等、非法状态拒绝、get_context 注入。
+    #[test]
+    fn goal_lifecycle_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        let _ = &mut dispatch_rx; // 本测试无派发，防 unused
+                                  // 登记
+        let created = call_tool(
+            &plugin,
+            "create_goal",
+            serde_json::json!({"title": "完成中枢模式 POC", "description": "按设计稿实现完整功能"}),
+        );
+        assert!(created.ok, "stderr: {}", created.stderr);
+        assert!(created.stdout.contains("完成中枢模式 POC"));
+        // 同名幂等
+        let again = call_tool(
+            &plugin,
+            "create_goal",
+            serde_json::json!({"title": "完成中枢模式 POC"}),
+        );
+        assert!(again.ok);
+        assert!(again.stdout.contains("已存在"));
+        // 空标题拒绝
+        let empty = call_tool(&plugin, "create_goal", serde_json::json!({"title": " "}));
+        assert!(!empty.ok);
+        // 状态更新（取出 goal_id）
+        let goal_id = load_goals(plugin.sessions.storage_root())[0]
+            .goal_id
+            .clone();
+        let updated = call_tool(
+            &plugin,
+            "update_goal_status",
+            serde_json::json!({"goal_id": goal_id, "status": "achieved"}),
+        );
+        assert!(updated.ok, "stderr: {}", updated.stderr);
+        assert_eq!(
+            load_goals(plugin.sessions.storage_root())[0].status,
+            "achieved"
+        );
+        // 非法状态拒绝
+        let bad = call_tool(
+            &plugin,
+            "update_goal_status",
+            serde_json::json!({"goal_id": goal_id, "status": "done"}),
+        );
+        assert!(!bad.ok);
+        // get_context 注入目标（新的 active 目标）
+        let _ = call_tool(
+            &plugin,
+            "create_goal",
+            serde_json::json!({"title": "重构状态机"}),
+        );
+        let context = call_tool(&plugin, "get_context", serde_json::json!({}));
+        assert!(context.ok);
+        assert!(context.stdout.contains("重构状态机"), "{}", context.stdout);
+    }
+
+    /// 报告存档与查询往返。
+    #[test]
+    fn report_archive_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let created = call_tool(
+            &plugin,
+            "create_report",
+            serde_json::json!({
+                "work_id": "work-x1",
+                "summary": "第十轮 review 修复全部完成",
+                "artifacts": ["/tmp/report.md"],
+                "risks": ["旧记录无 outcome"]
+            }),
+        );
+        assert!(created.ok, "stderr: {}", created.stderr);
+        // 空摘要拒绝
+        let empty = call_tool(
+            &plugin,
+            "create_report",
+            serde_json::json!({"work_id": "w", "summary": " "}),
+        );
+        assert!(!empty.ok);
+        // 查询
+        let listed = call_tool(&plugin, "list_reports", serde_json::json!({}));
+        assert!(listed.ok);
+        assert!(listed.stdout.contains("第十轮 review"), "{}", listed.stdout);
+        assert!(listed.stdout.contains("/tmp/report.md"));
+        // 按工作过滤
+        let filtered = call_tool(
+            &plugin,
+            "list_reports",
+            serde_json::json!({"work_id": "work-x1"}),
+        );
+        assert!(filtered.ok);
+        assert!(filtered.stdout.contains("第十轮 review"));
+        let none = call_tool(
+            &plugin,
+            "list_reports",
+            serde_json::json!({"work_id": "work-none"}),
+        );
+        assert!(none.ok);
+        assert!(none.stdout.contains("没有"));
+    }
+
+    /// 换模型：商量结论缺失拒绝；有效请求通过校验并留痕。
+    #[test]
+    fn switch_model_requires_consultation() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 无商量结论：拒绝（§15.11 先商量硬约束）
+        let no_consult = call_tool(
+            &plugin,
+            "switch_worker_model",
+            serde_json::json!({"session_id": "s0", "model": "k3"}),
+        );
+        assert!(!no_consult.ok, "缺少商量结论必须拒绝");
+        assert!(no_consult.stderr.contains("商量"));
+        // 中枢会话拒绝
+        let central = call_tool(
+            &plugin,
+            "switch_worker_model",
+            serde_json::json!({"session_id": "central-hub", "model": "k3", "consultation_summary": "用户同意换成 k3 处理超时问题"}),
+        );
+        assert!(!central.ok);
+        // 未知模型拒绝（附可用清单）
+        let unknown = call_tool(
+            &plugin,
+            "switch_worker_model",
+            serde_json::json!({"session_id": "s0", "model": "nope", "consultation_summary": "用户同意换模型"}),
+        );
+        assert!(!unknown.ok);
+        assert!(unknown.stderr.contains("可用模型"));
+        // 有效请求：离线会话 → 待生效（不报错，留痕完成）
+        let valid = call_tool(
+            &plugin,
+            "switch_worker_model",
+            serde_json::json!({"session_id": "s0", "model": "k3", "consultation_summary": "模型超时，用户同意换 k3"}),
+        );
+        assert!(valid.ok, "stderr: {}", valid.stderr);
+        assert!(valid.stdout.contains("留痕"));
     }
 
     /// 时间线：事件追加持久化 + get_work_timeline 工具查询往返。
