@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use central_state::{
+    failure_looks_model_related, should_deliver_now, transition_on_finished, WorkOutcome,
+};
 use tauri::Manager;
 
 use tiangong_core::agent_input::AgentInputKind;
@@ -1036,7 +1039,7 @@ impl TiangongApp {
     ) {
         // 阻塞识别（用户决策协议）：回报含【需要用户决策】→ waiting_user
         // （未终态），立即注入中枢（阻塞必达），中枢在对话中问用户；
-        let outcome = classify_work_outcome(notice);
+        let outcome = central_state::classify_outcome(notice);
         self.central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1053,10 +1056,13 @@ impl TiangongApp {
                 .iter()
                 .rev()
                 .find(|entry| entry.session_id == request.session_id)
-                .map(|entry| entry.state.clone())
+                .and_then(|entry| central_state::WorkState::parse(&entry.state))
         };
-        if current_state.as_deref() == Some("cancelled")
-            || current_state.as_deref() == Some("paused")
+        // 转移决策统一走 central-state（取消/暂停守卫 + 等待用户分流 + 成败
+        // 分态——行为锁定于 crate 测试，宿主不再自持规则）。
+        let next_state = transition_on_finished(current_state, outcome, done);
+        if current_state.is_some_and(|s| s == central_state::WorkState::Cancelled)
+            || current_state.is_some_and(|s| s == central_state::WorkState::Paused)
         {
             emit_central_work_updated(app);
             return;
@@ -1084,13 +1090,7 @@ impl TiangongApp {
                         .position(|entry| entry.session_id == request.session_id)
                 });
             if let Some(position) = position {
-                registry[position].state = if matches!(outcome, WorkOutcome::WaitingUser) {
-                    "waiting_user".to_string()
-                } else if done {
-                    "report_queued".to_string()
-                } else {
-                    "failed".to_string()
-                };
+                registry[position].state = next_state.as_str().to_string();
             }
         }
         if matches!(outcome, WorkOutcome::WaitingUser) {
@@ -1124,7 +1124,7 @@ impl TiangongApp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty();
-        if should_deliver_work_reports_now(done, has_running) {
+        if should_deliver_now(done, has_running) {
             self.deliver_pending_work_reports();
         }
         emit_central_work_updated(app);
@@ -2177,30 +2177,6 @@ fn attach_work_finished_callback(
         }));
 }
 
-/// 后台工作回报分类（Worker 用户决策协议，对话式）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkOutcome {
-    /// 正常终态（成功或失败）
-    Finished,
-    /// 等待用户决策：Worker 以【需要用户决策】标记结束本轮，由中枢在
-    /// 对话文本中直接询问用户（不依赖 request_user——用户裁决暂缓征询
-    /// 弹层），答复经 send_to_worker 回传后恢复执行。
-    WaitingUser,
-}
-/// 依据回报文本判定工作结局（可单测的纯函数）。
-fn classify_work_outcome(notice: &str) -> WorkOutcome {
-    if notice.contains("【需要用户决策】") {
-        WorkOutcome::WaitingUser
-    } else {
-        WorkOutcome::Finished
-    }
-}
-/// 回报是否应立即注入汇报：失败必达；成功仅在无其他在执行任务时
-/// 触发汇总轮（否则暂存等待汇总，或用户消息/询问兜底消费）。
-fn should_deliver_work_reports_now(done: bool, has_running_work: bool) -> bool {
-    !done || !has_running_work
-}
-
 /// 组装后台工作回报（读 Worker 会话最终答复，**不截断**）。
 ///
 /// 不做长度截断的依据：完成汇报必须基于真实完整结果（设计稿 §2.3 /
@@ -2254,112 +2230,18 @@ fn build_work_notice(
         )
     }
 }
-/// 字节偏移回退到最近的 UTF-8 字符边界（不越过 0）。
-fn char_safe_start(text: &str, mut offset: usize) -> usize {
-    offset = offset.min(text.len());
-    while offset > 0 && !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
-}
-
-/// 字节偏移前进到最近的 UTF-8 字符边界（不超过文本长度）。
-fn char_safe_end(text: &str, mut offset: usize) -> usize {
-    offset = offset.min(text.len());
-    while offset < text.len() && !text.is_char_boundary(offset) {
-        offset += 1;
-    }
-    offset
-}
-
-/// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
-/// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
-///
-/// 状态码按「词边界 + HTTP 语境窗口」匹配，避免「500 个文件」「401 行」
-/// 这类纯数字文本误判（review：判定过宽）；词形标记保持子串匹配。
-fn failure_looks_model_related(reason: &str) -> bool {
-    let lower = reason.to_lowercase();
-    const MARKERS: &[&str] = &[
-        "timeout",
-        "超时",
-        "rate limit",
-        "rate_limit",
-        "限流",
-        "quota",
-        "配额",
-        "unauthorized",
-        "authentication",
-        "认证",
-        "connection",
-        "连接",
-        "eof",
-        "dns",
-        "tls",
-        "ssl",
-        "网络",
-        "provider error",
-        "model not",
-        "context length",
-        "上下文长度",
-        "overloaded",
-        "internal server error",
-        "bad gateway",
-        "service unavailable",
-        "gateway timeout",
-        "too many requests",
-        "请求过于频繁",
-        "服务器错误",
-    ];
-    if MARKERS.iter().any(|marker| lower.contains(marker)) {
-        return true;
-    }
-    // 状态码：词边界（前后非数字）+ HTTP 语境（前后窗口含 http/api/status/
-    // code/error/错误/状态码/服务器/请求 之一）——「已扫描 500 个文件」
-    // 这类纯数字文本不再误判（review：判定过宽）。
-    const CODES: &[&str] = &["429", "401", "403", "500", "502", "503", "504"];
-    const CONTEXT: &[&str] = &[
-        "http",
-        "api",
-        "status",
-        "code",
-        "error",
-        "错误",
-        "状态码",
-        "服务器",
-        "请求",
-    ];
-    CODES.iter().any(|code| {
-        lower.match_indices(code).any(|(idx, matched)| {
-            let before_ok = idx == 0 || !lower[..idx].ends_with(|c: char| c.is_ascii_digit());
-            let end = idx + matched.len();
-            let after_ok =
-                end >= lower.len() || !lower[end..].starts_with(|c: char| c.is_ascii_digit());
-            if !(before_ok && after_ok) {
-                return false;
-            }
-            // UTF-8 安全窗口：字节偏移回退到最近字符边界再切片——
-            // `&s[a..b]` 的 a/b 落在多字节字符中间会 panic（review P1：
-            // 中文失败原因 + 状态码是常态输入，如「接口超时错误码429」）。
-            let window_start = char_safe_start(&lower, idx.saturating_sub(16));
-            let window_end = char_safe_end(&lower, (end + 16).min(lower.len()));
-            let window = &lower[window_start..window_end];
-            CONTEXT.iter().any(|context| window.contains(context))
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     /// 回报时机判定：失败必达；成功仅在无其他在执行任务时触发汇总轮。
     #[test]
     fn work_report_timing_follows_design() {
         // 失败：无论是否还有任务在跑，立即汇报（关键节点必达）
-        assert!(should_deliver_work_reports_now(false, true));
-        assert!(should_deliver_work_reports_now(false, false));
+        assert!(should_deliver_now(false, true));
+        assert!(should_deliver_now(false, false));
         // 成功且仍有任务在执行：暂存等待汇总
-        assert!(!should_deliver_work_reports_now(true, true));
+        assert!(!should_deliver_now(true, true));
         // 成功且是最后一个：触发汇总轮
-        assert!(should_deliver_work_reports_now(true, false));
+        assert!(should_deliver_now(true, false));
     }
 
     use super::*;
@@ -2408,15 +2290,17 @@ mod tests {
     #[test]
     fn work_outcome_classifies_waiting_user() {
         assert_eq!(
-            classify_work_outcome("[后台工作完成] work-1\n结论：一切正常"),
+            central_state::classify_outcome("[后台工作完成] work-1\n结论：一切正常"),
             WorkOutcome::Finished
         );
         assert_eq!(
-            classify_work_outcome("[后台工作失败] work-2\n失败原因：超时"),
+            central_state::classify_outcome("[后台工作失败] work-2\n失败原因：超时"),
             WorkOutcome::Finished
         );
         assert_eq!(
-            classify_work_outcome("[后台工作完成] work-3\n【需要用户决策】\n问题：是否继续？"),
+            central_state::classify_outcome(
+                "[后台工作完成] work-3\n【需要用户决策】\n问题：是否继续？"
+            ),
             WorkOutcome::WaitingUser
         );
     }

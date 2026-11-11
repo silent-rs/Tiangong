@@ -16,6 +16,7 @@ tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
+central-state = { workspace = true }
 tiangong-config = { workspace = true }
 silent = { workspace = true, features = ["scheduler"] }
 async-trait = { workspace = true }

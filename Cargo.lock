@@ -1248,6 +1248,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
+name = "central-state"
+version = "0.17.14"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10524,6 +10533,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "base64-url",
+ "central-state",
  "chrono",
  "clap",
  "flate2",

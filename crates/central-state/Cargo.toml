@@ -1,0 +1,10 @@
+[package]
+name = "central-state"
+version = "0.17.14"
+edition = "2021"
+description = "中枢模式状态机：后台工作的状态转移、保留策略与回报时机（纯逻辑，无宿主依赖）"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }

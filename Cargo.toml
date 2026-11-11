@@ -8,6 +8,7 @@ members = [
     "crates/tiangong-app-state",
     "crates/tiangong-core",
     "crates/tiangong-core-manager",
+    "crates/central-state",
     "crates/tiangong-cli",
     "crates/tiangong-central",
     "crates/tiangong-entry",
@@ -112,6 +113,7 @@ tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
 tiangong-plugin-prompt-sidecar = { path = "plugins/tiangong-plugin-prompt/sidecar" }
 tiangong-plugin-runtime = { path = "crates/plugin/tiangong-plugin-runtime" }
+central-state = { path = "crates/central-state" }
 tiangong-plugin-sidecar = { path = "crates/plugin/tiangong-plugin-sidecar" }
 tiangong-plugin-update = { path = "crates/plugin/tiangong-plugin-update" }
 tiangong-server = { path = "crates/tiangong-server" }
