@@ -217,13 +217,20 @@ export function CentralWorkStatusBar() {
 
   // 徽章常驻（用户设计裁决 2026-11-11）：无任务也显示（空态弱化样式），
   // 不因列表清空而消失——用户始终能找到后台工作入口。
-  const running = items.filter((item) => item.state === 'running');
-  const queued = items.filter((item) => item.state === 'report_queued');
-  const interrupted = items.filter((item) => item.state === 'interrupted');
-  const completed = items.filter((item) => item.state === 'completed');
-  const failed = items.filter((item) => item.state === 'failed');
+  // 会话聚合兜底：后端登记按会话 upsert（一屏一条）；此处对同会话多条
+  // 脏数据保留最新一条（数组尾部视为最新），徽章永不显示重复会话。
+  const aggregated = new Map<string, CentralWorkStatus>();
+  for (const item of items) {
+    aggregated.set(item.session_id, item);
+  }
+  const visible = Array.from(aggregated.values());
+  const running = visible.filter((item) => item.state === 'running');
+  const queued = visible.filter((item) => item.state === 'report_queued');
+  const interrupted = visible.filter((item) => item.state === 'interrupted');
+  const completed = visible.filter((item) => item.state === 'completed');
+  const failed = visible.filter((item) => item.state === 'failed');
 
-  const totalCount = items.length;
+  const totalCount = visible.length;
   return (
     <div
       className="absolute right-4 top-3 z-20"

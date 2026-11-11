@@ -167,6 +167,40 @@ describe('CentralWorkStatusBar', () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it('失败任务进入「失败」分组，与完成/中断分色呈现', async () => {
+    container = await mountWithItems([
+      makeItem({ work_id: 'work-f1', session_id: 'sess-f', state: 'failed', task: '失败任务' }),
+      makeItem({ work_id: 'work-c1', session_id: 'sess-c', state: 'completed', task: '完成任务' }),
+    ]);
+    const badge = container.querySelector('button');
+    act(() => {
+      badge!.click();
+    });
+    const drawer = container.querySelector('[role="dialog"]');
+    expect(drawer).not.toBeNull();
+    expect(drawer!.textContent).toContain('失败');
+    expect(drawer!.textContent).toContain('完成任务');
+    expect(drawer!.textContent).toContain('失败任务');
+  });
+
+  it('同会话多条记录按 session 聚合为单条显示', async () => {
+    container = await mountWithItems([
+      makeItem({ work_id: 'work-a', session_id: 'sess-same', task: '旧任务标题' }),
+      makeItem({ work_id: 'work-b', session_id: 'sess-same', task: '最新任务标题', state: 'completed' }),
+    ]);
+    const badge = container.querySelector('button');
+    act(() => {
+      badge!.click();
+    });
+    const text = container.querySelector('[role="dialog"]')!.textContent ?? '';
+    // 后端按会话聚合（一屏一条）；前端对脏数据兜底去重——同会话只显示最新
+    const rows = Array.from(
+      container.querySelectorAll('[role="button"][tabindex="0"]'),
+    ).filter((row) => (row.textContent ?? '').includes('任务标题'));
+    expect(rows.length).toBe(1);
+    expect(text).toContain('最新任务标题');
+  });
+
   it('工作项点击携带 session_id 并经普通模式打开', async () => {
     container = await mountWithItems([makeItem({ state: 'completed' })]);
     const badge = container.querySelector('button');

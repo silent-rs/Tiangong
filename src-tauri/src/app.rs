@@ -1472,6 +1472,52 @@ pub(crate) fn emit_central_work_updated_pub(app: &tauri::AppHandle) {
     emit_central_work_updated(app);
 }
 
+/// 重启恢复（§15.1 + 徽章「永不消失」）：从 work-items.json 全量重建
+/// 状态登记（completed/failed 按 outcome、legacy 从中枢会话回报推断成败、
+/// 未终态近期按 interrupted），并注入「离开期间」汇总回报——用户下一条
+/// 消息时中枢能主动说明离开期间发生了什么（review P2：恢复后回报丢失
+/// ——徽章显示已完成但中枢从未收到结果摘要）。
+/// 幂等：registry 非空时跳过（防 setup 与 lazy 通道双跑重复注入）。
+pub fn recover_central_work_state(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let state = app.state::<TiangongApp>();
+    let entries =
+        crate::central::recover_registry_entries(state.inner().core_manager.storage_root());
+    if entries.is_empty() {
+        return;
+    }
+    let mut registry = state
+        .inner()
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !registry.is_empty() {
+        return; // 已恢复过（双触发幂等）
+    }
+    let completed = entries.iter().filter(|e| e.state == "completed").count();
+    let failed = entries.iter().filter(|e| e.state == "failed").count();
+    let interrupted = entries.iter().filter(|e| e.state == "interrupted").count();
+    for entry in &entries {
+        tracing::info!(
+            work_id = %entry.work_id,
+            state = %entry.state,
+            "后台工作状态已从登记重建（重启恢复）"
+        );
+    }
+    registry.extend(entries);
+    drop(registry);
+    let summary = format!(
+        "[系统中枢] 应用重启恢复（离开期间）：{completed} 个后台工作已完成、{failed} 个失败、{interrupted} 个中断。\n完成与失败工作的结果在其各自会话中；中断的工作可重派（复用原会话延续上下文）。收到用户消息后请按需转述本汇总。"
+    );
+    state
+        .inner()
+        .central_work_reports
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(summary);
+    emit_central_work_updated(app);
+}
+
 /// 中枢派发执行器通道（惰性启动消费循环）。
 fn central_dispatch_sender(
     app: &tauri::AppHandle,
@@ -1485,31 +1531,6 @@ fn central_dispatch_sender(
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<crate::central::CentralPluginMessage>();
             let app = app.clone();
-            // 重启恢复（§15.1 离开期间变化 + 徽章「永不消失」）：
-            // 从 work-items.json 全量重建状态登记——completed/failed 按
-            // 落盘 outcome 重建（用户实测：完成的任务重启后不显示——
-            // 终态此前只存内存），未终态近期任务按「已中断」恢复。
-            {
-                let state = app.state::<TiangongApp>();
-                let mut recovered = false;
-                let registry = &state.inner().central_work_registry;
-                let mut entries = registry.lock().unwrap_or_else(|e| e.into_inner());
-                for entry in crate::central::recover_registry_entries(
-                    state.inner().core_manager.storage_root(),
-                ) {
-                    tracing::info!(
-                        work_id = %entry.work_id,
-                        state = %entry.state,
-                        "后台工作状态已从登记重建（重启恢复）"
-                    );
-                    entries.push(entry);
-                    recovered = true;
-                }
-                if recovered {
-                    emit_central_work_updated(&app);
-                }
-            }
-
             tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
                     match message {
@@ -1604,6 +1625,24 @@ async fn handle_central_dispatch(
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("工作目录不存在或不是目录：{cwd}"));
     }
+    // Workspace 确认统一兜底（review P1-x2：Steer 绕过）——Dispatch/Steer
+    // 殊途同归至此，最终 cwd（请求指定或复用会话自身）统一校验，插件侧
+    // dispatch_work 的前置校验保留（错误信息更早更具体）。
+    {
+        let default_workspace = state
+            .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
+            .await
+            .unwrap_or_default();
+        if !crate::central::workspace_confirmed(
+            state.core_manager.storage_root(),
+            &default_workspace,
+            &cwd,
+        ) {
+            return Err(format!(
+                "工作目录 {cwd} 尚未经用户确认（派发被拒绝）。请先在对话中向用户确认，\n                 同意后调用 confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
+            ));
+        }
+    }
     // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
     // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
     // prompt cache 失效；引导语义也要求保留在途执行）。
@@ -1685,11 +1724,21 @@ async fn handle_central_dispatch(
             .unwrap_or_else(|e| e.into_inner());
         running.insert(request.work_id.clone());
     }
-    state
-        .central_work_registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(crate::central::CentralWorkStatus {
+    // 状态登记按**会话维度 upsert**（用户实测：同会话重派后旧 interrupted
+    // 条目残留、多轮派发显示多条）——一个工作会话在徽章中始终是一条，
+    // 重派/引导覆盖更新（work_id/task/时间取最新），中断旧条目自然消失。
+    {
+        let mut registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(position) = registry
+            .iter()
+            .position(|entry| entry.session_id == request.session_id)
+        {
+            registry.remove(position);
+        }
+        registry.push(crate::central::CentralWorkStatus {
             work_id: request.work_id.clone(),
             session_id: request.session_id.clone(),
             task: request.task.clone(),
@@ -1709,6 +1758,7 @@ async fn handle_central_dispatch(
             state: "running".to_string(),
             reused_session: request.reused_session,
         });
+    }
     emit_central_work_updated(app);
     Ok(())
 }

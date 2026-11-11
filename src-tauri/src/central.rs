@@ -184,24 +184,45 @@ fn work_items_path(storage_root: &std::path::Path) -> std::path::PathBuf {
 
 /// 加载派发登记（损坏/缺失按空表处理；损坏时记日志便于排障）。
 fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
-    std::fs::read_to_string(work_items_path(storage_root))
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    let path = work_items_path(storage_root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "派发登记损坏，按空表处理");
+                Vec::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "派发登记读取失败，按空表处理");
+            Vec::new()
+        }
+    }
 }
 
-/// 全表落盘（原子写：tmp + rename）。
+/// 全表落盘（原子写：tmp + rename；失败记日志，不静默吞错）。
 fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) {
-    let Ok(content) = serde_json::to_string_pretty(items) else {
-        return;
-    };
     let path = work_items_path(storage_root);
+    let content = match serde_json::to_string_pretty(items) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "派发登记序列化失败，未落盘");
+            return;
+        }
+    };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!(%error, path = %path.display(), "派发登记目录创建失败");
+        }
     }
     let tmp_path = path.with_extension("json.tmp");
-    if std::fs::write(&tmp_path, &content).is_ok() {
-        let _ = std::fs::rename(&tmp_path, &path);
+    if let Err(error) = std::fs::write(&tmp_path, &content) {
+        tracing::warn!(%error, path = %tmp_path.display(), "派发登记临时文件写入失败");
+        return;
+    }
+    if let Err(error) = std::fs::rename(&tmp_path, &path) {
+        tracing::warn!(%error, from = %tmp_path.display(), to = %path.display(), "派发登记原子替换失败");
     }
 }
 
@@ -240,6 +261,47 @@ pub fn mark_work_item_finished_with_session(
     save_work_items(storage_root, &items);
 }
 
+/// 从中枢会话回报中提取失败工作的 work_id 集合（legacy 终态成败推断）。
+fn failed_work_ids_from_central_session(
+    storage_root: &std::path::Path,
+) -> std::collections::HashSet<String> {
+    let session_path = storage_root
+        .join("central")
+        .join("sessions")
+        .join("central-hub.json");
+    let Ok(content) = std::fs::read_to_string(&session_path) else {
+        return std::collections::HashSet::new();
+    };
+    let mut failed = std::collections::HashSet::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+        if let Some(messages) = value.get("messages").and_then(|m| m.as_array()) {
+            for message in messages {
+                let text = match message.get("content") {
+                    Some(serde_json::Value::String(text)) => text.clone(),
+                    Some(serde_json::Value::Array(blocks)) => blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => continue,
+                };
+                if let Some(rest) = text.strip_prefix("[后台工作失败] ") {
+                    // 形如 "[后台工作失败] work-xxx（模型 …）…"——按 work_id
+                    // 字符集（字母数字连字符）截断，不吃进中文括号注记
+                    let id: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect();
+                    if !id.is_empty() {
+                        failed.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    failed
+}
+
 /// 重启重建状态登记（徽章「永不消失」的持久化闭环）：
 /// - outcome=failed → failed；outcome=completed → completed
 /// - 旧终态记录（无 outcome 但 finished_at 有值）→ completed（近似）
@@ -248,6 +310,11 @@ pub fn mark_work_item_finished_with_session(
 pub fn recover_registry_entries(
     storage_root: &std::path::Path,
 ) -> Vec<crate::central::CentralWorkStatus> {
+    // legacy 终态记录（outcome 字段上线前）的成败从中枢会话回报推断：
+    // 扫描 central-hub.json 消息中的「[后台工作失败] work-X」标记——
+    // 命中即 failed，其余终态按 completed（review P2：一律近似 completed
+    // 会把失败显示成成功固化进历史）。
+    let failed_ids = failed_work_ids_from_central_session(storage_root);
     let cutoff = (chrono::Local::now() - chrono::Duration::hours(6))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
@@ -255,9 +322,15 @@ pub fn recover_registry_entries(
     for item in load_work_items(storage_root) {
         let state = if item.outcome.as_deref() == Some("failed") {
             "failed"
-        } else if item.finished_at.is_some() {
-            // outcome=completed 或旧终态记录（字段上线前无 outcome）→ 完成
+        } else if item.outcome.as_deref() == Some("completed") {
             "completed"
+        } else if item.finished_at.is_some() {
+            // legacy 终态：中枢会话回报标记失败 → failed；否则完成
+            if failed_ids.contains(&item.work_id) {
+                "failed"
+            } else {
+                "completed"
+            }
         } else if item.dispatched_at.as_str() > cutoff.as_str() {
             "interrupted"
         } else {
@@ -407,7 +480,7 @@ fn canonical_path_string(path: &str) -> String {
 /// 默认工作区内的子目录误拦为「新工作区」）。
 /// 其余目录：须在 confirmed-workspaces.json 登记（登记与判定双向
 /// canonicalize，符号链接/尾斜杠不产生绕过）。
-fn workspace_confirmed(
+pub fn workspace_confirmed(
     storage_root: &std::path::Path,
     default_workspace: &str,
     target: &str,
@@ -1087,6 +1160,15 @@ impl CentralPlugin {
             return self.error_result(format!("路径不存在或不是目录：{path}"));
         }
         add_confirmed_workspace(self.sessions.storage_root(), target);
+        // 留痕（review：confirm_workspace 无用户凭据，模型可自调）——登记
+        // 事实注入中枢回报队列，用户在下一条消息看到「谁确认了什么目录」，
+        // 模型未经征询自调即暴露。
+        self.work_reports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(format!(
+                "[系统中枢] 已登记工作区确认：{path}（confirm_workspace 由助手调用；若你未同意，请直接指出并要求撤销）"
+            ));
         self.text_result(
             "工作区已确认",
             format!("已登记用户确认的工作区：{path}\n后续向该目录派发后台工作不再需要重复确认。"),
@@ -2086,6 +2168,51 @@ mod tests {
         mark_work_item_finished_with_session(root.path(), "work-x", Some("sess-9"), true);
         // sess-9 无未终态条目（sess-1 已终态）→ 不改动
         assert_eq!(load_work_items(root.path()).len(), 1);
+    }
+
+    /// legacy 终态从中枢会话回报推断成败：回报含「[后台工作失败] work-X」
+    /// → failed；其余终态 → completed。
+    #[test]
+    fn recover_infers_legacy_outcome_from_central_session() {
+        let root = tempfile::tempdir().unwrap();
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        // 构造中枢会话（含一条失败回报与一条完成回报）
+        let central_dir = root.path().join("central").join("sessions");
+        std::fs::create_dir_all(&central_dir).unwrap();
+        std::fs::write(
+            central_dir.join("central-hub.json"),
+            serde_json::json!({
+                "messages": [
+                    {"role": "user", "content": "[后台工作完成] work-legacy-ok（模型 k3）\n任务：正常\n执行结果：完成"},
+                    {"role": "user", "content": "[后台工作失败] work-legacy-bad（模型 k3）\n任务：出错\n失败原因：超时"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for (id, task) in [
+            ("work-legacy-ok", "正常任务"),
+            ("work-legacy-bad", "出错任务"),
+        ] {
+            upsert_work_item(
+                root.path(),
+                &WorkItemRecord {
+                    work_id: id.to_string(),
+                    reused_session: false,
+                    session_id: format!("s-{id}"),
+                    task: task.to_string(),
+                    model: None,
+                    dispatched_at: now.clone(),
+                    finished_at: Some(now.clone()),
+                    outcome: None, // legacy：字段上线前的终态记录
+                },
+            );
+        }
+        let entries = recover_registry_entries(root.path());
+        let ok = entries.iter().find(|e| e.work_id == "work-legacy-ok");
+        let bad = entries.iter().find(|e| e.work_id == "work-legacy-bad");
+        assert_eq!(ok.map(|e| e.state.as_str()), Some("completed"));
+        assert_eq!(bad.map(|e| e.state.as_str()), Some("failed"));
     }
 
     /// 重启重建：outcome 分态、旧终态近似 completed、未终态近期
