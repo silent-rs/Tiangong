@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Loader2, Inbox, History, ChevronRight, AlertTriangle, CheckCircle2, HelpCircle } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, HelpCircle } from 'lucide-react';
 import { restoreFromCentralConversation } from '@/lib/centralConversation';
 
 interface CentralWorkStatus {
@@ -124,7 +124,11 @@ function WorkItemRow({
 
 export function CentralWorkStatusBar() {
   const [items, setItems] = useState<CentralWorkStatus[]>([]);
-  const [open, setOpen] = useState(false);
+  // M6 状态分离：hover 浮层（轻量预览，移出即收）与 pinned 抽屉
+  // （点击固定的工作视图，ESC/关闭按钮收起）互不干扰——固定后 hover
+  // 移出不再误关面板。
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const [pinned, setPinned] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const runStatus = useStore((s) => s.runStatus);
   const messagesLength = useStore((s) => s.messages.length);
@@ -159,14 +163,27 @@ export function CentralWorkStatusBar() {
     refresh();
   }, [runStatus, messagesLength, refresh]);
 
-  // 无任务时收起面板（否则下次任务出现时面板带着旧 open 状态自动展开）
+  // 无任务时收起浮层与抽屉（否则下次任务出现时带着旧展开状态）
   useEffect(() => {
-    if (items.length === 0) setOpen(false);
+    if (items.length === 0) {
+      setHoverOpen(false);
+      setPinned(false);
+    }
   }, [items.length]);
+
+  // 抽屉打开时 ESC 收起（键盘可达）
+  useEffect(() => {
+    if (!pinned) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPinned(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pinned]);
 
   const scheduleClose = useCallback(() => {
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-    closeTimer.current = window.setTimeout(() => setOpen(false), PANEL_CLOSE_DELAY_MS);
+    closeTimer.current = window.setTimeout(() => setHoverOpen(false), PANEL_CLOSE_DELAY_MS);
   }, []);
   const cancelClose = useCallback(() => {
     if (closeTimer.current !== null) {
@@ -175,15 +192,9 @@ export function CentralWorkStatusBar() {
     }
   }, []);
 
-  if (items.length === 0) return null;
-
-  const running = items.filter((item) => item.state === 'running');
-  const queued = items.filter((item) => item.state === 'report_queued');
-  const interrupted = items.filter((item) => item.state === 'interrupted');
-  const completed = items.filter((item) => item.state === 'completed');
-  const blocked = items.filter((item) => item.state === 'blocked');
-
-  // 点击工作项：退出中枢并在普通模式打开该工作会话（§4.4 可复核）
+  // 点击工作项：退出中枢并在普通模式打开该工作会话（§4.4 可复核）。
+  // 必须位于早退之前——否则空列表首渲染与有数据渲染的 hooks 数量不一致
+  //（React 规则：所有 hooks 需无条件按序调用）。
   const openInNormalMode = useCallback(
     async (sessionId: string) => {
       const store = useStore.getState();
@@ -197,24 +208,38 @@ export function CentralWorkStatusBar() {
     [],
   );
 
+  if (items.length === 0) return null;
+
+  const running = items.filter((item) => item.state === 'running');
+  const queued = items.filter((item) => item.state === 'report_queued');
+  const interrupted = items.filter((item) => item.state === 'interrupted');
+  const completed = items.filter((item) => item.state === 'completed');
+  const blocked = items.filter((item) => item.state === 'blocked');
+
+  const totalCount = items.length;
   return (
     <div
       className="absolute right-4 top-3 z-20"
       onMouseEnter={() => {
+        if (pinned) return;
         cancelClose();
-        setOpen(true);
+        setHoverOpen(true);
       }}
       onMouseLeave={scheduleClose}
     >
       <button
         type="button"
-        aria-label={`后台工作：${running.length} 个执行中，${queued.length} 条待汇报`}
-        aria-expanded={open}
-        // hover 之外的键盘/点击可达路径（无障碍 + 触屏）
-        onClick={() => setOpen((value) => !value)}
+        aria-label={`后台工作：${running.length} 个执行中，${blocked.length} 个等待用户决策，${queued.length} 条待汇报，共 ${totalCount} 项`}
+        aria-expanded={pinned || hoverOpen}
+        // hover 之外的键盘/点击可达路径（无障碍 + 触屏）；点击固定为抽屉
+        onClick={() => {
+          setPinned((value) => !value);
+          setHoverOpen(false);
+        }}
         onFocus={() => {
+          if (pinned) return;
           cancelClose();
-          setOpen(true);
+          setHoverOpen(true);
         }}
         onBlur={scheduleClose}
         className={`inline-flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-xs shadow-lg shadow-black/5 backdrop-blur-md transition-all ${
@@ -246,12 +271,74 @@ export function CentralWorkStatusBar() {
           </span>
         ) : null}
         <ChevronRight
-          className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${open ? 'rotate-90' : ''}`}
+          className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${pinned ? 'rotate-90' : ''}`}
         />
       </button>
 
-      {open ? (
+      {hoverOpen && !pinned ? (
         <div className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
+          <WorkGroups
+            running={running}
+            blocked={blocked}
+            queued={queued}
+            interrupted={interrupted}
+            completed={completed}
+            onOpen={openInNormalMode}
+          />
+        </div>
+      ) : null}
+
+      {pinned ? (
+        <aside
+          role="dialog"
+          aria-label="后台工作视图"
+          className="absolute right-0 top-[calc(100%+8px)] flex max-h-[min(70vh,560px)] w-[420px] flex-col rounded-2xl border border-border/70 bg-background/98 p-4 shadow-2xl shadow-black/15 backdrop-blur-xl"
+        >
+          <header className="mb-3 flex items-center justify-between border-b border-border/60 pb-2">
+            <h2 className="text-sm font-semibold text-foreground/90">后台工作</h2>
+            <button
+              type="button"
+              aria-label="收起后台工作视图"
+              onClick={() => setPinned(false)}
+              className="rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <ChevronDown className="h-4 w-4" />
+            </button>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <WorkGroups
+              running={running}
+              blocked={blocked}
+              queued={queued}
+              interrupted={interrupted}
+              completed={completed}
+              onOpen={openInNormalMode}
+            />
+          </div>
+        </aside>
+      ) : null}
+    </div>
+  );
+}
+
+/// 分组渲染（浮层与抽屉共用）。
+function WorkGroups({
+  running,
+  blocked,
+  queued,
+  interrupted,
+  completed,
+  onOpen,
+}: {
+  running: CentralWorkStatus[];
+  blocked: CentralWorkStatus[];
+  queued: CentralWorkStatus[];
+  interrupted: CentralWorkStatus[];
+  completed: CentralWorkStatus[];
+  onOpen: (sessionId: string) => void;
+}) {
+  return (
+    <div>
           {running.length > 0 ? (
             <section className="mb-3">
               <header className="mb-2 flex items-center justify-between px-1">
@@ -265,7 +352,7 @@ export function CentralWorkStatusBar() {
               </header>
               <div className="space-y-2">
                 {running.map((item) => (
-                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
                 ))}
               </div>
             </section>
@@ -284,7 +371,7 @@ export function CentralWorkStatusBar() {
               </header>
               <div className="space-y-2">
                 {queued.map((item) => (
-                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
                 ))}
               </div>
             </section>
@@ -303,7 +390,7 @@ export function CentralWorkStatusBar() {
               </header>
               <div className="space-y-2">
                 {blocked.map((item) => (
-                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
                 ))}
               </div>
             </section>
@@ -328,7 +415,7 @@ export function CentralWorkStatusBar() {
                   <WorkItemRow
                     key={item.work_id}
                     item={{ ...item, state: 'interrupted' }}
-                    onOpen={openInNormalMode}
+                    onOpen={onOpen}
                   />
                 ))}
               </div>
@@ -348,18 +435,16 @@ export function CentralWorkStatusBar() {
               </header>
               <div className="space-y-2 opacity-80">
                 {completed.map((item) => (
-                  <WorkItemRow key={item.work_id} item={item} onOpen={openInNormalMode} />
+                  <WorkItemRow key={item.work_id} item={item} onOpen={onOpen} />
                 ))}
               </div>
             </section>
           ) : null}
 
           {running.length === 0 && queued.length === 0 && interrupted.length === 0 && completed.length === 0 && blocked.length === 0 ? (
-            <p className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
+            <p role="status" className="px-1 py-2 text-xs text-muted-foreground">暂无后台工作</p>
           ) : null}
           <p className="mt-2 px-1 text-[10px] text-muted-foreground/70">点击工作项可在普通模式打开对应会话</p>
-        </div>
-      ) : null}
     </div>
   );
 }
