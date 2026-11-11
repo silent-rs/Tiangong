@@ -7,4 +7,5 @@ description = "中枢模式状态机：后台工作的状态转移、保留策�
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
+tracing = { workspace = true }

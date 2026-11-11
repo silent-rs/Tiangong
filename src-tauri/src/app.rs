@@ -1597,7 +1597,7 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
     // 先提取 owned 数据（避免与 extend 的所有权冲突）
     let failed_names: Vec<String> = entries
         .iter()
-        .filter(|e| e.state == "failed")
+        .filter(|e| e.state == central_state::WorkState::Failed)
         .map(|e| {
             format!(
                 "{}（{}）",
@@ -1606,15 +1606,32 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
             )
         })
         .collect();
-    let interrupted_count = entries.iter().filter(|e| e.state == "interrupted").count();
+    let interrupted_count = entries
+        .iter()
+        .filter(|e| e.state == central_state::WorkState::Interrupted)
+        .count();
     for entry in &entries {
         tracing::info!(
             work_id = %entry.work_id,
-            state = %entry.state,
+            state = entry.state.as_str(),
             "后台工作状态已从登记重建（重启恢复）"
         );
     }
-    registry.extend(entries);
+    registry.extend(
+        entries
+            .into_iter()
+            .map(|entry| crate::central::CentralWorkStatus {
+                work_id: entry.work_id,
+                session_id: entry.session_id,
+                task: entry.task,
+                model: entry.model,
+                dispatched_at: entry.dispatched_at,
+                state: entry.state.as_str().to_string(),
+                reused_session: entry.reused_session,
+                last_activity: entry.last_activity,
+                cwd: entry.cwd,
+            }),
+    );
     drop(registry);
     if !failed_names.is_empty() || interrupted_count > 0 {
         let failed_note = if failed_names.is_empty() {

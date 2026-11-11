@@ -7,6 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod persistence;
+pub use persistence::*;
+
 /// 后台工作状态（设计稿 §8.1 的实现子集 + 控制态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
