@@ -893,10 +893,27 @@ impl TiangongApp {
             }
         }
         // 新建：模型 = 中枢 session.model_ref ?? 设置的主对话模型（§15.12）。
+        // 模型故障兜底（§15.12「中枢不掉线」）：会话指定模型失效（被删除/
+        // 凭据缺失/能力不符）时不让中枢构建失败——回退默认 chat 路由；两者
+        // 都不可用才报错。回退事实写入日志，首个可用机会注入中枢对话。
         let session_model_ref = existing_session.and_then(|session| session.model_ref);
-        let model_endpoint = self
+        let model_endpoint = match self
             .core_manager
-            .resolve_turn_model(session_model_ref.as_deref())?;
+            .resolve_turn_model(session_model_ref.as_deref())
+        {
+            Ok(endpoint) => endpoint,
+            Err(reason) => {
+                tracing::warn!(
+                    %reason,
+                    "中枢会话模型不可用，回退默认对话模型（§15.12 中枢不掉线）"
+                );
+                self.core_manager
+                    .resolve_turn_model(None)
+                    .map_err(|fallback_error| {
+                        format!("中枢模型不可用（{reason}），默认模型回退也失败：{fallback_error}")
+                    })?
+            }
+        };
         let core = tiangong_core::core::TiangongCore::builder()
             .session_id(crate::central::CENTRAL_SESSION_ID.to_string())
             .config(CoreConfigProvider::new(session_config.clone()))
@@ -1814,11 +1831,54 @@ fn build_work_notice(
             work.work_id, model_note, work.task, summary, work.session_id
         )
     } else {
+        let guidance = if failure_looks_model_related(failed_reason) {
+            "\n\n（失败疑似模型/网络问题。处置：list_models 查询可用模型后，用              dispatch_work 带 session_id 与新 model 在原会话重派——上下文保留，             不要新建会话；确认无可用模型时再向用户说明。）"
+        } else {
+            ""
+        };
         format!(
-            "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{}",
+            "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{}{guidance}",
             work.work_id, model_note, work.task, failed_reason
         )
     }
+}
+/// 失败原因是否疑似模型/网络类（值得换模型重派，而非任务本身错误）。
+fn failure_looks_model_related(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "timeout",
+        "超时",
+        "429",
+        "401",
+        "403",
+        "500",
+        "502",
+        "503",
+        "504",
+        "rate limit",
+        "rate_limit",
+        "限流",
+        "quota",
+        "配额",
+        "unauthorized",
+        "authentication",
+        "认证",
+        "connection",
+        "连接",
+        "eof",
+        "dns",
+        "tls",
+        "ssl",
+        "网络",
+        "provider",
+        "provider error",
+        "模型",
+        "model not",
+        "context length",
+        "上下文长度",
+        "overloaded",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 #[cfg(test)]
@@ -1837,6 +1897,19 @@ mod tests {
 
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// 模型/网络类失败识别：指导中枢换模型重派，而非把任务当失败关闭。
+    #[test]
+    fn model_related_failure_markers() {
+        assert!(failure_looks_model_related(
+            "请求超时（timeout after 300s）"
+        ));
+        assert!(failure_looks_model_related("429 Too Many Requests"));
+        assert!(failure_looks_model_related("连接被对端重置"));
+        assert!(failure_looks_model_related("API 返回 500"));
+        assert!(!failure_looks_model_related("工作目录不存在：/tmp/missing"));
+        assert!(!failure_looks_model_related("任务要求删除文件被拒绝"));
+    }
 
     /// Worker 指令必须包含决策征询协议（后台会话无 UI）与任务正文。
     #[test]
