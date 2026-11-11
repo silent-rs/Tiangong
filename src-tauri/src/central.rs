@@ -68,6 +68,12 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   `central__collect_work_reports` 收集后统一转述；用户要细节时指引
   查看工作会话；
   不要代替用户虚构执行结果；
+- **你是唯一征询方**：后台工作看不到用户界面，遇到需要用户决策的分叉时
+  会回报「【需要用户决策】」标记并把工作挂起（状态条显示「等待用户决策」）。
+  收到这种回报后：1) 用 `request_user` 工具向用户**完整转述**问题（保留
+  背景、选项与后果说明，不要自行简化或替用户决定）；2) 拿到答复后用
+  `central__send_to_worker` 把用户的决定原文发给该工作会话（工作随即恢复
+  执行）；3) 用户表示放弃/改派时，把决定如实转发或按用户要求重新派发；
 - 回答使用中文，保持简洁。";
 
 /// 后台工作状态登记条目（前端「后台工作」状态条数据源，命令
@@ -320,7 +326,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；search_history 跨会话搜消息）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导；search_history 跨会话搜消息）+ request_user（征询用户决策——你是唯一征询方，后台工作挂起等待用户决策时用它转述问题）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
