@@ -3020,4 +3020,272 @@ mod tests {
             "两 turn 的回报都入队（旧代码第二次丢在此红）"
         );
     }
+
+    /// 旧 owner 回调被 T6 跳过；归属保持时正常执行——两条路径都验证。
+    #[tokio::test]
+    async fn host_owner_callback_respects_ownership_filter() {
+        let (state, _ws) = central_test_app();
+        // 路径 A：归属保持（owner 仍是当前条目）→ owner 回调执行
+        let owner = dispatch_request("work-owner", "s-own", "原工作", true);
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-owner".into(),
+                session_id: "s-own".into(),
+                task: "原工作".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            });
+        handle_work_terminal(&state, &owner, true, "");
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-owner")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::ReportQueued,
+                "归属保持时终态被处理"
+            );
+        }
+        // 路径 B：归属被 steer 覆盖（旧行为模拟）→ owner 的迟到回调被跳过
+        let mut registry = state.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter_mut()
+            .rev()
+            .find(|e| e.session_id == "s-own")
+            .unwrap();
+        entry.work_id = "steer-xxx".into(); // 模拟旧代码的 upsert 覆盖
+        entry.state = central_state::WorkState::Running;
+        drop(registry);
+        let stale_owner = dispatch_request("work-owner", "s-own", "原工作", true);
+        let before = state.central_work_reports.lock().unwrap().clone();
+        handle_work_terminal(&state, &stale_owner, true, "");
+        let after = state.central_work_reports.lock().unwrap().clone();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "归属已被覆盖时旧 owner 回调必须被 T6 跳过（不重复回报）"
+        );
+    }
+
+    /// 保持 Running；会话空闲时排队条目正常登记 Queued。
+    #[tokio::test]
+    async fn host_enqueue_preserves_running_entry() {
+        let (state, _ws) = central_test_app();
+        // 会话空闲 → 排队登记 Queued
+        let queued = dispatch_request("work-q1", "s-q1", "排队任务", false);
+        enqueue_central_dispatch(&state, queued, "work-dep", "/ws").await;
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-q1")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::Queued,
+                "空闲会话排队正常登记"
+            );
+        }
+        // 同会话在跑 → 排队不覆盖（W4：旧代码 retain+push 会改成 Queued）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-run".into(),
+                session_id: "s-run".into(),
+                task: "在跑工作".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            });
+        let queued2 = dispatch_request("work-q2", "s-run", "第二个排队", false);
+        enqueue_central_dispatch(&state, queued2, "work-dep", "/ws").await;
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let running = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-run")
+                .unwrap();
+            assert_eq!(
+                running.state,
+                central_state::WorkState::Running,
+                "在跑工作不得被排队登记覆盖（W4 旧代码在此红）"
+            );
+        }
+        // pending 队列两条都在
+        let pending = state.central_pending_dispatches.lock().unwrap().clone();
+        assert_eq!(pending.len(), 2, "排队请求必须入挂起队列");
+    }
+
+    /// 改成终态。
+    #[tokio::test]
+    async fn host_terminal_fallback_skips_queued_entry() {
+        let (state, _ws) = central_test_app();
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-q9".into(),
+                session_id: "s-mix".into(),
+                task: "排队条目".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Queued,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            });
+        // 未知 work_id + 命中 session 的排队条目 → 兜底不得写终态
+        let request = dispatch_request("work-unknown", "s-mix", "未知工作", false);
+        let notice = "[后台工作失败] work-unknown\n失败原因：超时".to_string();
+        state.on_central_work_finished(&request, false, &notice);
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-mix")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::Queued,
+                "排队条目不得被 session 兜底串态（W4-b 旧代码在此红）"
+            );
+        }
+    }
+
+    /// 反向验证：把判定改回 is_inflight（R1 旧代码）→ 本测试红。
+    #[tokio::test]
+    async fn host_plan_resume_not_merged_but_steer_is() {
+        let (state, ws) = central_test_app();
+        // 会话元数据（self_session_cwd 与确认校验需要）
+        let sessions_dir = state.core_manager.storage_root().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+        sessions_dir.join("s-resume.json"),
+        serde_json::json!({"id": "s-resume", "title": "暂停的会话", "created_at": "2026-11-12 10:00:00",
+            "updated_at": "2026-11-12 10:00:00", "trust_mode": "Supervised",
+            "cwd": ws.to_string_lossy(), "messages": []}).to_string(),
+    ).unwrap();
+        // Paused 条目：resume 请求 → plan 判定非并入（恢复语义）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-p".into(),
+                session_id: "s-resume".into(),
+                task: "暂停任务".into(),
+                model: None,
+                dispatched_at: "2026-11-12 10:00:00".into(),
+                state: central_state::WorkState::Paused,
+                reused_session: true,
+                last_activity: None,
+                cwd: Some(ws.to_string_lossy().to_string()),
+            });
+        let resume = dispatch_request("work-p", "s-resume", "继续暂停的任务", true);
+        let plan = plan_central_dispatch(&state, resume)
+            .await
+            .expect("plan 应成功");
+        let steer_merged = match plan {
+            crate::app::DispatchPlan::Execute {
+                steer_merged_into_running,
+                ..
+            } => steer_merged_into_running,
+            crate::app::DispatchPlan::Queued => panic!("Paused 的 resume 不应排队"),
+        };
+        assert!(
+            !steer_merged,
+            "Paused 的 resume 不得并入（R1 旧代码 is_inflight 在此红）"
+        );
+        // Running 条目：steer 判为并入
+        {
+            let mut registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter_mut()
+                .rev()
+                .find(|e| e.session_id == "s-resume")
+                .unwrap();
+            entry.state = central_state::WorkState::Running;
+        }
+        let steer = dispatch_request("steer-x", "s-resume", "补充指令", true);
+        let plan2 = plan_central_dispatch(&state, steer)
+            .await
+            .expect("plan 应成功");
+        let steer_merged2 = match plan2 {
+            crate::app::DispatchPlan::Execute {
+                steer_merged_into_running,
+                ..
+            } => steer_merged_into_running,
+            crate::app::DispatchPlan::Queued => panic!("Running 会话的引导不应排队"),
+        };
+        assert!(steer_merged2, "Running 会话的引导应并入（归属保持原工作）");
+    }
+
+    /// 语义且无测试暴露）。依赖在途 → plan 必须返回 Queued 并完成登记。
+    #[tokio::test]
+    async fn host_plan_queue_decision_returns_queued() {
+        let (state, ws) = central_test_app();
+        let sessions_dir = state.core_manager.storage_root().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+        sessions_dir.join("s-dep.json"),
+        serde_json::json!({"id": "s-dep", "title": "依赖会话", "created_at": "2026-11-12 10:00:00",
+            "updated_at": "2026-11-12 10:00:00", "trust_mode": "Supervised",
+            "cwd": ws.to_string_lossy(), "messages": []}).to_string(),
+    ).unwrap();
+        // 依赖在途
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-dep".into(),
+                session_id: "s-dep".into(),
+                task: "在跑依赖".into(),
+                model: None,
+                dispatched_at: "2026-11-12 10:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: Some(ws.to_string_lossy().to_string()),
+            });
+        let follow = crate::central::CentralDispatchRequest {
+            work_id: "work-follow".into(),
+            session_id: "s-new-follow".into(),
+            task: "排队任务".into(),
+            model: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            after_work_id: Some("work-dep".into()),
+            parallel: false,
+            reused_session: false,
+        };
+        let plan = plan_central_dispatch(&state, follow)
+            .await
+            .expect("plan 应成功");
+        assert!(
+            matches!(plan, crate::app::DispatchPlan::Queued),
+            "依赖在途时必须返回 Queued（执行段不投递）"
+        );
+        // 排队登记与挂起队列已就绪
+        let pending = state.central_pending_dispatches.lock().unwrap().clone();
+        assert_eq!(pending.len(), 1, "排队请求必须入挂起队列");
+    }
 }
