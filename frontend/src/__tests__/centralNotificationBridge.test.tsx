@@ -13,7 +13,11 @@ const off = vi.fn();
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn((_name: string, cb: Listener) => {
     listeners.push(cb);
-    return Promise.resolve(off);
+    return Promise.resolve(() => {
+      off();
+      const index = listeners.indexOf(cb);
+      if (index >= 0) listeners.splice(index, 1);
+    });
   }),
 }));
 
@@ -84,6 +88,28 @@ describe('CentralNotificationBridge', () => {
     emit({ message: '无标题', level: 'info' });
     emit(undefined);
     expect(showInfo).not.toHaveBeenCalled();
+  });
+
+  it('卸载后取消订阅（不再触发 toast）', async () => {
+    // 真正 unmount（root.unmount）——仅 remove DOM 不会触发 React 清理
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    let root!: ReturnType<typeof createRoot>;
+    act(() => {
+      root = createRoot(host);
+      root.render(<CentralNotificationBridge />);
+    });
+    act(() => {
+      root.unmount();
+    });
+    host.remove();
+    // flush 微任务（组件的 listen().then 在微任务里执行取消订阅）
+    await act(async () => {
+      await Promise.resolve();
+    });
+    emit({ title: '卸载后', level: 'info' });
+    expect(showInfo).not.toHaveBeenCalled();
+    expect(off).toHaveBeenCalled();
   });
 
   it('未知 level 回退 info', () => {

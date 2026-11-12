@@ -3519,4 +3519,33 @@ mod tests {
             "重放应建 Core（cwd 生效）"
         );
     }
+    /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，
+    /// 未 finish 的第二条被拒（当年「a 项」bug 的行为面：发送态收尾缺失会
+    /// 让 is_sending 永真）；finish 释放并递增 revision 后第二条可发送。
+    #[tokio::test]
+    async fn central_two_messages_pair_input_send() {
+        use crate::state_ops::{begin_input_send, finish_input_send};
+        let (state, _ws) = central_test_app();
+        let sid = crate::central::CENTRAL_SESSION_ID;
+        // 第一条：占住发送位
+        state
+            .with_state(|cs| begin_input_send(cs, sid, 0).map(|_| ()))
+            .await
+            .expect("第一条 begin 应成功");
+        // is_sending 占用期间：第二条被拒（互斥语义）
+        let rejected = state
+            .with_state(|cs| begin_input_send(cs, sid, 0).map(|_| ()))
+            .await;
+        assert!(rejected.is_err(), "发送位占用时第二条必须被拒");
+        // 中枢发送路径的收尾（缺它 is_sending 永真——即历史 bug）
+        state
+            .with_state(|cs| finish_input_send(cs, sid, 0, true).map(|_| ()))
+            .await
+            .expect("finish 应成功");
+        // 第二条：revision 递增后可发送
+        state
+            .with_state(|cs| begin_input_send(cs, sid, 1).map(|_| ()))
+            .await
+            .expect("释放后第二条 begin 应成功（is_sending 配对闭环）");
+    }
 }
