@@ -1062,8 +1062,12 @@ pub(crate) fn start_stream_consumer(
     // 中枢工作进度可见（§9.1）：中枢派发会话的 PhaseChanged / ToolStart /
     // ToolFinished 事件更新 registry 最近动作（徽章实时显示 Worker 在干嘛）。
     // 普通会话零成本：registry 无该 session 的 running 条目即返回。
+    // 进度广播节流声明（深检 E）
+    let last_activity_emit = std::sync::Arc::new(std::sync::Mutex::new(
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    ));
     let update_central_activity =
-        |app: &AppHandle, session_id: &str, event: &tiangong_types::StreamEvent| {
+        move |app: &AppHandle, session_id: &str, event: &tiangong_types::StreamEvent| {
             use tauri::Manager;
             let note = match event {
                 tiangong_types::StreamEvent::PhaseChanged { phase, iteration } => {
@@ -1086,7 +1090,13 @@ pub(crate) fn start_stream_consumer(
             }) {
                 entry.last_activity = Some(note);
                 drop(registry);
-                crate::app::emit_central_work_updated(app);
+                // 节流（深检 E）：高频工具事件 2 秒至多广播一次，防前端风暴
+                let mut last = last_activity_emit.lock().unwrap();
+                if last.elapsed() >= std::time::Duration::from_secs(2) {
+                    *last = std::time::Instant::now();
+                    drop(last);
+                    crate::app::emit_central_work_updated(app);
+                }
             }
         };
 
