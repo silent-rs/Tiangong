@@ -1641,7 +1641,8 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
                 cwd: None,
                 after_work_id: record.after_work_id,
                 parallel: false,
-                reused_session: true,
+                // 按记录还原复用语义——新建会话的排队重放保留标题写入
+                reused_session: record.reused_session,
             })
             .collect();
     registry.extend(entries);
@@ -2516,32 +2517,22 @@ mod tests {
             "拦截必须发生在 Core 创建之前"
         );
     }
-    /// 复用派发挂载的终态回调经流消费者 fire 链触发（T6/S6 归属过滤 +
-    /// 一次性守卫的可构造部分）：同会话新 work 回调存活，旧 work 回调
-    /// 因 registry 已归属新 work 而被跳过。
+    /// 复用派发挂载的终态回调经 fire 链真实触发（挂载 → take → 执行 →
+    /// drain 一次性），并覆盖 S6 一次性守卫与 T6 归属过滤的可构造部分。
     #[test]
     fn dispatch_reuse_fires_live_slot_callback() {
         let app = TiangongApp::new();
+        let session = "s-live";
         let slot: crate::commands::StreamFinishedSlot =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let work = crate::central::CentralDispatchRequest {
-            work_id: "work-live".to_string(),
-            session_id: "s-live".to_string(),
-            task: "复用任务".to_string(),
-            model: None,
-            cwd: None,
-            after_work_id: None,
-            parallel: false,
-            reused_session: true,
-        };
-        // registry 预置：该会话当前条目即本 work（归属过滤通过）
+        // registry 预置：该会话当前条目即本 work（T6 归属判定通过）
         app.central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(crate::central::CentralWorkStatus {
-                work_id: work.work_id.clone(),
-                session_id: work.session_id.clone(),
-                task: work.task.clone(),
+                work_id: "work-live".to_string(),
+                session_id: session.to_string(),
+                task: "复用任务".to_string(),
                 model: None,
                 dispatched_at: "2026-11-11 18:00:00".to_string(),
                 state: central_state::WorkState::Running,
@@ -2549,18 +2540,39 @@ mod tests {
                 last_activity: None,
                 cwd: None,
             });
-        // 直接复用 attach 的守卫逻辑等价验证：一次性集合首次插入成功、
-        // 二次拒绝（S6）；归属判定经 registry（T6）。
+        // 挂载（与 attach_work_finished_callback 同款闭包语义，去掉 app 依赖）
+        {
+            let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let fired_clone = std::sync::Arc::clone(&fired);
+            slot.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Box::new(move |done: bool, reason: String| {
+                    let mut log = fired_clone.lock().unwrap();
+                    log.push(format!("work-live:{done}:{reason}"));
+                }));
+            app.central_watch_slots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session.to_string(), std::sync::Arc::clone(&slot));
+            // fire（流消费者终态路径等价）：take 并逐个执行
+            let handlers = app.take_finished_handlers(session);
+            assert_eq!(handlers.len(), 1, "挂载的回调应被取出");
+            for handler in handlers {
+                handler(true, String::new());
+            }
+            assert_eq!(*fired.lock().unwrap(), vec!["work-live:true:".to_string()]);
+            // drain 一次性：再取为空（重复终态不重复触发）
+            assert!(
+                app.take_finished_handlers(session).is_empty(),
+                "fire 后槽必须为空（一次性 drain）"
+            );
+        }
+        // S6 一次性集合语义
         let mut once = app
             .central_finished_once
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        assert!(once.insert(work.work_id.clone()), "首次终态必须执行");
-        assert!(
-            !once.insert(work.work_id.clone()),
-            "重复终态必须被 S6 守卫拒绝"
-        );
-        drop(once);
-        let _ = slot; // slot 类型契约：Vec<Handler> 可挂载（真实 fire 见集成层）
+        assert!(once.insert("work-live".to_string()));
+        assert!(!once.insert("work-live".to_string()));
     }
 }
