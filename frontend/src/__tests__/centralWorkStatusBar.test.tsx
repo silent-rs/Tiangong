@@ -167,6 +167,56 @@ describe('CentralWorkStatusBar', () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it('中断任务进入「已中断」分组（重启恢复路径）', async () => {
+    container = await mountWithItems([
+      makeItem({ work_id: 'work-i1', session_id: 'sess-i', state: 'interrupted', task: '被中断的任务' }),
+    ]);
+    const badge = container.querySelector('button');
+    act(() => {
+      badge!.click();
+    });
+    const drawer = container.querySelector('[role="dialog"]');
+    expect(drawer).not.toBeNull();
+    expect(drawer!.textContent).toContain('已中断');
+    expect(drawer!.textContent).toContain('被中断的任务');
+    expect(drawer!.textContent).toContain('可让中枢重派');
+  });
+
+  it('focus 进入容器不触发 250ms 关闭（a11y focus-within）', async () => {
+    container = await mountWithItems([makeItem()]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }),
+      );
+    });
+    expect(container.querySelector('#central-work-popover')).not.toBeNull('hover 面板应打开');
+    // Tab 聚焦容器内控件（真实聚焦改变 activeElement）：focusin 捕获
+    // 打开面板并保持，随后鼠标移出不得关闭（focus-within 语义）
+    act(() => {
+      badge.focus();
+    });
+    act(() => {
+      badge.dispatchEvent(
+        new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }),
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 340));
+    expect(container.querySelector('#central-work-popover')).not.toBeNull(
+      '焦点在容器内时面板不得被 250ms 定时关闭',
+    );
+  });
+
+  it('aria-controls 指向面板/抽屉 id（a11y 关联）', async () => {
+    container = await mountWithItems([makeItem()]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.click();
+    });
+    expect(badge.getAttribute('aria-controls')).toBe('central-work-drawer');
+    expect(container.querySelector('#central-work-drawer')).not.toBeNull();
+  });
+
   it('失败任务进入「失败」分组，与完成/中断分色呈现', async () => {
     container = await mountWithItems([
       makeItem({ work_id: 'work-f1', session_id: 'sess-f', state: 'failed', task: '失败任务' }),

@@ -81,6 +81,8 @@ pub struct TiangongApp {
     central_pending_dispatches: Mutex<Vec<crate::central::CentralDispatchRequest>>,
     /// 中枢模型回退通知已发出（抖动控制：每进程一次）。
     central_model_fallback_notified: std::sync::atomic::AtomicBool,
+    /// 已触发过终态回调的 work（S6 一次性守卫：重复 attach 不重复回报）。
+    central_finished_once: std::sync::Mutex<std::collections::HashSet<String>>,
     /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
     central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -211,6 +213,7 @@ impl TiangongApp {
             central_work_registry: Mutex::new(Vec::new()),
             central_pending_dispatches: Mutex::new(Vec::new()),
             central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
+            central_finished_once: std::sync::Mutex::new(std::collections::HashSet::new()),
             central_watch_slots: Mutex::new(HashMap::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -807,6 +810,13 @@ impl TiangongApp {
         initial_model_ref: Option<&str>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> Result<tiangong_core_manager::EnsuredCore, String> {
+        // 机制守卫（review S9，先于一切副作用）：中枢对话误经此入口会创建
+        // 挂全插件的中枢 Core（破坏白名单隔离）——必须走 ensure_central_core。
+        if crate::central::is_central_session(session_id) {
+            return Err(format!(
+                "中枢对话（{session_id}）必须经 ensure_central_core 构造，误入 ensure_core 已拦截"
+            ));
+        }
         self.wait_plugin_preload().await?;
         let (app_config, agent_config, default_workspace_dir) = self
             .with_state_read(|state| {
@@ -837,8 +847,6 @@ impl TiangongApp {
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
         // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
         //
-        // 中枢对话不经此入口：中枢 Core 由 `ensure_central_core` 直接构造
-        // （内置且唯一的中枢插件，见 `crate::central`）。
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
         self.core_manager
@@ -2165,15 +2173,25 @@ fn attach_work_finished_callback(
     work: crate::central::CentralDispatchRequest,
 ) {
     let callback_app = app.clone();
-    slot.lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(Box::new(move |done: bool, reason: String| {
-            let state = state_of(&callback_app);
-            let notice = build_work_notice(state, &work, done, &reason);
-            state.on_central_work_finished(&work, done, &notice, &callback_app);
-            // 依赖本工作的排队项：终态后自动投递
-            state.flush_pending_dispatches(&work.work_id, &work.session_id, &callback_app);
-        }));
+    let mut handlers = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    handlers.push(Box::new(move |done: bool, reason: String| {
+        let state = state_of(&callback_app);
+        // 一次性守卫（review S6）：重复 attach（派发重试/并发路径）的
+        // 同 work 回调只执行首次——否则终态回报重复注入。
+        if !state
+            .central_finished_once
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(work.work_id.clone())
+        {
+            tracing::warn!(work_id = %work.work_id, "重复终态回调已忽略（attach 去重兜底）");
+            return;
+        }
+        let notice = build_work_notice(state, &work, done, &reason);
+        state.on_central_work_finished(&work, done, &notice, &callback_app);
+        // 依赖本工作的排队项：终态后自动投递
+        state.flush_pending_dispatches(&work.work_id, &work.session_id, &callback_app);
+    }));
 }
 
 /// 组装后台工作回报（读 Worker 会话最终答复，**不截断**）。
@@ -2458,5 +2476,32 @@ mod tests {
             .await
             .expect("正确所有者释放后等待方应继续")
             .expect("等待任务不应失败");
+    }
+    /// S9：ensure_core 拒绝中枢会话（白名单隔离的机制守卫，先于副作用）。
+    #[tokio::test]
+    async fn ensure_core_rejects_central_session_entry() {
+        let app = TiangongApp::new();
+        let (_tx, _rx) = std::sync::mpsc::channel();
+        let result = app
+            .ensure_core(
+                crate::central::CENTRAL_SESSION_ID,
+                None,
+                None,
+                None,
+                None,
+                _tx,
+            )
+            .await;
+        let error = result.expect_err("中枢会话经 ensure_core 必须被拒绝");
+        assert!(
+            error.contains("ensure_central_core"),
+            "错误信息须指向正确入口：{error}"
+        );
+        // 守卫先于副作用：未创建任何 Core
+        assert!(
+            !app.core_manager
+                .has_live_core(crate::central::CENTRAL_SESSION_ID),
+            "拦截必须发生在 Core 创建之前"
+        );
     }
 }

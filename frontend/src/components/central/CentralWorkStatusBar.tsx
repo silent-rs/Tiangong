@@ -162,6 +162,7 @@ export function CentralWorkStatusBar() {
   const [hoverOpen, setHoverOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const closeTimer = useRef<number | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const runStatus = useStore((s) => s.runStatus);
   const messagesLength = useStore((s) => s.messages.length);
 
@@ -213,7 +214,18 @@ export function CentralWorkStatusBar() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [pinned]);
 
+  // 卸载清理（review：closeTimer 残留会在组件卸载后触发 setState 警告）
+  useEffect(
+    () => () => {
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    },
+    [],
+  );
+
+  // focus-within（review a11y）：焦点在容器内（键盘 Tab 操作浮层）时
+  // 不挂关闭——鼠标移出不应误关正在键盘交互的面板。
   const scheduleClose = useCallback(() => {
+    if (rootRef.current?.contains(document.activeElement)) return;
     if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => setHoverOpen(false), PANEL_CLOSE_DELAY_MS);
   }, []);
@@ -267,6 +279,7 @@ export function CentralWorkStatusBar() {
   const totalCount = visible.length;
   return (
     <div
+      ref={rootRef}
       className="absolute right-4 top-3 z-20"
       onMouseEnter={() => {
         if (pinned) return;
@@ -274,6 +287,17 @@ export function CentralWorkStatusBar() {
         setHoverOpen(true);
       }}
       onMouseLeave={scheduleClose}
+      onFocusCapture={() => {
+        // focus-within（review a11y）：Tab 进入浮层/抽屉的控件视为仍在
+        // 交互区，取消挂起的关闭（不被 250ms 定时误关）。
+        if (pinned) return;
+        cancelClose();
+        setHoverOpen(true);
+      }}
+      onBlurCapture={() => {
+        // 延迟到下一拍判定：blur 后焦点可能移入容器内另一控件
+        window.setTimeout(scheduleClose, 0);
+      }}
     >
       <button
         type="button"
@@ -282,6 +306,7 @@ export function CentralWorkStatusBar() {
             ? '后台工作：暂无任务'
             : `后台工作：${running.length} 个执行中，${queued.length} 条待汇报，共 ${totalCount} 项`
         }
+        aria-controls={pinned ? 'central-work-drawer' : hoverOpen ? 'central-work-popover' : undefined}
         aria-expanded={pinned || hoverOpen}
         // hover 之外的键盘/点击可达路径（无障碍 + 触屏）；点击固定为抽屉
         onClick={() => {
@@ -334,7 +359,9 @@ export function CentralWorkStatusBar() {
       </button>
 
       {hoverOpen && !pinned ? (
-        <div className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
+        <div
+          id="central-work-popover"
+          className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
           <WorkGroups
             running={running}
             failed={failed}
@@ -352,6 +379,7 @@ export function CentralWorkStatusBar() {
 
       {pinned ? (
         <aside
+          id="central-work-drawer"
           role="dialog"
           aria-label="后台工作视图"
           className="absolute right-0 top-[calc(100%+8px)] flex max-h-[min(70vh,560px)] w-[420px] flex-col rounded-2xl border border-border/70 bg-background/98 p-4 shadow-2xl shadow-black/15 backdrop-blur-xl"

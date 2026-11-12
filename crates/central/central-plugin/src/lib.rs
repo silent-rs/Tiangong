@@ -173,7 +173,7 @@ pub struct CentralDispatchRequest {
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
 ///
-/// 工具集（§5.3 白名单的 POC 落地，共 10 项）：
+/// 工具集（§5.3 白名单的实现态，22 项——与 tool_specs 一一对应，
 /// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace` /
 ///   `list_models` / `list_sessions` / `search_history`；
 /// - 后台工作：`dispatch_work`（新建/复用派发）、`send_to_worker`（引导）、
