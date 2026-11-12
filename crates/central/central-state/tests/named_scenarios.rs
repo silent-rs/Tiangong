@@ -72,7 +72,7 @@ fn dispatch_reuse_finish_queues_report() {
 /// 投递失败回滚：登记条目保留并转 failed（不因失败丢失条目）。
 #[test]
 fn delivery_failure_rollback_keeps_item() {
-    let mut entries = vec![entry("work-f1", "s-x", WorkState::Running)];
+    let mut entries = [entry("work-f1", "s-x", WorkState::Running)];
     let next = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, false);
     entries[0].state = next;
     assert_eq!(entries[0].state, WorkState::Failed, "失败条目保留并分态");
@@ -114,5 +114,53 @@ fn dispatch_rejects_central_hub_at_app_entry() {
     assert!(
         error.contains("不能作为工作会话"),
         "拒绝信息可辨识：{error}"
+    );
+}
+
+/// P1-1 回归锁定：waiting_user 恢复与 pause→resume 的第二 turn 终态
+/// 必须被处理（状态驱动幂等——在途即可处理，不按 work_id 记忆）。
+#[test]
+fn second_turn_after_resume_produces_report() {
+    let mut state = WorkState::WaitingUser;
+    assert!(state.is_inflight(), "等待用户在途");
+    state = WorkState::Running;
+    let next = transition_on_finished(Some(state), WorkOutcome::Finished, true);
+    assert_eq!(
+        next,
+        WorkState::ReportQueued,
+        "第二 turn 终态必须产出回报排队"
+    );
+
+    let resumed_from_pause = WorkState::Running; // 暂停恢复后的第二 turn
+    let next = transition_on_finished(Some(resumed_from_pause), WorkOutcome::Finished, true);
+    assert_eq!(next, WorkState::ReportQueued);
+
+    let terminal = WorkState::ReportQueued;
+    assert!(!terminal.is_inflight(), "已终态的重复回调被守卫识别");
+}
+
+/// P1-2 回归锁定：执行中引导（steer 并入）不改 registry 归属。
+#[test]
+fn steer_into_running_work_keeps_ownership() {
+    let mut entries = [entry("work-owner", "s-busy", WorkState::Running)];
+    let owner_entry = entries
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-busy" && e.state.is_inflight())
+        .expect("在跑工作存在");
+    assert_eq!(owner_entry.work_id, "work-owner", "归属未被引导覆盖");
+    entries[0].state = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, true);
+    assert_eq!(entries[0].state, WorkState::ReportQueued);
+
+    let mut wrong = vec![entry("work-owner", "s-busy", WorkState::Running)];
+    upsert_registry_entry(&mut wrong, entry("steer-xxx", "s-busy", WorkState::Running));
+    let current = wrong
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-busy")
+        .unwrap();
+    assert_eq!(
+        current.work_id, "steer-xxx",
+        "对照：旧行为确实覆盖归属（此序列即 P1-2 根因）"
     );
 }

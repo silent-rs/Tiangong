@@ -528,6 +528,10 @@ impl CentralPlugin {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: cwd
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
             outcome: None,
         };
         let request = CentralDispatchRequest {
@@ -854,6 +858,7 @@ impl CentralPlugin {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
             outcome: None,
         };
         let request = CentralDispatchRequest {
@@ -2512,6 +2517,7 @@ mod tests {
                 events: Vec::new(),
                 queued_at: None,
                 after_work_id: None,
+                cwd: None,
             };
             upsert_work_item(root.path(), &record);
         }
@@ -2527,6 +2533,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
             outcome: None,
         };
         upsert_work_item(root.path(), &again);
@@ -2578,6 +2585,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
             outcome: None,
         };
         upsert_work_item(root.path(), &record);
@@ -2640,6 +2648,7 @@ mod tests {
                     events: Vec::new(),
                     queued_at: None,
                     after_work_id: None,
+                    cwd: None,
                 },
             );
         }
@@ -2674,6 +2683,7 @@ mod tests {
                 events: Vec::new(),
                 queued_at: None,
                 after_work_id: None,
+                cwd: None,
             });
         }
         records.push(WorkItemRecord {
@@ -2688,6 +2698,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-fail".to_string(),
@@ -2701,6 +2712,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-recent-open".to_string(),
@@ -2714,6 +2726,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-stale-open".to_string(),
@@ -2727,6 +2740,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
         });
         for record in &records {
             upsert_work_item(root.path(), record);
@@ -2774,6 +2788,7 @@ mod tests {
             events: Vec::new(),
             queued_at: None,
             after_work_id: None,
+            cwd: None,
             outcome: None,
         };
         upsert_work_item(root.path(), &record);

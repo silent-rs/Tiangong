@@ -35,6 +35,10 @@ pub struct WorkItemRecord {
     /// 排队等待的依赖（work_id 或会话 ID；queued_at 有值时有效）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_work_id: Option<String>,
+    /// 派发工作目录（排队重放还原——新建会话尚不存在，丢失 cwd 会在
+    /// 默认工作区执行，第十三轮 P2-2）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// 后台工作事件（时间线条目，§13.4 轻量版）。
@@ -174,6 +178,7 @@ pub fn mark_work_item_queued(
     storage_root: &std::path::Path,
     session_id: &str,
     after_work_id: &str,
+    cwd: Option<&str>,
 ) {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut items = load_work_items(storage_root);
@@ -184,6 +189,7 @@ pub fn mark_work_item_queued(
     {
         entry.queued_at = Some(now);
         entry.after_work_id = Some(after_work_id.to_string());
+        entry.cwd = cwd.map(str::to_string);
         save_work_items(storage_root, &items);
     }
 }

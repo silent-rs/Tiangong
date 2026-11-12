@@ -21,6 +21,7 @@ fn record(session: &str) -> WorkItemRecord {
         events: Vec::new(),
         queued_at: None,
         after_work_id: None,
+        cwd: None,
     }
 }
 
@@ -28,7 +29,7 @@ fn record(session: &str) -> WorkItemRecord {
 fn queued_state_survives_restart_as_queued_not_interrupted() {
     let root = tempfile::tempdir().unwrap();
     upsert_work_item(root.path(), &record("s-q"));
-    mark_work_item_queued(root.path(), "s-q", "work-dep");
+    mark_work_item_queued(root.path(), "s-q", "work-dep", Some("/ws/a"));
     // 落盘可读回（重放数据源）
     let queued = queued_work_items(root.path());
     assert_eq!(queued.len(), 1);

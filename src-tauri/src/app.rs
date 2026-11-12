@@ -81,8 +81,6 @@ pub struct TiangongApp {
     central_pending_dispatches: Mutex<Vec<crate::central::CentralDispatchRequest>>,
     /// 中枢模型回退通知已发出（抖动控制：每进程一次）。
     central_model_fallback_notified: std::sync::atomic::AtomicBool,
-    /// 已触发过终态回调的 work（S6 一次性守卫：重复 attach 不重复回报）。
-    central_finished_once: std::sync::Mutex<std::collections::HashSet<String>>,
     /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
     central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -213,7 +211,6 @@ impl TiangongApp {
             central_work_registry: Mutex::new(Vec::new()),
             central_pending_dispatches: Mutex::new(Vec::new()),
             central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
-            central_finished_once: std::sync::Mutex::new(std::collections::HashSet::new()),
             central_watch_slots: Mutex::new(HashMap::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -1638,7 +1635,7 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
                 session_id: record.session_id,
                 task: record.task,
                 model: record.model,
-                cwd: None,
+                cwd: record.cwd.clone(),
                 after_work_id: record.after_work_id,
                 parallel: false,
                 // 按记录还原复用语义——新建会话的排队重放保留标题写入
@@ -1882,6 +1879,7 @@ async fn enqueue_central_dispatch(
     app: &tauri::AppHandle,
     request: crate::central::CentralDispatchRequest,
     after: &str,
+    cwd: &str,
 ) {
     state
         .central_pending_dispatches
@@ -1914,6 +1912,7 @@ async fn enqueue_central_dispatch(
         state.core_manager.storage_root(),
         &request.session_id,
         after,
+        Some(cwd),
     );
     crate::central::append_work_item_event(
         state.core_manager.storage_root(),
@@ -1989,7 +1988,7 @@ async fn handle_central_dispatch(
                 after = %after,
                 "后台工作排队（依赖/写入锁），等待终态后自动投递"
             );
-            enqueue_central_dispatch(state, app, request.clone(), &after).await;
+            enqueue_central_dispatch(state, app, request.clone(), &after, &cwd).await;
             return Ok(());
         }
     }
@@ -2048,6 +2047,30 @@ async fn handle_central_dispatch(
         }
     }
 
+    // 引导并入判定（第十三轮 P1-2）：reused 派发到「仍在跑」的会话 =
+    // 对既有工作的引导补充——registry 归属保持原工作、不挂新回调
+    // （turn 终态由原工作既有回调处理；否则 steer 覆盖归属后原工作
+    // 终态被 T6 过滤跳过，永不终态）。空闲会话的 reused 派发 = 新工作
+    // （覆盖登记 + 挂回调）。
+    let mut steer_merged_into_running = false;
+    if request.reused_session && merged_work.work_id == request.work_id {
+        let registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let running_entry = registry
+            .iter()
+            .rev()
+            .find(|entry| entry.session_id == sid && entry.state.is_inflight());
+        if let Some(entry) = running_entry {
+            steer_merged_into_running = true;
+            tracing::info!(
+                steer_work = %request.work_id,
+                owner_work = %entry.work_id,
+                "引导并入执行中的工作：归属保持原工作"
+            );
+        }
+    }
     if state.core_manager.has_live_core(&sid) {
         // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
         // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
@@ -2061,7 +2084,9 @@ async fn handle_central_dispatch(
                 None,
             )
             .await?;
-        attach_work_finished_callback(&slot, app, merged_work.clone());
+        if !steer_merged_into_running {
+            attach_work_finished_callback(&slot, app, merged_work.clone());
+        }
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
@@ -2109,14 +2134,16 @@ async fn handle_central_dispatch(
             .central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        running.insert(merged_work.work_id.clone());
+        if !steer_merged_into_running {
+            running.insert(merged_work.work_id.clone());
+        }
     }
     // 状态登记按**会话维度 upsert**（用户实测：同会话重派后旧 interrupted
     // 条目残留、多轮派发显示多条）——一个工作会话在徽章中始终是一条，
     // 重派/引导覆盖更新（work_id/task/时间取最新），中断旧条目自然消失。
     // waiting_user 恢复（merged）时条目已在上方更新为 running，不重建。
     let merged_into_existing = merged_work.work_id != request.work_id;
-    if !merged_into_existing {
+    if !merged_into_existing && !steer_merged_into_running {
         {
             let mut registry = state
                 .central_work_registry
@@ -2136,6 +2163,9 @@ async fn handle_central_dispatch(
             );
         }
     }
+    // 排队标记清除（第十三轮 P2-1）：进入执行即失效——重放的 DispatchNow
+    // 路径不经 flush，若不在此清除，下次重启会再次重放导致重复执行。
+    crate::central::clear_work_item_queued(state.core_manager.storage_root(), &request.session_id);
     crate::central::append_work_item_event(
         state.core_manager.storage_root(),
         &request.session_id,
@@ -2189,16 +2219,31 @@ fn attach_work_finished_callback(
                 _ => {}
             }
         }
-        // 一次性守卫（review S6）：重复 attach（派发重试/并发路径）的
-        // 同 work 回调只执行首次——否则终态回报重复注入。
-        if !state
-            .central_finished_once
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(work.work_id.clone())
+        // 一次性守卫（review S6→第十三轮 P1-1 修正）：改为状态驱动幂等——
+        // 该 work 在 registry 中仍在途（running/waiting_user）才处理终态；
+        // 已终态（report_queued/failed/completed）说明已处理过，跳过。
+        // 集合记忆版会误杀同 work_id 的第二个 turn（waiting_user 恢复、
+        // pause→resume 都复用 work_id），导致回报丢失 + running 永久残留。
         {
-            tracing::warn!(work_id = %work.work_id, "重复终态回调已忽略（attach 去重兜底）");
-            return;
+            let registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let self_entry = registry
+                .iter()
+                .rev()
+                .find(|entry| entry.work_id == work.work_id);
+            match self_entry {
+                Some(entry) if !entry.state.is_inflight() => {
+                    tracing::warn!(
+                        work_id = %work.work_id,
+                        state = entry.state.as_str(),
+                        "终态回调跳过：该工作已终态（重复 attach/陈旧回调）"
+                    );
+                    return;
+                }
+                _ => {}
+            }
         }
         let notice = build_work_notice(state, &work, done, &reason);
         state.on_central_work_finished(&work, done, &notice, &callback_app);
@@ -2567,12 +2612,23 @@ mod tests {
                 "fire 后槽必须为空（一次性 drain）"
             );
         }
-        // S6 一次性集合语义
-        let mut once = app
-            .central_finished_once
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        assert!(once.insert("work-live".to_string()));
-        assert!(!once.insert("work-live".to_string()));
+        // 状态驱动幂等（P1-1 修正后的语义）：在途 → 可处理；已终态 → 跳过
+        {
+            let mut registry = app
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = registry
+                .iter_mut()
+                .rev()
+                .find(|e| e.work_id == "work-live")
+                .unwrap();
+            assert!(entry.state.is_inflight(), "running 在途可处理终态");
+            entry.state = central_state::WorkState::ReportQueued;
+            assert!(
+                !entry.state.is_inflight(),
+                "已终态的重复回调必须可被守卫识别跳过"
+            );
+        }
     }
 }
