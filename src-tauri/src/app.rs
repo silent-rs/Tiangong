@@ -2079,10 +2079,20 @@ async fn enqueue_central_dispatch(
     emit_central_work_updated_state(state);
 }
 
+/// 派发决策结果：Queued = 已入队（执行段不得投递）；Execute = 投递。
+pub(crate) enum DispatchPlan {
+    Queued,
+    Execute {
+        merged_work: crate::central::CentralDispatchRequest,
+        steer_merged_into_running: bool,
+        cwd: String,
+    },
+}
+
 async fn plan_central_dispatch(
     state: &TiangongApp,
     request: crate::central::CentralDispatchRequest,
-) -> Result<(crate::central::CentralDispatchRequest, bool), String> {
+) -> Result<DispatchPlan, String> {
     // app 入口目标守卫（机检 1：dispatch_rejects_central_hub_at_app_entry 的
     // 接线）——插件侧已拒，此处兜底拦截绕过插件直入执行器的路径。
     central_state::validate_dispatch_target(&request.session_id)?;
@@ -2144,7 +2154,7 @@ async fn plan_central_dispatch(
                 "后台工作排队（依赖/写入锁），等待终态后自动投递"
             );
             enqueue_central_dispatch(state, request.clone(), &after, &cwd).await;
-            return Ok((request, false));
+            return Ok(DispatchPlan::Queued);
         }
     }
 
@@ -2208,7 +2218,11 @@ async fn plan_central_dispatch(
         }
     }
 
-    Ok((merged_work, steer_merged_into_running))
+    Ok(DispatchPlan::Execute {
+        merged_work,
+        steer_merged_into_running,
+        cwd,
+    })
 }
 
 async fn handle_central_dispatch(
@@ -2216,15 +2230,19 @@ async fn handle_central_dispatch(
     app: &tauri::AppHandle,
     request: crate::central::CentralDispatchRequest,
 ) -> Result<(), String> {
-    let (merged_work, steer_merged_into_running) =
-        plan_central_dispatch(state, request.clone()).await?;
+    let (merged_work, steer_merged_into_running, cwd) =
+        match plan_central_dispatch(state, request.clone()).await? {
+            // 排队已在决策段完成登记落盘——执行段到此为止（分离手术曾
+            // 丢失此早退语义：返回值被当作投递继续，排队整体失效且无
+            // 测试暴露——P0，第十四轮深评自检发现）
+            DispatchPlan::Queued => return Ok(()),
+            DispatchPlan::Execute {
+                merged_work,
+                steer_merged_into_running,
+                cwd,
+            } => (merged_work, steer_merged_into_running, cwd),
+        };
     let sid = merged_work.session_id.clone();
-    let cwd = merged_work
-        .cwd
-        .clone()
-        .filter(|path| !path.trim().is_empty())
-        .or_else(|| self_session_cwd(state, &merged_work.session_id))
-        .unwrap_or_default();
     let effective_model = if merged_work.reused_session {
         None
     } else {
@@ -3132,9 +3150,16 @@ mod tests {
                 cwd: Some(ws.to_string_lossy().to_string()),
             });
         let resume = dispatch_request("work-p", "s-resume", "继续暂停的任务", true);
-        let (_merged, steer_merged) = plan_central_dispatch(&state, resume)
+        let plan = plan_central_dispatch(&state, resume)
             .await
             .expect("plan 应成功");
+        let steer_merged = match plan {
+            crate::app::DispatchPlan::Execute {
+                steer_merged_into_running,
+                ..
+            } => steer_merged_into_running,
+            crate::app::DispatchPlan::Queued => panic!("Paused 的 resume 不应排队"),
+        };
         assert!(
             !steer_merged,
             "Paused 的 resume 不得并入（R1 旧代码 is_inflight 在此红）"
@@ -3150,9 +3175,66 @@ mod tests {
             entry.state = central_state::WorkState::Running;
         }
         let steer = dispatch_request("steer-x", "s-resume", "补充指令", true);
-        let (_merged2, steer_merged2) = plan_central_dispatch(&state, steer)
+        let plan2 = plan_central_dispatch(&state, steer)
             .await
             .expect("plan 应成功");
+        let steer_merged2 = match plan2 {
+            crate::app::DispatchPlan::Execute {
+                steer_merged_into_running,
+                ..
+            } => steer_merged_into_running,
+            crate::app::DispatchPlan::Queued => panic!("Running 会话的引导不应排队"),
+        };
         assert!(steer_merged2, "Running 会话的引导应并入（归属保持原工作）");
+    }
+    /// P0 锁：排队决策返回 Queued（执行段据此不投递——分离手术曾丢失该
+    /// 语义且无测试暴露）。依赖在途 → plan 必须返回 Queued 并完成登记。
+    #[tokio::test]
+    async fn host_plan_queue_decision_returns_queued() {
+        let (state, ws) = central_test_app();
+        let sessions_dir = state.core_manager.storage_root().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+        sessions_dir.join("s-dep.json"),
+        serde_json::json!({"id": "s-dep", "title": "依赖会话", "created_at": "2026-11-12 10:00:00",
+            "updated_at": "2026-11-12 10:00:00", "trust_mode": "Supervised",
+            "cwd": ws.to_string_lossy(), "messages": []}).to_string(),
+    ).unwrap();
+        // 依赖在途
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-dep".into(),
+                session_id: "s-dep".into(),
+                task: "在跑依赖".into(),
+                model: None,
+                dispatched_at: "2026-11-12 10:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: Some(ws.to_string_lossy().to_string()),
+            });
+        let follow = crate::central::CentralDispatchRequest {
+            work_id: "work-follow".into(),
+            session_id: "s-new-follow".into(),
+            task: "排队任务".into(),
+            model: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            after_work_id: Some("work-dep".into()),
+            parallel: false,
+            reused_session: false,
+        };
+        let plan = plan_central_dispatch(&state, follow)
+            .await
+            .expect("plan 应成功");
+        assert!(
+            matches!(plan, crate::app::DispatchPlan::Queued),
+            "依赖在途时必须返回 Queued（执行段不投递）"
+        );
+        // 排队登记与挂起队列已就绪
+        let pending = state.central_pending_dispatches.lock().unwrap().clone();
+        assert_eq!(pending.len(), 1, "排队请求必须入挂起队列");
     }
 }
