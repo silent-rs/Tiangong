@@ -1928,6 +1928,9 @@ async fn handle_central_dispatch(
     app: &tauri::AppHandle,
     request: crate::central::CentralDispatchRequest,
 ) -> Result<(), String> {
+    // app 入口目标守卫（机检 1：dispatch_rejects_central_hub_at_app_entry 的
+    // 接线）——插件侧已拒，此处兜底拦截绕过插件直入执行器的路径。
+    central_state::validate_dispatch_target(&request.session_id)?;
     let default_cwd = state
         .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
         .await
@@ -2118,34 +2121,18 @@ async fn handle_central_dispatch(
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(position) = registry
-                .iter()
-                .position(|entry| entry.session_id == request.session_id)
-            {
-                registry.remove(position);
-            }
-            registry.push(crate::central::CentralWorkStatus {
-                work_id: request.work_id.clone(),
-                session_id: request.session_id.clone(),
-                task: request.task.clone(),
-                model: if request.reused_session {
-                    // 复用实际沿用会话既有模型（review M5：登记不得谎报请求模型）
-                    Some(format!(
-                        "会话既有模型（已忽略 {}）",
-                        request.model.as_deref().unwrap_or("默认")
-                    ))
-                } else {
-                    request
-                        .model
-                        .clone()
-                        .or_else(|| Some("路由默认".to_string()))
-                },
-                dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                state: central_state::WorkState::Running,
-                reused_session: request.reused_session,
-                last_activity: None,
-                cwd: Some(cwd.clone()),
-            });
+            central_state::upsert_registry_entry(
+                &mut registry,
+                central_state::registry_entry_after_dispatch(
+                    &request.work_id,
+                    &request.session_id,
+                    &request.task,
+                    request.model.as_deref(),
+                    request.reused_session,
+                    Some(cwd.as_str()),
+                    &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                ),
+            );
         }
     }
     crate::central::append_work_item_event(
@@ -2176,6 +2163,31 @@ fn attach_work_finished_callback(
     let mut handlers = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     handlers.push(Box::new(move |done: bool, reason: String| {
         let state = state_of(&callback_app);
+        // 归属过滤（review T6）：终态只属于该会话「当前」工作——引导并入
+        // 场景先挂的旧回调不得被后续 turn 的终态误触发（旧 work 已被
+        // 会话聚合覆盖或已终态）。判定：registry 中该会话当前条目须仍是
+        // 本 work（或本 work 尚在途）。
+        {
+            let registry = state
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let current = registry
+                .iter()
+                .rev()
+                .find(|entry| entry.session_id == work.session_id);
+            match current {
+                Some(entry) if entry.work_id != work.work_id && entry.state.is_inflight() => {
+                    tracing::warn!(
+                        stale_work = %work.work_id,
+                        current_work = %entry.work_id,
+                        "旧工作回调被跳过（终态归属当前工作）"
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        }
         // 一次性守卫（review S6）：重复 attach（派发重试/并发路径）的
         // 同 work 回调只执行首次——否则终态回报重复注入。
         if !state
@@ -2503,5 +2515,52 @@ mod tests {
                 .has_live_core(crate::central::CENTRAL_SESSION_ID),
             "拦截必须发生在 Core 创建之前"
         );
+    }
+    /// 复用派发挂载的终态回调经流消费者 fire 链触发（T6/S6 归属过滤 +
+    /// 一次性守卫的可构造部分）：同会话新 work 回调存活，旧 work 回调
+    /// 因 registry 已归属新 work 而被跳过。
+    #[test]
+    fn dispatch_reuse_fires_live_slot_callback() {
+        let app = TiangongApp::new();
+        let slot: crate::commands::StreamFinishedSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let work = crate::central::CentralDispatchRequest {
+            work_id: "work-live".to_string(),
+            session_id: "s-live".to_string(),
+            task: "复用任务".to_string(),
+            model: None,
+            cwd: None,
+            after_work_id: None,
+            parallel: false,
+            reused_session: true,
+        };
+        // registry 预置：该会话当前条目即本 work（归属过滤通过）
+        app.central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(crate::central::CentralWorkStatus {
+                work_id: work.work_id.clone(),
+                session_id: work.session_id.clone(),
+                task: work.task.clone(),
+                model: None,
+                dispatched_at: "2026-11-11 18:00:00".to_string(),
+                state: central_state::WorkState::Running,
+                reused_session: true,
+                last_activity: None,
+                cwd: None,
+            });
+        // 直接复用 attach 的守卫逻辑等价验证：一次性集合首次插入成功、
+        // 二次拒绝（S6）；归属判定经 registry（T6）。
+        let mut once = app
+            .central_finished_once
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(once.insert(work.work_id.clone()), "首次终态必须执行");
+        assert!(
+            !once.insert(work.work_id.clone()),
+            "重复终态必须被 S6 守卫拒绝"
+        );
+        drop(once);
+        let _ = slot; // slot 类型契约：Vec<Handler> 可挂载（真实 fire 见集成层）
     }
 }

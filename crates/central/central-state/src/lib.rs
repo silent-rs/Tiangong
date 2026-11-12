@@ -218,6 +218,54 @@ pub fn merge_waiting_user(
     ))
 }
 
+/// 派发后的登记条目构造（会话维度 upsert 语义：调用方先移除同会话条目）。
+///
+/// 复用时 `model` 登记「会话既有模型（已忽略请求的 X）」——执行模型与
+/// 请求模型不一致必须显式可见（review M5/S5），不得谎报请求模型。
+pub fn registry_entry_after_dispatch(
+    work_id: &str,
+    session_id: &str,
+    task: &str,
+    requested_model: Option<&str>,
+    reused_session: bool,
+    cwd: Option<&str>,
+    now: &str,
+) -> WorkStatus {
+    WorkStatus {
+        work_id: work_id.to_string(),
+        session_id: session_id.to_string(),
+        task: task.to_string(),
+        model: if reused_session {
+            Some(format!(
+                "会话既有模型（已忽略 {}）",
+                requested_model.unwrap_or("默认")
+            ))
+        } else {
+            Some(requested_model.unwrap_or("路由默认").to_string())
+        },
+        dispatched_at: now.to_string(),
+        state: WorkState::Running,
+        reused_session,
+        last_activity: None,
+        cwd: cwd.map(str::to_string),
+    }
+}
+
+/// 会话维度 upsert：同会话既有条目（含 interrupted/report_queued 残留）
+/// 被新派发覆盖——一个会话在徽章中始终一条。
+pub fn upsert_registry_entry(entries: &mut Vec<WorkStatus>, entry: WorkStatus) {
+    entries.retain(|existing| existing.session_id != entry.session_id);
+    entries.push(entry);
+}
+
+/// 派发目标校验（app 入口守卫的判定核）：中枢会话不得作为工作目标。
+pub fn validate_dispatch_target(session_id: &str) -> Result<(), String> {
+    if session_id == "central-hub" {
+        return Err("中枢对话自身不能作为工作会话（派发被拒绝）".to_string());
+    }
+    Ok(())
+}
+
 /// 排队投递匹配：依赖声明（work_id 或会话 ID）与刚终态工作的双字段比对
 /// （与 [`queue_decision`] 的依赖查找口径一致——否则以 session_id 声明
 /// 的依赖永远等不到 flush，工作永久 queued）。

@@ -77,7 +77,12 @@ function shortDir(path: string): string {
   return parts.slice(-2).join('/');
 }
 
-export function MessageList() {
+export function MessageList({
+  suppressWelcome = false,
+}: {
+  /** 抑制内置空态欢迎语（中枢模式由问候覆盖层承担——避免双份 DOM） */
+  suppressWelcome?: boolean;
+} = {}) {
   const messages = useStore(s => s.messages);
   const workspaceDir = useStore(s => s.workspaceDir);
   const sessionCwd = useStore(s => s.sessionCwd);
@@ -1258,7 +1263,7 @@ export function MessageList() {
     <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
-          {messages.length === 0 && !isThinking && !(remoteHost && switchingSessionId) ? (
+          {messages.length === 0 && !isThinking && !suppressWelcome && !(remoteHost && switchingSessionId) ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
                 <Cpu className="w-8 h-8 text-primary-foreground" />

@@ -56,7 +56,7 @@ export function CentralModeView() {
           列表」的虚拟化首帧定位竞态——中枢无会话切换信号，定位只能走
           新消息路径，延迟挂载会让 scrollToIndex 早于测量完成而失效。 */}
       <div className="relative min-h-0 flex-1">
-        <LazyMessageList />
+        <LazyMessageList suppressWelcome />
         {showGreeting ? (
           <div className="absolute inset-0 z-10 bg-background">
             <CentralGreeting />
