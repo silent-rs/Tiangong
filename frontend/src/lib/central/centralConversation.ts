@@ -31,6 +31,9 @@ export async function ensureCentralConversation(): Promise<void> {
     }
     return;
   }
+  // 激活问候（§4.2）：进入时注入状态摘要驱动中枢主动问候（后端幂等，
+  // 每进程首次；失败静默不阻塞切换）
+  void api.centralActivationGreeting().catch(() => undefined);
   // 记录进入前的普通模式上下文（退出中枢时恢复）
   preCentralContext = {
     activeSessionId: cur.activeSessionId,

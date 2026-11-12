@@ -740,6 +740,8 @@ export const api = {
       reused_session: boolean;
     }>
   > => invoke('get_central_work_status'),
+  centralActivationGreeting: (): Promise<void> =>
+    invoke('central_activation_greeting'),
 
   cancelTurn: (sessionId: string): Promise<boolean> =>
     invoke('cancel_turn', { sessionId }),

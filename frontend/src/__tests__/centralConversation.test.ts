@@ -11,6 +11,7 @@ import type { LoadedSession, Session } from '@/api/tauri';
 
 vi.mock('@/api/tauri', () => {
   const api = {
+    centralActivationGreeting: vi.fn(() => Promise.resolve()),
     getSessions: vi.fn(),
     getReasoningEffort: vi.fn(),
     getDefaultReasoningEffort: vi.fn(),

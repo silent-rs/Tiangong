@@ -81,6 +81,8 @@ pub struct TiangongApp {
     central_pending_dispatches: Mutex<Vec<crate::central::CentralDispatchRequest>>,
     /// 中枢模型回退通知已发出（抖动控制：每进程一次）。
     central_model_fallback_notified: std::sync::atomic::AtomicBool,
+    /// 激活问候已注入（每进程首次进入中枢模式时注入一次，§4.2/§10.4）。
+    central_activation_greeted: std::sync::atomic::AtomicBool,
     /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
     central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -211,6 +213,7 @@ impl TiangongApp {
             central_work_registry: Mutex::new(Vec::new()),
             central_pending_dispatches: Mutex::new(Vec::new()),
             central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
+            central_activation_greeted: std::sync::atomic::AtomicBool::new(false),
             central_watch_slots: Mutex::new(HashMap::new()),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -1673,6 +1676,92 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
     emit_central_work_updated(app);
 }
 
+/// 激活摘要组装（§4.2 基于可验证上下文生成问候的数据源；纯函数可测）。
+fn build_activation_summary(
+    entries: &[crate::central::CentralWorkStatus],
+    goals: &[crate::central::GoalRecord],
+) -> String {
+    use central_state::WorkState;
+    let count = |state: WorkState| entries.iter().filter(|e| e.state == state).count();
+    let waiting = count(WorkState::WaitingUser);
+    let interrupted = count(WorkState::Interrupted);
+    let failed = count(WorkState::Failed);
+    let running = count(WorkState::Running);
+    let paused = count(WorkState::Paused);
+    let queued = count(WorkState::Queued);
+    let mut facts: Vec<String> = Vec::new();
+    if waiting > 0 {
+        let names: Vec<String> = entries
+            .iter()
+            .filter(|e| e.state == WorkState::WaitingUser)
+            .map(|e| {
+                format!(
+                    "{}（{}）",
+                    e.work_id,
+                    e.task.chars().take(20).collect::<String>()
+                )
+            })
+            .collect();
+        facts.push(format!("{waiting} 个工作在等你决策：{}", names.join("、")));
+    }
+    if failed > 0 {
+        facts.push(format!("{failed} 个工作失败未处理（可换模型重派）"));
+    }
+    if interrupted > 0 {
+        facts.push(format!(
+            "{interrupted} 个工作中断未收尾（可复用原会话重派）"
+        ));
+    }
+    if running > 0 {
+        facts.push(format!("{running} 个工作在执行中"));
+    }
+    if paused > 0 {
+        facts.push(format!("{paused} 个工作已暂停（可恢复）"));
+    }
+    if queued > 0 {
+        facts.push(format!("{queued} 个工作排队等待"));
+    }
+    let active_goals: Vec<&str> = goals
+        .iter()
+        .filter(|g| g.status == "active")
+        .map(|g| g.title.as_str())
+        .collect();
+    let goal_note = if active_goals.is_empty() {
+        String::new()
+    } else {
+        format!("\n用户目标：{}", active_goals.join("、"))
+    };
+    if facts.is_empty() && active_goals.is_empty() {
+        "[系统中枢][激活] 用户已进入中枢模式。当前没有进行中的后台工作与已登记目标——\n这是首次或空闲状态：请向用户简短问候并介绍你能做什么（直接说目标，你会判断 Workspace、安排后台工作、跟踪进展并在关键节点汇报），不要编造状态。"
+            .to_string()
+    } else {
+        format!(
+            "[系统中枢][激活] 用户已进入中枢模式。基于可验证上下文的当前状态：\n{}{goal_note}\n请按人设「激活问候」规则主动问候用户：简洁、只陈述上述事实（不把推测写成事实）、最多给 1-3 条建议（如处理等待决策/重派中断/查看在跑进展），等用户指示。",
+            facts.join("；")
+        )
+    }
+}
+
+/// 激活问候注入（§4.2）：进入中枢模式时把状态摘要投递给中枢 Core，
+/// 驱动模型主动问候。幂等：每进程仅首次进入注入（避免频繁切换刷屏，
+/// §10.4 频率控制）。中枢 Core 须已 ensure。
+pub(crate) fn inject_central_activation_summary(state: &TiangongApp) -> Result<(), String> {
+    if state
+        .central_activation_greeted
+        .swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        return Ok(());
+    }
+    let entries = state.central_work_status();
+    let goals = crate::central::load_goals(state.core_manager.storage_root());
+    let summary = build_activation_summary(&entries, &goals);
+    state.deliver_central_message(
+        scru128::new().to_string(),
+        vec![tiangong_types::ContentBlock::text(summary)],
+        None,
+    )
+}
+
 /// 中枢派发执行器通道（惰性启动消费循环）。
 fn central_dispatch_sender(
     app: &tauri::AppHandle,
@@ -2634,5 +2723,54 @@ mod tests {
                 "已终态的重复回调必须可被守卫识别跳过"
             );
         }
+    }
+    /// 激活摘要（§4.2）：有事实按事实组装（等待决策/中断/失败优先），
+    /// 空闲态给能力介绍指引，不编造状态。
+    #[test]
+    fn activation_summary_builds_from_verifiable_facts() {
+        let entries = vec![
+            crate::central::CentralWorkStatus {
+                work_id: "w1".into(),
+                session_id: "s1".into(),
+                task: "review 仓库".into(),
+                model: None,
+                dispatched_at: "2026-11-12 10:00:00".into(),
+                state: central_state::WorkState::WaitingUser,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            },
+            crate::central::CentralWorkStatus {
+                work_id: "w2".into(),
+                session_id: "s2".into(),
+                task: "调研".into(),
+                model: None,
+                dispatched_at: "2026-11-12 09:00:00".into(),
+                state: central_state::WorkState::Interrupted,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            },
+        ];
+        let summary = build_activation_summary(&entries, &[]);
+        assert!(summary.contains("1 个工作在等你决策"), "{summary}");
+        assert!(summary.contains("review 仓库"), "{summary}");
+        assert!(summary.contains("1 个工作中断"), "{summary}");
+        assert!(summary.contains("激活问候"), "{summary}");
+        // 空闲态：能力介绍，不编造
+        let idle = build_activation_summary(&[], &[]);
+        assert!(idle.contains("首次或空闲状态"), "{idle}");
+        assert!(!idle.contains("等你决策"), "{idle}");
+        // 有目标：注入目标上下文
+        let goals = vec![crate::central::GoalRecord {
+            goal_id: "g1".into(),
+            title: "完成中枢模式".into(),
+            description: String::new(),
+            workspace: None,
+            created_at: "2026-11-12".into(),
+            status: "active".into(),
+        }];
+        let with_goal = build_activation_summary(&[], &goals);
+        assert!(with_goal.contains("完成中枢模式"), "{with_goal}");
     }
 }

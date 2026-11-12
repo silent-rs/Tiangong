@@ -981,6 +981,28 @@ pub(crate) async fn restore_failed_user_message_state(
         .await
 }
 
+/// 进入中枢模式的激活问候（§4.2）：ensure 中枢 Core 后注入状态摘要，
+/// 驱动模型主动问候。幂等（每进程首次）。前端切换流程尾部调用，失败静默
+/// （问候是增强体验，不阻塞模式切换）。
+#[tauri::command]
+pub async fn central_activation_greeting(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app.state::<TiangongApp>();
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+    let is_new = state
+        .ensure_central_core(&app, stream_tx)
+        .await
+        .map_err(|error| format!("中枢 Core 不可用：{error}"))?;
+    if is_new {
+        start_stream_consumer(
+            app.clone(),
+            crate::central::CENTRAL_SESSION_ID.to_string(),
+            stream_rx,
+        );
+    }
+    crate::app::inject_central_activation_summary(state.inner())
+}
+
 fn emit_session_stream_event(
     app: &AppHandle,
     session_id: &str,
