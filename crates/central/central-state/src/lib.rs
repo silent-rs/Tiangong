@@ -116,7 +116,9 @@ pub fn transition_on_finished(
     done: bool,
 ) -> WorkState {
     match current {
-        Some(WorkState::Cancelled) => WorkState::Cancelled,
+        // 已终态幂等守卫（深检 R2）：迟到的旧回调不得改写已完成/失败/
+        // 取消/中断的条目（含 Cancelled）——此前靠时序不触发，机制保证。
+        Some(state) if state.is_terminal() => state,
         Some(WorkState::Paused) => WorkState::Paused,
         _ => match outcome {
             WorkOutcome::WaitingUser => WorkState::WaitingUser,

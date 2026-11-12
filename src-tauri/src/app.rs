@@ -2058,10 +2058,14 @@ async fn handle_central_dispatch(
             .central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let running_entry = registry
-            .iter()
-            .rev()
-            .find(|entry| entry.session_id == sid && entry.state.is_inflight());
+        // 仅 Running 并入（turn 在跑，引导并入当前轮）——Paused 必须排除：
+        // resume 走 Steer 到暂停会话，需走恢复语义（覆盖登记 + 挂回调），
+        // 否则状态卡 paused 且恢复的 turn 无回报（深检 R1，第十三轮 P1-2
+        // 曾误用 is_inflight 把 resume 一并吞掉）。WaitingUser 由上方
+        // merged 分支处理，此处不会命中。
+        let running_entry = registry.iter().rev().find(|entry| {
+            entry.session_id == sid && entry.state == central_state::WorkState::Running
+        });
         if let Some(entry) = running_entry {
             steer_merged_into_running = true;
             tracing::info!(

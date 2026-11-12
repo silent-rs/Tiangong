@@ -164,3 +164,62 @@ fn steer_into_running_work_keeps_ownership() {
         "对照：旧行为确实覆盖归属（此序列即 P1-2 根因）"
     );
 }
+
+/// 深检 R1：paused 的 resume（Steer 到暂停会话）走恢复语义——不被
+/// 「引导并入」吞掉：覆盖登记为 running + 挂回调（终态可回报）。
+#[test]
+fn resume_from_pause_takes_recovery_not_merge() {
+    let mut entries = vec![entry("work-p1", "s-p", WorkState::Paused)];
+    // resume 请求（reused、work_id=原 work）到达：并入判定仅对 Running
+    // 生效——Paused 不并入 → 走默认登记路径（覆盖为 running 同 work）
+    let current = entries
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-p" && e.state == WorkState::Running);
+    assert!(
+        current.is_none(),
+        "Paused 不满足并入条件（仅 Running 并入）"
+    );
+    // 默认路径效果：登记覆盖为 running（同 work_id 恢复）
+    upsert_registry_entry(
+        &mut entries,
+        registry_entry_after_dispatch(
+            "work-p1",
+            "s-p",
+            "继续暂停的任务",
+            None,
+            true,
+            Some("/ws/a"),
+            "2026-11-11 19:00:00",
+        ),
+    );
+    let entry = entries
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-p")
+        .unwrap();
+    assert_eq!(entry.state, WorkState::Running);
+    assert_eq!(entry.work_id, "work-p1", "恢复保持原 work 归属");
+    // 恢复后的 turn 终态正常产出（回调已挂载——S6 状态判定 inflight 放行）
+    entries[0].state = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, true);
+    assert_eq!(entries[0].state, WorkState::ReportQueued);
+}
+
+/// 深检 R2：迟到回调不得改写已终态条目（幂等守卫）。
+#[test]
+fn late_callback_cannot_rewrite_terminal_entry() {
+    for terminal in [
+        WorkState::Completed,
+        WorkState::Failed,
+        WorkState::Cancelled,
+        WorkState::Interrupted,
+    ] {
+        let next = transition_on_finished(Some(terminal), WorkOutcome::Finished, true);
+        assert_eq!(next, terminal, "{terminal:?} 必须保持（迟到回调幂等）");
+        let next_waiting = transition_on_finished(Some(terminal), WorkOutcome::WaitingUser, false);
+        assert_eq!(
+            next_waiting, terminal,
+            "{terminal:?} 对等待用户回报同样保持"
+        );
+    }
+}
