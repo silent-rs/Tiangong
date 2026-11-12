@@ -59,7 +59,7 @@ getrandom = { workspace = true }
 if-addrs = "0.15"
 
 # Tauri 相关依赖
-tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable"] }
+tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable", "test"] }
 tauri-plugin-shell = { workspace = true }
 tauri-plugin-fs = { workspace = true }
 tauri-plugin-dialog = { workspace = true }

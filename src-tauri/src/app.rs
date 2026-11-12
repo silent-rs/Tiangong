@@ -281,6 +281,11 @@ impl TiangongApp {
     }
 
     /// 注入 Tauri 应用句柄（setup 阶段调用，仅一次）。
+    /// 已注入的 app_handle（测试环境通常未注入 → None）。
+    pub(crate) fn app_handle_read(&self) -> Option<tauri::AppHandle> {
+        self.app_handle.get().cloned()
+    }
+
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
         let _ = self.app_handle.set(handle);
     }
@@ -871,6 +876,41 @@ impl TiangongApp {
     // 内部自治。
     // =========================================================================
 
+    /// 测试构造：隔离 storage root 与工作区（host 集成测试用——避免读写
+    /// 真实 ~/.tiangong；生产代码不得调用）。
+    #[cfg(test)]
+    pub(crate) fn new_for_test(storage_root: std::path::PathBuf, workspace_dir: String) -> Self {
+        let config = tiangong_config::registry::init_from_dir(&storage_root);
+        let core_config = config.to_core_config();
+        let core_manager = tiangong_core_manager::CoreManager::new(
+            tiangong_core::config::core::CoreConfigProvider::new(core_config.clone()),
+            storage_root.clone(),
+        );
+        let core_state = tiangong_app_state::app_state::TiangongState {
+            config,
+            active_session_id: String::new(),
+            workspace_dir: workspace_dir.clone(),
+            input_caches: Default::default(),
+            model_list: Vec::new(),
+            agent_config: tiangong_core::config::agent::AgentConfig {
+                trust_mode: core_config.trust_mode,
+                default_trust_mode: core_config.default_trust_mode,
+                reasoning_effort: core_config.reasoning_effort,
+            },
+            pending_turns: Default::default(),
+            core_manager: core_manager.clone(),
+        };
+        let mut app = Self::new();
+        app.state = std::sync::Arc::new(tokio::sync::Mutex::new(core_state));
+        app.core_manager = core_manager;
+        app.desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
+            app_handle: std::sync::Arc::new(std::sync::OnceLock::new()),
+            config: tiangong_core::config::core::CoreConfigProvider::new(core_config),
+            storage_root,
+        });
+        app
+    }
+
     /// 确保中枢 Core 存在：已存在则刷新配置复用，否则直接构造（挂中枢插件）。
     /// 返回是否新建（调用方据此启动流事件消费者）。
     pub(crate) async fn ensure_central_core(
@@ -1043,7 +1083,6 @@ impl TiangongApp {
         request: &crate::central::CentralDispatchRequest,
         done: bool,
         notice: &str,
-        app: &tauri::AppHandle,
     ) {
         // 阻塞识别（用户决策协议）：回报含【需要用户决策】→ waiting_user
         // （未终态），立即注入中枢（阻塞必达），中枢在对话中问用户；
@@ -1072,7 +1111,7 @@ impl TiangongApp {
         if current_state.is_some_and(|s| s == central_state::WorkState::Cancelled)
             || current_state.is_some_and(|s| s == central_state::WorkState::Paused)
         {
-            emit_central_work_updated(app);
+            emit_central_work_updated_state(self);
             return;
         }
         self.central_work_reports
@@ -1095,7 +1134,13 @@ impl TiangongApp {
                 .or_else(|| {
                     registry
                         .iter()
-                        .position(|entry| entry.session_id == request.session_id)
+                        // W4：session 兜底不得命中 Queued——排队条目未被
+                        // 投递过，写入终态会让重启恢复错乱（Queued 非终态，
+                        // R2 守卫拦不住）
+                        .position(|entry| {
+                            entry.session_id == request.session_id
+                                && entry.state != central_state::WorkState::Queued
+                        })
                 });
             if let Some(position) = position {
                 registry[position].state = next_state;
@@ -1110,7 +1155,7 @@ impl TiangongApp {
                 "提出需要用户决策的问题，工作中挂起",
             );
             self.deliver_pending_work_reports();
-            emit_central_work_updated(app);
+            emit_central_work_updated_state(self);
             return;
         }
         // 终态事件（时间线）
@@ -1135,14 +1180,16 @@ impl TiangongApp {
         if should_deliver_now(done, has_running) {
             self.deliver_pending_work_reports();
         }
-        emit_central_work_updated(app);
+        emit_central_work_updated_state(self);
     }
     /// 依赖终态后投递排队工作（在终态回调路径调用；递归走标准派发链）。
+    /// `app`：Some（生产，投递经 spawn 走完整 dispatch 链）/ None（host
+    /// 集成测试同步核心：仅取出匹配项并清排队标记，不实际投递）。
     pub(crate) fn flush_pending_dispatches(
         &self,
         finished_work_id: &str,
         finished_session_id: &str,
-        app: &tauri::AppHandle,
+        app: Option<tauri::AppHandle>,
     ) {
         let ready: Vec<crate::central::CentralDispatchRequest> = {
             let mut pending = self
@@ -1164,7 +1211,11 @@ impl TiangongApp {
                 &request.session_id,
             );
             request.after_work_id = None;
-            let app_handle = app.clone();
+            let Some(app_handle) = app.clone() else {
+                // 测试同步核心：记录已就绪便于断言后跳过投递
+                tracing::info!(work_id = %request.work_id, "排队工作已就绪（测试同步核心，不投递）");
+                continue;
+            };
             tauri::async_runtime::spawn(async move {
                 if let Err(error) =
                     handle_central_dispatch(state_of(&app_handle), &app_handle, request.clone())
@@ -1176,7 +1227,7 @@ impl TiangongApp {
                         "[后台工作失败] {}（排队投递失败）\n任务：{}\n失败原因：{error}",
                         request.work_id, request.task
                     );
-                    state.on_central_work_finished(&request, false, &notice, &app_handle);
+                    state.on_central_work_finished(&request, false, &notice);
                 }
             });
         }
@@ -1573,6 +1624,14 @@ pub(crate) fn emit_central_work_updated(app: &tauri::AppHandle) {
     let _ = app.emit("central-work-updated", ());
 }
 
+/// emit 的 state 侧入口：经注入的 app_handle 广播（测试环境未注入时
+/// 静默跳过——host 集成测试因此无需 Wry 句柄）。
+pub(crate) fn emit_central_work_updated_state(state: &TiangongApp) {
+    if let Some(handle) = state.app_handle_read() {
+        emit_central_work_updated(&handle);
+    }
+}
+
 /// emit_central_work_updated 的跨模块入口（commands 复用）。
 pub(crate) fn emit_central_work_updated_pub(app: &tauri::AppHandle) {
     emit_central_work_updated(app);
@@ -1673,7 +1732,7 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
             .unwrap_or_else(|e| e.into_inner())
             .push(summary);
     }
-    emit_central_work_updated(app);
+    emit_central_work_updated_state(state.inner());
 }
 
 /// 激活摘要组装（§4.2 基于可验证上下文生成问候的数据源；纯函数可测）。
@@ -1791,7 +1850,7 @@ fn central_dispatch_sender(
                                 );
                                 // 派发即失败：无在执行登记，直接走失败必达路径
                                 state_of(&app)
-                                    .on_central_work_finished(&request, false, &notice, &app);
+                                    .on_central_work_finished(&request, false, &notice);
                             }
                         }
                         crate::central::CentralPluginMessage::Steer(request) => {
@@ -1808,7 +1867,7 @@ fn central_dispatch_sender(
                                     request.task
                                 );
                                 state_of(&app)
-                                    .on_central_work_finished(&request, false, &notice, &app);
+                                    .on_central_work_finished(&request, false, &notice);
                             }
                         }
                         crate::central::CentralPluginMessage::ReportsCollected => {
@@ -1959,13 +2018,12 @@ async fn handle_central_control(
         }
         _ => {}
     }
-    emit_central_work_updated(app);
+    emit_central_work_updated_state(state);
 }
 
 /// 排队登记（依赖/写入锁共用）：挂起 pending + registry queued + 事件。
 async fn enqueue_central_dispatch(
     state: &TiangongApp,
-    app: &tauri::AppHandle,
     request: crate::central::CentralDispatchRequest,
     after: &str,
     cwd: &str,
@@ -1980,21 +2038,30 @@ async fn enqueue_central_dispatch(
             .central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        registry.retain(|entry| entry.session_id != request.session_id);
-        registry.push(crate::central::CentralWorkStatus {
-            work_id: request.work_id.clone(),
-            session_id: request.session_id.clone(),
-            task: format!("[排队] 依赖 {after} 终态后投递：{}", request.task),
-            model: request
-                .model
-                .clone()
-                .or_else(|| Some("路由默认".to_string())),
-            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            state: central_state::WorkState::Queued,
-            reused_session: request.reused_session,
-            last_activity: None,
-            cwd: None,
+        // W4（第十四轮）：同会话已有在途（在跑/等待/暂停/已排队）条目时
+        // 不覆盖——徽章保持显示当前工作，排队事实由 pending 队列与
+        // work-items 落盘承载（此前 retain+push 会把在跑工作改成 Queued）。
+        let session_idle = !registry.iter().any(|entry| {
+            (entry.session_id == request.session_id && entry.state.is_inflight())
+                || (entry.session_id == request.session_id
+                    && entry.state == central_state::WorkState::Queued)
         });
+        if session_idle {
+            registry.push(crate::central::CentralWorkStatus {
+                work_id: request.work_id.clone(),
+                session_id: request.session_id.clone(),
+                task: format!("[排队] 依赖 {after} 终态后投递：{}", request.task),
+                model: request
+                    .model
+                    .clone()
+                    .or_else(|| Some("路由默认".to_string())),
+                dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                state: central_state::WorkState::Queued,
+                reused_session: request.reused_session,
+                last_activity: None,
+                cwd: None,
+            });
+        }
     }
     // 落盘排队标记（重启恢复重放——否则挂起队列丢失后误显示中断）
     crate::central::mark_work_item_queued(
@@ -2009,14 +2076,13 @@ async fn enqueue_central_dispatch(
         "queued",
         &format!("排队等待依赖 {after} 终态"),
     );
-    emit_central_work_updated(app);
+    emit_central_work_updated_state(state);
 }
 
-async fn handle_central_dispatch(
+async fn plan_central_dispatch(
     state: &TiangongApp,
-    app: &tauri::AppHandle,
     request: crate::central::CentralDispatchRequest,
-) -> Result<(), String> {
+) -> Result<(crate::central::CentralDispatchRequest, bool), String> {
     // app 入口目标守卫（机检 1：dispatch_rejects_central_hub_at_app_entry 的
     // 接线）——插件侧已拒，此处兜底拦截绕过插件直入执行器的路径。
     central_state::validate_dispatch_target(&request.session_id)?;
@@ -2077,35 +2143,12 @@ async fn handle_central_dispatch(
                 after = %after,
                 "后台工作排队（依赖/写入锁），等待终态后自动投递"
             );
-            enqueue_central_dispatch(state, app, request.clone(), &after, &cwd).await;
-            return Ok(());
+            enqueue_central_dispatch(state, request.clone(), &after, &cwd).await;
+            return Ok((request, false));
         }
     }
 
-    // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
-    // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
-    // prompt cache 失效；引导语义也要求保留在途执行）。
-    let slot = {
-        let mut slots = state
-            .central_watch_slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        slots
-            .entry(request.session_id.clone())
-            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
-            .clone()
-    };
-    // 复用派发忽略 model 参数（review p 项）：透传会经 set_core_model_ref
-    // 静默永久改写该会话的模型选择；复用/引导即沿用会话既有模型。
-    let effective_model = if request.reused_session {
-        None
-    } else {
-        request.model.as_deref()
-    };
-
     let sid = request.session_id.clone();
-    let instruction = build_worker_instruction(&request.work_id, &request.task);
-    let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
 
     // 用户答复/引导送达：目标会话存在 waiting_user（等用户决策）条目时，
     // 本轮终态归属该主 work——恢复 running 并复用其 work_id/task 挂回调
@@ -2164,6 +2207,44 @@ async fn handle_central_dispatch(
             );
         }
     }
+
+    Ok((merged_work, steer_merged_into_running))
+}
+
+async fn handle_central_dispatch(
+    state: &TiangongApp,
+    app: &tauri::AppHandle,
+    request: crate::central::CentralDispatchRequest,
+) -> Result<(), String> {
+    let (merged_work, steer_merged_into_running) =
+        plan_central_dispatch(state, request.clone()).await?;
+    let sid = merged_work.session_id.clone();
+    let cwd = merged_work
+        .cwd
+        .clone()
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| self_session_cwd(state, &merged_work.session_id))
+        .unwrap_or_default();
+    let effective_model = if merged_work.reused_session {
+        None
+    } else {
+        merged_work.model.as_deref()
+    };
+    let instruction = build_worker_instruction(&merged_work.work_id, &merged_work.task);
+    let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
+    // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
+    // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
+    // prompt cache 失效；引导语义也要求保留在途执行）。
+    let slot = {
+        let mut slots = state
+            .central_watch_slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        slots
+            .entry(request.session_id.clone())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+            .clone()
+    };
     if state.core_manager.has_live_core(&sid) {
         // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
         // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
@@ -2235,8 +2316,7 @@ async fn handle_central_dispatch(
     // 条目残留、多轮派发显示多条）——一个工作会话在徽章中始终是一条，
     // 重派/引导覆盖更新（work_id/task/时间取最新），中断旧条目自然消失。
     // waiting_user 恢复（merged）时条目已在上方更新为 running，不重建。
-    let merged_into_existing = merged_work.work_id != request.work_id;
-    if !merged_into_existing && !steer_merged_into_running {
+    if merged_work.work_id == request.work_id && !steer_merged_into_running {
         {
             let mut registry = state
                 .central_work_registry
@@ -2266,14 +2346,14 @@ async fn handle_central_dispatch(
         &format!(
             "派发执行（work_id {}，{}）",
             merged_work.work_id,
-            if merged_into_existing {
+            if merged_work.work_id != request.work_id {
                 "等待用户决策后恢复"
             } else {
                 "新任务"
             }
         ),
     );
-    emit_central_work_updated(app);
+    emit_central_work_updated_state(state);
     Ok(())
 }
 
@@ -2286,63 +2366,74 @@ fn attach_work_finished_callback(
     let callback_app = app.clone();
     let mut handlers = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     handlers.push(Box::new(move |done: bool, reason: String| {
-        let state = state_of(&callback_app);
-        // 归属过滤（review T6）：终态只属于该会话「当前」工作——引导并入
-        // 场景先挂的旧回调不得被后续 turn 的终态误触发（旧 work 已被
-        // 会话聚合覆盖或已终态）。判定：registry 中该会话当前条目须仍是
-        // 本 work（或本 work 尚在途）。
-        {
-            let registry = state
-                .central_work_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let current = registry
-                .iter()
-                .rev()
-                .find(|entry| entry.session_id == work.session_id);
-            match current {
-                Some(entry) if entry.work_id != work.work_id && entry.state.is_inflight() => {
-                    tracing::warn!(
-                        stale_work = %work.work_id,
-                        current_work = %entry.work_id,
-                        "旧工作回调被跳过（终态归属当前工作）"
-                    );
-                    return;
-                }
-                _ => {}
-            }
-        }
-        // 一次性守卫（review S6→第十三轮 P1-1 修正）：改为状态驱动幂等——
-        // 该 work 在 registry 中仍在途（running/waiting_user）才处理终态；
-        // 已终态（report_queued/failed/completed）说明已处理过，跳过。
-        // 集合记忆版会误杀同 work_id 的第二个 turn（waiting_user 恢复、
-        // pause→resume 都复用 work_id），导致回报丢失 + running 永久残留。
-        {
-            let registry = state
-                .central_work_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let self_entry = registry
-                .iter()
-                .rev()
-                .find(|entry| entry.work_id == work.work_id);
-            match self_entry {
-                Some(entry) if !entry.state.is_inflight() => {
-                    tracing::warn!(
-                        work_id = %work.work_id,
-                        state = entry.state.as_str(),
-                        "终态回调跳过：该工作已终态（重复 attach/陈旧回调）"
-                    );
-                    return;
-                }
-                _ => {}
-            }
-        }
-        let notice = build_work_notice(state, &work, done, &reason);
-        state.on_central_work_finished(&work, done, &notice, &callback_app);
-        // 依赖本工作的排队项：终态后自动投递
-        state.flush_pending_dispatches(&work.work_id, &work.session_id, &callback_app);
+        handle_work_terminal(state_of(&callback_app), &work, done, &reason);
     }));
+}
+
+/// 终态回调核心（host 集成测试的真实被测函数）：T6 归属过滤 + S6 状态
+/// 幂等 + 回报入队 + 依赖 flush——attach 的闭包体纯提取（零行为变化），
+/// 测试直接调用以锁定接线行为（旧代码会红）。
+pub(crate) fn handle_work_terminal(
+    state: &TiangongApp,
+    work: &crate::central::CentralDispatchRequest,
+    done: bool,
+    reason: &str,
+) {
+    // 归属过滤（review T6）：终态只属于该会话「当前」工作——引导并入
+    // 场景先挂的旧回调不得被后续 turn 的终态误触发（旧 work 已被
+    // 会话聚合覆盖或已终态）。判定：registry 中该会话当前条目须仍是
+    // 本 work（或本 work 尚在途）。
+    {
+        let registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let current = registry
+            .iter()
+            .rev()
+            .find(|entry| entry.session_id == work.session_id);
+        match current {
+            Some(entry) if entry.work_id != work.work_id && entry.state.is_inflight() => {
+                tracing::warn!(
+                    stale_work = %work.work_id,
+                    current_work = %entry.work_id,
+                    "旧工作回调被跳过（终态归属当前工作）"
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+    // 一次性守卫（review S6→第十三轮 P1-1 修正）：改为状态驱动幂等——
+    // 该 work 在 registry 中仍在途（running/waiting_user）才处理终态；
+    // 已终态（report_queued/failed/completed）说明已处理过，跳过。
+    // 集合记忆版会误杀同 work_id 的第二个 turn（waiting_user 恢复、
+    // pause→resume 都复用 work_id），导致回报丢失 + running 永久残留。
+    {
+        let registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_entry = registry
+            .iter()
+            .rev()
+            .find(|entry| entry.work_id == work.work_id);
+        match self_entry {
+            Some(entry) if !entry.state.is_inflight() => {
+                tracing::warn!(
+                    work_id = %work.work_id,
+                    state = entry.state.as_str(),
+                    "终态回调跳过：该工作已终态（重复 attach/陈旧回调）"
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+    let notice = build_work_notice(state, work, done, reason);
+    state.on_central_work_finished(work, done, &notice);
+    // 依赖本工作的排队项：终态后自动投递
+    state.flush_pending_dispatches(&work.work_id, &work.session_id, state.app_handle_read());
 }
 
 /// 组装后台工作回报（读 Worker 会话最终答复，**不截断**）。
@@ -2772,5 +2863,296 @@ mod tests {
         }];
         let with_goal = build_activation_summary(&[], &goals);
         assert!(with_goal.contains("完成中枢模式"), "{with_goal}");
+    }
+    // ============================================================================
+    // host 集成测试（W5，第十四轮 review 硬要求）：真实调用被修函数
+    // （attach_work_finished_callback / take_finished_handlers /
+    // on_central_work_finished / enqueue_central_dispatch），经 mock app +
+    // 隔离 storage——「旧代码会红」的反向验证见各测试注释。
+    // ============================================================================
+
+    /// 构造隔离 storage 的 TiangongApp（emit 经未注入句柄静默跳过——host
+    /// 集成测试无需 Wry 环境）。
+    fn central_test_app() -> (TiangongApp, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws_path = ws.clone();
+        (
+            TiangongApp::new_for_test(root.keep(), ws.to_string_lossy().to_string()),
+            ws_path,
+        )
+    }
+
+    fn dispatch_request(
+        work_id: &str,
+        session: &str,
+        task: &str,
+        reused: bool,
+    ) -> crate::central::CentralDispatchRequest {
+        crate::central::CentralDispatchRequest {
+            work_id: work_id.to_string(),
+            session_id: session.to_string(),
+            task: task.to_string(),
+            model: None,
+            cwd: None,
+            after_work_id: None,
+            parallel: false,
+            reused_session: reused,
+        }
+    }
+
+    /// W5-T1（P1-1 真锁·第二 turn 回报）：waiting_user 恢复后同 work_id 的
+    /// 第二个 turn 终态必须被处理——走真实 attach → take → 回调 →
+    /// on_central_work_finished 全链。
+    /// 反向验证：恢复 central_finished_once 集合版（旧代码），第二次
+    /// insert 失败 return → registry 不变 → 本测试红。
+    #[tokio::test]
+    async fn host_second_turn_after_resume_is_reported() {
+        let (state, _ws) = central_test_app();
+        let request = dispatch_request("work-t1", "s-t1", "任务一", true);
+        // 恢复后的状态：running（第一 turn 是 waiting_user，答复后恢复）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-t1".into(),
+                session_id: "s-t1".into(),
+                task: "任务一".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: true,
+                last_activity: None,
+                cwd: None,
+            });
+        handle_work_terminal(&state, &request, true, "");
+        // 断言：registry 转 report_queued + 回报入队（第二 turn 被处理）
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-t1")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::ReportQueued,
+                "第二 turn 终态必须被处理（旧 central_finished_once 代码在此红）"
+            );
+        }
+        let reports = state.central_work_reports.lock().unwrap().clone();
+        assert!(!reports.is_empty(), "回报必须入队（旧代码回报丢失在此红）");
+    }
+
+    /// W5-T2（S6/T6 行为锁·steer 覆盖与归属过滤）：registry 归属被覆盖时
+    /// 旧 owner 回调被 T6 跳过；归属保持时正常执行——两条路径都验证。
+    #[tokio::test]
+    async fn host_owner_callback_respects_ownership_filter() {
+        let (state, _ws) = central_test_app();
+        // 路径 A：归属保持（owner 仍是当前条目）→ owner 回调执行
+        let owner = dispatch_request("work-owner", "s-own", "原工作", true);
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-owner".into(),
+                session_id: "s-own".into(),
+                task: "原工作".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            });
+        handle_work_terminal(&state, &owner, true, "");
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-owner")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::ReportQueued,
+                "归属保持时终态被处理"
+            );
+        }
+        // 路径 B：归属被 steer 覆盖（旧行为模拟）→ owner 的迟到回调被跳过
+        let mut registry = state.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter_mut()
+            .rev()
+            .find(|e| e.session_id == "s-own")
+            .unwrap();
+        entry.work_id = "steer-xxx".into(); // 模拟旧代码的 upsert 覆盖
+        entry.state = central_state::WorkState::Running;
+        drop(registry);
+        let stale_owner = dispatch_request("work-owner", "s-own", "原工作", true);
+        let before = state.central_work_reports.lock().unwrap().clone();
+        handle_work_terminal(&state, &stale_owner, true, "");
+        let after = state.central_work_reports.lock().unwrap().clone();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "归属已被覆盖时旧 owner 回调必须被 T6 跳过（不重复回报）"
+        );
+    }
+
+    /// W5-T3（W4 真锁·enqueue 不覆盖在跑）：同会话在跑条目在排队登记后
+    /// 保持 Running；会话空闲时排队条目正常登记 Queued。
+    #[tokio::test]
+    async fn host_enqueue_preserves_running_entry() {
+        let (state, _ws) = central_test_app();
+        // 会话空闲 → 排队登记 Queued
+        let queued = dispatch_request("work-q1", "s-q1", "排队任务", false);
+        enqueue_central_dispatch(&state, queued, "work-dep", "/ws").await;
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-q1")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::Queued,
+                "空闲会话排队正常登记"
+            );
+        }
+        // 同会话在跑 → 排队不覆盖（W4：旧代码 retain+push 会改成 Queued）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-run".into(),
+                session_id: "s-run".into(),
+                task: "在跑工作".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            });
+        let queued2 = dispatch_request("work-q2", "s-run", "第二个排队", false);
+        enqueue_central_dispatch(&state, queued2, "work-dep", "/ws").await;
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let running = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-run")
+                .unwrap();
+            assert_eq!(
+                running.state,
+                central_state::WorkState::Running,
+                "在跑工作不得被排队登记覆盖（W4 旧代码在此红）"
+            );
+        }
+        // pending 队列两条都在
+        let pending = state.central_pending_dispatches.lock().unwrap().clone();
+        assert_eq!(pending.len(), 2, "排队请求必须入挂起队列");
+    }
+
+    /// W5-T4（W4-b 真锁·兜底不串 Queued）：终态 session 兜底不得把排队条目
+    /// 改成终态。
+    #[tokio::test]
+    async fn host_terminal_fallback_skips_queued_entry() {
+        let (state, _ws) = central_test_app();
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-q9".into(),
+                session_id: "s-mix".into(),
+                task: "排队条目".into(),
+                model: None,
+                dispatched_at: "2026-11-12 12:00:00".into(),
+                state: central_state::WorkState::Queued,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+            });
+        // 未知 work_id + 命中 session 的排队条目 → 兜底不得写终态
+        let request = dispatch_request("work-unknown", "s-mix", "未知工作", false);
+        let notice = "[后台工作失败] work-unknown\n失败原因：超时".to_string();
+        state.on_central_work_finished(&request, false, &notice);
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-mix")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::Queued,
+                "排队条目不得被 session 兜底串态（W4-b 旧代码在此红）"
+            );
+        }
+    }
+
+    /// R1 真锁（W5 反向验证锚点）：resume（Steer 到 Paused 会话）不得被判为
+    /// 引导并入——plan 返回 steer_merged=false 走恢复登记；Running 会话的
+    /// steer 判为并入（归属保持）。直接调用派发决策段（判定源头）。
+    /// 反向验证：把判定改回 is_inflight（R1 旧代码）→ 本测试红。
+    #[tokio::test]
+    async fn host_plan_resume_not_merged_but_steer_is() {
+        let (state, ws) = central_test_app();
+        // 会话元数据（self_session_cwd 与确认校验需要）
+        let sessions_dir = state.core_manager.storage_root().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+        sessions_dir.join("s-resume.json"),
+        serde_json::json!({"id": "s-resume", "title": "暂停的会话", "created_at": "2026-11-12 10:00:00",
+            "updated_at": "2026-11-12 10:00:00", "trust_mode": "Supervised",
+            "cwd": ws.to_string_lossy(), "messages": []}).to_string(),
+    ).unwrap();
+        // Paused 条目：resume 请求 → plan 判定非并入（恢复语义）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-p".into(),
+                session_id: "s-resume".into(),
+                task: "暂停任务".into(),
+                model: None,
+                dispatched_at: "2026-11-12 10:00:00".into(),
+                state: central_state::WorkState::Paused,
+                reused_session: true,
+                last_activity: None,
+                cwd: Some(ws.to_string_lossy().to_string()),
+            });
+        let resume = dispatch_request("work-p", "s-resume", "继续暂停的任务", true);
+        let (_merged, steer_merged) = plan_central_dispatch(&state, resume)
+            .await
+            .expect("plan 应成功");
+        assert!(
+            !steer_merged,
+            "Paused 的 resume 不得并入（R1 旧代码 is_inflight 在此红）"
+        );
+        // Running 条目：steer 判为并入
+        {
+            let mut registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter_mut()
+                .rev()
+                .find(|e| e.session_id == "s-resume")
+                .unwrap();
+            entry.state = central_state::WorkState::Running;
+        }
+        let steer = dispatch_request("steer-x", "s-resume", "补充指令", true);
+        let (_merged2, steer_merged2) = plan_central_dispatch(&state, steer)
+            .await
+            .expect("plan 应成功");
+        assert!(steer_merged2, "Running 会话的引导应并入（归属保持原工作）");
     }
 }
