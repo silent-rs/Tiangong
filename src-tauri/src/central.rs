@@ -7,9 +7,10 @@
 
 pub use central_plugin::*;
 pub use central_state::{
-    add_confirmed_workspace, append_work_item_event, canonical_path_string, interrupted_work_items,
-    load_confirmed_workspaces, load_goals, load_reports, load_work_items, mark_work_item_finished,
-    mark_work_item_finished_with_session, recover_registry_entries, save_goals, save_reports,
-    save_work_items, set_work_item_outcome, upsert_work_item, workspace_confirmed, GoalRecord,
-    ReportRecord, WorkItemEvent, WorkItemRecord,
+    add_confirmed_workspace, append_work_item_event, canonical_path_string, clear_work_item_queued,
+    interrupted_work_items, load_confirmed_workspaces, load_goals, load_reports, load_work_items,
+    mark_work_item_finished, mark_work_item_finished_with_session, mark_work_item_queued,
+    queued_work_items, recover_registry_entries, save_goals, save_reports, save_work_items,
+    set_work_item_outcome, upsert_work_item, workspace_confirmed, GoalRecord, ReportRecord,
+    WorkItemEvent, WorkItemRecord,
 };

@@ -135,3 +135,13 @@ fn model_failure_detection_boundaries() {
     assert!(!failure_looks_model_related("文件共 40110 行"));
     assert!(!failure_looks_model_related("工作目录不存在"));
 }
+
+#[test]
+fn flush_matches_accepts_work_id_and_session_id() {
+    // 依赖以 work_id 或会话 ID 声明都必须命中（review P1：只按 work_id
+    // 匹配会让 session_id 依赖永久 queued）
+    assert!(flush_matches("work-a", "work-a", "s-1"));
+    assert!(flush_matches("s-1", "work-a", "s-1"));
+    assert!(!flush_matches("work-b", "work-a", "s-1"));
+    assert!(!flush_matches("", "work-a", "s-1"));
+}

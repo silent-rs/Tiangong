@@ -1130,20 +1130,31 @@ impl TiangongApp {
         emit_central_work_updated(app);
     }
     /// 依赖终态后投递排队工作（在终态回调路径调用；递归走标准派发链）。
-    pub(crate) fn flush_pending_dispatches(&self, finished_work_id: &str, app: &tauri::AppHandle) {
+    pub(crate) fn flush_pending_dispatches(
+        &self,
+        finished_work_id: &str,
+        finished_session_id: &str,
+        app: &tauri::AppHandle,
+    ) {
         let ready: Vec<crate::central::CentralDispatchRequest> = {
             let mut pending = self
                 .central_pending_dispatches
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let (ready, waiting): (Vec<_>, Vec<_>) = pending
-                .drain(..)
-                .partition(|req| req.after_work_id.as_deref() == Some(finished_work_id));
+            let (ready, waiting): (Vec<_>, Vec<_>) = pending.drain(..).partition(|req| {
+                req.after_work_id.as_deref().is_some_and(|after| {
+                    central_state::flush_matches(after, finished_work_id, finished_session_id)
+                })
+            });
             *pending = waiting;
             ready
         };
         for mut request in ready {
-            // 清除依赖标记，递归派发走标准链（不再排队）
+            // 清除排队落盘标记（已进入投递），再递归走标准链
+            crate::central::clear_work_item_queued(
+                self.core_manager.storage_root(),
+                &request.session_id,
+            );
             request.after_work_id = None;
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -1608,8 +1619,35 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
             "后台工作状态已从登记重建（重启恢复）"
         );
     }
+    // 排队挂起重放：queued 条目重新进入派发链（依赖已终态 → 立即投递；
+    // 仍在途 → 重新排队）。内存 pending 队列随重启丢失，落盘标记是唯一
+    // 恢复源（review P2：队列不持久导致挂起任务丢失）。
+    let queued_replay: Vec<crate::central::CentralDispatchRequest> =
+        crate::central::queued_work_items(state.inner().core_manager.storage_root())
+            .into_iter()
+            .map(|record| crate::central::CentralDispatchRequest {
+                work_id: record.work_id,
+                session_id: record.session_id,
+                task: record.task,
+                model: record.model,
+                cwd: None,
+                after_work_id: record.after_work_id,
+                parallel: false,
+                reused_session: true,
+            })
+            .collect();
     registry.extend(entries);
     drop(registry);
+    for request in queued_replay {
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) =
+                handle_central_dispatch(state_of(&app_handle), &app_handle, request).await
+            {
+                tracing::warn!(%error, "排队工作重启重放失败");
+            }
+        });
+    }
     if !failed_names.is_empty() || interrupted_count > 0 {
         let failed_note = if failed_names.is_empty() {
             String::new()
@@ -1862,6 +1900,12 @@ async fn enqueue_central_dispatch(
             cwd: None,
         });
     }
+    // 落盘排队标记（重启恢复重放——否则挂起队列丢失后误显示中断）
+    crate::central::mark_work_item_queued(
+        state.core_manager.storage_root(),
+        &request.session_id,
+        after,
+    );
     crate::central::append_work_item_event(
         state.core_manager.storage_root(),
         &request.session_id,
@@ -2128,7 +2172,7 @@ fn attach_work_finished_callback(
             let notice = build_work_notice(state, &work, done, &reason);
             state.on_central_work_finished(&work, done, &notice, &callback_app);
             // 依赖本工作的排队项：终态后自动投递
-            state.flush_pending_dispatches(&work.work_id, &callback_app);
+            state.flush_pending_dispatches(&work.work_id, &work.session_id, &callback_app);
         }));
 }
 

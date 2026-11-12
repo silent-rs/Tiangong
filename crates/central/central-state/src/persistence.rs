@@ -29,6 +29,12 @@ pub struct WorkItemRecord {
     /// 持久化供回查（阶段 2「事件持久化」）；每工作上限 30 条。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<WorkItemEvent>,
+    /// 排队时刻（Some = 挂起待依赖终态；重启恢复重放投递）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<String>,
+    /// 排队等待的依赖（work_id 或会话 ID；queued_at 有值时有效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_work_id: Option<String>,
 }
 
 /// 后台工作事件（时间线条目，§13.4 轻量版）。
@@ -163,6 +169,47 @@ pub fn set_work_item_outcome(storage_root: &std::path::Path, session_id: &str, o
     }
 }
 
+/// 标记会话登记条目为排队挂起（queued_at + 依赖），落盘。
+pub fn mark_work_item_queued(
+    storage_root: &std::path::Path,
+    session_id: &str,
+    after_work_id: &str,
+) {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut items = load_work_items(storage_root);
+    if let Some(entry) = items
+        .iter_mut()
+        .rev()
+        .find(|item| item.session_id == session_id)
+    {
+        entry.queued_at = Some(now);
+        entry.after_work_id = Some(after_work_id.to_string());
+        save_work_items(storage_root, &items);
+    }
+}
+
+/// 清除排队标记（依赖终态投递或工作终态时调用），落盘。
+pub fn clear_work_item_queued(storage_root: &std::path::Path, session_id: &str) {
+    let mut items = load_work_items(storage_root);
+    if let Some(entry) = items
+        .iter_mut()
+        .rev()
+        .find(|item| item.session_id == session_id)
+    {
+        if entry.queued_at.take().is_some() | entry.after_work_id.take().is_some() {
+            save_work_items(storage_root, &items);
+        }
+    }
+}
+
+/// 读取排队挂起的登记（重启重放投递的数据源）。
+pub fn queued_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
+    load_work_items(storage_root)
+        .into_iter()
+        .filter(|item| item.queued_at.is_some() && item.finished_at.is_none())
+        .collect()
+}
+
 /// 从中枢会话回报中提取失败工作的 work_id 集合（legacy 终态成败推断）。
 fn failed_work_ids_from_central_session(
     storage_root: &std::path::Path,
@@ -227,6 +274,10 @@ pub fn recover_registry_entries(storage_root: &std::path::Path) -> Vec<crate::Wo
             } else {
                 WorkState::Completed
             }
+        } else if item.queued_at.is_some() {
+            // 排队挂起（依赖未终态/写入锁）：恢复为 queued，由宿主重放投递
+            // ——从未执行的工作不得显示为「已中断」（review P2）。
+            WorkState::Queued
         } else if item.dispatched_at.as_str() > cutoff.as_str() {
             WorkState::Interrupted
         } else {

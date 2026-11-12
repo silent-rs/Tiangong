@@ -101,6 +101,9 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   根因与影响面），不逐条重复展开同类失败；
 - **代决留痕**：你替用户做的每个决定（代决）都要在对话中留下依据
   （「代决：X，依据：Y，如不认可可要求撤销」），用户追问时能解释；
+- **排队依赖与并行**：用户要求「A 完成后再做 B」时 dispatch_work 派发 B 并
+  带 after_work_id（A 的 work_id）；同目录已有工作执行时系统会自动排队
+  防写冲突——仅当用户明确要求并行且任务只读时才带 parallel=true 豁免；
 - **排队依赖**：用户要求「A 完成后再做 B」时，dispatch_work 派发 B 并带
   `after_work_id=A 的 work_id`——系统会在 A 终态后自动投递 B；
 - **模型故障处置**：后台工作因模型/网络类原因失败（超时、限流、凭据、
@@ -274,6 +277,7 @@ impl CentralPlugin {
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
              待汇报的后台工作回报: {pending} 条（可调 collect_work_reports 收集后转述）\n\
+             中枢工具数: 22\n\
              因应用重启中断的任务: {interrupted} 个（徽章可见；结果未产出，可重派复用原会话）\n             当前用户目标: {goals}\n\
              当前时间: {now}",
             version = env!("CARGO_PKG_VERSION"),
@@ -522,6 +526,8 @@ impl CentralPlugin {
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             finished_at: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
             outcome: None,
         };
         let request = CentralDispatchRequest {
@@ -577,11 +583,17 @@ impl CentralPlugin {
         };
         self.upsert_memory_work_item(record.clone());
         upsert_work_item(self.sessions.storage_root(), &record);
-        let model_note = record
-            .model
-            .as_deref()
-            .unwrap_or("路由默认模型")
-            .to_string();
+        // 复用时 record.model 是「被忽略的请求模型」（M5 提示用）——执行模型
+        // 行必须报真实生效模型，避免与「已忽略请求的 X」同屏矛盾（review S5）
+        let model_note = if record.reused_session {
+            "会话既有模型".to_string()
+        } else {
+            record
+                .model
+                .as_deref()
+                .unwrap_or("路由默认模型")
+                .to_string()
+        };
         let session_note = if record.reused_session {
             // 复用实际沿用会话既有模型（review M5：明确告知忽略的请求模型）
             match record.model.as_deref() {
@@ -840,6 +852,8 @@ impl CentralPlugin {
             dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             finished_at: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
             outcome: None,
         };
         let request = CentralDispatchRequest {
@@ -1423,11 +1437,11 @@ impl ToolSpecProvider for CentralPlugin {
                         "task": {"type": "string", "description": "给执行会话的任务描述（完整、自包含）"},
                         "model": {"type": "string", "description": "模型 key（list_models 查询；省略用路由默认）"},
                         "cwd": {"type": "string", "description": "工作目录（省略：复用会话用其自身目录，新建用默认工作区）"},
-                        "session_id": {"type": "string", "description": "复用的已有会话 ID（list_sessions 查询）。任务与某会话相关（同工作区、同主题、上次未完成）时必须优先复用，保持上下文连续；仅无相关会话时省略新建"}
-                    },
-                    "required": ["task"],
-                        "after_work_id": {"type": "string", "description": "排队依赖：等待该工作终态（完成/失败/取消）后再自动投递本任务"},
+                        "session_id": {"type": "string", "description": "复用的已有会话 ID（list_sessions 查询）。任务与某会话相关（同工作区、同主题、上次未完成）时必须优先复用，保持上下文连续；仅无相关会话时省略新建"},
+                        "after_work_id": {"type": "string", "description": "排队依赖：等待该工作（work_id 或会话 ID）终态（完成/失败/取消）后再自动投递本任务"},
                         "parallel": {"type": "boolean", "description": "Workspace 写入锁豁免：仅只读任务且用户明确要求并行时 true（默认 false，同目录冲突自动排队）"}
+                    },
+                    "required": ["task"]
                 }),
             },
             ToolSpec {
@@ -1647,26 +1661,26 @@ impl ToolOverrideHandler for CentralPlugin {
         _session: &mut Session,
         _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
-        // search_history 返回异步 future（spawn_blocking 扫描），单独走
-        if call.name == "search_history" {
-            let query = call
-                .arguments
-                .get("query")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let limit = call
-                .arguments
-                .get("limit")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(10) as usize;
-            let scope_all = call
-                .arguments
-                .get("scope")
-                .and_then(|value| value.as_str())
-                .is_some_and(|scope| scope == "all");
-            return self.handle_search_history(query, limit, scope_all);
-        }
         let result = match call.name.as_str() {
+            // search_history 返回异步 future（spawn_blocking 扫描）
+            "search_history" => {
+                let query = call
+                    .arguments
+                    .get("query")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let limit = call
+                    .arguments
+                    .get("limit")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(10) as usize;
+                let scope_all = call
+                    .arguments
+                    .get("scope")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|scope| scope == "all");
+                return self.handle_search_history(query, limit, scope_all);
+            }
             "get_context" => self.handle_get_context(),
             "list_workspaces" => self.handle_list_workspaces(),
             "inspect_workspace" => {
@@ -2000,33 +2014,58 @@ mod tests {
 
     /// 工具声明与 handler 一致性：spec 集合 == 可处理集合（防再脱节）。
     #[test]
-    fn central_tool_specs_match_handlers() {
+    fn central_tool_specs_equal_handlers() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
         let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
-        let spec_names: std::collections::HashSet<String> =
-            plugin.tool_specs().into_iter().map(|s| s.name).collect();
-        // handler 侧逐一探测（以返回结果非“不拦截”为准的成本高；这里以
-        // 关键工具在双方都存在为断言，覆盖脱节的主要形态：spec 缺失）
-        for name in [
-            "get_context",
-            "list_workspaces",
-            "inspect_workspace",
-            "list_models",
-            "list_sessions",
-            "dispatch_work",
-            "send_to_worker",
-            "search_history",
-            "collect_work_reports",
-            "list_work_items",
-        ] {
-            assert!(spec_names.contains(name), "工具 {name} 缺少声明");
-            if name != "search_history" {
-                // search_history 需要 tokio reactor（独立用例覆盖）
-                let result = call_tool(&plugin, name, serde_json::json!({}));
-                let _ = result;
+        let spec_names: std::collections::HashSet<String> = plugin
+            .tool_specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        // handler 侧从源码 match arm 提取（无副作用、无遗漏——review 硬断言：
+        // spec 与 handler 双向相等，曾以 10 名清单 + let _ = result 假绿）
+        let source = include_str!("lib.rs");
+        let handle_pos = source
+            .find("let result = match call.name.as_str() {")
+            .expect("handle match");
+        let match_body = &source[handle_pos..source.len().min(handle_pos + 16000)];
+        // 截断到 match 闭合（首个顶格 '}'）
+        let body_end = match_body
+            .find("\n        let result")
+            .unwrap_or(match_body.len());
+        let body = &match_body[..body_end];
+        // 按 => 分段：每段末尾的引号词（可能跨行以 | 连接）是 arm 名
+        let mut handler_names: std::collections::HashSet<String> = Default::default();
+        for segment in body.split("=>") {
+            // 取段尾部连续的 arm 名行（以引号词结尾的行，向上直到非 arm 行）
+            let tail: Vec<&str> = segment
+                .lines()
+                .rev()
+                .take_while(|line| {
+                    let t = line.trim();
+                    (t.starts_with('"') || t.starts_with('|')) && !t.contains("match")
+                })
+                .collect();
+            for line in tail {
+                for token in line.split('|') {
+                    let token = token.trim().trim_matches('"');
+                    if !token.is_empty()
+                        && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        handler_names.insert(token.to_string());
+                    }
+                }
             }
         }
+        // match 头部（call.name.as_str() {）不会出现在 tail（无引号词）；
+        // 兜底过滤显然非工具名的内容
+        handler_names.retain(|name| name != "as_str");
+        assert_eq!(
+            spec_names, handler_names,
+            "spec 与 handler 集合必须相等（spec 缺失模型不可见；handler 缺失为死声明）"
+        );
+        assert_eq!(spec_names.len(), 22, "工具数应为 22（新增工具时同步更新）");
     }
 
     /// 复用校验：中枢对话自身不可作为工作会话（review q）。
@@ -2471,6 +2510,8 @@ mod tests {
                 finished_at: Some("2026-11-10 12:00:00".to_string()),
                 outcome: None,
                 events: Vec::new(),
+                queued_at: None,
+                after_work_id: None,
             };
             upsert_work_item(root.path(), &record);
         }
@@ -2484,6 +2525,8 @@ mod tests {
             dispatched_at: "2026-11-10 15:00:00".to_string(),
             finished_at: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
             outcome: None,
         };
         upsert_work_item(root.path(), &again);
@@ -2533,6 +2576,8 @@ mod tests {
             dispatched_at: "2026-11-11 12:00:00".to_string(),
             finished_at: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
             outcome: None,
         };
         upsert_work_item(root.path(), &record);
@@ -2593,6 +2638,8 @@ mod tests {
                     finished_at: Some(now.clone()),
                     outcome: None, // legacy：字段上线前的终态记录
                     events: Vec::new(),
+                    queued_at: None,
+                    after_work_id: None,
                 },
             );
         }
@@ -2625,6 +2672,8 @@ mod tests {
                 finished_at: Some(recent.clone()),
                 outcome: Some("completed".to_string()),
                 events: Vec::new(),
+                queued_at: None,
+                after_work_id: None,
             });
         }
         records.push(WorkItemRecord {
@@ -2637,6 +2686,8 @@ mod tests {
             finished_at: Some(stale.clone()),
             outcome: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-fail".to_string(),
@@ -2648,6 +2699,8 @@ mod tests {
             finished_at: Some(recent.clone()),
             outcome: Some("failed".to_string()),
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-recent-open".to_string(),
@@ -2659,6 +2712,8 @@ mod tests {
             finished_at: None,
             outcome: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-stale-open".to_string(),
@@ -2670,6 +2725,8 @@ mod tests {
             finished_at: None,
             outcome: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
         });
         for record in &records {
             upsert_work_item(root.path(), record);
@@ -2715,6 +2772,8 @@ mod tests {
             dispatched_at: "2026-11-11 12:00:00".to_string(),
             finished_at: None,
             events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
             outcome: None,
         };
         upsert_work_item(root.path(), &record);
@@ -2923,6 +2982,57 @@ mod tests {
         );
         assert!(valid.ok, "stderr: {}", valid.stderr);
         assert!(valid.stdout.contains("留痕"));
+    }
+
+    /// get_context 工具数与 tool_specs 一致（review 硬断言：漂移即失真）。
+    #[test]
+    fn get_context_tool_count_matches_specs() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let context = call_tool(&plugin, "get_context", serde_json::json!({}));
+        assert!(context.ok, "stderr: {}", context.stderr);
+        let count: usize = context
+            .stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("中枢工具数: "))
+            .and_then(|value| value.trim().parse().ok())
+            .expect("get_context 必须输出「中枢工具数: N」");
+        let specs = plugin.tool_specs().len();
+        assert_eq!(count, specs, "get_context 工具数与 tool_specs 漂移");
+    }
+
+    /// dispatch_work schema：after_work_id/parallel 必须在 properties 内
+    /// （review P1：曾落在 properties 外——模型看不到参数，写入锁豁免
+    /// 不可达且同目录派发被无条件串行）。
+    #[test]
+    fn dispatch_work_schema_exposes_queue_and_parallel_params() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let specs = plugin.tool_specs();
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == "dispatch_work")
+            .expect("dispatch_work spec");
+        let properties = spec
+            .input_schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .expect("properties 必须是对象");
+        for key in [
+            "task",
+            "model",
+            "cwd",
+            "session_id",
+            "after_work_id",
+            "parallel",
+        ] {
+            assert!(
+                properties.contains_key(key),
+                "dispatch_work.properties 缺少 {key}（模型将看不到该参数）"
+            );
+        }
     }
 
     /// 时间线：事件追加持久化 + get_work_timeline 工具查询往返。

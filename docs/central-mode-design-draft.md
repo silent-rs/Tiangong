@@ -320,24 +320,15 @@
 不应只靠提示词约束，应由宿主在工具路由层建立独立白名单：
 
 ```text
-中枢助手工具集：
-- get_context
-- list_workspaces
-- inspect_workspace
-- create_goal
-- create_work_item
-- dispatch_work_item
-- pause_work_item
-- resume_work_item
-- cancel_work_item
-- get_work_item_status
-- get_work_item_events
-- list_model_profiles
-- get_model_status
-- switch_worker_model
-- request_user
-- send_notification
-- create_report
+中枢助手工具集（POC 实现态，22 个——与 central-plugin tool_specs 逐一对应，
+由 `central_tool_specs_equal_handlers` 测试锁定双向一致）：
+- get_context / list_workspaces / inspect_workspace / list_models / list_sessions
+- dispatch_work（含 session_id 复用、after_work_id 排队、parallel 写入锁豁免）
+- send_to_worker / collect_work_reports / list_work_items / search_history
+- cancel_work / pause_work / resume_work / get_work_timeline / get_work_item_status
+- create_goal / update_goal_status / create_report / list_reports
+- switch_worker_model / send_notification / confirm_workspace
+（request_user 按用户裁决暂缓——中枢需要用户决策时在对话文本中直接询问）
 
 工作会话工具集：
 - fs
@@ -1036,9 +1027,13 @@ central_decision
 
 ### 15.1 用户关闭天工
 
-后台工作不应默认被取消。恢复时中枢助手汇报离开期间变化：
+后台工作不应默认被取消。恢复时中枢助手汇报离开期间变化（**实现口径**：
+completed 不注入恢复汇总——登记为滚动 20 条，无法区分本次离开新增，全量
+完成数会重复刷屏且语义失真；只注入需要用户处理的事实）：
 
-> 你离开期间有 3 个事项发生变化：1 个完成、1 个失败、1 个等待你的确认。
+> 应用重启恢复：N 个后台工作中断（结果未产出，可复用原会话重派）。失败：work-X（任务摘要）。
+
+排队挂起的工作重启后按落盘标记自动重放投递（依赖已终态则立即执行）。
 
 ### 15.2 中枢助手重启
 

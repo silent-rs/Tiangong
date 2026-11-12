@@ -218,6 +218,14 @@ pub fn merge_waiting_user(
     ))
 }
 
+/// 排队投递匹配：依赖声明（work_id 或会话 ID）与刚终态工作的双字段比对
+/// （与 [`queue_decision`] 的依赖查找口径一致——否则以 session_id 声明
+/// 的依赖永远等不到 flush，工作永久 queued）。
+pub fn flush_matches(after: &str, finished_work_id: &str, finished_session_id: &str) -> bool {
+    let after = after.trim();
+    !after.is_empty() && (after == finished_work_id || after == finished_session_id)
+}
+
 /// 失败原因是否疑似模型/网络类（值得换模型重派）。
 ///
 /// 状态码按「词边界 + HTTP 语境窗口」匹配（「500 个文件」不误判）。
