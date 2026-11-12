@@ -1003,8 +1003,8 @@ pub async fn central_activation_greeting(app: AppHandle) -> Result<(), String> {
     crate::app::inject_central_activation_summary(state.inner())
 }
 
-fn emit_session_stream_event(
-    app: &AppHandle,
+fn emit_session_stream_event<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     session_id: &str,
     event: &tiangong_types::StreamEvent,
 ) {
@@ -1063,9 +1063,13 @@ pub type StreamFinishedHandler = Box<dyn Fn(bool, String) + Send>;
 /// 终态回调槽（每会话一个，可多挂载）：每次 turn 终态触发并清空全部
 /// 已挂回调——派发与引导共用同一消费者流，逐 work 挂载各自的回报回调。
 pub type StreamFinishedSlot = std::sync::Arc<std::sync::Mutex<Vec<StreamFinishedHandler>>>;
+// T6 实现口径（第十四轮 W8 说明）：未采用 FinishedCtx 类型改造——流
+// 终态事件不携带 work_id，fire 侧无法精确归属；改为回调侧归属过滤
+// （attach 时闭包携带 work，fire 时查 registry 当前条目判定），与 S6
+// 状态幂等守卫构成双重防线（见 app.rs handle_work_terminal）。
 
-pub(crate) fn start_stream_consumer(
-    app: AppHandle,
+pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
 ) {
@@ -1073,14 +1077,15 @@ pub(crate) fn start_stream_consumer(
     // 携带槽——否则只有派发新建分支启动的消费者能触发回调；会话被普通
     // 模式激活（另起无槽消费者）后挂载的回调将无人读取（静默失报 +
     // running 永久占用）。挂载见 app.rs central_watch_slots。
-    let fire_session_finished = |app: &AppHandle, session_id: &str, done: bool, reason: String| {
-        use tauri::Manager;
-        let state = app.state::<TiangongApp>();
-        let handlers = state.inner().take_finished_handlers(session_id);
-        for callback in handlers {
-            callback(done, reason.clone());
-        }
-    };
+    let fire_session_finished =
+        |app: &tauri::AppHandle<R>, session_id: &str, done: bool, reason: String| {
+            use tauri::Manager;
+            let state = app.state::<TiangongApp>();
+            let handlers = state.inner().take_finished_handlers(session_id);
+            for callback in handlers {
+                callback(done, reason.clone());
+            }
+        };
     // 中枢工作进度可见（§9.1）：中枢派发会话的 PhaseChanged / ToolStart /
     // ToolFinished 事件更新 registry 最近动作（徽章实时显示 Worker 在干嘛）。
     // 普通会话零成本：registry 无该 session 的 running 条目即返回。
@@ -1089,7 +1094,7 @@ pub(crate) fn start_stream_consumer(
         std::time::Instant::now() - std::time::Duration::from_secs(10),
     ));
     let update_central_activity =
-        move |app: &AppHandle, session_id: &str, event: &tiangong_types::StreamEvent| {
+        move |app: &tauri::AppHandle<R>, session_id: &str, event: &tiangong_types::StreamEvent| {
             use tauri::Manager;
             let note = match event {
                 tiangong_types::StreamEvent::PhaseChanged { phase, iteration } => {
@@ -1367,7 +1372,7 @@ pub async fn edit_and_resend(
     // 编辑重发流程已校验无活跃 turn，Core 不会主动写盘，不存在旧 Core 覆盖编辑结果的
     // 风险。编辑重发复用现有 Core，不重复执行会话级初始化（on_session_ready 仅在该
     // Core 首次 turn 执行一次）；新一轮 turn 通过 on_turn_started 拿到截断后的最新
-    // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM 插件重新
+    // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与插件桥重新
     // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     // 编辑重发不改变模型：沿用会话已记录的选择策略。
@@ -4650,7 +4655,7 @@ pub async fn uninstall_plugin(
     Ok(())
 }
 
-/// 从已安装目录读取新制品并原子替换全部存活 WASM 实例。
+/// 从已安装目录读取新制品并原子替换全部存活插件实例（历史命名保留）。
 #[tauri::command]
 pub async fn reload_plugin(
     plugin_id: String,

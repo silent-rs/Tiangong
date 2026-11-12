@@ -282,7 +282,7 @@ impl CentralPlugin {
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
              待汇报的后台工作回报: {pending} 条（可调 collect_work_reports 收集后转述）\n\
-             中枢工具数: 22\n\
+             中枢工具数: {tool_count}\n\
              因应用重启中断的任务: {interrupted} 个（徽章可见；结果未产出，可重派复用原会话）\n             当前用户目标: {goals}\n\
              当前时间: {now}",
             version = env!("CARGO_PKG_VERSION"),
@@ -291,6 +291,7 @@ impl CentralPlugin {
             pending = pending_reports,
             interrupted = interrupted_reports,
             goals = goals_summary,
+            tool_count = self.tool_specs().len(),
             now = chrono::Local::now().format("%Y-%m-%d %H:%M"),
         );
         self.text_result("中枢上下文", body)

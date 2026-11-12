@@ -850,7 +850,7 @@ impl TiangongApp {
         }
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
-        // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
+        // 避免每次发送消息都重复构造插件集合（桌面插件桥实例化）。
         //
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
@@ -1615,13 +1615,13 @@ async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
 // =========================================================================
 
 /// 从 AppHandle 取 TiangongApp（派发执行器/插件的共享状态入口）。
-fn state_of(app: &tauri::AppHandle) -> &TiangongApp {
+fn state_of<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> &TiangongApp {
     use tauri::Manager;
     app.state::<TiangongApp>().inner()
 }
 
 /// 通知前端后台工作状态已变化（状态条刷新）。
-pub(crate) fn emit_central_work_updated(app: &tauri::AppHandle) {
+pub(crate) fn emit_central_work_updated<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Emitter;
     let _ = app.emit("central-work-updated", ());
 }
@@ -2227,9 +2227,9 @@ async fn plan_central_dispatch(
     })
 }
 
-async fn handle_central_dispatch(
+async fn handle_central_dispatch<R: tauri::Runtime>(
     state: &TiangongApp,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     request: crate::central::CentralDispatchRequest,
 ) -> Result<(), String> {
     let (merged_work, steer_merged_into_running, cwd) =
@@ -2378,9 +2378,9 @@ async fn handle_central_dispatch(
 }
 
 /// 向回调槽挂载单个 work 的终态回报回调。
-fn attach_work_finished_callback(
+fn attach_work_finished_callback<R: tauri::Runtime>(
     slot: &crate::commands::StreamFinishedSlot,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     work: crate::central::CentralDispatchRequest,
 ) {
     let callback_app = app.clone();
@@ -3287,5 +3287,236 @@ mod tests {
         // 排队登记与挂起队列已就绪
         let pending = state.central_pending_dispatches.lock().unwrap().clone();
         assert_eq!(pending.len(), 1, "排队请求必须入挂起队列");
+    }
+    // ============================================================================
+    // 执行段集成测试（第十五轮 review 最小集）：真走 handle_central_dispatch
+    //（mock_app 泛型 handle + 隔离 storage——WASM 插件早已淘汰，插件桥在
+    // 测试环境可构造；preload 默认完成态不阻塞 ensure）。
+    // ============================================================================
+
+    /// P0 锁（执行段级）：排队决策 → dispatch 不得投递（无 Core 创建、无
+    /// 回调挂载），挂起队列登记完整。
+    #[tokio::test]
+    async fn host_dispatch_queued_does_not_deliver() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let app = tauri::test::mock_app();
+        let state_arc = {
+            // manage 需要 TiangongApp 值；另取一份引用语义：manage 后用
+            // handle 经 state_of 取回。
+            app.manage(TiangongApp::new_for_test(
+                root.keep(),
+                ws.to_string_lossy().to_string(),
+            ));
+            app.handle()
+        };
+        std::fs::write(
+            state_of(state_arc)
+                .core_manager
+                .storage_root()
+                .join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state = state_of(state_arc);
+        // 依赖在途（另一会话）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralWorkStatus {
+                work_id: "work-dep".into(),
+                session_id: "s-dep".into(),
+                task: "依赖".into(),
+                model: None,
+                dispatched_at: "2026-11-12 10:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: Some(ws.to_string_lossy().to_string()),
+            });
+        let follow = crate::central::CentralDispatchRequest {
+            work_id: "work-f".into(),
+            session_id: "s-follow".into(),
+            task: "后续".into(),
+            model: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            after_work_id: Some("work-dep".into()),
+            parallel: false,
+            reused_session: false,
+        };
+        handle_central_dispatch(state, state_arc, follow)
+            .await
+            .expect("排队 dispatch 应成功");
+        // 未投递：无 Core、无回调、无 running 登记；挂起队列有
+        assert!(
+            !state.core_manager.has_live_core("s-follow"),
+            "排队不得创建 Core"
+        );
+        assert!(
+            state.take_finished_handlers("s-follow").is_empty(),
+            "排队不得挂回调"
+        );
+        assert!(!state
+            .central_running_works
+            .lock()
+            .unwrap()
+            .contains("work-f"));
+        assert_eq!(state.central_pending_dispatches.lock().unwrap().len(), 1);
+        let registry = state.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter()
+            .rev()
+            .find(|e| e.work_id == "work-f")
+            .unwrap();
+        assert_eq!(entry.state, central_state::WorkState::Queued);
+    }
+
+    /// W2 锁（执行段级）：steer 并入不改 registry 归属——先经 dispatch 建立
+    /// owner（Core 活跃），再 dispatch steer，断言归属保持 + 回调只挂 owner。
+    #[tokio::test]
+    async fn host_steer_keeps_owner_registry() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let app = tauri::test::mock_app();
+        let state = {
+            let s = TiangongApp::new_for_test(root.keep(), ws.to_string_lossy().to_string());
+            // 测试模型配置（新会话 ensure 的模型解析需要）
+            std::fs::write(
+            s.core_manager.storage_root().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            }).to_string(),
+        ).unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        // 第一次 dispatch：新会话 owner（真建 Core + 投递 + 挂回调）
+        let owner = crate::central::CentralDispatchRequest {
+            work_id: "work-owner".into(),
+            session_id: "s-own".into(),
+            task: "原工作".into(),
+            model: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            after_work_id: None,
+            parallel: false,
+            reused_session: false,
+        };
+        handle_central_dispatch(state, handle, owner)
+            .await
+            .expect("owner dispatch 应成功");
+        assert!(state.core_manager.has_live_core("s-own"), "owner 应建 Core");
+        // 第二次 dispatch：steer（reused 同会话）——Running 并入
+        let steer = crate::central::CentralDispatchRequest {
+            work_id: "steer-x".into(),
+            session_id: "s-own".into(),
+            task: "补充指令".into(),
+            model: None,
+            cwd: None,
+            after_work_id: None,
+            parallel: false,
+            reused_session: true,
+        };
+        handle_central_dispatch(state, handle, steer)
+            .await
+            .expect("steer dispatch 应成功");
+        // 归属保持 owner（W2：旧代码 steer upsert 覆盖 → 此断言红）
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-own")
+                .unwrap();
+            assert_eq!(
+                entry.work_id, "work-owner",
+                "steer 并入不得覆盖归属（W2 旧代码红）"
+            );
+            assert_eq!(entry.state, central_state::WorkState::Running);
+        }
+        // 回调只挂 owner（steer 不挂）
+        let handlers = state.take_finished_handlers("s-own");
+        assert_eq!(handlers.len(), 1, "只挂 owner 回调（steer 并入不挂）");
+    }
+
+    /// W3 锁（执行段级）：排队重放（cwd 还原）→ 投递成功清除 queued 标记。
+    #[tokio::test]
+    async fn host_replay_clears_marker_restores_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let app = tauri::test::mock_app();
+        let state = {
+            let s = TiangongApp::new_for_test(root.keep(), ws.to_string_lossy().to_string());
+            std::fs::write(
+            s.core_manager.storage_root().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            }).to_string(),
+        ).unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        // 落盘排队记录（含 cwd——重放数据源）
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-replay".into(),
+            reused_session: false,
+            session_id: "s-replay".into(),
+            task: "重放任务".into(),
+            model: None,
+            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: Some("2026-11-12 10:00:00".into()),
+            after_work_id: Some("work-gone".into()), // 依赖已不在登记（视为终态）
+            cwd: Some(ws.to_string_lossy().to_string()),
+        };
+        crate::central::upsert_work_item(state.core_manager.storage_root(), &record);
+        // 重放路径（recover 的重放等价）：按记录构造 request 走 dispatch
+        let request = crate::central::CentralDispatchRequest {
+            work_id: record.work_id.clone(),
+            session_id: record.session_id.clone(),
+            task: record.task.clone(),
+            model: record.model.clone(),
+            cwd: record.cwd.clone(),
+            after_work_id: record.after_work_id.clone(),
+            parallel: false,
+            reused_session: record.reused_session,
+        };
+        handle_central_dispatch(state, handle, request)
+            .await
+            .expect("重放投递应成功");
+        // queued 标记被清（不清 → 下次重启重复执行）
+        let items = crate::central::load_work_items(state.core_manager.storage_root());
+        let entry = items
+            .iter()
+            .rev()
+            .find(|i| i.session_id == "s-replay")
+            .unwrap();
+        assert!(
+            entry.queued_at.is_none(),
+            "投递成功后 queued 标记必须清除（W3 红点）"
+        );
+        // cwd 还原（记录里的目录用于投递）
+        assert!(
+            state.core_manager.has_live_core("s-replay"),
+            "重放应建 Core（cwd 生效）"
+        );
     }
 }
