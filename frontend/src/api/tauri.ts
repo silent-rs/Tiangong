@@ -764,6 +764,18 @@ export const api = {
   centralModeState: (): Promise<{ mode: string; last_mode: string }> =>
     invoke('central_mode_state'),
 
+  /** R5 授权卡片：用户真实操作签发 Workspace 授权票据（一次性/可记住）。 */
+  centralApproveWorkspace: (
+    path: string,
+    taskFingerprint: string,
+    persist: boolean,
+  ): Promise<{ approval_id: string; workspace_id: string; expires_at: string }> =>
+    invoke('central_approve_workspace', {
+      path,
+      taskFingerprint,
+      persist,
+    }),
+
   /** R4 工作抽屉：工作项事件时间线（事件日志事实源）。 */
   centralWorkTimeline: (
     workId: string,

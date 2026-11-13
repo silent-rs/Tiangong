@@ -12,6 +12,7 @@
  *   （lib/centralSession），切换逻辑独立于共用 store（lib/centralConversation）。
  */
 import { LazyMessageList } from '@/components/LazyComponents';
+import { CentralCardsBar } from '@/components/central/CentralCardsBar';
 import { CentralChatInput } from '@/components/central/CentralChatInput';
 import { CentralWorkStatusBar } from '@/components/central/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/components/central/centralGreeting';
@@ -63,6 +64,7 @@ export function CentralModeView() {
           </div>
         ) : null}
       </div>
+      <CentralCardsBar />
       <CentralChatInput />
     </main>
   );

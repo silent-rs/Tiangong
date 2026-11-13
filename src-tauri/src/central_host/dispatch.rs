@@ -340,6 +340,16 @@ pub(crate) async fn plan_central_dispatch(
                 .consume_workspace_approval_for(&cwd, &request.task)
                 .is_granted();
         if !directory_approved && !ticket_granted {
+            // R5 授权卡片：拒绝事实广播前端（用户真实操作签发票据后
+            // 模型重派即过；模型不能自证同意）
+            super::events::emit_approval_required(
+                state,
+                super::events::ApprovalRequiredEvent {
+                    cwd: cwd.clone(),
+                    task: request.task.clone(),
+                    work_id: request.work_id.clone(),
+                },
+            );
             return Err(format!(
                 "工作目录 {cwd} 尚未经用户授权（派发被拒绝）。请先在对话中向用户说明\n                 任务概要与影响，等待用户完成授权操作（授权由用户在系统侧确认，\n                 助手不能代替用户授权）后重新派发。"
             ));
