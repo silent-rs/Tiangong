@@ -2566,6 +2566,94 @@ mod tests {
         );
     }
 
+    /// Review Z1 具名锁 B：投影重建输出按 dispatched_at 升序（顺序
+    /// 不变量——retention「按位置取最旧」依赖此序；倒序输出曾使其
+    /// 淘汰最新记录）。
+    #[test]
+    fn rebuild_keeps_chronological_order() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("central");
+        std::fs::create_dir_all(&storage).unwrap();
+        let log = tiangong_central::EventLog::open(&storage.join("events.jsonl")).unwrap();
+        // 三条不同时间派发的工作（乱序写入事件日志）
+        for (work, at) in [
+            ("work-c", "2026-11-13 10:00:00"),
+            ("work-a", "2026-11-13 08:00:00"),
+            ("work-b", "2026-11-13 09:00:00"),
+        ] {
+            let session = format!("s-{work}");
+            let mut started = tiangong_central::WorkEvent::new(
+                work,
+                tiangong_central::event::WorkEventType::WorkItemStarted,
+            )
+            .with_worker_session(&session);
+            started.payload = serde_json::json!({ "task": "任务", "dispatched_at": at });
+            started.created_at = at.to_string();
+            log.append(started).unwrap();
+        }
+        let registry = crate::central_host::central_events::rebuild_registry_from_log(root.path())
+            .expect("应投影重建");
+        let order: Vec<&str> = registry.iter().map(|e| e.work_id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["work-a", "work-b", "work-c"],
+            "输出必须按派发时间升序"
+        );
+    }
+
+    /// Review Z1 具名锁 A：重建（升序）后保留策略保留最近 10 条
+    /// completed、淘汰最旧 2 条（倒序时代曾反向淘汰最新）。
+    #[test]
+    fn retention_keeps_latest_ten_after_rebuild() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("central");
+        std::fs::create_dir_all(&storage).unwrap();
+        let log = tiangong_central::EventLog::open(&storage.join("events.jsonl")).unwrap();
+        // 12 条 completed，时间 00..11（编号即时间序，00 最旧）
+        for i in 0..12 {
+            let work = format!("work-{i:02}");
+            let session = format!("s-{i:02}");
+            let at = format!("2026-11-13 {:02}:00:00", i);
+            let mut started = tiangong_central::WorkEvent::new(
+                &work,
+                tiangong_central::event::WorkEventType::WorkItemStarted,
+            )
+            .with_worker_session(&session);
+            started.payload = serde_json::json!({ "task": "任务", "dispatched_at": at });
+            started.created_at = at.clone();
+            log.append(started).unwrap();
+            let done = tiangong_central::WorkEvent::new(
+                &work,
+                tiangong_central::event::WorkEventType::WorkItemCompleted,
+            )
+            .with_worker_session(&session);
+            log.append(done).unwrap();
+        }
+        let mut registry =
+            crate::central_host::central_events::rebuild_registry_from_log(root.path())
+                .expect("应投影重建");
+        assert_eq!(registry.len(), 12);
+        // 保留策略（宿主在回报清账时调用同款逻辑）：按位置移除最旧
+        let removals = central_state::retention_removals(&registry, 10);
+        let removed: Vec<&str> = removals
+            .iter()
+            .map(|&i| registry[i].work_id.as_str())
+            .collect();
+        assert_eq!(removed, vec!["work-00", "work-01"], "必须淘汰最旧的 2 条");
+        for index in removals.iter().rev() {
+            registry.remove(*index);
+        }
+        let kept: Vec<&str> = registry.iter().map(|e| e.work_id.as_str()).collect();
+        assert_eq!(
+            kept,
+            vec![
+                "work-02", "work-03", "work-04", "work-05", "work-06", "work-07", "work-08",
+                "work-09", "work-10", "work-11"
+            ],
+            "保留最近 10 条（含最新 work-11）"
+        );
+    }
+
     /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，
     /// 未 finish 的第二条被拒（当年「a 项」bug 的行为面：发送态收尾缺失会
     /// 让 is_sending 永真）；finish 释放并递增 revision 后第二条可发送。

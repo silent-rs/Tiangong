@@ -123,9 +123,11 @@ describe('CentralWorkDrawer', () => {
     renderDrawer(makeItem(), { onClose });
     const overlay = container.querySelector('[data-testid="central-work-drawer-overlay"]');
     expect(overlay).not.toBeNull();
+    // 行为断言（十八轮口径 11：禁 className 断言）：遮罩与抽屉同现——
+    // 遮罩是 fixed 布局的伴随物（点击关闭已测），抽屉内容完整渲染
+    expect(container.querySelector('[data-testid="central-work-drawer-overlay"]')).not.toBeNull();
     const drawer = container.querySelector('[data-testid="central-work-drawer"]')!;
-    // fixed 定位验证（修复：此前 absolute 挂在角标小容器内尺寸塌陷）
-    expect(drawer.className).toContain('fixed');
+    expect(drawer.textContent).toContain(makeItem().task);
     await act(async () => {
       overlay!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });

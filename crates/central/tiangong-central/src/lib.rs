@@ -8,7 +8,8 @@
 //! - 状态机（`status.rs` §8.1）与风险分级（`risk.rs` §14.1）。
 //!
 //! 持久化与对账在 `central-state`（登记快照），宿主编排/IO 在
-//! `src-tauri/src/central_host/`——本 crate 不含 IO 与宿主依赖。
+//! `src-tauri/src/central_host/`——本 crate 仅含事件日志所需的最小
+//! 文件 IO（`EventLog` 追加写），无宿主（tauri）依赖。
 //! （R5 清理：POC 期的 store/model/tools 白名单死代码已删。）
 
 pub mod event;

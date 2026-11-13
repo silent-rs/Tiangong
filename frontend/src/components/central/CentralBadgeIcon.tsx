@@ -17,8 +17,10 @@
  * 动画为 SVG 内置 SMIL——`<img>` 加载即播放，无需 JS；完成即空闲
  * （实测七），非运行态不闪烁（实测六）。
  */
+import { useMemo } from 'react';
 import idleSvg from '@/assets/central/badge-idle.svg';
 import runningSvg from '@/assets/central/badge-running.svg';
+import runningStillSvg from '@/assets/central/badge-running-still.svg';
 import waitingUserSvg from '@/assets/central/badge-waiting-user.svg';
 import failedSvg from '@/assets/central/badge-failed.svg';
 import interruptedSvg from '@/assets/central/badge-interrupted.svg';
@@ -41,11 +43,21 @@ const SOURCES: Record<BadgeState, string> = {
   paused: pausedSvg,
 };
 
-/** 按状态加载对应 SVG 素材。 */
+/** 按状态加载对应 SVG 素材（reduced-motion 时执行中降级为静态帧）。 */
 export function CentralBadgeIcon({ state }: { state: BadgeState }) {
+  // SVG-in-img 的 SMIL 不受 CSS prefers-reduced-motion 约束——显式降级
+  const reducedMotion = useMemo(
+    () =>
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' && // jsdom 等环境防御
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    [],
+  );
+  const source =
+    state === 'running' && reducedMotion ? runningStillSvg : SOURCES[state];
   return (
     <img
-      src={SOURCES[state]}
+      src={source}
       alt=""
       draggable={false}
       data-testid={`central-badge-${state}`}

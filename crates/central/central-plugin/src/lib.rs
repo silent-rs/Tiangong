@@ -114,14 +114,14 @@ pub struct CentralDispatchRequest {
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
 ///
-/// 工具集（§5.3 白名单的实现态，21 项——与 tool_specs 一一对应；R3 移除
-/// confirm_workspace：Workspace 授权票据化，模型不再持有登记通道）：
+/// 工具集（§5.3 白名单的实现态，22 项——与 tool_specs 一一对应；R3 移除
+/// confirm_workspace 改票据化授权，新增 request_workspace_approval——
+/// 模型只能请求授权，不能代替用户授权）：
 /// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace` /
 ///   `list_models` / `list_sessions` / `search_history`；
 /// - 后台工作：`dispatch_work`（新建/复用派发）、`send_to_worker`（引导）、
 ///   `collect_work_reports`（收集回报）、`list_work_items`（派发登记）。
 ///
-/// 其余白名单工具（暂停/恢复/取消、征询、通知等）随中枢编排后续片扩展。
 pub struct CentralPlugin {
     /// 全局默认工作区（构造时注入的快照；中枢不绑定具体工作区，§6）。
     workspace_dir: String,
@@ -1714,6 +1714,61 @@ mod tests {
             serde_json::json!({"work_id": "work-none"}),
         );
         assert!(!ghost.ok);
+    }
+
+    /// Review Z2 定型：引导沿用 owner work_id（不再生成 steer-*）——
+    /// 归属与终态一致，重启投影无 Running 幽灵。
+    #[test]
+    fn send_to_worker_reuses_owner_work_id() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 先派发一个工作（owner 登记）
+        let dispatched = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "原工作", "session_id": "s0"}),
+        );
+        assert!(dispatched.ok, "stderr: {}", dispatched.stderr);
+        let owner_id = match dispatch_rx.try_recv().expect("派发请求") {
+            CentralPluginMessage::Dispatch(request) => request.work_id,
+            other => panic!("应收到 Dispatch，实际 {other:?}"),
+        };
+        assert!(!owner_id.starts_with("steer-"));
+        // 引导：work_id 必须沿用 owner（不再是 steer-*）
+        let steered = call_tool(
+            &plugin,
+            "send_to_worker",
+            serde_json::json!({"session_id": "s0", "message": "补充要求"}),
+        );
+        assert!(steered.ok, "stderr: {}", steered.stderr);
+        match dispatch_rx.try_recv().expect("引导请求") {
+            CentralPluginMessage::Steer(request) => {
+                assert_eq!(
+                    request.work_id, owner_id,
+                    "引导必须沿用 owner work_id（Z2：消除幽灵与时间线分叉）"
+                );
+                assert!(
+                    !request.execution_id.is_empty(),
+                    "引导仍是一次新执行（新 execution_id）"
+                );
+            }
+            other => panic!("应收到 Steer，实际 {other:?}"),
+        }
+        // 登记（按会话覆盖）也保持 owner
+        let items = load_work_items(plugin.sessions.storage_root());
+        assert!(items.iter().all(|item| !item.work_id.starts_with("steer-")));
     }
 
     /// R5：模型只能「请求」Workspace 授权（触发卡片），不能登记授权。

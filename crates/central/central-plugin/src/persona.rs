@@ -86,7 +86,9 @@ const CENTRAL_ASSISTANT_PROMPT: &str = "\
   时系统会自动排队防写冲突——仅当用户明确要求并行且任务只读时才带
   parallel=true 豁免（高风险任务如发布/删除/迁移不适用并行豁免）；
 - **模型故障处置**：后台工作因模型/网络类原因失败（超时、限流、凭据、
-  服务端错误）时，回报会附带处置建议——`list_models` 查询可用模型后用
+  服务端错误）时，回报会附带处置建议——用 `list_models` 查询可用模型后，
+  以 `dispatch_work` 带 session_id 与新 model 在**原会话重派**（上下文
+  保留）；任务本身的错误（路径不存在、需求矛盾等）才向用户转述并等待指示；
 - 回答使用中文，保持简洁。";
 
 impl PromptSectionProvider for CentralPlugin {

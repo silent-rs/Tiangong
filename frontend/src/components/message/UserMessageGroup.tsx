@@ -18,6 +18,8 @@ import { MessagePluginHost } from "../MessagePluginHost";
 import { MessageRenderHost } from "../MessageRenderHost";
 import type { HostMessageContext } from "../pluginHostContext";
 import { CollapsibleMarkdownText, CollapsibleUserText } from "./CollapsibleUserText";
+import { useStore } from "@/store/useStore";
+import { CENTRAL_SESSION_ID } from "@/lib/central/centralSession";
 
 
 
@@ -257,6 +259,7 @@ function CentralSystemNote({ kind, time, text }: {
             <button
               type="button"
               data-testid="central-system-note-toggle"
+              aria-expanded={open}
               onClick={() => setOpen(!open)}
               className="ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10"
             >
@@ -309,10 +312,14 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   const render = message.meta?.render;
   // 宿主系统注入（central-host/system-note，R5 P1-3）：回报/授权/派发
   // 说明/激活摘要不伪装为用户消息（方案 §6.2）——渲染为左侧系统条。
-  const isCentralSystemNote = (render?.plugin === 'central-host' && render?.view === 'system-note')
-    // 历史兜底：render 标记上线前的注入消息（[后台工作完成]/[系统中枢]
-    // 开头，动辄数万字全文）按系统条渲染——不再以用户气泡平铺
-    || /^\[后台工作(完成|失败)\]|^\[系统中枢\]/.test(messageText);
+  const activeSessionId = useStore((state) => state.activeSessionId);
+  const isCentralSystemNote =
+    (render?.plugin === 'central-host' && render?.view === 'system-note')
+    // 历史兜底（仅限中枢会话）：render 标记上线前的注入消息按系统条
+    // 渲染——前缀匹配限定 CENTRAL_SESSION_ID，普通会话用户手打同前缀
+    // 不受影响（十八轮 P3：内容耦合回流）
+    || (activeSessionId === CENTRAL_SESSION_ID
+      && /^\[后台工作(完成|失败)\]|^\[系统中枢\]/.test(messageText));
   const withPluginRender = (fallback: React.ReactNode) => render && !isCentralSystemNote
     ? (
       <MessageRenderHost

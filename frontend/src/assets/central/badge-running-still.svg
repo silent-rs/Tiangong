@@ -1,0 +1,35 @@
+<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 中枢角标 · 轨道运转（执行中 · 静态帧，reduced-motion 降级用）：渐变双弧反向旋转 + 内轨刻度 + 核脉冲 -->
+  <defs>
+    <linearGradient id="arc" x1="0" y1="0" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <radialGradient id="core" cx="0.4" cy="0.35" r="0.9">
+      <stop offset="0" stop-color="#c4b5fd"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(11 11)">
+    <g stroke="url(#arc)" stroke-width="1.8" stroke-linecap="round" fill="none">
+      <path d="M 0 -8.2 A 8.2 8.2 0 0 1 7.1 -4.1">
+      </path>
+      <path d="M 0 8.2 A 8.2 8.2 0 0 1 -7.1 4.1" opacity="0.55">
+      </path>
+    </g>
+    <g>
+      <path d="M 0 -4.9 A 4.9 4.9 0 0 1 4.9 0" stroke="url(#arc)" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.7">
+      </path>
+      <g fill="#8b5cf6">
+        <circle cx="0" cy="-4.9" r="0.55">
+        </circle>
+        <circle cx="4.25" cy="2.45" r="0.55">
+        </circle>
+        <circle cx="-4.25" cy="2.45" r="0.55">
+        </circle>
+      </g>
+    </g>
+    <circle r="2.2" fill="url(#core)">
+    </circle>
+  </g>
+</svg>

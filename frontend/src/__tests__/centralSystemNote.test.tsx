@@ -1,5 +1,5 @@
 /**
- * CentralSystemNote 行为（R5 用户实测三修复）：
+ * CentralSystemNote 行为（第十七轮 Z3① + 用户实测四修复）：
  * - 长回报默认折叠（预览 + 展开全文按钮）；展开限高滚动、可收起
  * - 历史兜底：无 render 标记的 [后台工作完成] 注入也走系统条
  */
@@ -8,6 +8,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserMessageGroup } from '@/components/message/UserMessageGroup';
 import type { MessageGroup } from '@/components/message/types';
+
+// 历史兜底限定中枢会话（十八轮 P3）——mock store 的 activeSessionId
+vi.mock('@/store/useStore', () => ({
+  useStore: (selector: (state: { activeSessionId: string }) => unknown) =>
+    selector({ activeSessionId: 'central-hub' }),
+}));
 
 const realNow = Date.now;
 

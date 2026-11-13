@@ -110,7 +110,7 @@ describe('CentralWorkStatusBar', () => {
     container = await mountWithItems([]);
     const badge = container.querySelector('button');
     expect(badge).not.toBeNull('徽章必须常驻，无任务也不消失');
-    expect(badge!.getAttribute('aria-label')).toBe('后台工作：暂无任务');
+    expect(badge!.getAttribute('aria-label')).toBe('后台工作：暂无进行中的任务');
     // SVG 徽章：空态为四角星（central-badge-idle），不再显示文字
     expect(container.querySelector('[data-testid="central-badge-idle"]')).not.toBeNull();
     // 点击仍可打开浮层（空态文案）
@@ -134,7 +134,8 @@ describe('CentralWorkStatusBar', () => {
           new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }),
         );
       });
-      expect(container.querySelector('[role="dialog"]')).toBeNull();
+      expect(container.querySelector('#central-work-popover')).not.toBeNull();
+      expect(container.querySelector('[data-testid="central-work-drawer"]')).toBeNull('hover 只开浮层，不开详情抽屉');
       expect(container.textContent).toContain('执行中');
       act(() => {
         badge!.dispatchEvent(
@@ -158,9 +159,9 @@ describe('CentralWorkStatusBar', () => {
       act(() => {
         badge!.click();
       });
-      // 点击打开的是浮层（无固定面板/抽屉角色）
+      // 点击打开的是浮层（无固定面板；详情抽屉未开）
       expect(container.querySelector('#central-work-popover')).not.toBeNull();
-      expect(container.querySelector('[role="dialog"]')).toBeNull('点击不再固定为抽屉');
+      expect(container.querySelector('[data-testid="central-work-drawer"]')).toBeNull('点击不再固定为抽屉');
       // 鼠标移出：浮层按 250ms 延迟收起（hover 语义）
       act(() => {
         badge!.dispatchEvent(
@@ -214,6 +215,67 @@ describe('CentralWorkStatusBar', () => {
     expect(container.querySelector('#central-work-popover')).not.toBeNull(
       '焦点在容器内时面板不得被 250ms 定时关闭',
     );
+  });
+
+
+  it('徽章 6 态随最高优先级切换（等你决定 > 执行中 > 失败 > 中断 > 暂停 > 空闲）', async () => {
+    // 空闲
+    container = await mountWithItems([]);
+    expect(container.querySelector('[data-testid="central-badge-idle"]')).not.toBeNull();
+    // 暂停/排队（无更高优先级时）
+    container = await mountWithItems([makeItem({ state: 'paused' })]);
+    expect(container.querySelector('[data-testid="central-badge-paused"]')).not.toBeNull();
+    // 中断 压过 暂停
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-p', session_id: 's-p', state: 'paused' }),
+      makeItem({ work_id: 'w-i', session_id: 's-i', state: 'interrupted' }),
+    ]);
+    expect(container.querySelector('[data-testid="central-badge-interrupted"]')).not.toBeNull();
+    // 失败 压过 中断
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-i', session_id: 's-i2', state: 'interrupted' }),
+      makeItem({ work_id: 'w-f', session_id: 's-f2', state: 'failed' }),
+    ]);
+    expect(container.querySelector('[data-testid="central-badge-failed"]')).not.toBeNull();
+    // 执行中 压过 失败
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-f', session_id: 's-f3', state: 'failed' }),
+      makeItem({ work_id: 'w-r', session_id: 's-r3', state: 'running' }),
+    ]);
+    expect(container.querySelector('[data-testid="central-badge-running"]')).not.toBeNull();
+    // 等你决定 压过 执行中（最高优先级）
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-r', session_id: 's-r4', state: 'running' }),
+      makeItem({ work_id: 'w-w', session_id: 's-w4', state: 'waiting_user' }),
+    ]);
+    expect(container.querySelector('[data-testid="central-badge-waiting_user"]')).not.toBeNull();
+    // 完成即空闲：仅 completed/report_queued → idle（实测七）
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-c', session_id: 's-c5', state: 'completed' }),
+      makeItem({ work_id: 'w-q', session_id: 's-q5', state: 'report_queued' }),
+    ]);
+    expect(container.querySelector('[data-testid="central-badge-idle"]')).not.toBeNull('完成即空闲');
+  });
+
+  it('列表按派发时间降序（最新在前，用户实测四；十八轮口径 11 顺序断言）', async () => {
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-old', session_id: 's-old', state: 'running', dispatched_at: '2026-11-13 08:00:00', task: '旧任务' }),
+      makeItem({ work_id: 'w-new', session_id: 's-new', state: 'running', dispatched_at: '2026-11-13 12:00:00', task: '新任务' }),
+      makeItem({ work_id: 'w-mid', session_id: 's-mid', state: 'running', dispatched_at: '2026-11-13 10:00:00', task: '中任务' }),
+    ]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.click();
+    });
+    const rows = Array.from(
+      container.querySelectorAll('[role="button"][tabindex="0"]'),
+    ).map((row) => row.textContent ?? '');
+    const newIdx = rows.findIndex((t) => t.includes('新任务'));
+    const midIdx = rows.findIndex((t) => t.includes('中任务'));
+    const oldIdx = rows.findIndex((t) => t.includes('旧任务'));
+    expect(newIdx).toBeGreaterThan(-1);
+    expect(midIdx).toBeGreaterThan(newIdx, '中任务在 新任务 之后');
+    expect(oldIdx).toBeGreaterThan(midIdx, '旧任务在 中任务 之后');
   });
 
   it('aria-controls 指向浮层 id（a11y 关联，纯 hover 模式）', async () => {

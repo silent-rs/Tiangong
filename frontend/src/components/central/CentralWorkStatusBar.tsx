@@ -261,8 +261,9 @@ export function CentralWorkStatusBar() {
   for (const item of items) {
     aggregated.set(item.session_id, item);
   }
-  // 用户实测修复：按派发时间降序（最新在前）——运行时 upsert 与投影重建
-  // 的数组顺序不一致（append 尾部 vs 倒序遍历头部），统一以时间为准
+  // 展示按派发时间降序（最新在前；用户实测四）。数据层顺序不变量由
+  // 后端保证（rebuild 输出 dispatched_at 升序 + retention 按位置取最旧，
+  // 见 rebuild_keeps_chronological_order / retention_keeps_latest_ten_after_rebuild）
   const visible = Array.from(aggregated.values()).sort((a, b) =>
     b.dispatched_at.localeCompare(a.dispatched_at),
   );
@@ -276,8 +277,14 @@ export function CentralWorkStatusBar() {
   const cancelled = visible.filter((item) => item.state === 'cancelled');
   const queuedDep = visible.filter((item) => item.state === 'queued');
 
+  // 徽章数字口径（实测/十八轮 P3）：只计未终态——completed/failed/
+  // cancelled 属于历史结果（完成即空闲），不与空闲图标并排出现数字
+  const settled = (item: CentralWorkStatus) =>
+    item.state === 'completed' || item.state === 'failed' || item.state === 'cancelled';
+  const activeCount = visible.filter((item) => !settled(item)).length;
   const totalCount = visible.length;
-  // 徽章主状态（优先级：等你决定 > 执行中 > 失败 > 中断 > 待汇报/完成 > 其他）
+  // 徽章主状态（优先级：等你决定 > 执行中 > 失败 > 中断 > 暂停/排队；
+  // completed/待汇报 → idle：完成即空闲，实测七）
   // 完成即空闲（用户实测七）：completed/待汇报不设徽章状态——回到空闲
   const badgeState: BadgeState = waitingUser.length > 0
     ? 'waiting_user'
@@ -313,9 +320,9 @@ export function CentralWorkStatusBar() {
       <button
         type="button"
         aria-label={
-          totalCount === 0
-            ? '后台工作：暂无任务'
-            : `后台工作：${running.length} 个执行中，${queued.length} 条待汇报，共 ${totalCount} 项`
+          activeCount === 0
+            ? '后台工作：暂无进行中的任务'
+            : `后台工作：${running.length} 个执行中，${waitingUser.length} 个等你决定，${activeCount} 项进行中`
         }
         aria-controls={hoverOpen ? 'central-work-popover' : undefined}
         aria-expanded={hoverOpen}
@@ -333,9 +340,12 @@ export function CentralWorkStatusBar() {
         className="group inline-flex items-center gap-2 rounded-full border px-2.5 py-1.5 shadow-lg shadow-black/5 backdrop-blur-md transition-all hover:border-primary/40"
       >
         <CentralBadgeIcon state={badgeState} />
-        {totalCount > 0 ? (
-          <span className="min-w-4 text-right text-xs font-semibold tabular-nums text-foreground/85">
-            {totalCount}
+        {activeCount > 0 ? (
+          <span
+            className="min-w-4 text-right text-xs font-semibold tabular-nums text-foreground/85"
+            title={`${activeCount} 项进行中（历史已结束 ${totalCount - activeCount} 项见浮层）`}
+          >
+            {activeCount}
           </span>
         ) : null}
         <ChevronRight
@@ -345,6 +355,8 @@ export function CentralWorkStatusBar() {
       {hoverOpen ? (
         <div
           id="central-work-popover"
+          role="dialog"
+          aria-label="后台工作"
           className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
           <WorkGroups
             running={running}

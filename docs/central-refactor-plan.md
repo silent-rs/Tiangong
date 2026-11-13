@@ -892,8 +892,27 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 ### A.3 验证与验收状态
 
-- 每提交独立可编译、可回滚；Rust 256 项测试 + 前端 573 项测试全绿；clippy/fmt 干净。
+- 每提交独立可编译、可回滚；**Rust 246 项（tiangong-central 30 + central-state 24 + central-plugin 33 + tiangong-app 158 + bin 1）+ 前端 584 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-13 十八轮修复后实测）。
 - §8 测试矩阵覆盖情况：领域/存储/权限/Host 集成大部分以单元与集成测试锁定（见各提交说明）；**§8.5 前端转场矩阵与 §8.6 实机验收十步未执行**——需要真实桌面环境（`cargo tauri dev` + 人工操作），合并前应完成并回填记录。
+
+### A.5 实测反馈修复记录（2026-11-13，第十八轮收口）
+
+用户在真实桌面环境的实测反馈与修复（每项有独立提交）：
+
+| 实测 | 反馈 | 修复 |
+| --- | --- | --- |
+| 一 | 激活问候机械（每次介绍能做什么）；授权死循环（模型无请求通道、连主仓库被拒） | 空闲/纯执行态不注入；`request_workspace_approval` 工具 + 拒绝指引；派发未执行不再伪装工作失败（`84aafd18`） |
+| 二 | 授权后不继续执行；已授权卡片长期占据；样式粗糙 | 授权完成注入中枢自动重派；卡片 3.5s 自动收起；紧凑化（`00cb9d61`） |
+| 三 | 中文选词回车误发送 | IME 组合态三重防御（composition ref + isComposing + keyCode 229，`f846008c`） |
+| 四 | 角标被消息导航条遮挡；抽屉定位塌陷 | 角标避位 + z 提升；抽屉视口级 fixed + 遮罩（`26d02f97`） |
+| 五 | 回报 2.4 万字无收缩；新旧消息渲染不一致；列表无时间排序 | 480 字折叠系统条；历史注入前缀兜底（限中枢会话）；dispatched_at 降序（`7c739d8a`） |
+| 六~九 | 角标交互与图标（去点击固定 → 纯 hover；文字 → 状态化原创 SVG 素材文件；非运行态不闪；完成即空闲） | 「枢纽轨道」6 相位素材（SMIL，img 加载）+ reduced-motion 静态帧降级（`3940c5b4`…`f33dd0cb` + 本轮） |
+
+第十八轮 review 修复（Z1/Z2/Z3 + 8.2）：
+- **Z1** 顺序不变量：`rebuild_registry_from_log` 输出恢复 `dispatched_at` 升序；具名锁 `rebuild_keeps_chronological_order` / `retention_keeps_latest_ten_after_rebuild`（倒序时代曾使保留策略淘汰最新记录）。
+- **Z2** steer 归属定型：`send_to_worker` 沿用 owner `work_id` + 新 `execution_id`（消除重启 Running 幽灵与时间线分叉）；插件测试锁定。
+- **Z3** 文档四项（本附录 A.3/A.5、persona 断句、lib.rs 头、设计稿实现态章节）。
+- **8.2** reduced-motion 降级、徽章 6 态 + 优先级 + 排序断言、浮层 role/aria、折叠 aria-expanded、历史兜底限中枢会话、徽章数字只计未终态、弱断言（className）改行为断言。
 
 ### A.4 后续工作（按优先级，2026-11-13 更新）
 

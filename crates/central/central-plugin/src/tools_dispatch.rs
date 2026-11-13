@@ -309,10 +309,23 @@ impl CentralPlugin {
                 "会话不存在：{target}（可用 list_work_items / list_sessions 查询）"
             ));
         }
-        // R0 契约（§5.4）：引导同样是一次执行，生成独立归属。
+        // R0 契约（§5.4）：引导是一次新执行（新 execution_id）；归属沿用
+        // 该会话当前工作的 work_id（review Z2 定型：此前生成 steer-* 新 id
+        // 导致登记/事件与终态分叉——重启后 steer-* 成为永不结束的 Running
+        // 幽灵、owner 时间线缺失引导段）。
+        let owner_work_id = {
+            // 落盘登记（真相源）取该会话最近一次工作的 work_id；无登记的
+            // 冷启动边缘回退 steer- 前缀（会话存在但从未经中枢派发）。
+            load_work_items(self.sessions.storage_root())
+                .into_iter()
+                .rev()
+                .find(|item| item.session_id == target)
+                .map(|item| item.work_id)
+                .unwrap_or_else(|| format!("steer-{}", scru128::new()))
+        };
         let execution_id = tiangong_central::new_execution_id();
         let record = WorkItemRecord {
-            work_id: format!("steer-{}", scru128::new()),
+            work_id: owner_work_id,
             reused_session: true,
             session_id: target.clone(),
             task: message.to_string(),

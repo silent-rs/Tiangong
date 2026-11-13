@@ -225,7 +225,8 @@ pub(crate) fn rebuild_registry_from_log(
     }
     let states = tiangong_central::project_work_state(&entries);
     let mut registry: Vec<crate::central::CentralWorkStatus> = Vec::new();
-    // 倒序遍历：同会话首条命中即最后一次派发（review P1-2 修复）
+    // 倒序遍历：同会话首条命中即最后一次派发（P1-2 修复）；最终输出
+    // 在函数末尾恢复 dispatched_at 升序（Z1 顺序不变量）
     for logged in entries.iter().rev() {
         if logged.event.event_type != tiangong_central::event::WorkEventType::WorkItemStarted {
             continue;
@@ -278,6 +279,11 @@ pub(crate) fn rebuild_registry_from_log(
     if registry.is_empty() {
         None
     } else {
+        // 顺序不变量（review Z1）：输出按 dispatched_at 升序——运行时
+        // upsert 的登记也是时间正序（尾部最新），retention_removals 的
+        // 「按位置取最旧」语义在两种来源下一致（倒序输出曾使保留策略
+        // 淘汰最新记录）。
+        registry.sort_by(|a, b| a.dispatched_at.cmp(&b.dispatched_at));
         Some(registry)
     }
 }
