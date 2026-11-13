@@ -116,8 +116,19 @@ export function CentralChatInput({ onHeightChange }: CentralChatInputProps) {
     api.cancelTurn(CENTRAL_SESSION_ID).catch((error) => console.error('取消失败:', error));
   }, []);
 
+  // IME 组合态追踪（macOS WebKit 怪癖，同 MentionEditor 三重防御）：
+  // 确认候选词的那次 Enter 上 isComposing 可能为 false，且 keydown 先于
+  // compositionend 派发——composition ref 在 keydown 时刻仍为 true，
+  // 正好拦截「选词回车被当成发送」（用户实测中文输入选词直接发消息）。
+  const composingRef = useRef(false);
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+    if (
+      event.key === 'Enter'
+      && !event.shiftKey
+      && !composingRef.current
+      && !event.nativeEvent.isComposing
+      && event.keyCode !== 229
+    ) {
       event.preventDefault();
       void handleSend();
     }
@@ -133,6 +144,12 @@ export function CentralChatInput({ onHeightChange }: CentralChatInputProps) {
             setInputCacheText(CENTRAL_SESSION_ID, event.target.value);
           }}
           onKeyDown={handleKeyDown}
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+        }}
           rows={1}
           placeholder="你想让我做什么？"
           aria-label="中枢对话输入"

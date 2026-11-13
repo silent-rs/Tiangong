@@ -58,6 +58,9 @@ function mountInput(): { unmount: () => void; textarea: () => HTMLTextAreaElemen
     },
     textarea,
     send,
+    get sendMessageMock() {
+      return mocks.api.sendMessage;
+    },
   };
 }
 
@@ -257,4 +260,51 @@ describe('CentralChatInput 发送链路', () => {
     expect(document.body.textContent).toContain('发送失败');
     view.unmount();
   });
+  it('IME 选词回车不发送（composition 态三重防御，macOS WebKit 怪癖）', async () => {
+    const view = mountInput();
+    const target = view.textarea();
+    await act(async () => {
+      target.focus();
+    });
+    const change = (value: string) => act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(target, value);
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await change('nihao');
+    // 进入 IME 组合态
+    await act(async () => {
+      target.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    });
+    // 选词确认的 Enter：isComposing=false（WebKit 怪癖）但组合 ref 仍为 true
+    await act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(view.sendMessageMock).not.toHaveBeenCalled();
+    expect(view.textarea().value).toBe('nihao');
+    // 组合结束后的 Enter 才发送
+    await act(async () => {
+      target.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+    });
+    await act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(view.sendMessageMock).toHaveBeenCalled();
+  });
+
 });
