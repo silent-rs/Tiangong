@@ -234,7 +234,7 @@ fn run_gui() {
             // 中枢后台工作状态重启恢复（用户实测：进中枢模式看不到历史
             // 任务）——挪到启动无条件执行，消除「lazy 通道建立时点 + 事件
             // 早于前端监听」的时序丢显；幂等（registry 非空即跳过）。
-            tiangong_app::app::recover_central_work_state(app.handle());
+            tiangong_app::central_host::recover_central_work_state(app.handle());
 
             // 注册插件生命周期变化订阅者：插件迁移（安装/升级/启停/卸载/重载）
             // 由 runtime 状态机执行并广播事件，宿主在此响应——主前端刷新 +

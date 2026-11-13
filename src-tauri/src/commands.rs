@@ -809,7 +809,7 @@ async fn send_message_inner(
         }
         if flush_failed.is_empty() {
             state.clear_queued_work_reports();
-            crate::app::emit_central_work_updated_pub(&app);
+            crate::central_host::events::emit_central_work_updated(&app);
         } else {
             state.push_central_work_reports(flush_failed);
         }
@@ -1000,7 +1000,7 @@ pub async fn central_activation_greeting(app: AppHandle) -> Result<(), String> {
             stream_rx,
         );
     }
-    crate::app::inject_central_activation_summary(state.inner())
+    crate::central_host::inject_central_activation_summary(state.inner())
 }
 
 fn emit_session_stream_event<R: tauri::Runtime>(
@@ -1122,7 +1122,7 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
                 if last.elapsed() >= std::time::Duration::from_secs(2) {
                     *last = std::time::Instant::now();
                     drop(last);
-                    crate::app::emit_central_work_updated(app);
+                    crate::central_host::emit_central_work_updated(app);
                 }
             }
         };
