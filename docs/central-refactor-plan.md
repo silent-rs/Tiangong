@@ -880,7 +880,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | R2 事件日志与事务存储 | ✅ | `d4bb144a` | `events.jsonl` 追加式事件日志（崩溃尾部修复 / 重复幂等 / 投影 / schema 版本）；持久层随机后缀临时文件 + 写锁 + fsync；旧时间线一次性迁移 |
 | R3 权限票据化 | ✅ | `1ba43261` `ee5a35a7` | `WorkspaceApprovalTicket`（任务指纹防偷换）/ `DecisionTicket`（绑定 execution+问题版本）一次性 fail-closed；`confirm_workspace` 已移除；宿主 `central_approve_workspace` / `central_resolve_decision` 签发；`parallel` 高风险豁免收紧（启发式） |
 | R4 ModeCoordinator 与前端 | ✅ 宿主+抽屉 | `120ef2bb` `1cf0fe61` | 宿主模式状态机 + 快照归还 + 偏好持久化 + 前端接线；工作抽屉（事件日志时间线）。**未做**：消息流内决定卡片/授权卡片组件（决定/授权命令已就绪，待消息结构化） |
-| R5 清理兼容层 | 🔶 | `0ea3293e` | 时间线双写已除（事件日志唯一事实源，旧数据兼容读+迁移）。**未做**：插件压缩至 300–500 行、快照 envelope 版本化、`central_work_registry` 重建路径切事件投影 |
+| R5 清理兼容层 | 🔶 | `0ea3293e` `fd7f9cab` `d0ace0a7` | 时间线双写已除；registry 由事件投影重建（派发事件携带登记字段，空日志回退旧快照）；快照 envelope 版本化（schema_version 包裹 + 裸数组兼容读）。**未做**：插件压缩至 300–500 行 |
 
 ### A.2 与正文的有意偏差
 
@@ -895,10 +895,10 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 - 每提交独立可编译、可回滚；Rust 256 项测试 + 前端 573 项测试全绿；clippy/fmt 干净。
 - §8 测试矩阵覆盖情况：领域/存储/权限/Host 集成大部分以单元与集成测试锁定（见各提交说明）；**§8.5 前端转场矩阵与 §8.6 实机验收十步未执行**——需要真实桌面环境（`cargo tauri dev` + 人工操作），合并前应完成并回填记录。
 
-### A.4 后续工作（按优先级）
+### A.4 后续工作（按优先级，2026-11-13 更新）
 
 1. 消息流结构化：Worker 回报 / 决定请求 / 授权请求以结构化消息进入中枢对话（决定卡片、授权卡片组件消费已就绪命令）。
-2. `central_work_registry` 由事件投影重建（消除内存登记与事件的第二事实源）。
-3. 快照 envelope 版本化 + `recover` 对账（事件 offset vs 快照版本）。
+2. ~~registry 由事件投影重建~~ ✅ `fd7f9cab`（派发事件携带登记字段；空日志回退旧快照）。
+3. ~~快照 envelope 版本化~~ ✅ `d0ace0a7`（schema_version=1 包裹 + 裸数组兼容读）；recover 对账（事件 offset vs 快照版本）待做。
 4. 插件压缩：`central-plugin/lib.rs` 执行适配继续拆分（现约 2900 行）。
 5. 实机验收十步（§8.6）与设计稿实现态注记同步。
