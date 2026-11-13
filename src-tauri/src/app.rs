@@ -2407,6 +2407,7 @@ mod tests {
             reused_session: false,
         };
         // 1) 未授权：拒绝且指引等待用户授权
+        let storage_root = state.core_manager.storage_root().to_path_buf();
         let denied = handle_central_dispatch(state, handle, request("发布模块 v2"))
             .await
             .expect_err("未授权工作区必须拒绝");
@@ -2433,6 +2434,34 @@ mod tests {
             .await
             .expect_err("票据一次性：同任务重派需要新授权");
         assert!(replay.contains("尚未经用户授权"), "重放拒绝信息：{replay}");
+        // Z6 审计：每次拒绝事实都进事件日志（唯一事实源）
+        {
+            let log = tiangong_central::EventLog::open(
+                &storage_root.join("central").join("events.jsonl"),
+            )
+            .unwrap();
+            let approvals: Vec<_> = log
+                .load_all()
+                .unwrap()
+                .into_iter()
+                .filter(|e| {
+                    e.event.event_type == tiangong_central::event::WorkEventType::ApprovalRequired
+                })
+                .collect();
+            // 拒绝 3 次（未授权/偷换/重放）+ 匹配票据消费前后各……至少 3 条拒绝审计
+            assert!(
+                approvals.len() >= 3,
+                "每次授权拒绝都必须留审计事件（实际 {}）",
+                approvals.len()
+            );
+            assert!(approvals.iter().all(|e| e
+                .event
+                .payload
+                .get("note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("未经用户授权")));
+        }
     }
 
     /// R5：登记由事件日志投影重建（唯一事实源重放；快照仅旧数据回退）。

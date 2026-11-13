@@ -59,6 +59,19 @@ pub async fn central_approve_workspace(
         persist = persist.unwrap_or(false),
         "Workspace 授权票据已签发（用户操作）"
     );
+    // Z6 审计：授权事实入事件日志（work_id 空串标记目录级授权）
+    super::central_events::record_central_event(
+        state.core_manager.storage_root(),
+        "workspace-approval",
+        &ticket.approval_id,
+        "",
+        tiangong_central::event::WorkEventType::ApprovalRequired,
+        &format!(
+            "用户授权目录 {path}（任务指纹：{}；persist={}）",
+            task_fingerprint.trim(),
+            persist.unwrap_or(false)
+        ),
+    );
     // 授权闭环（用户实测修复）：授权完成后必须通知中枢，否则模型在
     // 等一个不会来的信号、不会自动重派。注入提示触发中枢 turn，
     // 模型立即重派同一任务（task 文本一致才放行）。

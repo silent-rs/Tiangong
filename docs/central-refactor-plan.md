@@ -892,7 +892,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 ### A.3 验证与验收状态
 
-- 每提交独立可编译、可回滚；**Rust 246 项（tiangong-central 30 + central-state 24 + central-plugin 33 + tiangong-app 158 + bin 1）+ 前端 584 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-13 十八轮修复后实测）。
+- 每提交独立可编译、可回滚；**Rust 248 项（tiangong-central 30 + central-state 26 + central-plugin 33 + tiangong-app 158 + bin 1）+ 前端 584 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-13 Z4 批次后实测）。
 - §8 测试矩阵覆盖情况：领域/存储/权限/Host 集成大部分以单元与集成测试锁定（见各提交说明）；**§8.5 前端转场矩阵与 §8.6 实机验收十步未执行**——需要真实桌面环境（`cargo tauri dev` + 人工操作），合并前应完成并回填记录。
 
 ### A.5 实测反馈修复记录（2026-11-13，第十八轮收口）
@@ -913,6 +913,8 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 - **Z2** steer 归属定型：`send_to_worker` 沿用 owner `work_id` + 新 `execution_id`（消除重启 Running 幽灵与时间线分叉）；插件测试锁定。
 - **Z3** 文档四项（本附录 A.3/A.5、persona 断句、lib.rs 头、设计稿实现态章节）。
 - **8.2** reduced-motion 降级、徽章 6 态 + 优先级 + 排序断言、浮层 role/aria、折叠 aria-expanded、历史兜底限中枢会话、徽章数字只计未终态、弱断言（className）改行为断言。
+- **Z4**（第二批）RMW 事务化 + 写失败诚实性：`with_work_items` 锁内读改写（消除并发丢更新）；save/upsert/mark 系列全部返回 `Result`；生产形态并发测试 `concurrent_upserts_keep_both_sessions`。
+- **Z6 部分** 授权审计：拒绝与签发事实入事件日志（此前授权链路无持久轨迹）；决定票据消费点与 ModelSwitch 硬门禁待结构化决定协议（见 A.4）。
 
 ### A.4 后续工作（按优先级，2026-11-13 更新）
 

@@ -399,6 +399,16 @@ pub(crate) async fn plan_central_dispatch(
                     work_id: request.work_id.clone(),
                 },
             );
+            // Z6 审计：拒绝事实入事件日志（唯一事实源——此前授权链路
+            // 不留持久轨迹）
+            super::central_events::record_central_event(
+                state.core_manager.storage_root(),
+                &request.work_id,
+                "",
+                &request.session_id,
+                tiangong_central::event::WorkEventType::ApprovalRequired,
+                &format!("派发被拒：目录 {cwd} 未经用户授权（任务指纹已送授权卡片）"),
+            );
             return Err(format!(
                 "工作目录 {cwd} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{cwd}\", task_fingerprint=<与本次 task 完全一致>) 向用户发起授权卡片，并向用户说明任务与影响；用户确认后重派同一任务。授权只能由用户完成，不要更换目录规避，也不要在授权前重复派发。"
             ));
