@@ -116,6 +116,22 @@ describe('CentralWorkDrawer', () => {
     expect(onOpenSession).toHaveBeenCalledWith('sess-worker');
   });
 
+
+  it('视口级抽屉：遮罩点击关闭（fixed 定位，不再受角标容器尺寸影响）', async () => {
+    timelineMock.mockResolvedValue([]);
+    const onClose = vi.fn();
+    renderDrawer(makeItem(), { onClose });
+    const overlay = container.querySelector('[data-testid="central-work-drawer-overlay"]');
+    expect(overlay).not.toBeNull();
+    const drawer = container.querySelector('[data-testid="central-work-drawer"]')!;
+    // fixed 定位验证（修复：此前 absolute 挂在角标小容器内尺寸塌陷）
+    expect(drawer.className).toContain('fixed');
+    await act(async () => {
+      overlay!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('时间线加载失败：显示错误而非静默', async () => {
     timelineMock.mockRejectedValue(new Error('disk io'));
     renderDrawer(makeItem());

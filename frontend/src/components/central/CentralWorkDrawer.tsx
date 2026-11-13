@@ -139,12 +139,20 @@ export function CentralWorkDrawer({
   const meta = STATE_META[work.state] ?? { label: work.state, className: 'text-muted-foreground' };
 
   return (
-    <div
-      data-testid="central-work-drawer"
-      role="dialog"
-      aria-label={`工作详情 ${work.work_id}`}
-      className="absolute inset-y-0 right-0 z-30 flex w-full max-w-md flex-col border-l border-border/70 bg-background/98 shadow-2xl shadow-black/20 backdrop-blur-xl"
-    >
+    <>
+      {/* 视口级遮罩：点击关闭（抽屉不改变模式与上下文，§6.4） */}
+      <div
+        data-testid="central-work-drawer-overlay"
+        className="fixed inset-0 z-40 bg-black/20 backdrop-blur-[1px]"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        data-testid="central-work-drawer"
+        role="dialog"
+        aria-label={`工作详情 ${work.work_id}`}
+        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-border/70 bg-background shadow-2xl shadow-black/20"
+      >
       {/* 头部：状态 + 关闭 */}
       <div className="flex items-start justify-between gap-3 border-b border-border/60 p-4">
         <div className="min-w-0">
@@ -253,6 +261,7 @@ export function CentralWorkDrawer({
           打开原始工作会话
         </button>
       </div>
-    </div>
+      </div>
+    </>
   );
 }

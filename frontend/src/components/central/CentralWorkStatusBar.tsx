@@ -288,7 +288,7 @@ export function CentralWorkStatusBar() {
   return (
     <div
       ref={rootRef}
-      className="absolute right-4 top-3 z-20"
+      className="absolute right-[70px] top-3 z-30"
       onMouseEnter={() => {
         if (pinned) return;
         cancelClose();
