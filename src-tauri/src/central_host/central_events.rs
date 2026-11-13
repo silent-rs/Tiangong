@@ -201,3 +201,106 @@ pub(crate) fn work_timeline(
         })
         .unwrap_or_default()
 }
+
+/// 从事件日志投影重建登记（R5：registry 由事件重放，消除第二事实源）。
+///
+/// 每个 work_item：最后一次 `work_item.started` 的 payload 提供登记字段
+/// （task/model/cwd/reused_session/execution_id），状态由
+/// [`tiangong_central::project_work_state`] 投影。日志为空返回 None
+/// （调用方回退旧路径 work-items.json——R5 前数据兼容）。
+pub(crate) fn rebuild_registry_from_log(
+    storage_root: &std::path::Path,
+) -> Option<Vec<crate::central::CentralWorkStatus>> {
+    let log = EventLog::open(&event_log_path(storage_root)).ok()?;
+    let entries = log.load_all().ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let states = tiangong_central::project_work_state(&entries);
+    let mut registry: Vec<crate::central::CentralWorkStatus> = Vec::new();
+    for logged in &entries {
+        if logged.event.event_type != tiangong_central::event::WorkEventType::WorkItemStarted {
+            continue;
+        }
+        let work_id = &logged.event.work_item_id;
+        // 会话维度 upsert 语义：同会话取最后一次 started（覆盖旧执行）
+        if registry.iter().any(|entry| {
+            &entry.session_id == logged.event.worker_session_id.as_deref().unwrap_or("")
+        }) {
+            continue;
+        }
+        let Some(status) = states.get(work_id) else {
+            continue;
+        };
+        let payload = &logged.event.payload;
+        let session_id = logged.event.worker_session_id.clone().unwrap_or_default();
+        registry.push(crate::central::CentralWorkStatus {
+            work_id: work_id.clone(),
+            session_id: session_id.clone(),
+            task: payload
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            model: payload
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| Some("路由默认".to_string())),
+            dispatched_at: logged.event.created_at.clone(),
+            state: project_status_to_work_state(*status),
+            reused_session: payload
+                .get("reused_session")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            last_activity: None,
+            cwd: payload
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            execution_id: logged.event.execution_id.clone(),
+        });
+    }
+    if registry.is_empty() {
+        None
+    } else {
+        Some(registry)
+    }
+}
+
+/// 契约状态（WorkItemStatus）→ 登记状态（WorkState）。
+///
+/// 映射决策：completed 事件 → Completed（与旧重建路径的 outcome 分组
+/// 一致，徽章重启前后不变）；waiting_resource → Running（在途）；
+/// blocked → Paused（R5 起 paused 事件以 blocked 类型承载）。
+fn project_status_to_work_state(
+    status: tiangong_central::status::WorkItemStatus,
+) -> central_state::WorkState {
+    use central_state::WorkState;
+    use tiangong_central::status::WorkItemStatus as S;
+    match status {
+        S::Draft | S::Planned | S::Queued => WorkState::Queued,
+        S::Running | S::WaitingResource => WorkState::Running,
+        S::WaitingUser => WorkState::WaitingUser,
+        S::Blocked => WorkState::Paused,
+        S::Failed => WorkState::Failed,
+        S::Completed => WorkState::Completed,
+        S::Cancelled => WorkState::Cancelled,
+        S::Paused => WorkState::Paused,
+    }
+}
+
+/// 写入一个已构造好的事件（payload 由调用方定制，R5 派发事件携带
+/// 登记字段供投影重建）。
+pub(crate) fn record_event(storage_root: &std::path::Path, event: tiangong_central::WorkEvent) {
+    let log = match EventLog::open(&event_log_path(storage_root)) {
+        Ok(log) => log,
+        Err(error) => {
+            tracing::warn!(%error, "中枢事件日志打开失败（事实未入日志）");
+            return;
+        }
+    };
+    if let Err(error) = log.append(event) {
+        tracing::warn!(%error, "中枢事件日志追加失败（事实未入日志）");
+    }
+}

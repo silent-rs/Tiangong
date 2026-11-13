@@ -18,8 +18,11 @@ use super::state_of;
 pub fn recover_central_work_state(app: &tauri::AppHandle) {
     use tauri::Manager;
     let state = app.state::<TiangongApp>();
-    let entries =
-        crate::central::recover_registry_entries(state.inner().core_manager.storage_root());
+    // R5：登记由事件日志投影重建（唯一事实源重放）；日志为空（R5 前
+    // 旧数据）回退 work-items.json 快照重建。
+    let storage_root = state.inner().core_manager.storage_root().to_path_buf();
+    let entries = super::central_events::rebuild_registry_from_log(&storage_root)
+        .unwrap_or_else(|| crate::central::recover_registry_entries(&storage_root));
     if entries.is_empty() {
         return;
     }

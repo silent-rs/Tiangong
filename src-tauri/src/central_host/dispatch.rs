@@ -4,7 +4,6 @@
 //! 「中枢不直接执行工作」的宿主侧闭环。
 
 use central_state::failure_looks_model_related;
-use tauri::Manager;
 
 use crate::app::TiangongApp;
 
@@ -550,15 +549,25 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
         reused_session = request.reused_session,
         "中枢后台工作已派发"
     );
-    // R2 事件日志（唯一事实源，双写阶段）：派发事实入日志。
-    super::central_events::record_for(
-        state,
-        &request.work_id,
-        &request.execution_id,
-        &sid,
-        tiangong_central::event::WorkEventType::WorkItemStarted,
-        "派发投递成功",
-    );
+    // R5 事件日志（唯一事实源）：派发事实入日志，payload 携带登记字段
+    // （registry 投影重建的数据源——重启后从事件重放，不再依赖快照）。
+    {
+        let mut dispatch_event = tiangong_central::WorkEvent::new(
+            &request.work_id,
+            tiangong_central::event::WorkEventType::WorkItemStarted,
+        )
+        .with_execution(&request.execution_id)
+        .with_worker_session(&sid);
+        dispatch_event.payload = serde_json::json!({
+            "note": "派发投递成功",
+            "task": request.task,
+            "model": request.model,
+            "cwd": cwd,
+            "reused_session": request.reused_session,
+            "parallel": request.parallel,
+        });
+        super::central_events::record_event(state.core_manager.storage_root(), dispatch_event);
+    }
     // R0 契约：投递成功后同步执行归属到落盘登记——插件侧派发已带同值
     // （幂等），恢复 / 排队重放经此把新 execution_id 写回，事件时间线与
     // 终态日志才能归属到本次执行。

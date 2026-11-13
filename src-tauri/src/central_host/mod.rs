@@ -3,7 +3,7 @@
 //! 事件广播与重启恢复。app.rs 只保留应用装配与非中枢职责。
 
 pub mod authorization;
-mod central_events;
+pub(crate) mod central_events;
 mod core_lifecycle;
 pub(crate) mod dispatch;
 pub(crate) mod events;

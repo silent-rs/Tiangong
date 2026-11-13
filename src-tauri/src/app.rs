@@ -2418,6 +2418,61 @@ mod tests {
         assert!(replay.contains("尚未经用户授权"), "重放拒绝信息：{replay}");
     }
 
+    /// R5：登记由事件日志投影重建（唯一事实源重放；快照仅旧数据回退）。
+    #[test]
+    fn host_registry_rebuilds_from_event_log() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("central");
+        std::fs::create_dir_all(&storage).unwrap();
+        let log = tiangong_central::EventLog::open(&storage.join("events.jsonl")).unwrap();
+        // 派发事件携带登记字段
+        let started = tiangong_central::WorkEvent::new(
+            "work-r1",
+            tiangong_central::event::WorkEventType::WorkItemStarted,
+        )
+        .with_execution("exec-r1")
+        .with_worker_session("s-r1");
+        let mut started = started;
+        started.payload = serde_json::json!({
+            "task": "重构登录模块", "model": "k3", "cwd": "/ws/proj", "reused_session": false,
+        });
+        log.append(started).unwrap();
+        log.append(
+            tiangong_central::WorkEvent::new(
+                "work-r1",
+                tiangong_central::event::WorkEventType::WorkItemCompleted,
+            )
+            .with_execution("exec-r1")
+            .with_worker_session("s-r1"),
+        )
+        .unwrap();
+
+        let registry = crate::central_host::central_events::rebuild_registry_from_log(root.path())
+            .expect("日志非空应投影重建");
+        assert_eq!(registry.len(), 1);
+        let entry = &registry[0];
+        assert_eq!(entry.work_id, "work-r1");
+        assert_eq!(entry.session_id, "s-r1");
+        assert_eq!(entry.task, "重构登录模块");
+        assert_eq!(entry.model.as_deref(), Some("k3"));
+        assert_eq!(entry.cwd.as_deref(), Some("/ws/proj"));
+        assert_eq!(entry.execution_id.as_deref(), Some("exec-r1"));
+        assert_eq!(
+            entry.state,
+            central_state::WorkState::Completed,
+            "终态由事件投影"
+        );
+
+        // 日志为空 → None（调用方回退旧快照路径）
+        let empty_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(empty_root.path().join("central")).unwrap();
+        assert!(
+            crate::central_host::central_events::rebuild_registry_from_log(empty_root.path())
+                .is_none(),
+            "空日志必须回退旧路径（R5 前数据兼容）"
+        );
+    }
+
     /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，
     /// 未 finish 的第二条被拒（当年「a 项」bug 的行为面：发送态收尾缺失会
     /// 让 is_sending 永真）；finish 释放并递增 revision 后第二条可发送。

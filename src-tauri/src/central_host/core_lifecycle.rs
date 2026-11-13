@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use tauri::Manager;
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::config::core::CoreConfigProvider;
 
