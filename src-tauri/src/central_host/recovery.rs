@@ -1,8 +1,6 @@
 //! 中枢重启恢复与激活摘要（R1 从 app.rs 拆出）：从 work-items.json 重建状态
 //! 登记、排队重放投递、离开期间汇总回报、进入中枢的激活问候注入。
 
-use tauri::Manager;
-
 use crate::app::TiangongApp;
 
 use super::dispatch::handle_central_dispatch;

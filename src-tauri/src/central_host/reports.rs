@@ -3,7 +3,6 @@
 //! 回报暂存队列（失败必达 / 成功汇总的时机判定）。
 
 use central_state::{should_deliver_now, transition_on_finished, WorkOutcome};
-use tauri::Manager;
 use tiangong_core::agent_input::AgentInputKind;
 
 use crate::app::TiangongApp;
