@@ -212,7 +212,9 @@ pub(crate) fn rebuild_registry_from_log(
     storage_root: &std::path::Path,
 ) -> Option<Vec<crate::central::CentralWorkStatus>> {
     let log = EventLog::open(&event_log_path(storage_root)).ok()?;
-    let entries = log.load_all().ok()?;
+    // R5 对账：宽松读——中段损坏行跳过并 warn（丢失可观测），恢复以
+    // 幸存事件为准；open 失败（含尾部修复失败）回退快照路径。
+    let (entries, _skipped) = log.load_all_lenient();
     if entries.is_empty() {
         return None;
     }

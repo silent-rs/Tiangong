@@ -79,7 +79,18 @@ fn parse_snapshot<T: serde::de::DeserializeOwned>(
     content: &str,
 ) -> std::result::Result<Vec<T>, serde_json::Error> {
     match serde_json::from_str::<SnapshotEnvelope<T>>(content) {
-        Ok(envelope) => Ok(envelope.records),
+        Ok(envelope) => {
+            // 对账（R5）：快照版本超前于当前代码（未来格式被旧版本读取）
+            // ——字段级 serde default 保证不崩，但版本差必须可观测。
+            if envelope.schema_version > SNAPSHOT_SCHEMA_VERSION {
+                tracing::warn!(
+                    snapshot_version = envelope.schema_version,
+                    supported = SNAPSHOT_SCHEMA_VERSION,
+                    "快照 schema 版本超前（未知字段按默认值读取，建议升级应用）"
+                );
+            }
+            Ok(envelope.records)
+        }
         Err(_) => serde_json::from_str(content),
     }
 }

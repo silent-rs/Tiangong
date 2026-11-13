@@ -147,6 +147,41 @@ impl EventLog {
         self.load_all_inner()
     }
 
+    /// 宽松读取（R5 recover 对账）：跳过中段损坏行并记 warn 计数，
+    /// 返回 (完整事件, 跳过行数)——恢复路径不因个别坏行整体失败，
+    /// 且丢失事实数量可观测。
+    pub fn load_all_lenient(&self) -> (Vec<LoggedEvent>, usize) {
+        let _guard = self
+            .append_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(_) => return (Vec::new(), 0),
+        };
+        let reader = std::io::BufReader::new(file);
+        let mut entries = Vec::new();
+        let mut skipped = 0usize;
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<LoggedEvent>(trimmed) {
+                Ok(logged) => entries.push(logged),
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                path = %self.path.display(),
+                skipped,
+                "事件日志存在损坏行（已跳过；事实源不完整，恢复以幸存事件为准）"
+            );
+        }
+        (entries, skipped)
+    }
+
     fn load_all_inner(&self) -> Result<Vec<LoggedEvent>> {
         let file = std::fs::File::open(&self.path)
             .with_context(|| format!("打开事件日志失败: {}", self.path.display()))?;
