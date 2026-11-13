@@ -238,20 +238,6 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
-                name: "confirm_workspace".to_string(),
-                description: "登记用户已确认可用的后台工作区。向非默认工作区的目录派发
-                    后台工作前必须先在对话中征得用户同意，同意后调用本工具
-                    登记该目录（一次确认长期有效），然后才能 dispatch_work 指定该 cwd。"
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "工作区绝对路径（必须存在的目录）"}
-                    },
-                    "required": ["path"]
-                }),
-            },
-            ToolSpec {
                 name: "send_to_worker".to_string(),
                 description: "向已派发的后台工作会话发送引导消息：调整方向、补充要求、\
                     追问细节。会话执行中作为引导消息并入当前任务；空闲时开启新任务。\

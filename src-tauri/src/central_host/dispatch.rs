@@ -312,21 +312,31 @@ pub(crate) async fn plan_central_dispatch(
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("工作目录不存在或不是目录：{cwd}"));
     }
-    // Workspace 确认统一兜底（review P1-x2：Steer 绕过）——Dispatch/Steer
-    // 殊途同归至此，最终 cwd（请求指定或复用会话自身）统一校验，插件侧
-    // dispatch_work 的前置校验保留（错误信息更早更具体）。
+    // Workspace 授权统一兜底（review P1-x2：Steer 绕过；R3 票据化双通道）
+    // ——Dispatch/Steer 殊途同归至此，最终 cwd（请求指定或复用会话自身）
+    // 统一校验。放行条件（任一）：
+    //   1. 目录长期授权（confirmed-workspaces，用户此前「记住」的目录）；
+    //   2. 一次性票据（宿主用户操作签发，绑定任务指纹——防「授权 A、
+    //      执行 B」偷换，消费即失效）。
+    // 无票据通道前模型无法自证同意（confirm_workspace 已移除）。
     {
         let default_workspace = state
             .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
             .await
             .unwrap_or_default();
-        if !crate::central::workspace_confirmed(
+        let directory_approved = crate::central::workspace_confirmed(
             state.core_manager.storage_root(),
             &default_workspace,
             &cwd,
-        ) {
+        );
+        let ticket_granted = !directory_approved
+            && state
+                .ticket_registry
+                .consume_workspace_approval_for(&cwd, &request.task)
+                .is_granted();
+        if !directory_approved && !ticket_granted {
             return Err(format!(
-                "工作目录 {cwd} 尚未经用户确认（派发被拒绝）。请先在对话中向用户确认，\n                 同意后调用 confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
+                "工作目录 {cwd} 尚未经用户授权（派发被拒绝）。请先在对话中向用户说明\n                 任务概要与影响，等待用户完成授权操作（授权由用户在系统侧确认，\n                 助手不能代替用户授权）后重新派发。"
             ));
         }
     }
@@ -344,6 +354,7 @@ pub(crate) async fn plan_central_dispatch(
                 &request.session_id,
                 &cwd,
                 request.parallel,
+                &request.task,
             )
         };
         if let central_state::QueueDecision::QueueAfter(after) = decision {

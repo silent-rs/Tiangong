@@ -158,6 +158,34 @@ impl TicketRegistry {
         TicketVerdict::Granted
     }
 
+    /// 按对消费（派发路径）：取最新的匹配 (workspace, 任务指纹) 的未用
+    /// 票据并消费；无匹配/已用/过期拒绝。任务指纹不一致 = 偷换，拒绝。
+    pub fn consume_workspace_approval_for(
+        &self,
+        workspace_id: &str,
+        task_fingerprint: &str,
+    ) -> TicketVerdict {
+        let now = now_text();
+        let mut tickets = self
+            .workspace_approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(position) = tickets.iter().rposition(|t| {
+            t.workspace_id == workspace_id && t.task_fingerprint == task_fingerprint
+        }) else {
+            return TicketVerdict::DeniedUsedOrMissing;
+        };
+        let ticket = &mut tickets[position];
+        if ticket.used_at.is_some() {
+            return TicketVerdict::DeniedUsedOrMissing;
+        }
+        if is_expired(&ticket.expires_at, &now) {
+            return TicketVerdict::DeniedExpired;
+        }
+        ticket.used_at = Some(now);
+        TicketVerdict::Granted
+    }
+
     /// 宿主签发决策票据（用户真实选择选项后调用）。
     pub fn issue_decision(
         &self,
@@ -296,6 +324,28 @@ mod tests {
         assert_eq!(
             registry.consume_decision(&ticket.ticket_id, "exec-run", 2),
             TicketVerdict::DeniedUsedOrMissing
+        );
+    }
+    /// 派发路径按对消费：任务指纹偷换拒绝，匹配票据一次性放行。
+    #[test]
+    fn consume_for_dispatch_binds_fingerprint() {
+        let registry = TicketRegistry::new();
+        registry.issue_workspace_approval("/ws/d", "任务甲", RiskLevel::Low, 600);
+        // 偷换任务：指纹不匹配视同无授权
+        assert_eq!(
+            registry.consume_workspace_approval_for("/ws/d", "任务乙"),
+            TicketVerdict::DeniedUsedOrMissing
+        );
+        // 匹配任务：放行且一次性
+        assert!(
+            registry
+                .consume_workspace_approval_for("/ws/d", "任务甲")
+                .is_granted()
+        );
+        assert_eq!(
+            registry.consume_workspace_approval_for("/ws/d", "任务甲"),
+            TicketVerdict::DeniedUsedOrMissing,
+            "同一任务重派需要新授权（一次性）"
         );
     }
 }

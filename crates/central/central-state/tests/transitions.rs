@@ -97,30 +97,60 @@ fn queue_decision_combinations() {
     entries[1].cwd = Some("/ws/b".to_string());
 
     assert_eq!(
-        queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false),
+        queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false, "普通任务"),
         QueueDecision::QueueAfter("dep".to_string())
     );
     entries[0].state = WorkState::Completed;
     assert_eq!(
-        queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false),
+        queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false, "普通任务"),
         QueueDecision::DispatchNow
     );
     assert_eq!(
-        queue_decision(&entries, None, "s-new", "/ws/b", false),
+        queue_decision(&entries, None, "s-new", "/ws/b", false, "普通任务"),
         QueueDecision::QueueAfter("other".to_string())
     );
     assert_eq!(
-        queue_decision(&entries, None, "s-new", "/ws/b", true),
+        queue_decision(&entries, None, "s-new", "/ws/b", true, "普通任务"),
         QueueDecision::DispatchNow
     );
+    // R3（方案 §3.4）：高风险任务（发布/删除/迁移/覆写）声明 parallel 也
+    // 不得豁免写入锁——用户说「并行」不能绕过冲突保护。
     assert_eq!(
-        queue_decision(&entries, None, "s-other", "/ws/b", false),
+        queue_decision(
+            &entries,
+            None,
+            "s-new",
+            "/ws/b",
+            true,
+            "发布新版本到生产环境"
+        ),
+        QueueDecision::QueueAfter("other".to_string()),
+        "高风险任务 parallel 豁免必须失效"
+    );
+    assert_eq!(
+        queue_decision(
+            &entries,
+            None,
+            "s-new",
+            "/ws/b",
+            true,
+            "删除旧分支并迁移目录"
+        ),
+        QueueDecision::QueueAfter("other".to_string()),
+        "删除/迁移类任务 parallel 豁免必须失效"
+    );
+    assert!(
+        !crate::task_is_high_risk("重构解析器并补充测试"),
+        "普通开发任务不得误判为高风险"
+    );
+    assert_eq!(
+        queue_decision(&entries, None, "s-other", "/ws/b", false, "普通任务"),
         QueueDecision::DispatchNow
     );
     for state in [WorkState::WaitingUser, WorkState::Paused, WorkState::Queued] {
         entries[0].state = state;
         assert_eq!(
-            queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false),
+            queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false, "普通任务"),
             QueueDecision::QueueAfter("dep".to_string()),
             "{state:?} 应视为在途依赖"
         );

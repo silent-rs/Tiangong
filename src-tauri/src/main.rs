@@ -887,6 +887,8 @@ fn run_gui() {
         })
         .invoke_handler(tauri::generate_handler![
             tiangong_app::commands::central_activation_greeting,
+            tiangong_app::central_host::authorization::central_approve_workspace,
+            tiangong_app::central_host::authorization::central_resolve_decision,
             tiangong_app::commands::get_sessions,
             tiangong_app::commands::get_central_work_status,
             tiangong_app::commands::get_session_meta,

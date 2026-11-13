@@ -2,6 +2,7 @@
 //! 按职责拆分）：执行路由、Core 生命周期、派发执行器、终态回报、
 //! 事件广播与重启恢复。app.rs 只保留应用装配与非中枢职责。
 
+pub mod authorization;
 mod central_events;
 mod core_lifecycle;
 pub(crate) mod dispatch;

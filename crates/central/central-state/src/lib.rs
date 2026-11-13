@@ -172,6 +172,41 @@ pub fn retention_removals(entries: &[WorkStatus], keep: usize) -> Vec<usize> {
     removals
 }
 
+/// 高风险任务启发式（R3，方案 §3.4）：发布/删除/迁移/覆写类任务禁止
+/// 通过 `parallel` 豁免写入锁——宁可串行，不可并发写坏。
+///
+/// 关键词来自方案的明示清单（发布、迁移、删除 + 等价的英文命令词）；
+/// 判定是保守偏严的：命中即视为高风险，漏判由 Workspace 锁兜底。
+pub fn task_is_high_risk(task: &str) -> bool {
+    const HIGH_RISK_MARKERS: &[&str] = &[
+        "发布",
+        "上线",
+        "deploy",
+        "release",
+        "publish",
+        "推送",
+        "push",
+        "强制推送",
+        "force push",
+        "删除",
+        "delete",
+        "drop",
+        "truncate",
+        "purge",
+        "清空",
+        "rm -rf",
+        "迁移",
+        "migrate",
+        "覆写",
+        "overwrite",
+        "格式化",
+        "reset --hard",
+        "卸载",
+    ];
+    let task = task.to_lowercase();
+    HIGH_RISK_MARKERS.iter().any(|marker| task.contains(marker))
+}
+
 /// 派发排队决策：依赖（after_work_id）与同目录写入锁的统一判定。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueDecision {
@@ -186,6 +221,9 @@ pub enum QueueDecision {
 /// - 显式依赖 `after` 在途（running/waiting_user/paused/queued）→ 排队跟随；
 /// - 写入锁：同 `cwd` 已有其他 running 工作（未声明 `parallel` 豁免、
 ///   非同会话重派）→ 排队跟随占用者；
+/// - `parallel` 豁免收紧（R3，方案 §3.4）：高风险任务（发布/删除/迁移/
+///   覆写类）即使声明 `parallel` 也不豁免写入锁——用户说「并行」不能
+///   绕过冲突保护；
 /// - 其余 → 立即派发。
 pub fn queue_decision(
     entries: &[WorkStatus],
@@ -193,6 +231,7 @@ pub fn queue_decision(
     session_id: &str,
     cwd: &str,
     parallel: bool,
+    task: &str,
 ) -> QueueDecision {
     if let Some(after) = after.map(str::trim).filter(|id| !id.is_empty()) {
         let dependency = entries
@@ -206,7 +245,10 @@ pub fn queue_decision(
             return QueueDecision::QueueAfter(after.to_string());
         }
     }
-    if !parallel {
+    // R3：parallel 豁免不适用于高风险任务（发布/删除/迁移/覆写——保守
+    // 启发式判定，宁可串行排队）。
+    let parallel_effective = parallel && !task_is_high_risk(task);
+    if !parallel_effective {
         if let Some(holder) = entries.iter().rev().find(|entry| {
             entry.state == WorkState::Running
                 && entry.cwd.as_deref() == Some(cwd)

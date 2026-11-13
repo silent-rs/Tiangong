@@ -83,6 +83,9 @@ pub struct TiangongApp {
     /// 每会话的终态路由（R1：按 execution_id 路由 Worker turn 终态，
     /// 取代 session 级回调槽——快速完成暂存补发、投递失败显式取消）。
     pub(crate) execution_router: crate::central_host::ExecutionRouter,
+    /// 授权票据注册表（R3：WorkspaceApproval / Decision 一次性票据，
+    /// 仅宿主 UI 真实用户操作后签发；模型只能请求，不能生成）。
+    pub(crate) ticket_registry: tiangong_central::TicketRegistry,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -213,6 +216,7 @@ impl TiangongApp {
             central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
             central_activation_greeted: std::sync::atomic::AtomicBool::new(false),
             execution_router: crate::central_host::ExecutionRouter::new(),
+            ticket_registry: tiangong_central::TicketRegistry::new(),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -1196,7 +1200,7 @@ async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
 mod tests {
     use crate::central_host::dispatch::{
         build_worker_instruction, enqueue_central_dispatch, handle_central_dispatch,
-        handle_work_terminal, plan_central_dispatch, DispatchPlan,
+        handle_work_terminal, plan_central_dispatch,
     };
     use crate::central_host::recovery::build_activation_summary;
     use crate::central_host::state_of;
@@ -2354,6 +2358,74 @@ mod tests {
                 "事件日志中的派发事实必须带 Worker 会话"
             );
         }
+    }
+
+    /// R3 行为基线：Workspace 授权票据双通道——未授权拒绝、指纹匹配
+    /// 票据放行且一次性、指纹偷换拒绝（方案 §5.6 / §3.4）。
+    #[tokio::test]
+    async fn host_ticket_channel_authorizes_workspace_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        // 未长期授权的目标目录（非默认工作区子树）
+        let extra = tempfile::tempdir().unwrap();
+        let extra_path = extra.path().to_string_lossy().to_string();
+        let app = tauri::test::mock_app();
+        let state = {
+            let s = TiangongApp::new_for_test(root.keep(), ws.to_string_lossy().to_string());
+            std::fs::write(
+                s.core_manager.storage_root().join("models.json"),
+                serde_json::json!({
+                    "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                    "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                    "routing": {"chat": "k3"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let request = |task: &str| crate::central::CentralDispatchRequest {
+            work_id: format!("work-{task}"),
+            execution_id: tiangong_central::new_execution_id(),
+            session_id: "s-ticket".to_string(),
+            task: task.to_string(),
+            model: None,
+            cwd: Some(extra_path.clone()),
+            after_work_id: None,
+            parallel: false,
+            reused_session: false,
+        };
+        // 1) 未授权：拒绝且指引等待用户授权
+        let denied = handle_central_dispatch(state, handle, request("发布模块 v2"))
+            .await
+            .expect_err("未授权工作区必须拒绝");
+        assert!(denied.contains("尚未经用户授权"), "拒绝信息：{denied}");
+        // 2) 指纹偷换：签发「任务甲」票据，派发「发布模块 v2」→ 拒绝
+        state.ticket_registry.issue_workspace_approval(
+            &extra_path,
+            "任务甲",
+            tiangong_central::tickets::RiskLevel::High,
+            600,
+        );
+        let swapped = handle_central_dispatch(state, handle, request("发布模块 v2"))
+            .await
+            .expect_err("任务指纹不一致必须拒绝（防偷换）");
+        assert!(
+            swapped.contains("尚未经用户授权"),
+            "偷换拒绝信息：{swapped}"
+        );
+        // 3) 匹配票据：放行且一次性（同任务再派拒绝）
+        handle_central_dispatch(state, handle, request("任务甲"))
+            .await
+            .expect("匹配票据应放行派发");
+        let replay = handle_central_dispatch(state, handle, request("任务甲"))
+            .await
+            .expect_err("票据一次性：同任务重派需要新授权");
+        assert!(replay.contains("尚未经用户授权"), "重放拒绝信息：{replay}");
     }
 
     /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，

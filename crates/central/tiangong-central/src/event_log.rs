@@ -19,7 +19,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::event::WorkEvent;
 use crate::execution::CENTRAL_CONTRACT_SCHEMA_VERSION;

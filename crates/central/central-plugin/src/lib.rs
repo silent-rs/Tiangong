@@ -18,7 +18,9 @@ use std::pin::Pin;
 
 use tiangong_core::core::Plugin;
 use tiangong_core::session::Session;
-use tiangong_core::tools::extension::{ToolOverrideHandler, ToolSpecProvider};
+use tiangong_core::tools::extension::{
+    PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+};
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::ToolCall;
 
@@ -103,7 +105,8 @@ pub struct CentralDispatchRequest {
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
 ///
-/// 工具集（§5.3 白名单的实现态，22 项——与 tool_specs 一一对应，
+/// 工具集（§5.3 白名单的实现态，21 项——与 tool_specs 一一对应；R3 移除
+/// confirm_workspace：Workspace 授权票据化，模型不再持有登记通道）：
 /// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace` /
 ///   `list_models` / `list_sessions` / `search_history`；
 /// - 后台工作：`dispatch_work`（新建/复用派发）、`send_to_worker`（引导）、
@@ -202,7 +205,7 @@ impl CentralPlugin {
             "天工版本: {version}\n\
              中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
              身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；get_work_timeline 查工作时间线；create_goal/update_goal_status 管理用户目标（用户表达目标时登记，达成/放弃时更新）；create_report/list_reports 结构化报告存档与查询；get_work_item_status 单工作详情；switch_worker_model 换工作会话模型（必须先与用户商量并携带结论）；send_notification 应用内通知（重要事件，勿滥用）；dispatch_work 支持 after_work_id 排队依赖；confirm_workspace 登记用户确认的工作区——向新工作区派发前必须先在对话中征得用户同意再 confirm_workspace；search_history 跨会话搜消息）\n\
+             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；get_work_timeline 查工作时间线；create_goal/update_goal_status 管理用户目标（用户表达目标时登记，达成/放弃时更新）；create_report/list_reports 结构化报告存档与查询；get_work_item_status 单工作详情；switch_worker_model 换工作会话模型（必须先与用户商量并携带结论）；send_notification 应用内通知（重要事件，勿滥用）；dispatch_work 支持 after_work_id 排队依赖；search_history 跨会话搜消息）\n\
              后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
              默认工作区: {workspace}\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
@@ -341,10 +344,11 @@ impl CentralPlugin {
         if task.is_empty() {
             return self.error_result("task 不能为空".to_string());
         }
-        // Workspace 确认（§资源边界）：向非默认工作区派发前，该工作区必须
-        // 已经用户确认（confirm_workspace 登记过）。机制级拦截——提示式
-        // 兜底会被模型忽略（强制复用同款教训）。默认工作区及其子树按
-        // 前缀天然放行（workspace_confirmed 内判定）。
+        // Workspace 授权（§资源边界，R3 票据化）：向非默认工作区派发前，
+        // 该工作区必须已获用户授权——授权是宿主事实（用户真实操作签发
+        // 的一次性票据，或历史已确认工作区），助手不能自证同意
+        // （confirm_workspace 已移除：模型可自调的登记通道不可信）。
+        // 默认工作区及其子树按前缀天然放行（workspace_confirmed 内判定）。
         let unconfirmed = |dir: &str| -> Option<String> {
             let dir = dir.trim();
             if dir.is_empty() {
@@ -357,9 +361,9 @@ impl CentralPlugin {
         };
         if let Some(cwd) = cwd.and_then(unconfirmed) {
             return self.error_result(format!(
-                "工作区 {cwd} 尚未经用户确认。请先在对话中向用户确认\n\
-                 （说明要在该目录执行后台工作及任务概要），用户同意后调用\n\
-                 confirm_workspace(path=\"{cwd}\") 登记，再重新派发。"
+                "工作区 {cwd} 尚未经用户授权。请在对话中向用户说明要在该目录\n\
+                 执行的任务概要与影响，等待用户完成授权操作（授权由用户在\n\
+                 系统侧确认，助手不能代替用户授权）后重新派发。"
             ));
         }
         // 模型校验（白名单 §5.3：派发前确认模型可用；失败时附可用清单）
@@ -402,9 +406,9 @@ impl CentralPlugin {
             .unwrap_or_default();
             if let Some(dir) = unconfirmed(&session_cwd) {
                 return self.error_result(format!(
-                    "复用会话 {existing} 的工作目录 {dir} 尚未经用户确认。请先在\n\
-                     对话中向用户确认（说明任务概要），同意后调用\n\
-                     confirm_workspace(path=\"{dir}\") 登记，再重新派发。"
+                    "复用会话 {existing} 的工作目录 {dir} 尚未经用户授权。请先在\n\
+                     对话中向用户说明任务概要，等待用户完成授权操作（系统侧\n\
+                     确认，助手不能代替授权）后重新派发。"
                 ));
             }
         }
@@ -1195,31 +1199,6 @@ impl CentralPlugin {
         )
     }
 
-    /// 登记用户已确认的工作区（配合 Workspace 确认交互）。
-    fn handle_confirm_workspace(&self, path: &str) -> Option<ToolResult> {
-        let path = path.trim();
-        if path.is_empty() {
-            return self.error_result("path 不能为空".to_string());
-        }
-        let target = std::path::Path::new(path);
-        if !target.is_dir() {
-            return self.error_result(format!("路径不存在或不是目录：{path}"));
-        }
-        add_confirmed_workspace(self.sessions.storage_root(), target);
-        // 留痕（review：confirm_workspace 无用户凭据，模型可自调）——登记
-        // 事实注入中枢回报队列，用户在下一条消息看到「谁确认了什么目录」，
-        // 模型未经征询自调即暴露。
-        self.work_reports
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(format!(
-                "[系统中枢] 已登记工作区确认：{path}（confirm_workspace 由助手调用；若你未同意，请直接指出并要求撤销）"
-            ));
-        self.text_result(
-            "工作区已确认",
-            format!("已登记用户确认的工作区：{path}\n后续向该目录派发后台工作不再需要重复确认。"),
-        )
-    }
     /// 派发登记表（中枢视角的派发事实）。
     fn handle_list_work_items(&self) -> Option<ToolResult> {
         let items = self
@@ -1438,14 +1417,6 @@ impl ToolOverrideHandler for CentralPlugin {
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 self.handle_work_timeline(work_id)
-            }
-            "confirm_workspace" => {
-                let path = call
-                    .arguments
-                    .get("path")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.handle_confirm_workspace(path)
             }
             "send_to_worker" => {
                 let session_id = call
@@ -1670,7 +1641,11 @@ mod tests {
             spec_names, handler_names,
             "spec 与 handler 集合必须相等（spec 缺失模型不可见；handler 缺失为死声明）"
         );
-        assert_eq!(spec_names.len(), 22, "工具数应为 22（新增工具时同步更新）");
+        assert_eq!(
+            spec_names.len(),
+            21,
+            "工具数应为 21（confirm_workspace 已移除；新增工具时同步更新）"
+        );
     }
 
     /// 复用校验：中枢对话自身不可作为工作会话（review q）。
@@ -1761,13 +1736,8 @@ mod tests {
         .unwrap();
         let (plugin, mut dispatch_rx, _reports) =
             plugin_with_channel("/tmp/ws".to_string(), manager);
-        // /tmp 非默认工作区：预先登记用户确认（Workspace 确认交互）
-        let confirm = call_tool(
-            &plugin,
-            "confirm_workspace",
-            serde_json::json!({"path": "/tmp"}),
-        );
-        assert!(confirm.ok, "stderr: {}", confirm.stderr);
+        // /tmp 非默认工作区：预先落盘宿主授权产物（Workspace 授权）
+        add_confirmed_workspace(plugin.sessions.storage_root(), std::path::Path::new("/tmp"));
         let result = call_tool(
             &plugin,
             "dispatch_work",
@@ -2153,24 +2123,6 @@ mod tests {
         // 最旧的 sess-0 已被裁剪
         assert!(!items.iter().any(|item| item.session_id == "sess-0"));
     }
-    /// confirm_workspace 参数边界：空路径拒绝，不得登记。
-    #[test]
-    fn confirm_workspace_rejects_empty_path() {
-        let root = tempfile::tempdir().unwrap();
-        let manager = manager_with_session_cwds(root.path(), &[]);
-        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
-        let empty = call_tool(
-            &plugin,
-            "confirm_workspace",
-            serde_json::json!({"path": "   "}),
-        );
-        assert!(!empty.ok, "空白路径不得登记为已确认工作区");
-        assert!(
-            load_confirmed_workspaces(plugin.sessions.storage_root()).is_empty(),
-            "拒绝路径不得产生登记"
-        );
-    }
-
     /// 终态登记兜底：work_id 未命中时按 session_id 找未终态条目——
     /// 用户实测「执行完毕显示中断」的修复路径；双键都未命中时不落盘。
     #[test]
@@ -2783,9 +2735,9 @@ mod tests {
         assert!(!empty.ok, "空 work_id 必须拒绝");
     }
 
-    /// Workspace 确认交互：未确认的 cwd 拒绝 → confirm_workspace 登记 → 放行；
-    /// 默认工作区与已确认目录无需确认；复用会话的 cwd 同样校验；
-    /// 不存在的目录拒绝登记。
+    /// Workspace 授权（R3）：未经授权的 cwd 拒绝且指引等待用户授权；
+    /// 授权是宿主事实（此处以落盘模拟宿主授权产物）→ 放行；
+    /// 默认工作区与已授权目录无需授权；复用会话的 cwd 同样校验。
     #[test]
     fn dispatch_requires_workspace_confirmation() {
         let root = tempfile::tempdir().unwrap();
@@ -2815,22 +2767,20 @@ mod tests {
         );
         assert!(!denied.ok, "未确认工作区必须拒绝：{}", denied.stderr);
         assert!(
-            denied.stderr.contains("尚未经用户确认"),
-            "拒绝信息须说明确认流程：{}",
+            denied.stderr.contains("尚未经用户授权"),
+            "拒绝信息须说明授权流程：{}",
             denied.stderr
         );
         assert!(
-            denied.stderr.contains("confirm_workspace"),
-            "拒绝信息须指引 confirm_workspace：{}",
+            denied.stderr.contains("授权"),
+            "拒绝信息须指向用户授权（非助手自证）：{}",
             denied.stderr
         );
-        // 登记确认
-        let confirmed = call_tool(
-            &plugin,
-            "confirm_workspace",
-            serde_json::json!({"path": extra_path}),
+        // 宿主授权产物（模拟：授权通道落盘——助手侧无登记工具）
+        add_confirmed_workspace(
+            plugin.sessions.storage_root(),
+            std::path::Path::new(&extra_path),
         );
-        assert!(confirmed.ok, "stderr: {}", confirmed.stderr);
         // 确认后放行
         let allowed = call_tool(
             &plugin,
@@ -2838,7 +2788,7 @@ mod tests {
             serde_json::json!({"task": "扫描依赖并升级", "cwd": extra_path}),
         );
         assert!(allowed.ok, "stderr: {}", allowed.stderr);
-        assert!(!allowed.stderr.contains("尚未经用户确认"));
+        assert!(!allowed.stderr.contains("尚未经用户授权"));
         // 复用路径同样校验（review P1：强制复用把模型赶向复用，该路径
         // 不得成为绕过通道）——会话 cwd 未确认时复用派发被拒
         let reuse = call_tool(
@@ -2852,17 +2802,10 @@ mod tests {
             reuse.stderr
         );
         assert!(
-            reuse.stderr.contains("未经用户确认"),
-            "复用拒绝须说明确认流程：{}",
+            reuse.stderr.contains("未经用户授权"),
+            "复用拒绝须说明授权流程：{}",
             reuse.stderr
         );
-        // 不存在的目录拒绝登记
-        let ghost = call_tool(
-            &plugin,
-            "confirm_workspace",
-            serde_json::json!({"path": "/definitely/not/exist/xyz"}),
-        );
-        assert!(!ghost.ok, "不存在目录不得登记为已确认工作区");
     }
 
     /// 相似任务强制复用：同前缀第二次（不带 session_id/【全新】）拒绝，
