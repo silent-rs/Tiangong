@@ -4,15 +4,17 @@
  * 精品 lucide 图标 + 状态色 + 光环动画（Tailwind），随最高优先级
  * 状态切换；空闲态与顶栏中枢入口同用 Sparkles——全局视觉一致：
  *
- * | 状态 | 图标 | 动画 |
+ * | 状态 | 图标 | 表现 |
  * | --- | --- | --- |
- * | 等你决定 | MessageCircleQuestion | 呼吸（amber） |
- * | 执行中 | Orbit 慢速自转 | ping 光环（violet） |
- * | 失败 | OctagonAlert | 脉冲（red） |
+ * | 执行中 | Orbit 慢速自转 + ping 光环 | 动画（violet，唯一动态） |
+ * | 等你决定 | MessageCircleQuestion | 静态（amber） |
+ * | 失败 | OctagonAlert | 静态（red） |
  * | 中断 | ZapOff | 静态（slate） |
- * | 待汇报/完成 | BadgeCheck | 轻 pulse（emerald） |
  * | 暂停/排队 | PauseCircle | 静态（slate） |
  * | 空闲 | Sparkles（同顶栏中枢入口） | 静态（muted） |
+ *
+ * 完成即空闲（用户实测七）：completed/待汇报不设专用徽章状态——
+ * 徽章回到 Sparkles 空闲态；动画只在执行中（实测六）。
  */
 import {
   Sparkles,
@@ -20,7 +22,6 @@ import {
   MessageCircleQuestion,
   OctagonAlert,
   ZapOff,
-  BadgeCheck,
   PauseCircle,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -31,7 +32,6 @@ export type BadgeState =
   | 'waiting_user'
   | 'failed'
   | 'interrupted'
-  | 'done'
   | 'paused';
 
 interface BadgeVisual {
@@ -59,24 +59,17 @@ const VISUALS: Record<BadgeState, BadgeVisual> = {
   waiting_user: {
     icon: MessageCircleQuestion,
     color: 'text-amber-500 dark:text-amber-400',
-    glow: 'bg-amber-400',
-    iconClass: 'h-[15px] w-[15px] animate-pulse',
+    iconClass: 'h-[15px] w-[15px]',
   },
   failed: {
     icon: OctagonAlert,
     color: 'text-red-500 dark:text-red-400',
-    glow: 'bg-red-400',
-    iconClass: 'h-[15px] w-[15px] animate-pulse',
+    iconClass: 'h-[15px] w-[15px]',
   },
   interrupted: {
     icon: ZapOff,
     color: 'text-slate-500 dark:text-slate-400',
     iconClass: 'h-[15px] w-[15px]',
-  },
-  done: {
-    icon: BadgeCheck,
-    color: 'text-emerald-500 dark:text-emerald-400',
-    iconClass: 'h-[15px] w-[15px] animate-pulse [animation-duration:3s]',
   },
   paused: {
     icon: PauseCircle,

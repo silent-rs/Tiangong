@@ -278,6 +278,7 @@ export function CentralWorkStatusBar() {
 
   const totalCount = visible.length;
   // 徽章主状态（优先级：等你决定 > 执行中 > 失败 > 中断 > 待汇报/完成 > 其他）
+  // 完成即空闲（用户实测七）：completed/待汇报不设徽章状态——回到空闲
   const badgeState: BadgeState = waitingUser.length > 0
     ? 'waiting_user'
     : running.length > 0
@@ -286,11 +287,9 @@ export function CentralWorkStatusBar() {
         ? 'failed'
         : interrupted.length > 0
           ? 'interrupted'
-          : queued.length + completed.length > 0
-            ? 'done'
-            : paused.length + cancelled.length + queuedDep.length > 0
-              ? 'paused'
-              : 'idle';
+          : paused.length + cancelled.length + queuedDep.length > 0
+            ? 'paused'
+            : 'idle';
   return (
     <div
       ref={rootRef}
