@@ -30,16 +30,36 @@ pub(crate) fn central_dispatch_sender(
                             if let Err(error) =
                                 handle_central_dispatch(state_of(&app), &app, request.clone()).await
                             {
-                                tracing::warn!(%error, work_id = %request.work_id, "中枢派发执行失败");
-                                let notice = format!(
-                                    "[后台工作失败] {}（模型 {}）\n任务：{}\n失败原因：{error}",
-                                    request.work_id,
-                                    request.model.as_deref().unwrap_or("（默认）"),
-                                    request.task
-                                );
-                                // 派发即失败：无在执行登记，直接走失败必达路径
-                                state_of(&app)
-                                    .on_central_work_finished(&request, false, &notice);
+                                tracing::warn!(%error, work_id = %request.work_id, "中枢派发未执行");
+                                // 派发未执行 ≠ 工作失败：不产生终态事件、不进
+                                // 登记 registry（用户实测：授权拒绝被伪装成
+                                // [后台工作失败] 会误导模型去「处理失败」——
+                                // 换目录规避、连续重试——而不是等待授权）。
+                                // 立即注入中枢对话（本轮派发的直接后续），
+                                // 给出与错误类别匹配的行动指引。
+                                let is_authorization = error.contains("未经用户授权");
+                                let note = if is_authorization {
+                                    format!(
+                                        "[系统中枢] 派发未执行：{error}\n\
+                                         授权卡片已发给用户（也可调 request_workspace_approval 主动发起）。\n\
+                                         请向用户说明要在该目录做什么、为什么需要授权；等用户确认后重新派发同一任务。\n\
+                                         不要更换目录规避授权，也不要在授权前重复派发。这不是工作失败，没有产生后台工作。"
+                                    )
+                                } else {
+                                    format!(
+                                        "[系统中枢] 派发未执行：{error}\n\
+                                         没有产生后台工作（不是工作失败）。请修正问题后重派，或向用户说明无法派发的原因。"
+                                    )
+                                };
+                                if let Err(deliver_error) =
+                                    state_of(&app).deliver_central_message(
+                                        scru128::new().to_string(),
+                                        vec![tiangong_types::ContentBlock::text(note)],
+                                        None,
+                                    )
+                                {
+                                    tracing::warn!(%deliver_error, "派发未执行说明注入中枢失败");
+                                }
                             }
                         }
                         crate::central::CentralPluginMessage::Steer(request) => {
@@ -82,6 +102,25 @@ pub(crate) fn central_dispatch_sender(
                                     "message": message,
                                     "level": level,
                                 }),
+                            );
+                        }
+                        crate::central::CentralPluginMessage::RequestWorkspaceApproval {
+                            path,
+                            task_fingerprint,
+                        } => {
+                            // 模型只能「请求」授权（R3 票据化）：触发前端
+                            // 授权卡片；票据由用户操作签发（approve 命令）。
+                            super::events::emit_approval_required(
+                                state_of(&app),
+                                super::events::ApprovalRequiredEvent {
+                                    cwd: path.clone(),
+                                    task: task_fingerprint.clone(),
+                                    work_id: String::new(),
+                                },
+                            );
+                            tracing::info!(
+                                cwd = %path,
+                                "Workspace 授权卡片已发起（模型请求）"
                             );
                         }
                     }
@@ -351,7 +390,7 @@ pub(crate) async fn plan_central_dispatch(
                 },
             );
             return Err(format!(
-                "工作目录 {cwd} 尚未经用户授权（派发被拒绝）。请先在对话中向用户说明\n                 任务概要与影响，等待用户完成授权操作（授权由用户在系统侧确认，\n                 助手不能代替用户授权）后重新派发。"
+                "工作目录 {cwd} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{cwd}\", task_fingerprint=<与本次 task 完全一致>) 向用户发起授权卡片，并向用户说明任务与影响；用户确认后重派同一任务。授权只能由用户完成，不要更换目录规避，也不要在授权前重复派发。"
             ));
         }
     }

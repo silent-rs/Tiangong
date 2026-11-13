@@ -41,9 +41,7 @@ impl CentralPlugin {
         };
         if let Some(cwd) = cwd.and_then(unconfirmed) {
             return self.error_result(format!(
-                "工作区 {cwd} 尚未经用户授权。请在对话中向用户说明要在该目录\n\
-                 执行的任务概要与影响，等待用户完成授权操作（授权由用户在\n\
-                 系统侧确认，助手不能代替用户授权）后重新派发。"
+                "工作区 {cwd} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{cwd}\", task_fingerprint=\"{task}\") 向用户发起授权卡片，并说明任务与影响；用户确认后重派同一任务。不要更换目录规避，也不要在授权前重复派发。"
             ));
         }
         // 模型校验（白名单 §5.3：派发前确认模型可用；失败时附可用清单）
@@ -86,9 +84,7 @@ impl CentralPlugin {
             .unwrap_or_default();
             if let Some(dir) = unconfirmed(&session_cwd) {
                 return self.error_result(format!(
-                    "复用会话 {existing} 的工作目录 {dir} 尚未经用户授权。请先在\n\
-                     对话中向用户说明任务概要，等待用户完成授权操作（系统侧\n\
-                     确认，助手不能代替授权）后重新派发。"
+                    "复用会话 {existing} 的工作目录 {dir} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{dir}\", task_fingerprint=\"{task}\") 向用户发起授权卡片；用户确认后重派同一任务。"
                 ));
             }
         }

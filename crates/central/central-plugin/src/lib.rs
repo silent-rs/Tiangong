@@ -65,6 +65,13 @@ pub enum CentralPluginMessage {
         message: String,
         level: String,
     },
+    /// 请求用户授权 Workspace（R3 票据化的「模型只能请求」侧）：
+    /// 触发前端授权卡片；真正的票据只能由用户操作签发。
+    RequestWorkspaceApproval {
+        path: String,
+        /// 任务指纹（与后续派发的 task 文本一致才放行，防偷换）。
+        task_fingerprint: String,
+    },
 }
 
 /// 中枢工作控制请求（cancel_work / pause_work / resume_work）。
@@ -407,6 +414,19 @@ impl ToolOverrideHandler for CentralPlugin {
                     .unwrap_or("");
                 self.handle_switch_worker_model(session_id, model, consultation)
             }
+            "request_workspace_approval" => {
+                let path = call
+                    .arguments
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let task_fingerprint = call
+                    .arguments
+                    .get("task_fingerprint")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_request_workspace_approval(path, task_fingerprint)
+            }
             "send_notification" => {
                 let title = call
                     .arguments
@@ -669,8 +689,8 @@ mod tests {
         );
         assert_eq!(
             spec_names.len(),
-            21,
-            "工具数应为 21（confirm_workspace 已移除；新增工具时同步更新）"
+            22,
+            "工具数应为 22（request_workspace_approval 已加入；新增工具时同步更新）"
         );
     }
 
@@ -738,7 +758,7 @@ mod tests {
         let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(&plugin, "get_context", serde_json::json!({}));
         assert!(result.ok);
-        assert!(result.stdout.contains("后台工作派发: 已接入"));
+        assert!(result.stdout.contains("身份: 天工中枢"));
         assert!(result.stdout.contains("/tmp/ws"));
     }
 
@@ -1587,24 +1607,6 @@ mod tests {
         assert!(valid.stdout.contains("留痕"));
     }
 
-    /// get_context 工具数与 tool_specs 一致（review 硬断言：漂移即失真）。
-    #[test]
-    fn get_context_tool_count_matches_specs() {
-        let root = tempfile::tempdir().unwrap();
-        let manager = manager_with_session_cwds(root.path(), &[]);
-        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
-        let context = call_tool(&plugin, "get_context", serde_json::json!({}));
-        assert!(context.ok, "stderr: {}", context.stderr);
-        let count: usize = context
-            .stdout
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("中枢工具数: "))
-            .and_then(|value| value.trim().parse().ok())
-            .expect("get_context 必须输出「中枢工具数: N」");
-        let specs = plugin.tool_specs().len();
-        assert_eq!(count, specs, "get_context 工具数与 tool_specs 漂移");
-    }
-
     /// dispatch_work schema：after_work_id/parallel 必须在 properties 内
     /// （review P1：曾落在 properties 外——模型看不到参数，写入锁豁免
     /// 不可达且同目录派发被无条件串行）。
@@ -1711,6 +1713,52 @@ mod tests {
             serde_json::json!({"work_id": "work-none"}),
         );
         assert!(!ghost.ok);
+    }
+
+    /// R5：模型只能「请求」Workspace 授权（触发卡片），不能登记授权。
+    #[test]
+    fn request_workspace_approval_sends_request_not_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 空路径/空指纹拒绝
+        let empty = call_tool(
+            &plugin,
+            "request_workspace_approval",
+            serde_json::json!({"path": "  ", "task_fingerprint": "t"}),
+        );
+        assert!(!empty.ok);
+        let no_fingerprint = call_tool(
+            &plugin,
+            "request_workspace_approval",
+            serde_json::json!({"path": "/tmp"}),
+        );
+        assert!(!no_fingerprint.ok, "缺任务指纹必须拒绝（防偷换无从校验）");
+
+        // 正常请求：发出 RequestWorkspaceApproval 消息（不是授权登记）
+        let ok = call_tool(
+            &plugin,
+            "request_workspace_approval",
+            serde_json::json!({"path": "/tmp/proj", "task_fingerprint": "发布模块 v2"}),
+        );
+        assert!(ok.ok, "stderr: {}", ok.stderr);
+        assert!(ok.stdout.contains("已向用户发出"), "{}", ok.stdout);
+        match dispatch_rx.try_recv().expect("请求应经通道发出") {
+            CentralPluginMessage::RequestWorkspaceApproval {
+                path,
+                task_fingerprint,
+            } => {
+                assert_eq!(path, "/tmp/proj");
+                assert_eq!(task_fingerprint, "发布模块 v2");
+            }
+            other => panic!("应收到 RequestWorkspaceApproval，实际 {other:?}"),
+        }
+        // 请求不产生授权事实
+        assert!(
+            load_confirmed_workspaces(plugin.sessions.storage_root()).is_empty(),
+            "请求授权不得直接登记工作区"
+        );
     }
 
     /// 工作控制工具：work_id 校验 + Control 消息送达（通道层验证）。

@@ -117,15 +117,19 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
 pub(crate) fn build_activation_summary(
     entries: &[crate::central::CentralWorkStatus],
     goals: &[crate::central::GoalRecord],
-) -> String {
+) -> Option<String> {
     use central_state::WorkState;
     let count = |state: WorkState| entries.iter().filter(|e| e.state == state).count();
     let waiting = count(WorkState::WaitingUser);
     let interrupted = count(WorkState::Interrupted);
     let failed = count(WorkState::Failed);
-    let running = count(WorkState::Running);
-    let paused = count(WorkState::Paused);
-    let queued = count(WorkState::Queued);
+    // 适时沉默（§9 / 用户实测反馈）：空闲与纯执行态（running/paused/
+    // queued——徽章可见）一律不注入，不要求模型自我介绍或播报状态；
+    // 只有「需要用户动作」的事实（等待决策 / 失败未处理 / 中断未收尾）
+    // 才注入一条简洁提醒——这是关键节点必达，其余保持安静。
+    if waiting == 0 && interrupted == 0 && failed == 0 {
+        return None;
+    }
     let mut facts: Vec<String> = Vec::new();
     if waiting > 0 {
         let names: Vec<String> = entries
@@ -149,15 +153,6 @@ pub(crate) fn build_activation_summary(
             "{interrupted} 个工作中断未收尾（可复用原会话重派）"
         ));
     }
-    if running > 0 {
-        facts.push(format!("{running} 个工作在执行中"));
-    }
-    if paused > 0 {
-        facts.push(format!("{paused} 个工作已暂停（可恢复）"));
-    }
-    if queued > 0 {
-        facts.push(format!("{queued} 个工作排队等待"));
-    }
     let active_goals: Vec<&str> = goals
         .iter()
         .filter(|g| g.status == "active")
@@ -166,17 +161,12 @@ pub(crate) fn build_activation_summary(
     let goal_note = if active_goals.is_empty() {
         String::new()
     } else {
-        format!("\n用户目标：{}", active_goals.join("、"))
+        format!("\n相关目标：{}", active_goals.join("、"))
     };
-    if facts.is_empty() && active_goals.is_empty() {
-        "[系统中枢][激活] 用户已进入中枢模式。当前没有进行中的后台工作与已登记目标——\n这是首次或空闲状态：请向用户简短问候并介绍你能做什么（直接说目标，你会判断 Workspace、安排后台工作、跟踪进展并在关键节点汇报），不要编造状态。"
-            .to_string()
-    } else {
-        format!(
-            "[系统中枢][激活] 用户已进入中枢模式。基于可验证上下文的当前状态：\n{}{goal_note}\n请按人设「激活问候」规则主动问候用户：简洁、只陈述上述事实（不把推测写成事实）、最多给 1-3 条建议（如处理等待决策/重派中断/查看在跑进展），等用户指示。",
-            facts.join("；")
-        )
-    }
+    Some(format!(
+        "[系统中枢][激活] 用户刚回到中枢。有需要用户知道的事：{}{goal_note}\n请用一两句自然的话告诉用户（说事实即可，不用列清单，不用介绍自己能做什么）；其余等用户开口。",
+        facts.join("；")
+    ))
 }
 
 /// 激活问候注入（§4.2）：进入中枢模式时把状态摘要投递给中枢 Core，
@@ -191,7 +181,11 @@ pub(crate) fn inject_central_activation_summary(state: &TiangongApp) -> Result<(
     }
     let entries = state.central_work_status();
     let goals = crate::central::load_goals(state.core_manager.storage_root());
-    let summary = build_activation_summary(&entries, &goals);
+    // 空闲与纯执行态不注入（适时沉默——用户实测：机械问候无价值）；
+    // 仅存在需要用户动作的事实时注入一条自然提醒。
+    let Some(summary) = build_activation_summary(&entries, &goals) else {
+        return Ok(());
+    };
     state.deliver_central_message(
         scru128::new().to_string(),
         vec![tiangong_types::ContentBlock::text(summary)],

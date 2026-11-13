@@ -30,25 +30,22 @@ impl CentralPlugin {
                 active.join("、")
             }
         };
+        // R5 用户实测修正：这是给模型的工作上下文，不是状态面板——
+        // 去掉版本号/阶段标签/工具清单/工具数等机读信息（模型有完整
+        // 工具 schema，不需要在本表复述；这些字段还会被复述给用户）。
         let body = format!(
-            "天工版本: {version}\n\
-             中枢模式: POC 阶段 1（单一中枢对话 + 指定模型派发后台工作已接入）\n\
-             身份边界: 中枢是控制面，不直接执行工作型任务（§5.2）\n\
-             可用工具: get_context / list_workspaces / inspect_workspace / list_models / list_sessions / dispatch_work / send_to_worker / collect_work_reports / list_work_items / search_history（查询类只读；dispatch_work 派发、支持 session_id 复用；send_to_worker 发引导（等待用户决策的工作收到答复后自动恢复执行）；cancel_work/pause_work/resume_work 控制；get_work_timeline 查工作时间线；create_goal/update_goal_status 管理用户目标（用户表达目标时登记，达成/放弃时更新）；create_report/list_reports 结构化报告存档与查询；get_work_item_status 单工作详情；switch_worker_model 换工作会话模型（必须先与用户商量并携带结论）；send_notification 应用内通知（重要事件，勿滥用）；dispatch_work 支持 after_work_id 排队依赖；search_history 跨会话搜消息）\n\
-             后台工作派发: 已接入（dispatch_work 指定模型派发后台会话执行，完成进入待汇报队列，随用户下一条消息一并进入对话，或由你调 collect_work_reports 主动收集）\n\
-             默认工作区: {workspace}\n\
+            "身份: 天工中枢——控制面，理解目标、协调后台工作，不直接执行工作型任务\n\
+             默认工作区: {workspace}（其他目录派发前需用户授权）\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
-             待汇报的后台工作回报: {pending} 条（可调 collect_work_reports 收集后转述）\n\
-             中枢工具数: {tool_count}\n\
-             因应用重启中断的任务: {interrupted} 个（徽章可见；结果未产出，可重派复用原会话）\n             当前用户目标: {goals}\n\
+             待汇报的后台工作回报: {pending} 条（collect_work_reports 收集后转述）\n\
+             因应用重启中断的任务: {interrupted} 个（结果未产出，可重派复用原会话）\n\
+             当前用户目标: {goals}\n\
              当前时间: {now}",
-            version = env!("CARGO_PKG_VERSION"),
             workspace = self.workspace_dir,
             count = workspace_count,
             pending = pending_reports,
             interrupted = interrupted_reports,
             goals = goals_summary,
-            tool_count = self.tool_specs().len(),
             now = chrono::Local::now().format("%Y-%m-%d %H:%M"),
         );
         self.text_result("中枢上下文", body)

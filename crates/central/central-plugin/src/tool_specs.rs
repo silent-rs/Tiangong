@@ -186,6 +186,19 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
+                name: "request_workspace_approval".to_string(),
+                description: "向用户发起 Workspace 授权请求（触发授权卡片）。dispatch_work 因目录未授权被拒后使用：先请求授权并向用户说明，用户确认后重派同一任务。task_fingerprint 必须与 dispatch_work 的 task 完全一致（防偷换）。你只能请求授权，不能代替用户授权。"
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "要授权的工作区绝对路径"},
+                        "task_fingerprint": {"type": "string", "description": "任务指纹（与 dispatch_work 的 task 文本完全一致）"}
+                    },
+                    "required": ["path", "task_fingerprint"]
+                }),
+            },
+            ToolSpec {
                 name: "send_notification".to_string(),
                 description: "向用户发送应用内通知（桌面气泡）。重要事件需要用户即时知晓\
                     （高风险操作提醒、关键完成、需要尽快决策）时使用；常规汇报走对话，\

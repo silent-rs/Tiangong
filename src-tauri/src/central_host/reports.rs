@@ -187,13 +187,16 @@ impl TiangongApp {
                     handle_central_dispatch(state_of(&app_handle), &app_handle, request.clone())
                         .await
                 {
-                    tracing::warn!(%error, "排队工作投递失败");
+                    tracing::warn!(%error, "排队工作投递未执行");
+                    // 与派发路径同语义：投递未执行 ≠ 工作失败——不产生终态、
+                    // 不伪装失败回报；注入说明（随下一条消息进入中枢对话）。
                     let state = state_of(&app_handle);
                     let notice = format!(
-                        "[后台工作失败] {}（排队投递失败）\n任务：{}\n失败原因：{error}",
-                        request.work_id, request.task
+                        "[系统中枢] 排队工作 {} 投递未执行：{error}\n没有产生后台工作（不是工作失败）；依赖已终态，可重新派发。",
+                        request.work_id
                     );
-                    state.on_central_work_finished(&request, false, &notice);
+                    state.push_central_work_reports(vec![notice]);
+                    super::events::emit_central_work_updated_state(state);
                 }
             });
         }

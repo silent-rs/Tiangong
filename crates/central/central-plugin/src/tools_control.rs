@@ -138,6 +138,42 @@ impl CentralPlugin {
         self.text_result("通知已发送", format!("已向用户发送 {level} 通知：{title}"))
     }
 
+    /// 请求用户授权 Workspace（R3 票据化：模型只能请求，票据由用户
+    /// 操作签发）。触发授权卡片；指纹须与后续派发的任务文本一致。
+    pub(crate) fn handle_request_workspace_approval(
+        &self,
+        path: &str,
+        task_fingerprint: &str,
+    ) -> Option<ToolResult> {
+        let path = path.trim();
+        let task_fingerprint = task_fingerprint.trim();
+        if path.is_empty() {
+            return self.error_result("path 不能为空".to_string());
+        }
+        if task_fingerprint.is_empty() {
+            return self.error_result(
+                "task_fingerprint 不能为空（应与 dispatch_work 的 task 完全一致，否则授权不生效）"
+                    .to_string(),
+            );
+        }
+        if let Err(error) = self
+            .dispatch_tx
+            .send(CentralPluginMessage::RequestWorkspaceApproval {
+                path: path.to_string(),
+                task_fingerprint: task_fingerprint.to_string(),
+            })
+        {
+            return self.error_result(format!("派发通道已关闭：{error}"));
+        }
+        self.text_result(
+            "已请求用户授权",
+            format!(
+                "已向用户发出 {path} 的授权请求（授权卡片）。
+\
+                 请向用户说明要在该目录做什么、为什么需要授权；用户确认后重新派发同一任务（task 文本保持不变，否则需重新授权）。"
+            ),
+        )
+    }
     /// 工作控制（取消/暂停/恢复）共用：校验登记存在并发 Control 消息。
     pub(crate) fn handle_work_control(&self, work_id: &str, action: &str) -> Option<ToolResult> {
         let work_id = work_id.trim();

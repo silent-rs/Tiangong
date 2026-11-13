@@ -1562,16 +1562,33 @@ mod tests {
                 execution_id: None,
             },
         ];
-        let summary = build_activation_summary(&entries, &[]);
+        // R5 用户实测修正：只有需要用户动作的事实才注入（必达），
+        // 且措辞自然（不说工具数/状态清单/能力介绍）
+        let summary = build_activation_summary(&entries, &[]).expect("有等待决策/中断事实应注入");
         assert!(summary.contains("1 个工作在等你决策"), "{summary}");
         assert!(summary.contains("review 仓库"), "{summary}");
         assert!(summary.contains("1 个工作中断"), "{summary}");
-        assert!(summary.contains("激活问候"), "{summary}");
-        // 空闲态：能力介绍，不编造
-        let idle = build_activation_summary(&[], &[]);
-        assert!(idle.contains("首次或空闲状态"), "{idle}");
-        assert!(!idle.contains("等你决策"), "{idle}");
-        // 有目标：注入目标上下文
+        assert!(summary.contains("一两句自然"), "{summary}");
+        assert!(!summary.contains("介绍你能做什么"), "{summary}");
+        // 空闲与纯执行态：完全静默（适时沉默——机械问候无价值）
+        assert!(build_activation_summary(&[], &[]).is_none(), "空闲不注入");
+        let running_only = vec![crate::central::CentralWorkStatus {
+            work_id: "w-run".into(),
+            session_id: "s-run".into(),
+            task: "跑测试".into(),
+            model: None,
+            dispatched_at: "2026-11-12 10:00:00".into(),
+            state: central_state::WorkState::Running,
+            reused_session: false,
+            last_activity: None,
+            cwd: None,
+            execution_id: None,
+        }];
+        assert!(
+            build_activation_summary(&running_only, &[]).is_none(),
+            "纯执行态不注入（徽章可见，不打扰）"
+        );
+        // 有需用户动作的事实时，相关目标一并提供
         let goals = vec![crate::central::GoalRecord {
             goal_id: "g1".into(),
             title: "完成中枢模式".into(),
@@ -1580,7 +1597,7 @@ mod tests {
             created_at: "2026-11-12".into(),
             status: "active".into(),
         }];
-        let with_goal = build_activation_summary(&[], &goals);
+        let with_goal = build_activation_summary(&entries, &goals).expect("有事实时应注入");
         assert!(with_goal.contains("完成中枢模式"), "{with_goal}");
     }
     // ============================================================================
