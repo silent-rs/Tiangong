@@ -897,7 +897,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 ### A.4 后续工作（按优先级，2026-11-13 更新）
 
-1. 消息流结构化：Worker 回报 / 决定请求 / 授权请求以结构化消息进入中枢对话（决定卡片、授权卡片组件消费已就绪命令）。
+1. 消息流结构化：✅ 第一片 `900ef26d`——授权卡片（事件驱动：拒绝→卡片→用户签发票据→重派过指纹校验，防偷换闭环）+ 决定卡片（waiting_user 状态驱动，答复经对话恢复同一执行）。后续可选：Worker 回报 ReportCard / SupervisorActivityBlock 折叠展示。
 2. ~~registry 由事件投影重建~~ ✅ `fd7f9cab`（派发事件携带登记字段；空日志回退旧快照）。
 3. ~~快照 envelope 版本化~~ ✅ `d0ace0a7`；~~recover 对账可观测~~ ✅ `13704405`（宽松读跳坏行计数、快照版本超前 warn）。
 4. ~~插件压缩~~ ✅ `5cd27fb6`（lib.rs 非测试约 490 行；tools_context / tools_dispatch / tools_goal_report / tools_control 四模块）。
