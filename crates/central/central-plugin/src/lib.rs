@@ -159,6 +159,9 @@ pub struct CentralControlRequest {
 pub struct CentralDispatchRequest {
     /// 派发标识（中枢对话内引用用）。
     pub work_id: String,
+    /// 本次执行的唯一归属（R0 契约，§5.4）：`exec-<scru128>`。派发/恢复/
+    /// 重试/重放各生成新值；终态回调与日志据此唯一定位，不靠会话猜测。
+    pub execution_id: String,
     /// Worker 会话 ID：新建时为插件生成的 scru128；复用已有会话时为
     /// `reuse_session_id` 校验通过后的同一 ID（应用尽用，保持上下文连续）。
     pub session_id: String,
@@ -520,6 +523,9 @@ impl CentralPlugin {
             }
         }
         let similarity_hint = String::new(); // 强制拒绝已替代提示式兜底
+                                             // R0 契约（§5.4）：每次派发生成唯一执行归属，随请求、登记与
+                                             // 事件时间线一起流动——日志与持久化记录据此唯一定位。
+        let execution_id = tiangong_central::new_execution_id();
         let record = WorkItemRecord {
             work_id: pending_work_id,
             reused_session: reused,
@@ -539,6 +545,7 @@ impl CentralPlugin {
                 .filter(|path| !path.is_empty())
                 .map(str::to_string),
             outcome: None,
+            execution_id: Some(execution_id.clone()),
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),
@@ -552,6 +559,7 @@ impl CentralPlugin {
             after_work_id: after_work_id.map(str::to_string),
             parallel,
             reused_session: reused,
+            execution_id,
         };
         if let Err(error) = self
             .dispatch_tx
@@ -853,6 +861,8 @@ impl CentralPlugin {
                 "会话不存在：{target}（可用 list_work_items / list_sessions 查询）"
             ));
         }
+        // R0 契约（§5.4）：引导同样是一次执行，生成独立归属。
+        let execution_id = tiangong_central::new_execution_id();
         let record = WorkItemRecord {
             work_id: format!("steer-{}", scru128::new()),
             reused_session: true,
@@ -866,6 +876,7 @@ impl CentralPlugin {
             after_work_id: None,
             cwd: None,
             outcome: None,
+            execution_id: Some(execution_id.clone()),
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),
@@ -876,6 +887,7 @@ impl CentralPlugin {
             after_work_id: None,
             parallel: false,
             reused_session: true,
+            execution_id,
         };
         if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Steer(request)) {
             return self.error_result(format!("派发通道已关闭：{error}"));
@@ -2524,6 +2536,7 @@ mod tests {
                 queued_at: None,
                 after_work_id: None,
                 cwd: None,
+                execution_id: None,
             };
             upsert_work_item(root.path(), &record);
         }
@@ -2541,6 +2554,7 @@ mod tests {
             after_work_id: None,
             cwd: None,
             outcome: None,
+            execution_id: None,
         };
         upsert_work_item(root.path(), &again);
         let items = load_work_items(root.path());
@@ -2593,6 +2607,7 @@ mod tests {
             after_work_id: None,
             cwd: None,
             outcome: None,
+            execution_id: None,
         };
         upsert_work_item(root.path(), &record);
         // 错误 work_id + 正确 session_id：兜底命中并写终态
@@ -2655,6 +2670,7 @@ mod tests {
                     queued_at: None,
                     after_work_id: None,
                     cwd: None,
+                    execution_id: None,
                 },
             );
         }
@@ -2690,6 +2706,7 @@ mod tests {
                 queued_at: None,
                 after_work_id: None,
                 cwd: None,
+                execution_id: None,
             });
         }
         records.push(WorkItemRecord {
@@ -2705,6 +2722,7 @@ mod tests {
             queued_at: None,
             after_work_id: None,
             cwd: None,
+            execution_id: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-fail".to_string(),
@@ -2719,6 +2737,7 @@ mod tests {
             queued_at: None,
             after_work_id: None,
             cwd: None,
+            execution_id: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-recent-open".to_string(),
@@ -2733,6 +2752,7 @@ mod tests {
             queued_at: None,
             after_work_id: None,
             cwd: None,
+            execution_id: None,
         });
         records.push(WorkItemRecord {
             work_id: "work-stale-open".to_string(),
@@ -2747,6 +2767,7 @@ mod tests {
             queued_at: None,
             after_work_id: None,
             cwd: None,
+            execution_id: None,
         });
         for record in &records {
             upsert_work_item(root.path(), record);
@@ -2796,6 +2817,7 @@ mod tests {
             after_work_id: None,
             cwd: None,
             outcome: None,
+            execution_id: None,
         };
         upsert_work_item(root.path(), &record);
         let items = load_work_items(root.path());

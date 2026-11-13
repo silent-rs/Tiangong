@@ -14,6 +14,7 @@ fn entry(work_id: &str, session: &str, state: WorkState) -> WorkStatus {
         reused_session: false,
         last_activity: None,
         cwd: None,
+        execution_id: None,
     }
 }
 
@@ -28,6 +29,7 @@ fn dispatch_reuse_model_ignored_is_explicit() {
         true,
         Some("/ws/a"),
         "2026-11-11 15:00:00",
+        "exec-lock",
     );
     assert_eq!(
         entry.model.as_deref(),
@@ -43,6 +45,7 @@ fn dispatch_reuse_model_ignored_is_explicit() {
         false,
         None,
         "2026-11-11 15:00:00",
+        "exec-lock",
     );
     assert_eq!(fresh.model.as_deref(), Some("k3"));
     assert_eq!(fresh.cwd.as_deref(), None);
@@ -60,6 +63,7 @@ fn dispatch_reuse_finish_queues_report() {
         true,
         Some("/ws/a"),
         "2026-11-11 16:00:00",
+        "exec-lock",
     );
     upsert_registry_entry(&mut entries, dispatched);
     assert_eq!(entries.len(), 1, "会话维度单条");
@@ -94,6 +98,7 @@ fn interrupted_items_migrate_and_clear() {
         true,
         Some("/ws/a"),
         "2026-11-11 17:00:00",
+        "exec-lock",
     );
     upsert_registry_entry(&mut entries, re_dispatch);
     assert!(
@@ -191,6 +196,7 @@ fn resume_from_pause_takes_recovery_not_merge() {
             true,
             Some("/ws/a"),
             "2026-11-11 19:00:00",
+            "exec-lock",
         ),
     );
     let entry = entries

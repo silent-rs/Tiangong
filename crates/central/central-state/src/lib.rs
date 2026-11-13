@@ -84,6 +84,10 @@ pub struct WorkStatus {
     pub last_activity: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// 当前执行的归属（R0 契约，§5.4）：终态回调与日志据此唯一定位，
+    /// 不再依赖「当前 session 最近一条」。None = 旧登记（字段上线前）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
 }
 
 /// 工作回报结局（终态回调入参的分类）。
@@ -93,6 +97,16 @@ pub enum WorkOutcome {
     Finished,
     /// 等待用户决策：回报含【需要用户决策】标记，工作未终态。
     WaitingUser,
+}
+
+impl WorkOutcome {
+    /// 日志用短名（R0 观测）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Finished => "finished",
+            Self::WaitingUser => "waiting_user",
+        }
+    }
 }
 
 /// 依据回报文本判定结局（Worker 用户决策协议）。
@@ -232,6 +246,7 @@ pub fn registry_entry_after_dispatch(
     reused_session: bool,
     cwd: Option<&str>,
     now: &str,
+    execution_id: &str,
 ) -> WorkStatus {
     WorkStatus {
         work_id: work_id.to_string(),
@@ -250,6 +265,11 @@ pub fn registry_entry_after_dispatch(
         reused_session,
         last_activity: None,
         cwd: cwd.map(str::to_string),
+        execution_id: if execution_id.is_empty() {
+            None
+        } else {
+            Some(execution_id.to_string())
+        },
     }
 }
 

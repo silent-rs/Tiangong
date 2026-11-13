@@ -39,6 +39,11 @@ pub struct WorkItemRecord {
     /// 默认工作区执行，第十三轮 P2-2）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// 最近一次执行的归属（R0 契约，§5.4）：`exec-<scru128>`。会话维度
+    /// upsert 时取最新派发的执行；恢复 / 重试 / 重放会换新 execution_id。
+    /// None = 旧记录（字段上线前）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
 }
 
 /// 后台工作事件（时间线条目，§13.4 轻量版）。
@@ -50,6 +55,10 @@ pub struct WorkItemEvent {
     pub kind: String,
     /// 人读说明
     pub note: String,
+    /// 事件归属的执行（R0 契约）：由 `append_work_item_event` 按该会话
+    /// 登记的最近执行自动回填，保证时间线可唯一定位到一次执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
 }
 
 /// 保留最近 30 条）。找不到条目时静默跳过（时间线是附加信息，不阻塞主链）。
@@ -67,10 +76,12 @@ pub fn append_work_item_event(
     else {
         return;
     };
+    let execution_id = entry.execution_id.clone();
     entry.events.push(WorkItemEvent {
         at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         kind: kind.to_string(),
         note: note.to_string(),
+        execution_id,
     });
     let overflow = entry.events.len().saturating_sub(30);
     if overflow > 0 {
@@ -299,6 +310,7 @@ pub fn recover_registry_entries(storage_root: &std::path::Path) -> Vec<crate::Wo
             reused_session: item.reused_session,
             last_activity: None,
             cwd: None,
+            execution_id: item.execution_id,
         });
     }
     // 截断：completed/failed 各保留最近 10 条（尾部为最新，从头部移除）
@@ -352,6 +364,32 @@ pub fn upsert_work_item(storage_root: &std::path::Path, record: &WorkItemRecord)
         let overflow = items.len() - MAX_WORK_ITEMS;
         items.drain(..overflow);
     }
+    if let Some(parent) = work_items_path(storage_root).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    save_work_items(storage_root, &items);
+}
+
+/// 更新会话登记的当前执行归属（R0 契约，§5.4）。
+///
+/// 宿主在投递成功后调用：插件侧派发落盘已带 execution_id（幂等无害）；
+/// 恢复 / 排队重放由宿主构造请求，经此把新 execution_id 写回登记，
+/// 后续事件时间线（`append_work_item_event` 自动回填）与终态日志
+/// 才能归属到本次执行而非历史执行。
+pub fn set_work_item_execution(
+    storage_root: &std::path::Path,
+    session_id: &str,
+    execution_id: &str,
+) {
+    let mut items = load_work_items(storage_root);
+    let Some(entry) = items
+        .iter_mut()
+        .rev()
+        .find(|item| item.session_id == session_id)
+    else {
+        return;
+    };
+    entry.execution_id = Some(execution_id.to_string());
     if let Some(parent) = work_items_path(storage_root).parent() {
         let _ = std::fs::create_dir_all(parent);
     }

@@ -166,6 +166,11 @@ pub struct WorkEvent {
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_session_id: Option<String>,
+    /// 归属执行（R0 契约，§5.4）：终态与过程事件唯一挂到一次执行上，
+    /// 不再依赖「当前 session 最近一条 registry」猜归属。旧数据缺失时
+    /// 为 None（兼容读取）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
     pub event_type: WorkEventType,
     pub severity: EventSeverity,
     pub requires_user_action: bool,
@@ -184,6 +189,7 @@ impl WorkEvent {
             work_item_id: work_item_id.into(),
             workspace_id: None,
             worker_session_id: None,
+            execution_id: None,
             event_type,
             severity: EventSeverity::Normal,
             requires_user_action: false,
@@ -191,6 +197,13 @@ impl WorkEvent {
             created_at: now_text(),
             acknowledged_at: None,
         }
+    }
+
+    /// 标记归属执行（§5.4：所有 Started / Progress / 终态事件必须带
+    /// `execution_id`）。
+    pub fn with_execution(mut self, execution_id: impl Into<String>) -> Self {
+        self.execution_id = Some(execution_id.into());
+        self
     }
 
     /// 标记该事件需要用户动作（如 `approval.required`，§8.2）。
@@ -260,5 +273,35 @@ mod tests {
         assert!(WorkEventType::WorkItemFailed.is_work_item_final());
         assert!(!WorkEventType::WorkItemCancelled.is_work_item_final());
         assert!(!WorkEventType::ModelUnavailable.is_work_item_final());
+    }
+
+    /// R0 契约：旧事件 JSON（无 execution_id 字段）必须能兼容读取。
+    #[test]
+    fn legacy_event_json_without_execution_id_parses() {
+        let legacy = r#"{
+            "id": "ev-1",
+            "work_item_id": "work-1",
+            "worker_session_id": "sess-1",
+            "event_type": "work_item.completed",
+            "severity": "normal",
+            "requires_user_action": false,
+            "payload": {},
+            "created_at": "2026-11-13 10:00:00"
+        }"#;
+        let event: WorkEvent = serde_json::from_str(legacy).expect("旧事件 JSON 必须兼容读取");
+        assert_eq!(event.work_item_id, "work-1");
+        assert_eq!(event.execution_id, None, "缺失 execution_id 应回退 None");
+    }
+
+    /// R0 契约：execution_id 参与序列化，且可往返。
+    #[test]
+    fn execution_id_round_trips() {
+        let event =
+            WorkEvent::new("work-1", WorkEventType::WorkItemStarted).with_execution("exec-abc123");
+        assert_eq!(event.execution_id.as_deref(), Some("exec-abc123"));
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"execution_id\":\"exec-abc123\""));
+        let back: WorkEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.execution_id.as_deref(), Some("exec-abc123"));
     }
 }

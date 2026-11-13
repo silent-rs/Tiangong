@@ -13,6 +13,7 @@ fn entry(work_id: &str, session: &str, state: WorkState) -> WorkStatus {
         reused_session: false,
         last_activity: None,
         cwd: None,
+        execution_id: None,
     }
 }
 

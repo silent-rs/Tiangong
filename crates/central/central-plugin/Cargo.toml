@@ -6,6 +6,7 @@ description = "中枢插件层：22 个中枢工具、人设与派发通道（�
 
 [dependencies]
 central-state = { workspace = true }
+tiangong-central = { workspace = true }
 tiangong-core = { workspace = true }
 tiangong-core-manager = { workspace = true }
 tiangong-types = { workspace = true }

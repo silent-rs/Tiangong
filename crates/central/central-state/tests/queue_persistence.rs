@@ -22,6 +22,7 @@ fn record(session: &str) -> WorkItemRecord {
         queued_at: None,
         after_work_id: None,
         cwd: None,
+        execution_id: None,
     }
 }
 

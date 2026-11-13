@@ -946,6 +946,11 @@ impl TiangongApp {
                 let _ = core.replace_config(session_config.clone());
                 core.set_trust_mode(session_config.trust_mode);
                 core.set_reasoning_effort(session_config.reasoning_effort);
+                // R0 观测：复用已有中枢 Core（进入中枢模式，无重建）。
+                tracing::info!(
+                    session_id = crate::central::CENTRAL_SESSION_ID,
+                    "中枢 Core 复用（进入中枢模式，后台工作不受影响）"
+                );
                 return Ok(false);
             }
         }
@@ -1013,6 +1018,11 @@ impl TiangongApp {
             return Ok(false);
         }
         *guard = Some(core);
+        // R0 观测：中枢 Core 创建 = 模式切换的宿主锚点（进入中枢）。
+        tracing::info!(
+            session_id = crate::central::CENTRAL_SESSION_ID,
+            "中枢 Core 已创建（进入中枢模式）"
+        );
         Ok(true)
     }
 
@@ -1087,6 +1097,16 @@ impl TiangongApp {
         // 阻塞识别（用户决策协议）：回报含【需要用户决策】→ waiting_user
         // （未终态），立即注入中枢（阻塞必达），中枢在对话中问用户；
         let outcome = central_state::classify_outcome(notice);
+        // R0 观测：终态回调按 execution_id 唯一定位（快速完成 / 迟到回调
+        // 均可在日志中区分归属），成败与结局一并记录。
+        tracing::info!(
+            execution_id = %request.execution_id,
+            work_id = %request.work_id,
+            session_id = %request.session_id,
+            done,
+            outcome = outcome.as_str(),
+            "后台工作终态回调"
+        );
         self.central_running_works
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1696,6 +1716,9 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
             .into_iter()
             .map(|record| crate::central::CentralDispatchRequest {
                 work_id: record.work_id,
+                // R0 契约：排队重放是一次新执行（§5.4），旧 execution_id
+                // 留在事件时间线中可追溯，投递用新归属。
+                execution_id: tiangong_central::new_execution_id(),
                 session_id: record.session_id,
                 task: record.task,
                 model: record.model,
@@ -2005,6 +2028,8 @@ async fn handle_central_control(
             );
             let request = crate::central::CentralDispatchRequest {
                 work_id: control.work_id.clone(),
+                // R0 契约：恢复是一次新执行（§5.4），生成新 execution_id
+                execution_id: tiangong_central::new_execution_id(),
                 session_id: control.session_id.clone(),
                 task: "继续之前暂停的任务：请从中断处继续执行并完成既定目标，已有进展无需重做。"
                     .to_string(),
@@ -2014,6 +2039,12 @@ async fn handle_central_control(
                 parallel: false,
                 reused_session: true,
             };
+            tracing::info!(
+                execution_id = %request.execution_id,
+                work_id = %request.work_id,
+                session_id = %request.session_id,
+                "恢复暂停工作：发送继续指令"
+            );
             if let Err(error) = handle_central_dispatch(state, app, request.clone()).await {
                 tracing::warn!(%error, work_id = %control.work_id, "恢复指令发送失败");
             }
@@ -2062,6 +2093,7 @@ async fn enqueue_central_dispatch(
                 reused_session: request.reused_session,
                 last_activity: None,
                 cwd: None,
+                execution_id: Some(request.execution_id.clone()),
             });
         }
     }
@@ -2184,6 +2216,7 @@ async fn plan_central_dispatch(
                 "收到用户答复，恢复执行",
             );
             tracing::info!(
+                execution_id = %request.execution_id,
                 work_id = %merged_work.work_id,
                 session_id = %sid,
                 "等待用户决策的工作已收到答复，恢复执行"
@@ -2313,7 +2346,23 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
             .await?;
         attach_work_finished_callback(&slot, app, merged_work.clone());
     }
-    tracing::info!(work_id = %request.work_id, session_id = %sid, "中枢后台工作已派发");
+    tracing::info!(
+        execution_id = %request.execution_id,
+        work_id = %request.work_id,
+        session_id = %sid,
+        cwd = %cwd,
+        parallel = request.parallel,
+        reused_session = request.reused_session,
+        "中枢后台工作已派发"
+    );
+    // R0 契约：投递成功后同步执行归属到落盘登记——插件侧派发已带同值
+    // （幂等），恢复 / 排队重放经此把新 execution_id 写回，事件时间线与
+    // 终态日志才能归属到本次执行。
+    crate::central::set_work_item_execution(
+        state.core_manager.storage_root(),
+        &sid,
+        &request.execution_id,
+    );
     // 给 Worker 会话写可识别标题（仅新建会话；复用/引导保留原标题）。
     if !request.reused_session {
         let title_preview: String = request.task.chars().take(24).collect();
@@ -2352,6 +2401,7 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
                     request.reused_session,
                     Some(cwd.as_str()),
                     &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    &request.execution_id,
                 ),
             );
         }
@@ -2788,6 +2838,7 @@ mod tests {
                 reused_session: true,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             });
         // 挂载（与 attach_work_finished_callback 同款闭包语义，去掉 app 依赖）
         {
@@ -2850,6 +2901,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             },
             crate::central::CentralWorkStatus {
                 work_id: "w2".into(),
@@ -2861,6 +2913,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             },
         ];
         let summary = build_activation_summary(&entries, &[]);
@@ -2919,6 +2972,7 @@ mod tests {
             after_work_id: None,
             parallel: false,
             reused_session: reused,
+            execution_id: "exec-test".to_string(),
         }
     }
 
@@ -2960,6 +3014,7 @@ mod tests {
                 reused_session: true,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             });
         // 第一 turn：回报含决策标记 → waiting_user（未终态）
         handle_work_terminal(&state, &request, true, "");
@@ -3041,6 +3096,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             });
         handle_work_terminal(&state, &owner, true, "");
         {
@@ -3112,6 +3168,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             });
         let queued2 = dispatch_request("work-q2", "s-run", "第二个排队", false);
         enqueue_central_dispatch(&state, queued2, "work-dep", "/ws").await;
@@ -3151,6 +3208,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: None,
+                execution_id: None,
             });
         // 未知 work_id + 命中 session 的排队条目 → 兜底不得写终态
         let request = dispatch_request("work-unknown", "s-mix", "未知工作", false);
@@ -3199,6 +3257,7 @@ mod tests {
                 reused_session: true,
                 last_activity: None,
                 cwd: Some(ws.to_string_lossy().to_string()),
+                execution_id: None,
             });
         let resume = dispatch_request("work-p", "s-resume", "继续暂停的任务", true);
         let plan = plan_central_dispatch(&state, resume)
@@ -3266,6 +3325,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: Some(ws.to_string_lossy().to_string()),
+                execution_id: None,
             });
         let follow = crate::central::CentralDispatchRequest {
             work_id: "work-follow".into(),
@@ -3276,6 +3336,7 @@ mod tests {
             after_work_id: Some("work-dep".into()),
             parallel: false,
             reused_session: false,
+            execution_id: "exec-test".to_string(),
         };
         let plan = plan_central_dispatch(&state, follow)
             .await
@@ -3340,6 +3401,7 @@ mod tests {
                 reused_session: false,
                 last_activity: None,
                 cwd: Some(ws.to_string_lossy().to_string()),
+                execution_id: None,
             });
         let follow = crate::central::CentralDispatchRequest {
             work_id: "work-f".into(),
@@ -3350,6 +3412,7 @@ mod tests {
             after_work_id: Some("work-dep".into()),
             parallel: false,
             reused_session: false,
+            execution_id: "exec-test".to_string(),
         };
         handle_central_dispatch(state, state_arc, follow)
             .await
@@ -3412,6 +3475,7 @@ mod tests {
             after_work_id: None,
             parallel: false,
             reused_session: false,
+            execution_id: "exec-test".to_string(),
         };
         handle_central_dispatch(state, handle, owner)
             .await
@@ -3427,6 +3491,7 @@ mod tests {
             after_work_id: None,
             parallel: false,
             reused_session: true,
+            execution_id: "exec-test".to_string(),
         };
         handle_central_dispatch(state, handle, steer)
             .await
@@ -3486,6 +3551,7 @@ mod tests {
             queued_at: Some("2026-11-12 10:00:00".into()),
             after_work_id: Some("work-gone".into()), // 依赖已不在登记（视为终态）
             cwd: Some(ws.to_string_lossy().to_string()),
+            execution_id: None,
         };
         crate::central::upsert_work_item(state.core_manager.storage_root(), &record);
         // 重放路径（recover 的重放等价）：按记录构造 request 走 dispatch
@@ -3498,6 +3564,7 @@ mod tests {
             after_work_id: record.after_work_id.clone(),
             parallel: false,
             reused_session: record.reused_session,
+            execution_id: "exec-test".to_string(),
         };
         handle_central_dispatch(state, handle, request)
             .await
@@ -3519,6 +3586,108 @@ mod tests {
             "重放应建 Core（cwd 生效）"
         );
     }
+
+    /// R0 行为基线：派发后执行归属必须三处一致——登记条目、落盘记录与
+    /// 事件时间线都携带本次 execution_id，任何后台工作可唯一定位
+    /// （重构方案 §5.4 / 阶段 R0 完成标准）。
+    #[tokio::test]
+    async fn host_dispatch_records_execution_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let app = tauri::test::mock_app();
+        let state = {
+            let s = TiangongApp::new_for_test(root.keep(), ws.to_string_lossy().to_string());
+            std::fs::write(
+                s.core_manager.storage_root().join("models.json"),
+                serde_json::json!({
+                    "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                    "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                    "routing": {"chat": "k3"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 先落盘登记（生产链路中由中枢插件派发工具写入；此处模拟
+        // resume / 重放场景：记录存在，执行归属待宿主投递后更新）。
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-exec1".into(),
+            reused_session: false,
+            session_id: "s-exec".into(),
+            task: "执行归属基线任务".into(),
+            model: None,
+            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            execution_id: None,
+        };
+        crate::central::upsert_work_item(&storage_root, &record);
+        let request = crate::central::CentralDispatchRequest {
+            work_id: "work-exec1".into(),
+            execution_id: "exec-baseline-1".into(),
+            session_id: "s-exec".into(),
+            task: "执行归属基线任务".into(),
+            model: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            after_work_id: None,
+            parallel: false,
+            reused_session: false,
+        };
+        handle_central_dispatch(state, handle, request)
+            .await
+            .expect("派发应成功");
+        // 1) 内存登记条目带本次执行归属
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-exec")
+                .unwrap();
+            assert_eq!(
+                entry.execution_id.as_deref(),
+                Some("exec-baseline-1"),
+                "登记条目必须携带本次 execution_id"
+            );
+        }
+        // 2) 落盘记录同步执行归属（事件回填的数据源）
+        let items = crate::central::load_work_items(&storage_root);
+        let record = items
+            .iter()
+            .rev()
+            .find(|i| i.session_id == "s-exec")
+            .unwrap();
+        assert_eq!(
+            record.execution_id.as_deref(),
+            Some("exec-baseline-1"),
+            "投递成功后落盘记录必须是本次 execution_id"
+        );
+        // 3) 事件时间线自动回填执行归属
+        crate::central::append_work_item_event(&storage_root, "s-exec", "finished", "工作完成");
+        let items = crate::central::load_work_items(&storage_root);
+        let record = items
+            .iter()
+            .rev()
+            .find(|i| i.session_id == "s-exec")
+            .unwrap();
+        let last_event = record.events.last().expect("事件应已追加");
+        assert_eq!(
+            last_event.execution_id.as_deref(),
+            Some("exec-baseline-1"),
+            "时间线事件必须归属到本次执行"
+        );
+    }
+
     /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，
     /// 未 finish 的第二条被拒（当年「a 项」bug 的行为面：发送态收尾缺失会
     /// 让 is_sending 永真）；finish 释放并递增 revision 后第二条可发送。
