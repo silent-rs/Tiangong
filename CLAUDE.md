@@ -122,6 +122,8 @@ fn load_session(&self, id: &str) -> Result<Session> {
 - `PLAN.md` - 项目总体规划和当前里程碑
 - `TODO.md` - 当前任务列表
 - `docs/central-mode-design-draft.md` - 中枢模式设计基线（职责边界、状态机、事件与模型接力硬约束）
+- `docs/central-refactor-plan.md` - 中枢模式重构方案（基于 POC 验证结论的工程重构基线，本分支实施依据）
+- `docs/central-refactor-demo.html` - 中枢模式交互 demo（重构方案配套演示页）
 - `docs/requirements.md` - 需求边界与非目标
 - `docs/core-architecture.md` - 当前 Core 执行模型与消息路由
 - `docs/agent-loop-refactor/design.md` - 当前 Agent Core 专题说明
