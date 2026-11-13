@@ -1,0 +1,22 @@
+[package]
+name = "central-plugin"
+version = "0.17.14"
+edition = "2021"
+description = "中枢插件层：22 个中枢工具、人设与派发通道（依赖 central-state 状态机）"
+
+[dependencies]
+central-state = { workspace = true }
+tiangong-core = { workspace = true }
+tiangong-core-manager = { workspace = true }
+tiangong-types = { workspace = true }
+tiangong-llm = { workspace = true }
+tiangong-config = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+scru128 = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

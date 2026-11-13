@@ -184,6 +184,11 @@
 
 - 问候必须简洁；
 - 不把推测写成事实；
+- **实现态（2026-11-12）**：激活问候已落地——进入中枢模式时系统注入
+  `[系统中枢][激活]` 状态摘要（等待决策/失败/中断/在跑/暂停/排队/目标，
+  经 build_activation_summary 组装可验证事实），驱动中枢主动开 turn
+  问候；幂等（每进程首次，§10.4 频率控制）；空闲态给能力介绍指引；
+  人设「激活问候」段承载本节约束；
 - 不一次罗列过多信息；
 - 建议最多 1～3 条；
 - 明确区分“我发现”“我推测”“我建议”“已完成”。
@@ -320,24 +325,15 @@
 不应只靠提示词约束，应由宿主在工具路由层建立独立白名单：
 
 ```text
-中枢助手工具集：
-- get_context
-- list_workspaces
-- inspect_workspace
-- create_goal
-- create_work_item
-- dispatch_work_item
-- pause_work_item
-- resume_work_item
-- cancel_work_item
-- get_work_item_status
-- get_work_item_events
-- list_model_profiles
-- get_model_status
-- switch_worker_model
-- request_user
-- send_notification
-- create_report
+中枢助手工具集（POC 实现态，22 个——与 central-plugin tool_specs 逐一对应，
+由 `central_tool_specs_equal_handlers` 测试锁定双向一致）：
+- get_context / list_workspaces / inspect_workspace / list_models / list_sessions
+- dispatch_work（含 session_id 复用、after_work_id 排队、parallel 写入锁豁免）
+- send_to_worker / collect_work_reports / list_work_items / search_history
+- cancel_work / pause_work / resume_work / get_work_timeline / get_work_item_status
+- create_goal / update_goal_status / create_report / list_reports
+- switch_worker_model / send_notification / confirm_workspace
+（request_user 按用户裁决暂缓——中枢需要用户决策时在对话文本中直接询问）
 
 工作会话工具集：
 - fs
@@ -1036,9 +1032,13 @@ central_decision
 
 ### 15.1 用户关闭天工
 
-后台工作不应默认被取消。恢复时中枢助手汇报离开期间变化：
+后台工作不应默认被取消。恢复时中枢助手汇报离开期间变化（**实现口径**：
+completed 不注入恢复汇总——登记为滚动 20 条，无法区分本次离开新增，全量
+完成数会重复刷屏且语义失真；只注入需要用户处理的事实）：
 
-> 你离开期间有 3 个事项发生变化：1 个完成、1 个失败、1 个等待你的确认。
+> 应用重启恢复：N 个后台工作中断（结果未产出，可复用原会话重派）。失败：work-X（任务摘要）。
+
+排队挂起的工作重启后按落盘标记自动重放投递（依赖已终态则立即执行）。
 
 ### 15.2 中枢助手重启
 
@@ -1356,6 +1356,23 @@ central_decision
 18. **代决可复核**：每次代决都留依据、决定与影响范围，用户能追问和撤销。
 
 ---
+
+## 19.1 已裁决事项（POC 阶段，2026-11-11 用户裁决回写）
+
+以下为 POC 实现阶段的产品裁决，实现以本节为准：
+
+1. **徽章常驻显示**：中枢模式右上角的后台工作徽章**始终渲染**——无任务
+   时以弱化空态呈现（灰点 +「无后台任务」），有任务时按分组着色；不因
+   任务清空而消失（用户入口常在）。状态登记持久化并跨重启恢复
+   （completed/failed/interrupted 重建；legacy 终态从中枢会话回报推断
+   成败），同一工作会话在徽章中聚合为一条。
+2. **征询功能暂缓**：中枢模式暂不开发 request_user 弹层征询链路（POC
+   曾实现后整条回退）。中枢需要用户决策时在对话文本中直接询问；Worker
+   后台会话禁用交互工具，确因缺少用户决策无法继续时在最终结论中如实
+   说明阻塞点，不虚构结果。§19-17/18 的征询与代决机制留待后续阶段与
+   征询功能一并设计。
+3. **POC 完整实现优先**：功能按设计稿继续完整实现，改版优化以重构形式
+   迭代（不做大范围推倒重写）。
 
 ## 20. 阶段性结论
 

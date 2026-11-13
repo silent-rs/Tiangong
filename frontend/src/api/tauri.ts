@@ -729,6 +729,20 @@ export const api = {
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
     invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
 
+  getCentralWorkStatus: (): Promise<
+    Array<{
+      work_id: string;
+      session_id: string;
+      task: string;
+      model: string | null;
+      dispatched_at: string;
+      state: string;
+      reused_session: boolean;
+    }>
+  > => invoke('get_central_work_status'),
+  centralActivationGreeting: (): Promise<void> =>
+    invoke('central_activation_greeting'),
+
   cancelTurn: (sessionId: string): Promise<boolean> =>
     invoke('cancel_turn', { sessionId }),
 

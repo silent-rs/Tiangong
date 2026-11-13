@@ -8,6 +8,13 @@ import {
   type TabKind,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
+import { CentralModeView } from '@/components/central/CentralModeView';
+import { CentralTransition } from '@/components/central/CentralTransition';
+import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
+import {
+  ensureCentralConversation,
+  restoreFromCentralConversation,
+} from '@/lib/central/centralConversation';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';
@@ -23,7 +30,7 @@ import { InputOverlayPluginHost } from '@/components/InputOverlayPluginHost';
 import { useToast } from '@/components/Toast';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
-import { isRemoteHost, listen as hostListen } from '@/api/host';
+import { isRemoteHost, isDesktopHost, listen as hostListen } from '@/api/host';
 import { RemoteStatusBanner } from '@/components/RemoteStatusBanner';
 import { getRemoteStatus, onRemoteStatus } from '@/api/remote';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -88,12 +95,29 @@ function browserPluginSessionId(sessionId?: string | null): string {
 
 export function MainApp() {
   const remote = isRemoteHost();
+  // 中枢模式：注册 Cmd/Ctrl+Shift+J 快捷键（仅 desktop），centralActive 驱动布局分支
+  useCentralModeHotkey();
+  const { centralActive } = useCentralMode();
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const { showWarning } = useToast();
   const activeSessionId = useStore((state) => state.activeSessionId);
   const newConversationId = useStore((state) => state.newConversationId);
   const currentSessionId = activeSessionId ?? newConversationId;
   useUpdateCheck();
+
+  // 中枢模式对话绑定（POC 阶段 1）：进入/退出时切换中枢对话与普通模式上下文
+  // （逻辑独立于共用 store，见 lib/centralConversation）。mount 时按当前状态
+  // 初始化（重启直入中枢也会建立绑定）。
+  const prevCentralActiveRef = useRef(false);
+  useEffect(() => {
+    if (centralActive === prevCentralActiveRef.current) return;
+    prevCentralActiveRef.current = centralActive;
+    if (centralActive) {
+      void ensureCentralConversation();
+    } else {
+      void restoreFromCentralConversation();
+    }
+  }, [centralActive]);
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [interactionVisible, setInteractionVisible] = useState(false);
   const [inputOverlayVisible, setInputOverlayVisible] = useState(false);
@@ -655,6 +679,14 @@ export function MainApp() {
         window.open(url, '_blank', 'noopener,noreferrer');
         return;
       }
+      // 中枢模式没有拓展区面板（POC）：外链交给系统浏览器打开，避免打开
+      // 一个不可见面板；后续片接入中枢模式自己的内嵌浏览入口。
+      if (useStore.getState().centralMode && isDesktopHost()) {
+        import('@tauri-apps/plugin-shell')
+          .then(({ open }) => open(url))
+          .catch((error) => console.error('打开链接失败:', error));
+        return;
+      }
       const store = useStore.getState();
       const sessionId = store.activeSessionId || store.newConversationId;
       if (!sessionId) {
@@ -736,7 +768,14 @@ export function MainApp() {
           onToggleExtension={remote ? undefined : handleToggleExtension}
         />
 
-        <div className="flex flex-1 min-h-0">
+        <div className="flex flex-1 min-h-0" data-central-body>
+          {/* centralActive 已含 desktop 宿主判定，非 desktop 即使 store 被置位也不切换。
+              切换转场见 CentralTransition：仅叠加视觉层，布局仍由 React 立即切换，
+              参数来自 docs/central-demo.html 调参台定型的 orbit 预设。 */}
+          {centralActive ? (
+            <CentralModeView />
+          ) : (
+          <>
           <AppSidebar />
 
           <main className="flex flex-1 flex-col min-w-0 bg-background">
@@ -748,7 +787,6 @@ export function MainApp() {
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
                 </div>
-
                 <LazyMessageInput
                   interactionVisible={interactionVisible}
                   inputOverlayVisible={inputOverlayVisible}
@@ -820,7 +858,10 @@ export function MainApp() {
               )}
             </div>
           </main>
+          </>
+          )}
         </div>
+        <CentralTransition />
       </div>
 
       {!remote && (

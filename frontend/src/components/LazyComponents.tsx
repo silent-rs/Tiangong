@@ -21,10 +21,12 @@ function ComponentLoader() {
 }
 
 // 懒加载包装器
-export function LazyMessageList() {
+type MessageListProps = React.ComponentProps<typeof MessageList>;
+
+export function LazyMessageList(props: MessageListProps) {
   return (
     <Suspense fallback={<ComponentLoader />}>
-      <MessageList />
+      <MessageList {...props} />
     </Suspense>
   );
 }

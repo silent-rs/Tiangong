@@ -4,6 +4,7 @@
 //! 不包含业务逻辑，只有数据结构和序列化。
 
 pub mod attachment;
+pub mod central_session;
 pub mod delivery;
 pub mod mention;
 pub mod message;

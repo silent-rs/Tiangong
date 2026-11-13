@@ -1,0 +1,225 @@
+//! 宿主接线层行为的具名锁定（review 机检 1 的可离线部分）——场景均取自
+//! 十一轮 review 累计清单，以纯数据序列模拟宿主状态流。
+
+use central_state::*;
+
+fn entry(work_id: &str, session: &str, state: WorkState) -> WorkStatus {
+    WorkStatus {
+        work_id: work_id.to_string(),
+        session_id: session.to_string(),
+        task: format!("任务 {work_id}"),
+        model: None,
+        dispatched_at: "2026-11-11 12:00:00".to_string(),
+        state,
+        reused_session: false,
+        last_activity: None,
+        cwd: None,
+    }
+}
+
+/// 复用派发的登记：模型谎报防线（M5）——执行模型显式标注「已忽略请求的 X」。
+#[test]
+fn dispatch_reuse_model_ignored_is_explicit() {
+    let entry = registry_entry_after_dispatch(
+        "work-r1",
+        "s-review",
+        "继续 review",
+        Some("k3"),
+        true,
+        Some("/ws/a"),
+        "2026-11-11 15:00:00",
+    );
+    assert_eq!(
+        entry.model.as_deref(),
+        Some("会话既有模型（已忽略 k3）"),
+        "复用登记不得谎报请求模型"
+    );
+    assert_eq!(entry.state, WorkState::Running);
+    let fresh = registry_entry_after_dispatch(
+        "work-n1",
+        "s-new",
+        "新任务",
+        Some("k3"),
+        false,
+        None,
+        "2026-11-11 15:00:00",
+    );
+    assert_eq!(fresh.model.as_deref(), Some("k3"));
+    assert_eq!(fresh.cwd.as_deref(), None);
+}
+
+/// 复用工作完成 → 回报排队；同会话旧条目被 upsert 覆盖。
+#[test]
+fn dispatch_reuse_finish_queues_report() {
+    let mut entries = vec![entry("work-old", "s-review", WorkState::Completed)];
+    let dispatched = registry_entry_after_dispatch(
+        "work-r2",
+        "s-review",
+        "增量 review",
+        None,
+        true,
+        Some("/ws/a"),
+        "2026-11-11 16:00:00",
+    );
+    upsert_registry_entry(&mut entries, dispatched);
+    assert_eq!(entries.len(), 1, "会话维度单条");
+    assert_eq!(entries[0].work_id, "work-r2");
+    let next = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, true);
+    assert_eq!(next, WorkState::ReportQueued);
+    assert!(should_deliver_now(true, false));
+}
+
+/// 投递失败回滚：登记条目保留并转 failed（不因失败丢失条目）。
+#[test]
+fn delivery_failure_rollback_keeps_item() {
+    let mut entries = [entry("work-f1", "s-x", WorkState::Running)];
+    let next = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, false);
+    entries[0].state = next;
+    assert_eq!(entries[0].state, WorkState::Failed, "失败条目保留并分态");
+    assert!(should_deliver_now(false, true));
+}
+
+/// 中断条目迁移与清理：同会话重派覆盖 interrupted（不再残留误报）。
+#[test]
+fn interrupted_items_migrate_and_clear() {
+    let mut entries = vec![
+        entry("work-i1", "s-review", WorkState::Interrupted),
+        entry("work-other", "s-other", WorkState::Running),
+    ];
+    let re_dispatch = registry_entry_after_dispatch(
+        "work-i2",
+        "s-review",
+        "重派中断的任务",
+        None,
+        true,
+        Some("/ws/a"),
+        "2026-11-11 17:00:00",
+    );
+    upsert_registry_entry(&mut entries, re_dispatch);
+    assert!(
+        entries.iter().all(|e| e.state != WorkState::Interrupted),
+        "同会话重派后中断条目必须清除"
+    );
+    let review = entries.iter().find(|e| e.session_id == "s-review").unwrap();
+    assert_eq!(review.state, WorkState::Running);
+    assert_eq!(review.work_id, "work-i2");
+}
+
+/// app 入口派发目标守卫：中枢会话拒绝。
+#[test]
+fn dispatch_rejects_central_hub_at_app_entry() {
+    assert!(validate_dispatch_target("central-hub").is_err());
+    assert!(validate_dispatch_target("s-normal").is_ok());
+    let error = validate_dispatch_target("central-hub").unwrap_err();
+    assert!(
+        error.contains("不能作为工作会话"),
+        "拒绝信息可辨识：{error}"
+    );
+}
+
+/// P1-1 回归锁定：waiting_user 恢复与 pause→resume 的第二 turn 终态
+/// 必须被处理（状态驱动幂等——在途即可处理，不按 work_id 记忆）。
+#[test]
+fn second_turn_after_resume_produces_report() {
+    let mut state = WorkState::WaitingUser;
+    assert!(state.is_inflight(), "等待用户在途");
+    state = WorkState::Running;
+    let next = transition_on_finished(Some(state), WorkOutcome::Finished, true);
+    assert_eq!(
+        next,
+        WorkState::ReportQueued,
+        "第二 turn 终态必须产出回报排队"
+    );
+
+    let resumed_from_pause = WorkState::Running; // 暂停恢复后的第二 turn
+    let next = transition_on_finished(Some(resumed_from_pause), WorkOutcome::Finished, true);
+    assert_eq!(next, WorkState::ReportQueued);
+
+    let terminal = WorkState::ReportQueued;
+    assert!(!terminal.is_inflight(), "已终态的重复回调被守卫识别");
+}
+
+/// P1-2 回归锁定：执行中引导（steer 并入）不改 registry 归属。
+#[test]
+fn steer_into_running_work_keeps_ownership() {
+    let mut entries = [entry("work-owner", "s-busy", WorkState::Running)];
+    let owner_entry = entries
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-busy" && e.state.is_inflight())
+        .expect("在跑工作存在");
+    assert_eq!(owner_entry.work_id, "work-owner", "归属未被引导覆盖");
+    entries[0].state = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, true);
+    assert_eq!(entries[0].state, WorkState::ReportQueued);
+
+    let mut wrong = vec![entry("work-owner", "s-busy", WorkState::Running)];
+    upsert_registry_entry(&mut wrong, entry("steer-xxx", "s-busy", WorkState::Running));
+    let current = wrong
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-busy")
+        .unwrap();
+    assert_eq!(
+        current.work_id, "steer-xxx",
+        "对照：旧行为确实覆盖归属（此序列即 P1-2 根因）"
+    );
+}
+
+/// 深检 R1：paused 的 resume（Steer 到暂停会话）走恢复语义——不被
+/// 「引导并入」吞掉：覆盖登记为 running + 挂回调（终态可回报）。
+#[test]
+fn resume_from_pause_takes_recovery_not_merge() {
+    let mut entries = vec![entry("work-p1", "s-p", WorkState::Paused)];
+    // resume 请求（reused、work_id=原 work）到达：并入判定仅对 Running
+    // 生效——Paused 不并入 → 走默认登记路径（覆盖为 running 同 work）
+    let current = entries
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-p" && e.state == WorkState::Running);
+    assert!(
+        current.is_none(),
+        "Paused 不满足并入条件（仅 Running 并入）"
+    );
+    // 默认路径效果：登记覆盖为 running（同 work_id 恢复）
+    upsert_registry_entry(
+        &mut entries,
+        registry_entry_after_dispatch(
+            "work-p1",
+            "s-p",
+            "继续暂停的任务",
+            None,
+            true,
+            Some("/ws/a"),
+            "2026-11-11 19:00:00",
+        ),
+    );
+    let entry = entries
+        .iter()
+        .rev()
+        .find(|e| e.session_id == "s-p")
+        .unwrap();
+    assert_eq!(entry.state, WorkState::Running);
+    assert_eq!(entry.work_id, "work-p1", "恢复保持原 work 归属");
+    // 恢复后的 turn 终态正常产出（回调已挂载——S6 状态判定 inflight 放行）
+    entries[0].state = transition_on_finished(Some(entries[0].state), WorkOutcome::Finished, true);
+    assert_eq!(entries[0].state, WorkState::ReportQueued);
+}
+
+/// 深检 R2：迟到回调不得改写已终态条目（幂等守卫）。
+#[test]
+fn late_callback_cannot_rewrite_terminal_entry() {
+    for terminal in [
+        WorkState::Completed,
+        WorkState::Failed,
+        WorkState::Cancelled,
+        WorkState::Interrupted,
+    ] {
+        let next = transition_on_finished(Some(terminal), WorkOutcome::Finished, true);
+        assert_eq!(next, terminal, "{terminal:?} 必须保持（迟到回调幂等）");
+        let next_waiting = transition_on_finished(Some(terminal), WorkOutcome::WaitingUser, false);
+        assert_eq!(
+            next_waiting, terminal,
+            "{terminal:?} 对等待用户回报同样保持"
+        );
+    }
+}

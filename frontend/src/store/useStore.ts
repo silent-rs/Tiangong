@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
+import { persistCentralMode, readPersistedCentralMode } from '../lib/central/centralModePreference';
+import { CENTRAL_SESSION_ID } from '../lib/central/centralSession';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {
@@ -1018,6 +1020,11 @@ export interface AppState {
 
   // 从外部触发打开设置页到指定 tab
   pendingSettingsTab: string | null;
+  /** 中枢模式开关：进入/退出时持久化（localStorage），重启按上次状态直接进入；
+   *  仅 desktop 宿主真正切换视图（布局守卫见 useCentralMode）。中枢对话的
+   *  会话切换逻辑独立于本 store，见 lib/centralConversation。 */
+  centralMode: boolean;
+  setCentralMode: (on: boolean) => void;
   setPendingSettingsTab: (tab: string | null) => void;
 
   // 操作
@@ -1135,6 +1142,12 @@ export const useStore = create<AppState>((set, get) => ({
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
+  centralMode: readPersistedCentralMode(),
+  setCentralMode: (on) => {
+    set({ centralMode: on });
+    // 记录停留偏好：重启直接回到上次的模式（见 lib/centralModePreference）
+    persistCentralMode(on);
+  },
   sandboxDisabled: null,
   autoUpdate: null,
   sandboxState: null,
@@ -1194,7 +1207,10 @@ export const useStore = create<AppState>((set, get) => ({
       }
       const prev = get();
       const activeSessionId = prev.activeSessionId;
+      // 中枢对话不在普通会话列表（单独存储），激活期间不算失效，
+      // 不得触发自动迁移（切到列表首个会话）。
       const activeSessionInvalid = !!activeSessionId
+        && activeSessionId !== CENTRAL_SESSION_ID
         && !sessions.some((session) => session.id === activeSessionId);
       let newConversationId = prev.newConversationId;
       // 普通加载时为尚未初始化的新对话预生成 ID。active 失效由下方完整迁移处理。
@@ -1256,6 +1272,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 精确更新单条会话的元数据（消息数/更新时间），替代全量 loadSessions。
   updateSessionMeta: async (sessionId: string) => {
+    // 中枢对话不属于普通会话列表（单独存储），不追加、不更新列表条目
+    if (sessionId === CENTRAL_SESSION_ID) return;
     try {
       const meta = await api.getSessionMeta(sessionId);
       if (!meta) return;
@@ -2493,6 +2511,9 @@ export const useStore = create<AppState>((set, get) => ({
           void get().dequeueNextQueuedInput(sessionId);
         }
         if (sessionId !== nextState.activeSessionId || !appIsForeground) {
+          // 中枢对话不发系统完成通知：中枢的反馈在自身对话里呈现（§9），
+          // 系统通知留给普通后台会话。
+          if (sessionId === CENTRAL_SESSION_ID) continue;
           const session = nextState.sessions.find((item) => item.id === sessionId);
           notifyBackgroundSessionCompleted(session?.title || '对话', sessionId).catch(console.warn);
         }

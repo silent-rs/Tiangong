@@ -16,6 +16,8 @@ tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
+central-state = { workspace = true }
+central-plugin = { workspace = true }
 tiangong-config = { workspace = true }
 silent = { workspace = true, features = ["scheduler"] }
 async-trait = { workspace = true }
@@ -57,7 +59,7 @@ getrandom = { workspace = true }
 if-addrs = "0.15"
 
 # Tauri 相关依赖
-tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable"] }
+tauri = { workspace = true, features = ["protocol-asset", "tray-icon", "unstable", "test"] }
 tauri-plugin-shell = { workspace = true }
 tauri-plugin-fs = { workspace = true }
 tauri-plugin-dialog = { workspace = true }

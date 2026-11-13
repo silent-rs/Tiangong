@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod app;
+pub mod central;
 pub mod commands;
 mod config_handoff;
 mod core_factory;
