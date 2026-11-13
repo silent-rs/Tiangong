@@ -10,9 +10,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
-import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
+import { Loader2, Inbox, History, ChevronRight, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
 import { restoreFromCentralConversation } from '@/lib/central/centralConversation';
 import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/components/central/CentralWorkDrawer';
+import { CentralBadgeIcon, type BadgeState } from '@/components/central/CentralBadgeIcon';
 
 interface CentralWorkStatus {
   work_id: string;
@@ -157,11 +158,9 @@ function WorkItemRow({
 
 export function CentralWorkStatusBar() {
   const [items, setItems] = useState<CentralWorkStatus[]>([]);
-  // M6 状态分离：hover 浮层（轻量预览，移出即收）与 pinned 抽屉
-  // （点击固定的工作视图，ESC/关闭按钮收起）互不干扰——固定后 hover
-  // 移出不再误关面板。
+  // 用户实测五：纯 hover 交互（移出即收，250ms 延迟防误触）——
+  // 点击固定（pinned）模式已移除；点击工作行打开详情抽屉。
   const [hoverOpen, setHoverOpen] = useState(false);
-  const [pinned, setPinned] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const runStatus = useStore((s) => s.runStatus);
@@ -201,19 +200,9 @@ export function CentralWorkStatusBar() {
   useEffect(() => {
     if (items.length === 0) {
       setHoverOpen(false);
-      setPinned(false);
     }
   }, [items.length]);
 
-  // 抽屉打开时 ESC 收起（键盘可达）
-  useEffect(() => {
-    if (!pinned) return undefined;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setPinned(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [pinned]);
 
   // 卸载清理（review：closeTimer 残留会在组件卸载后触发 setState 警告）
   useEffect(
@@ -244,7 +233,6 @@ export function CentralWorkStatusBar() {
   const [drawerWork, setDrawerWork] = useState<CentralWorkDrawerItem | null>(null);
   const openDrawer = useCallback((item: CentralWorkStatus) => {
     setHoverOpen(false);
-    setPinned(false);
     setDrawerWork(item);
   }, []);
   const openInNormalMode = useCallback(
@@ -289,20 +277,32 @@ export function CentralWorkStatusBar() {
   const queuedDep = visible.filter((item) => item.state === 'queued');
 
   const totalCount = visible.length;
+  // 徽章主状态（优先级：等你决定 > 执行中 > 失败 > 中断 > 待汇报/完成 > 其他）
+  const badgeState: BadgeState = waitingUser.length > 0
+    ? 'waiting_user'
+    : running.length > 0
+      ? 'running'
+      : failed.length > 0
+        ? 'failed'
+        : interrupted.length > 0
+          ? 'interrupted'
+          : queued.length + completed.length > 0
+            ? 'done'
+            : paused.length + cancelled.length + queuedDep.length > 0
+              ? 'paused'
+              : 'idle';
   return (
     <div
       ref={rootRef}
       className="absolute right-[70px] top-3 z-30"
       onMouseEnter={() => {
-        if (pinned) return;
         cancelClose();
         setHoverOpen(true);
       }}
       onMouseLeave={scheduleClose}
       onFocusCapture={() => {
-        // focus-within（review a11y）：Tab 进入浮层/抽屉的控件视为仍在
+        // focus-within（review a11y）：Tab 进入浮层的控件视为仍在
         // 交互区，取消挂起的关闭（不被 250ms 定时误关）。
-        if (pinned) return;
         cancelClose();
         setHoverOpen(true);
       }}
@@ -318,59 +318,32 @@ export function CentralWorkStatusBar() {
             ? '后台工作：暂无任务'
             : `后台工作：${running.length} 个执行中，${queued.length} 条待汇报，共 ${totalCount} 项`
         }
-        aria-controls={pinned ? 'central-work-drawer' : hoverOpen ? 'central-work-popover' : undefined}
-        aria-expanded={pinned || hoverOpen}
-        // hover 之外的键盘/点击可达路径（无障碍 + 触屏）；点击固定为抽屉
+        aria-controls={hoverOpen ? 'central-work-popover' : undefined}
+        aria-expanded={hoverOpen}
+        // 纯 hover/focus 交互（用户实测五）；点击无固定行为——工作详情
+        // 经浮层内的工作行打开
         onClick={() => {
-          setPinned((value) => !value);
-          setHoverOpen(false);
+          cancelClose();
+          setHoverOpen(true);
         }}
         onFocus={() => {
-          if (pinned) return;
           cancelClose();
           setHoverOpen(true);
         }}
         onBlur={scheduleClose}
-        className={`inline-flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-xs shadow-lg shadow-black/5 backdrop-blur-md transition-all ${
-          running.length > 0
-            ? 'border-primary/30 bg-primary/[0.08] text-foreground hover:border-primary/50'
-            : totalCount > 0
-              ? 'border-amber-500/30 bg-amber-500/[0.08] text-foreground hover:border-amber-500/50'
-              : 'border-border/60 bg-background/80 text-muted-foreground hover:border-border hover:text-foreground'
-        }`}
+        className="group inline-flex items-center gap-2 rounded-full border px-2.5 py-1.5 shadow-lg shadow-black/5 backdrop-blur-md transition-all hover:border-primary/40"
       >
-        <span className="relative flex h-2 w-2">
-          {running.length > 0 ? (
-            <>
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-50" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
-            </>
-          ) : totalCount > 0 ? (
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
-          ) : (
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-muted-foreground/40" />
-          )}
-        </span>
-        <span className="tabular-nums font-medium">
-          {running.length > 0
-          ? `${running.length} 个后台任务`
-          : interrupted.length > 0
-            ? `${interrupted.length} 个任务已中断`
-            : totalCount > 0
-              ? '后台任务已结束'
-              : '无后台任务'}
-        </span>
-        {queued.length > 0 ? (
-          <span className="rounded-full bg-amber-500/15 px-1.5 py-px font-medium tabular-nums text-amber-600 dark:text-amber-400">
-            {queued.length} 待汇报
+        <CentralBadgeIcon state={badgeState} />
+        {totalCount > 0 ? (
+          <span className="min-w-4 text-right text-xs font-semibold tabular-nums text-foreground/85">
+            {totalCount}
           </span>
         ) : null}
         <ChevronRight
-          className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${pinned ? 'rotate-90' : ''}`}
+          className={`h-3 w-3 text-muted-foreground/60 transition-transform duration-200 ${hoverOpen ? 'rotate-90' : ''}`}
         />
       </button>
-
-      {hoverOpen && !pinned ? (
+      {hoverOpen ? (
         <div
           id="central-work-popover"
           className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-2xl border border-border/70 bg-background/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl">
@@ -389,40 +362,6 @@ export function CentralWorkStatusBar() {
         </div>
       ) : null}
 
-      {pinned ? (
-        <aside
-          id="central-work-drawer"
-          role="dialog"
-          aria-label="后台工作视图"
-          className="absolute right-0 top-[calc(100%+8px)] flex max-h-[min(70vh,560px)] w-[420px] flex-col rounded-2xl border border-border/70 bg-background/98 p-4 shadow-2xl shadow-black/15 backdrop-blur-xl"
-        >
-          <header className="mb-3 flex items-center justify-between border-b border-border/60 pb-2">
-            <h2 className="text-sm font-semibold text-foreground/90">后台工作</h2>
-            <button
-              type="button"
-              aria-label="收起后台工作视图"
-              onClick={() => setPinned(false)}
-              className="rounded-lg p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <ChevronDown className="h-4 w-4" />
-            </button>
-          </header>
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <WorkGroups
-              running={running}
-              failed={failed}
-              waitingUser={waitingUser}
-              paused={paused}
-              cancelled={cancelled}
-              queuedDep={queuedDep}
-              queued={queued}
-              interrupted={interrupted}
-              completed={completed}
-              onOpen={openDrawer}
-            />
-          </div>
-        </aside>
-      ) : null}
       {drawerWork ? (
         <CentralWorkDrawer
           work={drawerWork}

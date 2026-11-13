@@ -111,14 +111,15 @@ describe('CentralWorkStatusBar', () => {
     const badge = container.querySelector('button');
     expect(badge).not.toBeNull('徽章必须常驻，无任务也不消失');
     expect(badge!.getAttribute('aria-label')).toBe('后台工作：暂无任务');
-    expect(badge!.textContent).toContain('无后台任务');
-    // 空态面板可打开，展示空态文案
+    // SVG 徽章：空态为四角星（central-badge-idle），不再显示文字
+    expect(container.querySelector('[data-testid="central-badge-idle"]')).not.toBeNull();
+    // 点击仍可打开浮层（空态文案）
     act(() => {
       badge!.click();
     });
-    const drawer = container.querySelector('[role="dialog"]');
-    expect(drawer).not.toBeNull();
-    expect(drawer!.textContent).toContain('暂无后台工作');
+    const popover = container.querySelector('#central-work-popover');
+    expect(popover).not.toBeNull();
+    expect(popover!.textContent).toContain('暂无后台工作');
   });
 
   it('hover 打开轻量浮层，鼠标移出后收起', async () => {
@@ -149,27 +150,30 @@ describe('CentralWorkStatusBar', () => {
     }
   });
 
-  it('点击徽章固定为抽屉，鼠标移出不收起，ESC 收起', async () => {
-    container = await mountWithItems([makeItem()]);
-    const badge = container.querySelector('button');
-    act(() => {
-      badge!.click();
-    });
-    const drawer = container.querySelector('[role="dialog"]');
-    expect(drawer).not.toBeNull();
-    expect(drawer!.getAttribute('aria-label')).toBe('后台工作视图');
-    // 固定后鼠标移出：抽屉仍在（M6 状态分离）
-    act(() => {
-      badge!.dispatchEvent(
-        new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }),
-      );
-    });
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
-    // ESC 收起
-    act(() => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    });
-    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  it('用户实测五：纯 hover 交互——点击徽章打开浮层但不固定，移出即收（无 pinned）', async () => {
+    vi.useFakeTimers();
+    try {
+      container = await mountWithItems([makeItem()]);
+      const badge = container.querySelector('button');
+      act(() => {
+        badge!.click();
+      });
+      // 点击打开的是浮层（无固定面板/抽屉角色）
+      expect(container.querySelector('#central-work-popover')).not.toBeNull();
+      expect(container.querySelector('[role="dialog"]')).toBeNull('点击不再固定为抽屉');
+      // 鼠标移出：浮层按 250ms 延迟收起（hover 语义）
+      act(() => {
+        badge!.dispatchEvent(
+          new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }),
+        );
+      });
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(container.querySelector('#central-work-popover')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('中断任务进入「已中断」分组（重启恢复路径）', async () => {
@@ -180,11 +184,11 @@ describe('CentralWorkStatusBar', () => {
     act(() => {
       badge!.click();
     });
-    const drawer = container.querySelector('[role="dialog"]');
-    expect(drawer).not.toBeNull();
-    expect(drawer!.textContent).toContain('已中断');
-    expect(drawer!.textContent).toContain('被中断的任务');
-    expect(drawer!.textContent).toContain('可让中枢重派');
+    const popover = container.querySelector('#central-work-popover');
+    expect(popover).not.toBeNull();
+    expect(popover!.textContent).toContain('已中断');
+    expect(popover!.textContent).toContain('被中断的任务');
+    expect(popover!.textContent).toContain('可让中枢重派');
   });
 
   it('focus 进入容器不触发 250ms 关闭（a11y focus-within）', async () => {
@@ -212,14 +216,14 @@ describe('CentralWorkStatusBar', () => {
     );
   });
 
-  it('aria-controls 指向面板/抽屉 id（a11y 关联）', async () => {
+  it('aria-controls 指向浮层 id（a11y 关联，纯 hover 模式）', async () => {
     container = await mountWithItems([makeItem()]);
     const badge = container.querySelector('button')!;
     act(() => {
       badge.click();
     });
-    expect(badge.getAttribute('aria-controls')).toBe('central-work-drawer');
-    expect(container.querySelector('#central-work-drawer')).not.toBeNull();
+    expect(badge.getAttribute('aria-controls')).toBe('central-work-popover');
+    expect(container.querySelector('#central-work-popover')).not.toBeNull();
   });
 
   it('失败任务进入「失败」分组，与完成/中断分色呈现', async () => {
@@ -231,11 +235,11 @@ describe('CentralWorkStatusBar', () => {
     act(() => {
       badge!.click();
     });
-    const drawer = container.querySelector('[role="dialog"]');
-    expect(drawer).not.toBeNull();
-    expect(drawer!.textContent).toContain('失败');
-    expect(drawer!.textContent).toContain('完成任务');
-    expect(drawer!.textContent).toContain('失败任务');
+    const popover = container.querySelector('#central-work-popover');
+    expect(popover).not.toBeNull();
+    expect(popover!.textContent).toContain('失败');
+    expect(popover!.textContent).toContain('完成任务');
+    expect(popover!.textContent).toContain('失败任务');
   });
 
   it('同会话多条记录按 session 聚合为单条显示', async () => {
@@ -247,7 +251,7 @@ describe('CentralWorkStatusBar', () => {
     act(() => {
       badge!.click();
     });
-    const text = container.querySelector('[role="dialog"]')!.textContent ?? '';
+    const text = container.querySelector('#central-work-popover')!.textContent ?? '';
     // 后端按会话聚合（一屏一条）；前端对脏数据兜底去重——同会话只显示最新
     const rows = Array.from(
       container.querySelectorAll('[role="button"][tabindex="0"]'),
