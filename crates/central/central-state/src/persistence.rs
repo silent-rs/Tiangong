@@ -63,6 +63,37 @@ fn random_tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(tmp_name)
 }
 
+/// 快照 envelope（R5 附录 A.4 第 3 项）：schema 版本包裹记录数组，
+/// 为后续格式演进与 recover 对账（事件 offset vs 快照版本）建立锚点。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotEnvelope<T> {
+    schema_version: u32,
+    records: Vec<T>,
+}
+
+/// 快照 schema 版本（与契约版本同步起点）。
+const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+/// 兼容读：envelope 或裸数组（R5 前格式）——旧文件不迁移即读。
+fn parse_snapshot<T: serde::de::DeserializeOwned>(
+    content: &str,
+) -> std::result::Result<Vec<T>, serde_json::Error> {
+    match serde_json::from_str::<SnapshotEnvelope<T>>(content) {
+        Ok(envelope) => Ok(envelope.records),
+        Err(_) => serde_json::from_str(content),
+    }
+}
+
+/// 序列化为 envelope（新写入统一带版本）。
+fn serialize_snapshot<T: serde::Serialize + Clone>(
+    records: &[T],
+) -> std::result::Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&SnapshotEnvelope {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        records: records.to_vec(),
+    })
+}
+
 /// 派发登记（中枢视角的最低事实：派发了什么、给谁、什么模型）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkItemRecord {
@@ -128,7 +159,7 @@ pub fn work_items_path(storage_root: &std::path::Path) -> std::path::PathBuf {
 pub fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
     let path = work_items_path(storage_root);
     match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str(&content) {
+        Ok(content) => match parse_snapshot(&content) {
             Ok(items) => items,
             Err(error) => {
                 tracing::warn!(%error, path = %path.display(), "派发登记损坏，按空表处理");
@@ -146,7 +177,7 @@ pub fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
 /// 全表落盘（原子写：tmp + rename；失败记日志，不静默吞错）。
 pub fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) {
     let path = work_items_path(storage_root);
-    let content = match serde_json::to_string_pretty(items) {
+    let content = match serialize_snapshot(items) {
         Ok(content) => content,
         Err(error) => {
             tracing::warn!(%error, path = %path.display(), "派发登记序列化失败，未落盘");
@@ -502,7 +533,7 @@ fn goals_path(storage_root: &std::path::Path) -> std::path::PathBuf {
 pub fn load_goals(storage_root: &std::path::Path) -> Vec<GoalRecord> {
     let path = goals_path(storage_root);
     match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|error| {
+        Ok(content) => parse_snapshot(&content).unwrap_or_else(|error| {
             tracing::warn!(%error, path = %path.display(), "目标记录损坏，按空表处理");
             Vec::new()
         }),
@@ -518,7 +549,7 @@ pub fn save_goals(storage_root: &std::path::Path, goals: &[GoalRecord]) {
         tracing::warn!(%error, "目标目录创建失败");
         return;
     }
-    match serde_json::to_string_pretty(goals) {
+    match serialize_snapshot(goals) {
         Ok(text) => {
             if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
                 tracing::warn!(%error, "目标落盘失败（数据未更新）");
@@ -552,7 +583,7 @@ fn reports_path(storage_root: &std::path::Path) -> std::path::PathBuf {
 pub fn load_reports(storage_root: &std::path::Path) -> Vec<ReportRecord> {
     let path = reports_path(storage_root);
     match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|error| {
+        Ok(content) => parse_snapshot(&content).unwrap_or_else(|error| {
             tracing::warn!(%error, path = %path.display(), "报告存档损坏，按空表处理");
             Vec::new()
         }),
@@ -568,7 +599,7 @@ pub fn save_reports(storage_root: &std::path::Path, reports: &[ReportRecord]) {
         tracing::warn!(%error, "报告目录创建失败");
         return;
     }
-    match serde_json::to_string_pretty(reports) {
+    match serialize_snapshot(reports) {
         Ok(text) => {
             if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
                 tracing::warn!(%error, "报告落盘失败（数据未更新）");

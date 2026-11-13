@@ -43,11 +43,39 @@ fn concurrent_writes_keep_file_consistent() {
     for handle in handles {
         handle.join().unwrap();
     }
-    let text = std::fs::read_to_string(root.path().join("central").join("work-items.json"))
-        .expect("最终文件必须存在");
-    let parsed: Vec<WorkItemRecord> =
-        serde_json::from_str(&text).expect("并发写后文件必须可完整解析（无半文件/交错）");
+    // envelope 格式经 load_work_items 读回（完整性 = 可完整解析且内容为最后写入）
+    let parsed = central_state::load_work_items(root.path());
     assert_eq!(parsed.len(), 1, "最后一次写入的完整内容");
+}
+
+/// R5 envelope：新写入带 schema 版本包裹；旧裸数组文件不迁移即读。
+#[test]
+fn snapshot_envelope_round_trips_and_reads_legacy() {
+    let root = tempfile::tempdir().unwrap();
+    // 新写：envelope（含 schema_version）
+    save_work_items(root.path(), &[record("s-env", "envelope 任务")]);
+    let raw = std::fs::read_to_string(root.path().join("central").join("work-items.json")).unwrap();
+    assert!(
+        raw.contains("\"schema_version\""),
+        "新写入必须是 envelope：{raw}"
+    );
+    let parsed = central_state::load_work_items(root.path());
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].task, "envelope 任务");
+
+    // 旧格式（R5 前裸数组）直接可读
+    let legacy = tempfile::tempdir().unwrap();
+    let legacy_dir = legacy.path().join("central");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(
+        legacy_dir.join("work-items.json"),
+        serde_json::to_string(&vec![record("s-old", "旧格式任务")]).unwrap(),
+    )
+    .unwrap();
+    let parsed = central_state::load_work_items(legacy.path());
+    assert_eq!(parsed.len(), 1, "裸数组旧文件必须兼容读取");
+    assert_eq!(parsed[0].session_id, "s-old");
+    assert_eq!(parsed[0].task, "旧格式任务");
 }
 
 /// 正常写入不残留 .tmp（随机后缀 tmp 在 rename 后消失）。
