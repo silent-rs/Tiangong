@@ -6,4 +6,4 @@ pub mod types;
 pub use client::AnthropicClient;
 pub use config::AnthropicClientBuilder;
 pub use error::AnthropicError;
-pub use types::{CacheControl, SystemContent, TextBlock};
+pub use types::{CacheControl, SafetyCheck, SafetyLevel, SystemContent, TextBlock};

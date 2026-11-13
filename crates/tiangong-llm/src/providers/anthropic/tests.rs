@@ -106,6 +106,59 @@ fn sample_request() -> ProviderRequest {
 }
 
 #[test]
+fn deepseek_app_suite_server_tools_and_safety_check_from_metadata() {
+    let mut req = sample_request();
+    req.tools.clear();
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "deepseek_server_tools".to_string(),
+        json!(["deepseek_web_search", "deepseek_read_url"]),
+    );
+    metadata.insert("safety_check".to_string(), json!("high"));
+    req.metadata = Some(metadata);
+
+    let mapped = super::mapping::to_anthropic_request(&req).expect("mapped request");
+    let tools = mapped.tools.expect("tools");
+    assert_eq!(tools.len(), 2);
+    // 官方 Messages 协议：服务端工具需同时携带 type 与 name，无 input_schema；
+    // mapping 现有缓存断点逻辑可能在工具上追加 cache_control，与断言无关。
+    let strip_cache_control = |tool: &serde_json::Value| {
+        let mut value = tool.clone();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("cache_control");
+        }
+        value
+    };
+    assert_eq!(
+        strip_cache_control(&serde_json::to_value(&tools[0]).unwrap()),
+        json!({"type": "deepseek_web_search", "name": "deepseek_web_search"})
+    );
+    assert_eq!(
+        strip_cache_control(&serde_json::to_value(&tools[1]).unwrap()),
+        json!({"type": "deepseek_read_url", "name": "deepseek_read_url"})
+    );
+    assert_eq!(
+        mapped.safety_check,
+        Some(tiangong_anthropic::types::SafetyCheck {
+            level: tiangong_anthropic::types::SafetyLevel::High,
+        })
+    );
+}
+
+#[test]
+fn custom_tool_keeps_official_shape_without_type_field() {
+    let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped");
+    let tools = mapped.tools.expect("tools");
+    let value = serde_json::to_value(&tools[0]).unwrap();
+    assert!(
+        value.get("type").is_none(),
+        "官方端点自定义工具不带 type 字段"
+    );
+    assert_eq!(value["name"], "search_web");
+    assert!(value["input_schema"].is_object());
+}
+
+#[test]
 fn test_request_mapping_with_system_and_tools() {
     let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
     assert_eq!(mapped.model, "claude-3-7-sonnet");

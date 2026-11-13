@@ -47,6 +47,7 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     if !req.tools.is_empty() {
         inject_function_tools(&mut payload, &req.tools, req.tool_choice.as_ref());
     }
+    inject_deepseek_app_suite(&mut payload, req);
     match req.reasoning_effort.is_thinking_enabled() {
         true => {
             inject_reasoning_effort(&mut payload, req.reasoning_effort);
@@ -382,6 +383,60 @@ fn inject_temperature_config(payload: &mut Value, temperature: f32) -> Result<()
     Ok(())
 }
 
+/// 注入 DeepSeek 全家桶应用 API 的对话扩展参数（与 deepseek provider 的
+/// metadata 约定一致，供以 OpenAI 兼容协议访问 DeepSeek 时使用）：
+/// - `deepseek_server_tools`：`["deepseek_web_search", "deepseek_read_url"]`，
+///   声明服务端联网工具（追加到既有 tools，或独立成组）；
+/// - `safety_check`：`"high"` / `"low"`，模型内容安全校验。
+fn inject_deepseek_app_suite(payload: &mut Value, req: &ProviderRequest) {
+    let Some(metadata) = req.metadata.as_ref() else {
+        return;
+    };
+    let server_tools: Vec<&str> = metadata
+        .get("deepseek_server_tools")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !server_tools.is_empty() {
+        let entries: Vec<Value> = server_tools
+            .into_iter()
+            .filter_map(|name| match name {
+                "deepseek_web_search" => Some(json!({"type": "deepseek_web_search"})),
+                "deepseek_read_url" => Some(json!({"type": "deepseek_read_url"})),
+                other => {
+                    tracing::warn!(tool = other, "未知的 DeepSeek 服务端工具，已忽略");
+                    None
+                }
+            })
+            .collect();
+        if !entries.is_empty()
+            && let Some(obj) = payload.as_object_mut()
+        {
+            let mut tools = obj
+                .remove("tools")
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            tools.extend(entries);
+            obj.insert("tools".to_string(), Value::Array(tools));
+        }
+    }
+    if let Some(level) = metadata.get("safety_check").and_then(Value::as_str) {
+        let level = match level {
+            "high" | "low" => level,
+            other => {
+                tracing::warn!(
+                    level = other,
+                    "未知的 safety_check 档位，已忽略（仅支持 high/low）"
+                );
+                return;
+            }
+        };
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("safety_check".to_string(), json!({ "level": level }));
+        }
+    }
+}
+
 fn inject_function_tools(
     payload: &mut Value,
     functions: &[ToolSpec],
@@ -484,6 +539,56 @@ pub fn strip_think_tags(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::message::{ImageContent, MessageContent};
+
+    #[test]
+    fn deepseek_app_suite_metadata_injects_server_tools_and_safety_check() {
+        let mut req: ProviderRequest = serde_json::from_value(json!({
+            "model":"deepseek-flash", "messages":[],
+            "max_tokens":1024
+        }))
+        .unwrap();
+        req.messages
+            .push(ChatMessage::text(MessageRole::User, "最新新闻"));
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "deepseek_server_tools".to_string(),
+            json!(["deepseek_web_search", "deepseek_read_url"]),
+        );
+        metadata.insert("safety_check".to_string(), Value::String("high".into()));
+        req.metadata = Some(metadata);
+
+        let payload = build_request_json(&req, false).unwrap();
+        let tools = payload["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0], json!({"type": "deepseek_web_search"}));
+        assert_eq!(tools[1], json!({"type": "deepseek_read_url"}));
+        assert_eq!(payload["safety_check"], json!({"level": "high"}));
+    }
+
+    #[test]
+    fn deepseek_app_suite_server_tools_append_to_function_tools() {
+        let mut req: ProviderRequest = serde_json::from_value(json!({
+            "model":"deepseek-flash", "messages":[],
+            "max_tokens":1024,
+            "tools":[{"name":"get_weather","description":"查询","input_schema":{"type":"object"}}]
+        }))
+        .unwrap();
+        req.messages
+            .push(ChatMessage::text(MessageRole::User, "查天气"));
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "deepseek_server_tools".to_string(),
+            json!(["deepseek_read_url"]),
+        );
+        req.metadata = Some(metadata);
+
+        let payload = build_request_json(&req, false).unwrap();
+        let tools = payload["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[1], json!({"type": "deepseek_read_url"}));
+        assert!(payload.get("safety_check").is_none());
+    }
 
     #[test]
     fn reasoning_history_survives_rounds_reload_and_internal_injection() {

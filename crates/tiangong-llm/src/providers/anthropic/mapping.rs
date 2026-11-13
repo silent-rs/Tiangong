@@ -5,7 +5,8 @@ use tiangong_anthropic::types::{
     CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
     EffortLevel, ImageSourceParam, Message as AnthropicMessage,
     MessageRole as AnthropicMessageRole, MessagesCreateRequest, MessagesCreateResponse,
-    OutputConfig, StreamEvent, SystemContent, TextBlock, ThinkingConfig, Tool as AnthropicTool,
+    OutputConfig, SafetyCheck as AnthropicSafetyCheck, SafetyLevel as AnthropicSafetyLevel,
+    StreamEvent, SystemContent, TextBlock, ThinkingConfig, Tool as AnthropicTool,
     ToolChoice as AnthropicToolChoice, Usage,
 };
 
@@ -96,7 +97,29 @@ pub(super) fn to_anthropic_request(
         stream: None,
         thinking,
         output_config: map_output_config(request),
+        safety_check: map_safety_check(request),
     })
+}
+
+/// 从 metadata 提取安全校验档位（DeepSeek 兼容端点扩展）：
+/// `{"safety_check": "high"}` 开启基础风控；`"low"` 与不传等价。
+fn map_safety_check(request: &ProviderRequest) -> Option<AnthropicSafetyCheck> {
+    let level = request.metadata.as_ref()?.get("safety_check")?.as_str()?;
+    match level {
+        "high" => Some(AnthropicSafetyCheck {
+            level: AnthropicSafetyLevel::High,
+        }),
+        "low" => Some(AnthropicSafetyCheck {
+            level: AnthropicSafetyLevel::Low,
+        }),
+        other => {
+            tracing::warn!(
+                level = other,
+                "未知的 safety_check 档位，已忽略（仅支持 high/low）"
+            );
+            None
+        }
+    }
 }
 
 /// 在消息尾部的两个可标记内容块（Text/ToolResult）上放断点，保证请求
@@ -125,21 +148,45 @@ fn mark_message_tail_breakpoints(
 }
 
 fn build_tools(request: &ProviderRequest) -> Option<Vec<AnthropicTool>> {
-    if request.tools.is_empty() {
+    if request.tools.is_empty() && server_tool_names(request).is_empty() {
         return None;
     }
-    Some(
-        request
-            .tools
-            .iter()
-            .map(|tool| AnthropicTool {
-                name: tool.name.clone(),
-                description: Some(tool.description.clone()),
-                input_schema: tool.input_schema.clone(),
-                cache_control: None,
-            })
-            .collect(),
-    )
+    let mut tools: Vec<AnthropicTool> = request
+        .tools
+        .iter()
+        .map(|tool| AnthropicTool {
+            kind: None,
+            name: tool.name.clone(),
+            description: Some(tool.description.clone()),
+            input_schema: Some(tool.input_schema.clone()),
+            cache_control: None,
+        })
+        .collect();
+    for name in server_tool_names(request) {
+        match name.as_str() {
+            "deepseek_web_search" => tools.push(AnthropicTool::deepseek_web_search()),
+            "deepseek_read_url" => tools.push(AnthropicTool::deepseek_read_url()),
+            other => tracing::warn!(tool = other, "未知的 DeepSeek 服务端工具，已忽略"),
+        }
+    }
+    (!tools.is_empty()).then_some(tools)
+}
+
+/// 从 metadata 读取声明的 DeepSeek 服务端工具名列表
+/// （`deepseek_server_tools`，与 deepseek / openai_chatcompletions provider 约定一致）。
+fn server_tool_names(request: &ProviderRequest) -> Vec<String> {
+    let Some(serde_json::Value::Array(items)) = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("deepseek_server_tools"))
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {

@@ -473,6 +473,7 @@ mod tests {
             stream: None,
             thinking,
             output_config: None,
+            safety_check: None,
         }
     }
 
