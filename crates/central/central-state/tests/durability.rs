@@ -36,7 +36,9 @@ fn concurrent_writes_keep_file_consistent() {
                     &format!("s-{thread}-{i}"),
                     &format!("任务 {thread}-{i}"),
                 )];
-                save_work_items(&base, &items);
+                if let Err(error) = save_work_items(&base, &items) {
+                    tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+                }
             }
         }));
     }
@@ -53,7 +55,9 @@ fn concurrent_writes_keep_file_consistent() {
 fn snapshot_envelope_round_trips_and_reads_legacy() {
     let root = tempfile::tempdir().unwrap();
     // 新写：envelope（含 schema_version）
-    save_work_items(root.path(), &[record("s-env", "envelope 任务")]);
+    if let Err(error) = save_work_items(root.path(), &[record("s-env", "envelope 任务")]) {
+        tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+    }
     let raw = std::fs::read_to_string(root.path().join("central").join("work-items.json")).unwrap();
     assert!(
         raw.contains("\"schema_version\""),
@@ -82,7 +86,9 @@ fn snapshot_envelope_round_trips_and_reads_legacy() {
 #[test]
 fn normal_write_leaves_no_tmp_residue() {
     let root = tempfile::tempdir().unwrap();
-    upsert_work_item(root.path(), &record("s-clean", "任务"));
+    if let Err(error) = upsert_work_item(root.path(), &record("s-clean", "任务")) {
+        tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+    }
     let central_dir = root.path().join("central");
     let leftovers: Vec<_> = std::fs::read_dir(&central_dir)
         .unwrap()
@@ -96,9 +102,60 @@ fn normal_write_leaves_no_tmp_residue() {
 #[test]
 fn write_then_read_round_trips() {
     let root = tempfile::tempdir().unwrap();
-    upsert_work_item(root.path(), &record("s-rt", "往返任务"));
+    if let Err(error) = upsert_work_item(root.path(), &record("s-rt", "往返任务")) {
+        tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+    }
     let items = central_state::load_work_items(root.path());
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].session_id, "s-rt");
     assert_eq!(items[0].task, "往返任务");
+}
+
+/// Z4 具名锁：生产形态 RMW 并发——两线程并发 upsert **不同会话**，
+/// 两行都必须保留（此前 load-modify-save 在锁外，后写者的 load 看不到
+/// 前写者的 save，整表覆盖丢一行；with_work_items 后串行化不丢）。
+#[test]
+fn concurrent_upserts_keep_both_sessions() {
+    let root = tempfile::tempdir().unwrap();
+    let base = Arc::new(root.path().to_path_buf());
+    let mut handles = Vec::new();
+    // 4 线程 × 4 次 = 16 会话（< 保留上限 20，避开 drain 裁剪干扰）
+    for t in 0..4 {
+        let base = Arc::clone(&base);
+        handles.push(std::thread::spawn(move || {
+            for i in 0..4 {
+                let record_item = record(&format!("s-{t}-{i}"), &format!("任务 {t}-{i}"));
+                let _ = upsert_work_item(&base, &record_item);
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let items = central_state::load_work_items(root.path());
+    let sessions: std::collections::HashSet<_> =
+        items.iter().map(|item| item.session_id.clone()).collect();
+    assert_eq!(
+        sessions.len(),
+        items.len(),
+        "每个会话恰好一条（会话维度 upsert）"
+    );
+    assert_eq!(
+        sessions.len(),
+        16,
+        "并发 upsert 不丢会话（实际 {} 条；锁外 RMW 时代会互相覆盖丢行）",
+        sessions.len()
+    );
+}
+
+/// Z4 写失败诚实性：save/upsert 返回 Result（调用方可感知），
+/// 正常路径 Ok。
+#[test]
+fn write_apis_report_result() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(upsert_work_item(root.path(), &record("s-ok", "任务")).is_ok());
+    assert!(
+        central_state::persistence::save_work_items(root.path(), &[]).is_ok(),
+        "空表落盘也应 Ok"
+    );
 }

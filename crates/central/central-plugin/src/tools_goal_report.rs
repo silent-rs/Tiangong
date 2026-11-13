@@ -52,7 +52,9 @@ impl CentralPlugin {
                 goals[position].status = "archived".to_string();
             }
         }
-        save_goals(self.sessions.storage_root(), &goals);
+        if let Err(error) = save_goals(self.sessions.storage_root(), &goals) {
+            tracing::warn!(%error, "报告存档落盘失败（Z4：写失败显式可见）");
+        }
         self.text_result(
             "目标已登记",
             format!(
@@ -82,7 +84,9 @@ impl CentralPlugin {
         };
         goal.status = status.to_string();
         let title = goal.title.clone();
-        save_goals(self.sessions.storage_root(), &goals);
+        if let Err(error) = save_goals(self.sessions.storage_root(), &goals) {
+            tracing::warn!(%error, "报告存档落盘失败（Z4：写失败显式可见）");
+        }
         self.text_result("目标状态已更新", format!("目标「{title}」→ {status}"))
     }
 
@@ -114,7 +118,9 @@ impl CentralPlugin {
         if overflow > 0 {
             reports.drain(..overflow);
         }
-        save_reports(self.sessions.storage_root(), &reports);
+        if let Err(error) = save_reports(self.sessions.storage_root(), &reports) {
+            tracing::warn!(%error, "报告存档落盘失败（Z4：写失败显式可见）");
+        }
         self.text_result(
             "报告已存档",
             format!(

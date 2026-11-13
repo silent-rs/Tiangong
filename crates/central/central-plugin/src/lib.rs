@@ -784,7 +784,8 @@ mod tests {
         let (plugin, mut dispatch_rx, _reports) =
             plugin_with_channel("/tmp/ws".to_string(), manager);
         // /tmp 非默认工作区：预先落盘宿主授权产物（Workspace 授权）
-        add_confirmed_workspace(plugin.sessions.storage_root(), std::path::Path::new("/tmp"));
+        let _ =
+            add_confirmed_workspace(plugin.sessions.storage_root(), std::path::Path::new("/tmp"));
         let result = call_tool(
             &plugin,
             "dispatch_work",
@@ -1137,7 +1138,7 @@ mod tests {
                 cwd: None,
                 execution_id: None,
             };
-            upsert_work_item(root.path(), &record);
+            let _ = upsert_work_item(root.path(), &record);
         }
         // 同一会话 sess-24 再派发 → 更新（不新增）
         let again = WorkItemRecord {
@@ -1155,7 +1156,7 @@ mod tests {
             outcome: None,
             execution_id: None,
         };
-        upsert_work_item(root.path(), &again);
+        let _ = upsert_work_item(root.path(), &again);
         let items = load_work_items(root.path());
         assert_eq!(items.len(), 20, "上限 20：{}", items.len());
         // sess-24 只有一条且是更新后的
@@ -1190,9 +1191,10 @@ mod tests {
             outcome: None,
             execution_id: None,
         };
-        upsert_work_item(root.path(), &record);
+        let _ = upsert_work_item(root.path(), &record);
         // 错误 work_id + 正确 session_id：兜底命中并写终态
-        mark_work_item_finished_with_session(root.path(), "work-wrong", Some("sess-1"), false);
+        let _ =
+            mark_work_item_finished_with_session(root.path(), "work-wrong", Some("sess-1"), false);
         let items = load_work_items(root.path());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].work_id, "work-real");
@@ -1201,13 +1203,14 @@ mod tests {
             "session 兜底应写入终态：{items:?}"
         );
         // 双键都未命中：不新增不改动
-        mark_work_item_finished_with_session(root.path(), "work-none", Some("sess-none"), true);
+        let _ =
+            mark_work_item_finished_with_session(root.path(), "work-none", Some("sess-none"), true);
         let after = load_work_items(root.path());
         assert_eq!(after.len(), 1, "未命中不得新增条目：{after:?}");
         // 成败落盘：成功 → completed；失败 → failed
         let finished = &after[0];
         assert_eq!(finished.outcome.as_deref(), Some("completed"));
-        mark_work_item_finished_with_session(root.path(), "work-x", Some("sess-9"), true);
+        let _ = mark_work_item_finished_with_session(root.path(), "work-x", Some("sess-9"), true);
         // sess-9 无未终态条目（sess-1 已终态）→ 不改动
         assert_eq!(load_work_items(root.path()).len(), 1);
     }
@@ -1236,7 +1239,7 @@ mod tests {
             ("work-legacy-ok", "正常任务"),
             ("work-legacy-bad", "出错任务"),
         ] {
-            upsert_work_item(
+            let _ = upsert_work_item(
                 root.path(),
                 &WorkItemRecord {
                     work_id: id.to_string(),
@@ -1351,7 +1354,7 @@ mod tests {
             execution_id: None,
         });
         for record in &records {
-            upsert_work_item(root.path(), record);
+            let _ = upsert_work_item(root.path(), record);
         }
         let entries = recover_registry_entries(root.path());
         let count = |state: &str| entries.iter().filter(|e| e.state.as_str() == state).count();
@@ -1400,7 +1403,7 @@ mod tests {
             outcome: None,
             execution_id: None,
         };
-        upsert_work_item(root.path(), &record);
+        let _ = upsert_work_item(root.path(), &record);
         let items = load_work_items(root.path());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].work_id, "work-1");
@@ -1921,7 +1924,7 @@ mod tests {
             denied.stderr
         );
         // 宿主授权产物（模拟：授权通道落盘——助手侧无登记工具）
-        add_confirmed_workspace(
+        let _ = add_confirmed_workspace(
             plugin.sessions.storage_root(),
             std::path::Path::new(&extra_path),
         );

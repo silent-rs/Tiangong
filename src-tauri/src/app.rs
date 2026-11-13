@@ -2220,7 +2220,7 @@ mod tests {
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
         };
-        crate::central::upsert_work_item(state.core_manager.storage_root(), &record);
+        let _ = crate::central::upsert_work_item(state.core_manager.storage_root(), &record);
         // 重放路径（recover 的重放等价）：按记录构造 request 走 dispatch
         let request = crate::central::CentralDispatchRequest {
             work_id: record.work_id.clone(),
@@ -2298,7 +2298,7 @@ mod tests {
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
         };
-        crate::central::upsert_work_item(&storage_root, &record);
+        let _ = crate::central::upsert_work_item(&storage_root, &record);
         let request = crate::central::CentralDispatchRequest {
             work_id: "work-exec1".into(),
             execution_id: "exec-baseline-1".into(),
@@ -2547,7 +2547,7 @@ mod tests {
             cwd: Some("/ws/legacy".into()),
             execution_id: None,
         };
-        crate::central::upsert_work_item(storage_root, &record);
+        let _ = crate::central::upsert_work_item(storage_root, &record);
         // 迁移（幂等导入）
         crate::central_host::central_events::migrate_legacy_timeline(storage_root);
         // 投影重建：字段必须完整（任务/模型/cwd/派发时间来自登记）

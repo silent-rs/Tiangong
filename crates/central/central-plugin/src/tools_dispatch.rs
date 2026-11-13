@@ -202,7 +202,9 @@ impl CentralPlugin {
             }
         };
         self.upsert_memory_work_item(record.clone());
-        upsert_work_item(self.sessions.storage_root(), &record);
+        if let Err(error) = upsert_work_item(self.sessions.storage_root(), &record) {
+            tracing::warn!(%error, "派发登记落盘失败（Z4：写失败显式可见）");
+        }
         // 复用时 record.model 是「被忽略的请求模型」（M5 提示用）——执行模型
         // 行必须报真实生效模型，避免与「已忽略请求的 X」同屏矛盾（review S5）
         let model_note = if record.reused_session {
@@ -354,7 +356,9 @@ impl CentralPlugin {
             return self.error_result(format!("派发通道已关闭：{error}"));
         }
         self.upsert_memory_work_item(record.clone());
-        upsert_work_item(self.sessions.storage_root(), &record);
+        if let Err(error) = upsert_work_item(self.sessions.storage_root(), &record) {
+            tracing::warn!(%error, "派发登记落盘失败（Z4：写失败显式可见）");
+        }
         let body = format!(
             "已发送引导消息：\n- 目标会话: {}\n- work_id: {}（终态同样回到本对话）\n- 内容: {}",
             record.session_id, record.work_id, record.task

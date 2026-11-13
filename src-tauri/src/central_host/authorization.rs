@@ -41,7 +41,11 @@ pub async fn central_approve_workspace(
         return Err(format!("路径不存在或不是目录：{path}"));
     }
     if persist.unwrap_or(false) {
-        crate::central::add_confirmed_workspace(state.core_manager.storage_root(), target);
+        if let Err(error) =
+            crate::central::add_confirmed_workspace(state.core_manager.storage_root(), target)
+        {
+            tracing::warn!(%error, "授权目录长期登记失败（一次性票据仍然生效）");
+        }
     }
     let ticket = state.ticket_registry.issue_workspace_approval(
         &path,

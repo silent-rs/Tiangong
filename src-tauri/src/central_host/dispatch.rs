@@ -194,18 +194,22 @@ async fn handle_central_control(
             }
             if control.action == "cancelled" {
                 // 取消是终态：落盘 outcome（重启恢复后显示已取消）
-                crate::central::mark_work_item_finished_with_session(
+                if let Err(error) = crate::central::mark_work_item_finished_with_session(
                     state.core_manager.storage_root(),
                     &control.work_id,
                     Some(&control.session_id),
                     false,
-                );
+                ) {
+                    tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+                }
                 // outcome 目前只有 completed/failed——取消以显式改写 outcome 表达
-                crate::central::set_work_item_outcome(
+                if let Err(error) = crate::central::set_work_item_outcome(
                     state.core_manager.storage_root(),
                     &control.session_id,
                     "cancelled",
-                );
+                ) {
+                    tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+                }
             }
             super::central_events::record_by_session(
                 state.core_manager.storage_root(),
@@ -309,12 +313,14 @@ pub(crate) async fn enqueue_central_dispatch(
         }
     }
     // 落盘排队标记（重启恢复重放——否则挂起队列丢失后误显示中断）
-    crate::central::mark_work_item_queued(
+    if let Err(error) = crate::central::mark_work_item_queued(
         state.core_manager.storage_root(),
         &request.session_id,
         after,
         Some(cwd),
-    );
+    ) {
+        tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+    }
     super::central_events::record_by_session(
         state.core_manager.storage_root(),
         &request.session_id,
@@ -624,11 +630,13 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
     // R0 契约：投递成功后同步执行归属到落盘登记——插件侧派发已带同值
     // （幂等），恢复 / 排队重放经此把新 execution_id 写回，事件时间线与
     // 终态日志才能归属到本次执行。
-    crate::central::set_work_item_execution(
+    if let Err(error) = crate::central::set_work_item_execution(
         state.core_manager.storage_root(),
         &sid,
         &request.execution_id,
-    );
+    ) {
+        tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+    }
     // 给 Worker 会话写可识别标题（仅新建会话；复用/引导保留原标题）。
     if !request.reused_session {
         let title_preview: String = request.task.chars().take(24).collect();
@@ -674,7 +682,12 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
     }
     // 排队标记清除（第十三轮 P2-1）：进入执行即失效——重放的 DispatchNow
     // 路径不经 flush，若不在此清除，下次重启会再次重放导致重复执行。
-    crate::central::clear_work_item_queued(state.core_manager.storage_root(), &request.session_id);
+    if let Err(error) = crate::central::clear_work_item_queued(
+        state.core_manager.storage_root(),
+        &request.session_id,
+    ) {
+        tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+    }
     // R5 单写：派发事实已由上方 record_for（WorkItemStarted）入事件日志；
     // 此处仅以 note 补充「恢复 / 新任务」语义。
     super::central_events::record_for(

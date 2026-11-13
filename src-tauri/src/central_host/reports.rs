@@ -130,12 +130,14 @@ impl TiangongApp {
             if done { "工作完成" } else { "工作失败" },
         );
         // 持久化终态与成败（重启后徽章按 outcome 重建 completed/failed 分组）
-        crate::central::mark_work_item_finished_with_session(
+        if let Err(error) = crate::central::mark_work_item_finished_with_session(
             self.core_manager.storage_root(),
             &request.work_id,
             Some(&request.session_id),
             !done,
-        );
+        ) {
+            tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+        }
         let has_running = !self
             .central_running_works
             .lock()
@@ -176,10 +178,12 @@ impl TiangongApp {
         };
         for mut request in ready {
             // 清除排队落盘标记（已进入投递），再递归走标准链
-            crate::central::clear_work_item_queued(
+            if let Err(error) = crate::central::clear_work_item_queued(
                 self.core_manager.storage_root(),
                 &request.session_id,
-            );
+            ) {
+                tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
+            }
             request.after_work_id = None;
             let app_handle = app.clone().expect("app 已在函数入口判空，此处必为 Some");
             tauri::async_runtime::spawn(async move {

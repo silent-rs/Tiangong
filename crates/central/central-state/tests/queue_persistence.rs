@@ -29,8 +29,12 @@ fn record(session: &str) -> WorkItemRecord {
 #[test]
 fn queued_state_survives_restart_as_queued_not_interrupted() {
     let root = tempfile::tempdir().unwrap();
-    upsert_work_item(root.path(), &record("s-q"));
-    mark_work_item_queued(root.path(), "s-q", "work-dep", Some("/ws/a"));
+    if let Err(error) = upsert_work_item(root.path(), &record("s-q")) {
+        tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+    }
+    if let Err(error) = mark_work_item_queued(root.path(), "s-q", "work-dep", Some("/ws/a")) {
+        tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+    }
     // 落盘可读回（重放数据源）
     let queued = queued_work_items(root.path());
     assert_eq!(queued.len(), 1);
@@ -45,7 +49,9 @@ fn queued_state_survives_restart_as_queued_not_interrupted() {
 fn queued_records_require_queued_marker() {
     let root = tempfile::tempdir().unwrap();
     // 未标记排队的未终态近期条目 → interrupted（原有语义不变）
-    upsert_work_item(root.path(), &record("s-run"));
+    if let Err(error) = upsert_work_item(root.path(), &record("s-run")) {
+        tracing::warn!(%error, "测试（Z4：写失败显式可见）");
+    }
     let entries = recover_registry_entries(root.path());
     let entry = entries.iter().find(|e| e.session_id == "s-run").unwrap();
     assert_eq!(entry.state, WorkState::Interrupted);

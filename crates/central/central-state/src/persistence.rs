@@ -30,6 +30,12 @@ pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let _guard = PERSISTENCE_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    atomic_write_bytes_locked(path, content)
+}
+
+/// 无锁写核心（调用方须已持有 PERSISTENCE_WRITE_LOCK——如
+/// [`with_work_items`] 的 RMW 区间；直接调用会破坏互斥）。
+fn atomic_write_bytes_locked(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -185,28 +191,54 @@ pub fn load_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
     }
 }
 
-/// 全表落盘（原子写：tmp + rename；失败记日志，不静默吞错）。
-pub fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord]) {
+/// 全表落盘（原子写）。写失败显式返回 Err（Z4：不再静默吞错——
+/// 调用方必须知道数据未更新；事实源见事件日志）。
+pub fn save_work_items(
+    storage_root: &std::path::Path,
+    items: &[WorkItemRecord],
+) -> Result<(), String> {
     let path = work_items_path(storage_root);
-    let content = match serialize_snapshot(items) {
-        Ok(content) => content,
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "派发登记序列化失败，未落盘");
-            return;
-        }
-    };
-    if let Some(parent) = path.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            tracing::warn!(%error, path = %path.display(), "派发登记目录创建失败");
-        }
-    }
-    if let Err(error) = atomic_write_bytes(&path, content.as_bytes()) {
-        tracing::warn!(%error, path = %path.display(), "派发登记落盘失败（数据未更新，事实源见事件日志）");
-    }
+    let content =
+        serialize_snapshot(items).map_err(|error| format!("派发登记序列化失败: {error}"))?;
+    atomic_write_bytes(&path, content.as_bytes())
+        .map_err(|error| format!("派发登记落盘失败（数据未更新）: {error}"))
+}
+
+/// 无锁 save（with_work_items 区间内使用）。
+fn save_work_items_locked(
+    storage_root: &std::path::Path,
+    items: &[WorkItemRecord],
+) -> Result<(), String> {
+    let path = work_items_path(storage_root);
+    let content =
+        serialize_snapshot(items).map_err(|error| format!("派发登记序列化失败: {error}"))?;
+    atomic_write_bytes_locked(&path, content.as_bytes())
+        .map_err(|error| format!("派发登记落盘失败（数据未更新）: {error}"))
+}
+
+/// RMW 事务（Z4）：在进程内写锁内完成 load → mutate → save——
+/// 消除锁外的「读-改-写」丢更新（两线程并发 upsert 不同会话，
+/// 此前后写者的 load 看不到前写者的 save，覆盖丢失一行）。
+///
+/// `mutate` 返回值经 Ok 透传；落盘失败返回 Err（改动未生效）。
+pub fn with_work_items<R>(
+    storage_root: &std::path::Path,
+    mutate: impl FnOnce(&mut Vec<WorkItemRecord>) -> R,
+) -> Result<R, String> {
+    let _guard = PERSISTENCE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut items = load_work_items(storage_root);
+    let result = mutate(&mut items);
+    save_work_items_locked(storage_root, &items)?;
+    Ok(result)
 }
 
 /// 更新某条登记的终态时间并落盘（完成语义）。
-pub fn mark_work_item_finished(storage_root: &std::path::Path, work_id: &str) {
+pub fn mark_work_item_finished(
+    storage_root: &std::path::Path,
+    work_id: &str,
+) -> Result<(), String> {
     mark_work_item_finished_with_session(storage_root, work_id, None, false)
 }
 
@@ -216,38 +248,40 @@ pub fn mark_work_item_finished_with_session(
     work_id: &str,
     session_id: Option<&str>,
     failed: bool,
-) {
+) -> Result<(), String> {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let outcome = if failed { "failed" } else { "completed" };
-    let mut items = load_work_items(storage_root);
-    let idx_by_work = items.iter().position(|item| item.work_id == work_id);
-    let idx = idx_by_work.or_else(|| {
-        session_id.and_then(|sid| {
-            items
-                .iter()
-                .position(|item| item.session_id == sid && item.finished_at.is_none())
-        })
-    });
-    if let Some(idx) = idx {
-        items[idx].finished_at = Some(now);
-        items[idx].outcome = Some(outcome.to_string());
-    } else {
-        return;
-    }
-    save_work_items(storage_root, &items);
+    with_work_items(storage_root, |items| {
+        let idx_by_work = items.iter().position(|item| item.work_id == work_id);
+        let idx = idx_by_work.or_else(|| {
+            session_id.and_then(|sid| {
+                items
+                    .iter()
+                    .position(|item| item.session_id == sid && item.finished_at.is_none())
+            })
+        });
+        if let Some(idx) = idx {
+            items[idx].finished_at = Some(now);
+            items[idx].outcome = Some(outcome.to_string());
+        }
+    })
 }
 
 /// mark 写入，此函数只改 outcome 表达）。
-pub fn set_work_item_outcome(storage_root: &std::path::Path, session_id: &str, outcome: &str) {
-    let mut items = load_work_items(storage_root);
-    if let Some(entry) = items
-        .iter_mut()
-        .rev()
-        .find(|item| item.session_id == session_id)
-    {
-        entry.outcome = Some(outcome.to_string());
-        save_work_items(storage_root, &items);
-    }
+pub fn set_work_item_outcome(
+    storage_root: &std::path::Path,
+    session_id: &str,
+    outcome: &str,
+) -> Result<(), String> {
+    with_work_items(storage_root, |items| {
+        if let Some(entry) = items
+            .iter_mut()
+            .rev()
+            .find(|item| item.session_id == session_id)
+        {
+            entry.outcome = Some(outcome.to_string());
+        }
+    })
 }
 
 /// 标记会话登记条目为排队挂起（queued_at + 依赖），落盘。
@@ -256,33 +290,36 @@ pub fn mark_work_item_queued(
     session_id: &str,
     after_work_id: &str,
     cwd: Option<&str>,
-) {
+) -> Result<(), String> {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut items = load_work_items(storage_root);
-    if let Some(entry) = items
-        .iter_mut()
-        .rev()
-        .find(|item| item.session_id == session_id)
-    {
-        entry.queued_at = Some(now);
-        entry.after_work_id = Some(after_work_id.to_string());
-        entry.cwd = cwd.map(str::to_string);
-        save_work_items(storage_root, &items);
-    }
+    with_work_items(storage_root, |items| {
+        if let Some(entry) = items
+            .iter_mut()
+            .rev()
+            .find(|item| item.session_id == session_id)
+        {
+            entry.queued_at = Some(now);
+            entry.after_work_id = Some(after_work_id.to_string());
+            entry.cwd = cwd.map(str::to_string);
+        }
+    })
 }
 
 /// 清除排队标记（依赖终态投递或工作终态时调用），落盘。
-pub fn clear_work_item_queued(storage_root: &std::path::Path, session_id: &str) {
-    let mut items = load_work_items(storage_root);
-    if let Some(entry) = items
-        .iter_mut()
-        .rev()
-        .find(|item| item.session_id == session_id)
-    {
-        if entry.queued_at.take().is_some() | entry.after_work_id.take().is_some() {
-            save_work_items(storage_root, &items);
+pub fn clear_work_item_queued(
+    storage_root: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
+    with_work_items(storage_root, |items| {
+        if let Some(entry) = items
+            .iter_mut()
+            .rev()
+            .find(|item| item.session_id == session_id)
+        {
+            entry.queued_at.take();
+            entry.after_work_id.take();
         }
-    }
+    })
 }
 
 /// 读取排队挂起的登记（重启重放投递的数据源）。
@@ -411,29 +448,29 @@ pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRec
 }
 
 /// 会话级 upsert 派发登记并落盘（同会话更新、保留最近 20 条）。
-pub fn upsert_work_item(storage_root: &std::path::Path, record: &WorkItemRecord) {
-    let mut items = load_work_items(storage_root);
-    // 会话维度记忆：同一会话的再次派发/引导更新原记录（反映该会话
-    // 最近一次工作），不堆积多条；尾部为最新。
-    if let Some(idx) = items
-        .iter()
-        .position(|item| item.session_id == record.session_id)
-    {
-        items.remove(idx);
-    }
-    items.push(record.clone());
-    // 保留上限：登记表只服务「近期派发会话的记忆与复用」（按用户
-    // 要求保留 20 个会话条目）；会话文件本身不受影响——那是复用与
-    // 复核的真相源。
-    const MAX_WORK_ITEMS: usize = 20;
-    if items.len() > MAX_WORK_ITEMS {
-        let overflow = items.len() - MAX_WORK_ITEMS;
-        items.drain(..overflow);
-    }
-    if let Some(parent) = work_items_path(storage_root).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    save_work_items(storage_root, &items);
+pub fn upsert_work_item(
+    storage_root: &std::path::Path,
+    record: &WorkItemRecord,
+) -> Result<(), String> {
+    with_work_items(storage_root, |items| {
+        // 会话维度记忆：同一会话的再次派发/引导更新原记录（反映该会话
+        // 最近一次工作），不堆积多条；尾部为最新。
+        if let Some(idx) = items
+            .iter()
+            .position(|item| item.session_id == record.session_id)
+        {
+            items.remove(idx);
+        }
+        items.push(record.clone());
+        // 保留上限：登记表只服务「近期派发会话的记忆与复用」（按用户
+        // 要求保留 20 个会话条目）；会话文件本身不受影响——那是复用与
+        // 复核的真相源。
+        const MAX_WORK_ITEMS: usize = 20;
+        if items.len() > MAX_WORK_ITEMS {
+            let overflow = items.len() - MAX_WORK_ITEMS;
+            items.drain(..overflow);
+        }
+    })
 }
 
 /// 更新会话登记的当前执行归属（R0 契约，§5.4）。
@@ -446,20 +483,16 @@ pub fn set_work_item_execution(
     storage_root: &std::path::Path,
     session_id: &str,
     execution_id: &str,
-) {
-    let mut items = load_work_items(storage_root);
-    let Some(entry) = items
-        .iter_mut()
-        .rev()
-        .find(|item| item.session_id == session_id)
-    else {
-        return;
-    };
-    entry.execution_id = Some(execution_id.to_string());
-    if let Some(parent) = work_items_path(storage_root).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    save_work_items(storage_root, &items);
+) -> Result<(), String> {
+    with_work_items(storage_root, |items| {
+        if let Some(entry) = items
+            .iter_mut()
+            .rev()
+            .find(|item| item.session_id == session_id)
+        {
+            entry.execution_id = Some(execution_id.to_string());
+        }
+    })
 }
 
 /// 已确认工作区持久化路径：`{storage_root}/central/confirmed-workspaces.json`。
@@ -481,7 +514,10 @@ pub fn load_confirmed_workspaces(storage_root: &std::path::Path) -> Vec<std::pat
 }
 
 /// 追加已确认工作区（去重、canonicalize）并落盘。
-pub fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path::Path) {
+pub fn add_confirmed_workspace(
+    storage_root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(), String> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let list = load_confirmed_workspaces(storage_root);
     let list: Vec<std::path::PathBuf> = std::iter::once(canonical)
@@ -494,11 +530,6 @@ pub fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path:
         .filter(|item| seen.insert(item.clone()))
         .collect();
     let path = confirmed_workspaces_path(storage_root);
-    if let Some(parent) = path.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            tracing::warn!(%error, path = %path.display(), "已确认工作区目录创建失败");
-        }
-    }
     let text = match serde_json::to_string_pretty(
         &list
             .iter()
@@ -506,15 +537,11 @@ pub fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path:
             .collect::<Vec<String>>(),
     ) {
         Ok(text) => text,
-        Err(error) => {
-            tracing::warn!(%error, "已确认工作区序列化失败，未落盘");
-            return;
-        }
+        Err(error) => return Err(format!("已确认工作区序列化失败: {error}")),
     };
-    // 事务化原子写（R2：随机后缀 + 写锁 + fsync；失败记日志不吞错）
-    if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
-        tracing::warn!(%error, path = %path.display(), "已确认工作区落盘失败（数据未更新）");
-    }
+    // 事务化原子写（R2：随机后缀 + 写锁 + fsync；Z4：失败显式返回）
+    atomic_write_bytes(&path, text.as_bytes())
+        .map_err(|error| format!("已确认工作区落盘失败（数据未更新）: {error}"))
 }
 
 /// 用户目标（§13.2：中枢以用户目标为语义核心，目标跨工作持续存在）。
@@ -553,21 +580,11 @@ pub fn load_goals(storage_root: &std::path::Path) -> Vec<GoalRecord> {
 }
 
 /// 目标登记（active 上限 10：久远的 inactive 目标自动归档移除）。
-pub fn save_goals(storage_root: &std::path::Path, goals: &[GoalRecord]) {
+pub fn save_goals(storage_root: &std::path::Path, goals: &[GoalRecord]) -> Result<(), String> {
     let path = goals_path(storage_root);
-    let Some(parent) = path.parent() else { return };
-    if let Err(error) = std::fs::create_dir_all(parent) {
-        tracing::warn!(%error, "目标目录创建失败");
-        return;
-    }
-    match serialize_snapshot(goals) {
-        Ok(text) => {
-            if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
-                tracing::warn!(%error, "目标落盘失败（数据未更新）");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "目标序列化失败"),
-    }
+    let text = serialize_snapshot(goals).map_err(|error| format!("目标序列化失败: {error}"))?;
+    atomic_write_bytes(&path, text.as_bytes())
+        .map_err(|error| format!("目标落盘失败（数据未更新）: {error}"))
 }
 
 /// 结构化报告（§13.5：工作终态的结论/产物/风险结构化存档，供回查）。
@@ -603,21 +620,14 @@ pub fn load_reports(storage_root: &std::path::Path) -> Vec<ReportRecord> {
 }
 
 /// 报告存档（保留最近 50 份）。
-pub fn save_reports(storage_root: &std::path::Path, reports: &[ReportRecord]) {
+pub fn save_reports(
+    storage_root: &std::path::Path,
+    reports: &[ReportRecord],
+) -> Result<(), String> {
     let path = reports_path(storage_root);
-    let Some(parent) = path.parent() else { return };
-    if let Err(error) = std::fs::create_dir_all(parent) {
-        tracing::warn!(%error, "报告目录创建失败");
-        return;
-    }
-    match serialize_snapshot(reports) {
-        Ok(text) => {
-            if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
-                tracing::warn!(%error, "报告落盘失败（数据未更新）");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "报告序列化失败"),
-    }
+    let text = serialize_snapshot(reports).map_err(|error| format!("报告序列化失败: {error}"))?;
+    atomic_write_bytes(&path, text.as_bytes())
+        .map_err(|error| format!("报告落盘失败（数据未更新）: {error}"))
 }
 
 /// 路径规范化（canonicalize 失败退回原样，比较仍可进行）。
