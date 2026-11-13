@@ -31,6 +31,8 @@ pub fn recover_central_work_state(app: &tauri::AppHandle) {
     if !registry.is_empty() {
         return; // 已恢复过（双触发幂等）
     }
+    // R2：旧工作项时间线一次性迁移至事件日志（幂等：日志非空跳过）。
+    super::central_events::migrate_legacy_timeline(state_of(app).core_manager.storage_root());
     // 汇总只在有「需要用户处理/知晓的新事实」时注入：interrupted（结果
     // 未产出，可重派）与 failed（可换模型重派）。completed 不注入——
     // 每次重启都注入全量历史完成数会重复刷屏且数字并非「离开期间」

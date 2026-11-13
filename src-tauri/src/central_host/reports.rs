@@ -110,6 +110,15 @@ impl TiangongApp {
                 "waiting_user",
                 "提出需要用户决策的问题，工作中挂起",
             );
+            // R2 事件日志（唯一事实源，双写阶段）：等待用户事实入日志。
+            super::central_events::record_for(
+                self,
+                &request.work_id,
+                &request.execution_id,
+                &request.session_id,
+                tiangong_central::event::WorkEventType::WorkItemWaitingUser,
+                "提出需要用户决策的问题，工作中挂起",
+            );
             self.deliver_pending_work_reports();
             emit_central_work_updated_state(self);
             return;
@@ -119,6 +128,19 @@ impl TiangongApp {
             self.core_manager.storage_root(),
             &request.session_id,
             "finished",
+            if done { "工作完成" } else { "工作失败" },
+        );
+        // R2 事件日志（唯一事实源，双写阶段）：终态事实入日志（带成败）。
+        super::central_events::record_for(
+            self,
+            &request.work_id,
+            &request.execution_id,
+            &request.session_id,
+            if done {
+                tiangong_central::event::WorkEventType::WorkItemCompleted
+            } else {
+                tiangong_central::event::WorkEventType::WorkItemFailed
+            },
             if done { "工作完成" } else { "工作失败" },
         );
         // 持久化终态与成败（重启后徽章按 outcome 重建 completed/failed 分组）

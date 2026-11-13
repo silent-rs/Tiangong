@@ -2328,6 +2328,32 @@ mod tests {
             Some("exec-baseline-1"),
             "时间线事件必须归属到本次执行"
         );
+        // 4) R2 事件日志（唯一事实源）：派发事实入 events.jsonl 且带归属
+        {
+            let log = tiangong_central::EventLog::open(
+                &storage_root.join("central").join("events.jsonl"),
+            )
+            .expect("事件日志应可打开");
+            let entries = log.load_all().expect("事件日志应可读取");
+            let started = entries
+                .iter()
+                .find(|logged| {
+                    logged.event.event_type
+                        == tiangong_central::event::WorkEventType::WorkItemStarted
+                        && logged.event.work_item_id == "work-exec1"
+                })
+                .expect("派发事实必须已写入事件日志");
+            assert_eq!(
+                started.event.execution_id.as_deref(),
+                Some("exec-baseline-1"),
+                "事件日志中的派发事实必须带执行归属"
+            );
+            assert_eq!(
+                started.event.worker_session_id.as_deref(),
+                Some("s-exec"),
+                "事件日志中的派发事实必须带 Worker 会话"
+            );
+        }
     }
 
     /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，

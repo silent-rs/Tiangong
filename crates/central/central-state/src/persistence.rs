@@ -1,9 +1,67 @@
 //! 中枢持久化对账（work-items / goals / reports / confirmed-workspaces）。
 //!
-//! 全部 IO 与状态重建逻辑集中于此（原子写 + 失败记日志），宿主经
+//! 全部 IO 与状态重建逻辑集中于此（事务化原子写 + 失败记日志），宿主经
 //! [`crate`] 的 re-export 调用——对账规则变化只改这一处。
+//!
+//! R2 事务加固（方案 §5.5）：随机后缀临时文件（不再共用固定 `.tmp`——
+//! 并发写会互相覆盖半成品）、进程内全局写锁（同存储根串行化）、
+//! fsync 后 rename（崩溃时不留下「半个文件」）；写失败显式记日志并
+//! 清理临时残留，不静默声称成功。
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::{WorkState, WorkStatus};
+
+/// 同一进程内的持久化写入共用此锁（方案 §5.5：同一存储根的进程内写锁）。
+static PERSISTENCE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 临时文件序号（与纳秒时间戳组合，保证同进程内不重名）。
+static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 事务化原子写：随机后缀 tmp + 写锁 + fsync + rename（方案 §5.5）。
+///
+/// - 临时文件名带随机后缀，多写者不会互相覆盖（旧实现共用固定
+///   `.json.tmp`，并发下 rename 会错挂半成品）；
+/// - 追加 fsync：崩溃后 tmp 是完整旧内容或不存在，目标文件不会是半个；
+/// - rename 原子替换；失败清理 tmp 残留并返回错误。
+fn atomic_write_bytes(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let _guard = PERSISTENCE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = random_tmp_path(path);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp_path, path)
+    })();
+    if result.is_err() {
+        // 清理残留临时文件（失败路径不留垃圾，下次写入全新后缀）
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// 随机后缀临时路径：`{stem}.{nanos}-{seq}.{ext}.tmp`。
+fn random_tmp_path(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let seq = TMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "central.json".to_string());
+    let tmp_name = format!("{file_name}.{nanos}-{seq}.tmp");
+    path.with_file_name(tmp_name)
+}
 
 /// 派发登记（中枢视角的最低事实：派发了什么、给谁、什么模型）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -129,13 +187,8 @@ pub fn save_work_items(storage_root: &std::path::Path, items: &[WorkItemRecord])
             tracing::warn!(%error, path = %path.display(), "派发登记目录创建失败");
         }
     }
-    let tmp_path = path.with_extension("json.tmp");
-    if let Err(error) = std::fs::write(&tmp_path, &content) {
-        tracing::warn!(%error, path = %tmp_path.display(), "派发登记临时文件写入失败");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp_path, &path) {
-        tracing::warn!(%error, from = %tmp_path.display(), to = %path.display(), "派发登记原子替换失败");
+    if let Err(error) = atomic_write_bytes(&path, content.as_bytes()) {
+        tracing::warn!(%error, path = %path.display(), "派发登记落盘失败（数据未更新，事实源见事件日志）");
     }
 }
 
@@ -445,14 +498,9 @@ pub fn add_confirmed_workspace(storage_root: &std::path::Path, path: &std::path:
             return;
         }
     };
-    // 原子写：tmp + rename（与派发登记一致，失败记日志不吞错）
-    let tmp_path = path.with_extension("json.tmp");
-    if let Err(error) = std::fs::write(&tmp_path, text) {
-        tracing::warn!(%error, path = %tmp_path.display(), "已确认工作区临时文件写入失败");
-        return;
-    }
-    if let Err(error) = std::fs::rename(&tmp_path, &path) {
-        tracing::warn!(%error, from = %tmp_path.display(), to = %path.display(), "已确认工作区原子替换失败");
+    // 事务化原子写（R2：随机后缀 + 写锁 + fsync；失败记日志不吞错）
+    if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
+        tracing::warn!(%error, path = %path.display(), "已确认工作区落盘失败（数据未更新）");
     }
 }
 
@@ -501,13 +549,8 @@ pub fn save_goals(storage_root: &std::path::Path, goals: &[GoalRecord]) {
     }
     match serde_json::to_string_pretty(goals) {
         Ok(text) => {
-            let tmp = path.with_extension("json.tmp");
-            if let Err(error) = std::fs::write(&tmp, text) {
-                tracing::warn!(%error, "目标临时文件写入失败");
-                return;
-            }
-            if let Err(error) = std::fs::rename(&tmp, &path) {
-                tracing::warn!(%error, "目标原子替换失败");
+            if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
+                tracing::warn!(%error, "目标落盘失败（数据未更新）");
             }
         }
         Err(error) => tracing::warn!(%error, "目标序列化失败"),
@@ -556,13 +599,8 @@ pub fn save_reports(storage_root: &std::path::Path, reports: &[ReportRecord]) {
     }
     match serde_json::to_string_pretty(reports) {
         Ok(text) => {
-            let tmp = path.with_extension("json.tmp");
-            if let Err(error) = std::fs::write(&tmp, text) {
-                tracing::warn!(%error, "报告临时文件写入失败");
-                return;
-            }
-            if let Err(error) = std::fs::rename(&tmp, &path) {
-                tracing::warn!(%error, "报告原子替换失败");
+            if let Err(error) = atomic_write_bytes(&path, text.as_bytes()) {
+                tracing::warn!(%error, "报告落盘失败（数据未更新）");
             }
         }
         Err(error) => tracing::warn!(%error, "报告序列化失败"),

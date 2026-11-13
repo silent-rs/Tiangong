@@ -19,6 +19,7 @@
 //! - 中枢对话消息链路（复用现有 Session 持久化，不新建消息体系）。
 
 pub mod event;
+pub mod event_log;
 pub mod execution;
 pub mod ids;
 pub mod model;
@@ -28,6 +29,7 @@ pub mod store;
 pub mod tools;
 
 pub use event::{EventSeverity, WorkEvent, WorkEventType};
+pub use event_log::{EventLog, LoggedEvent, project_work_state};
 pub use execution::{
     CENTRAL_CONTRACT_SCHEMA_VERSION, EXECUTION_ID_PREFIX, Execution, new_execution_id,
 };

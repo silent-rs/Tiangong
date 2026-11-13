@@ -533,6 +533,15 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
         reused_session = request.reused_session,
         "中枢后台工作已派发"
     );
+    // R2 事件日志（唯一事实源，双写阶段）：派发事实入日志。
+    super::central_events::record_for(
+        state,
+        &request.work_id,
+        &request.execution_id,
+        &sid,
+        tiangong_central::event::WorkEventType::WorkItemStarted,
+        "派发投递成功",
+    );
     // R0 契约：投递成功后同步执行归属到落盘登记——插件侧派发已带同值
     // （幂等），恢复 / 排队重放经此把新 execution_id 写回，事件时间线与
     // 终态日志才能归属到本次执行。

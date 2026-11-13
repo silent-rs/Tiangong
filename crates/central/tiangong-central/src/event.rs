@@ -220,6 +220,12 @@ impl WorkEvent {
         self
     }
 
+    /// 标记归属 Worker 会话（§13.4 字段）。
+    pub fn with_worker_session(mut self, session_id: impl Into<String>) -> Self {
+        self.worker_session_id = Some(session_id.into());
+        self
+    }
+
     pub fn with_severity(mut self, severity: EventSeverity) -> Self {
         self.severity = severity;
         self
