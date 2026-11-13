@@ -1,9 +1,7 @@
-//! 中枢宿主桥（薄层）：插件与状态机已迁移至独立 crate——
-//! - `central_plugin`（crates/central/central-plugin）：22 工具插件层、
-//!   人设与派发通道消息
-//! - `central_state`（crates/central/central-state）：状态机与持久化对账
-//!
-//! 本模块仅 re-export，保持宿主内 `crate::central::xxx` 调用路径稳定。
+//! 中枢模块桥（薄层 re-export）：插件层在 `central-plugin`（22 工具、
+//! 人设、派发通道消息），状态与持久化对账在 `central-state`；宿主编排
+//! 在 `central_host/`（派发执行器/执行路由/模式协调/授权/事件）。
+//! 本模块保持宿主内 `crate::central::xxx` 调用路径稳定。
 
 pub use central_plugin::*;
 pub use central_state::{

@@ -18,7 +18,7 @@ use std::pin::Pin;
 
 use tiangong_core::core::Plugin;
 use tiangong_core::session::Session;
-use tiangong_core::tools::extension::{ToolOverrideHandler, ToolSpecProvider};
+use tiangong_core::tools::extension::ToolOverrideHandler;
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::ToolCall;
 
@@ -508,6 +508,7 @@ impl ToolOverrideHandler for CentralPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiangong_core::tools::extension::ToolSpecProvider;
 
     #[test]
     fn central_session_id_matches_frontend_constant() {

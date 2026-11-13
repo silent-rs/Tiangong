@@ -6,8 +6,10 @@
  * 即便 store 状态被意外置位，非 desktop 宿主下 `centralActive` 仍为 false，
  * 布局不会切换（双保险）。
  *
- * 模式切换是纯前端视图分支：Session 数据、消息缓存、后台 turn 一律保留，
- * 退出即完整恢复普通模式（§4.1 退出无损、§16 兼容原则）。
+ * 模式事实源在宿主（R4 ModeCoordinator：快照保存/归还/偏好持久化）；
+ * 前端经 central_mode_enter/exit 上报与取回（本地 preCentralContext 为
+ * 过渡兜底）。Session 数据、消息缓存、后台 turn 不受切换影响
+ * （§4.1 退出无损、§16 兼容原则）。
  */
 import { useCallback, useEffect } from 'react';
 import { useStore } from '@/store/useStore';

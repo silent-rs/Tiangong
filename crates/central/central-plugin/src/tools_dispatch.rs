@@ -358,7 +358,7 @@ impl CentralPlugin {
         if items.is_empty() {
             return self.text_result(
                 "后台工作",
-                "当前没有派发记录（若应用刚重启，既往工作会话仍在——请用                  list_sessions 查询并按需复用）。".to_string(),
+                "当前没有派发记录（若应用刚重启，既往工作会话仍在——请用 list_sessions 查询并按需复用）。".to_string(),
             );
         }
         let lines: Vec<String> = items

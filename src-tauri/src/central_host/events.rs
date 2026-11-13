@@ -31,15 +31,24 @@ pub(crate) fn emit_central_work_updated_state(state: &TiangongApp) {
     }
 }
 
-/// emit_central_work_updated 的跨模块入口（commands 复用）。
-pub(crate) fn emit_central_work_updated_pub(app: &tauri::AppHandle) {
-    emit_central_work_updated(app);
-}
-
 /// 授权请求广播（R5 卡片）：派发被授权拒绝时通知前端渲染授权卡片。
 pub(crate) fn emit_approval_required(state: &TiangongApp, event: ApprovalRequiredEvent) {
     if let Some(handle) = state.app_handle_read() {
         use tauri::Emitter;
         let _ = handle.emit("central-approval-required", event);
+    }
+}
+
+/// 宿主系统注入的渲染标记（R5 P1-3 修复）：中枢宿主注入的消息
+/// （回报/授权/派发说明/激活摘要）不得伪装为用户消息（方案 §6.2）。
+///
+/// 前端按 `plugin = "central-host" && view = "system-note"` 识别，
+/// 渲染为系统提示块（非用户气泡）。`kind` 供细分样式：
+/// report / approval / dispatch-note / activation / recovery。
+pub(crate) fn system_note_render(kind: &str) -> tiangong_types::MessageRender {
+    tiangong_types::MessageRender {
+        plugin: "central-host".to_string(),
+        view: "system-note".to_string(),
+        data: serde_json::json!({ "kind": kind }),
     }
 }

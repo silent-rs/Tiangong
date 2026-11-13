@@ -7,9 +7,10 @@
  * - **输入区**：CentralChatInput（「你想让我做什么？」），不复用普通
  *   MessageInput；征询（request_user）为后续片工具，接入时按 §5.4 在中枢对话内呈现；
  * - **后台状态**：CentralWorkStatusBar（执行中任务/待汇报条数）；
- * - **数据与执行**：中枢 Core 由 app 直接持有（单独
- *   存储 / 中枢插件承载工具白名单，见 `src-tauri/src/central.rs`），固定 Session ID
- *   （lib/centralSession），切换逻辑独立于共用 store（lib/centralConversation）。
+ * - **数据与执行**：中枢 Core 由宿主直接持有（见
+ *   `src-tauri/src/central_host/`），固定 Session ID（lib/centralSession），
+ *   切换逻辑独立于共用 store（lib/centralConversation，模式事实在宿主
+ *   ModeCoordinator）。结构化卡片条（CentralCardsBar）渲染授权/决定。
  */
 import { LazyMessageList } from '@/components/LazyComponents';
 import { CentralCardsBar } from '@/components/central/CentralCardsBar';

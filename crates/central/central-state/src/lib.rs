@@ -225,6 +225,9 @@ pub enum QueueDecision {
 ///   覆写类）即使声明 `parallel` 也不豁免写入锁——用户说「并行」不能
 ///   绕过冲突保护；
 /// - 其余 → 立即派发。
+// 派发上下文参数为宿主派发链原生形态；聚合为 struct 会连动 6 处
+// 调用点与全部排队测试，暂以原形态保留。
+#[allow(clippy::too_many_arguments)]
 pub fn queue_decision(
     entries: &[WorkStatus],
     after: Option<&str>,
@@ -286,6 +289,7 @@ pub fn merge_waiting_user(
 ///
 /// 复用时 `model` 登记「会话既有模型（已忽略请求的 X）」——执行模型与
 /// 请求模型不一致必须显式可见（review M5/S5），不得谎报请求模型。
+#[allow(clippy::too_many_arguments)]
 pub fn registry_entry_after_dispatch(
     work_id: &str,
     session_id: &str,

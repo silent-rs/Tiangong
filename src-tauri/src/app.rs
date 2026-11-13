@@ -2490,6 +2490,82 @@ mod tests {
         );
     }
 
+    /// Review P1-2 具名锁 ①：同会话多次派发，投影重建取**最后**一条
+    /// started（此前正序遍历错误保留最早条目——重派/恢复后徽章显示首轮）。
+    #[test]
+    fn host_registry_rebuild_keeps_latest_dispatch_per_session() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("central");
+        std::fs::create_dir_all(&storage).unwrap();
+        let log = tiangong_central::EventLog::open(&storage.join("events.jsonl")).unwrap();
+        // 同会话两次派发（重派：不同任务、不同执行）
+        for (task, execution) in [("首轮任务", "exec-1"), ("重派任务", "exec-2")] {
+            let mut started = tiangong_central::WorkEvent::new(
+                "work-r1",
+                tiangong_central::event::WorkEventType::WorkItemStarted,
+            )
+            .with_execution(execution)
+            .with_worker_session("s-r1");
+            started.payload = serde_json::json!({ "task": task, "cwd": "/ws" });
+            log.append(started).unwrap();
+        }
+
+        let registry = crate::central_host::central_events::rebuild_registry_from_log(root.path())
+            .expect("应投影重建");
+        assert_eq!(registry.len(), 1, "会话维度单条");
+        assert_eq!(
+            registry[0].task, "重派任务",
+            "必须取最后一次派发（review P1-2：此前保留最早）"
+        );
+        assert_eq!(registry[0].execution_id.as_deref(), Some("exec-2"));
+    }
+
+    /// Review P1-2 具名锁 ②：旧时间线迁移后，投影重建字段完整
+    /// （此前迁移事件缺登记 payload——任务空串/模型默认/cwd 丢失）。
+    #[test]
+    fn host_migration_preserves_registry_fields_for_rebuild() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_root = root.path();
+        // R5 前旧数据：work-items.json（裸数组）含内嵌时间线
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-old".into(),
+            reused_session: false,
+            session_id: "s-old".into(),
+            task: "旧任务全文".into(),
+            model: Some("k3".into()),
+            dispatched_at: "2026-11-01 09:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: vec![crate::central::WorkItemEvent {
+                at: "2026-11-01 09:00:00".into(),
+                kind: "dispatched".into(),
+                note: "派发执行".into(),
+                execution_id: None,
+            }],
+            queued_at: None,
+            after_work_id: None,
+            cwd: Some("/ws/legacy".into()),
+            execution_id: None,
+        };
+        crate::central::upsert_work_item(storage_root, &record);
+        // 迁移（幂等导入）
+        crate::central_host::central_events::migrate_legacy_timeline(storage_root);
+        // 投影重建：字段必须完整（任务/模型/cwd/派发时间来自登记）
+        let registry = crate::central_host::central_events::rebuild_registry_from_log(storage_root)
+            .expect("迁移后应可投影重建");
+        let entry = registry
+            .iter()
+            .find(|e| e.work_id == "work-old")
+            .expect("迁移事件应重建登记");
+        assert_eq!(entry.task, "旧任务全文", "任务名不得丢失（P1-2）");
+        assert_eq!(entry.model.as_deref(), Some("k3"));
+        assert_eq!(entry.cwd.as_deref(), Some("/ws/legacy"));
+        assert_eq!(
+            entry.dispatched_at, "2026-11-01 09:00:00",
+            "派发时间取原值非迁移时刻"
+        );
+    }
+
     /// W6 具名：中枢连发两条消息的 is_sending 配对——第一条 begin 占住后，
     /// 未 finish 的第二条被拒（当年「a 项」bug 的行为面：发送态收尾缺失会
     /// 让 is_sending 永真）；finish 释放并递增 revision 后第二条可发送。

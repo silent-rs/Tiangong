@@ -55,7 +55,9 @@ pub(crate) fn central_dispatch_sender(
                                     state_of(&app).deliver_central_message(
                                         scru128::new().to_string(),
                                         vec![tiangong_types::ContentBlock::text(note)],
-                                        None,
+                                        Some(super::events::system_note_render(
+                                            if is_authorization { "approval" } else { "dispatch-note" },
+                                        )),
                                     )
                                 {
                                     tracing::warn!(%deliver_error, "派发未执行说明注入中枢失败");
@@ -323,10 +325,12 @@ pub(crate) async fn enqueue_central_dispatch(
 }
 
 /// 派发决策结果：Queued = 已入队（执行段不得投递）；Execute = 投递。
+/// Execute 的请求体较大（任务全文），Box 收窄变体尺寸差（clippy
+/// large_enum_variant）。
 pub(crate) enum DispatchPlan {
     Queued,
     Execute {
-        merged_work: crate::central::CentralDispatchRequest,
+        merged_work: Box<crate::central::CentralDispatchRequest>,
         steer_merged_into_running: bool,
         cwd: String,
     },
@@ -484,7 +488,7 @@ pub(crate) async fn plan_central_dispatch(
     }
 
     Ok(DispatchPlan::Execute {
-        merged_work,
+        merged_work: Box::new(merged_work),
         steer_merged_into_running,
         cwd,
     })
@@ -543,7 +547,7 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
             return Err(error);
         }
         if !steer_merged_into_running {
-            attach_work_finished_callback(state, app, merged_work.clone());
+            attach_work_finished_callback(state, app, (*merged_work).clone());
         }
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
@@ -587,7 +591,7 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
             state.execution_router.cancel(&sid, &request.execution_id);
             return Err(error);
         }
-        attach_work_finished_callback(state, app, merged_work.clone());
+        attach_work_finished_callback(state, app, (*merged_work).clone());
     }
     tracing::info!(
         execution_id = %request.execution_id,
@@ -824,7 +828,7 @@ fn build_work_notice(
         )
     } else {
         let guidance = if failure_looks_model_related(failed_reason) {
-            "\n\n（失败疑似模型/网络问题。处置：list_models 查询可用模型后，用              dispatch_work 带 session_id 与新 model 在原会话重派——上下文保留，             不要新建会话；确认无可用模型时再向用户说明。）"
+            "\n\n（失败疑似模型/网络问题。处置：list_models 查询可用模型后，用 dispatch_work 带 session_id 与新 model 在原会话重派——上下文保留，不要新建会话；确认无可用模型时再向用户说明。）"
         } else {
             ""
         };

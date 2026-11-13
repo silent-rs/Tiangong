@@ -69,7 +69,7 @@ impl CentralPlugin {
         // 商量结论是硬约束：没有留痕依据的切换被拒绝（§15.11 票据的轻量版）
         if consultation_summary.len() < 8 {
             return self.error_result(
-                "consultation_summary 必须说明与用户商量的结论（原因 + 用户同意事实），                 不能为空或过短——换模型必须先商量。"
+                "consultation_summary 必须说明与用户商量的结论（原因 + 用户同意事实），不能为空或过短——换模型必须先商量。"
                     .to_string(),
             );
         }

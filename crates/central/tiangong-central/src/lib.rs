@@ -1,33 +1,23 @@
-//! 天工「中枢模式」域框架（POC 骨架）。
+//! 中枢模式契约层（重构分支 `feature/central-refactor` 的 central-contract）。
 //!
-//! 依据 `docs/central-mode-design-draft.md`（设计基线，跟踪 Issue #773），
-//! 在 `poc/central-mode` 分支上以 worktree 隔离开发。
+//! 依据 `docs/central-refactor-plan.md` §5.1：纯数据结构、契约与规则——
+//! - 执行归属（`execution.rs`：Execution / execution_id / 契约版本）；
+//! - 事件（`event.rs`：22 种工作事件）与追加式事件日志
+//!   （`event_log.rs`：崩溃恢复 / 幂等 / 投影）；
+//! - 授权票据（`tickets.rs`：Workspace / Decision 一次性 fail-closed）；
+//! - 状态机（`status.rs` §8.1）与风险分级（`risk.rs` §14.1）。
 //!
-//! 本 crate 承载中枢模式的执行层基础框架：
-//! - 后台工作状态机（设计稿 §8.1）；
-//! - 工作事件类型与结构（§8.2 / §8.3）；
-//! - 数据模型：用户目标、后台工作、报告、建议、模型协商、中枢代决（§13）；
-//! - 风险分级（§14.1）；
-//! - 中枢助手工具白名单与模型切换票据（§5.3 / §15.10）；
-//! - JSON 文件原子持久化（沿用 `tiangong-core::session::atomic_replace_file`
-//!   与 scheduler `JobStore` 的既有范式）。
-//!
-//! 明确不在本 crate 范围内（由后续开发片承接）：
-//! - 中枢模式 UI 入口与激活问候（阶段 1 第一片）；
-//! - Worker 调度、事件总线订阅与代决执行；
-//! - 模型接力的实际切换调用（复用现有 `TiangongCore::switch_model`）；
-//! - 中枢对话消息链路（复用现有 Session 持久化，不新建消息体系）。
+//! 持久化与对账在 `central-state`（登记快照），宿主编排/IO 在
+//! `src-tauri/src/central_host/`——本 crate 不含 IO 与宿主依赖。
+//! （R5 清理：POC 期的 store/model/tools 白名单死代码已删。）
 
 pub mod event;
 pub mod event_log;
 pub mod execution;
 pub mod ids;
-pub mod model;
 pub mod risk;
 pub mod status;
-pub mod store;
 pub mod tickets;
-pub mod tools;
 
 pub use event::{EventSeverity, WorkEvent, WorkEventType};
 pub use event_log::{EventLog, LoggedEvent, project_work_state};
@@ -35,13 +25,6 @@ pub use execution::{
     CENTRAL_CONTRACT_SCHEMA_VERSION, EXECUTION_ID_PREFIX, Execution, new_execution_id,
 };
 pub use ids::{new_id, now_text};
-pub use model::{
-    CentralConversation, CentralDecision, FailureClass, GoalPriority, GoalStatus, HandoverDecision,
-    HandoverScope, ModelHandoverConsultation, Report, ReportType, Suggestion, SuggestionStatus,
-    SuggestionType, UserGoal, WorkItem,
-};
 pub use risk::RiskLevel;
 pub use status::WorkItemStatus;
-pub use store::CentralStore;
 pub use tickets::{DecisionTicket, TicketRegistry, TicketVerdict, WorkspaceApprovalTicket};
-pub use tools::{CENTRAL_TOOL_ALLOWLIST, ModelSwitchTicket, is_central_tool_allowed};

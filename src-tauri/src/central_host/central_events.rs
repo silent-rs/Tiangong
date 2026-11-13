@@ -1,8 +1,6 @@
-//! 中枢事件日志接线（R2）：宿主关键节点写入追加式事件日志。
-//!
-//! 双写阶段：现有时间线（`WorkItemRecord.events`，R5 删除）照旧，
-//! 本模块把同一事实另写入唯一权威事实源 `central/events.jsonl`
-//! （`tiangong_central::EventLog`）。旧时间线在恢复时一次性迁移。
+//! 中枢事件日志接线（R2/R5）：宿主关键节点写入追加式事件日志
+//! `central/events.jsonl`（`tiangong_central::EventLog`，唯一事实源）。
+//! 旧内嵌时间线已停止写入（R5 双写消除），恢复时一次性迁移导入。
 
 use tiangong_central::event::WorkEventType as E;
 use tiangong_central::{EventLog, WorkEvent};
@@ -87,10 +85,17 @@ pub(crate) fn migrate_legacy_timeline(storage_root: &std::path::Path) {
             if let Some(execution_id) = record.execution_id.as_deref() {
                 event = event.with_execution(execution_id);
             }
+            // 登记字段随事件入 payload（review P1-2：迁移后投影重建的
+            // 数据源——缺这些字段会导致任务名空/模型默认/cwd 丢失）
             event.payload = serde_json::json!({
                 "legacy_kind": legacy.kind,
                 "note": legacy.note,
                 "at": legacy.at,
+                "task": record.task,
+                "model": record.model,
+                "cwd": record.cwd,
+                "reused_session": record.reused_session,
+                "dispatched_at": record.dispatched_at,
             });
             if log.append(event).is_ok() {
                 migrated += 1;
@@ -220,14 +225,16 @@ pub(crate) fn rebuild_registry_from_log(
     }
     let states = tiangong_central::project_work_state(&entries);
     let mut registry: Vec<crate::central::CentralWorkStatus> = Vec::new();
-    for logged in &entries {
+    // 倒序遍历：同会话首条命中即最后一次派发（review P1-2 修复）
+    for logged in entries.iter().rev() {
         if logged.event.event_type != tiangong_central::event::WorkEventType::WorkItemStarted {
             continue;
         }
         let work_id = &logged.event.work_item_id;
-        // 会话维度 upsert 语义：同会话取最后一次 started（覆盖旧执行）
+        // 会话维度 upsert 语义：同会话保留最后一次 started（倒序遍历，
+        // 首条命中即最新执行——修复此前正序遍历保留最早条目的错误）
         if registry.iter().any(|entry| {
-            &entry.session_id == logged.event.worker_session_id.as_deref().unwrap_or("")
+            entry.session_id == logged.event.worker_session_id.as_deref().unwrap_or("")
         }) {
             continue;
         }
@@ -249,7 +256,12 @@ pub(crate) fn rebuild_registry_from_log(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
                 .or_else(|| Some("路由默认".to_string())),
-            dispatched_at: logged.event.created_at.clone(),
+            dispatched_at: payload
+                .get("dispatched_at")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(&logged.event.created_at)
+                .to_string(),
             state: project_status_to_work_state(*status),
             reused_session: payload
                 .get("reused_session")

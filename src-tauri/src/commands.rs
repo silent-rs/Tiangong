@@ -800,9 +800,11 @@ async fn send_message_inner(
         let mut flush_failed: Vec<String> = Vec::new();
         for notice in flushed {
             let notice_prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
-            if let Err(error) =
-                state.deliver_central_message(scru128::new().to_string(), notice_prepared, None)
-            {
+            if let Err(error) = state.deliver_central_message(
+                scru128::new().to_string(),
+                notice_prepared,
+                Some(crate::central_host::events::system_note_render("report")),
+            ) {
                 tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列，继续投递用户消息）");
                 flush_failed.push(notice);
             }

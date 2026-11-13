@@ -65,7 +65,7 @@ pub async fn central_approve_workspace(
     if let Err(error) = state.deliver_central_message(
         scru128::new().to_string(),
         vec![tiangong_types::ContentBlock::text(note)],
-        None,
+        Some(super::events::system_note_render("approval")),
     ) {
         tracing::warn!(%error, "授权完成提示注入中枢失败（用户下次发言时仍可重派）");
     }

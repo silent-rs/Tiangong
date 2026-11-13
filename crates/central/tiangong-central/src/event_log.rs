@@ -62,6 +62,7 @@ impl EventLog {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&self.path)
             .with_context(|| format!("打开事件日志失败: {}", self.path.display()))?;
         let mut reader = std::io::BufReader::new(&file);

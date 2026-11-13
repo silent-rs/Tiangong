@@ -189,6 +189,6 @@ pub(crate) fn inject_central_activation_summary(state: &TiangongApp) -> Result<(
     state.deliver_central_message(
         scru128::new().to_string(),
         vec![tiangong_types::ContentBlock::text(summary)],
-        None,
+        Some(super::events::system_note_render("activation")),
     )
 }

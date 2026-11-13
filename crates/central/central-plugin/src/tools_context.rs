@@ -2,7 +2,6 @@
 //! inspect_workspace / list_models / list_sessions / search_history——
 //! 「先了解情况再回答」的数据面。
 
-use serde_json;
 use tiangong_core::tools::result::ToolResult;
 
 use crate::CentralPlugin;

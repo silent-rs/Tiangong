@@ -247,10 +247,10 @@ impl TiangongApp {
         let mut failed: Vec<String> = Vec::new();
         for notice in notices {
             let prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
-            if let Err(error) = core.deliver(AgentInputKind::prepared_with_id(
-                scru128::new().to_string(),
-                prepared,
-            )) {
+            if let Err(error) = core.deliver(
+                AgentInputKind::prepared_with_id(scru128::new().to_string(), prepared)
+                    .with_render(Some(super::events::system_note_render("report"))),
+            ) {
                 tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列）");
                 failed.push(notice);
             }

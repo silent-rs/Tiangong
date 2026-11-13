@@ -4,7 +4,7 @@ import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
 import { MentionChip } from "../MentionChip";
 import { MentionEditor, type MentionEditorHandle } from "../MentionEditor";
-import { Clock3, Webhook as WebhookIcon, X, Paperclip } from "lucide-react";
+import { Clock3, Webhook as WebhookIcon, X, Paperclip, Info } from "lucide-react";
 import { resolveAttachmentUrl, type Attachment } from "@/utils/attachments";
 import { parseScheduledTaskMessage } from "@/utils/scheduledTaskMessage";
 import { parseWebhookMessage } from "@/utils/webhookMessage";
@@ -257,7 +257,10 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   // 显示（含附件，插件从消息上下文读取）；插件缺失时按下方默认规则渲染，
   // 附件与用户上传的同类文件一致显示。
   const render = message.meta?.render;
-  const withPluginRender = (fallback: React.ReactNode) => render
+  // 宿主系统注入（central-host/system-note，R5 P1-3）：回报/授权/派发
+  // 说明/激活摘要不伪装为用户消息（方案 §6.2）——渲染为左侧系统条。
+  const isCentralSystemNote = render?.plugin === 'central-host' && render?.view === 'system-note';
+  const withPluginRender = (fallback: React.ReactNode) => render && !isCentralSystemNote
     ? (
       <MessageRenderHost
         render={render}
@@ -376,6 +379,25 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
               </button>
               <button onClick={onConfirmEdit} className="px-2.5 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors">发送</button>
             </div>
+          </div>
+        </div>
+      ) : isCentralSystemNote ? (
+        <div className="flex justify-start" data-testid="central-system-note">
+          <div className="max-w-[85%] rounded-xl border border-border/60 bg-muted/[0.25] px-3.5 py-2 text-xs leading-relaxed text-muted-foreground">
+            <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+              <Info className="h-3 w-3" aria-hidden="true" />
+              {(render?.data as { kind?: string } | undefined)?.kind === 'report'
+                ? '工作回报'
+                : (render?.data as { kind?: string } | undefined)?.kind === 'approval'
+                  ? '授权'
+                  : (render?.data as { kind?: string } | undefined)?.kind === 'activation'
+                    ? '中枢'
+                    : '系统'}
+              <span className="ml-1 font-normal normal-case tracking-normal">
+                {formatMessageTime(message.created_at)}
+              </span>
+            </div>
+            <div className="whitespace-pre-wrap break-words">{messageText}</div>
           </div>
         </div>
       ) : (
