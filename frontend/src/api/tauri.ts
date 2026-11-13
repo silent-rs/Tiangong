@@ -743,6 +743,27 @@ export const api = {
   centralActivationGreeting: (): Promise<void> =>
     invoke('central_activation_greeting'),
 
+  /** R4 模式协调：进入中枢（上报普通上下文快照，宿主保存为事实源）。 */
+  centralModeEnter: (
+    activeSessionId: string | null,
+    newConversationId: string | null,
+  ): Promise<{ mode: string }> =>
+    invoke('central_mode_enter', { activeSessionId, newConversationId }),
+
+  /** R4 模式协调：退出中枢（宿主归还快照；null = 无恢复点，须显式恢复分支）。 */
+  centralModeExit: (): Promise<{
+    mode: string;
+    snapshot: {
+      active_session_id: string | null;
+      new_conversation_id: string | null;
+      saved_at: string;
+    } | null;
+  }> => invoke('central_mode_exit'),
+
+  /** R4 模式协调：查询模式状态与上次停留偏好（重启恢复依据）。 */
+  centralModeState: (): Promise<{ mode: string; last_mode: string }> =>
+    invoke('central_mode_state'),
+
   cancelTurn: (sessionId: string): Promise<boolean> =>
     invoke('cancel_turn', { sessionId }),
 

@@ -26,7 +26,7 @@ static TMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 ///   `.json.tmp`，并发下 rename 会错挂半成品）；
 /// - 追加 fsync：崩溃后 tmp 是完整旧内容或不存在，目标文件不会是半个；
 /// - rename 原子替换；失败清理 tmp 残留并返回错误。
-fn atomic_write_bytes(path: &Path, content: &[u8]) -> std::io::Result<()> {
+pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let _guard = PERSISTENCE_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

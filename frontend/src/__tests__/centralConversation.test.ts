@@ -12,6 +12,13 @@ import type { LoadedSession, Session } from '@/api/tauri';
 vi.mock('@/api/tauri', () => {
   const api = {
     centralActivationGreeting: vi.fn(() => Promise.resolve()),
+    centralModeEnter: vi.fn(() => Promise.resolve({ mode: 'central_active' })),
+    centralModeExit: vi.fn(() =>
+      Promise.resolve({ mode: 'normal', snapshot: null }),
+    ),
+    centralModeState: vi.fn(() =>
+      Promise.resolve({ mode: 'normal', last_mode: 'normal' }),
+    ),
     getSessions: vi.fn(),
     getReasoningEffort: vi.fn(),
     getDefaultReasoningEffort: vi.fn(),
@@ -175,6 +182,30 @@ describe('restoreFromCentralConversation', () => {
     __resetCentralConversationForTests();
     resetStore({ activeSessionId: 'work-1', sessions: list });
     await ensureCentralConversation();
+    await restoreFromCentralConversation();
+    expect(useStore.getState().activeSessionId).toBe('work-1');
+  });
+  it('R4 模式协调：宿主快照优先于本地副本（事实源在宿主）', async () => {
+    const list = [session('work-1'), session('work-host'), session(CENTRAL_SESSION_ID)];
+    resetStore({ activeSessionId: 'work-1', sessions: list });
+    await ensureCentralConversation();
+    // 本地副本指向 work-1；宿主快照指向 work-host——恢复必须以宿主为准
+    vi.mocked(api.centralModeExit).mockResolvedValueOnce({
+      mode: 'normal',
+      snapshot: {
+        active_session_id: 'work-host',
+        new_conversation_id: null,
+        saved_at: '2026-11-13 12:00:00',
+      },
+    });
+    await restoreFromCentralConversation();
+    expect(useStore.getState().activeSessionId).toBe('work-host');
+  });
+  it('R4 模式协调：宿主退出失败时回退本地副本（过渡双源兜底）', async () => {
+    const list = [session('work-1'), session(CENTRAL_SESSION_ID)];
+    resetStore({ activeSessionId: 'work-1', sessions: list });
+    await ensureCentralConversation();
+    vi.mocked(api.centralModeExit).mockRejectedValueOnce(new Error('host down'));
     await restoreFromCentralConversation();
     expect(useStore.getState().activeSessionId).toBe('work-1');
   });

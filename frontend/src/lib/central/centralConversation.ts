@@ -39,6 +39,11 @@ export async function ensureCentralConversation(): Promise<void> {
     activeSessionId: cur.activeSessionId,
     newConversationId: cur.newConversationId,
   };
+  // R4 模式协调：快照上报宿主（事实源；本地副本为过渡兜底，R5 移除）。
+  // 失败静默——宿主无快照时退出走「无恢复点」分支，不阻塞切换。
+  void api
+    .centralModeEnter(cur.activeSessionId, cur.newConversationId)
+    .catch(() => undefined);
   // 中枢对话历史从中枢存储加载；尚未创建（首次进入）按空对话处理。
   const loaded = await api.loadSession(CENTRAL_SESSION_ID).catch(() => null);
   // 加载期间模式被来回切换：放弃本次写入
@@ -70,8 +75,17 @@ export async function ensureCentralConversation(): Promise<void> {
 export async function restoreFromCentralConversation(): Promise<void> {
   // 作废在途的 ensure；后续切回动作由 store 自身的版本控制保证时序。
   ++centralSwitchVersion;
-  const context = preCentralContext;
+  // R4 模式协调：宿主快照优先（事实源）；宿主无记录（异常进入/调用
+  // 失败）回退本地副本（过渡双源，R5 收敛为纯宿主）。
+  let context = preCentralContext;
   preCentralContext = null;
+  const hostSnapshot = await api.centralModeExit().catch(() => null);
+  if (hostSnapshot?.snapshot) {
+    context = {
+      activeSessionId: hostSnapshot.snapshot.active_session_id,
+      newConversationId: hostSnapshot.snapshot.new_conversation_id,
+    };
+  }
   if (!context) return;
   if (context.activeSessionId) {
     const cur = useStore.getState();

@@ -86,6 +86,9 @@ pub struct TiangongApp {
     /// 授权票据注册表（R3：WorkspaceApproval / Decision 一次性票据，
     /// 仅宿主 UI 真实用户操作后签发；模型只能请求，不能生成）。
     pub(crate) ticket_registry: tiangong_central::TicketRegistry,
+    /// 模式协调器（R4：中枢/普通切换的宿主状态机与普通上下文快照，
+    /// 取代前端模块级变量作为事实源；后台工作不受切换影响）。
+    pub(crate) mode_coordinator: crate::central_host::mode_coordinator::ModeCoordinator,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -217,6 +220,7 @@ impl TiangongApp {
             central_activation_greeted: std::sync::atomic::AtomicBool::new(false),
             execution_router: crate::central_host::ExecutionRouter::new(),
             ticket_registry: tiangong_central::TicketRegistry::new(),
+            mode_coordinator: crate::central_host::mode_coordinator::ModeCoordinator::new(),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),

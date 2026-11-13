@@ -8,6 +8,8 @@ mod core_lifecycle;
 pub(crate) mod dispatch;
 pub(crate) mod events;
 mod execution_router;
+pub mod mode_commands;
+pub mod mode_coordinator;
 pub(crate) mod recovery;
 mod reports;
 
