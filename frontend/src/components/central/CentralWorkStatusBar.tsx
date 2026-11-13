@@ -12,6 +12,7 @@ import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
 import { Loader2, Inbox, History, ChevronRight, ChevronDown, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
 import { restoreFromCentralConversation } from '@/lib/central/centralConversation';
+import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/components/central/CentralWorkDrawer';
 
 interface CentralWorkStatus {
   work_id: string;
@@ -31,7 +32,7 @@ function WorkItemRow({
   onOpen,
 }: {
   item: CentralWorkStatus;
-  onOpen?: (sessionId: string) => void;
+  onOpen?: (item: CentralWorkStatus) => void;
 }) {
   const running = item.state === 'running';
   const interrupted = item.state === 'interrupted';
@@ -43,13 +44,13 @@ function WorkItemRow({
   const queuedState = item.state === 'queued';
   return (
     <div
-      onClick={() => onOpen?.(item.session_id)}
+      onClick={() => onOpen?.(item)}
       role={onOpen ? 'button' : undefined}
       tabIndex={onOpen ? 0 : undefined}
       onKeyDown={(event) => {
         if (onOpen && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
-          onOpen(item.session_id);
+          onOpen(item);
         }
       }}
       className={`group/row cursor-pointer rounded-xl border p-3 text-left transition-colors ${
@@ -236,9 +237,16 @@ export function CentralWorkStatusBar() {
     }
   }, []);
 
-  // 点击工作项：退出中枢并在普通模式打开该工作会话（§4.4 可复核）。
+  // R4 工作抽屉：点击工作行打开抽屉复核（不离开中枢、不切上下文，
+  // §3.5/§6.4）；「打开原始工作会话」是抽屉内的显式动作。
   // 必须位于早退之前——否则空列表首渲染与有数据渲染的 hooks 数量不一致
   //（React 规则：所有 hooks 需无条件按序调用）。
+  const [drawerWork, setDrawerWork] = useState<CentralWorkDrawerItem | null>(null);
+  const openDrawer = useCallback((item: CentralWorkStatus) => {
+    setHoverOpen(false);
+    setPinned(false);
+    setDrawerWork(item);
+  }, []);
   const openInNormalMode = useCallback(
     async (sessionId: string) => {
       const store = useStore.getState();
@@ -372,7 +380,7 @@ export function CentralWorkStatusBar() {
             queued={queued}
             interrupted={interrupted}
             completed={completed}
-            onOpen={openInNormalMode}
+            onOpen={openDrawer}
           />
         </div>
       ) : null}
@@ -406,10 +414,20 @@ export function CentralWorkStatusBar() {
               queued={queued}
               interrupted={interrupted}
               completed={completed}
-              onOpen={openInNormalMode}
+              onOpen={openDrawer}
             />
           </div>
         </aside>
+      ) : null}
+      {drawerWork ? (
+        <CentralWorkDrawer
+          work={drawerWork}
+          onClose={() => setDrawerWork(null)}
+          onOpenSession={(sessionId) => {
+            setDrawerWork(null);
+            void openInNormalMode(sessionId);
+          }}
+        />
       ) : null}
     </div>
   );
@@ -437,7 +455,7 @@ function WorkGroups({
   queued: CentralWorkStatus[];
   interrupted: CentralWorkStatus[];
   completed: CentralWorkStatus[];
-  onOpen: (sessionId: string) => void;
+  onOpen: (item: CentralWorkStatus) => void;
 }) {
   return (
     <div>

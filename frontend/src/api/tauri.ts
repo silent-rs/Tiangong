@@ -764,6 +764,12 @@ export const api = {
   centralModeState: (): Promise<{ mode: string; last_mode: string }> =>
     invoke('central_mode_state'),
 
+  /** R4 工作抽屉：工作项事件时间线（事件日志事实源）。 */
+  centralWorkTimeline: (
+    workId: string,
+  ): Promise<Array<{ at: string; kind: string; note: string }>> =>
+    invoke('central_work_timeline', { workId }),
+
   cancelTurn: (sessionId: string): Promise<boolean> =>
     invoke('cancel_turn', { sessionId }),
 

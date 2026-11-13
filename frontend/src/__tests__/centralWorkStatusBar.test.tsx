@@ -17,6 +17,11 @@ const getCentralWorkStatusMock = vi.fn(() => Promise.resolve([]));
 vi.mock('@/api/tauri', () => ({
   api: {
     getCentralWorkStatus: (...args: unknown[]) => getCentralWorkStatusMock(...args),
+    centralWorkTimeline: () =>
+      Promise.resolve([
+        { at: '2026-11-13 10:00:00', kind: 'work_item.started', note: '派发投递成功' },
+        { at: '2026-11-13 10:05:00', kind: 'work_item.completed', note: '工作完成' },
+      ]),
   },
 }));
 
@@ -251,7 +256,7 @@ describe('CentralWorkStatusBar', () => {
     expect(text).toContain('最新任务标题');
   });
 
-  it('工作项点击携带 session_id 并经普通模式打开', async () => {
+  it('R4 工作抽屉：点击工作行打开抽屉（不切模式），「打开原始工作会话」才切', async () => {
     container = await mountWithItems([makeItem({ state: 'completed' })]);
     const badge = container.querySelector('button');
     act(() => {
@@ -264,6 +269,25 @@ describe('CentralWorkStatusBar', () => {
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
       );
     });
+    // 点击行：打开抽屉，不退出中枢、不切会话（§6.4 抽屉不改上下文）
+    expect(switchSessionMock).not.toHaveBeenCalled();
+    const drawer = container.querySelector('[data-testid="central-work-drawer"]');
+    expect(drawer).not.toBeNull();
+    expect(drawer!.textContent).toContain('sess-aaaaaaaa'.slice(0, 0) + '已完成');
+    // 时间线加载（api mock 已注入 centralWorkTimeline）
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // 「打开原始工作会话」：显式动作才切换（按文本定位，避免结构耦合）
+    const openSession = Array.from(drawer!.querySelectorAll('button')).find((btn) =>
+      btn.textContent?.includes('打开原始工作会话'),
+    );
+    expect(openSession).toBeDefined();
+    await act(async () => {
+      openSession!.click();
+    });
     expect(switchSessionMock).toHaveBeenCalledWith('sess-aaaaaaaa');
+    // 抽屉关闭
+    expect(container.querySelector('[data-testid="central-work-drawer"]')).toBeNull();
   });
 });

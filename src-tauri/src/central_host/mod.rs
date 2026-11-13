@@ -12,6 +12,7 @@ pub mod mode_commands;
 pub mod mode_coordinator;
 pub(crate) mod recovery;
 mod reports;
+pub mod work_view;
 
 pub(crate) use events::emit_central_work_updated;
 pub use execution_router::ExecutionRouter;
