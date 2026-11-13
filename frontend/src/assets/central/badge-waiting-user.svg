@@ -1,0 +1,14 @@
+<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 中枢角标 · 呼出信号（等你决定）：底座弧 + 渐变信号弧 + 信号核 -->
+  <defs>
+    <linearGradient id="sig" x1="11" y1="14" x2="11" y2="3" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#f59e0b" stop-opacity="0.55"/>
+    </linearGradient>
+  </defs>
+  <path d="M4.4 13.2 A7.4 7.4 0 0 0 17.6 13.2" stroke="#f59e0b" stroke-opacity="0.42" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M8.1 10.6 A4.6 4.6 0 0 1 13.9 10.6" stroke="url(#sig)" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M5.9 8.1 A7.6 7.6 0 0 1 16.1 8.1" stroke="url(#sig)" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.75"/>
+  <circle cx="11" cy="13.4" r="1.9" fill="#f59e0b"/>
+  <circle cx="11" cy="13.4" r="3.1" stroke="#f59e0b" stroke-opacity="0.38" stroke-width="1"/>
+</svg>
