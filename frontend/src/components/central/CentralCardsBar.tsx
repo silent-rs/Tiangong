@@ -1,18 +1,18 @@
 /**
  * 中枢结构化卡片条（R5 消息卡片，方案 §3.6/§6.2）：
  * - 授权卡片（事件驱动）：派发被 Workspace 授权拒绝时（宿主
- *   `central-approval-required`），渲染目录与任务指纹，用户真实操作签发
- *   票据（centralApproveWorkspace）——「授权」与「授权并记住」两种；
- *   已授权卡片提示助手可重派。模型不能自证同意（§5.6）。
+ *   `central-approval-required`），渲染紧凑的行内授权条，用户真实操作
+ *   签发票据（centralApproveWorkspace）；授权完成后宿主会通知中枢自动
+ *   重派，卡片短暂显示「已授权」后自动收起。
  * - 决定卡片（状态驱动）：等待用户决策的工作（work status 的
  *   waiting_user），提示回中枢对话答复；状态变化自动消失。
  *
  * 数据源均为宿主事实（UI 是投影，§5.3）；挂载于中枢输入区上方。
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { ShieldCheck, HelpCircle, Loader2, CheckCircle2 } from 'lucide-react';
+import { ShieldQuestion, MessageCircleQuestion, Check } from 'lucide-react';
 
 interface ApprovalRequiredEvent {
   cwd: string;
@@ -31,7 +31,13 @@ interface WaitingWork {
   state: string;
 }
 
-/** 授权卡片：一次待授权事项（目录 + 任务指纹）。 */
+/** 任务摘要（一行内展示）。 */
+function taskPreview(task: string, max = 48): string {
+  const chars = Array.from(task);
+  return chars.length > max ? `${chars.slice(0, max).join('')}…` : task;
+}
+
+/** 授权卡片：紧凑行内条——图标 + 目录/任务 + 右侧动作。 */
 function ApprovalCard({
   approval,
   onApproved,
@@ -62,15 +68,10 @@ function ApprovalCard({
     return (
       <div
         data-testid="central-approval-card-approved"
-        className="flex items-start gap-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-xs"
+        className="flex items-center gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] px-3 py-1.5 text-xs text-emerald-700 dark:text-emerald-300"
       >
-        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-        <div className="min-w-0">
-          <p className="font-medium text-emerald-700 dark:text-emerald-300">已授权</p>
-          <p className="mt-0.5 break-all leading-relaxed text-muted-foreground">
-            {approval.cwd}｜任务「{approval.task}」——助手重新派发即可继续。
-          </p>
-        </div>
+        <Check className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 truncate">已授权 {approval.cwd}，助手正在重新派发…</span>
       </div>
     );
   }
@@ -78,46 +79,47 @@ function ApprovalCard({
   return (
     <div
       data-testid="central-approval-card"
-      className="rounded-xl border border-amber-500/30 bg-amber-500/[0.05] p-3 text-xs"
+      className="rounded-lg border border-amber-500/25 bg-amber-500/[0.04] px-3 py-2 text-xs"
     >
-      <div className="flex items-start gap-2.5">
-        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+      <div className="flex items-center gap-2.5">
+        <ShieldQuestion className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="min-w-0 flex-1">
-          <p className="font-medium text-amber-700 dark:text-amber-300">需要你授权工作目录</p>
-          <p className="mt-1 break-all leading-relaxed text-muted-foreground">
-            助手要在以下目录执行后台工作，请确认任务与影响：
-          </p>
-          <p className="mt-1 break-all font-mono text-[11px] text-foreground/80">{approval.cwd}</p>
-          <p className="mt-1 leading-relaxed text-muted-foreground">任务：{approval.task}</p>
-          {error ? (
-            <p className="mt-1 text-red-600 dark:text-red-400" role="alert">
-              授权失败：{error}
-            </p>
-          ) : null}
-          <div className="mt-2.5 flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => void approve(false)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 font-medium text-primary-foreground transition-opacity disabled:opacity-60"
-            >
-              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              授权本次
-            </button>
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => void approve(true)}
-              className="rounded-lg border border-border/70 bg-muted/40 px-3 py-1.5 font-medium transition-colors hover:bg-muted disabled:opacity-60"
-            >
-              授权并记住此目录
-            </button>
-          </div>
-          <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">
-            授权仅对上述任务生效（一次性票据）；「记住」后该目录后续派发不再询问。
+          <span className="font-medium text-amber-700 dark:text-amber-300">需要授权</span>
+          <span className="ml-2 text-muted-foreground" title={approval.task}>
+            {taskPreview(approval.task)}
+          </span>
+          <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground" title={approval.cwd}>
+            {approval.cwd}
           </p>
         </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => void approve(false)}
+            className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground transition-opacity disabled:opacity-60"
+          >
+            授权
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => void approve(true)}
+            title="授权并记住此目录（后续派发不再询问）"
+            className="rounded-md border border-border/70 bg-muted/30 px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-muted disabled:opacity-60"
+          >
+            记住
+          </button>
+        </div>
       </div>
+      {submitting ? (
+        <p className="mt-1 pl-6 text-[10px] text-muted-foreground">正在签发授权…</p>
+      ) : null}
+      {error ? (
+        <p className="mt-1 pl-6 text-[10px] text-red-600 dark:text-red-400" role="alert">
+          授权失败：{error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -127,18 +129,16 @@ function DecisionCard({ work }: { work: WaitingWork }) {
   return (
     <div
       data-testid="central-decision-card"
-      className="flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.04] p-3 text-xs"
+      className="flex items-center gap-2.5 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2 text-xs"
     >
-      <HelpCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-      <div className="min-w-0">
-        <p className="font-medium text-amber-700 dark:text-amber-300">有工作在等你的决定</p>
-        <p className="mt-0.5 truncate leading-relaxed text-muted-foreground" title={work.task}>
-          {work.task}
-        </p>
-        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-          在下方输入框直接答复即可（恢复的是同一个执行，上下文连续）。
-        </p>
-      </div>
+      <MessageCircleQuestion className="h-4 w-4 shrink-0 text-primary" />
+      <span className="min-w-0 flex-1">
+        <span className="font-medium">在等你的决定</span>
+        <span className="ml-2 text-muted-foreground" title={work.task}>
+          {taskPreview(work.task)}
+        </span>
+      </span>
+      <span className="shrink-0 text-[10px] text-muted-foreground">直接在下方答复即可</span>
     </div>
   );
 }
@@ -147,6 +147,7 @@ function DecisionCard({ work }: { work: WaitingWork }) {
 export function CentralCardsBar() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [waitingWorks, setWaitingWorks] = useState<WaitingWork[]>([]);
+  const dismissTimers = useRef(new Map<string, number>());
 
   // 授权请求：宿主事件驱动（拒绝时到达）
   useEffect(() => {
@@ -158,9 +159,7 @@ export function CentralCardsBar() {
       setApprovals((current) => {
         // 同目录同任务去重（模型重试拒绝只保留一张卡）
         if (
-          current.some(
-            (item) => item.cwd === payload.cwd && item.task === payload.task,
-          )
+          current.some((item) => item.cwd === payload.cwd && item.task === payload.task)
         ) {
           return current;
         }
@@ -208,6 +207,32 @@ export function CentralCardsBar() {
     };
   }, [refreshWaiting]);
 
+  // 已授权卡片短暂展示「正在重新派发」后自动收起（用户实测：长期
+  // 占据页面；授权完成的事实已由宿主注入中枢，卡片无需常驻）
+  useEffect(() => {
+    for (const approval of approvals) {
+      if (approval.status !== 'approved' || dismissTimers.current.has(approval.work_id)) {
+        continue;
+      }
+      const timer = window.setTimeout(() => {
+        dismissTimers.current.delete(approval.work_id);
+        setApprovals((current) =>
+          current.filter(
+            (item) => !(item.work_id === approval.work_id && item.cwd === approval.cwd),
+          ),
+        );
+      }, 3500);
+      dismissTimers.current.set(approval.work_id, timer);
+    }
+  }, [approvals]);
+  useEffect(() => {
+    const timers = dismissTimers.current;
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
+    };
+  }, []);
+
   const handleApproved = useCallback((workId: string) => {
     setApprovals((current) =>
       current.map((item) =>
@@ -219,9 +244,13 @@ export function CentralCardsBar() {
   if (approvals.length === 0 && waitingWorks.length === 0) return null;
 
   return (
-    <div data-testid="central-cards-bar" className="space-y-2 border-t border-border/60 px-4 py-2">
+    <div data-testid="central-cards-bar" className="space-y-1.5 border-t border-border/60 px-4 py-2">
       {approvals.map((approval) => (
-        <ApprovalCard key={`${approval.work_id}-${approval.cwd}`} approval={approval} onApproved={handleApproved} />
+        <ApprovalCard
+          key={`${approval.work_id}-${approval.cwd}`}
+          approval={approval}
+          onApproved={handleApproved}
+        />
       ))}
       {waitingWorks.map((work) => (
         <DecisionCard key={work.work_id} work={work} />

@@ -55,6 +55,20 @@ pub async fn central_approve_workspace(
         persist = persist.unwrap_or(false),
         "Workspace 授权票据已签发（用户操作）"
     );
+    // 授权闭环（用户实测修复）：授权完成后必须通知中枢，否则模型在
+    // 等一个不会来的信号、不会自动重派。注入提示触发中枢 turn，
+    // 模型立即重派同一任务（task 文本一致才放行）。
+    let fingerprint_preview: String = task_fingerprint.trim().chars().take(60).collect();
+    let note = format!(
+        "[系统中枢] 用户已授权目录 {path}（任务：{fingerprint_preview}）。请立即重新派发该任务——dispatch_work 的 task 文本与上述任务保持完全一致（授权票据绑定任务指纹），不要改动任务描述。"
+    );
+    if let Err(error) = state.deliver_central_message(
+        scru128::new().to_string(),
+        vec![tiangong_types::ContentBlock::text(note)],
+        None,
+    ) {
+        tracing::warn!(%error, "授权完成提示注入中枢失败（用户下次发言时仍可重派）");
+    }
     Ok(json!({
         "approval_id": ticket.approval_id,
         "workspace_id": ticket.workspace_id,

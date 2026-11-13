@@ -74,8 +74,9 @@ describe('CentralCardsBar', () => {
     expect(card!.textContent).toContain('发布模块 v2');
 
     const button = Array.from(card!.querySelectorAll('button')).find((btn) =>
-      btn.textContent?.includes('授权本次'),
+      btn.textContent?.trim() === '授权',
     );
+    vi.useFakeTimers();
     await act(async () => {
       button!.click();
     });
@@ -85,7 +86,16 @@ describe('CentralCardsBar', () => {
     ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="central-approval-card-approved"]')!.textContent,
-    ).toContain('助手重新派发即可继续');
+    ).toContain('正在重新派发');
+    // 已授权卡片 3.5s 后自动收起（不再长期占据页面）
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      vi.advanceTimersByTime(3600);
+    });
+    vi.useRealTimers();
+    expect(container.querySelector('[data-testid="central-approval-card-approved"]')).toBeNull();
   });
 
   it('「授权并记住」传 persist=true', async () => {
@@ -96,7 +106,7 @@ describe('CentralCardsBar', () => {
     });
     const card = container.querySelector('[data-testid="central-approval-card"]')!;
     const button = Array.from(card.querySelectorAll('button')).find((btn) =>
-      btn.textContent?.includes('授权并记住'),
+      btn.textContent?.trim() === '记住',
     );
     await act(async () => {
       button!.click();
