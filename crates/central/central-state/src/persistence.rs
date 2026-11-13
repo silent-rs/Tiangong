@@ -113,39 +113,10 @@ pub struct WorkItemEvent {
     pub kind: String,
     /// 人读说明
     pub note: String,
-    /// 事件归属的执行（R0 契约）：由 `append_work_item_event` 按该会话
-    /// 登记的最近执行自动回填，保证时间线可唯一定位到一次执行。
+    /// 事件归属的执行（R0 契约）：按该会话登记的执行回填（R5 起写
+    /// 入事件日志；本字段为旧数据兼容读）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
-}
-
-/// 保留最近 30 条）。找不到条目时静默跳过（时间线是附加信息，不阻塞主链）。
-pub fn append_work_item_event(
-    storage_root: &std::path::Path,
-    session_id: &str,
-    kind: &str,
-    note: &str,
-) {
-    let mut items = load_work_items(storage_root);
-    let Some(entry) = items
-        .iter_mut()
-        .rev()
-        .find(|item| item.session_id == session_id)
-    else {
-        return;
-    };
-    let execution_id = entry.execution_id.clone();
-    entry.events.push(WorkItemEvent {
-        at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        kind: kind.to_string(),
-        note: note.to_string(),
-        execution_id,
-    });
-    let overflow = entry.events.len().saturating_sub(30);
-    if overflow > 0 {
-        entry.events.drain(..overflow);
-    }
-    save_work_items(storage_root, &items);
 }
 
 /// 派发登记持久化路径：`{storage_root}/central/work-items.json`。
@@ -427,7 +398,7 @@ pub fn upsert_work_item(storage_root: &std::path::Path, record: &WorkItemRecord)
 ///
 /// 宿主在投递成功后调用：插件侧派发落盘已带 execution_id（幂等无害）；
 /// 恢复 / 排队重放由宿主构造请求，经此把新 execution_id 写回登记，
-/// 后续事件时间线（`append_work_item_event` 自动回填）与终态日志
+/// 后续事件（R5：事件日志按登记执行归属）与终态日志
 /// 才能归属到本次执行而非历史执行。
 pub fn set_work_item_execution(
     storage_root: &std::path::Path,

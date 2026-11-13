@@ -35,7 +35,7 @@ mod workspace_summary;
 use workspace_summary::{list_worktrees, read_head_branch, workspace_git_summary};
 
 pub use central_state::{
-    add_confirmed_workspace, append_work_item_event, canonical_path_string, interrupted_work_items,
+    add_confirmed_workspace, canonical_path_string, interrupted_work_items,
     load_confirmed_workspaces, load_goals, load_reports, load_work_items, mark_work_item_finished,
     mark_work_item_finished_with_session, recover_registry_entries, save_goals, save_reports,
     save_work_items, set_work_item_outcome, upsert_work_item, workspace_confirmed, GoalRecord,
@@ -136,6 +136,84 @@ pub struct CentralPlugin {
 /// 天然已确认：默认工作区**及其子目录**（应用级选择的根，其子树均属
 /// 既定授权范围，按前缀判定而非精确相等——review P1：精确比较会把
 /// 默认工作区内的子目录误拦为「新工作区」）。
+/// 按 session 归属写中枢事件日志（R5 单写，取代旧内嵌时间线）。
+fn record_central_event_by_session(
+    storage_root: &std::path::Path,
+    session_id: &str,
+    event_type: tiangong_central::event::WorkEventType,
+    note: &str,
+) {
+    let record = load_work_items(storage_root)
+        .into_iter()
+        .rev()
+        .find(|item| item.session_id == session_id);
+    let Some(record) = record else {
+        tracing::warn!(session_id, "事件归属会话无登记，事实未入日志");
+        return;
+    };
+    let log = match tiangong_central::EventLog::open(
+        &storage_root.join("central").join("events.jsonl"),
+    ) {
+        Ok(log) => log,
+        Err(error) => {
+            tracing::warn!(%error, "中枢事件日志打开失败（事实未入日志）");
+            return;
+        }
+    };
+    let mut event = tiangong_central::WorkEvent::new(&record.work_id, event_type)
+        .with_worker_session(session_id);
+    if let Some(execution_id) = record.execution_id.as_deref() {
+        event = event.with_execution(execution_id);
+    }
+    event.payload = serde_json::json!({ "note": note });
+    if let Err(error) = log.append(event) {
+        tracing::warn!(%error, "中枢事件日志追加失败（事实未入日志）");
+    }
+}
+
+/// 读工作项时间线：事件日志优先，旧内嵌时间线兼容读（R5）。
+fn work_timeline_from_log(
+    storage_root: &std::path::Path,
+    work_id: &str,
+) -> Vec<(String, String, String)> {
+    let mut timeline = Vec::new();
+    if let Ok(log) =
+        tiangong_central::EventLog::open(&storage_root.join("central").join("events.jsonl"))
+    {
+        if let Ok(entries) = log.load_all() {
+            for logged in entries {
+                if logged.event.work_item_id == work_id {
+                    let note = logged
+                        .event
+                        .payload
+                        .get("note")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    timeline.push((
+                        logged.event.created_at.clone(),
+                        logged.event.event_type.as_str().to_string(),
+                        note.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    if !timeline.is_empty() {
+        return timeline;
+    }
+    load_work_items(storage_root)
+        .into_iter()
+        .rev()
+        .find(|item| item.work_id == work_id)
+        .map(|item| {
+            item.events
+                .iter()
+                .map(|e| (e.at.clone(), e.kind.clone(), e.note.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl CentralPlugin {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1069,10 +1147,10 @@ impl CentralPlugin {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(format!("[系统中枢] {note}"));
-        append_work_item_event(
+        record_central_event_by_session(
             self.sessions.storage_root(),
             session_id,
-            "model_switched",
+            tiangong_central::event::WorkEventType::ModelHandoverConfirmed,
             &note,
         );
         match switch_result {
@@ -1160,40 +1238,35 @@ impl CentralPlugin {
         if work_id.is_empty() {
             return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
         }
-        // 读磁盘（真相源）：事件由 app 执行器经 append_work_item_event 落盘，
-        // 插件内存登记不含 events——两份视图以磁盘为准。
-        let items = load_work_items(self.sessions.storage_root());
-        let Some(entry) = items.iter().rev().find(|item| item.work_id == work_id) else {
-            // 磁盘没有再看内存（可能尚未落盘）
-            let memory = self
-                .work_items
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if memory.iter().any(|item| item.work_id == work_id) {
+        // R5：事件日志是唯一事实源（旧内嵌时间线仅兼容读）。
+        let timeline = work_timeline_from_log(self.sessions.storage_root(), work_id);
+        if timeline.is_empty() {
+            // 日志与旧时间线都无记录：登记存在则说明是旧版本数据
+            let known = load_work_items(self.sessions.storage_root())
+                .iter()
+                .any(|item| item.work_id == work_id)
+                || self
+                    .work_items
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .any(|item| item.work_id == work_id);
+            if known {
                 return self.text_result(
                     "工作时间线",
                     format!("工作 {work_id} 暂无事件记录（可能为旧版本登记）。"),
                 );
             }
             return self.error_result(format!("未找到工作 {work_id}"));
-        };
-        if entry.events.is_empty() {
-            return self.text_result(
-                "工作时间线",
-                format!("工作 {work_id} 暂无事件记录（可能为旧版本登记）。"),
-            );
         }
-        let lines: Vec<String> = entry
-            .events
+        let lines: Vec<String> = timeline
             .iter()
-            .map(|event| format!("- [{}] {}：{}", event.at, event.kind, event.note))
+            .map(|(at, kind, note)| format!("- [{at}] {kind}：{note}"))
             .collect();
         self.text_result(
             "工作时间线",
             format!(
-                "工作 {}（会话 {}）事件时间线：\n{}",
-                work_id,
-                entry.session_id,
+                "工作 {work_id} 事件时间线（事件日志）：\n{}",
                 lines.join("\n")
             ),
         )
@@ -2634,9 +2707,19 @@ mod tests {
             serde_json::json!({"task": "时间线任务", "session_id": "s0"}),
         );
         assert!(dispatch.ok, "stderr: {}", dispatch.stderr);
-        // 追加事件（模拟 app 侧写入）
-        append_work_item_event(root.path(), "s0", "waiting_user", "提出问题，工作中挂起");
-        append_work_item_event(root.path(), "s0", "resumed", "收到答复恢复");
+        // 追加事件（模拟宿主侧写入——R5：事件日志是唯一事实源）
+        record_central_event_by_session(
+            root.path(),
+            "s0",
+            tiangong_central::event::WorkEventType::WorkItemWaitingUser,
+            "提出问题，工作中挂起",
+        );
+        record_central_event_by_session(
+            root.path(),
+            "s0",
+            tiangong_central::event::WorkEventType::WorkItemStarted,
+            "收到答复恢复",
+        );
         // 查询往返
         let work_id = {
             let items = plugin.work_items.lock().unwrap_or_else(|e| e.into_inner());
@@ -2654,7 +2737,7 @@ mod tests {
         );
         assert!(timeline.ok, "stderr: {}", timeline.stderr);
         assert!(
-            timeline.stdout.contains("waiting_user"),
+            timeline.stdout.contains("work_item.waiting_user"),
             "{}",
             timeline.stdout
         );
@@ -2663,7 +2746,11 @@ mod tests {
             "{}",
             timeline.stdout
         );
-        assert!(timeline.stdout.contains("resumed"), "{}", timeline.stdout);
+        assert!(
+            timeline.stdout.contains("work_item.started"),
+            "{}",
+            timeline.stdout
+        );
         // 未知的 work_id 拒绝
         let ghost = call_tool(
             &plugin,

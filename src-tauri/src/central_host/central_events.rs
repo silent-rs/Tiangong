@@ -123,3 +123,81 @@ pub(crate) fn record_for(
         note,
     );
 }
+
+/// 按会话归属记录事件（R5 单写：事件日志是唯一事实源）。
+///
+/// 从落盘登记按 `session_id` 解析 work_id 与当前 execution_id，再写入
+/// 事件日志——取代旧的 `append_work_item_event`（work-items.json 内嵌
+/// 时间线的双写路径已删除）。
+pub(crate) fn record_by_session(
+    storage_root: &std::path::Path,
+    session_id: &str,
+    event_type: E,
+    note: &str,
+) {
+    let record = crate::central::load_work_items(storage_root)
+        .into_iter()
+        .rev()
+        .find(|item| item.session_id == session_id);
+    let Some(record) = record else {
+        tracing::warn!(
+            session_id,
+            event = event_type.as_str(),
+            "事件归属会话无登记，事实未入日志"
+        );
+        return;
+    };
+    record_central_event(
+        storage_root,
+        &record.work_id,
+        record.execution_id.as_deref().unwrap_or(""),
+        session_id,
+        event_type,
+        note,
+    );
+}
+
+/// 读一个工作项的事件时间线（R5：事件日志优先，旧时间线兼容读）。
+///
+/// 返回 (at, kind, note) 列表；事件日志为空时回退读取 work-items.json
+/// 内嵌时间线（R5 前的旧数据，恢复时 migrate_legacy_timeline 已导入，
+/// 此处兜底极端时序）。
+pub(crate) fn work_timeline(
+    storage_root: &std::path::Path,
+    work_item_id: &str,
+) -> Vec<(String, String, String)> {
+    let mut timeline = Vec::new();
+    if let Ok(log) = EventLog::open(&event_log_path(storage_root)) {
+        if let Ok(entries) = log.load_all() {
+            for logged in entries {
+                if logged.event.work_item_id == work_item_id {
+                    let note = logged
+                        .event
+                        .payload
+                        .get("note")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    timeline.push((
+                        logged.event.created_at.clone(),
+                        logged.event.event_type.as_str().to_string(),
+                        note.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    if !timeline.is_empty() {
+        return timeline;
+    }
+    crate::central::load_work_items(storage_root)
+        .into_iter()
+        .rev()
+        .find(|item| item.work_id == work_item_id)
+        .map(|item| {
+            item.events
+                .iter()
+                .map(|e| (e.at.clone(), e.kind.clone(), e.note.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}

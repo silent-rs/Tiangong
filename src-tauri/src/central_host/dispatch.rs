@@ -167,10 +167,16 @@ async fn handle_central_control(
                     "cancelled",
                 );
             }
-            crate::central::append_work_item_event(
+            super::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &control.session_id,
-                &control.action,
+                if control.action == "cancelled" {
+                    tiangong_central::event::WorkEventType::WorkItemCancelled
+                } else {
+                    // 事件清单无 paused 专用类型（§8.2）：以 blocked 承载，
+                    // 原文动作保留在 note
+                    tiangong_central::event::WorkEventType::WorkItemBlocked
+                },
                 if control.action == "cancelled" {
                     "用户取消：中断执行，工作终止"
                 } else {
@@ -185,10 +191,10 @@ async fn handle_central_control(
         }
         "resume" => {
             // 恢复：向工作会话发送继续指令（复用 Steer 链路，挂回调走回报）
-            crate::central::append_work_item_event(
+            super::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &control.session_id,
-                "resumed",
+                tiangong_central::event::WorkEventType::WorkItemStarted,
                 "用户恢复：发送继续指令，回到执行中",
             );
             let request = crate::central::CentralDispatchRequest {
@@ -269,10 +275,10 @@ pub(crate) async fn enqueue_central_dispatch(
         after,
         Some(cwd),
     );
-    crate::central::append_work_item_event(
+    super::central_events::record_by_session(
         state.core_manager.storage_root(),
         &request.session_id,
-        "queued",
+        tiangong_central::event::WorkEventType::WorkItemProgress,
         &format!("排队等待依赖 {after} 终态"),
     );
     emit_central_work_updated_state(state);
@@ -385,10 +391,10 @@ pub(crate) async fn plan_central_dispatch(
         {
             merged_work.work_id = owner_work_id;
             merged_work.task = owner_task;
-            crate::central::append_work_item_event(
+            super::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &sid,
-                "resumed",
+                tiangong_central::event::WorkEventType::WorkItemStarted,
                 "收到用户答复，恢复执行",
             );
             tracing::info!(
@@ -607,19 +613,19 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
     // 排队标记清除（第十三轮 P2-1）：进入执行即失效——重放的 DispatchNow
     // 路径不经 flush，若不在此清除，下次重启会再次重放导致重复执行。
     crate::central::clear_work_item_queued(state.core_manager.storage_root(), &request.session_id);
-    crate::central::append_work_item_event(
-        state.core_manager.storage_root(),
-        &request.session_id,
-        "dispatched",
-        &format!(
-            "派发执行（work_id {}，{}）",
-            merged_work.work_id,
-            if merged_work.work_id != request.work_id {
-                "等待用户决策后恢复"
-            } else {
-                "新任务"
-            }
-        ),
+    // R5 单写：派发事实已由上方 record_for（WorkItemStarted）入事件日志；
+    // 此处仅以 note 补充「恢复 / 新任务」语义。
+    super::central_events::record_for(
+        state,
+        &merged_work.work_id,
+        &request.execution_id,
+        &sid,
+        tiangong_central::event::WorkEventType::WorkItemProgress,
+        &if merged_work.work_id != request.work_id {
+            "派发执行（等待用户决策后恢复）".to_string()
+        } else {
+            "派发执行（新任务）".to_string()
+        },
     );
     emit_central_work_updated_state(state);
     Ok(())

@@ -104,13 +104,7 @@ impl TiangongApp {
         }
         if matches!(outcome, WorkOutcome::WaitingUser) {
             // 阻塞必达 + 不落终态（等待用户答复后经引导恢复执行）
-            crate::central::append_work_item_event(
-                self.core_manager.storage_root(),
-                &request.session_id,
-                "waiting_user",
-                "提出需要用户决策的问题，工作中挂起",
-            );
-            // R2 事件日志（唯一事实源，双写阶段）：等待用户事实入日志。
+            // R5 单写：等待用户事实入事件日志（唯一事实源）。
             super::central_events::record_for(
                 self,
                 &request.work_id,
@@ -123,14 +117,7 @@ impl TiangongApp {
             emit_central_work_updated_state(self);
             return;
         }
-        // 终态事件（时间线）
-        crate::central::append_work_item_event(
-            self.core_manager.storage_root(),
-            &request.session_id,
-            "finished",
-            if done { "工作完成" } else { "工作失败" },
-        );
-        // R2 事件日志（唯一事实源，双写阶段）：终态事实入日志（带成败）。
+        // R5 单写：终态事实入事件日志（唯一事实源，带成败）。
         super::central_events::record_for(
             self,
             &request.work_id,

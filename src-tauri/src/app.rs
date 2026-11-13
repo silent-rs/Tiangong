@@ -2322,21 +2322,7 @@ mod tests {
             Some("exec-baseline-1"),
             "投递成功后落盘记录必须是本次 execution_id"
         );
-        // 3) 事件时间线自动回填执行归属
-        crate::central::append_work_item_event(&storage_root, "s-exec", "finished", "工作完成");
-        let items = crate::central::load_work_items(&storage_root);
-        let record = items
-            .iter()
-            .rev()
-            .find(|i| i.session_id == "s-exec")
-            .unwrap();
-        let last_event = record.events.last().expect("事件应已追加");
-        assert_eq!(
-            last_event.execution_id.as_deref(),
-            Some("exec-baseline-1"),
-            "时间线事件必须归属到本次执行"
-        );
-        // 4) R2 事件日志（唯一事实源）：派发事实入 events.jsonl 且带归属
+        // 3) R2/R5 事件日志（唯一事实源）：派发事实入 events.jsonl 且带归属
         {
             let log = tiangong_central::EventLog::open(
                 &storage_root.join("central").join("events.jsonl"),
