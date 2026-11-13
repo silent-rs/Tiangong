@@ -62,14 +62,14 @@ fn merge_waiting_user_restores_and_returns_owner() {
         entry("work-a", "s1", WorkState::WaitingUser),
         entry("work-b", "s2", WorkState::Running),
     ];
-    let owner = merge_waiting_user(&mut entries, "s1");
+    let owner = merge_waiting_user(&mut entries, "s1", Some("exec-resume"));
     assert_eq!(
         owner,
         Some(("work-a".to_string(), "任务 work-a".to_string()))
     );
     assert_eq!(entries[0].state, WorkState::Running);
-    assert_eq!(merge_waiting_user(&mut entries, "s2"), None);
-    assert_eq!(merge_waiting_user(&mut entries, "s-none"), None);
+    assert_eq!(merge_waiting_user(&mut entries, "s2", None), None);
+    assert_eq!(merge_waiting_user(&mut entries, "s-none", None), None);
 }
 
 #[test]

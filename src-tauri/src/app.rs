@@ -83,8 +83,9 @@ pub struct TiangongApp {
     central_model_fallback_notified: std::sync::atomic::AtomicBool,
     /// 激活问候已注入（每进程首次进入中枢模式时注入一次，§4.2/§10.4）。
     central_activation_greeted: std::sync::atomic::AtomicBool,
-    /// 每会话的终态回调槽（派发与引导共用消费者流，逐 work 挂载）。
-    central_watch_slots: Mutex<HashMap<String, crate::commands::StreamFinishedSlot>>,
+    /// 每会话的终态路由（R1：按 execution_id 路由 Worker turn 终态，
+    /// 取代 session 级回调槽——快速完成暂存补发、投递失败显式取消）。
+    pub(crate) execution_router: crate::central_host::ExecutionRouter,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -214,7 +215,7 @@ impl TiangongApp {
             central_pending_dispatches: Mutex::new(Vec::new()),
             central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
             central_activation_greeted: std::sync::atomic::AtomicBool::new(false),
-            central_watch_slots: Mutex::new(HashMap::new()),
+            execution_router: crate::central_host::ExecutionRouter::new(),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -1322,18 +1323,6 @@ impl TiangongApp {
 
     /// 取走该会话全部已挂载的终态回调（消费者终态触发用；表取模式使
     /// 任意消费者实例都能触发挂载的回调——见 commands.rs N1 注释）。
-    pub(crate) fn take_finished_handlers(
-        &self,
-        session_id: &str,
-    ) -> Vec<crate::commands::StreamFinishedHandler> {
-        self.central_watch_slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-            .map(|slot| std::mem::take(&mut *slot.lock().unwrap_or_else(|e| e.into_inner())))
-            .unwrap_or_default()
-    }
-
     /// 追加回报到暂存队列（投递失败的放回路径）。
     pub(crate) fn push_central_work_reports(&self, notices: Vec<String>) {
         self.central_work_reports
@@ -2205,7 +2194,7 @@ async fn plan_central_dispatch(
             .unwrap_or_else(|e| e.into_inner());
         // 恢复归属统一走 central-state（waiting_user → running + 主工作回传）
         if let Some((owner_work_id, owner_task)) =
-            central_state::merge_waiting_user(&mut registry, &sid)
+            central_state::merge_waiting_user(&mut registry, &sid, Some(&request.execution_id))
         {
             merged_work.work_id = owner_work_id;
             merged_work.task = owner_task;
@@ -2288,21 +2277,18 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
     // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
     // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
     // prompt cache 失效；引导语义也要求保留在途执行）。
-    let slot = {
-        let mut slots = state
-            .central_watch_slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        slots
-            .entry(request.session_id.clone())
-            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
-            .clone()
-    };
+    // R1 执行路由：投递前声明活跃执行——瞬间完成的 turn 在回调挂载前
+    // fire 时，终态会暂存到该 execution_id，attach 后补发不丢归属。
+    // 引导并入（steer_merged_into_running）不换活跃执行：turn 终态仍
+    // 路由到原执行的回调（归属保持原工作）。
+    if !steer_merged_into_running {
+        state.execution_router.register(&sid, &request.execution_id);
+    }
     if state.core_manager.has_live_core(&sid) {
         // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
         // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
-        // （review N5：先挂后投会在投递失败时残留回调，下次终态重复回报）。
-        state
+        // （投递失败经 cancel 清理，不残留）。
+        if let Err(error) = state
             .deliver_prepared_if_live(
                 &sid,
                 scru128::new().to_string(),
@@ -2310,15 +2296,19 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
                 effective_model,
                 None,
             )
-            .await?;
+            .await
+        {
+            state.execution_router.cancel(&sid, &request.execution_id);
+            return Err(error);
+        }
         if !steer_merged_into_running {
-            attach_work_finished_callback(&slot, app, merged_work.clone());
+            attach_work_finished_callback(state, app, merged_work.clone());
         }
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
-        let ensured = state
+        let ensured = match state
             .ensure_core(
                 &sid,
                 Some(cwd.clone()),
@@ -2327,15 +2317,23 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
                 effective_model,
                 stream_tx,
             )
-            .await?;
+            .await
+        {
+            Ok(ensured) => ensured,
+            Err(error) => {
+                state.execution_router.cancel(&sid, &request.execution_id);
+                return Err(error);
+            }
+        };
         if !ensured.is_new {
+            state.execution_router.cancel(&sid, &request.execution_id);
             return Err(format!(
                 "会话 {} 的 Core 已被并发创建，本次流通道未绑定；请稍后重派",
                 sid
             ));
         }
         crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx);
-        state
+        if let Err(error) = state
             .deliver_prepared_if_live(
                 &sid,
                 scru128::new().to_string(),
@@ -2343,8 +2341,12 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
                 effective_model,
                 None,
             )
-            .await?;
-        attach_work_finished_callback(&slot, app, merged_work.clone());
+            .await
+        {
+            state.execution_router.cancel(&sid, &request.execution_id);
+            return Err(error);
+        }
+        attach_work_finished_callback(state, app, merged_work.clone());
     }
     tracing::info!(
         execution_id = %request.execution_id,
@@ -2427,17 +2429,21 @@ async fn handle_central_dispatch<R: tauri::Runtime>(
     Ok(())
 }
 
-/// 向回调槽挂载单个 work 的终态回报回调。
+/// 向执行路由器挂载单个执行的终态回报回调（R1：按 execution_id 路由）。
 fn attach_work_finished_callback<R: tauri::Runtime>(
-    slot: &crate::commands::StreamFinishedSlot,
+    state: &TiangongApp,
     app: &tauri::AppHandle<R>,
     work: crate::central::CentralDispatchRequest,
 ) {
     let callback_app = app.clone();
-    let mut handlers = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    handlers.push(Box::new(move |done: bool, reason: String| {
-        handle_work_terminal(state_of(&callback_app), &work, done, &reason);
-    }));
+    let work_for_handler = work.clone();
+    state.execution_router.attach(
+        &work.session_id,
+        &work.execution_id,
+        Box::new(move |done: bool, reason: String| {
+            handle_work_terminal(state_of(&callback_app), &work_for_handler, done, &reason);
+        }),
+    );
 }
 
 /// 终态回调核心（host 集成测试的真实被测函数）：T6 归属过滤 + S6 状态
@@ -2449,10 +2455,11 @@ pub(crate) fn handle_work_terminal(
     done: bool,
     reason: &str,
 ) {
-    // 归属过滤（review T6）：终态只属于该会话「当前」工作——引导并入
-    // 场景先挂的旧回调不得被后续 turn 的终态误触发（旧 work 已被
-    // 会话聚合覆盖或已终态）。判定：registry 中该会话当前条目须仍是
-    // 本 work（或本 work 尚在途）。
+    // 归属过滤（R1 升级）：路由器已保证只有活跃执行的回调被触发；此处
+    // 为防御迟到路由再做执行归属校验——registry 当前条目若已是**另一
+    // 个在途执行**（同会话新派发/恢复已接管），本回调属旧执行，跳过。
+    // 按 execution_id 比对取代旧的 work_id 比对：同 work 重派是新执行，
+    // 旧回调同样必须让位。
     {
         let registry = state
             .central_work_registry
@@ -2462,16 +2469,24 @@ pub(crate) fn handle_work_terminal(
             .iter()
             .rev()
             .find(|entry| entry.session_id == work.session_id);
-        match current {
-            Some(entry) if entry.work_id != work.work_id && entry.state.is_inflight() => {
-                tracing::warn!(
-                    stale_work = %work.work_id,
-                    current_work = %entry.work_id,
-                    "旧工作回调被跳过（终态归属当前工作）"
-                );
-                return;
+        let displaced_by_newer_execution = match current {
+            Some(entry) => {
+                let execution_differs = match entry.execution_id.as_deref() {
+                    // 登记缺执行归属（R0 前旧数据）：回退 work_id 比对语义
+                    None => entry.work_id != work.work_id,
+                    Some(current_exec) => current_exec != work.execution_id.as_str(),
+                };
+                execution_differs && entry.state.is_inflight()
             }
-            _ => {}
+            None => false,
+        };
+        if displaced_by_newer_execution {
+            tracing::warn!(
+                stale_execution = %work.execution_id,
+                current_execution = ?current.and_then(|e| e.execution_id.clone()),
+                "旧执行回调被跳过（终态归属当前执行）"
+            );
+            return;
         }
     }
     // 一次性守卫（review S6→第十三轮 P1-1 修正）：改为状态驱动幂等——
@@ -2818,13 +2833,14 @@ mod tests {
     }
     /// 复用派发挂载的终态回调经 fire 链真实触发（挂载 → take → 执行 →
     /// drain 一次性），并覆盖 S6 一次性守卫与 T6 归属过滤的可构造部分。
+    /// R1 执行路由（取代槽测试）：register → attach → fire 恰好触发一次，
+    /// drain 一次性（重复 fire 不重复触发），并覆盖 S6 一次性守卫与
+    /// 执行归属过滤的可构造部分。
     #[test]
     fn dispatch_reuse_fires_live_slot_callback() {
         let app = TiangongApp::new();
         let session = "s-live";
-        let slot: crate::commands::StreamFinishedSlot =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        // registry 预置：该会话当前条目即本 work（T6 归属判定通过）
+        // registry 预置：该会话当前条目即本执行（归属判定通过）
         app.central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2838,33 +2854,30 @@ mod tests {
                 reused_session: true,
                 last_activity: None,
                 cwd: None,
-                execution_id: None,
+                execution_id: Some("exec-live".to_string()),
             });
         // 挂载（与 attach_work_finished_callback 同款闭包语义，去掉 app 依赖）
         {
             let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             let fired_clone = std::sync::Arc::clone(&fired);
-            slot.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(Box::new(move |done: bool, reason: String| {
+            app.execution_router.register(session, "exec-live");
+            app.execution_router.attach(
+                session,
+                "exec-live",
+                Box::new(move |done: bool, reason: String| {
                     let mut log = fired_clone.lock().unwrap();
                     log.push(format!("work-live:{done}:{reason}"));
-                }));
-            app.central_watch_slots
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(session.to_string(), std::sync::Arc::clone(&slot));
-            // fire（流消费者终态路径等价）：take 并逐个执行
-            let handlers = app.take_finished_handlers(session);
-            assert_eq!(handlers.len(), 1, "挂载的回调应被取出");
-            for handler in handlers {
-                handler(true, String::new());
-            }
+                }),
+            );
+            // fire（流消费者终态路径等价）：路由给活跃执行的回调
+            app.execution_router.fire(session, true, String::new());
             assert_eq!(*fired.lock().unwrap(), vec!["work-live:true:".to_string()]);
-            // drain 一次性：再取为空（重复终态不重复触发）
-            assert!(
-                app.take_finished_handlers(session).is_empty(),
-                "fire 后槽必须为空（一次性 drain）"
+            // drain 一次性：再 fire 无回调（重复终态不重复触发）
+            app.execution_router.fire(session, true, String::new());
+            assert_eq!(
+                fired.lock().unwrap().len(),
+                1,
+                "fire 后回调必须已消费（一次性）"
             );
         }
         // 状态驱动幂等（P1-1 修正后的语义）：在途 → 可处理；已终态 → 跳过
@@ -2939,7 +2952,7 @@ mod tests {
     }
     // ============================================================================
     // host 集成测试（W5，第十四轮 review 硬要求）：真实调用被修函数
-    // （attach_work_finished_callback / take_finished_handlers /
+    // （attach_work_finished_callback / execution_router /
     // on_central_work_finished / enqueue_central_dispatch），经 mock app +
     // 隔离 storage——「旧代码会红」的反向验证见各测试注释。
     // ============================================================================
@@ -3423,7 +3436,7 @@ mod tests {
             "排队不得创建 Core"
         );
         assert!(
-            state.take_finished_handlers("s-follow").is_empty(),
+            state.execution_router.pending_handler_count("s-follow") == 0,
             "排队不得挂回调"
         );
         assert!(!state
@@ -3511,8 +3524,8 @@ mod tests {
             assert_eq!(entry.state, central_state::WorkState::Running);
         }
         // 回调只挂 owner（steer 不挂）
-        let handlers = state.take_finished_handlers("s-own");
-        assert_eq!(handlers.len(), 1, "只挂 owner 回调（steer 并入不挂）");
+        let handler_count = state.execution_router.pending_handler_count("s-own");
+        assert_eq!(handler_count, 1, "只挂 owner 回调（steer 并入不挂）");
     }
 
     /// W3 锁（执行段级）：排队重放（cwd 还原）→ 投递成功清除 queued 标记。

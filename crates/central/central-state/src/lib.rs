@@ -223,11 +223,17 @@ pub fn queue_decision(
 pub fn merge_waiting_user(
     entries: &mut [WorkStatus],
     session_id: &str,
+    resuming_execution_id: Option<&str>,
 ) -> Option<(String, String)> {
     let position = entries.iter().rposition(|entry| {
         entry.session_id == session_id && entry.state == WorkState::WaitingUser
     })?;
     entries[position].state = WorkState::Running;
+    // R0 契约：恢复是一次新执行——登记条目换上新 execution_id，
+    // 后续终态路由与归属校验以新执行为准。
+    if let Some(execution_id) = resuming_execution_id.filter(|id| !id.is_empty()) {
+        entries[position].execution_id = Some(execution_id.to_string());
+    }
     Some((
         entries[position].work_id.clone(),
         entries[position].task.clone(),

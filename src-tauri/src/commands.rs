@@ -1073,18 +1073,18 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
 ) {
-    // 回调统一从 app 全局槽表现取（review N1）：不再依赖消费者创建时闭包
-    // 携带槽——否则只有派发新建分支启动的消费者能触发回调；会话被普通
-    // 模式激活（另起无槽消费者）后挂载的回调将无人读取（静默失报 +
-    // running 永久占用）。挂载见 app.rs central_watch_slots。
+    // 回调统一走执行路由器（R1）：终态按 session 的活跃 execution 路由，
+    // 回调未挂时暂存（投递后瞬间完成的 turn 不丢终态）。路由器挂载于
+    // app 全局状态（同 review N1 语义：不依赖消费者创建时闭包携带槽，
+    // 会话被普通模式激活后挂载的回调同样可被触发）。
     let fire_session_finished =
         |app: &tauri::AppHandle<R>, session_id: &str, done: bool, reason: String| {
             use tauri::Manager;
             let state = app.state::<TiangongApp>();
-            let handlers = state.inner().take_finished_handlers(session_id);
-            for callback in handlers {
-                callback(done, reason.clone());
-            }
+            state
+                .inner()
+                .execution_router
+                .fire(session_id, done, reason);
         };
     // 中枢工作进度可见（§9.1）：中枢派发会话的 PhaseChanged / ToolStart /
     // ToolFinished 事件更新 registry 最近动作（徽章实时显示 Worker 在干嘛）。
