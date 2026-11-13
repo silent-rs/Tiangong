@@ -26,6 +26,7 @@ pub mod model;
 pub mod risk;
 pub mod status;
 pub mod store;
+pub mod tickets;
 pub mod tools;
 
 pub use event::{EventSeverity, WorkEvent, WorkEventType};
@@ -42,4 +43,5 @@ pub use model::{
 pub use risk::RiskLevel;
 pub use status::WorkItemStatus;
 pub use store::CentralStore;
+pub use tickets::{DecisionTicket, TicketRegistry, TicketVerdict, WorkspaceApprovalTicket};
 pub use tools::{CENTRAL_TOOL_ALLOWLIST, ModelSwitchTicket, is_central_tool_allowed};
