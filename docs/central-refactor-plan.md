@@ -880,7 +880,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | R2 事件日志与事务存储 | ✅ | `d4bb144a` | `events.jsonl` 追加式事件日志（崩溃尾部修复 / 重复幂等 / 投影 / schema 版本）；持久层随机后缀临时文件 + 写锁 + fsync；旧时间线一次性迁移 |
 | R3 权限票据化 | ✅ | `1ba43261` `ee5a35a7` | `WorkspaceApprovalTicket`（任务指纹防偷换）/ `DecisionTicket`（绑定 execution+问题版本）一次性 fail-closed；`confirm_workspace` 已移除；宿主 `central_approve_workspace` / `central_resolve_decision` 签发；`parallel` 高风险豁免收紧（启发式） |
 | R4 ModeCoordinator 与前端 | ✅ 宿主+抽屉 | `120ef2bb` `1cf0fe61` | 宿主模式状态机 + 快照归还 + 偏好持久化 + 前端接线；工作抽屉（事件日志时间线）。**未做**：消息流内决定卡片/授权卡片组件（决定/授权命令已就绪，待消息结构化） |
-| R5 清理兼容层 | 🔶 | `0ea3293e` `fd7f9cab` `d0ace0a7` | 时间线双写已除；registry 由事件投影重建（派发事件携带登记字段，空日志回退旧快照）；快照 envelope 版本化（schema_version 包裹 + 裸数组兼容读）。**未做**：插件压缩至 300–500 行 |
+| R5 清理兼容层 | ✅ | `0ea3293e` `fd7f9cab` `d0ace0a7` `13704405` `5cd27fb6` | 时间线双写已除；registry 事件投影重建；快照 envelope 版本化 + recover 对账可观测（损坏行跳过计数、版本超前 warn）；插件压缩——lib.rs 非测试部分约 490 行（§5.2 目标 300–500 达成），工具按域拆四模块 |
 
 ### A.2 与正文的有意偏差
 
@@ -899,6 +899,6 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 1. 消息流结构化：Worker 回报 / 决定请求 / 授权请求以结构化消息进入中枢对话（决定卡片、授权卡片组件消费已就绪命令）。
 2. ~~registry 由事件投影重建~~ ✅ `fd7f9cab`（派发事件携带登记字段；空日志回退旧快照）。
-3. ~~快照 envelope 版本化~~ ✅ `d0ace0a7`（schema_version=1 包裹 + 裸数组兼容读）；recover 对账（事件 offset vs 快照版本）待做。
-4. 插件压缩：`central-plugin/lib.rs` 执行适配继续拆分（现约 2900 行）。
-5. 实机验收十步（§8.6）与设计稿实现态注记同步。
+3. ~~快照 envelope 版本化~~ ✅ `d0ace0a7`；~~recover 对账可观测~~ ✅ `13704405`（宽松读跳坏行计数、快照版本超前 warn）。
+4. ~~插件压缩~~ ✅ `5cd27fb6`（lib.rs 非测试约 490 行；tools_context / tools_dispatch / tools_goal_report / tools_control 四模块）。
+5. 实机验收十步（§8.6）：需真实桌面环境，合并前执行并回填记录。
