@@ -273,7 +273,11 @@ export function CentralWorkStatusBar() {
   for (const item of items) {
     aggregated.set(item.session_id, item);
   }
-  const visible = Array.from(aggregated.values());
+  // 用户实测修复：按派发时间降序（最新在前）——运行时 upsert 与投影重建
+  // 的数组顺序不一致（append 尾部 vs 倒序遍历头部），统一以时间为准
+  const visible = Array.from(aggregated.values()).sort((a, b) =>
+    b.dispatched_at.localeCompare(a.dispatched_at),
+  );
   const running = visible.filter((item) => item.state === 'running');
   const queued = visible.filter((item) => item.state === 'report_queued');
   const interrupted = visible.filter((item) => item.state === 'interrupted');

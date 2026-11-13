@@ -224,6 +224,56 @@ function SubagentReportCard({ agentName, status, content, contentOffset, time, o
   );
 }
 
+
+/// 宿主系统注入条（R5 P1-3）：回报/授权/派发说明/激活摘要。
+/// 长回报默认折叠（Worker 全文动辄数万字——用户实测要求收缩能力），
+/// 展开态限高内部滚动。
+const CENTRAL_NOTE_PREVIEW_CHARS = 480;
+function CentralSystemNote({ kind, time, text }: {
+  kind?: string;
+  time: string;
+  text: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const kindLabel = kind === 'report'
+    ? '工作回报'
+    : kind === 'approval'
+      ? '授权'
+      : kind === 'activation'
+        ? '中枢'
+        : '系统';
+  const collapsible = text.length > CENTRAL_NOTE_PREVIEW_CHARS;
+  const shown = collapsible && !open
+    ? `${Array.from(text).slice(0, CENTRAL_NOTE_PREVIEW_CHARS).join('')}…`
+    : text;
+  return (
+    <div className="flex justify-start" data-testid="central-system-note">
+      <div className={`flex max-w-[85%] flex-col rounded-xl border border-border/60 bg-muted/[0.25] px-3.5 py-2 text-xs leading-relaxed text-muted-foreground ${open ? 'w-full' : ''}`}>
+        <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          <Info className="h-3 w-3" aria-hidden="true" />
+          {kindLabel}
+          <span className="ml-1 font-normal normal-case tracking-normal">{time}</span>
+          {collapsible ? (
+            <button
+              type="button"
+              data-testid="central-system-note-toggle"
+              onClick={() => setOpen(!open)}
+              className="ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10"
+            >
+              {open ? '收起' : `展开全文（${text.length.toLocaleString()} 字）`}
+            </button>
+          ) : null}
+        </div>
+        <div
+          className={`whitespace-pre-wrap break-words ${open ? 'max-h-[60vh] overflow-y-auto pr-1' : ''}`}
+        >
+          {shown}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
   runStatus: string;
@@ -259,7 +309,10 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   const render = message.meta?.render;
   // 宿主系统注入（central-host/system-note，R5 P1-3）：回报/授权/派发
   // 说明/激活摘要不伪装为用户消息（方案 §6.2）——渲染为左侧系统条。
-  const isCentralSystemNote = render?.plugin === 'central-host' && render?.view === 'system-note';
+  const isCentralSystemNote = (render?.plugin === 'central-host' && render?.view === 'system-note')
+    // 历史兜底：render 标记上线前的注入消息（[后台工作完成]/[系统中枢]
+    // 开头，动辄数万字全文）按系统条渲染——不再以用户气泡平铺
+    || /^\[后台工作(完成|失败)\]|^\[系统中枢\]/.test(messageText);
   const withPluginRender = (fallback: React.ReactNode) => render && !isCentralSystemNote
     ? (
       <MessageRenderHost
@@ -382,24 +435,11 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
           </div>
         </div>
       ) : isCentralSystemNote ? (
-        <div className="flex justify-start" data-testid="central-system-note">
-          <div className="max-w-[85%] rounded-xl border border-border/60 bg-muted/[0.25] px-3.5 py-2 text-xs leading-relaxed text-muted-foreground">
-            <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-              <Info className="h-3 w-3" aria-hidden="true" />
-              {(render?.data as { kind?: string } | undefined)?.kind === 'report'
-                ? '工作回报'
-                : (render?.data as { kind?: string } | undefined)?.kind === 'approval'
-                  ? '授权'
-                  : (render?.data as { kind?: string } | undefined)?.kind === 'activation'
-                    ? '中枢'
-                    : '系统'}
-              <span className="ml-1 font-normal normal-case tracking-normal">
-                {formatMessageTime(message.created_at)}
-              </span>
-            </div>
-            <div className="whitespace-pre-wrap break-words">{messageText}</div>
-          </div>
-        </div>
+        <CentralSystemNote
+          kind={(render?.data as { kind?: string } | undefined)?.kind}
+          time={formatMessageTime(message.created_at)}
+          text={messageText}
+        />
       ) : (
         <div className="flex justify-end">
           {withPluginRender(subagentTaskMatch ? (() => {
