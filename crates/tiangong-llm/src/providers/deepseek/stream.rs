@@ -380,6 +380,7 @@ mod tests {
                 output_tokens: 5,
                 output_tokens_details: None,
                 total_tokens: 15,
+                server_tool_use: None,
             }),
         }
     }

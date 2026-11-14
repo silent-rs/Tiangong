@@ -1,9 +1,10 @@
 [package]
 name = "tiangong-deepseek"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 license = "Apache-2.0"
-description = "An asynchronous Rust client for the DeepSeek API, supporting chat completions (with SSE streaming), responses, files, web search/fetch, model listing, and balance queries."
+description = "An asynchronous Rust client for the DeepSeek API: chat completions (SSE streaming), responses, files (document parsing), web search/fetch, OCR, ASR, TTS (HTTP & WebSocket streaming), server-side web tools, and safety check."
+readme = "README.md"
 repository = "https://github.com/silent-rs/silent-Tiangong"
 keywords = ["deepseek", "llm", "ai", "openai", "chat"]
 categories = ["api-bindings", "asynchronous", "web-programming::http-client"]
@@ -19,6 +20,7 @@ scru128 = "4"
 tokio = { workspace = true, features = ["time"] }
 futures-util = "0.3"
 tracing = { workspace = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "__rustls-tls", "rustls-tls-native-roots"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -4,9 +4,9 @@ use serde_json::json;
 use crate::chat::parse_stream_chunk;
 use crate::error::DeepSeekError;
 use crate::types::{
-    BalanceResponse, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Currency,
-    ListModelsResponse, MessageRole, ReasoningEffort, StreamEvent, StreamOptions, ThinkingConfig,
-    ToolCall, ToolSpec, Usage,
+    BalanceResponse, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ChatTool,
+    Currency, ListModelsResponse, MessageRole, ReasoningEffort, SafetyCheck, StreamEvent,
+    StreamOptions, ThinkingConfig, ToolCall, ToolSpec, Usage,
 };
 
 // ── 配置 ──────────────────────────────────────────────
@@ -142,12 +142,53 @@ fn chat_request_serialization() {
         reasoning_effort: None,
         response_format: None,
         user_id: None,
+        safety_check: None,
     };
     let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["model"], "deepseek-v4-flash");
     assert_eq!(value["max_tokens"], 1024);
     assert!((value["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
     assert!(!value.as_object().unwrap().contains_key("top_p"));
+}
+
+#[test]
+fn chat_server_tools_and_safety_check_serialize() {
+    let request = ChatCompletionRequest {
+        tools: Some(vec![
+            ChatTool::DeepSeekWebSearch,
+            ChatTool::DeepSeekReadUrl,
+            ChatTool::function(
+                "get_weather",
+                "查询天气",
+                Some(json!({"type": "object", "properties": {}})),
+            ),
+        ]),
+        safety_check: Some(SafetyCheck::high()),
+        ..ChatCompletionRequest {
+            model: "deepseek-flash".into(),
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: None,
+            stream_options: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            reasoning_effort: None,
+            response_format: None,
+            user_id: None,
+            safety_check: None,
+        }
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    let tools = value["tools"].as_array().unwrap();
+    assert_eq!(tools[0], json!({"type": "deepseek_web_search"}));
+    assert_eq!(tools[1], json!({"type": "deepseek_read_url"}));
+    assert_eq!(tools[2]["type"], "function");
+    assert_eq!(tools[2]["function"]["name"], "get_weather");
+    assert_eq!(value["safety_check"], json!({"level": "high"}));
 }
 
 #[test]
