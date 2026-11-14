@@ -168,58 +168,12 @@ pub enum ToolChoice {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tool {
-    /// 工具类型：官方端点不携带该字段（自定义工具）；DeepSeek 兼容端点的
-    /// 服务端工具需声明 `deepseek_web_search` / `deepseek_read_url`。
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_schema: Option<Value>,
+    pub input_schema: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
-}
-
-impl Tool {
-    /// 构造标准自定义工具（带 JSON Schema，官方端点形态，无 `type` 字段）。
-    pub fn custom(
-        name: impl Into<String>,
-        description: Option<String>,
-        input_schema: Value,
-    ) -> Self {
-        Self {
-            kind: None,
-            name: name.into(),
-            description,
-            input_schema: Some(input_schema),
-            cache_control: None,
-        }
-    }
-
-    /// DeepSeek 服务端联网搜索工具：`{"type": "deepseek_web_search", "name": ...}`。
-    /// 声明后模型可自主发起搜索（关闭思考）或深度思考搜索（开启思考）。
-    pub fn deepseek_web_search() -> Self {
-        Self {
-            kind: Some("deepseek_web_search".into()),
-            name: "deepseek_web_search".into(),
-            description: None,
-            input_schema: None,
-            cache_control: None,
-        }
-    }
-
-    /// DeepSeek 服务端阅读链接工具（`deepseek_read_url`）：自动识别
-    /// 最后一条用户消息中的 URL 并抓取内容作答。
-    pub fn deepseek_read_url() -> Self {
-        Self {
-            kind: Some("deepseek_read_url".into()),
-            name: "deepseek_read_url".into(),
-            description: None,
-            input_schema: None,
-            cache_control: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,27 +232,6 @@ pub struct MessagesCreateRequest {
     /// 输出配置：adaptive thinking 模型的深度档位（output_config.effort）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
-    /// 模型内容安全校验（DeepSeek 兼容端点扩展，官方 Anthropic API 无此字段）：
-    /// `{"level": "high"}` 开启基础风控，审核模型输入输出，命中风险返回拒答标识。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub safety_check: Option<SafetyCheck>,
-}
-
-/// 安全校验档位（DeepSeek 兼容端点扩展）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SafetyLevel {
-    /// API 默认的内容检查，与不传 `safety_check` 相同。
-    #[default]
-    Low,
-    /// 开启基础风控。
-    High,
-}
-
-/// 模型内容安全校验参数。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SafetyCheck {
-    pub level: SafetyLevel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
