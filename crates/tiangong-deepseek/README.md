@@ -26,7 +26,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.2.0"
+tiangong-deepseek = "0.1.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 serde_json = "1"
@@ -339,7 +339,7 @@ println!("{}\n{}", page.title, page.content);
 
 计费与限速：按成功请求次数计费（Search 需 `results` 非空，Fetch 需返回正文）；Search 100 QPS、Fetch 25 QPS（账号级，互相独立），Fetch 另有目标域名级限速。
 
-## 全家桶应用 API（0.2.0）
+## 全家桶应用 API（0.1.8）
 
 [DeepSeek 全家桶应用 API](https://api-docs.deepseek.com/zh-cn/guides/build_a_chatbot)（2026-11-13 发布）把 App 端的联网搜索、文件输入、阅读链接、语音与安全能力开放给开发者：对话增强参数直接加在 Messages / Responses / Chat Completions 请求上，底层能力亦可作为独立接口调用（Search、Fetch、OCR、ASR、TTS）。
 
