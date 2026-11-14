@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "An asynchronous Rust client for the DeepSeek API: chat completions (SSE streaming), responses, files (document parsing), web search/fetch, OCR, ASR, TTS (HTTP & WebSocket streaming), server-side web tools, and safety check."
+readme = "README.md"
 repository = "https://github.com/silent-rs/silent-Tiangong"
 keywords = ["deepseek", "llm", "ai", "openai", "chat"]
 categories = ["api-bindings", "asynchronous", "web-programming::http-client"]

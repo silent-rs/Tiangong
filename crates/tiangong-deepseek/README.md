@@ -10,8 +10,13 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 - **Streaming Robustness** — 单 chunk 多事件收集、空 delta 容错
 - **Finish Reason** — 普通响应与流式事件均原样保留服务端结束原因，支持完整 JSON 回退和未知值
 - **Responses API** — OpenAI Responses 兼容格式（适配 Codex 场景），非流式 + 流式，支持图片输入（`image_url` / `file_id`）、function / web_search 工具、reasoning effort
-- **Files API** — 图片文件上传（multipart，支持有效期）、列出、查询、删除，`file_id` 可在对话中引用
+- **Server-side Web Tools** — 对话中声明 `deepseek_web_search`（联网搜索 / 深度思考搜索 / 图片搜索）与 `deepseek_read_url`（阅读链接），搜索与抓取由服务端完成；Chat Completions 与 Responses 均支持，响应解析 `server_tool_calls`（含 `signature` 原样回传）、`annotations` 引用与 `usage.server_tool_use` 计费用量
+- **Safety Check** — `safety_check: {"level": "high"}` 模型内容安全校验（基础风控、拒答标识、`safety_tokens` 用量）
+- **Files API** — 图片文件上传（multipart，支持有效期）、文档解析上传（`text_recognition` / `rich_layout_recognition`）、列出、查询、删除，`file_id` 可在对话中引用（Responses `input_file` 块）
 - **Search / Fetch API** — 网页搜索（结构化结果、搜索语法、可选正文）与网页抓取（Markdown 正文），本地参数校验
+- **OCR** — `/v1/tools/ocr` 识别 PDF、Word、PowerPoint 与图片中的文字，按页返回，`text_recognition` / `rich_layout_recognition` 两种方式
+- **ASR** — `/v1/tools/asr` 语音识别，16 位 PCM WAV / Ogg Opus，语种自动识别
+- **TTS** — `/v1/tools/tts` 语音合成：HTTP 整段（流式音频，wav / 24kHz·16bit·mono PCM）与 WebSocket 流式（边生成边朗读，音频帧 + finish 事件），`stella` / `tide` 音色
 - **Model Listing** — list available models
 - **Balance Queries** — check account balance (CNY / USD)
 - **Context Caching** — `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` exposed in usage
@@ -21,7 +26,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.1.6"
+tiangong-deepseek = "0.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 serde_json = "1"
@@ -226,16 +231,15 @@ ResponseInputItem::Message(InputMessage {
 | `model` / `input` / `instructions` / `stream` | 完整支持；`input` 与 `instructions` 至少传一个 |
 | `temperature` / `top_p` | 支持，思考模式下不生效 |
 | `max_output_tokens` / `top_logprobs`（0–20）/ `user` | 支持 |
-| `tools` / `tool_choice` | function、web_search（含 `web_search_2025_08_26`）；tool_choice 支持 none / auto / required / 指定工具 |
+| `tools` / `tool_choice` | function、web_search（含 `web_search_2025_08_26`）与 DeepSeek 服务端工具 `deepseek_web_search` / `deepseek_read_url`（是否调用由模型判断，`tool_choice` 不能指定它们）；tool_choice 支持 none / auto / required / 指定工具 |
 | `reasoning.effort` | `none`–`max` 七档：none 关闭，minimal/low → low，medium/high/xhigh → high，max 最高 |
 | `text.format` | text / json_object / json_schema |
+| `safety_check` | `{"level": "high"}` 开启基础风控（DeepSeek 扩展），见 [模型内容安全](https://api-docs.deepseek.com/zh-cn/guides/safety) |
 | `parallel_tool_calls` / `store` / `previous_response_id` 等 | 不支持，传入被静默忽略 |
 
 ## Files API
 
-上传图片文件并在对话中通过 `file_id` 引用，适合多请求复用同一图片或发送超过内联限制的大图。文件归属 API key，可被 Chat Completions 与 Responses API 共同引用。
-
-```rust
+上传图片文件并在对话中通过 `file_id` 引用，适合多请求复用同一图片或发送超过内联限制的大图。文件归属 API key，可被 Chat Completions 与 Responses API 共同引用。```rust
 // 上传：格式按文件实际内容判断（JPEG/PNG/GIF/WebP），支持设置有效期（3600–2592000 秒，
 // 即 1 小时至 30 天），None 表示永久有效
 let png = std::fs::read("chart.png")?;
@@ -263,6 +267,38 @@ assert!(deleted.deleted);
 ```
 
 限制速览：单文件最大 64 MiB，文件名最长 512 字符，单用户 25 GiB / 10000 个文件，上传须在 10 分钟内完成。
+
+### 文档解析上传（文件输入）
+
+让模型基于 PDF、Word、PowerPoint、图片等文档作答：上传时指定解析方式，上传完成即解析，之后在对话中通过 `file_id` 引用（每请求最多 20 个文档，文字合计 ≤8 MiB）。
+
+```rust
+// 方式一：只有文字——文档里的图表、照片、示意图会被丢弃，适合以文字为主的文档
+let file = client.files().upload_document(
+    "report.pdf", std::fs::read("report.pdf")?,
+    FileParsePurpose::TextRecognition,
+).await?;
+
+// 方式二：文字加文档里的图——图表等按原位置裁出交给模型，适合带图表的报告、幻灯片
+let file = client.files().upload_document(
+    "slides.pptx", std::fs::read("slides.pptx")?,
+    FileParsePurpose::RichLayoutRecognition,
+).await?;
+
+// Responses API 中引用（Chat Completions 为 {"type":"file","file_id":...} 内容块）
+ResponseInputItem::Message(InputMessage {
+    role: Some(ResponseRole::User),
+    content: Some(MessageContent::Blocks(vec![
+        ContentBlock::InputFile(InputFileBlock { file_id: file.id }),
+        ContentBlock::InputText(TextBlock { text: "总结这份文档的要点".into() }),
+    ])),
+})
+```
+
+- 解析成功按页数一次性计费（1.5 元/千页），对话引用时按实际拼入的输入 Token 计费。
+- 限制：单文件 ≤100 MiB、1000 页；上传 120 秒内完成，解析 120 秒内完成；并发上传 15 个/账号。
+- 纯文本、表格与电子书（txt、md、csv、json、代码、XLSX、XLS、EPUB、MOBI）**不需要解析**，用 [`Files::upload`](#files-api)（`user_data`）即可，不计解析费。
+- 解析出的文档不能当图片用（图片块引用返回 400）；`rich_layout_recognition` 裁出的图计入请求图片数量上限。
 
 ## Search / Fetch API
 
@@ -301,7 +337,135 @@ println!("{}\n{}", page.title, page.content);
 | 408 / 5xx | `Transport` | 是 |
 | 429 QPS 超限 | `RateLimited` | 是 |
 
-计费与限速：按成功请求次数计费（Search 需 `results` 非空，Fetch 需返回正文）；Search、Fetch 各 5 QPS（账号级），Fetch 另有目标域名级限速。
+计费与限速：按成功请求次数计费（Search 需 `results` 非空，Fetch 需返回正文）；Search 100 QPS、Fetch 25 QPS（账号级，互相独立），Fetch 另有目标域名级限速。
+
+## 全家桶应用 API（0.2.0）
+
+[DeepSeek 全家桶应用 API](https://api-docs.deepseek.com/zh-cn/guides/build_a_chatbot)（2026-11-13 发布）把 App 端的联网搜索、文件输入、阅读链接、语音与安全能力开放给开发者：对话增强参数直接加在 Messages / Responses / Chat Completions 请求上，底层能力亦可作为独立接口调用（Search、Fetch、OCR、ASR、TTS）。
+
+### 服务端联网工具（对话内搜索与阅读链接）
+
+在 `tools` 中声明即可，**是否调用由模型判断**，搜索与抓取全部在服务端完成，客户端不需要执行任何工具；`tool_choice` 不能指定这两个工具（返回 400），`none` 则关闭全部工具。请使用 `deepseek-flash` 模型。
+
+```rust
+// Chat Completions：ChatTool 枚举
+let request = ChatCompletionRequest {
+    model: "deepseek-flash".into(),
+    messages: vec![/* ... */],
+    tools: Some(vec![
+        ChatTool::DeepSeekWebSearch,   // 联网搜索；开启思考时为深度思考搜索（模型多步推理中自主搜索、打开网页、页内查找）
+        ChatTool::DeepSeekReadUrl,     // 阅读链接：自动识别最后一条用户消息中的 URL（最多 10 个）并抓取作答
+        ChatTool::function("get_weather", "查询天气", None),  // 与函数工具共存
+    ]),
+    ..Default::default()
+};
+
+// Responses API：ResponsesTool 枚举变体
+tools: Some(vec![
+    ResponsesTool::DeepSeekWebSearch,
+    ResponsesTool::DeepSeekReadUrl,
+])
+```
+
+响应侧 SDK 已完整建模：
+
+- Chat Completions：`message.server_tool_calls`（分步的思考与调用，`signature` 保存加密网页正文——**多轮回传 assistant 消息时连同该字段原样回传**，网页才会拼回上下文）、`message.annotations`（`url_citation` 引用，按 Unicode 码点计 index）、流式 `server_tool_event`（`step_reasoning_done` / `call_started` / `call_completed`）与 `delta.title` / `delta.refusal`。
+- Responses：`web_search_call` 输出项（DeepSeek 扩展的 `kind` / `signature` 经 `extra` 保留，原样放回 `input` 即可还原）。
+- 用量：`usage.server_tool_use`（`tool_search` / `tool_fetch` / `tool_image_search` 为计费次数）；`usage.completion_tokens_details.safety_tokens` 为安全审核 Token。
+
+### 模型内容安全（safety_check）
+
+```rust
+// Chat Completions 与 Responses 通用
+safety_check: Some(SafetyCheck::high()),   // level: high 开启基础风控；low 与不传等价
+```
+
+开启后服务端审核模型输入与输出：输入命中风险返回 400（`Content Exists Risk`），输出命中风险以拒答结束（Messages `stop_reason: "refusal"` / Responses `status: "incomplete"` + `content_filter` / Chat Completions `finish_reason: "content_filter"`）。已流式下发的文本无法撤回，请在前端处理拒答展示。
+
+### OCR（文字识别）
+
+[OCR API](https://api-docs.deepseek.com/zh-cn/guides/ocr) 识别 PDF、Word、PowerPoint 文档或图片中的文字，按页返回；文件不存入 Files API，也不交给对话模型。
+
+```rust
+let result = client.ocr().recognize(
+    "contract.pdf",
+    std::fs::read("contract.pdf")?,
+    OcrPurpose::TextRecognition,       // 或 RichLayoutRecognition：全部逐页识别，文本保留 <｜ref｜>/<｜box｜> 定位标记与 0–1000 归一化坐标
+).await?;
+for page in &result.pages {
+    println!("[第 {} 页 / 共 {} 页] {}", page.index + 1, result.page_count, page.text);
+}
+```
+
+- 支持格式（按文件实际内容判断）：PDF、DOC/DOCX、PPT/PPTX、PNG/JPEG/WebP/GIF/BMP/TIFF。
+- 限制：≤100 MiB、1000 页；上传 120 秒内完成（中途停顿 ≤30 秒），上传+识别总时长 180 秒。
+- `text_recognition` 下不含图片的 Word/PowerPoint 直接提取文字（无定位标记）；`page.finish_reason == "length"` 表示该页输出达到上限、文本不完整。
+- 计费：1.5 元/千页，按识别成功的页数计；限速：15 个并发识别/账号（客户端断开不取消，未完成的仍占名额）。
+
+### ASR（语音识别）
+
+[ASR API](https://api-docs.deepseek.com/zh-cn/guides/asr) 一次请求发送完整音频，返回完整转写文本（不支持流式识别），语种根据音频自动识别（中/粤/英/日/韩/德/法/西/葡/意/俄/阿拉伯/印地/印尼/越/泰/土/马来/菲律宾/波兰/匈牙利）。
+
+```rust
+let audio = std::fs::read("speech.wav")?;   // 16 位 PCM WAV（8k/16k/22.05k/24k/32k/44.1k/48k Hz）或 Ogg Opus
+let transcript = client.asr().transcribe("speech.wav", audio).await?;
+println!("{}（音频 {} ms）", transcript.text, transcript.duration_ms);
+```
+
+- 声道：单声道或双声道（双声道只识别左声道）；限制：≤8 MiB、时长 ≤120 秒、上传 10 分钟内完成。
+- SDK 本地预检文件魔数（非 WAV/Ogg 直接 `InvalidRequest`，不发请求不计费）。
+- 计费：0.78 元/小时（限时 5 折 0.39），按音频时长精确到秒（不足 1 秒按 1 秒）；限速：50 并发/账号。
+
+### TTS（语音合成）
+
+[TTS API](https://api-docs.deepseek.com/zh-cn/guides/tts) 提供整段合成与 WebSocket 流式合成两种方式；音色 `stella`（海星，女声，默认）/ `tide`（暗潮，男声），语种按文本自动识别（普通话/粤语/英/日/韩/马来/阿拉伯/印尼/泰/越）。
+
+**整段合成**——文本一次性发送，音频在响应体中边合成边返回：
+
+```rust
+// 流式读取（适合边收边播）
+let mut stream = client.tts().synthesize_stream(
+    TtsRequest::new("你好，我是 DeepSeek。")
+        .voice(TtsVoice::Stella)
+        .format(TtsAudioFormat::Pcm),        // wav（默认）或 pcm（24kHz、16 位、单声道）
+).await?;
+while let Some(chunk) = stream.next().await {
+    play(&chunk?);   // Bytes
+}
+
+// 便捷聚合：一次性拿到完整音频
+let wav = client.tts().synthesize(TtsRequest::new("朗读这段话。")).await?;
+```
+
+**WebSocket 流式合成**——分段发送文本（例如模型仍在生成时边生成边朗读），音频按帧返回：
+
+```rust
+let mut session = client.tts().stream_session(
+    TtsVoice::Stella, TtsAudioFormat::Pcm, None,   // format 还支持 Opus（不带容器的 Opus 包）
+).await?;
+session.send_text("Hello ").await?;
+session.send_text("from DeepSeek.").await?;
+session.finish_text().await?;
+loop {
+    match session.next_event().await? {
+        Some(TtsStreamEvent::Audio(frame)) => play(&frame),
+        Some(TtsStreamEvent::Finish(event)) => {
+            assert!(event.is_success());   // code: success / invalid_input / content_filter / input_timeout / service_error
+            break;
+        }
+        None => break,
+    }
+}
+
+// 或一把梭：发送全部分片并收完音频
+let (audio, finish) = client.tts().stream_session(TtsVoice::Tide, TtsAudioFormat::Pcm, None)
+    .await?
+    .run(["分段一".to_string(), "分段二".to_string()]).await?;
+```
+
+- 限制：单次请求/会话最多 10,000 个计费字符（汉字算 2，SDK 本地校验）、64 KiB 文本；音频最长 30 分钟。WebSocket 会话 60 秒未收到文字即结束（`input_timeout`），服务端每 25 秒 ping（自动应答）。
+- 不支持调节语速，不支持中断续传；音频已开始返回后合成失败会中途断流，请视为失败。
+- 计费：3 元/万字符（限时 5 折 1.5）；限速：50 并发/账号。
 
 ## Thinking Mode
 
