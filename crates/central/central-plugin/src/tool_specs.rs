@@ -74,7 +74,7 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "search_history".to_string(),
-                description: "搜索历史会话消息（跨会话）：标题走元数据缓存，正文扫描                    近期会话（子串匹配），返回命中片段。用户问「之前谁说过什么/某结论                    在哪个会话/以前怎么处理的」时使用；也可用于派发前确认是否已有                    相关工作。scope=all 扫全部（较慢），默认近期 200 个会话。"
+                description: "搜索历史会话消息（跨会话）：标题走元数据缓存，正文扫描 近期会话（子串匹配），返回命中片段。用户问「之前谁说过什么/某结论 在哪个会话/以前怎么处理的」时使用；也可用于派发前确认是否已有 相关工作。scope=all 扫全部（较慢），默认近期 200 个会话。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -88,7 +88,7 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "get_work_timeline".to_string(),
-                description: "查询后台工作的事件时间线（派发/排队/阻塞/恢复/暂停/取消/终态等\n                    关键节点，持久化可回查）。用户想了解某工作经历了什么/为何中断/\n                    何时完成时使用。"
+                description: "查询后台工作的事件时间线（派发/排队/阻塞/恢复/暂停/取消/终态等\n 关键节点，持久化可回查）。用户想了解某工作经历了什么/为何中断/\n 何时完成时使用。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -216,7 +216,7 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "cancel_work".to_string(),
-                description: "取消后台工作：中断该工作会话的当前执行并标记为已取消（终态，不再恢复）。\n                    用户明确要求停止/放弃某个工作时使用；取消后如需再做需重新派发。"
+                description: "取消后台工作：中断该工作会话的当前执行并标记为已取消（终态，不再恢复）。\n 用户明确要求停止/放弃某个工作时使用；取消后如需再做需重新派发。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -228,7 +228,7 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "pause_work".to_string(),
-                description: "暂停后台工作：中断当前执行但保留全部上下文（会话不删除），状态标记为已暂停。\n                    用户要求暂停/先放一放时使用；恢复用 resume_work。"
+                description: "暂停后台工作：中断当前执行但保留全部上下文（会话不删除），状态标记为已暂停。\n 用户要求暂停/先放一放时使用；恢复用 resume_work。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -240,7 +240,7 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "resume_work".to_string(),
-                description: "恢复已暂停的后台工作：向该工作会话发送「继续之前暂停的任务」指令，\n                    工作回到执行中（上下文连续）。用户要求继续/恢复时使用。"
+                description: "恢复已暂停的后台工作：向该工作会话发送「继续之前暂停的任务」指令，\n 工作回到执行中（上下文连续）。用户要求继续/恢复时使用。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",

@@ -212,6 +212,29 @@ impl TicketRegistry {
         ticket
     }
 
+    /// 按执行消费（恢复链路，Z6）：取最新的匹配 `execution_id` 的未用
+    /// 票据并消费——无票据/已用/过期返回非 Granted（渐进收紧：调用方
+    /// 决定是否放行；协议结构化后转为硬校验）。
+    pub fn consume_decision_for_execution(&self, execution_id: &str) -> TicketVerdict {
+        let now = now_text();
+        let mut tickets = self
+            .decisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(position) = tickets.iter().rposition(|t| t.execution_id == execution_id) else {
+            return TicketVerdict::DeniedUsedOrMissing;
+        };
+        let ticket = &mut tickets[position];
+        if ticket.used_at.is_some() {
+            return TicketVerdict::DeniedUsedOrMissing;
+        }
+        if is_expired(&ticket.expires_at, &now) {
+            return TicketVerdict::DeniedExpired;
+        }
+        ticket.used_at = Some(now);
+        TicketVerdict::Granted
+    }
+
     /// 消费决策票据：绑定 execution 与问题版本，一次性。
     pub fn consume_decision(
         &self,

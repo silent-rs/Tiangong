@@ -31,9 +31,6 @@ export async function ensureCentralConversation(): Promise<void> {
     }
     return;
   }
-  // 激活问候（§4.2）：进入时注入状态摘要驱动中枢主动问候（后端幂等，
-  // 每进程首次；失败静默不阻塞切换）
-  void api.centralActivationGreeting().catch(() => undefined);
   // 记录进入前的普通模式上下文（退出中枢时恢复）
   preCentralContext = {
     activeSessionId: cur.activeSessionId,
@@ -48,6 +45,11 @@ export async function ensureCentralConversation(): Promise<void> {
   const loaded = await api.loadSession(CENTRAL_SESSION_ID).catch(() => null);
   // 加载期间模式被来回切换：放弃本次写入
   if (version !== centralSwitchVersion) return;
+  // 激活问候（§4.2，Z7 移至加载后）：先加载落位 messages 再触发——
+  // 此前问候先 fire（中枢 turn 产生流事件），后到的 loaded 覆盖式
+  // setState 会吞掉问候期间的流式消息（十八轮 Z7 竞态）。后端幂等，
+  // 每进程首次；失败静默不阻塞切换。
+  void api.centralActivationGreeting().catch(() => undefined);
   const knownRunStatus = useStore.getState().sessionRunStatuses[CENTRAL_SESSION_ID];
   useStore.setState({
     isNewConversation: false,

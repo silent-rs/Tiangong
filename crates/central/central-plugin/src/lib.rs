@@ -1601,14 +1601,16 @@ mod tests {
         );
         assert!(!unknown.ok);
         assert!(unknown.stderr.contains("可用模型"));
-        // 有效请求：离线会话 → 待生效（不报错，留痕完成）
+        // 有效请求：离线会话 → 明确的「未完成」错误（Z6 诚实性：不再
+        // ok:true 伪装待生效；留痕完成，下次派发带 model 生效）
         let valid = call_tool(
             &plugin,
             "switch_worker_model",
             serde_json::json!({"session_id": "s0", "model": "k3", "consultation_summary": "模型超时，用户同意换 k3"}),
         );
-        assert!(valid.ok, "stderr: {}", valid.stderr);
-        assert!(valid.stdout.contains("留痕"));
+        assert!(!valid.ok, "离线会话切换未完成必须显式失败（Z6）");
+        assert!(valid.stderr.contains("切换未完成"), "{}", valid.stderr);
+        assert!(valid.stderr.contains("留痕"), "{}", valid.stderr);
     }
 
     /// dispatch_work schema：after_work_id/parallel 必须在 properties 内

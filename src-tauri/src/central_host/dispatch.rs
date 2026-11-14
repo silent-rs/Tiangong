@@ -369,9 +369,9 @@ pub(crate) async fn plan_central_dispatch(
     // Workspace 授权统一兜底（review P1-x2：Steer 绕过；R3 票据化双通道）
     // ——Dispatch/Steer 殊途同归至此，最终 cwd（请求指定或复用会话自身）
     // 统一校验。放行条件（任一）：
-    //   1. 目录长期授权（confirmed-workspaces，用户此前「记住」的目录）；
-    //   2. 一次性票据（宿主用户操作签发，绑定任务指纹——防「授权 A、
-    //      执行 B」偷换，消费即失效）。
+    // 1. 目录长期授权（confirmed-workspaces，用户此前「记住」的目录）；
+    // 2. 一次性票据（宿主用户操作签发，绑定任务指纹——防「授权 A、
+    // 执行 B」偷换，消费即失效）。
     // 无票据通道前模型无法自证同意（confirm_workspace 已移除）。
     {
         let default_workspace = state
@@ -457,6 +457,20 @@ pub(crate) async fn plan_central_dispatch(
         if let Some((owner_work_id, owner_task)) =
             central_state::merge_waiting_user(&mut registry, &sid, Some(&request.execution_id))
         {
+            // Z6 决定票据消费点：该恢复执行若存在用户签发的未消费
+            // DecisionTicket（决定卡片 → resolve_decision），在此一次性
+            // 消费（fail-closed 渐进收紧：有票据则必须消费；自然语言答复
+            // 无票据时暂放行——待决定协议结构化后转为硬校验，附录 A.2）
+            if state
+                .ticket_registry
+                .consume_decision_for_execution(&request.execution_id)
+                .is_granted()
+            {
+                tracing::info!(
+                    execution_id = %request.execution_id,
+                    "恢复经 DecisionTicket 授权（一次性消费）"
+                );
+            }
             merged_work.work_id = owner_work_id;
             merged_work.task = owner_task;
             super::central_events::record_by_session(

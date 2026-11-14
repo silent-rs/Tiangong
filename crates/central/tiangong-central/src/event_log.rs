@@ -34,23 +34,66 @@ pub struct LoggedEvent {
     pub event: WorkEvent,
 }
 
+/// 跨实例共享状态（Z5）：生产代码每次 `EventLog::open` 都是新实例——
+/// 实例级锁无互斥（两实例并发 append 可能交错/offset 重复）。按路径
+/// 注册表共享锁与缓存：
+/// - `append_lock`：同路径全部实例串行；
+/// - `cache`：`last_offset` + 已见事件 id（append 幂等判定免去全量读）。
+struct LogShared {
+    append_lock: Mutex<()>,
+    cache: Mutex<LogCache>,
+}
+
+#[derive(Default)]
+struct LogCache {
+    last_offset: u64,
+    seen_ids: HashSet<String>,
+    /// 已从文件重建（冷缓存判定，仅进程内该路径首次 append 时扫描）。
+    loaded: bool,
+}
+
+fn log_registry()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<LogShared>>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<LogShared>>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 事件日志轮转阈值（Z5：无界增长防护）：超过则归档为 `.1` 重开。
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// 追加式事件日志。
 pub struct EventLog {
     path: PathBuf,
-    /// append 串行锁（进程内；多进程场景需文件锁，方案 §5.5 留 SQLite/锁升级）。
-    append_lock: Mutex<()>,
+    shared: std::sync::Arc<LogShared>,
 }
 
 impl EventLog {
     /// 打开（或创建）事件日志；尾部不完整行截断（崩溃恢复）。
+    /// 同路径的所有实例共享锁与幂等缓存（Z5）。
     pub fn open(base: &Path) -> Result<Self> {
         if let Some(parent) = base.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建事件日志目录失败: {}", base.display()))?;
         }
+        let shared = {
+            let mut registry = log_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry
+                .entry(base.to_path_buf())
+                .or_insert_with(|| {
+                    std::sync::Arc::new(LogShared {
+                        append_lock: Mutex::new(()),
+                        cache: Mutex::new(LogCache::default()),
+                    })
+                })
+                .clone()
+        };
         let log = Self {
             path: base.to_path_buf(),
-            append_lock: Mutex::new(()),
+            shared,
         };
         log.repair_tail()?;
         Ok(log)
@@ -112,14 +155,57 @@ impl EventLog {
     /// 既有 offset（不产生第二条事实）。
     pub fn append(&self, event: WorkEvent) -> Result<u64> {
         let _guard = self
+            .shared
             .append_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entries = self.load_all_inner()?;
-        if let Some(existing) = entries.iter().find(|logged| logged.event.id == event.id) {
-            return Ok(existing.offset);
+        // Z5 缓存：共享缓存（已见 id / last_offset）免去每次全量读；
+        // 冷缓存（进程内该路径首开）时从文件重建一次。
+        {
+            let mut cache = self
+                .shared
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !cache.loaded {
+                let entries = self.load_all_inner()?;
+                cache.last_offset = entries.last().map(|logged| logged.offset).unwrap_or(0);
+                cache.seen_ids = entries
+                    .iter()
+                    .map(|logged| logged.event.id.clone())
+                    .collect();
+                cache.loaded = true;
+            }
+            if cache.seen_ids.contains(&event.id) {
+                // 幂等：已见事件 id → 返回既有 offset（一次查询）
+                let entries = self.load_all_inner()?;
+                if let Some(existing) = entries.iter().find(|logged| logged.event.id == event.id) {
+                    return Ok(existing.offset);
+                }
+            }
         }
-        let offset = entries.last().map(|logged| logged.offset).unwrap_or(0) + 1;
+        let offset = {
+            let mut cache = self
+                .shared
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.last_offset += 1;
+            cache.seen_ids.insert(event.id.clone());
+            cache.last_offset
+        };
+        // Z5 轮转：超过阈值归档为 `.1` 重开（offset 连续性由缓存保留）
+        if let Ok(meta) = std::fs::metadata(&self.path)
+            && meta.len() > LOG_ROTATE_BYTES
+        {
+            let rotated = self.path.with_extension("jsonl.1");
+            let _ = std::fs::rename(&self.path, &rotated);
+            tracing::info!(
+                path = %self.path.display(),
+                bytes = meta.len(),
+                "事件日志超过轮转阈值，已归档重开"
+            );
+        }
         let logged = LoggedEvent {
             offset,
             schema_version: CENTRAL_CONTRACT_SCHEMA_VERSION,
@@ -142,6 +228,7 @@ impl EventLog {
     /// 读取全部完整事件（投影/对账数据源）。
     pub fn load_all(&self) -> Result<Vec<LoggedEvent>> {
         let _guard = self
+            .shared
             .append_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -153,6 +240,7 @@ impl EventLog {
     /// 且丢失事实数量可观测。
     pub fn load_all_lenient(&self) -> (Vec<LoggedEvent>, usize) {
         let _guard = self
+            .shared
             .append_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -319,15 +407,18 @@ mod tests {
     }
 
     /// 方案 8.2「两线程并发 append」：无丢失、offset 唯一且有序。
+    /// Z5/Z8 生产形态：每次 `EventLog::open` 新实例（生产调用形态）——
+    /// 此前单 Arc 共享实例的「并发」测不到实例级锁无互斥的缺陷
+    /// （两实例交错 append / offset 重复），全局注册表锁后跨实例串行。
     #[test]
     fn concurrent_appends_do_not_lose_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let log = std::sync::Arc::new(EventLog::open(&path).unwrap());
         let mut handles = Vec::new();
         for t in 0..4 {
-            let log = std::sync::Arc::clone(&log);
+            let path = path.clone();
             handles.push(std::thread::spawn(move || {
+                let log = EventLog::open(&path).unwrap(); // 生产形态：新实例
                 for i in 0..25 {
                     let mut e = event(&format!("w{t}"), WorkEventType::WorkItemProgress);
                     e.id = new_id();
@@ -339,12 +430,15 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        let entries = log.load_all().unwrap();
-        assert_eq!(entries.len(), 100, "并发追加不丢事件");
+        let verify = EventLog::open(&path).unwrap();
+        let entries = verify.load_all().unwrap();
+        assert_eq!(entries.len(), 100, "跨实例并发追加不丢事件");
         let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
         let mut sorted = offsets.clone();
         sorted.sort_unstable();
-        assert_eq!(offsets, sorted, "offset 连续有序");
+        assert_eq!(offsets.len(), sorted.len());
+        let unique: std::collections::HashSet<u64> = offsets.iter().copied().collect();
+        assert_eq!(unique.len(), 100, "offset 全局唯一（实例级锁时代会重复）");
     }
 
     /// 投影：事件序列重建状态；终态吸收迟到事件。

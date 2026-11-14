@@ -218,7 +218,7 @@ export function CentralCardsBar() {
         dismissTimers.current.delete(approval.work_id);
         setApprovals((current) =>
           current.filter(
-            (item) => !(item.work_id === approval.work_id && item.cwd === approval.cwd),
+            (item) => !(item.cwd === approval.cwd && item.task === approval.task),
           ),
         );
       }, 3500);
@@ -233,12 +233,18 @@ export function CentralCardsBar() {
     };
   }, []);
 
+  // Z7 修复：按（目录 + 任务指纹）定位卡片——request_workspace_approval
+  // 发起的卡片 work_id 为空串，按 id 匹配会同时标记/消失同批全部空 id 卡
   const handleApproved = useCallback((workId: string) => {
-    setApprovals((current) =>
-      current.map((item) =>
-        item.work_id === workId ? { ...item, status: 'approved' as const } : item,
-      ),
-    );
+    setApprovals((current) => {
+      const target = current.find((item) => item.work_id === workId);
+      if (!target) return current;
+      return current.map((item) =>
+        item.cwd === target.cwd && item.task === target.task
+          ? { ...item, status: 'approved' as const }
+          : item,
+      );
+    });
   }, []);
 
   if (approvals.length === 0 && waitingWorks.length === 0) return null;

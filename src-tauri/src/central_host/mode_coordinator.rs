@@ -25,49 +25,24 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-/// 模式状态（方案 §4.2 状态机的宿主核心）。
+/// 模式状态（Z7 两态化：EnterRequested/ExitRequested 为死变体——
+/// request_enter/exit 同步完成，从未置位过渡态；方案 §4.2 的完整
+/// 异步状态机待前端转场异步化时再引入，偏差已记录于附录 A.2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModeState {
     /// 普通模式（默认）。
     Normal,
-    /// 进入请求中（合并短时间重复请求；异步建立中枢视图）。
-    EnterRequested,
     /// 中枢模式激活。
     CentralActive,
-    /// 退出请求中（恢复普通上下文）。
-    ExitRequested,
 }
 
 impl ModeState {
     pub fn as_str(self) -> &'static str {
         match self {
             ModeState::Normal => "normal",
-            ModeState::EnterRequested => "enter_requested",
             ModeState::CentralActive => "central_active",
-            ModeState::ExitRequested => "exit_requested",
         }
-    }
-
-    /// 合法转移（可测试的状态机规则）。
-    ///
-    /// - 标准链：Normal → EnterRequested → CentralActive → ExitRequested → Normal；
-    /// - 异常分支：EnterRequested → Normal（进入失败）、ExitRequested →
-    ///   CentralActive（恢复失败，可重试）；
-    /// - EnterRequested 重入自身（请求合并）、ExitRequested 重入自身。
-    pub fn can_transition_to(self, target: ModeState) -> bool {
-        use ModeState::*;
-        matches!(
-            (self, target),
-            (Normal, EnterRequested)
-                | (EnterRequested, CentralActive)
-                | (EnterRequested, Normal)
-                | (EnterRequested, EnterRequested)
-                | (CentralActive, ExitRequested)
-                | (ExitRequested, Normal)
-                | (ExitRequested, CentralActive)
-                | (ExitRequested, ExitRequested)
-        )
     }
 }
 
@@ -164,7 +139,7 @@ impl ModeCoordinator {
         let mut inner = self.lock();
         let current = inner.state.unwrap_or(ModeState::Normal);
         match current {
-            ModeState::Normal | ModeState::EnterRequested => {
+            ModeState::Normal => {
                 inner.normal_context = Some(snapshot);
                 inner.state = Some(ModeState::CentralActive);
                 tracing::info!(
@@ -173,7 +148,7 @@ impl ModeCoordinator {
                 );
             }
             // 中枢中重入（请求合并）：仅刷新快照
-            ModeState::CentralActive | ModeState::ExitRequested => {
+            ModeState::CentralActive => {
                 inner.normal_context = Some(snapshot);
                 inner.state = Some(ModeState::CentralActive);
                 tracing::info!("模式切换：中枢激活期间重复进入请求已合并");
@@ -190,7 +165,7 @@ impl ModeCoordinator {
         let mut inner = self.lock();
         let current = inner.state.unwrap_or(ModeState::Normal);
         match current {
-            ModeState::CentralActive | ModeState::ExitRequested | ModeState::EnterRequested => {
+            ModeState::CentralActive => {
                 inner.state = Some(ModeState::Normal);
                 let snapshot = inner.normal_context.take();
                 tracing::info!(
@@ -222,29 +197,31 @@ impl ModeCoordinator {
 mod tests {
     use super::*;
 
+    /// Z7/Z8 行为驱动（取代自证式矩阵测试）：request_enter/exit 的
+    /// 真实转移行为——重入合并、快照无损往返、异常退出分支。
     #[test]
-    fn transition_matrix_matches_design() {
-        use ModeState::*;
-        let legal = [
-            (Normal, EnterRequested),
-            (EnterRequested, CentralActive),
-            (EnterRequested, Normal),
-            (EnterRequested, EnterRequested),
-            (CentralActive, ExitRequested),
-            (ExitRequested, Normal),
-            (ExitRequested, CentralActive),
-            (ExitRequested, ExitRequested),
-        ];
-        for from in [Normal, EnterRequested, CentralActive, ExitRequested] {
-            for to in [Normal, EnterRequested, CentralActive, ExitRequested] {
-                let allowed = from.can_transition_to(to);
-                assert_eq!(
-                    allowed,
-                    legal.contains(&(from, to)),
-                    "转移 {from:?} → {to:?} 判定与设计不符"
-                );
-            }
-        }
+    fn enter_exit_transitions_are_driven_by_real_calls() {
+        let coordinator = ModeCoordinator::new();
+        assert_eq!(coordinator.state(), ModeState::Normal);
+        coordinator.request_enter(NormalContextSnapshot {
+            active_session_id: Some("s-1".to_string()),
+            new_conversation_id: None,
+            saved_at: "2026-11-13 12:00:00".to_string(),
+        });
+        assert_eq!(coordinator.state(), ModeState::CentralActive);
+        // 重入合并：仍 CentralActive、快照取最新
+        coordinator.request_enter(NormalContextSnapshot {
+            active_session_id: Some("s-2".to_string()),
+            new_conversation_id: None,
+            saved_at: "2026-11-13 12:01:00".to_string(),
+        });
+        assert_eq!(coordinator.state(), ModeState::CentralActive);
+        let restored = coordinator.request_exit().expect("快照归还");
+        assert_eq!(restored.active_session_id.as_deref(), Some("s-2"));
+        assert_eq!(coordinator.state(), ModeState::Normal);
+        // Normal 下再退出：无操作、无快照
+        assert!(coordinator.request_exit().is_none());
+        assert_eq!(coordinator.state(), ModeState::Normal);
     }
 
     /// 进入/退出往返：快照原样归还；再次退出（Normal）返回 None。

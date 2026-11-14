@@ -88,7 +88,8 @@ impl CentralPlugin {
             (Some(core), Some(endpoint)) => core.switch_model(endpoint).map_err(|e| e.to_string()),
             _ => Err("目标会话当前不在线（已空闲回收）；下次派发时带 model 参数生效".to_string()),
         };
-        // 商量留痕：回报队列 + 时间线
+        // 商量留痕：回报队列 + 时间线（Z6 诚实性：留痕内容按真实结果区分——
+        // 失败不再写 ModelHandoverConfirmed 事件「记录未发生的事实」）
         let note = format!("模型切换（{model}）：{consultation_summary}");
         self.work_reports
             .lock()
@@ -98,17 +99,16 @@ impl CentralPlugin {
             self.sessions.storage_root(),
             session_id,
             tiangong_central::event::WorkEventType::ModelHandoverConfirmed,
-            &note,
+            &format!("{note}（切换成功，下轮生效）"),
         );
         match switch_result {
             Ok(()) => self.text_result(
                 "模型已切换",
                 format!("会话 {session_id} → {model}（执行中的工作下一轮生效）。商量记录已留痕。"),
             ),
-            Err(reason) => self.text_result(
-                "模型切换待生效",
-                format!("会话 {session_id} → {model}：{reason}。商量记录已留痕。"),
-            ),
+            Err(reason) => self.error_result(format!(
+                "会话 {session_id} → {model} 切换未完成：{reason}。商量记录已留痕；下次派发时带 model 参数可生效。"
+            )),
         }
     }
 
