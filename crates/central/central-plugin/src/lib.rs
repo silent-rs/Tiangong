@@ -114,9 +114,8 @@ pub struct CentralDispatchRequest {
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
 ///
-/// 工具集（§5.3 白名单的实现态，22 项——与 tool_specs 一一对应；R3 移除
-/// confirm_workspace 改票据化授权，新增 request_workspace_approval——
-/// 模型只能请求授权，不能代替用户授权）：
+/// 工具集（§5.3 白名单的实现态，21 项——与 tool_specs 一一对应；R4 移除
+/// dispatch_work 带 model 参数，复用原会话上下文）：
 /// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace` /
 ///   `list_models` / `list_sessions` / `search_history`；
 /// - 后台工作：`dispatch_work`（新建/复用派发）、`send_to_worker`（引导）、
@@ -145,7 +144,9 @@ pub struct CentralPlugin {
 /// 天然已确认：默认工作区**及其子目录**（应用级选择的根，其子树均属
 /// 既定授权范围，按前缀判定而非精确相等——review P1：精确比较会把
 /// 默认工作区内的子目录误拦为「新工作区」）。
-/// 按 session 归属写中枢事件日志（R5 单写，取代旧内嵌时间线）。
+/// 按 session 归属写中枢事件日志（测试辅助：生产写路径在宿主
+/// central_events；仅插件测试构造事件用）。
+#[cfg(test)]
 fn record_central_event_by_session(
     storage_root: &std::path::Path,
     session_id: &str,
@@ -157,17 +158,13 @@ fn record_central_event_by_session(
         .rev()
         .find(|item| item.session_id == session_id);
     let Some(record) = record else {
-        tracing::warn!(session_id, "事件归属会话无登记，事实未入日志");
         return;
     };
     let log = match tiangong_central::EventLog::open(
         &storage_root.join("central").join("events.jsonl"),
     ) {
         Ok(log) => log,
-        Err(error) => {
-            tracing::warn!(%error, "中枢事件日志打开失败（事实未入日志）");
-            return;
-        }
+        Err(_) => return,
     };
     let mut event = tiangong_central::WorkEvent::new(&record.work_id, event_type)
         .with_worker_session(session_id);
@@ -175,9 +172,7 @@ fn record_central_event_by_session(
         event = event.with_execution(execution_id);
     }
     event.payload = serde_json::json!({ "note": note });
-    if let Err(error) = log.append(event) {
-        tracing::warn!(%error, "中枢事件日志追加失败（事实未入日志）");
-    }
+    let _ = log.append(event);
 }
 
 /// 读工作项时间线：事件日志优先，旧内嵌时间线兼容读（R5）。
@@ -395,24 +390,6 @@ impl ToolOverrideHandler for CentralPlugin {
                     .get("work_id")
                     .and_then(|value| value.as_str());
                 self.handle_list_reports(work_id)
-            }
-            "switch_worker_model" => {
-                let session_id = call
-                    .arguments
-                    .get("session_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let model = call
-                    .arguments
-                    .get("model")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let consultation = call
-                    .arguments
-                    .get("consultation_summary")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.handle_switch_worker_model(session_id, model, consultation)
             }
             "request_workspace_approval" => {
                 let path = call
@@ -690,8 +667,8 @@ mod tests {
         );
         assert_eq!(
             spec_names.len(),
-            22,
-            "工具数应为 22（request_workspace_approval 已加入；新增工具时同步更新）"
+            21,
+            "工具数应为 21（switch_worker_model 已移除：换模型经 dispatch_work 带 model；新增工具时同步更新）"
         );
     }
 
@@ -1560,117 +1537,6 @@ mod tests {
         );
         assert!(none.ok);
         assert!(none.stdout.contains("没有"));
-    }
-
-    /// 换模型：商量结论缺失拒绝；有效请求通过校验并留痕。
-    #[test]
-    fn switch_model_requires_consultation() {
-        let root = tempfile::tempdir().unwrap();
-        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
-        std::fs::write(
-            root.path().join("models.json"),
-            serde_json::json!({
-                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
-                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
-                "routing": {"chat": "k3"}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
-        // 无商量结论：拒绝（§15.11 先商量硬约束）
-        let no_consult = call_tool(
-            &plugin,
-            "switch_worker_model",
-            serde_json::json!({"session_id": "s0", "model": "k3"}),
-        );
-        assert!(!no_consult.ok, "缺少商量结论必须拒绝");
-        assert!(no_consult.stderr.contains("商量"));
-        // 中枢会话拒绝
-        let central = call_tool(
-            &plugin,
-            "switch_worker_model",
-            serde_json::json!({"session_id": "central-hub", "model": "k3", "consultation_summary": "用户同意换成 k3 处理超时问题"}),
-        );
-        assert!(!central.ok);
-        // 未知模型拒绝（附可用清单）
-        let unknown = call_tool(
-            &plugin,
-            "switch_worker_model",
-            serde_json::json!({"session_id": "s0", "model": "nope", "consultation_summary": "用户同意换模型"}),
-        );
-        assert!(!unknown.ok);
-        assert!(unknown.stderr.contains("可用模型"));
-        // 建立会话登记（switch 事件按会话归属写日志，登记缺失会被跳过）
-        let _ = upsert_work_item(
-            plugin.sessions.storage_root(),
-            &WorkItemRecord {
-                work_id: "work-s0-base".into(),
-                reused_session: false,
-                session_id: "s0".into(),
-                task: "登记基线".into(),
-                model: None,
-                dispatched_at: "2026-11-13 09:00:00".into(),
-                finished_at: None,
-                outcome: None,
-                events: Vec::new(),
-                queued_at: None,
-                after_work_id: None,
-                cwd: None,
-                execution_id: None,
-            },
-        );
-        // 有效请求：离线会话 → 明确的「未完成」错误（Z6 诚实性：不再
-        // ok:true 伪装待生效；留痕完成，下次派发带 model 生效）
-        let valid = call_tool(
-            &plugin,
-            "switch_worker_model",
-            serde_json::json!({"session_id": "s0", "model": "k3", "consultation_summary": "模型超时，用户同意换 k3"}),
-        );
-        assert!(!valid.ok, "离线会话切换未完成必须显式失败（Z6）");
-        assert!(valid.stderr.contains("切换未完成"), "{}", valid.stderr);
-        assert!(valid.stderr.contains("留痕"), "{}", valid.stderr);
-        // 十九轮 P1-1 具名锁：失败路径的事件日志不得出现「切换成功」
-        // ——事实源不得记录未发生的事实
-        {
-            let log = tiangong_central::EventLog::open(
-                &plugin
-                    .sessions
-                    .storage_root()
-                    .join("central")
-                    .join("events.jsonl"),
-            )
-            .expect("事件日志应可打开");
-            let entries = log.load_all().expect("事件日志应可读取");
-            let switch_events: Vec<&tiangong_central::LoggedEvent> = entries
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        e.event.event_type,
-                        tiangong_central::event::WorkEventType::ModelHandoverConfirmed
-                            | tiangong_central::event::WorkEventType::ModelHandoverFailed
-                    )
-                })
-                .collect();
-            assert!(
-                switch_events.iter().all(|e| {
-                    e.event
-                        .payload
-                        .get("note")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .contains("切换未完成")
-                }),
-                "离线失败只允许「切换未完成」事件，不得出现成功事实（十九轮 P1-1）"
-            );
-            assert!(
-                entries.iter().any(|e| {
-                    e.event.event_type
-                        == tiangong_central::event::WorkEventType::ModelHandoverFailed
-                }),
-                "失败路径应记录 ModelHandoverFailed 事件"
-            );
-        }
     }
 
     /// dispatch_work schema：after_work_id/parallel 必须在 properties 内

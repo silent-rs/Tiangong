@@ -1,5 +1,5 @@
 //! 控制与状态工具（R5 从 lib.rs 拆出）：get_work_item_status /
-//! switch_worker_model（票据校验）/ send_notification / cancel-pause-resume /
+//! send_notification / cancel-pause-resume /
 //! get_work_timeline（事件日志）。
 
 use tiangong_core::tools::result::ToolResult;
@@ -49,80 +49,6 @@ impl CentralPlugin {
                 }
             ),
         )
-    }
-
-    /// 换模型（§15.10/15.11：先商量后切换，商量结论留痕）。
-    pub(crate) fn handle_switch_worker_model(
-        &self,
-        session_id: &str,
-        model: &str,
-        consultation_summary: &str,
-    ) -> Option<ToolResult> {
-        let session_id = session_id.trim();
-        let model = model.trim();
-        let consultation_summary = consultation_summary.trim();
-        if session_id.is_empty() || model.is_empty() {
-            return self.error_result("session_id 与 model 不能为空".to_string());
-        }
-        if is_central_session(session_id) {
-            return self.error_result("不能对中枢对话切换模型".to_string());
-        }
-        // 商量结论是硬约束：没有留痕依据的切换被拒绝（§15.11 票据的轻量版）
-        if consultation_summary.len() < 8 {
-            return self.error_result(
-                "consultation_summary 必须说明与用户商量的结论（原因 + 用户同意事实），不能为空或过短——换模型必须先商量。"
-                    .to_string(),
-            );
-        }
-        // 模型解析校验（复用派发同款：失败附可用清单）
-        if let Err(error) = self.sessions.resolve_turn_model(Some(model)) {
-            let models = tiangong_config::io::load_models_config_at(self.sessions.storage_root());
-            let available: Vec<String> = models.models.keys().cloned().collect();
-            return self.error_result(format!("{error}\n可用模型：{}", available.join("、")));
-        }
-        // 执行切换：目标会话的 Core 在线时直接切换（下轮生效）；不在线则
-        // 记录模型偏好由下次 ensure 生效（dispatch 带 model 亦可）。
-        let endpoint = self.sessions.resolve_turn_model(Some(model)).ok();
-        let registry = self.sessions.registry();
-        let core = registry.get(session_id);
-        let switch_result = match (&core, endpoint) {
-            (Some(core), Some(endpoint)) => core.switch_model(endpoint).map_err(|e| e.to_string()),
-            _ => Err("目标会话当前不在线（已空闲回收）；下次派发时带 model 参数生效".to_string()),
-        };
-        // 商量留痕：回报队列；事件按真实结果区分（十九轮 P1-1 修复：
-        // 事件写入移入结果分支——失败不再写「切换成功」污染事实源）
-        let note = format!("模型切换（{model}）：{consultation_summary}");
-        self.work_reports
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(format!("[系统中枢] {note}"));
-        match switch_result {
-            Ok(()) => {
-                record_central_event_by_session(
-                    self.sessions.storage_root(),
-                    session_id,
-                    tiangong_central::event::WorkEventType::ModelHandoverConfirmed,
-                    &format!("{note}（切换成功，下轮生效）"),
-                );
-                self.text_result(
-                    "模型已切换",
-                    format!(
-                        "会话 {session_id} → {model}（执行中的工作下一轮生效）。商量记录已留痕。"
-                    ),
-                )
-            }
-            Err(reason) => {
-                record_central_event_by_session(
-                    self.sessions.storage_root(),
-                    session_id,
-                    tiangong_central::event::WorkEventType::ModelHandoverFailed,
-                    &format!("{note}（切换未完成：{reason}；仅留商量记录，模型未变）"),
-                );
-                self.error_result(format!(
-                    "会话 {session_id} → {model} 切换未完成：{reason}。商量记录已留痕；下次派发时带 model 参数可生效。"
-                ))
-            }
-        }
     }
 
     /// 应用内通知（经通道由执行器 emit 前端 toast）。

@@ -170,22 +170,6 @@ impl ToolSpecProvider for CentralPlugin {
                 }),
             },
             ToolSpec {
-                name: "switch_worker_model".to_string(),
-                description: "切换工作会话的模型（§15.10/15.11：换模型先商量）。必须先在对话中\
-                    与用户说明原因并征得同意（当前模型不可用/质量不佳等），同意后携带\
-                    consultation_summary（商量结论）调用。执行中的工作在下轮生效。"
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "session_id": {"type": "string", "description": "目标工作会话 ID"},
-                        "model": {"type": "string", "description": "新模型 key（list_models 查询）"},
-                        "consultation_summary": {"type": "string", "description": "与用户商量的结论（原因 + 用户同意的事实）"}
-                    },
-                    "required": ["session_id", "model", "consultation_summary"]
-                }),
-            },
-            ToolSpec {
                 name: "request_workspace_approval".to_string(),
                 description: "向用户发起 Workspace 授权请求（触发授权卡片）。dispatch_work 因目录未授权被拒后使用：先请求授权并向用户说明，用户确认后重派同一任务。task_fingerprint 必须与 dispatch_work 的 task 完全一致（防偷换）。你只能请求授权，不能代替用户授权。"
                     .to_string(),
