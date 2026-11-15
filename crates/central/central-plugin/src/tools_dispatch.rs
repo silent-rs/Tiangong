@@ -124,9 +124,8 @@ impl CentralPlugin {
                 ));
             }
         }
-        let similarity_hint = String::new(); // 强制拒绝已替代提示式兜底
-                                             // R0 契约（§5.4）：每次派发生成唯一执行归属，随请求、登记与
-                                             // 事件时间线一起流动——日志与持久化记录据此唯一定位。
+        // R0 契约（§5.4）：每次派发生成唯一执行归属，随请求、登记与
+        // 事件时间线一起流动——日志与持久化记录据此唯一定位。
         let execution_id = tiangong_central::new_execution_id();
         let record = WorkItemRecord {
             work_id: pending_work_id,
@@ -202,8 +201,10 @@ impl CentralPlugin {
             }
         };
         self.upsert_memory_work_item(record.clone());
-        if let Err(error) = upsert_work_item(self.sessions.storage_root(), &record) {
-            tracing::warn!(%error, "派发登记落盘失败（Z4：写失败显式可见）");
+        let registry_write_failed =
+            upsert_work_item(self.sessions.storage_root(), &record).is_err();
+        if registry_write_failed {
+            tracing::warn!("派发登记落盘失败（事件日志为准，会话复用记忆可能缺失）");
         }
         // 复用时 record.model 是「被忽略的请求模型」（M5 提示用）——执行模型
         // 行必须报真实生效模型，避免与「已忽略请求的 X」同屏矛盾（review S5）
@@ -231,13 +232,18 @@ impl CentralPlugin {
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
              - 工作会话: {session_note}\n- 任务: {task}\n\n\
              结果按时机自动回到本对话（失败立即；成功待全部结束后汇总一轮），\
-             届时由你向用户转述。执行中如需查看可调 list_work_items。{prior_note}{similarity_hint}",
+             届时由你向用户转述。执行中如需查看可调 list_work_items。{prior_note}{registry_note}",
             work_id = record.work_id,
             model_note = model_note,
             session_note = session_note,
             task = record.task,
             prior_note = prior_note,
-            similarity_hint = similarity_hint,
+            // 十九轮 P2-5：登记落盘失败显式提示（事件日志为准）
+            registry_note = if registry_write_failed {
+                "\n\n⚠ 派发登记落盘失败（事件日志为准；会话复用记忆可能缺失，重启后以事件重建。）"
+            } else {
+                ""
+            }
         );
         self.text_result("已派发", body)
     }

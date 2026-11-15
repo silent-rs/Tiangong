@@ -22,9 +22,7 @@ pub mod tickets;
 
 pub use event::{EventSeverity, WorkEvent, WorkEventType};
 pub use event_log::{EventLog, LoggedEvent, project_work_state};
-pub use execution::{
-    CENTRAL_CONTRACT_SCHEMA_VERSION, EXECUTION_ID_PREFIX, Execution, new_execution_id,
-};
+pub use execution::{CENTRAL_CONTRACT_SCHEMA_VERSION, EXECUTION_ID_PREFIX, new_execution_id};
 pub use ids::{new_id, now_text};
 pub use risk::RiskLevel;
 pub use status::WorkItemStatus;

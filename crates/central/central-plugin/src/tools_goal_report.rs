@@ -85,7 +85,7 @@ impl CentralPlugin {
         goal.status = status.to_string();
         let title = goal.title.clone();
         if let Err(error) = save_goals(self.sessions.storage_root(), &goals) {
-            tracing::warn!(%error, "报告存档落盘失败（Z4：写失败显式可见）");
+            return self.error_result(format!("目标状态落盘失败（更新未保存）: {error}"));
         }
         self.text_result("目标状态已更新", format!("目标「{title}」→ {status}"))
     }
@@ -119,7 +119,8 @@ impl CentralPlugin {
             reports.drain(..overflow);
         }
         if let Err(error) = save_reports(self.sessions.storage_root(), &reports) {
-            tracing::warn!(%error, "报告存档落盘失败（Z4：写失败显式可见）");
+            // 十九轮 P2-5：reports 无事件日志兜底——写失败显式报错
+            return self.error_result(format!("报告存档落盘失败（报告未保存）: {error}"));
         }
         self.text_result(
             "报告已存档",

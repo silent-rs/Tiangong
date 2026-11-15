@@ -61,7 +61,7 @@ fn log_registry()
 }
 
 /// 事件日志轮转阈值（Z5：无界增长防护）：超过则归档为 `.1` 重开。
-const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_ROTATE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// 追加式事件日志。
 pub struct EventLog {
@@ -95,11 +95,55 @@ impl EventLog {
             path: base.to_path_buf(),
             shared,
         };
-        log.repair_tail()?;
+        // 十九轮 P2-2：尾部修复移入共享 append 锁（此前锁外扫描——并发
+        // append 写到一半时，另一线程的 open 可能把残行判为崩溃残片并
+        // 截断，丢失刚写入的事件）；并以 cache.loaded 保证每路径每进程
+        // 仅首次 open 扫描一次（此前生产每个事件写入都 open → 全量
+        // 解析，缓存收益被吃光）。
+        {
+            let _guard = log
+                .shared
+                .append_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let already_scanned = log
+                .shared
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .loaded;
+            if !already_scanned {
+                log.repair_tail()?;
+                let mut cache = log
+                    .shared
+                    .cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                cache.loaded = true;
+            }
+        }
         Ok(log)
     }
 
     /// 尾部修复：读到最后一个完整换行，截断其后残片（崩溃写一半）。
+    /// P2-3（十九轮）：重复 event id 行**跳过而非截断**——只把「缺换行
+    /// 且非空」的行当残片；重复 id 是幂等语义的合法形态（轮转后新进程
+    /// 重新导入历史时可能出现），截断会静默删掉其后全部事件。
+    #[doc(hidden)]
+    pub fn force_repair_on_next_open(path: &Path) {
+        // 测试辅助：同进程内共享注册表会记住「已扫描」，无法模拟新
+        // 进程的崩溃恢复——显式重置该路径的扫描门槛。
+        let registry = log_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(shared) = registry.get(path) {
+            shared
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .loaded = false;
+        }
+    }
     fn repair_tail(&self) -> Result<()> {
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -122,16 +166,27 @@ impl EventLog {
             }
             let line_ends_newline = line.ends_with('\n');
             let trimmed = line.trim();
-            let parse_ok = !trimmed.is_empty()
-                && serde_json::from_str::<LoggedEvent>(trimmed).is_ok_and(|logged| {
-                    // 顺带收集已见事件 id（重复追加的幂等判据）
-                    seen.insert(logged.event.id.clone())
-                });
+            if trimmed.is_empty() {
+                // 空行：跳过（计入完整区，截断点不受影响）
+                if line_ends_newline {
+                    complete_bytes += read as u64;
+                }
+                continue;
+            }
+            let parse_ok = serde_json::from_str::<LoggedEvent>(trimmed)
+                .is_ok_and(|logged| seen.insert(logged.event.id.clone()));
             if parse_ok && line_ends_newline {
                 complete_bytes += read as u64;
             } else {
-                // 尾部残片：非 JSON、缺换行（写一半崩溃）或重复事件 id
-                // （旧数据已有）——截断点定在此处。
+                let is_dup = serde_json::from_str::<LoggedEvent>(trimmed).is_ok();
+                if is_dup && line_ends_newline {
+                    // 十九轮 P2-3：重复 event id 的完整行——跳过而非
+                    // 截断（轮转后历史重导入的合法形态；截断会静默删除
+                    // 其后全部事件）。计入完整区，继续向后扫描。
+                    complete_bytes += read as u64;
+                    continue;
+                }
+                // 尾部残片：非 JSON 或缺换行（写一半崩溃）——截断点在此。
                 last_partial = !trimmed.is_empty() && !line_ends_newline;
                 break;
             }
@@ -272,10 +327,21 @@ impl EventLog {
     }
 
     fn load_all_inner(&self) -> Result<Vec<LoggedEvent>> {
-        let file = std::fs::File::open(&self.path)
-            .with_context(|| format!("打开事件日志失败: {}", self.path.display()))?;
-        let reader = std::io::BufReader::new(file);
+        // 十九轮 P2-1：轮转读回——归档 `.1` 在前、当前文件在后拼接
+        // （offset 天然递增；此前轮转只写不读，重启后历史只剩轮转后事件）
+        let archived = self.path.with_extension("jsonl.1");
         let mut entries = Vec::new();
+        if archived.exists() {
+            self.parse_file_into(&archived, &mut entries)?;
+        }
+        self.parse_file_into(&self.path, &mut entries)?;
+        Ok(entries)
+    }
+
+    fn parse_file_into(&self, path: &Path, entries: &mut Vec<LoggedEvent>) -> Result<()> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("打开事件日志失败: {}", path.display()))?;
+        let reader = std::io::BufReader::new(file);
         for line in reader.lines() {
             let line = line.with_context(|| "读取事件日志行失败")?;
             let trimmed = line.trim();
@@ -286,7 +352,7 @@ impl EventLog {
                 .with_context(|| format!("事件日志行解析失败（offset 附近）: {trimmed}"))?;
             entries.push(logged);
         }
-        Ok(entries)
+        Ok(())
     }
 
     /// 最后完整事件的 offset（空日志为 0）。
@@ -386,6 +452,8 @@ mod tests {
         log.append(event("w1", WorkEventType::WorkItemCompleted))
             .unwrap();
         drop(log);
+        // 同进程共享注册表记住了「已扫描」——重置以模拟新进程崩溃恢复
+        EventLog::force_repair_on_next_open(&path);
         // 模拟崩溃：追加半行 JSON（无换行、不完整）
         {
             use std::io::Write as _;
@@ -436,9 +504,77 @@ mod tests {
         let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
         let mut sorted = offsets.clone();
         sorted.sort_unstable();
-        assert_eq!(offsets.len(), sorted.len());
+        assert_eq!(
+            offsets, sorted,
+            "offset 跨实例并发下仍须有序（十九轮 P2-2 恢复真断言）"
+        );
         let unique: std::collections::HashSet<u64> = offsets.iter().copied().collect();
         assert_eq!(unique.len(), 100, "offset 全局唯一（实例级锁时代会重复）");
+    }
+
+    /// 十九轮 P2-1 具名锁：轮转写入-读回成对（口径 12）——归档 `.1`
+    /// 与当前文件拼接后历史完整、offset 递增连续。
+    #[test]
+    fn rotation_preserves_history_on_readback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let log = EventLog::open(&path).unwrap();
+        for i in 0..5 {
+            let mut e = event("w-rot", WorkEventType::WorkItemProgress);
+            e.id = new_id();
+            e.payload = serde_json::json!({ "i": i });
+            log.append(e).unwrap();
+        }
+        // 模拟轮转：手工归档当前文件（绕过 100MB 阈值），再写新文件
+        let archived = path.with_extension("jsonl.1");
+        std::fs::rename(&path, &archived).unwrap();
+        let reopened = EventLog::open(&path).unwrap();
+        reopened
+            .append(event("w-post-rot", WorkEventType::WorkItemStarted))
+            .unwrap();
+        // 读回：历史 5 条 + 新 1 条，offset 连续递增
+        let entries = reopened.load_all().unwrap();
+        assert_eq!(entries.len(), 6, "归档 + 当前拼接，历史不丢（P2-1）");
+        let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
+        let mut sorted = offsets.clone();
+        sorted.sort_unstable();
+        assert_eq!(offsets, sorted, "归档段 offset 先于当前段");
+        assert!(entries.iter().any(|e| e.event.work_item_id == "w-post-rot"));
+    }
+
+    /// 十九轮 P2-3：重复 event id 行跳过（不截断其后内容）。
+    #[test]
+    fn duplicate_id_line_is_skipped_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let log = EventLog::open(&path).unwrap();
+        let first = event("w-dup", WorkEventType::WorkItemStarted);
+        let first_id = first.id.clone();
+        log.append(first).unwrap();
+        log.append(event("w-dup", WorkEventType::WorkItemCompleted))
+            .unwrap();
+        drop(log);
+        // 追加一行重复 id 的完整 JSON（模拟轮转后历史重导入）
+        {
+            use std::io::Write as _;
+            let dup = format!(
+                "{{\"offset\":99,\"schema_version\":1,\"event\":{{\"id\":\"{first_id}\",\"work_item_id\":\"w-dup\",\"event_type\":\"work_item.started\",\"severity\":\"normal\",\"requires_user_action\":false,\"payload\":null,\"created_at\":\"2026-11-13 00:00:00\"}}}}\n"
+            );
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(dup.as_bytes()).unwrap();
+        }
+        EventLog::force_repair_on_next_open(&path);
+        let reopened = EventLog::open(&path).unwrap();
+        // 重复行被跳过，其后内容（此处无后续）不截断；完整事件保留
+        let entries = reopened.load_all().unwrap();
+        assert_eq!(
+            entries.len(),
+            3,
+            "重复 id 行保留在日志中（跳过语义而非截断）"
+        );
     }
 
     /// 投影：事件序列重建状态；终态吸收迟到事件。

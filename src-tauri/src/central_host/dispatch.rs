@@ -407,8 +407,16 @@ pub(crate) async fn plan_central_dispatch(
                 "",
                 &request.session_id,
                 tiangong_central::event::WorkEventType::ApprovalRequired,
-                &format!("派发被拒：目录 {cwd} 未经用户授权（任务指纹已送授权卡片）"),
+                "派发被拒：目录未经用户授权（任务指纹已送授权卡片）",
             );
+            // 十九轮 8.2：outcome 结构化（denied/granted）而非 note 文本区分
+            if let Some(handle) = state.app_handle_read() {
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "central-approval-audit",
+                    serde_json::json!({ "outcome": "denied", "cwd": cwd, "work_id": request.work_id }),
+                );
+            }
             return Err(format!(
                 "工作目录 {cwd} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{cwd}\", task_fingerprint=<与本次 task 完全一致>) 向用户发起授权卡片，并向用户说明任务与影响；用户确认后重派同一任务。授权只能由用户完成，不要更换目录规避，也不要在授权前重复派发。"
             ));

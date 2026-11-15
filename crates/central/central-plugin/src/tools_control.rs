@@ -27,10 +27,11 @@ impl CentralPlugin {
             _ if entry.finished_at.is_some() => "已终态",
             _ => "未终态（执行/等待/中断以徽章为准）",
         };
-        let timeline: Vec<String> = entry
-            .events
+        // 十九轮口径 3：时间线改读事件日志（唯一事实源）——此前读
+        // WorkItemRecord.events 死字段（R5 后永不写入），恒为空。
+        let timeline: Vec<String> = work_timeline_from_log(self.sessions.storage_root(), work_id)
             .iter()
-            .map(|e| format!("  - [{}] {}：{}", e.at, e.kind, e.note))
+            .map(|(at, kind, note)| format!("  - [{at}] {kind}：{note}"))
             .collect();
         self.text_result(
             "工作详情",
@@ -88,27 +89,39 @@ impl CentralPlugin {
             (Some(core), Some(endpoint)) => core.switch_model(endpoint).map_err(|e| e.to_string()),
             _ => Err("目标会话当前不在线（已空闲回收）；下次派发时带 model 参数生效".to_string()),
         };
-        // 商量留痕：回报队列 + 时间线（Z6 诚实性：留痕内容按真实结果区分——
-        // 失败不再写 ModelHandoverConfirmed 事件「记录未发生的事实」）
+        // 商量留痕：回报队列；事件按真实结果区分（十九轮 P1-1 修复：
+        // 事件写入移入结果分支——失败不再写「切换成功」污染事实源）
         let note = format!("模型切换（{model}）：{consultation_summary}");
         self.work_reports
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(format!("[系统中枢] {note}"));
-        record_central_event_by_session(
-            self.sessions.storage_root(),
-            session_id,
-            tiangong_central::event::WorkEventType::ModelHandoverConfirmed,
-            &format!("{note}（切换成功，下轮生效）"),
-        );
         match switch_result {
-            Ok(()) => self.text_result(
-                "模型已切换",
-                format!("会话 {session_id} → {model}（执行中的工作下一轮生效）。商量记录已留痕。"),
-            ),
-            Err(reason) => self.error_result(format!(
-                "会话 {session_id} → {model} 切换未完成：{reason}。商量记录已留痕；下次派发时带 model 参数可生效。"
-            )),
+            Ok(()) => {
+                record_central_event_by_session(
+                    self.sessions.storage_root(),
+                    session_id,
+                    tiangong_central::event::WorkEventType::ModelHandoverConfirmed,
+                    &format!("{note}（切换成功，下轮生效）"),
+                );
+                self.text_result(
+                    "模型已切换",
+                    format!(
+                        "会话 {session_id} → {model}（执行中的工作下一轮生效）。商量记录已留痕。"
+                    ),
+                )
+            }
+            Err(reason) => {
+                record_central_event_by_session(
+                    self.sessions.storage_root(),
+                    session_id,
+                    tiangong_central::event::WorkEventType::ModelHandoverFailed,
+                    &format!("{note}（切换未完成：{reason}；仅留商量记录，模型未变）"),
+                );
+                self.error_result(format!(
+                    "会话 {session_id} → {model} 切换未完成：{reason}。商量记录已留痕；下次派发时带 model 参数可生效。"
+                ))
+            }
         }
     }
 

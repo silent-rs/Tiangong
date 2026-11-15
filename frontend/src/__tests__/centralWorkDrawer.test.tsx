@@ -123,11 +123,12 @@ describe('CentralWorkDrawer', () => {
     renderDrawer(makeItem(), { onClose });
     const overlay = container.querySelector('[data-testid="central-work-drawer-overlay"]');
     expect(overlay).not.toBeNull();
-    // 行为断言（十八轮口径 11：禁 className 断言）：遮罩与抽屉同现——
-    // 遮罩是 fixed 布局的伴随物（点击关闭已测），抽屉内容完整渲染
+    // 行为断言（十九轮：重复空断言 → 有效内容断言）：遮罩与抽屉同现，
+    // 抽屉渲染完整详情（任务/执行归属/模型）
     expect(container.querySelector('[data-testid="central-work-drawer-overlay"]')).not.toBeNull();
     const drawer = container.querySelector('[data-testid="central-work-drawer"]')!;
     expect(drawer.textContent).toContain(makeItem().task);
+    expect(drawer.getAttribute('role')).toBe('dialog');
     await act(async () => {
       overlay!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });

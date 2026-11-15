@@ -74,7 +74,7 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "search_history".to_string(),
-                description: "搜索历史会话消息（跨会话）：标题走元数据缓存，正文扫描 近期会话（子串匹配），返回命中片段。用户问「之前谁说过什么/某结论 在哪个会话/以前怎么处理的」时使用；也可用于派发前确认是否已有 相关工作。scope=all 扫全部（较慢），默认近期 200 个会话。"
+                description: "搜索历史会话消息（跨会话）：标题走元数据缓存，正文扫描近期会话（子串匹配），返回命中片段。用户问「之前谁说过什么/某结论在哪个会话/以前怎么处理的」时使用；也可用于派发前确认是否已有相关工作。scope=all 扫全部（较慢），默认近期 200 个会话。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",

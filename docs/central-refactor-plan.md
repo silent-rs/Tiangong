@@ -889,6 +889,9 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 3. **§3.6 DecisionTicket 消费点**：签发通道就绪（`central_resolve_decision`），但恢复链路仍允许模型引导（POC 链路）；强制票据恢复待阻塞事件结构化（`needs_user_decision` 带 options）后收紧。
 4. **§8.2 事件清单无 `queued`/`paused` 类型**：排队以 `work_item.progress` + note 承载、暂停以 `work_item.blocked` + note 承载（原文保真，不扩枚举）。
 5. **Workspace 授权双通道**：票据（默认，一次性+指纹）OR 目录长期授权（`persist=true`「记住此工作区」，兼容既有体验）；正文纯票据语义在 R5 末收敛。
+6. **模式状态机两态化**（十九轮 Z7）：`EnterRequested/ExitRequested` 为从未置位的死变体，已删——`request_enter/exit` 同步完成转移；完整异步状态机（含进入失败回退/恢复失败重试）待前端转场异步化时引入。
+7. **事件轮转与归档读回**（十九轮 P2-1）：100MB 归档 `events.jsonl.1`，`load_all` 拼接归档+当前；归档仅一级（下次轮转覆盖）。
+8. **投影按 work_item_id 单键**（十九轮 P2-4 备注）：steer 与 owner 共用 work_id、execution_id 区分——调度器按同会话互斥排队，steer 与 owner 执行不并发的假设成立（`queue_decision` 同会话重派不拦但 dispatch 顺序投递）。
 
 ### A.3 验证与验收状态
 
@@ -919,6 +922,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 - **Z6 尾** 决定票据消费点（consume_decision_for_execution：waiting_user 恢复时一次性消费，硬校验待协议结构化）；switch_worker_model 失败诚实性（离线显式「切换未完成」）。
 - **Z7** 模式状态机两态化（死变体删除，偏差记录 A.2）；问候/加载竞态（先加载后问候）；空 work_id 卡片按（目录+指纹）定位；续行残留空格 11 处。
 - **Z8** 假绿三形态清零：自证矩阵 → 行为驱动；事件日志并发改生产形态（独立 open + offset 全局唯一断言）；持久化并发 Z4 已改。
+- **十九轮 P1/P2 修复**（2026-11-15）：P1-1 switch 事件按真实结果写入（失败记 `ModelHandoverFailed`，移入结果分支 + 具名锁）；P2-1 轮转读回（`load_all` 拼接归档 `.1`，阈值提 100MB，往返用例）；P2-2 `open` 收口（repair_tail 入共享锁 + 每路径每进程仅首次扫描，恢复 offset 有序真断言）；P2-3 重复 id 行跳过不截断；P2-5 工具层诚实性（goals/reports 落盘失败显式报错；dispatch 落盘失败正文提示）；口径 3 死代码（删 Execution 结构与死测试、`get_work_item_status` 改读事件日志、删 similarity_hint）；A.2 补 6/7/8 条偏差；progress 数字修正；中文句中空格清理。
 
 ### A.4 后续工作（按优先级，2026-11-13 更新）
 

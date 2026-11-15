@@ -62,12 +62,12 @@ pub async fn central_approve_workspace(
     // Z6 审计：授权事实入事件日志（work_id 空串标记目录级授权）
     super::central_events::record_central_event(
         state.core_manager.storage_root(),
-        "workspace-approval",
+        &format!("approval-{}", ticket.approval_id),
         &ticket.approval_id,
         "",
         tiangong_central::event::WorkEventType::ApprovalRequired,
         &format!(
-            "用户授权目录 {path}（任务指纹：{}；persist={}）",
+            "用户授权目录 {path}（outcome=granted；任务指纹：{}；persist={}）",
             task_fingerprint.trim(),
             persist.unwrap_or(false)
         ),

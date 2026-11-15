@@ -211,18 +211,19 @@ export function CentralCardsBar() {
   // 占据页面；授权完成的事实已由宿主注入中枢，卡片无需常驻）
   useEffect(() => {
     for (const approval of approvals) {
-      if (approval.status !== 'approved' || dismissTimers.current.has(approval.work_id)) {
+      const key = `${approval.cwd}::${approval.task}`;
+      if (approval.status !== 'approved' || dismissTimers.current.has(key)) {
         continue;
       }
       const timer = window.setTimeout(() => {
-        dismissTimers.current.delete(approval.work_id);
+        dismissTimers.current.delete(key);
         setApprovals((current) =>
           current.filter(
             (item) => !(item.cwd === approval.cwd && item.task === approval.task),
           ),
         );
       }, 3500);
-      dismissTimers.current.set(approval.work_id, timer);
+      dismissTimers.current.set(key, timer);
     }
   }, [approvals]);
   useEffect(() => {

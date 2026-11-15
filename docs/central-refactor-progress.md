@@ -16,7 +16,7 @@ R0～R5 全部完成；消息卡片第一片完成（授权卡片票据闭环 + 
 | --- | --- | --- | --- |
 | R0 冻结契约与观测 | ✅ 完成 | `bbbb67f9` | Execution 契约、execution_id 三处一致（登记/落盘/时间线）、观测日志、旧数据兼容与行为基线测试 |
 | R1 拆分宿主控制器 | ✅ 完成 | `34e65b20` `563fe2e0` `dcc248d5` | ExecutionRouter 终态路由（快速完成暂存补发/失败取消/stale 清理）；app.rs 1371 行拆入 `central_host/` 六模块；central-plugin 拆出 persona/tool_specs/workspace_summary |
-| R2 事件日志与事务存储 | 🔶 核心完成 | `d4bb144a` | append-only 事件日志（崩溃恢复/幂等/投影）、持久层事务加固（随机后缀+写锁+fsync）、旧时间线迁移、双写接线 |
+| R2 事件日志与事务存储 | ✅（轮转读回补齐，十九轮） | `d4bb144a` | append-only 事件日志（崩溃恢复/幂等/投影）、持久层事务加固（随机后缀+写锁+fsync）、旧时间线迁移、双写接线 |
 | R3 权限票据化 | ✅ 完成 | `1ba43261` `ee5a35a7` | 票据契约与注册表；移除 confirm_workspace（模型不可自证同意）；宿主签发命令（approve_workspace / resolve_decision）；派发双通道校验；parallel 高风险豁免收紧 |
 | R4 ModeCoordinator 与前端 | ✅ | `120ef2bb` `1cf0fe61` | 宿主模式状态机 + 快照归还 + 偏好持久化 + 前端接线（宿主快照优先，本地兜底过渡）；前端工作视图（抽屉/卡片）待做 |
 | R5 清理 POC 兼容层 | ✅ | `0ea3293e` `fd7f9cab` `d0ace0a7` `13704405` `5cd27fb6` | 时间线双写消除（事件日志唯一事实源、旧数据迁移+兼容读）；插件压缩/快照 envelope/实机验收待做 |
@@ -24,7 +24,7 @@ R0～R5 全部完成；消息卡片第一片完成（授权卡片票据闭环 + 
 ## 验证基线
 
 - `cargo clippy --workspace --all-targets -- -D warnings` 退出 0（CI 口径）
-- `cargo test -p tiangong-central -p central-state -p central-plugin -p tiangong-app` 全绿（30 + 24 + 33 + 158 = 245 lib + 1 bin；含 Z1 两条具名锁与 Z2 锁定）
+- `cargo test -p tiangong-central -p central-state -p central-plugin -p tiangong-app` 全绿（30 + 26 + 33 + 158 = 247 lib + 1 bin = 248；含 Z1 两条具名锁、Z2 锁定与轮转/重复 id 用例）
 - clippy / fmt 干净（仓库余 warning 均为 POC 既有 workspace 依赖声明，非本分支引入）
 - 前端未动（R4 之前保持 POC 界面）
 

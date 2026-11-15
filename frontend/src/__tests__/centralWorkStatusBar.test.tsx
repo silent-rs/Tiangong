@@ -278,6 +278,34 @@ describe('CentralWorkStatusBar', () => {
     expect(oldIdx).toBeGreaterThan(midIdx, '旧任务在 中任务 之后');
   });
 
+
+  it('reduced-motion：执行中降级静态素材（SMIL 不受 CSS 约束，JS 判定）', async () => {
+    // matchMedia stub（jsdom 无原生）
+    const realMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: (query: string) => ({
+        matches: query.includes('prefers-reduced-motion'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }),
+    });
+    try {
+      container = await mountWithItems([makeItem({ state: 'running' })]);
+      const img = container.querySelector('[data-testid="central-badge-running"]');
+      expect(img).not.toBeNull();
+      const src = (img as HTMLImageElement).src;
+      // Vite 内联 SVG 为 data URI（无文件名）——以「无 SMIL 动画标签」判定静态帧
+      expect(src).not.toContain('animate', 'reduced-motion 素材不得含 SMIL 动画');
+    } finally {
+      Object.defineProperty(window, 'matchMedia', { writable: true, value: realMatchMedia });
+    }
+  });
+
   it('aria-controls 指向浮层 id（a11y 关联，纯 hover 模式）', async () => {
     container = await mountWithItems([makeItem()]);
     const badge = container.querySelector('button')!;

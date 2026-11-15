@@ -1601,6 +1601,25 @@ mod tests {
         );
         assert!(!unknown.ok);
         assert!(unknown.stderr.contains("可用模型"));
+        // 建立会话登记（switch 事件按会话归属写日志，登记缺失会被跳过）
+        let _ = upsert_work_item(
+            plugin.sessions.storage_root(),
+            &WorkItemRecord {
+                work_id: "work-s0-base".into(),
+                reused_session: false,
+                session_id: "s0".into(),
+                task: "登记基线".into(),
+                model: None,
+                dispatched_at: "2026-11-13 09:00:00".into(),
+                finished_at: None,
+                outcome: None,
+                events: Vec::new(),
+                queued_at: None,
+                after_work_id: None,
+                cwd: None,
+                execution_id: None,
+            },
+        );
         // 有效请求：离线会话 → 明确的「未完成」错误（Z6 诚实性：不再
         // ok:true 伪装待生效；留痕完成，下次派发带 model 生效）
         let valid = call_tool(
@@ -1611,6 +1630,47 @@ mod tests {
         assert!(!valid.ok, "离线会话切换未完成必须显式失败（Z6）");
         assert!(valid.stderr.contains("切换未完成"), "{}", valid.stderr);
         assert!(valid.stderr.contains("留痕"), "{}", valid.stderr);
+        // 十九轮 P1-1 具名锁：失败路径的事件日志不得出现「切换成功」
+        // ——事实源不得记录未发生的事实
+        {
+            let log = tiangong_central::EventLog::open(
+                &plugin
+                    .sessions
+                    .storage_root()
+                    .join("central")
+                    .join("events.jsonl"),
+            )
+            .expect("事件日志应可打开");
+            let entries = log.load_all().expect("事件日志应可读取");
+            let switch_events: Vec<&tiangong_central::LoggedEvent> = entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.event.event_type,
+                        tiangong_central::event::WorkEventType::ModelHandoverConfirmed
+                            | tiangong_central::event::WorkEventType::ModelHandoverFailed
+                    )
+                })
+                .collect();
+            assert!(
+                switch_events.iter().all(|e| {
+                    e.event
+                        .payload
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .contains("切换未完成")
+                }),
+                "离线失败只允许「切换未完成」事件，不得出现成功事实（十九轮 P1-1）"
+            );
+            assert!(
+                entries.iter().any(|e| {
+                    e.event.event_type
+                        == tiangong_central::event::WorkEventType::ModelHandoverFailed
+                }),
+                "失败路径应记录 ModelHandoverFailed 事件"
+            );
+        }
     }
 
     /// dispatch_work schema：after_work_id/parallel 必须在 properties 内

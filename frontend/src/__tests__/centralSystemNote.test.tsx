@@ -10,9 +10,10 @@ import { UserMessageGroup } from '@/components/message/UserMessageGroup';
 import type { MessageGroup } from '@/components/message/types';
 
 // 历史兜底限定中枢会话（十八轮 P3）——mock store 的 activeSessionId
+let mockActiveSessionId = 'central-hub';
 vi.mock('@/store/useStore', () => ({
   useStore: (selector: (state: { activeSessionId: string }) => unknown) =>
-    selector({ activeSessionId: 'central-hub' }),
+    selector({ get activeSessionId() { return mockActiveSessionId; } }),
 }));
 
 const realNow = Date.now;
@@ -99,6 +100,19 @@ describe('CentralSystemNote 折叠与历史兜底', () => {
     const note = container.querySelector('[data-testid="central-system-note"]');
     expect(note).not.toBeNull('历史注入不得以用户气泡平铺');
     expect(note!.textContent!.length).toBeLessThan(legacy.length);
+  });
+
+
+  it('负例：普通会话手打同前缀不受影响（用户气泡，非系统条）', () => {
+    mockActiveSessionId = 'normal-session-1';
+    try {
+      renderGroup(makeGroup('[后台工作完成] 用户手打的文本'));
+      expect(
+        container.querySelector('[data-testid="central-system-note"]'),
+      ).toBeNull('普通会话不注入系统条（前缀兜底限中枢会话）');
+    } finally {
+      mockActiveSessionId = 'central-hub';
+    }
   });
 
   it('普通用户消息不受影响（右对齐气泡，非系统条）', () => {
