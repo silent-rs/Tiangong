@@ -12,7 +12,7 @@ impl CentralPlugin {
     pub(crate) fn handle_work_item_status(&self, work_id: &str) -> Option<ToolResult> {
         let work_id = work_id.trim();
         if work_id.is_empty() {
-            return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
+            return self.error_result("work_id 不能为空（work 查询：action=list）".to_string());
         }
         // 状态：内存 registry 经 dispatch 通道不可达，读磁盘登记 + 中枢状态不可得时
         // 返回登记事实与时间线（状态实时值以徽章/get_context 为准）。
@@ -117,7 +117,7 @@ impl CentralPlugin {
     pub(crate) fn handle_work_control(&self, work_id: &str, action: &str) -> Option<ToolResult> {
         let work_id = work_id.trim();
         if work_id.is_empty() {
-            return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
+            return self.error_result("work_id 不能为空（work 查询：action=list）".to_string());
         }
         let items = self
             .work_items
@@ -126,7 +126,7 @@ impl CentralPlugin {
         let found = items.iter().rev().find(|item| item.work_id == work_id);
         let Some(entry) = found else {
             return self.error_result(format!(
-                "未找到工作 {work_id}（list_work_items 查询登记；仅最近 20 个会话有记录）"
+                "未找到工作 {work_id}（work 查询登记：action=list；仅最近 20 个会话有记录）"
             ));
         };
         let request = CentralControlRequest {
@@ -158,7 +158,7 @@ impl CentralPlugin {
     pub(crate) fn handle_work_timeline(&self, work_id: &str) -> Option<ToolResult> {
         let work_id = work_id.trim();
         if work_id.is_empty() {
-            return self.error_result("work_id 不能为空（list_work_items 查询）".to_string());
+            return self.error_result("work_id 不能为空（work 查询：action=list）".to_string());
         }
         // R5：事件日志是唯一事实源（旧内嵌时间线仅兼容读）。
         let timeline = work_timeline_from_log(self.sessions.storage_root(), work_id);
@@ -192,5 +192,41 @@ impl CentralPlugin {
                 lines.join("\n")
             ),
         )
+    }
+
+    /// 工作控制统一入口（二十轮合并：cancel/pause/resume → control）。
+    pub(crate) fn handle_control(&self, work_id: &str, action: &str) -> Option<ToolResult> {
+        match action {
+            "cancel" => self.handle_work_control(work_id, "cancelled"),
+            "pause" => self.handle_work_control(work_id, "paused"),
+            "resume" => self.handle_work_control(work_id, "resume"),
+            _ => self.error_result(format!(
+                "action 必须是 cancel / pause / resume（收到：{action}）"
+            )),
+        }
+    }
+
+    /// 工作查询统一入口（二十轮合并：list_work_items / get_work_item_status /
+    /// get_work_timeline / collect_work_reports → work）。
+    pub(crate) fn handle_work(&self, action: &str, work_id: &str) -> Option<ToolResult> {
+        match action {
+            "list" | "" => self.handle_list_work_items(),
+            "status" => {
+                if work_id.trim().is_empty() {
+                    return self.error_result("action=status 需要 work_id".to_string());
+                }
+                self.handle_work_item_status(work_id)
+            }
+            "timeline" => {
+                if work_id.trim().is_empty() {
+                    return self.error_result("action=timeline 需要 work_id".to_string());
+                }
+                self.handle_work_timeline(work_id)
+            }
+            "reports" => self.handle_collect_work_reports(),
+            _ => self.error_result(format!(
+                "action 必须是 list / status / timeline / reports（收到：{action}）"
+            )),
+        }
     }
 }

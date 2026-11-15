@@ -114,12 +114,15 @@ pub struct CentralDispatchRequest {
 
 /// 中枢助手内置插件：中枢 Core 唯一挂载的插件。
 ///
-/// 工具集（§5.3 白名单的实现态，21 项——与 tool_specs 一一对应；R4 移除
-/// dispatch_work 带 model 参数，复用原会话上下文）：
-/// - 只读上下文：`get_context` / `list_workspaces` / `inspect_workspace` /
-///   `list_models` / `list_sessions` / `search_history`；
-/// - 后台工作：`dispatch_work`（新建/复用派发）、`send_to_worker`（引导）、
-///   `collect_work_reports`（收集回报）、`list_work_items`（派发登记）。
+/// 工具集（§5.3 白名单的实现态，10 项——与 tool_specs 一一对应；二十轮
+/// 合并后形态：21 工具收敛为 10，复用会话的引导并入 dispatch_work、
+/// 换模型经 dispatch_work 带 model 参数复用原会话上下文）：
+/// - 只读上下文：`get_context` / `inspect_context`（工作区·工作区详情·
+///   会话三合一）/ `list_models` / `search_history`；
+/// - 工作操作：`dispatch_work`（新建/复用/引导/换模型统一派发）、
+///   `control`（cancel/pause/resume）、`work`（list/status/timeline/
+///   reports）、`goal`（save_goal/set_goal_status/save_report/list_reports）；
+/// - 授权与通知：`request_workspace_approval` / `send_notification`。
 ///
 pub struct CentralPlugin {
     /// 全局默认工作区（构造时注入的快照；中枢不绑定具体工作区，§6）。
@@ -135,7 +138,7 @@ pub struct CentralPlugin {
     work_reports: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// 派发登记表（work_id → 派发事实；状态汇报经注入消息回到对话）。
     /// 持久化于 `{storage_root}/central/work-items.json`：应用重启后
-    /// `list_work_items` 仍可查到既往派发（应用尽用的判定依据之一）。
+    /// `work`（action=list）仍可查到既往派发（应用尽用的判定依据之一）。
     work_items: std::sync::Mutex<Vec<WorkItemRecord>>,
 }
 
@@ -296,100 +299,78 @@ impl ToolOverrideHandler for CentralPlugin {
                     .is_some_and(|scope| scope == "all");
                 return self.handle_search_history(query, limit, scope_all);
             }
+            // ── 合并入口（二十轮：21 → 10）──────────────────────────
             "get_context" => self.handle_get_context(),
-            "list_workspaces" => self.handle_list_workspaces(),
-            "inspect_workspace" => {
+            "inspect_context" => {
+                let focus = call
+                    .arguments
+                    .get("focus")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 let path = call
                     .arguments
                     .get("path")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                self.handle_inspect_workspace(path)
+                self.handle_inspect_context(focus, path)
             }
             "list_models" => self.handle_list_models(),
-            "list_sessions" => self.handle_list_sessions(),
-            "cancel_work" | "pause_work" | "resume_work" => {
-                let work_id = call
+            "dispatch_work" => {
+                let task = call
                     .arguments
-                    .get("work_id")
+                    .get("task")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                let action = match call.name.as_str() {
-                    "cancel_work" => "cancelled",
-                    "pause_work" => "paused",
-                    _ => "resume",
-                };
-                self.handle_work_control(work_id, action)
-            }
-            "create_goal" => {
-                let title = call
+                let model = call.arguments.get("model").and_then(|value| value.as_str());
+                let cwd = call.arguments.get("cwd").and_then(|value| value.as_str());
+                let session_id = call
                     .arguments
-                    .get("title")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let description = call
-                    .arguments
-                    .get("description")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let workspace = call
-                    .arguments
-                    .get("workspace")
+                    .get("session_id")
                     .and_then(|value| value.as_str());
-                self.handle_create_goal(title, description, workspace)
-            }
-            "update_goal_status" => {
-                let goal_id = call
+                let after_work_id = call
                     .arguments
-                    .get("goal_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let status = call
-                    .arguments
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.handle_update_goal_status(goal_id, status)
-            }
-            "create_report" => {
-                let work_id = call
-                    .arguments
-                    .get("work_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let summary = call
-                    .arguments
-                    .get("summary")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let artifacts = call
-                    .arguments
-                    .get("artifacts")
-                    .and_then(|value| value.as_array())
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect::<Vec<String>>()
-                    })
-                    .unwrap_or_default();
-                let risks = call
-                    .arguments
-                    .get("risks")
-                    .and_then(|value| value.as_array())
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect::<Vec<String>>()
-                    })
-                    .unwrap_or_default();
-                self.handle_create_report(work_id, summary, &artifacts, &risks)
-            }
-            "list_reports" => {
-                let work_id = call
-                    .arguments
-                    .get("work_id")
+                    .get("after_work_id")
                     .and_then(|value| value.as_str());
-                self.handle_list_reports(work_id)
+                let parallel = call
+                    .arguments
+                    .get("parallel")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                self.handle_dispatch_work(task, model, cwd, session_id, after_work_id, parallel)
+            }
+            "control" => {
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let action = call
+                    .arguments
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_control(work_id, action)
+            }
+            "work" => {
+                let action = call
+                    .arguments
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("list");
+                let work_id = call
+                    .arguments
+                    .get("work_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_work(action, work_id)
+            }
+            "goal" => {
+                let action = call
+                    .arguments
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                self.handle_goal(call, action)
             }
             "request_workspace_approval" => {
                 let path = call
@@ -422,60 +403,6 @@ impl ToolOverrideHandler for CentralPlugin {
                     .unwrap_or("info");
                 self.handle_send_notification(title, message, level)
             }
-            "get_work_item_status" => {
-                let work_id = call
-                    .arguments
-                    .get("work_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.handle_work_item_status(work_id)
-            }
-            "get_work_timeline" => {
-                let work_id = call
-                    .arguments
-                    .get("work_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.handle_work_timeline(work_id)
-            }
-            "send_to_worker" => {
-                let session_id = call
-                    .arguments
-                    .get("session_id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let message = call
-                    .arguments
-                    .get("message")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                self.handle_send_to_worker(session_id, message)
-            }
-            "dispatch_work" => {
-                let after_work_id = call
-                    .arguments
-                    .get("after_work_id")
-                    .and_then(|value| value.as_str());
-                let parallel = call
-                    .arguments
-                    .get("parallel")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let task = call
-                    .arguments
-                    .get("task")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let model = call.arguments.get("model").and_then(|value| value.as_str());
-                let cwd = call.arguments.get("cwd").and_then(|value| value.as_str());
-                let session_id = call
-                    .arguments
-                    .get("session_id")
-                    .and_then(|value| value.as_str());
-                self.handle_dispatch_work(task, model, cwd, session_id, after_work_id, parallel)
-            }
-            "collect_work_reports" => self.handle_collect_work_reports(),
-            "list_work_items" => self.handle_list_work_items(),
             _ => None,
         };
         Box::pin(async move { result })
@@ -596,8 +523,8 @@ mod tests {
         assert!(sections[0].contains("先调用工具了解情况再回答"));
         let specs = plugin.tool_specs();
         assert!(
-            specs.iter().any(|spec| spec.name == "list_sessions"),
-            "list_sessions 必须有声明（review o：有 handler 无 spec 则模型不可见）"
+            specs.iter().any(|spec| spec.name == "inspect_context"),
+            "inspect_context 必须有声明（review o：有 handler 无 spec 则模型不可见）"
         );
         assert!(
             specs
@@ -667,8 +594,8 @@ mod tests {
         );
         assert_eq!(
             spec_names.len(),
-            21,
-            "工具数应为 21（switch_worker_model 已移除：换模型经 dispatch_work 带 model；新增工具时同步更新）"
+            10,
+            "工具数应为 10（二十轮合并：inspect_context / control / work / goal 四个统一入口）"
         );
     }
 
@@ -780,7 +707,7 @@ mod tests {
         assert_eq!(request.cwd.as_deref(), Some("/tmp"));
         assert!(!request.work_id.is_empty());
         // 登记表可见
-        let listing = call_tool(&plugin, "list_work_items", serde_json::json!({}));
+        let listing = call_tool(&plugin, "work", serde_json::json!({"action": "list"}));
         assert!(listing.stdout.contains(&request.work_id));
         assert!(listing.stdout.contains("审查仓库提交"));
     }
@@ -872,8 +799,8 @@ mod tests {
         );
         let result = call_tool(
             &plugin,
-            "inspect_workspace",
-            serde_json::json!({"path": worktree_dir.display().to_string()}),
+            "inspect_context",
+            serde_json::json!({"focus": "workspace", "path": worktree_dir.display().to_string()}),
         );
         assert!(result.ok);
         assert!(result.stdout.contains("主仓库分支: poc/central-mode"));
@@ -887,8 +814,8 @@ mod tests {
         let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         let result = call_tool(
             &plugin,
-            "inspect_workspace",
-            serde_json::json!({"path": "/definitely/not/exist"}),
+            "inspect_context",
+            serde_json::json!({"focus": "workspace", "path": "/definitely/not/exist"}),
         );
         assert!(!result.ok);
         assert_eq!(result.error_kind.as_deref(), Some("argument_error"));
@@ -906,7 +833,11 @@ mod tests {
         );
         let (plugin, _dispatch_rx, _reports) =
             plugin_with_channel(root.path().display().to_string(), manager);
-        let result = call_tool(&plugin, "list_workspaces", serde_json::json!({}));
+        let result = call_tool(
+            &plugin,
+            "inspect_context",
+            serde_json::json!({"focus": "workspaces"}),
+        );
         assert!(result.ok);
         // 默认工作区在列（去重后仅一次 dev/tiangong）
         assert!(result.stdout.contains("（默认）"));
@@ -972,32 +903,36 @@ mod tests {
             .unwrap()
             .push("[后台工作完成] work-b：结果二".to_string());
 
-        let first = call_tool(&plugin, "collect_work_reports", serde_json::json!({}));
+        let first = call_tool(&plugin, "work", serde_json::json!({"action": "reports"}));
         assert!(first.ok);
         assert!(first.stdout.contains("共 2 条"));
         assert!(first.stdout.contains("work-a"));
         assert!(first.stdout.contains("work-b"));
 
-        let second = call_tool(&plugin, "collect_work_reports", serde_json::json!({}));
+        let second = call_tool(&plugin, "work", serde_json::json!({"action": "reports"}));
         assert!(second.ok);
         assert!(second.stdout.contains("没有待汇报"));
     }
     /// 引导消息：校验 + 登记 + 通道消息类型。
     #[test]
-    fn send_to_worker_validates_and_sends_steer() {
+    fn dispatch_work_to_existing_session_dispatches_reused() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &[]);
         let (plugin, mut dispatch_rx, _reports) =
             plugin_with_channel("/tmp/ws".to_string(), manager);
+        let _ =
+            add_confirmed_workspace(plugin.sessions.storage_root(), std::path::Path::new("/tmp"));
         // 目标不存在 → 拒绝
         let missing = call_tool(
             &plugin,
-            "send_to_worker",
-            serde_json::json!({"session_id": "nope", "message": "调整"}),
+            "dispatch_work",
+            serde_json::json!({"session_id": "nope", "task": "调整"}),
         );
         assert!(!missing.ok);
         assert!(missing.stderr.contains("会话不存在"));
-        // 建一个会话文件后 → 通过并发送 Steer
+        // 建一个会话文件后 → 通过并发送 Dispatch（reused_session=true；
+        // 二十轮合并：send_to_worker 并入 dispatch_work，Steer 消息消失，
+        // 归属合并由宿主 plan_dispatch + central-state 具名锁保证）
         let target = root.path().join("sessions/worker-1.json");
         std::fs::write(
             &target,
@@ -1011,23 +946,25 @@ mod tests {
         .unwrap();
         let ok = call_tool(
             &plugin,
-            "send_to_worker",
-            serde_json::json!({"session_id": "worker-1", "message": "重点看事件流部分"}),
+            "dispatch_work",
+            serde_json::json!({"session_id": "worker-1", "task": "重点看事件流部分"}),
         );
         assert!(ok.ok, "stderr: {}", ok.stderr);
         match dispatch_rx.try_recv().expect("应有通道消息") {
-            CentralPluginMessage::Steer(request) => {
+            CentralPluginMessage::Dispatch(request) => {
                 assert_eq!(request.session_id, "worker-1");
                 assert_eq!(request.task, "重点看事件流部分");
-                assert!(request.work_id.starts_with("steer-"));
+                assert!(request.reused_session, "复用会话必须标记 reused_session");
+                assert!(!request.work_id.starts_with("steer-"));
+                assert!(!request.execution_id.is_empty());
             }
-            other => panic!("应收到 Steer，实际 {other:?}"),
+            other => panic!("应收到 Dispatch，实际 {other:?}"),
         }
         // 中枢自身 → 拒绝
         let self_send = call_tool(
             &plugin,
-            "send_to_worker",
-            serde_json::json!({"session_id": CENTRAL_SESSION_ID, "message": "x"}),
+            "dispatch_work",
+            serde_json::json!({"session_id": CENTRAL_SESSION_ID, "task": "x"}),
         );
         assert!(!self_send.ok);
     }
@@ -1445,21 +1382,25 @@ mod tests {
                                   // 登记
         let created = call_tool(
             &plugin,
-            "create_goal",
-            serde_json::json!({"title": "完成中枢模式 POC", "description": "按设计稿实现完整功能"}),
+            "goal",
+            serde_json::json!({"action": "save_goal", "title": "完成中枢模式 POC", "description": "按设计稿实现完整功能"}),
         );
         assert!(created.ok, "stderr: {}", created.stderr);
         assert!(created.stdout.contains("完成中枢模式 POC"));
         // 同名幂等
         let again = call_tool(
             &plugin,
-            "create_goal",
-            serde_json::json!({"title": "完成中枢模式 POC"}),
+            "goal",
+            serde_json::json!({"action": "save_goal", "title": "完成中枢模式 POC"}),
         );
         assert!(again.ok);
         assert!(again.stdout.contains("已存在"));
         // 空标题拒绝
-        let empty = call_tool(&plugin, "create_goal", serde_json::json!({"title": " "}));
+        let empty = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "save_goal", "title": " "}),
+        );
         assert!(!empty.ok);
         // 状态更新（取出 goal_id）
         let goal_id = load_goals(plugin.sessions.storage_root())[0]
@@ -1467,8 +1408,8 @@ mod tests {
             .clone();
         let updated = call_tool(
             &plugin,
-            "update_goal_status",
-            serde_json::json!({"goal_id": goal_id, "status": "achieved"}),
+            "goal",
+            serde_json::json!({"action": "set_goal_status", "goal_id": goal_id, "status": "achieved"}),
         );
         assert!(updated.ok, "stderr: {}", updated.stderr);
         assert_eq!(
@@ -1478,15 +1419,15 @@ mod tests {
         // 非法状态拒绝
         let bad = call_tool(
             &plugin,
-            "update_goal_status",
-            serde_json::json!({"goal_id": goal_id, "status": "done"}),
+            "goal",
+            serde_json::json!({"action": "set_goal_status", "goal_id": goal_id, "status": "done"}),
         );
         assert!(!bad.ok);
         // get_context 注入目标（新的 active 目标）
         let _ = call_tool(
             &plugin,
-            "create_goal",
-            serde_json::json!({"title": "重构状态机"}),
+            "goal",
+            serde_json::json!({"action": "save_goal", "title": "重构状态机"}),
         );
         let context = call_tool(&plugin, "get_context", serde_json::json!({}));
         assert!(context.ok);
@@ -1501,8 +1442,9 @@ mod tests {
         let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
         let created = call_tool(
             &plugin,
-            "create_report",
+            "goal",
             serde_json::json!({
+                "action": "save_report",
                 "work_id": "work-x1",
                 "summary": "第十轮 review 修复全部完成",
                 "artifacts": ["/tmp/report.md"],
@@ -1513,27 +1455,31 @@ mod tests {
         // 空摘要拒绝
         let empty = call_tool(
             &plugin,
-            "create_report",
-            serde_json::json!({"work_id": "w", "summary": " "}),
+            "goal",
+            serde_json::json!({"action": "save_report", "work_id": "w", "summary": " "}),
         );
         assert!(!empty.ok);
         // 查询
-        let listed = call_tool(&plugin, "list_reports", serde_json::json!({}));
+        let listed = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "list_reports"}),
+        );
         assert!(listed.ok);
         assert!(listed.stdout.contains("第十轮 review"), "{}", listed.stdout);
         assert!(listed.stdout.contains("/tmp/report.md"));
         // 按工作过滤
         let filtered = call_tool(
             &plugin,
-            "list_reports",
-            serde_json::json!({"work_id": "work-x1"}),
+            "goal",
+            serde_json::json!({"action": "list_reports", "work_id": "work-x1"}),
         );
         assert!(filtered.ok);
         assert!(filtered.stdout.contains("第十轮 review"));
         let none = call_tool(
             &plugin,
-            "list_reports",
-            serde_json::json!({"work_id": "work-none"}),
+            "goal",
+            serde_json::json!({"action": "list_reports", "work_id": "work-none"}),
         );
         assert!(none.ok);
         assert!(none.stdout.contains("没有"));
@@ -1619,8 +1565,8 @@ mod tests {
         };
         let timeline = call_tool(
             &plugin,
-            "get_work_timeline",
-            serde_json::json!({"work_id": work_id}),
+            "work",
+            serde_json::json!({"action": "timeline", "work_id": work_id}),
         );
         assert!(timeline.ok, "stderr: {}", timeline.stderr);
         assert!(
@@ -1641,8 +1587,8 @@ mod tests {
         // 未知的 work_id 拒绝
         let ghost = call_tool(
             &plugin,
-            "get_work_timeline",
-            serde_json::json!({"work_id": "work-none"}),
+            "work",
+            serde_json::json!({"action": "timeline", "work_id": "work-none"}),
         );
         assert!(!ghost.ok);
     }
@@ -1650,7 +1596,7 @@ mod tests {
     /// Review Z2 定型：引导沿用 owner work_id（不再生成 steer-*）——
     /// 归属与终态一致，重启投影无 Running 幽灵。
     #[test]
-    fn send_to_worker_reuses_owner_work_id() {
+    fn dispatch_work_reused_session_keeps_registration_clean() {
         let root = tempfile::tempdir().unwrap();
         let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
         std::fs::write(
@@ -1677,27 +1623,25 @@ mod tests {
             other => panic!("应收到 Dispatch，实际 {other:?}"),
         };
         assert!(!owner_id.starts_with("steer-"));
-        // 引导：work_id 必须沿用 owner（不再是 steer-*）
+        // 复用会话再派发：Dispatch{reused_session=true} + 独立执行归属
+        // （Z2 归属合并已上移宿主 plan_dispatch：并入 Running 原工作 /
+        // merge_waiting_user 恢复 owner，central-state 具名锁
+        // steer_into_running_work_keeps_ownership 覆盖）
         let steered = call_tool(
             &plugin,
-            "send_to_worker",
-            serde_json::json!({"session_id": "s0", "message": "补充要求"}),
+            "dispatch_work",
+            serde_json::json!({"session_id": "s0", "task": "补充要求"}),
         );
         assert!(steered.ok, "stderr: {}", steered.stderr);
         match dispatch_rx.try_recv().expect("引导请求") {
-            CentralPluginMessage::Steer(request) => {
-                assert_eq!(
-                    request.work_id, owner_id,
-                    "引导必须沿用 owner work_id（Z2：消除幽灵与时间线分叉）"
-                );
-                assert!(
-                    !request.execution_id.is_empty(),
-                    "引导仍是一次新执行（新 execution_id）"
-                );
+            CentralPluginMessage::Dispatch(request) => {
+                assert!(request.reused_session);
+                assert_eq!(request.session_id, "s0");
+                assert_ne!(request.execution_id, "", "复用派发仍是独立执行（R0 契约）");
             }
-            other => panic!("应收到 Steer，实际 {other:?}"),
+            other => panic!("应收到 Dispatch，实际 {other:?}"),
         }
-        // 登记（按会话覆盖）也保持 owner
+        // 登记无 steer-* 条目（Steer 消息与登记形态已消失）
         let items = load_work_items(plugin.sessions.storage_root());
         assert!(items.iter().all(|item| !item.work_id.starts_with("steer-")));
     }
@@ -1786,8 +1730,8 @@ mod tests {
         // 取消：消息送达
         let cancel = call_tool(
             &plugin,
-            "cancel_work",
-            serde_json::json!({"work_id": work_id}),
+            "control",
+            serde_json::json!({"work_id": work_id, "action": "cancel"}),
         );
         assert!(cancel.ok, "stderr: {}", cancel.stderr);
         match dispatch_rx.try_recv() {
@@ -1801,12 +1745,16 @@ mod tests {
         // 不存在的 work_id 拒绝
         let ghost = call_tool(
             &plugin,
-            "pause_work",
-            serde_json::json!({"work_id": "work-none"}),
+            "control",
+            serde_json::json!({"work_id": "work-none", "action": "pause"}),
         );
         assert!(!ghost.ok, "不存在的 work 必须拒绝");
         // 空 work_id 拒绝
-        let empty = call_tool(&plugin, "resume_work", serde_json::json!({"work_id": "  "}));
+        let empty = call_tool(
+            &plugin,
+            "control",
+            serde_json::json!({"work_id": "  ", "action": "resume"}),
+        );
         assert!(!empty.ok, "空 work_id 必须拒绝");
     }
 

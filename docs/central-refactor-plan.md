@@ -895,7 +895,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 ### A.3 验证与验收状态
 
-- 每提交独立可编译、可回滚；**Rust 248 项（tiangong-central 30 + central-state 26 + central-plugin 33 + tiangong-app 158 + bin 1）+ 前端 584 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-13 Z4 批次后实测）。
+- 每提交独立可编译、可回滚；**Rust 全量 700 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十轮合并后实测；中枢相关：central-plugin 32 + tiangong-central + central-state + tiangong-app 158）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
 - §8 测试矩阵覆盖情况：领域/存储/权限/Host 集成大部分以单元与集成测试锁定（见各提交说明）；**§8.5 前端转场矩阵与 §8.6 实机验收十步未执行**——需要真实桌面环境（`cargo tauri dev` + 人工操作），合并前应完成并回填记录。
 
 ### A.5 实测反馈修复记录（2026-11-13，第十八轮收口）
@@ -913,7 +913,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 第十八轮 review 修复（Z1/Z2/Z3 + 8.2）：
 - **Z1** 顺序不变量：`rebuild_registry_from_log` 输出恢复 `dispatched_at` 升序；具名锁 `rebuild_keeps_chronological_order` / `retention_keeps_latest_ten_after_rebuild`（倒序时代曾使保留策略淘汰最新记录）。
-- **Z2** steer 归属定型：`send_to_worker` 沿用 owner `work_id` + 新 `execution_id`（消除重启 Running 幽灵与时间线分叉）；插件测试锁定。
+- **Z2** steer 归属定型：`send_to_worker` 沿用 owner `work_id` + 新 `execution_id`（消除重启 Running 幽灵与时间线分叉）；插件测试锁定。（二十轮合并后 `send_to_worker` 并入 `dispatch_work` 复用路径，归属合并上移宿主 plan_dispatch，由 central-state 具名锁 `steer_into_running_work_keeps_ownership` / `merge_waiting_user_restores_and_returns_owner` 覆盖。）
 - **Z3** 文档四项（本附录 A.3/A.5、persona 断句、lib.rs 头、设计稿实现态章节）。
 - **8.2** reduced-motion 降级、徽章 6 态 + 优先级 + 排序断言、浮层 role/aria、折叠 aria-expanded、历史兜底限中枢会话、徽章数字只计未终态、弱断言（className）改行为断言。
 - **Z4**（第二批）RMW 事务化 + 写失败诚实性：`with_work_items` 锁内读改写（消除并发丢更新）；save/upsert/mark 系列全部返回 `Result`；生产形态并发测试 `concurrent_upserts_keep_both_sessions`。
@@ -923,6 +923,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 - **Z7** 模式状态机两态化（死变体删除，偏差记录 A.2）；问候/加载竞态（先加载后问候）；空 work_id 卡片按（目录+指纹）定位；续行残留空格 11 处。
 - **Z8** 假绿三形态清零：自证矩阵 → 行为驱动；事件日志并发改生产形态（独立 open + offset 全局唯一断言）；持久化并发 Z4 已改。
 - **十九轮 P1/P2 修复**（2026-11-15）：P1-1 switch 事件按真实结果写入（失败记 `ModelHandoverFailed`，移入结果分支 + 具名锁）；P2-1 轮转读回（`load_all` 拼接归档 `.1`，阈值提 100MB，往返用例）；P2-2 `open` 收口（repair_tail 入共享锁 + 每路径每进程仅首次扫描，恢复 offset 有序真断言）；P2-3 重复 id 行跳过不截断；P2-5 工具层诚实性（goals/reports 落盘失败显式报错；dispatch 落盘失败正文提示）；口径 3 死代码（删 Execution 结构与死测试、`get_work_item_status` 改读事件日志、删 similarity_hint）；A.2 补 6/7/8 条偏差；progress 数字修正；中文句中空格清理。
+- **二十轮工具大合并**（2026-11-16，用户裁决方案）：21 工具收敛为 10——`inspect_context`（list_workspaces / inspect_workspace / list_sessions 三合一，focus=workspaces/workspace/sessions，缺省综合摘要）；`dispatch_work` 吸收 send_to_worker（复用在跑会话 task 自动作为引导并入当前执行，`Steer` 消息自插件侧消失——宿主 resume 恢复链路仍内部使用）；`control`（cancel/pause/resume）；`work`（list/status/timeline/reports，reports 保留取走语义）；`goal`（save_goal/set_goal_status/save_report/list_reports）。不动：get_context / list_models / search_history / request_workspace_approval / send_notification。配套：删除死方法 `handle_send_to_worker`（归属合并上移宿主 plan_dispatch，Z2 具名锁迁移 central-state）；persona 提示词全量改写为新工具名；面向模型的错误提示文本同步；spec-handler 一致性测试锁 10 工具。
 
 ### A.4 后续工作（按优先级，2026-11-13 更新）
 

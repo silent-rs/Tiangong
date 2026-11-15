@@ -309,4 +309,50 @@ impl CentralPlugin {
             })
         })
     }
+
+    /// 环境感知统一入口（二十轮合并：list_workspaces / inspect_workspace /
+    /// list_sessions → inspect_context）。缺省综合摘要；focus 深入。
+    pub(crate) fn handle_inspect_context(&self, focus: &str, path: &str) -> Option<ToolResult> {
+        match focus {
+            "workspaces" => self.handle_list_workspaces(),
+            "sessions" => self.handle_list_sessions(),
+            "workspace" => self.handle_inspect_workspace(path),
+            _ => {
+                // 综合摘要：工作区 + 近期会话的紧凑视图
+                let workspaces = self.known_workspace_paths();
+                let ws_summary: Vec<String> = workspaces
+                    .iter()
+                    .take(8)
+                    .map(|w| format!("  · {w}"))
+                    .collect();
+                let sessions: Vec<_> = self
+                    .sessions
+                    .list_session_metadata()
+                    .into_iter()
+                    .rev()
+                    .take(8)
+                    .collect();
+                let sess_summary: Vec<String> = sessions
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "  · {}｜{}｜{}",
+                            s.id,
+                            s.title.chars().take(30).collect::<String>(),
+                            s.cwd.as_str()
+                        )
+                    })
+                    .collect();
+                self.text_result(
+                    "环境摘要",
+                    format!(
+                        "工作区（{} 个已知；focus=workspaces 看全部）：\n{}\n\n近期会话（focus=sessions 看详情）：\n{}",
+                        workspaces.len(),
+                        ws_summary.join("\n"),
+                        sess_summary.join("\n")
+                    ),
+                )
+            }
+        }
+    }
 }

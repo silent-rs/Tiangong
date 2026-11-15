@@ -58,7 +58,7 @@ impl CentralPlugin {
         self.text_result(
             "目标已登记",
             format!(
-                "目标「{title}」（{goal_id}）已记录；后续派发与汇报将围绕该目标组织，用户问「我的目标」时可引用。达成或放弃时用 update_goal_status 更新。"
+                "目标「{title}」（{goal_id}）已记录；后续派发与汇报将围绕该目标组织，用户问「我的目标」时可引用。达成或放弃时用 goal（action=set_goal_status）更新。"
             ),
         )
     }
@@ -172,5 +172,50 @@ impl CentralPlugin {
             "报告存档",
             format!("共 {} 份：\n{}", filtered.len(), lines.join("\n")),
         )
+    }
+
+    /// 目标与报告统一入口（二十轮合并：create_goal / update_goal_status /
+    /// create_report / list_reports → goal）。
+    pub(crate) fn handle_goal(
+        &self,
+        call: &tiangong_llm::tool::ToolCall,
+        action: &str,
+    ) -> Option<ToolResult> {
+        let arg = |key: &str| {
+            call.arguments
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        };
+        match action {
+            "save_goal" => {
+                let ws = arg("workspace");
+                let ws_opt = if ws.trim().is_empty() { None } else { Some(ws) };
+                self.handle_create_goal(arg("title"), arg("description"), ws_opt)
+            },
+            "set_goal_status" => self.handle_update_goal_status(arg("goal_id"), arg("status")),
+            "save_report" => {
+                let artifacts = call
+                    .arguments
+                    .get("artifacts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>())
+                    .unwrap_or_default();
+                let risks = call
+                    .arguments
+                    .get("risks")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>())
+                    .unwrap_or_default();
+                self.handle_create_report(arg("work_id"), arg("summary"), &artifacts, &risks)
+            },
+            "list_reports" => {
+                let wid = arg("work_id");
+                self.handle_list_reports(if wid.trim().is_empty() { None } else { Some(wid) })
+            }
+            _ => self.error_result(format!(
+                "action 必须是 save_goal / set_goal_status / save_report / list_reports（收到：{action}）"
+            )),
+        }
     }
 }

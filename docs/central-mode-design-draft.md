@@ -325,14 +325,16 @@
 不应只靠提示词约束，应由宿主在工具路由层建立独立白名单：
 
 ```text
-中枢助手工具集（POC 实现态，22 个——与 central-plugin tool_specs 逐一对应，
-由 `central_tool_specs_equal_handlers` 测试锁定双向一致）：
-- get_context / list_workspaces / inspect_workspace / list_models / list_sessions
-- dispatch_work（含 session_id 复用、after_work_id 排队、parallel 写入锁豁免）
-- send_to_worker / collect_work_reports / list_work_items / search_history
-- cancel_work / pause_work / resume_work / get_work_timeline / get_work_item_status
-- create_goal / update_goal_status / create_report / list_reports
-- switch_worker_model / send_notification / confirm_workspace
+中枢助手工具集（实现态，10 个——二十轮合并后形态，与 central-plugin
+tool_specs 逐一对应，由 `central_tool_specs_equal_handlers` 测试锁定双向一致）：
+- get_context / list_models / search_history
+- inspect_context（环境感知三合一：focus=workspaces/workspace/sessions）
+- dispatch_work（统一派发：新建 / 复用空闲会话 / 复用在跑会话引导并入 /
+  带 model 换模型；含 after_work_id 排队、parallel 写入锁豁免）
+- control（action：cancel / pause / resume）
+- work（action：list / status / timeline / reports）
+- goal（action：save_goal / set_goal_status / save_report / list_reports）
+- request_workspace_approval / send_notification
 （request_user 按用户裁决暂缓——中枢需要用户决策时在对话文本中直接询问）
 
 工作会话工具集：

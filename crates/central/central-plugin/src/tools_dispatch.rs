@@ -1,5 +1,5 @@
 //! 派发与回报工具（R5 从 lib.rs 拆出）：dispatch_work（前置校验与派发）、
-//! send_to_worker 引导、collect_work_reports、list_work_items 登记表。
+//! 引导（send_to_worker 已并入 dispatch_work 复用路径）与登记表。
 
 use tiangong_core::tools::result::ToolResult;
 
@@ -69,7 +69,7 @@ impl CentralPlugin {
             .is_err()
             {
                 return self.error_result(format!(
-                    "复用的会话不存在：{existing}（可用 list_sessions 查询近期会话）"
+                    "复用的会话不存在：{existing}（可用 inspect_context focus=sessions 查询近期会话）"
                 ));
             }
             // 复用路径的 Workspace 确认（review P1 补齐）：复用会话沿用其
@@ -232,7 +232,7 @@ impl CentralPlugin {
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
              - 工作会话: {session_note}\n- 任务: {task}\n\n\
              结果按时机自动回到本对话（失败立即；成功待全部结束后汇总一轮），\
-             届时由你向用户转述。执行中如需查看可调 list_work_items。{prior_note}{registry_note}",
+             届时由你向用户转述。执行中如需查看可调 work（action=list）。{prior_note}{registry_note}",
             work_id = record.work_id,
             model_note = model_note,
             session_note = session_note,
@@ -289,90 +289,6 @@ impl CentralPlugin {
     }
 
     /// 向已有 Worker 会话发送引导消息：调整方向、补充要求、追问细节。
-    pub(crate) fn handle_send_to_worker(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) -> Option<ToolResult> {
-        let message = message.trim();
-        if message.is_empty() {
-            return self.error_result("message 不能为空".to_string());
-        }
-        let target = session_id.trim().to_string();
-        if target.is_empty() {
-            return self.error_result(
-                "session_id 不能为空（list_work_items / list_sessions 查询）".to_string(),
-            );
-        }
-        if is_central_session(&target) {
-            return self.error_result("不能向中枢对话自身发送引导消息".to_string());
-        }
-        if tiangong_core_manager::SessionMetadata::load_from_storage(
-            self.sessions.storage_root(),
-            &target,
-        )
-        .is_err()
-        {
-            return self.error_result(format!(
-                "会话不存在：{target}（可用 list_work_items / list_sessions 查询）"
-            ));
-        }
-        // R0 契约（§5.4）：引导是一次新执行（新 execution_id）；归属沿用
-        // 该会话当前工作的 work_id（review Z2 定型：此前生成 steer-* 新 id
-        // 导致登记/事件与终态分叉——重启后 steer-* 成为永不结束的 Running
-        // 幽灵、owner 时间线缺失引导段）。
-        let owner_work_id = {
-            // 落盘登记（真相源）取该会话最近一次工作的 work_id；无登记的
-            // 冷启动边缘回退 steer- 前缀（会话存在但从未经中枢派发）。
-            load_work_items(self.sessions.storage_root())
-                .into_iter()
-                .rev()
-                .find(|item| item.session_id == target)
-                .map(|item| item.work_id)
-                .unwrap_or_else(|| format!("steer-{}", scru128::new()))
-        };
-        let execution_id = tiangong_central::new_execution_id();
-        let record = WorkItemRecord {
-            work_id: owner_work_id,
-            reused_session: true,
-            session_id: target.clone(),
-            task: message.to_string(),
-            model: None,
-            dispatched_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            finished_at: None,
-            events: Vec::new(),
-            queued_at: None,
-            after_work_id: None,
-            cwd: None,
-            outcome: None,
-            execution_id: Some(execution_id.clone()),
-        };
-        let request = CentralDispatchRequest {
-            work_id: record.work_id.clone(),
-            session_id: target,
-            task: record.task.clone(),
-            model: None,
-            cwd: None,
-            after_work_id: None,
-            parallel: false,
-            reused_session: true,
-            execution_id,
-        };
-        if let Err(error) = self.dispatch_tx.send(CentralPluginMessage::Steer(request)) {
-            return self.error_result(format!("派发通道已关闭：{error}"));
-        }
-        self.upsert_memory_work_item(record.clone());
-        if let Err(error) = upsert_work_item(self.sessions.storage_root(), &record) {
-            tracing::warn!(%error, "派发登记落盘失败（Z4：写失败显式可见）");
-        }
-        let body = format!(
-            "已发送引导消息：\n- 目标会话: {}\n- work_id: {}（终态同样回到本对话）\n- 内容: {}",
-            record.session_id, record.work_id, record.task
-        );
-        self.text_result("引导已发送", body)
-    }
-
-    /// 派发登记表（中枢视角的派发事实）。
     pub(crate) fn handle_list_work_items(&self) -> Option<ToolResult> {
         let items = self
             .work_items
@@ -381,7 +297,7 @@ impl CentralPlugin {
         if items.is_empty() {
             return self.text_result(
                 "后台工作",
-                "当前没有派发记录（若应用刚重启，既往工作会话仍在——请用 list_sessions 查询并按需复用）。".to_string(),
+                "当前没有派发记录（若应用刚重启，既往工作会话仍在——请用 inspect_context（focus=sessions）查询并按需复用）。".to_string(),
             );
         }
         let lines: Vec<String> = items
