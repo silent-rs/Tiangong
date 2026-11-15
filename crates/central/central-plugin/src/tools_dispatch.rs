@@ -206,27 +206,20 @@ impl CentralPlugin {
         if registry_write_failed {
             tracing::warn!("派发登记落盘失败（事件日志为准，会话复用记忆可能缺失）");
         }
-        // 复用时 record.model 是「被忽略的请求模型」（M5 提示用）——执行模型
-        // 行必须报真实生效模型，避免与「已忽略请求的 X」同屏矛盾（review S5）
-        let model_note = if record.reused_session {
-            "会话既有模型".to_string()
-        } else {
-            record
-                .model
-                .as_deref()
-                .unwrap_or("路由默认模型")
-                .to_string()
+        // model 是统一的换模型通道（二十轮合并 + 用户裁决）：复用会话
+        // 同样生效——空闲则本轮切换，执行中则引导并入当前 turn、本轮
+        // 沿用当前模型（deliver 层忙时跳过模型编排）。
+        let model_note = match (record.reused_session, record.model.as_deref()) {
+            (true, Some(requested)) => format!("切换为 {requested}"),
+            (true, None) => "会话既有模型".to_string(),
+            (false, model) => model.unwrap_or("路由默认模型").to_string(),
         };
-        let session_note = if record.reused_session {
-            // 复用实际沿用会话既有模型（review M5：明确告知忽略的请求模型）
-            match record.model.as_deref() {
-                Some(requested) => format!(
-                    "{session_id}（复用已有会话，沿用其既有模型；已忽略请求的 {requested}）"
-                ),
-                None => format!("{session_id}（复用已有会话，沿用其既有模型）"),
-            }
-        } else {
-            format!("{session_id}（新会话；普通模式会话列表可查看）")
+        let session_note = match (record.reused_session, record.model.as_deref()) {
+            (true, Some(requested)) => format!(
+                "{session_id}（复用已有会话，切换为 {requested}：空闲本轮生效；                 若正在执行则本轮沿用当前模型）"
+            ),
+            (true, None) => format!("{session_id}（复用已有会话，沿用其既有模型）"),
+            (false, _) => format!("{session_id}（新会话；普通模式会话列表可查看）"),
         };
         let body = format!(
             "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\

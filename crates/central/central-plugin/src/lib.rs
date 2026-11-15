@@ -1646,6 +1646,59 @@ mod tests {
         assert!(items.iter().all(|item| !item.work_id.starts_with("steer-")));
     }
 
+    /// 二十一轮 review 修复锁：复用会话带 model = 换模型通道（不再是
+    /// M5 时代的「已忽略请求的 X」——switch_worker_model 移除后的
+    /// 用户裁决，提示文本必须与新行为一致）。
+    #[test]
+    fn dispatch_work_reused_with_model_announces_switch() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &["/tmp/ws"]);
+        std::fs::write(
+            root.path().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        std::fs::write(
+            root.path().join("sessions/s9.json"),
+            serde_json::json!({
+                "id": "s9", "title": "w", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 10:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp/ws", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let ok = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"session_id": "s9", "task": "继续分析", "model": "k3"}),
+        );
+        assert!(ok.ok, "stderr: {}", ok.stderr);
+        match dispatch_rx.try_recv().expect("派发请求") {
+            CentralPluginMessage::Dispatch(request) => {
+                assert!(request.reused_session);
+                assert_eq!(request.model.as_deref(), Some("k3"), "model 必须随请求流动");
+            }
+            other => panic!("应收到 Dispatch，实际 {other:?}"),
+        }
+        assert!(
+            ok.stdout.contains("切换为 k3"),
+            "提示应宣告切换（新语义）：{}",
+            ok.stdout
+        );
+        assert!(
+            !ok.stdout.contains("已忽略请求"),
+            "不得再出现 M5 旧语义（忽略请求模型）：{}",
+            ok.stdout
+        );
+    }
     /// R5：模型只能「请求」Workspace 授权（触发卡片），不能登记授权。
     #[test]
     fn request_workspace_approval_sends_request_not_confirmation() {

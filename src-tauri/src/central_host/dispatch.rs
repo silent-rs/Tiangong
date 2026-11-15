@@ -550,11 +550,12 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
             } => (merged_work, steer_merged_into_running, cwd),
         };
     let sid = merged_work.session_id.clone();
-    let effective_model = if merged_work.reused_session {
-        None
-    } else {
-        merged_work.model.as_deref()
-    };
+    // model 是统一的换模型通道（switch_worker_model 移除后的用户裁决）：
+    // 复用会话同样生效——live Core 经 deliver 的 model_ref 走模型编排
+    //（空闲：持久化选择 + 切换端点，本轮生效；执行中：引导并入当前
+    // turn 沿用当前模型）；无 Core（重启后复用）经 ensure_core 以目标
+    // 模型初始化 + 下方 set_core_model_ref 持久化，回收重建不回退。
+    let effective_model = merged_work.model.as_deref();
     let instruction = build_worker_instruction(&merged_work.work_id, &merged_work.task);
     let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
     // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
@@ -616,6 +617,17 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
             ));
         }
         crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx);
+        // ensure_core 的 initial_model_ref 只初始化新 Core 端点，不落
+        // Session.model_ref——此处补写（Core 刚建必不忙），空闲回收后
+        // 重建不再回退旧模型（二十一轮 review 修复的持久化缺口）。
+        if let Some(model_key) = effective_model {
+            if let Err(error) = state
+                .core_manager
+                .set_core_model_ref(&sid, Some(model_key.to_string()))
+            {
+                tracing::warn!(session_id = %sid, error, "复用派发的模型选择持久化失败");
+            }
+        }
         if let Err(error) = state
             .deliver_prepared_if_live(
                 &sid,
