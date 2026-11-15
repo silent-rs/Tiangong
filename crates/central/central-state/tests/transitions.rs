@@ -176,3 +176,40 @@ fn flush_matches_accepts_work_id_and_session_id() {
     assert!(!flush_matches("work-b", "work-a", "s-1"));
     assert!(!flush_matches("", "work-a", "s-1"));
 }
+
+// ============ 覆盖率补充批（2026-11-16）：枚举全分支 ============
+
+/// WorkState::as_str ↔ parse 全枚举双向闭合；未知值归 None。
+#[test]
+fn work_state_str_parse_round_trip_all_variants() {
+    let all = [
+        WorkState::Running,
+        WorkState::ReportQueued,
+        WorkState::Completed,
+        WorkState::Failed,
+        WorkState::Interrupted,
+        WorkState::WaitingUser,
+        WorkState::Paused,
+        WorkState::Cancelled,
+        WorkState::Queued,
+    ];
+    for state in all {
+        let text = state.as_str();
+        assert_eq!(WorkState::parse(text), Some(state), "{text} 应双射");
+    }
+    assert_eq!(WorkState::parse("unknown-state"), None);
+    assert_eq!(WorkState::parse(""), None);
+}
+
+/// WorkOutcome::as_str 短名；classify_outcome 按标记判定。
+#[test]
+fn work_outcome_names_and_classifier_boundaries() {
+    assert_eq!(WorkOutcome::Finished.as_str(), "finished");
+    assert_eq!(WorkOutcome::WaitingUser.as_str(), "waiting_user");
+    assert_eq!(classify_outcome("正常完成"), WorkOutcome::Finished);
+    assert_eq!(
+        classify_outcome("问题：【需要用户决策】要不要继续"),
+        WorkOutcome::WaitingUser
+    );
+    assert_eq!(classify_outcome(""), WorkOutcome::Finished);
+}

@@ -13,7 +13,7 @@ use super::state_of;
 /// 消息时中枢能主动说明离开期间发生了什么（review P2：恢复后回报丢失
 /// ——徽章显示已完成但中枢从未收到结果摘要）。
 /// 幂等：registry 非空时跳过（防 setup 与 lazy 通道双跑重复注入）。
-pub fn recover_central_work_state(app: &tauri::AppHandle) {
+pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Manager;
     let state = app.state::<TiangongApp>();
     // R5：登记由事件日志投影重建（唯一事实源重放）；日志为空（R5 前

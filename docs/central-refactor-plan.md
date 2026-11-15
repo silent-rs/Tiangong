@@ -896,27 +896,27 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 ### A.3 验证与验收状态
 - 每提交独立可编译、可回滚；**Rust 全量 700 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十轮合并后实测；中枢相关：central-plugin 33 + tiangong-central 29 + central-state 19 + tiangong-app 宿主/中枢 29）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
 
-#### A.3.1 行覆盖率实测（cargo-llvm-cov 0.9.1，2026-11-16）
+#### A.3.1 行覆盖率实测（cargo-llvm-cov 0.9.1，2026-11-16；同日补测后刷新）
 
 核心三包（领域 + 存储 + 插件，合计 4606 覆盖行）：
 
 | 模块 | 行覆盖 | 分支 | 备注 |
 | --- | --- | --- | --- |
 | tiangong-central/status.rs | 93.28% | 80% | 状态机转移矩阵有锁 |
-| tiangong-central/tickets.rs | 89.34% | 68% | 票据三拒绝路径有锁 |
+| tiangong-central/tickets.rs | 97.28% | 78% | 票据消费全分支有锁 |
 | tiangong-central/event.rs | 87.74% | 76% | 含 legacy 兼容 |
-| tiangong-central/event_log.rs | **77.95%** | **59.62%** | 轮转/修复路径分支多 |
+| tiangong-central/event_log.rs | 86.96% | 65.52% | lenient/投影/跨实例已锁（轮转阈值分支除外） |
 | tiangong-central/risk.rs | 83.33% | 80% | |
 | tiangong-central/ids.rs、execution.rs | 100% | — | |
-| central-state/lib.rs | 83.81% | 91% | |
-| central-state/persistence.rs | **72.61%** | 65% | 迁移/兜底分支 |
+| central-state/lib.rs | 97.62% | 100% | 枚举双射 + 分类边界有锁 |
+| central-state/persistence.rs | 83.17% | 79% | setter 三件套 + goals/reports 往返有锁 |
 | central-plugin/lib.rs | 97.55% | 88% | |
 | central-plugin/tools_dispatch.rs | 93.61% | 78% | |
 | central-plugin/tools_goal_report.rs | 87.57% | 91% | |
-| central-plugin/tools_context.rs | 74.82% | 76% | inspect_context 聚合分支 |
-| central-plugin/tools_control.rs | **53.05%** | 60% | control/work 合并入口分支 |
+| central-plugin/tools_context.rs | 90.15% | 96% | focus 矩阵 + 会话/搜索分支有锁 |
+| central-plugin/tools_control.rs | 88.41% | 80% | control/work/notif 全 action 有锁 |
 | central-plugin/workspace_summary.rs | 74.00% | 56% | git 元信息聚合 |
-| **三包合计** | **88.23%** | **76.16%** | |
+| **三包合计** | **94.41%** | **84.41%** | 补测后（原 88.23%/76.16%） |
 
 宿主层（tiangong-app lib 单测，central_host 模块）：
 
@@ -924,13 +924,15 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | --- | --- | --- |
 | execution_router.rs | 94.07% | — |
 | mode_coordinator.rs | 86.06% | — |
-| central_events.rs | 63.51% | work_timeline(36)、migrate_legacy_timeline(14) |
-| dispatch.rs | **54.47%** | handle_central_control(90)、central_dispatch_sender(66)、plan_central_dispatch(35)、handle_central_dispatch(30) |
-| reports.rs | **44.13%** | flush_pending_dispatches(33)、deliver_pending_work_reports(18)、on_central_work_finished(14) |
+| central_events.rs | 75.83% | migrate_legacy_timeline 部分分支 |
+| dispatch.rs | 61.12% | control 三路径 + cancel 终态落盘已锁；central_dispatch_sender(66，spawn 消费循环) 未锁 |
+| reports.rs | 53.63% | push/take/clear 语义已锁；deliver_pending（需中枢 Core 在线）未锁 |
 | events.rs | 38.10% | system_note 组装分支 |
-| recovery.rs | **31.85%** | recover_central_work_state(69)、inject_central_activation_summary(16) |
+| recovery.rs | 60.74% | 事件投影重建已锁；activation_summary 注入分支未锁 |
 | authorization.rs / core_lifecycle.rs / mode_commands.rs / work_view.rs | **0%** | Tauri command/窗口层——lib 单测无法构造 AppHandle，只能实机验收（§8.6） |
-| （对照）app.rs 全文件 | 76.29% | 含 29 项宿主中枢测试 |
+| （对照）app.rs 全文件 | 79.37% | 含 33 项宿主中枢测试 |
+
+补测批次（2026-11-16，+21 项）：central-plugin +6（control/work action 矩阵、通知校验、inspect_context focus 矩阵、会话排序、goal 边界）；tiangong-central +7（lenient 三态、投影映射、跨实例 offset、事件 builder、票据消费分支）；central-state +4（setter 三件套、goals/reports 往返、枚举双射）；tiangong-app 宿主 +4（control cancel 落盘/暂停恢复往返、回报 take 语义、事件投影重启重建）。
 
 前端：central 相关 12 文件 94 用例（Transition 18 / ModeEntry 16 / Conversation 16 / WorkStatusBar 12 / WorkDrawer 6 / ChatInput 6 / NotificationBridge 5 / SystemNote 4 / CardsBar 4 / ModePreference 3 / Greeting 3 / normalModeSmoke 1）；行覆盖工具未安装，按用例映射评估。
 

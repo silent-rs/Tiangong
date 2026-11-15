@@ -609,3 +609,124 @@ mod tests {
         assert_eq!(entries[0].schema_version, CENTRAL_CONTRACT_SCHEMA_VERSION);
     }
 }
+
+#[cfg(test)]
+mod coverage_extra_tests {
+    use super::*;
+    use crate::event::WorkEventType;
+    use crate::ids::new_id;
+
+    fn event(work: &str, event_type: WorkEventType) -> WorkEvent {
+        WorkEvent::new(work, event_type)
+    }
+
+    /// load_all_lenient：坏行跳过计数、空文件、文件不存在三态。
+    #[test]
+    fn lenient_read_skips_corrupt_lines_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        // 文件不存在 → 空且 0 跳过
+        let missing = EventLog::open(&path).unwrap();
+        let (empty_entries, empty_skipped) = missing.load_all_lenient();
+        assert!(empty_entries.is_empty());
+        assert_eq!(empty_skipped, 0);
+        // 1 好 + 1 坏 + 空行 + 1 好 → 2 条 + 1 跳过
+        let good = |work: &str, offset: u64| {
+            serde_json::json!({
+                "offset": offset, "schema_version": 1,
+                "event": {
+                    "id": format!("ev-l{offset}"), "work_item_id": work,
+                    "event_type": "work_item.started", "severity": "normal",
+                    "requires_user_action": false, "payload": null,
+                    "created_at": "2026-11-16 10:00:00"
+                }
+            })
+            .to_string()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{{broken json\n\n{}\n",
+                good("w-lenient", 0),
+                good("w-lenient", 1)
+            ),
+        )
+        .unwrap();
+        let log = EventLog::open(&path).unwrap();
+        let (entries, skipped) = log.load_all_lenient();
+        assert_eq!(entries.len(), 2, "幸存事件为准");
+        assert_eq!(skipped, 1, "坏行计入 skipped");
+        assert_eq!(entries[0].offset, 0);
+        assert_eq!(entries[1].offset, 1);
+    }
+
+    /// project_work_state：各事件类型到工作状态的映射（§8.1 投影）。
+    #[test]
+    fn project_work_state_maps_event_kinds() {
+        let make = |kind: WorkEventType| LoggedEvent {
+            offset: 0,
+            schema_version: 1,
+            event: {
+                let mut e = event("w-map", kind);
+                e.id = new_id();
+                e
+            },
+        };
+        use crate::status::WorkItemStatus as S;
+        let cases: Vec<(WorkEventType, Option<S>)> = vec![
+            (WorkEventType::WorkItemStarted, Some(S::Running)),
+            (WorkEventType::WorkItemProgress, Some(S::Running)),
+            (WorkEventType::WorkItemWaitingUser, Some(S::WaitingUser)),
+            (
+                WorkEventType::WorkItemWaitingResource,
+                Some(S::WaitingResource),
+            ),
+            (WorkEventType::WorkItemBlocked, Some(S::Blocked)),
+            (WorkEventType::WorkItemFailed, Some(S::Failed)),
+            (WorkEventType::WorkItemCompleted, Some(S::Completed)),
+            (WorkEventType::WorkItemCancelled, Some(S::Cancelled)),
+            (WorkEventType::ReportReady, None), // 非工作项事件不映射
+        ];
+        for (kind, expected) in cases {
+            let states = project_work_state(&[make(kind)]);
+            match expected {
+                Some(want) => assert_eq!(
+                    states.get("w-map"),
+                    Some(&want),
+                    "{:?} 应投影为 {want:?}",
+                    kind.as_str()
+                ),
+                None => assert!(
+                    !states.contains_key("w-map"),
+                    "{:?} 不应产生状态",
+                    kind.as_str()
+                ),
+            }
+        }
+    }
+
+    /// 跨实例 append：第二个实例首次 append 触发 cache 重扫分支
+    ///（cache.loaded=false → load_all_inner 回填 offset/seen_ids）。
+    #[test]
+    fn second_instance_append_rescans_before_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let first = EventLog::open(&path).unwrap();
+        first
+            .append(event("w-x1", WorkEventType::WorkItemStarted))
+            .unwrap();
+        // 新实例（独立 cache）：首次 append 必须先读回文件补 offset，
+        // 否则 offset 从 0 重写会与既有行冲突
+        let second = EventLog::open(&path).unwrap();
+        second
+            .append(event("w-x2", WorkEventType::WorkItemStarted))
+            .unwrap();
+        let entries = second.load_all().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[1].offset,
+            entries[0].offset + 1,
+            "跨实例 offset 必须连续（不与既有行冲突）"
+        );
+    }
+}

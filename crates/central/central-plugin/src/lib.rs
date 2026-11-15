@@ -1961,4 +1961,345 @@ mod tests {
             fourth.stderr
         );
     }
+
+    // ============ 覆盖率补充批（2026-11-16）：control/work/notif/context ============
+
+    /// control 三动作发出 Control 消息；未知动作与未登记 work_id 拒绝。
+    #[test]
+    fn control_actions_send_messages_and_validate() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        std::fs::write(
+            root.path().join("sessions/s0.json"),
+            serde_json::json!({
+                "id": "s0", "title": "w", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 10:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _ =
+            add_confirmed_workspace(plugin.sessions.storage_root(), std::path::Path::new("/tmp"));
+        // 先经派发落一条登记
+        let dispatched = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "被控工作", "session_id": "s0"}),
+        );
+        assert!(dispatched.ok, "stderr: {}", dispatched.stderr);
+        let _ = dispatch_rx.try_recv();
+        // 三动作对未登记 work_id 一律拒绝
+        for action in ["cancel", "pause", "resume"] {
+            let ok = call_tool(
+                &plugin,
+                "control",
+                serde_json::json!({"action": action, "work_id": "work-ctrl"}),
+            );
+            assert!(!ok.ok, "{action} 对未登记 work_id 应拒绝");
+        }
+        // 从登记表取真实 work_id
+        let items = load_work_items(plugin.sessions.storage_root());
+        let real = items.last().unwrap().work_id.clone();
+        for (action, verb) in [("cancel", "取消"), ("pause", "暂停"), ("resume", "恢复")] {
+            let ok = call_tool(
+                &plugin,
+                "control",
+                serde_json::json!({"action": action, "work_id": real}),
+            );
+            assert!(ok.ok, "{action} stderr: {}", ok.stderr);
+            assert!(ok.stdout.contains(verb), "{}", ok.stdout);
+            match dispatch_rx.try_recv().expect("应有 Control 消息") {
+                CentralPluginMessage::Control(req) => {
+                    assert_eq!(req.work_id, real);
+                }
+                other => panic!("应收到 Control，实际 {other:?}"),
+            }
+        }
+        // 未知 action 拒绝；空 work_id 拒绝
+        let bad = call_tool(
+            &plugin,
+            "control",
+            serde_json::json!({"action": "explode", "work_id": real}),
+        );
+        assert!(!bad.ok);
+        let empty = call_tool(&plugin, "control", serde_json::json!({"action": "cancel"}));
+        assert!(!empty.ok);
+    }
+
+    /// work 四 action 分发与参数校验；status 读登记 + 事件时间线。
+    #[test]
+    fn work_actions_dispatch_and_report_status() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        std::fs::write(
+            root.path().join("sessions/s0.json"),
+            serde_json::json!({
+                "id": "s0", "title": "w", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 10:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _ =
+            add_confirmed_workspace(plugin.sessions.storage_root(), std::path::Path::new("/tmp"));
+        let dispatched = call_tool(
+            &plugin,
+            "dispatch_work",
+            serde_json::json!({"task": "查询目标工作", "session_id": "s0"}),
+        );
+        assert!(dispatched.ok, "stderr: {}", dispatched.stderr);
+        let _ = dispatch_rx.try_recv();
+        let items = load_work_items(plugin.sessions.storage_root());
+        let real = items.last().unwrap().work_id.clone();
+        // action=list 与缺省一致
+        let listed = call_tool(&plugin, "work", serde_json::json!({"action": "list"}));
+        assert!(listed.ok);
+        assert!(listed.stdout.contains(real.as_str()));
+        let default = call_tool(&plugin, "work", serde_json::json!({}));
+        assert!(default.ok);
+        assert!(default.stdout.contains(real.as_str()));
+        // status：登记 + 时间线（派发事件已入日志）
+        let status = call_tool(
+            &plugin,
+            "work",
+            serde_json::json!({"action": "status", "work_id": real}),
+        );
+        assert!(status.ok, "stderr: {}", status.stderr);
+        assert!(status.stdout.contains(real.as_str()));
+        assert!(status.stdout.contains("查询目标工作"));
+        // 插件层测试宿主不在场：事件日志无记录 → 走「无事件记录」分支
+        //（宿主写入路径由 tiangong-app host_* 测试覆盖）
+        assert!(status.stdout.contains("无事件记录"), "{}", status.stdout);
+        // 未知 work_id / 空 work_id / 未知 action 拒绝
+        let ghost = call_tool(
+            &plugin,
+            "work",
+            serde_json::json!({"action": "status", "work_id": "work-none"}),
+        );
+        assert!(!ghost.ok);
+        for action in ["status", "timeline"] {
+            let missing = call_tool(&plugin, "work", serde_json::json!({"action": action}));
+            assert!(!missing.ok, "{action} 缺 work_id 应拒绝");
+        }
+        let bad = call_tool(&plugin, "work", serde_json::json!({"action": "explode"}));
+        assert!(!bad.ok);
+        // timeline：无事件但登记存在（手工落盘一条无事件登记）
+        let legacy = central_state::WorkItemRecord {
+            work_id: "work-legacy".to_string(),
+            reused_session: false,
+            session_id: "s-legacy".to_string(),
+            task: "旧版本登记".to_string(),
+            model: None,
+            dispatched_at: "2026-11-01 10:00:00".to_string(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: None,
+            execution_id: None,
+        };
+        let _ = upsert_work_item(plugin.sessions.storage_root(), &legacy);
+        let legacy_tl = call_tool(
+            &plugin,
+            "work",
+            serde_json::json!({"action": "timeline", "work_id": "work-legacy"}),
+        );
+        assert!(legacy_tl.ok, "stderr: {}", legacy_tl.stderr);
+        assert!(
+            legacy_tl.stdout.contains("暂无事件记录"),
+            "{}",
+            legacy_tl.stdout
+        );
+    }
+
+    /// send_notification：空标题拒绝、level 归一、通道投递。
+    #[test]
+    fn send_notification_validates_level_and_delivers() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, mut dispatch_rx, _reports) =
+            plugin_with_channel("/tmp/ws".to_string(), manager);
+        let empty = call_tool(
+            &plugin,
+            "send_notification",
+            serde_json::json!({"title": "  ", "message": "x"}),
+        );
+        assert!(!empty.ok);
+        // 非法 level 归一为 info
+        let ok = call_tool(
+            &plugin,
+            "send_notification",
+            serde_json::json!({"title": "构建失败", "message": "详情", "level": "loud"}),
+        );
+        assert!(ok.ok, "stderr: {}", ok.stderr);
+        assert!(ok.stdout.contains("info"), "{}", ok.stdout);
+        match dispatch_rx.try_recv().expect("应有 Notification") {
+            CentralPluginMessage::Notification { title, level, .. } => {
+                assert_eq!(title, "构建失败");
+                assert_eq!(level, "info");
+            }
+            other => panic!("应收到 Notification，实际 {other:?}"),
+        }
+        // 合法 warning level 原样传递
+        let warn = call_tool(
+            &plugin,
+            "send_notification",
+            serde_json::json!({"title": "风险", "message": "m", "level": "warning"}),
+        );
+        assert!(warn.ok);
+        match dispatch_rx.try_recv().expect("第二条 Notification") {
+            CentralPluginMessage::Notification { level, .. } => assert_eq!(level, "warning"),
+            other => panic!("应收到 Notification，实际 {other:?}"),
+        }
+    }
+
+    /// inspect_context 三 focus + 缺省综合摘要。
+    #[test]
+    fn inspect_context_focus_matrix() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[plain.to_str().unwrap()]);
+        let (plugin, _dispatch_rx, _reports) =
+            plugin_with_channel(plain.to_string_lossy().to_string(), manager);
+        std::fs::write(
+            root.path().join("sessions/s-a.json"),
+            serde_json::json!({
+                "id": "s-a", "title": "标题A会话", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 11:00:00", "trust_mode": "Supervised",
+                "cwd": plain.to_string_lossy(), "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // 缺省综合摘要：工作区 + 会话都在
+        let summary = call_tool(&plugin, "inspect_context", serde_json::json!({}));
+        assert!(summary.ok, "stderr: {}", summary.stderr);
+        assert!(summary.stdout.contains("工作区"), "{}", summary.stdout);
+        assert!(summary.stdout.contains("s-a"), "{}", summary.stdout);
+        assert!(summary.stdout.contains("标题A会话"), "{}", summary.stdout);
+        // focus=workspaces / sessions / workspace（默认目录）
+        for focus in ["workspaces", "sessions"] {
+            let r = call_tool(
+                &plugin,
+                "inspect_context",
+                serde_json::json!({"focus": focus}),
+            );
+            assert!(r.ok, "{focus} stderr: {}", r.stderr);
+        }
+        let ws = call_tool(
+            &plugin,
+            "inspect_context",
+            serde_json::json!({"focus": "workspace"}),
+        );
+        assert!(ws.ok, "stderr: {}", ws.stderr);
+        assert!(ws.stdout.contains("非 git 仓库"), "{}", ws.stdout);
+        // focus=workspace 缺 path 且默认目录无效 → 拒绝
+        let bad = call_tool(
+            &plugin,
+            "inspect_context",
+            serde_json::json!({"focus": "workspace", "path": "/nonexistent-dir-xyz"}),
+        );
+        assert!(!bad.ok);
+    }
+
+    /// list_sessions：倒序 + 消息数 + 空态。
+    #[test]
+    fn list_sessions_sorted_with_message_counts() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        // 空态
+        let empty = call_tool(
+            &plugin,
+            "inspect_context",
+            serde_json::json!({"focus": "sessions"}),
+        );
+        assert!(empty.ok);
+        assert!(empty.stdout.contains("没有任何会话"), "{}", empty.stdout);
+        // 两个会话，更新时间不同 + message_count 不同
+        std::fs::write(
+            root.path().join("sessions/older.json"),
+            serde_json::json!({
+                "id": "older", "title": "旧会话", "created_at": "2026-11-09 10:00:00",
+                "updated_at": "2026-11-09 10:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp", "messages": [{"role":"user","content":"a","created_at":"2026-11-09 10:00:00"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("sessions/newer.json"),
+            serde_json::json!({
+                "id": "newer", "title": "新会话", "created_at": "2026-11-10 10:00:00",
+                "updated_at": "2026-11-10 12:00:00", "trust_mode": "Supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let listed = call_tool(
+            &plugin,
+            "inspect_context",
+            serde_json::json!({"focus": "sessions"}),
+        );
+        assert!(listed.ok);
+        let older_pos = listed.stdout.find("older").expect("应含 older");
+        let newer_pos = listed.stdout.find("newer").expect("应含 newer");
+        assert!(newer_pos < older_pos, "按更新时间倒序：{}", listed.stdout);
+        assert!(listed.stdout.contains("1 条消息"), "{}", listed.stdout);
+    }
+
+    /// goal 边界：未知 goal_id、非法 status、save_report 缺参。
+    #[test]
+    fn goal_validates_unknown_goal_and_bad_status() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = manager_with_session_cwds(root.path(), &[]);
+        let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+        let unknown = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "set_goal_status", "goal_id": "goal-none", "status": "achieved"}),
+        );
+        assert!(!unknown.ok);
+        let created = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "save_goal", "title": "边界目标"}),
+        );
+        assert!(created.ok, "stderr: {}", created.stderr);
+        let goal_id = created
+            .stdout
+            .split("（")
+            .nth(1)
+            .and_then(|rest| rest.split('）').next())
+            .map(str::to_string)
+            .expect("应能从输出提取 goal_id");
+        let bad_status = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "set_goal_status", "goal_id": goal_id, "status": "maybe"}),
+        );
+        assert!(!bad_status.ok, "非法 status 应拒绝：{}", bad_status.stdout);
+        let ok_status = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "set_goal_status", "goal_id": goal_id, "status": "achieved"}),
+        );
+        assert!(ok_status.ok, "stderr: {}", ok_status.stderr);
+        // save_report 缺 work_id / summary 拒绝
+        let no_work = call_tool(
+            &plugin,
+            "goal",
+            serde_json::json!({"action": "save_report", "summary": "s"}),
+        );
+        assert!(!no_work.ok);
+    }
 }

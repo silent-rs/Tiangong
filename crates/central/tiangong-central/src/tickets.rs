@@ -372,3 +372,65 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_extra_tests {
+    use super::*;
+
+    /// consume_decision_for_execution：无票据 / 命中消费 / 二次消费拒绝 /
+    /// 过期拒绝。
+    #[test]
+    fn consume_decision_for_execution_paths() {
+        let registry = TicketRegistry::default();
+        // 无票据 → 拒绝
+        assert_eq!(
+            registry.consume_decision_for_execution("exec-none"),
+            TicketVerdict::DeniedUsedOrMissing
+        );
+        // 签发 → 命中消费 → Granted
+        registry.issue_decision("exec-d1", 1, "继续", 3600);
+        assert_eq!(
+            registry.consume_decision_for_execution("exec-d1"),
+            TicketVerdict::Granted
+        );
+        // 二次消费 → 拒绝（一次性）
+        assert_eq!(
+            registry.consume_decision_for_execution("exec-d1"),
+            TicketVerdict::DeniedUsedOrMissing
+        );
+        // 过期 → 拒绝
+        registry.issue_decision("exec-d2", 1, "继续", 1);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(
+            registry.consume_decision_for_execution("exec-d2"),
+            TicketVerdict::DeniedExpired
+        );
+    }
+
+    /// consume_decision（带 ticket_id + 版本）与按 execution 消费的互通。
+    #[test]
+    fn consume_decision_binds_ticket_id_and_version() {
+        let registry = TicketRegistry::default();
+        let ticket = registry.issue_decision("exec-t1", 2, "方案B", 3600);
+        // 版本错绑拒绝（mismatch）
+        assert_eq!(
+            registry.consume_decision(&ticket.ticket_id, "exec-t1", 1),
+            TicketVerdict::DeniedMismatch
+        );
+        // execution 错绑拒绝（mismatch）
+        assert_eq!(
+            registry.consume_decision(&ticket.ticket_id, "exec-other", 2),
+            TicketVerdict::DeniedMismatch
+        );
+        // 正确组合 → Granted
+        assert_eq!(
+            registry.consume_decision(&ticket.ticket_id, "exec-t1", 2),
+            TicketVerdict::Granted
+        );
+        // 同一票据按 execution 再消费 → 已用拒绝
+        assert_eq!(
+            registry.consume_decision_for_execution("exec-t1"),
+            TicketVerdict::DeniedUsedOrMissing
+        );
+    }
+}

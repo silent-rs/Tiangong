@@ -159,3 +159,84 @@ fn write_apis_report_result() {
         "空表落盘也应 Ok"
     );
 }
+
+// ============ 覆盖率补充批（2026-11-16）：字段级 setter / goals / reports ============
+
+/// 会话级 setter 三件套：命中条目修改、未命中 no-op 成功、落盘可读回。
+#[test]
+fn session_setters_mutate_latest_and_tolerate_unknown_session() {
+    use central_state::persistence::{
+        clear_work_item_queued, load_work_items, mark_work_item_queued, set_work_item_execution,
+        set_work_item_outcome,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path();
+    upsert_work_item(base, &record("s-set", "setter 目标")).unwrap();
+    // outcome 命中
+    set_work_item_outcome(base, "s-set", "completed").unwrap();
+    // queued 标记 → 清除
+    mark_work_item_queued(base, "s-set", "work-dep", Some("/ws")).unwrap();
+    clear_work_item_queued(base, "s-set").unwrap();
+    // execution 归属写入
+    set_work_item_execution(base, "s-set", "exec-1").unwrap();
+    let items = load_work_items(base);
+    let entry = items
+        .iter()
+        .rev()
+        .find(|i| i.session_id == "s-set")
+        .unwrap();
+    assert_eq!(entry.outcome.as_deref(), Some("completed"));
+    assert!(entry.queued_at.is_none() && entry.after_work_id.is_none());
+    assert_eq!(entry.execution_id.as_deref(), Some("exec-1"));
+    // 未命中会话：no-op 成功（不报错、不改文件）
+    set_work_item_outcome(base, "s-none", "failed").unwrap();
+    clear_work_item_queued(base, "s-none").unwrap();
+    set_work_item_execution(base, "s-none", "exec-x").unwrap();
+    let after = load_work_items(base);
+    assert_eq!(after.len(), items.len(), "未命中不得新增条目");
+}
+
+/// goals / reports 存储往返与坏文件回退空表。
+#[test]
+fn goals_and_reports_roundtrip_and_corrupt_fallback() {
+    use central_state::persistence::{
+        load_goals, load_reports, save_goals, save_reports, GoalRecord, ReportRecord,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path();
+    // 空态
+    assert!(load_goals(base).is_empty());
+    assert!(load_reports(base).is_empty());
+    // 往返
+    let goal = GoalRecord {
+        goal_id: "goal-g1".to_string(),
+        title: "覆盖率目标".to_string(),
+        description: "补齐中枢测试".to_string(),
+        workspace: None,
+        created_at: "2026-11-16 10:00:00".to_string(),
+        status: "active".to_string(),
+    };
+    let report = ReportRecord {
+        report_id: "report-r1".to_string(),
+        work_id: "work-r1".to_string(),
+        summary: "覆盖率已补齐".to_string(),
+        artifacts: Vec::new(),
+        risks: Vec::new(),
+        created_at: "2026-11-16 10:00:00".to_string(),
+    };
+    save_goals(base, &[goal]).unwrap();
+    save_reports(base, &[report]).unwrap();
+    let goals = load_goals(base);
+    assert_eq!(goals.len(), 1);
+    assert_eq!(goals[0].goal_id, "goal-g1");
+    assert_eq!(goals[0].title, "覆盖率目标");
+    let reports = load_reports(base);
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].work_id, "work-r1");
+    assert_eq!(reports[0].summary, "覆盖率已补齐");
+    // 坏 JSON → 空表（宽松读，不 panic）
+    std::fs::write(base.join("central/goals.json"), "{broken").unwrap();
+    std::fs::write(base.join("central/reports.json"), "{broken").unwrap();
+    assert!(load_goals(base).is_empty());
+    assert!(load_reports(base).is_empty());
+}

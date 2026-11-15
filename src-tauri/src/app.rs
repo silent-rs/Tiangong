@@ -1639,6 +1639,326 @@ mod tests {
         }
     }
 
+    // ============ 宿主覆盖补充批（2026-11-16）：control / reports / recover ============
+
+    /// control cancel：registry 终态 + 落盘 outcome=cancelled + 事件入日志。
+    #[tokio::test]
+    async fn host_control_cancel_persists_terminal_state() {
+        let app = tauri::test::mock_app();
+        let state = {
+            let (s, _ws) = central_test_app();
+            std::fs::write(
+                s.core_manager.storage_root().join("models.json"),
+                serde_json::json!({
+                    "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                    "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                    "routing": {"chat": "k3"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 预置：登记 + registry Running
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-ctl1".into(),
+            reused_session: false,
+            session_id: "s-ctl".into(),
+            task: "被取消的工作".into(),
+            model: None,
+            dispatched_at: "2026-11-16 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: None,
+            execution_id: Some("exec-ctl1".into()),
+        };
+        let _ = crate::central::upsert_work_item(&storage_root, &record);
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(central_state::WorkStatus {
+                work_id: "work-ctl1".into(),
+                session_id: "s-ctl".into(),
+                task: "被取消的工作".into(),
+                model: None,
+                dispatched_at: "2026-11-16 10:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+                execution_id: Some("exec-ctl1".into()),
+            });
+        crate::central_host::dispatch::handle_central_control(
+            state,
+            handle,
+            crate::central::CentralControlRequest {
+                work_id: "work-ctl1".into(),
+                session_id: "s-ctl".into(),
+                action: "cancelled".into(),
+            },
+        )
+        .await;
+        // registry → Cancelled（终态）
+        let registry = state.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter()
+            .rev()
+            .find(|e| e.session_id == "s-ctl")
+            .unwrap();
+        assert_eq!(entry.state, central_state::WorkState::Cancelled);
+        drop(registry);
+        // 落盘 outcome=cancelled
+        let items = crate::central::load_work_items(&storage_root);
+        let saved = items
+            .iter()
+            .rev()
+            .find(|i| i.session_id == "s-ctl")
+            .unwrap();
+        assert_eq!(saved.outcome.as_deref(), Some("cancelled"));
+        assert!(saved.finished_at.is_some());
+        // 事件日志含 work_item.cancelled
+        let timeline =
+            crate::central_host::central_events::work_timeline(&storage_root, "work-ctl1");
+        assert!(
+            timeline
+                .iter()
+                .any(|(_, kind, _)| kind == "work_item.cancelled"),
+            "应有取消事件：{timeline:?}"
+        );
+    }
+
+    /// control pause → registry Paused + blocked 事件；resume 走派发链回 Running。
+    #[tokio::test]
+    async fn host_control_pause_resume_roundtrip() {
+        let app = tauri::test::mock_app();
+        let state = {
+            let (s, _ws) = central_test_app();
+            std::fs::write(
+                s.core_manager.storage_root().join("models.json"),
+                serde_json::json!({
+                    "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                    "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                    "routing": {"chat": "k3"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 工作会话文件（resume 的派发链要求会话存在 + cwd 授权）
+        std::fs::create_dir_all(storage_root.join("sessions")).unwrap();
+        std::fs::write(
+            storage_root.join("sessions/s-resume.json"),
+            serde_json::json!({
+                "id": "s-resume", "title": "w", "created_at": "2026-11-16 10:00:00",
+                "updated_at": "2026-11-16 10:00:00", "trust_mode": "supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _ = central_state::persistence::add_confirmed_workspace(
+            &storage_root,
+            std::path::Path::new("/tmp"),
+        );
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-res1".into(),
+            reused_session: true,
+            session_id: "s-resume".into(),
+            task: "暂停后恢复的工作".into(),
+            model: None,
+            dispatched_at: "2026-11-16 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: None,
+            execution_id: Some("exec-res1".into()),
+        };
+        let _ = crate::central::upsert_work_item(&storage_root, &record);
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(central_state::WorkStatus {
+                work_id: "work-res1".into(),
+                session_id: "s-resume".into(),
+                task: "暂停后恢复的工作".into(),
+                model: None,
+                dispatched_at: "2026-11-16 10:00:00".into(),
+                state: central_state::WorkState::Running,
+                reused_session: true,
+                last_activity: None,
+                cwd: None,
+                execution_id: Some("exec-res1".into()),
+            });
+        // pause
+        crate::central_host::dispatch::handle_central_control(
+            state,
+            handle,
+            crate::central::CentralControlRequest {
+                work_id: "work-res1".into(),
+                session_id: "s-resume".into(),
+                action: "paused".into(),
+            },
+        )
+        .await;
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.session_id == "s-resume")
+                .unwrap();
+            assert_eq!(entry.state, central_state::WorkState::Paused);
+        }
+        // resume：走 Steer→dispatch 链（复用会话）——直接调派发链并断言
+        // 成功（错误路径只 warn 会被吞，这里显式暴露）
+        let resume_request = crate::central::CentralDispatchRequest {
+            work_id: "work-res1".into(),
+            execution_id: tiangong_central::new_execution_id(),
+            session_id: "s-resume".into(),
+            task: "继续之前暂停的任务".into(),
+            model: None,
+            cwd: None,
+            after_work_id: None,
+            parallel: false,
+            reused_session: true,
+        };
+        crate::central_host::dispatch::handle_central_dispatch(state, handle, resume_request)
+            .await
+            .expect("resume 派发应成功");
+        let registry = state.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter()
+            .rev()
+            .find(|e| e.session_id == "s-resume")
+            .unwrap();
+        assert_eq!(
+            entry.state,
+            central_state::WorkState::Running,
+            "resume 后应回到执行中"
+        );
+    }
+
+    /// 回报暂存链：push → take 非空 → clear 清空。
+    #[test]
+    fn host_reports_push_take_clear_cycle() {
+        let (state, _ws) = central_test_app();
+        assert!(state.take_central_work_reports().is_empty());
+        state.push_central_work_reports(vec!["工作A完成".to_string()]);
+        state.push_central_work_reports(vec!["工作B完成".to_string()]);
+        let taken = state.take_central_work_reports();
+        assert_eq!(taken.len(), 2);
+        assert!(taken[0].contains("工作A"));
+        // take 是取走语义（std::mem::take）：再取为空
+        assert!(state.take_central_work_reports().is_empty());
+        // clear_queued_work_reports 清的是 registry 待汇报态（ReportQueued→
+        // Completed，ReportsCollected 消息的状态同步路径），不动回报队列
+        state.push_central_work_reports(vec!["工作C完成".to_string()]);
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(central_state::WorkStatus {
+                work_id: "work-q1".into(),
+                session_id: "s-q".into(),
+                task: "待汇报工作".into(),
+                model: None,
+                dispatched_at: "2026-11-16 10:00:00".into(),
+                state: central_state::WorkState::ReportQueued,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+                execution_id: None,
+            });
+        state.clear_queued_work_reports();
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-q1")
+                .unwrap();
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::Completed,
+                "待汇报态应收拢为完成"
+            );
+        }
+        assert!(
+            !state.take_central_work_reports().is_empty(),
+            "clear 不清回报队列"
+        );
+    }
+
+    /// 重启恢复：事件日志投影重建 registry（R5 唯一事实源）。
+    #[test]
+    fn host_recover_rebuilds_registry_from_event_log() {
+        let app = tauri::test::mock_app();
+        let state = {
+            let (s, _ws) = central_test_app();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state_of_handle = state_of(handle);
+        let storage_root = state_of_handle.core_manager.storage_root().to_path_buf();
+        // 事件日志（真实行格式：offset + schema_version + event 包裹）：
+        // 每个工作一条 started（登记字段）+ 一条终态（投影状态）
+        let log_path = storage_root.join("central/events.jsonl");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let mut lines = Vec::new();
+        let mut offset = 0;
+        for (work, session, final_kind) in [
+            ("work-a", "s-a", "work_item.completed"),
+            ("work-b", "s-b", "work_item.failed"),
+        ] {
+            for (kind, note) in [("work_item.started", "派发投递成功"), (final_kind, "终态")]
+            {
+                let line = serde_json::json!({
+                    "offset": offset,
+                    "schema_version": 1,
+                    "event": {
+                        "id": format!("ev-{work}-{offset}"),
+                        "work_item_id": work,
+                        "event_type": kind,
+                        "severity": "normal",
+                        "requires_user_action": false,
+                        "worker_session_id": session,
+                        "payload": {
+                            "note": note,
+                            "task": "恢复任务",
+                            "dispatched_at": "2026-11-16 09:00:00"
+                        },
+                        "created_at": "2026-11-16 10:00:00"
+                    }
+                });
+                lines.push(line.to_string());
+                offset += 1;
+            }
+        }
+        std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
+        crate::central_host::recover_central_work_state(handle);
+        let registry = state_of_handle.central_work_registry.lock().unwrap();
+        assert_eq!(registry.len(), 2, "事件投影应重建两条登记");
+        assert!(registry.iter().any(|e| e.work_id == "work-a"));
+        assert!(registry.iter().any(|e| e.work_id == "work-b"));
+    }
+
     /// W5-T1（P1-1 真锁·第二 turn 回报）**真两 turn**：第一 turn（waiting_user
     /// 分流）→ 模拟答复恢复（registry 回 running）→ 第二 turn 终态。
     /// 反向验证留痕（第十五轮 review 要求）：恢复 central_finished_once 集合版，

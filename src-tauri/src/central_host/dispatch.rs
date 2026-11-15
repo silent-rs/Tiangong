@@ -156,9 +156,9 @@ pub(crate) fn build_worker_instruction(work_id: &str, task: &str) -> String {
 }
 
 /// 中枢工作控制执行：cancelled/paused 中断运行时，resume 发送继续指令。
-async fn handle_central_control(
+pub(crate) async fn handle_central_control<R: tauri::Runtime>(
     state: &TiangongApp,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     control: crate::central::CentralControlRequest,
 ) {
     let was_running = state

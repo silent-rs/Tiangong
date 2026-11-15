@@ -311,3 +311,48 @@ mod tests {
         assert_eq!(back.execution_id.as_deref(), Some("exec-abc123"));
     }
 }
+
+#[cfg(test)]
+mod coverage_extra_tests {
+    use super::*;
+
+    /// builder 全链：user_action / payload / worker_session / severity。
+    #[test]
+    fn event_builders_set_optional_fields() {
+        let event = WorkEvent::new("work-b1", WorkEventType::ApprovalRequired)
+            .with_user_action()
+            .with_payload(serde_json::json!({"dir": "/ws"}))
+            .with_worker_session("s-worker")
+            .with_severity(EventSeverity::Critical);
+        assert!(event.requires_user_action);
+        assert_eq!(event.payload["dir"], "/ws");
+        assert_eq!(event.worker_session_id.as_deref(), Some("s-worker"));
+        assert_eq!(event.severity, EventSeverity::Critical);
+        // severity serde snake_case 往返
+        let text = serde_json::to_string(&event.severity).unwrap();
+        assert_eq!(text, "\"critical\"");
+    }
+
+    /// EventSeverity::as_str 全枚举 + 与 from_str_name 的名称一致性。
+    #[test]
+    fn severity_names_cover_all_variants() {
+        for (sev, name) in [
+            (EventSeverity::Info, "info"),
+            (EventSeverity::Normal, "normal"),
+            (EventSeverity::Warning, "warning"),
+            (EventSeverity::Critical, "critical"),
+        ] {
+            assert_eq!(sev.as_str(), name);
+        }
+        // WorkEventType::as_str 与 ALL 一致（防新增变体漏映射）
+        for event_type in WorkEventType::ALL {
+            assert_eq!(
+                WorkEventType::from_str_name(event_type.as_str()),
+                Some(event_type),
+                "{} 应可解析",
+                event_type.as_str()
+            );
+        }
+        assert_eq!(WorkEventType::from_str_name("no.such.event"), None);
+    }
+}
