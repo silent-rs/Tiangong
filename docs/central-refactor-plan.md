@@ -894,9 +894,54 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 8. **投影按 work_item_id 单键**（十九轮 P2-4 备注）：steer 与 owner 共用 work_id、execution_id 区分——调度器按同会话互斥排队，steer 与 owner 执行不并发的假设成立（`queue_decision` 同会话重派不拦但 dispatch 顺序投递）。
 
 ### A.3 验证与验收状态
+- 每提交独立可编译、可回滚；**Rust 全量 700 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十轮合并后实测；中枢相关：central-plugin 33 + tiangong-central 29 + central-state 19 + tiangong-app 宿主/中枢 29）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
 
-- 每提交独立可编译、可回滚；**Rust 全量 700 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十轮合并后实测；中枢相关：central-plugin 32 + tiangong-central + central-state + tiangong-app 158）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
-- §8 测试矩阵覆盖情况：领域/存储/权限/Host 集成大部分以单元与集成测试锁定（见各提交说明）；**§8.5 前端转场矩阵与 §8.6 实机验收十步未执行**——需要真实桌面环境（`cargo tauri dev` + 人工操作），合并前应完成并回填记录。
+#### A.3.1 行覆盖率实测（cargo-llvm-cov 0.9.1，2026-11-16）
+
+核心三包（领域 + 存储 + 插件，合计 4606 覆盖行）：
+
+| 模块 | 行覆盖 | 分支 | 备注 |
+| --- | --- | --- | --- |
+| tiangong-central/status.rs | 93.28% | 80% | 状态机转移矩阵有锁 |
+| tiangong-central/tickets.rs | 89.34% | 68% | 票据三拒绝路径有锁 |
+| tiangong-central/event.rs | 87.74% | 76% | 含 legacy 兼容 |
+| tiangong-central/event_log.rs | **77.95%** | **59.62%** | 轮转/修复路径分支多 |
+| tiangong-central/risk.rs | 83.33% | 80% | |
+| tiangong-central/ids.rs、execution.rs | 100% | — | |
+| central-state/lib.rs | 83.81% | 91% | |
+| central-state/persistence.rs | **72.61%** | 65% | 迁移/兜底分支 |
+| central-plugin/lib.rs | 97.55% | 88% | |
+| central-plugin/tools_dispatch.rs | 93.61% | 78% | |
+| central-plugin/tools_goal_report.rs | 87.57% | 91% | |
+| central-plugin/tools_context.rs | 74.82% | 76% | inspect_context 聚合分支 |
+| central-plugin/tools_control.rs | **53.05%** | 60% | control/work 合并入口分支 |
+| central-plugin/workspace_summary.rs | 74.00% | 56% | git 元信息聚合 |
+| **三包合计** | **88.23%** | **76.16%** | |
+
+宿主层（tiangong-app lib 单测，central_host 模块）：
+
+| 文件 | 行覆盖 | 未覆盖集中区（函数级） |
+| --- | --- | --- |
+| execution_router.rs | 94.07% | — |
+| mode_coordinator.rs | 86.06% | — |
+| central_events.rs | 63.51% | work_timeline(36)、migrate_legacy_timeline(14) |
+| dispatch.rs | **54.47%** | handle_central_control(90)、central_dispatch_sender(66)、plan_central_dispatch(35)、handle_central_dispatch(30) |
+| reports.rs | **44.13%** | flush_pending_dispatches(33)、deliver_pending_work_reports(18)、on_central_work_finished(14) |
+| events.rs | 38.10% | system_note 组装分支 |
+| recovery.rs | **31.85%** | recover_central_work_state(69)、inject_central_activation_summary(16) |
+| authorization.rs / core_lifecycle.rs / mode_commands.rs / work_view.rs | **0%** | Tauri command/窗口层——lib 单测无法构造 AppHandle，只能实机验收（§8.6） |
+| （对照）app.rs 全文件 | 76.29% | 含 29 项宿主中枢测试 |
+
+前端：central 相关 12 文件 94 用例（Transition 18 / ModeEntry 16 / Conversation 16 / WorkStatusBar 12 / WorkDrawer 6 / ChatInput 6 / NotificationBridge 5 / SystemNote 4 / CardsBar 4 / ModePreference 3 / Greeting 3 / normalModeSmoke 1）；行覆盖工具未安装，按用例映射评估。
+
+#### A.3.2 §8 矩阵逐项映射（2026-11-16 复核）
+
+**8.1 领域**：状态转移合法性 ✅（transition_matrix_matches_design / queue_decision_combinations）；终态幂等 ✅（late_callback_cannot_rewrite_terminal_entry / terminal_states_are_immutable）；execution 归属 ✅（host_dispatch_records_execution_ownership / stale_callback_from_old_execution_is_dropped）；同 session 多 execution ✅；waiting_user 恢复 ✅（merge_waiting_user_restores_and_returns_owner / second_turn_after_resume_produces_report / host_second_turn_after_resume_is_reported）；cancel/pause 后迟到 Done ✅（cancel_guard / pause_guard / resume_from_pause_takes_recovery_not_merge）；依赖与 Workspace 锁 ✅（queue_decision_combinations 含 parallel 豁免与高风险失效 / host_dispatch_queued_does_not_deliver）；WorkerReport 不进用户消息流 ✅（work_report_timing_follows_design）；Guidance 回到同一 execution ✅（steer_into_running_work_keeps_ownership + host_steer_keeps_owner_registry）；「证据不足不生成完成报告」「用户不看到伪造 UserMessage」⏳ 行为级由 MessageRender 机制约束（system-note 渲染有前端锁），无端到端断言；报告聚合策略 ✅（collect_work_reports_takes_all_then_empty / report_archive_roundtrip）。
+**8.2 存储**：并发 append ✅×3；torn tail 修复 ✅；临时文件残留 ✅；重复 event ✅×2；旧 JSON 迁移 ✅×4；日志/快照不一致修复 ✅×3（rebuild 系）。「snapshot 写一半进程退出」由 envelope 版本 + 宽松读覆盖，无精确 kill-9 场景 ⏳。
+**8.3 权限**：伪造确认 ✅（request_workspace_approval_sends_request_not_confirmation / forged_ticket_id_is_denied）；过期票据 ✅；错绑 work_id/execution ✅×3；parallel 越权（高风险失效）✅；中枢无法调 Worker 工具 ✅×3（双向入口拒绝）；未授权 Workspace fail-closed ✅×2。
+**8.4 Host 集成**：派发后立即完成 ✅（fire_before_attach_buffers_and_replays）；派发失败 ✅（delivery_failure_rollback_keeps_item）；回调投递前后 ✅；应用重启恢复 ✅×4；多 Worker 同时终态 ⏳（部分：dispatch_reuse_fires_live_slot_callback）；模式切换期间 Worker 继续执行 ⏳（快照归还有锁，时序无断言）；中枢 Core 失败不影响普通 Worker ❌（core_lifecycle 0%）。
+**8.5 前端**：九项全部 ✅（见 A.3.1 用例分布）。
+**8.6 实机验收**：❌ 未执行——唯一整体空缺，需真实桌面环境（`cargo tauri dev` + 人工操作），合并前完成并回填。
 
 ### A.5 实测反馈修复记录（2026-11-13，第十八轮收口）
 
