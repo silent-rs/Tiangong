@@ -205,6 +205,17 @@ pub fn work_timeline(
         .unwrap_or_default()
 }
 
+/// 事件 payload 的 reused_session 标记（迁移补登记字段后恒存在；缺省
+/// 视为 owner 派发）。
+fn payload_is_reused(logged: &tiangong_central::LoggedEvent) -> bool {
+    logged
+        .event
+        .payload
+        .get("reused_session")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// 从事件日志投影重建登记（R5：registry 由事件重放，消除第二事实源）。
 ///
 /// 每个 work_item：最后一次 `work_item.started` 的 payload 提供登记字段
@@ -231,11 +242,23 @@ pub fn rebuild_registry_from_log(
         }
         let work_id = &logged.event.work_item_id;
         // 会话维度 upsert 语义：同会话保留最后一次 started（倒序遍历，
-        // 首条命中即最新执行——修复此前正序遍历保留最早条目的错误）
-        if registry.iter().any(|entry| {
-            entry.session_id == logged.event.worker_session_id.as_deref().unwrap_or("")
-        }) {
-            continue;
+        // 首条命中即最新执行）。**归属修正（二十一轮 review CC2）**：已
+        // 命中的条目若是引导派发（reused_session=true），而当前遍历到的
+        // 更早 started 是 owner（reused_session=false）——引导并入 owner
+        // （Z2），owner 优先：移除引导孤儿条目，改留 owner。否则引导
+        // 孤儿会在重启迁移后变成「已中断的假任务（可重派）」——真实
+        // 工作条目消失且 control(owner) 失效。
+        let current_session = logged.event.worker_session_id.as_deref().unwrap_or("");
+        let current_is_owner = !payload_is_reused(logged);
+        if let Some(position) = registry
+            .iter()
+            .position(|entry| entry.session_id == current_session)
+        {
+            let existing_is_owner = !registry[position].reused_session;
+            if existing_is_owner || !current_is_owner {
+                continue;
+            }
+            registry.remove(position);
         }
         let Some(status) = states.get(work_id) else {
             continue;

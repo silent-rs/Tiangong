@@ -1850,6 +1850,99 @@ mod tests {
         assert!(!reused.expect("复用应成功"), "已建核心应复用");
     }
 
+    // ============ 二十一轮 review 修复锁（CC2 引导归属 / 中断计数） ============
+
+    /// CC2：重启重建时同会话引导孤儿让位 owner——owner 条目不消失、
+    /// control(owner) 恢复可达；仅有引导（冷启动边缘）时保留引导条目。
+    #[tokio::test]
+    async fn host_rebuild_prefers_owner_over_steer_orphan() {
+        let app = tauri::test::mock_app();
+        let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
+        app.manage(state);
+        let handle = app.handle();
+        let state_of_handle = state_of(handle);
+        let storage_root = state_of_handle.core_manager.storage_root().to_path_buf();
+        let log_path = storage_root.join("central/events.jsonl");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let mut lines = Vec::new();
+        let events: [(&str, &str, &str, bool); 4] = [
+            // owner 派发（reused=false）→ running
+            ("work-ownerX", "s-cc2", "work_item.started", false),
+            // 引导（reused=true，更晚）——重启后不得顶替 owner
+            ("work-steerX", "s-cc2", "work_item.started", true),
+            // 对照：另一会话仅有引导（冷启动边缘）→ 保留
+            ("work-only-steer", "s-cc2b", "work_item.started", true),
+            // ownerY 终态（failed）——保证 states 有终态投影可取
+            ("work-ownerY", "s-cc2y", "work_item.started", false),
+        ];
+        for (offset, (work, session, kind, reused)) in events.into_iter().enumerate() {
+            lines.push(
+                serde_json::json!({
+                    "offset": offset,
+                    "schema_version": 1,
+                    "event": {
+                        "id": format!("ev-cc2-{offset}"),
+                        "work_item_id": work,
+                        "event_type": kind,
+                        "severity": "normal",
+                        "requires_user_action": false,
+                        "worker_session_id": session,
+                        "payload": {
+                            "note": "n", "task": "CC2 任务", "dispatched_at": "2026-11-16 09:00:00",
+                            "reused_session": reused
+                        },
+                        "created_at": "2026-11-16 10:00:00"
+                    }
+                })
+                .to_string(),
+            );
+        }
+        std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
+        crate::central_host::recover_central_work_state(handle);
+        {
+            let registry = state_of_handle
+                .central
+                .central_work_registry
+                .lock()
+                .unwrap();
+            // s-cc2：owner 保留（引导孤儿被移除，不是并存/顶替）
+            let cc2: Vec<_> = registry
+                .iter()
+                .filter(|e| e.session_id == "s-cc2")
+                .collect();
+            assert_eq!(cc2.len(), 1, "同会话一条：{cc2:?}");
+            assert_eq!(cc2[0].work_id, "work-ownerX", "owner 优先于更晚的引导孤儿");
+            assert!(!cc2[0].reused_session);
+            // s-cc2b：仅引导 → 保留（不能因无 owner 而丢登记）
+            let cc2b: Vec<_> = registry
+                .iter()
+                .filter(|e| e.session_id == "s-cc2b")
+                .collect();
+            assert_eq!(cc2b.len(), 1);
+            assert_eq!(cc2b[0].work_id, "work-only-steer");
+        }
+        // control(owner) 可达：登记存在即发 Control 消息（通道未启动仅验证不拒绝）
+        // control 可达性验证：调用本身（登记存在即执行，无拒绝返回值可断言）
+        crate::central_host::dispatch::handle_central_control(
+            &state_of_handle.central,
+            handle,
+            crate::central::CentralControlRequest {
+                work_id: "work-ownerX".into(),
+                session_id: "s-cc2".into(),
+                action: "cancelled".into(),
+            },
+        )
+        .await;
+        let items = crate::central::load_work_items(&storage_root);
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.work_id == "work-steerX" && i.outcome.is_some()),
+            "引导孤儿不得落成可重派假任务"
+        );
+    }
+
     // ============ 宿主覆盖补充批五（2026-11-16）：终态矩阵 / 排队 / 迁移 / 决定票据 ============
 
     fn reg_entry(

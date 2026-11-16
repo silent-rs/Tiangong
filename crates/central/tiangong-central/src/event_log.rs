@@ -705,10 +705,15 @@ mod coverage_extra_tests {
         }
     }
 
-    /// 跨实例 append：第二个实例首次 append 触发 cache 重扫分支
-    ///（cache.loaded=false → load_all_inner 回填 offset/seen_ids）。
+    /// 跨实例 append 的 offset 连续性（二十一轮 review CC3 注释诚实化）：
+    /// 同进程内每路径共享 cache（Z5 注册表），第二实例命中共享 cache 不
+    /// 重扫——本测试锁定的是「无论实例边界，offset 不与既有行冲突」；
+    /// loaded=false 的真实重扫分支由每个**新路径**日志的首次 append
+    /// 覆盖（见 append_assigns_increasing_offsets / duplicate_* 系列，
+    /// 均在新 tempdir 路径上首 append）。跨进程场景不适用（单实例桌面
+    /// 应用，events.jsonl 无跨进程并发写）。
     #[test]
-    fn second_instance_append_rescans_before_write() {
+    fn second_instance_append_keeps_offsets_continuous() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         let first = EventLog::open(&path).unwrap();
@@ -728,5 +733,9 @@ mod coverage_extra_tests {
             entries[0].offset + 1,
             "跨实例 offset 必须连续（不与既有行冲突）"
         );
+        // 全量严格递增（防共享 cache 与文件状态分叉）
+        for pair in entries.windows(2) {
+            assert!(pair[1].offset > pair[0].offset, "offset 应严格递增");
+        }
     }
 }

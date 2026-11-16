@@ -21,13 +21,13 @@ R0～R5 全部完成；消息卡片第一片完成（授权卡片票据闭环 + 
 | R4 ModeCoordinator 与前端 | ✅ | `120ef2bb` `1cf0fe61` | 宿主模式状态机 + 快照归还 + 偏好持久化 + 前端接线（宿主快照优先，本地兜底过渡）；前端工作视图（抽屉/卡片）待做 |
 | R5 清理 POC 兼容层 | ✅ | `0ea3293e` `fd7f9cab` `d0ace0a7` `13704405` `5cd27fb6` | 时间线双写消除（事件日志唯一事实源、旧数据迁移+兼容读）；插件压缩/快照 envelope/实机验收待做 |
 
-## 验证基线
-
+## 验证基线（2026-11-16 二十一轮修复后刷新）
 - `cargo clippy --workspace --all-targets -- -D warnings` 退出 0（CI 口径）
-- `cargo test -p tiangong-central -p central-state -p central-plugin -p tiangong-app` 全绿（30 + 26 + 33 + 158 = 247 lib + 1 bin = 248；含 Z1 两条具名锁、Z2 锁定与轮转/重复 id 用例）
+- `cargo test -p tiangong-central -p central-state -p central-plugin -p central-host -p tiangong-app` 全绿（36 + 23 + 39 + 11 + 168；workspace 全量约 730 项）
+- 覆盖率（llvm-cov）：核心三包 94.41%（分支 84.41%）；central-host 全文件 ≥70%（mode_commands/work_view 100%、authorization 87%、core_lifecycle 83%、central_events 85%）
+- 前端：`tsc --noEmit` 0 错误；Vitest 586/586（65 文件，中枢 12 文件 94 用例）
 - clippy / fmt 干净（仓库余 warning 均为 POC 既有 workspace 依赖声明，非本分支引入）
-- 前端未动（R4 之前保持 POC 界面）
-
+- 前端已完成 R4/R6b：模式切换/工作视图/抽屉/卡片 + features/central 特性模块化
 ## R4 剩余要点（方案 §4 / §6）
 
 1. DecisionTicket 消费点接线：等待用户 → 用户选择 → 恢复同一 execution 的链路校验（决定卡片触发）。

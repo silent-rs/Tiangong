@@ -49,10 +49,6 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
             )
         })
         .collect();
-    let interrupted_count = entries
-        .iter()
-        .filter(|e| e.state == central_state::WorkState::Interrupted)
-        .count();
     for entry in &entries {
         tracing::info!(
             work_id = %entry.work_id,
@@ -94,6 +90,12 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
             entry
         })
         .collect();
+    // 中断计数取在迁移**之后**（二十一轮 review：此前取在 in-flight→
+    // Interrupted 迁移之前，恒为 0——摘要漏报「离开期间有工作中断」）
+    let interrupted_count = entries
+        .iter()
+        .filter(|e| e.state == central_state::WorkState::Interrupted)
+        .count();
     registry.extend(entries);
     drop(registry);
     for request in queued_replay {

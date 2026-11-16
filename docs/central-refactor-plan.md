@@ -892,9 +892,10 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 6. **模式状态机两态化**（十九轮 Z7）：`EnterRequested/ExitRequested` 为从未置位的死变体，已删——`request_enter/exit` 同步完成转移；完整异步状态机（含进入失败回退/恢复失败重试）待前端转场异步化时引入。
 7. **事件轮转与归档读回**（十九轮 P2-1）：100MB 归档 `events.jsonl.1`，`load_all` 拼接归档+当前；归档仅一级（下次轮转覆盖）。
 8. **投影按 work_item_id 单键**（十九轮 P2-4 备注）：steer 与 owner 共用 work_id、execution_id 区分——调度器按同会话互斥排队，steer 与 owner 执行不并发的假设成立（`queue_decision` 同会话重派不拦但 dispatch 顺序投递）。
+9. **换模型持久化为会话默认**（二十一轮 review CC1，用户裁决 A 2026-11-16）：二十轮裁决原文为「本轮生效、不持久改写」；实现与裁决 B 差异——复用派发带 model 经 `set_core_model_ref` 写入 `Session.model_ref`，该会话此后默认沿用新模型（空闲回收/重启重建不回退）。用户明确选定 A（持久化）为目标语义，设计稿 §5.3 与 persona/spec 措辞已同步；偏离二十轮原文以此条为准。
 
 ### A.3 验证与验收状态
-- 每提交独立可编译、可回滚；**Rust 全量 700 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十轮合并后实测；中枢相关：central-plugin 33 + tiangong-central 29 + central-state 19 + tiangong-app 宿主/中枢 29）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
+- 每提交独立可编译、可回滚；**Rust 全量约 730 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十一轮修复后实测；中枢相关：central-plugin 39 + tiangong-central 36 + central-state 23 + central-host 11 + tiangong-app 宿主/中枢 168）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
 
 #### A.3.1 行覆盖率实测（cargo-llvm-cov 0.9.1，2026-11-16；同日补测后刷新）
 
@@ -918,18 +919,18 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | central-plugin/workspace_summary.rs | 74.00% | 56% | git 元信息聚合 |
 | **三包合计** | **94.41%** | **84.41%** | 补测后（原 88.23%/76.16%） |
 
-宿主层（tiangong-app lib 单测，central_host 模块）：
+宿主层（R6 后位于 `crates/central/central-host/`；tiangong-app 测试联测，llvm-cov 双包合并口径）：
 
 | 文件 | 行覆盖 | 未覆盖集中区（函数级） |
 | --- | --- | --- |
 | execution_router.rs | 94.07% | — |
 | mode_coordinator.rs | 86.06% | — |
-| central_events.rs | 83.89%（分支 100%） | 旧时间线迁移幂等+投影映射全枚举已锁 |
+| central_events.rs | 84.62%（分支 100%） | 迁移幂等+投影映射+CC2 引导归属（owner 优先）已锁 |
 | events.rs | 85.71% | system_note 渲染已锁 |
-| dispatch.rs | 73.60% | 终态回调守卫矩阵（取消/暂停/陈旧执行/幂等/waiting_user 分流）+写入锁排队往返+waiting_user 恢复合并+cancel 在跑命令已锁；残余为 deliver 失败清理分支 |
+| dispatch.rs | 73.46% | 终态回调守卫矩阵（取消/暂停/陈旧执行/幂等/waiting_user 分流）+写入锁排队往返+waiting_user 恢复合并+cancel 在跑命令已锁；残余为 deliver 失败清理分支 |
 | reports.rs | 70.39% | 终态矩阵经 handle_work_terminal 全覆盖；残余为 deliver_pending 汇总轮（需中枢 Core 消费流） |
 | events.rs | 38.10% | system_note 组装分支 |
-| recovery.rs | 71.13% | 投影重建+在跑中断迁移+激活摘要幂等/静默已锁 |
+| recovery.rs | 72.73% | 投影重建+在跑中断迁移（计数取迁移后——二十一轮修复）+激活摘要幂等/静默已锁 |
 | authorization.rs | 87.36%（分支 100%） | 签发+persist 双通道+决定票据签发消费闭环已锁 |
 | core_lifecycle.rs | 83.00% | 无模型报错/会话配置沿用/失效模型回退默认/复用刷新已锁 |
 | mode_commands.rs / work_view.rs | 100% | 命令往返/时间线命令已锁 |
@@ -949,10 +950,10 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 
 #### A.3.2 §8 矩阵逐项映射（2026-11-16 复核）
 
-**8.1 领域**：状态转移合法性 ✅（transition_matrix_matches_design / queue_decision_combinations）；终态幂等 ✅（late_callback_cannot_rewrite_terminal_entry / terminal_states_are_immutable）；execution 归属 ✅（host_dispatch_records_execution_ownership / stale_callback_from_old_execution_is_dropped）；同 session 多 execution ✅；waiting_user 恢复 ✅（merge_waiting_user_restores_and_returns_owner / second_turn_after_resume_produces_report / host_second_turn_after_resume_is_reported）；cancel/pause 后迟到 Done ✅（cancel_guard / pause_guard / resume_from_pause_takes_recovery_not_merge）；依赖与 Workspace 锁 ✅（queue_decision_combinations 含 parallel 豁免与高风险失效 / host_dispatch_queued_does_not_deliver）；WorkerReport 不进用户消息流 ✅（work_report_timing_follows_design）；Guidance 回到同一 execution ✅（steer_into_running_work_keeps_ownership + host_steer_keeps_owner_registry）；「证据不足不生成完成报告」「用户不看到伪造 UserMessage」⏳ 行为级由 MessageRender 机制约束（system-note 渲染有前端锁），无端到端断言；报告聚合策略 ✅（collect_work_reports_takes_all_then_empty / report_archive_roundtrip）。
+**8.1 领域**：状态转移合法性 ✅（transition_matrix_matches_design / queue_decision_combinations）；终态幂等 ✅（late_callback_cannot_rewrite_terminal_entry / terminal_states_are_immutable）；execution 归属 ✅（host_dispatch_records_execution_ownership / stale_callback_from_old_execution_is_dropped）；同 session 多 execution ✅；waiting_user 恢复 ✅（merge_waiting_user_restores_and_returns_owner / second_turn_after_resume_produces_report / host_second_turn_after_resume_is_reported）；cancel/pause 后迟到 Done ✅（cancel_guard / pause_guard / resume_from_pause_takes_recovery_not_merge）；依赖与 Workspace 锁 ✅（queue_decision_combinations 含 parallel 豁免与高风险失效 / host_dispatch_queued_does_not_deliver）；WorkerReport 不进用户消息流 ✅（work_report_timing_follows_design）；Guidance 回到同一 execution ✅（steer_into_running_work_keeps_ownership + host_steer_keeps_owner_registry）；「证据不足不生成完成报告」「用户不看到伪造 UserMessage」⏳ 行为级由 MessageRender 机制约束（system-note 渲染有前端锁），无端到端断言（补齐待消息结构化，A.4）；报告聚合策略 ✅（collect_work_reports_takes_all_then_empty / report_archive_roundtrip）。
 **8.2 存储**：并发 append ✅×3；torn tail 修复 ✅；临时文件残留 ✅；重复 event ✅×2；旧 JSON 迁移 ✅×4；日志/快照不一致修复 ✅×3（rebuild 系）。「snapshot 写一半进程退出」由 envelope 版本 + 宽松读覆盖，无精确 kill-9 场景 ⏳。
 **8.3 权限**：伪造确认 ✅（request_workspace_approval_sends_request_not_confirmation / forged_ticket_id_is_denied）；过期票据 ✅；错绑 work_id/execution ✅×3；parallel 越权（高风险失效）✅；中枢无法调 Worker 工具 ✅×3（双向入口拒绝）；未授权 Workspace fail-closed ✅×2。
-**8.4 Host 集成**：派发后立即完成 ✅（fire_before_attach_buffers_and_replays）；派发失败 ✅（delivery_failure_rollback_keeps_item）；回调投递前后 ✅；应用重启恢复 ✅×4；多 Worker 同时终态 ⏳（部分：dispatch_reuse_fires_live_slot_callback）；模式切换期间 Worker 继续执行 ⏳（快照归还有锁，时序无断言）；中枢 Core 失败不影响普通 Worker ❌（core_lifecycle 0%）。
+**8.4 Host 集成**：派发后立即完成 ✅（fire_before_attach_buffers_and_replays）；派发失败 ✅（delivery_failure_rollback_keeps_item）；回调投递前后 ✅；应用重启恢复 ✅×5（投影重建/中断迁移/**CC2 引导归属 owner 优先**/排队重放/快照回退——二十一轮修复后）；多 Worker 同时终态 ⏳（部分：dispatch_reuse_fires_live_slot_callback——单会话多分支已锁，跨会话并发终态无专测）；模式切换期间 Worker 继续执行 ⏳（快照归还有锁，切换中 Worker 不重建有 ensure 复用分支锁，实时序无断言）；中枢 Core 失败不影响普通 Worker ✅（core_lifecycle 83%：中枢 Core 独立持有 `central_core` 字段不经 CoreManager registry——普通 Worker 的 registry/cancel 路径不触中枢实例；构建三态已锁）。
 **8.5 前端**：九项全部 ✅（见 A.3.1 用例分布）。
 **8.6 实机验收**：❌ 未执行——唯一整体空缺，需真实桌面环境（`cargo tauri dev` + 人工操作），合并前完成并回填。
 

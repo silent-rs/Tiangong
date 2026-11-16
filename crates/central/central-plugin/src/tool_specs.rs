@@ -52,7 +52,7 @@ impl ToolSpecProvider for CentralPlugin {
                     "properties": {
                         "task": {"type": "string", "description": "任务描述（新任务用完整描述；引导用简洁指令）"},
                         "session_id": {"type": "string", "description": "复用/引导的目标会话 ID（inspect_context focus=sessions 或 work action=list 查询）"},
-                        "model": {"type": "string", "description": "指定模型 key（list_models 确认；缺省用路由默认）。复用会话时即换模型通道：空闲本轮生效、执行中本轮沿用当前模型"},
+                        "model": {"type": "string", "description": "指定模型 key（list_models 确认；缺省用路由默认）。复用会话时即换模型通道：空闲本轮生效并成为该会话默认（持久化），执行中本轮沿用当前模型"},
                         "cwd": {"type": "string", "description": "工作目录（缺省复用会话自身或全局默认；其他目录需用户授权）"},
                         "after_work_id": {"type": "string", "description": "排队依赖：等待该 work 终态后再投递本工作"},
                         "parallel": {"type": "boolean", "description": "写入锁豁免（仅用户明确要求并行且任务只读时使用）"}
