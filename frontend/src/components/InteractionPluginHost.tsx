@@ -206,6 +206,16 @@ export function InteractionPluginHost({
   const centralPending = centralActive && invocationSessions.current.size > 0;
   const centralRecent = centralActive
     && [...recentSessions].some((sessionId) => sessionId !== CENTRAL_SESSION_ID);
+  // 插件 UI 按 sessionId 过滤征询（App.vue requests.filter）——中枢激活
+  // 时交互面代表所有 worker：sandbox 的 sessionId 传当前 pending 的
+  // worker 会话（而非 central-hub，否则插件过滤恒空、卡片只剩一行空态
+  // ——用户实测「征询始终只显示一排」）。无 pending 时保持当前会话。
+  const pendingWorkerSession = centralActive
+    ? ([...invocationSessions.current.values()].find(
+        (sessionId) => sessionId !== CENTRAL_SESSION_ID,
+      ) ?? null)
+    : null;
+  const sandboxSessionId = pendingWorkerSession ?? currentSessionId;
   const visible = Boolean(
     (currentSessionId && (hasPending || recentSessions.has(currentSessionId)))
       || centralPending
@@ -256,7 +266,7 @@ export function InteractionPluginHost({
               contributionId={handler.contribution_id}
               sandbox={handler.sandbox}
               html={html}
-              sessionId={currentSessionId}
+              sessionId={sandboxSessionId}
               className="block h-full min-h-0 w-full overflow-hidden [max-height:inherit]"
             />
           ) : visible ? (
