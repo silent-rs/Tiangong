@@ -17,8 +17,8 @@ use crate::central_host::mode_coordinator::NormalContextSnapshot;
 
 /// 进入中枢：保存普通上下文快照，状态切 CentralActive（幂等，重入合并）。
 #[tauri::command]
-pub async fn central_mode_enter(
-    app: AppHandle,
+pub async fn central_mode_enter<R: tauri::Runtime>(
+    app: AppHandle<R>,
     active_session_id: Option<String>,
     new_conversation_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -40,7 +40,9 @@ pub async fn central_mode_enter(
 /// `snapshot == null` 表示无可用恢复点（异常进入路径）——前端必须显示
 /// 「原会话不可恢复」并提供「打开新普通对话 / 查看会话列表」选项。
 #[tauri::command]
-pub async fn central_mode_exit(app: AppHandle) -> Result<serde_json::Value, String> {
+pub async fn central_mode_exit<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<serde_json::Value, String> {
     let state = app.state::<TiangongApp>();
     let snapshot = state.mode_coordinator.request_exit();
     state
@@ -54,7 +56,9 @@ pub async fn central_mode_exit(app: AppHandle) -> Result<serde_json::Value, Stri
 
 /// 模式状态查询（前端对账与重启恢复依据）。
 #[tauri::command]
-pub async fn central_mode_state(app: AppHandle) -> Result<serde_json::Value, String> {
+pub async fn central_mode_state<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<serde_json::Value, String> {
     let state = app.state::<TiangongApp>();
     let mode = state.mode_coordinator.state();
     let preference = crate::central_host::mode_coordinator::load_mode_preference(

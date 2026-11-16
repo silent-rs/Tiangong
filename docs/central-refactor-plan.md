@@ -925,14 +925,19 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | execution_router.rs | 94.07% | — |
 | mode_coordinator.rs | 86.06% | — |
 | central_events.rs | 75.83% | migrate_legacy_timeline 部分分支 |
-| dispatch.rs | 61.12% | control 三路径 + cancel 终态落盘已锁；central_dispatch_sender(66，spawn 消费循环) 未锁 |
-| reports.rs | 53.63% | push/take/clear 语义已锁；deliver_pending（需中枢 Core 在线）未锁 |
+| events.rs | 85.71% | system_note 渲染已锁 |
+| dispatch.rs | 69.35% | control 三路径 + cancel 落盘 + sender 消费循环（四类消息）已锁；残余为 Steer 错误注入分支 |
+| reports.rs | 68.72% | push/take/clear + flush_pending（排队投递/非匹配保留/无句柄守卫）已锁；deliver_pending 汇总轮未锁 |
 | events.rs | 38.10% | system_note 组装分支 |
 | recovery.rs | 60.74% | 事件投影重建已锁；activation_summary 注入分支未锁 |
-| authorization.rs / core_lifecycle.rs / mode_commands.rs / work_view.rs | **0%** | Tauri command/窗口层——lib 单测无法构造 AppHandle，只能实机验收（§8.6） |
-| （对照）app.rs 全文件 | 79.37% | 含 33 项宿主中枢测试 |
+| authorization.rs | 59.77% | 签发+persist 双通道+校验已锁；决定票据命令残余 |
+| core_lifecycle.rs | 64.00% | ensure 首建/幂等/alive/deliver/cancel 已锁 |
+| mode_commands.rs / work_view.rs | 100% | 命令往返/时间线命令已锁 |
+| （对照）app.rs 全文件 | 约 80% | 含 42 项宿主中枢测试 |
 
-补测批次（2026-11-16，+21 项）：central-plugin +6（control/work action 矩阵、通知校验、inspect_context focus 矩阵、会话排序、goal 边界）；tiangong-central +7（lenient 三态、投影映射、跨实例 offset、事件 builder、票据消费分支）；central-state +4（setter 三件套、goals/reports 往返、枚举双射）；tiangong-app 宿主 +4（control cancel 落盘/暂停恢复往返、回报 take 语义、事件投影重启重建）。
+补测批次二（2026-11-16，+10 项，宿主深水区）：mode 命令往返（enter/state/exit + 偏好落盘）、work_timeline 命令（空 id 拒绝 + 事件 JSON）、central_approve_workspace（校验/一次性票据/persist 双通道）、system_note_render、sender 消费循环真实 spawn（Notification/ReportsCollected/Control/未授权 Dispatch 四类）、中枢 Core 生命周期（ensure 首建+幂等双检/alive/deliver/cancel/shutdown）、flush_pending_dispatches（匹配投递/非匹配保留/无句柄不丢队列/queued 标记清除）。配套：mode_commands/work_view/authorization/ensure_central_core/central_dispatch_sender/flush_pending_dispatches 泛型化 <R: Runtime>（MockRuntime 可测，生产注册不变）。
+
+补测批次一（2026-11-16，+21 项）：central-plugin +6（control/work action 矩阵、通知校验、inspect_context focus 矩阵、会话排序、goal 边界）；tiangong-central +7（lenient 三态、投影映射、跨实例 offset、事件 builder、票据消费分支）；central-state +4（setter 三件套、goals/reports 往返、枚举双射）；tiangong-app 宿主 +4（control cancel 落盘/暂停恢复往返、回报 take 语义、事件投影重启重建）。
 
 前端：central 相关 12 文件 94 用例（Transition 18 / ModeEntry 16 / Conversation 16 / WorkStatusBar 12 / WorkDrawer 6 / ChatInput 6 / NotificationBridge 5 / SystemNote 4 / CardsBar 4 / ModePreference 3 / Greeting 3 / normalModeSmoke 1）；行覆盖工具未安装，按用例映射评估。
 

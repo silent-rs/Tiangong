@@ -1639,6 +1639,504 @@ mod tests {
         }
     }
 
+    // ============ 宿主覆盖补充批四（2026-11-16）：排队投递 flush ============
+
+    /// 排队依赖终态后 flush：pending 投递（after 匹配）、queued 标记清除、
+    /// 非匹配条目保留；无句柄直接返回不丢队列。
+    #[tokio::test]
+    async fn host_flush_pending_dispatches_delivers_matching() {
+        let app = tauri::test::mock_app();
+        let state = {
+            let (s, ws) = central_test_app();
+            std::fs::write(
+                s.core_manager.storage_root().join("models.json"),
+                serde_json::json!({
+                    "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                    "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                    "routing": {"chat": "k3"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let _ = ws;
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 工作会话（flush 后真实投递需要会话 + 授权）
+        std::fs::create_dir_all(storage_root.join("sessions")).unwrap();
+        std::fs::write(
+            storage_root.join("sessions/s-flush.json"),
+            serde_json::json!({
+                "id": "s-flush", "title": "w", "created_at": "2026-11-16 10:00:00",
+                "updated_at": "2026-11-16 10:00:00", "trust_mode": "supervised",
+                "cwd": "/tmp", "messages": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _ =
+            crate::central::add_confirmed_workspace(&storage_root, std::path::Path::new("/tmp"));
+        // 被排队的工作登记（queued 标记 after=work-dep）
+        let queued = crate::central::WorkItemRecord {
+            work_id: "work-flush".into(),
+            reused_session: false,
+            session_id: "s-flush".into(),
+            task: "依赖完成后执行".into(),
+            model: None,
+            dispatched_at: "2026-11-16 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: Some("2026-11-16 10:00:00".into()),
+            after_work_id: Some("work-dep".into()),
+            cwd: None,
+            execution_id: Some("exec-flush".into()),
+        };
+        let _ = crate::central::upsert_work_item(&storage_root, &queued);
+        // pending 队列：一条匹配 after=work-dep + 一条不匹配 after=work-other
+        state.central_pending_dispatches.lock().unwrap().push(
+            crate::central::CentralDispatchRequest {
+                work_id: "work-flush".into(),
+                execution_id: "exec-flush".into(),
+                session_id: "s-flush".into(),
+                task: "依赖完成后执行".into(),
+                model: None,
+                cwd: None,
+                after_work_id: Some("work-dep".into()),
+                parallel: false,
+                reused_session: false,
+            },
+        );
+        state.central_pending_dispatches.lock().unwrap().push(
+            crate::central::CentralDispatchRequest {
+                work_id: "work-hold".into(),
+                execution_id: "exec-hold".into(),
+                session_id: "s-hold".into(),
+                task: "等待其他依赖".into(),
+                model: None,
+                cwd: None,
+                after_work_id: Some("work-other".into()),
+                parallel: false,
+                reused_session: false,
+            },
+        );
+        // 无句柄：直接返回，队列不丢
+        state.flush_pending_dispatches(
+            "work-dep",
+            "s-dep",
+            None::<tauri::AppHandle<tauri::test::MockRuntime>>,
+        );
+        assert_eq!(
+            state.central_pending_dispatches.lock().unwrap().len(),
+            2,
+            "无句柄不消费"
+        );
+        // 有句柄：work-dep 终态 → 匹配条目投递（spawn），非匹配保留
+        state.flush_pending_dispatches("work-dep", "s-dep", Some(handle.clone()));
+        // 等待 spawn 投递完成（registry 出现 s-flush）
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let done = {
+                let registry = state.central_work_registry.lock().unwrap();
+                registry.iter().any(|e| e.session_id == "s-flush")
+            };
+            if done {
+                break;
+            }
+        }
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            assert!(
+                registry.iter().any(|e| e.session_id == "s-flush"),
+                "匹配条目应已投递登记"
+            );
+        }
+        let pending = state.central_pending_dispatches.lock().unwrap();
+        assert_eq!(pending.len(), 1, "非匹配条目保留");
+        assert_eq!(pending[0].work_id, "work-hold");
+        drop(pending);
+        // queued 落盘标记已清除（进入执行即失效）
+        let items = crate::central::load_work_items(&storage_root);
+        let saved = items
+            .iter()
+            .rev()
+            .find(|i| i.session_id == "s-flush")
+            .unwrap();
+        assert!(saved.queued_at.is_none(), "投递后排队标记应清除");
+    }
+
+    // ============ 宿主覆盖补充批三（2026-11-16）：sender 消费循环 / 中枢 Core ============
+
+    /// 派发通道消费循环：真实 spawn 后逐类消息消费（Notification /
+    /// ReportsCollected / Control / 未授权 Dispatch 的错误注入路径）。
+    #[tokio::test]
+    async fn host_sender_channel_consumes_all_message_kinds() {
+        let app = tauri::test::mock_app();
+        let state = {
+            let (s, _ws) = central_test_app();
+            std::fs::write(
+                s.core_manager.storage_root().join("models.json"),
+                serde_json::json!({
+                    "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                    "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                    "routing": {"chat": "k3"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            s
+        };
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 预置：registry 待汇报条目（ReportsCollected 消费对象）+ Running 条目
+        //（Control 消费对象）+ 落盘登记（Control cancel 写 outcome）
+        state
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(central_state::WorkStatus {
+                work_id: "work-sender".into(),
+                session_id: "s-sender".into(),
+                task: "通道消费工作".into(),
+                model: None,
+                dispatched_at: "2026-11-16 10:00:00".into(),
+                state: central_state::WorkState::ReportQueued,
+                reused_session: false,
+                last_activity: None,
+                cwd: None,
+                execution_id: None,
+            });
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-sender".into(),
+            reused_session: false,
+            session_id: "s-sender".into(),
+            task: "通道消费工作".into(),
+            model: None,
+            dispatched_at: "2026-11-16 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: None,
+            execution_id: None,
+        };
+        let _ = crate::central::upsert_work_item(&storage_root, &record);
+        // 启动消费循环（get_or_init + spawn）
+        let tx = crate::central_host::dispatch::central_dispatch_sender(handle);
+        // 1) Notification：emit（mock 静默）不 panic
+        tx.send(crate::central::CentralPluginMessage::Notification {
+            title: "测试通知".into(),
+            message: "m".into(),
+            level: "info".into(),
+        })
+        .unwrap();
+        // 2) ReportsCollected：待汇报条目收拢为 Completed
+        tx.send(crate::central::CentralPluginMessage::ReportsCollected)
+            .unwrap();
+        // 3) Control(cancel)：registry → Cancelled + 落盘 outcome
+        tx.send(crate::central::CentralPluginMessage::Control(
+            crate::central::CentralControlRequest {
+                work_id: "work-sender".into(),
+                session_id: "s-sender".into(),
+                action: "cancelled".into(),
+            },
+        ))
+        .unwrap();
+        // 4) 未授权 Dispatch：错误路径（派发未执行注入中枢——中枢 Core
+        // 不在场时 warn 跳过，不 panic）
+        tx.send(crate::central::CentralPluginMessage::Dispatch(
+            crate::central::CentralDispatchRequest {
+                work_id: "work-denied".into(),
+                execution_id: "exec-denied".into(),
+                session_id: "s-denied".into(),
+                task: "未授权任务".into(),
+                model: None,
+                cwd: Some("/nonexistent-ws-xyz".into()),
+                after_work_id: None,
+                parallel: false,
+                reused_session: false,
+            },
+        ))
+        .unwrap();
+        // 等待消费（unbounded → spawn 逐条处理）
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let done = {
+                let registry = state.central_work_registry.lock().unwrap();
+                registry.iter().rev().any(|e| {
+                    e.work_id == "work-sender" && e.state == central_state::WorkState::Cancelled
+                })
+            };
+            if done {
+                break;
+            }
+        }
+        // 消费结果断言
+        {
+            let registry = state.central_work_registry.lock().unwrap();
+            let entry = registry
+                .iter()
+                .rev()
+                .find(|e| e.work_id == "work-sender")
+                .expect("条目应在");
+            assert_eq!(
+                entry.state,
+                central_state::WorkState::Cancelled,
+                "Control 应被消费"
+            );
+        }
+        let items = crate::central::load_work_items(&storage_root);
+        let saved = items
+            .iter()
+            .rev()
+            .find(|i| i.session_id == "s-sender")
+            .unwrap();
+        assert_eq!(saved.outcome.as_deref(), Some("cancelled"), "cancel 落盘");
+    }
+
+    /// 中枢 Core 生命周期：ensure 首建 / 幂等双检 / alive / deliver / cancel。
+    #[tokio::test]
+    async fn host_central_core_lifecycle_roundtrip() {
+        let app = tauri::test::mock_app();
+        let (state, _ws) = central_test_app();
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        std::fs::write(
+            state.core_manager.storage_root().join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // drain 流通道（中枢 Core 的 stream 消费者）
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+        std::thread::spawn(move || for _ in stream_rx {});
+        // 未建时：deliver 报「不存在」、cancel false
+        assert!(state
+            .deliver_central_message("m0".into(), vec![], None)
+            .is_err());
+        assert!(!state.cancel_central_turn());
+        assert!(!state.central_core_alive());
+        // 首建 true；二次 ensure false（并发双检）
+        let first = state.ensure_central_core(handle, stream_tx.clone()).await;
+        assert!(first.expect("首次创建应成功"), "首次应创建");
+        assert!(state.central_core_alive());
+        let second = state.ensure_central_core(handle, stream_tx).await;
+        assert!(!second.expect("二次应成功返回 false"), "重复 ensure 幂等");
+        // deliver 入队成功 + cancel 送达
+        assert!(state
+            .deliver_central_message(
+                "m1".into(),
+                vec![tiangong_types::ContentBlock::text("你好")],
+                None,
+            )
+            .is_ok());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(state.cancel_central_turn());
+        // 关闭（join 不 panic）
+        state.shutdown_join_central_core().await;
+    }
+
+    // ============ 宿主覆盖补充批二（2026-11-16）：commands / 授权 / 通知渲染 ============
+
+    /// 模式命令往返：enter（快照保存+偏好落盘）→ state → exit（归还快照）。
+    #[tokio::test]
+    async fn host_mode_commands_roundtrip() {
+        let app = tauri::test::mock_app();
+        let (state, _ws) = central_test_app();
+        app.manage(state);
+        let handle = app.handle();
+        // 初始 normal
+        let initial = crate::central_host::mode_commands::central_mode_state(handle.clone())
+            .await
+            .unwrap();
+        assert_eq!(initial["mode"], "normal");
+        // enter：携带普通上下文快照
+        let entered = crate::central_host::mode_commands::central_mode_enter(
+            handle.clone(),
+            Some("s-normal-1".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entered["mode"], "central_active");
+        let mid = crate::central_host::mode_commands::central_mode_state(handle.clone())
+            .await
+            .unwrap();
+        assert_eq!(mid["mode"], "central_active");
+        assert_eq!(mid["last_mode"], "central", "偏好文件记录短名 central");
+        // exit：归还快照（active_session_id 回到普通模式）
+        let exited = crate::central_host::mode_commands::central_mode_exit(handle.clone())
+            .await
+            .unwrap();
+        assert_eq!(exited["mode"], "normal");
+        assert_eq!(exited["snapshot"]["active_session_id"], "s-normal-1");
+        let after = crate::central_host::mode_commands::central_mode_state(handle.clone())
+            .await
+            .unwrap();
+        assert_eq!(after["mode"], "normal");
+        assert_eq!(after["last_mode"], "normal", "偏好随退出落盘");
+    }
+
+    /// 工作时间线命令：空 work_id 拒绝 + 事件 JSON 输出。
+    #[tokio::test]
+    async fn host_work_timeline_command_outputs_events() {
+        let app = tauri::test::mock_app();
+        let (state, ws) = central_test_app();
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 预置一条登记 + 真实派发写事件日志（复用宿主派发链）
+        std::fs::write(
+            storage_root.join("models.json"),
+            serde_json::json!({
+                "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+                "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+                "routing": {"chat": "k3"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _ = crate::central::add_confirmed_workspace(&storage_root, &ws);
+        let record = crate::central::WorkItemRecord {
+            work_id: "work-tlv".into(),
+            reused_session: false,
+            session_id: "s-tlv".into(),
+            task: "时间线命令任务".into(),
+            model: None,
+            dispatched_at: "2026-11-16 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: Some(ws.to_string_lossy().to_string()),
+            execution_id: Some("exec-tlv".into()),
+        };
+        let _ = crate::central::upsert_work_item(&storage_root, &record);
+        crate::central_host::dispatch::handle_central_dispatch(
+            state,
+            handle,
+            crate::central::CentralDispatchRequest {
+                work_id: "work-tlv".into(),
+                execution_id: "exec-tlv".into(),
+                session_id: "s-tlv".into(),
+                task: "时间线命令任务".into(),
+                model: None,
+                cwd: None,
+                after_work_id: None,
+                parallel: false,
+                reused_session: false,
+            },
+        )
+        .await
+        .expect("派发应成功");
+        // 命令：空 work_id 拒绝
+        let empty =
+            crate::central_host::work_view::central_work_timeline(handle.clone(), "  ".to_string())
+                .await;
+        assert!(empty.is_err());
+        // 有事件的 work_id → JSON 数组含 started
+        let timeline = crate::central_host::work_view::central_work_timeline(
+            handle.clone(),
+            "work-tlv".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(!timeline.is_empty(), "事件日志应有派发事件");
+        assert!(
+            timeline
+                .iter()
+                .any(|item| item["kind"] == "work_item.started"),
+            "{timeline:?}"
+        );
+    }
+
+    /// 用户授权命令：校验 + 票据签发 + persist 双通道 + 授权通知注入中枢。
+    #[tokio::test]
+    async fn host_approve_workspace_command_issuance() {
+        let app = tauri::test::mock_app();
+        let (state, ws) = central_test_app();
+        app.manage(state);
+        let handle = app.handle();
+        let state = state_of(handle);
+        let storage_root = state.core_manager.storage_root().to_path_buf();
+        // 空 path / 非目录拒绝
+        let empty = crate::central_host::authorization::central_approve_workspace(
+            handle.clone(),
+            "  ".to_string(),
+            "任务".to_string(),
+            None,
+            None,
+        )
+        .await;
+        assert!(empty.is_err());
+        let not_dir = crate::central_host::authorization::central_approve_workspace(
+            handle.clone(),
+            "/nonexistent-dir-xyz".to_string(),
+            "任务".to_string(),
+            None,
+            None,
+        )
+        .await;
+        assert!(not_dir.is_err());
+        // 成功签发（一次性票据，不 persist）
+        let granted = crate::central_host::authorization::central_approve_workspace(
+            handle.clone(),
+            ws.to_string_lossy().to_string(),
+            "只读分析任务".to_string(),
+            Some(false),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(granted["approval_id"].is_string());
+        assert_eq!(granted["persist"], false);
+        // 目录未长期登记（persist=false）
+        assert!(crate::central::load_confirmed_workspaces(&storage_root)
+            .iter()
+            .all(|p| p != &ws));
+        // persist=true → 长期授权落盘 + 新票据
+        let persisted = crate::central_host::authorization::central_approve_workspace(
+            handle.clone(),
+            ws.to_string_lossy().to_string(),
+            "只读分析任务".to_string(),
+            Some(true),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(persisted["persist"], true);
+        assert!(
+            crate::central::load_confirmed_workspaces(&storage_root)
+                .iter()
+                .any(|p| p == &ws),
+            "persist=true 应登记目录长期授权"
+        );
+    }
+
+    /// system_note_render：kind 透传到渲染数据。
+    #[test]
+    fn system_note_render_carries_kind() {
+        for kind in ["approval", "report", "dispatch-note", "activation"] {
+            let render = crate::central_host::events::system_note_render(kind);
+            assert_eq!(render.plugin, "central-host");
+            assert_eq!(render.view, "system-note");
+            assert_eq!(render.data["kind"], kind);
+        }
+    }
+
     // ============ 宿主覆盖补充批（2026-11-16）：control / reports / recover ============
 
     /// control cancel：registry 终态 + 落盘 outcome=cancelled + 事件入日志。

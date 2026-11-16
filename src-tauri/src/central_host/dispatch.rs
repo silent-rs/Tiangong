@@ -11,8 +11,8 @@ use super::events::{emit_central_work_updated, emit_central_work_updated_state};
 use super::state_of;
 
 /// 中枢派发执行器通道（惰性启动消费循环）。
-pub(crate) fn central_dispatch_sender(
-    app: &tauri::AppHandle,
+pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
 ) -> tokio::sync::mpsc::UnboundedSender<crate::central::CentralPluginMessage> {
     use tauri::Manager;
     let state = app.state::<TiangongApp>();

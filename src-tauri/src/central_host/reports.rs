@@ -151,11 +151,11 @@ impl TiangongApp {
     /// 依赖终态后投递排队工作（在终态回调路径调用；递归走标准派发链）。
     /// `app`：Some（生产，投递经 spawn 走完整 dispatch 链）/ None（host
     /// 集成测试同步核心：仅取出匹配项并清排队标记，不实际投递）。
-    pub(crate) fn flush_pending_dispatches(
+    pub(crate) fn flush_pending_dispatches<R: tauri::Runtime>(
         &self,
         finished_work_id: &str,
         finished_session_id: &str,
-        app: Option<tauri::AppHandle>,
+        app: Option<tauri::AppHandle<R>>,
     ) {
         // 无句柄（host 集成测试同步核心）：先判空直接返回——队列与落盘
         // 标记保持原样，绝不「drain 后丢弃」（review：消费后 continue 是

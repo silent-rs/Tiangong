@@ -14,9 +14,9 @@ use super::dispatch::central_dispatch_sender;
 impl TiangongApp {
     /// 确保中枢 Core 存在：已存在则刷新配置复用，否则直接构造（挂中枢插件）。
     /// 返回是否新建（调用方据此启动流事件消费者）。
-    pub(crate) async fn ensure_central_core(
+    pub(crate) async fn ensure_central_core<R: tauri::Runtime>(
         &self,
-        app: &tauri::AppHandle,
+        app: &tauri::AppHandle<R>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> Result<bool, String> {
         let (app_config, agent_config, workspace_dir) = self

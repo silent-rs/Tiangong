@@ -24,8 +24,8 @@ const DEFAULT_TICKET_TTL_SECONDS: i64 = 600;
 /// - `persist`：true 时同时登记目录长期授权（「记住此工作区」语义，
 ///   兼容既有体验）；默认 false（仅一次性票据）。
 #[tauri::command]
-pub async fn central_approve_workspace(
-    app: AppHandle,
+pub async fn central_approve_workspace<R: tauri::Runtime>(
+    app: AppHandle<R>,
     path: String,
     task_fingerprint: String,
     persist: Option<bool>,
@@ -100,8 +100,8 @@ pub async fn central_approve_workspace(
 /// 消费点校验（问题已更新则旧票据作废）。R4 决定卡片接线前，此通道
 /// 供宿主集成与未来 UI 使用。
 #[tauri::command]
-pub async fn central_resolve_decision(
-    app: AppHandle,
+pub async fn central_resolve_decision<R: tauri::Runtime>(
+    app: AppHandle<R>,
     execution_id: String,
     question_version: u32,
     option: String,

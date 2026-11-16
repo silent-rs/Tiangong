@@ -10,8 +10,8 @@ use crate::app::TiangongApp;
 /// 供工作抽屉展示：每个关键节点（派发/排队/等待用户/恢复/控制/终态）
 /// 的时间、类型与人读说明，最新在尾。
 #[tauri::command]
-pub async fn central_work_timeline(
-    app: AppHandle,
+pub async fn central_work_timeline<R: tauri::Runtime>(
+    app: AppHandle<R>,
     work_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let state = app.state::<TiangongApp>();
