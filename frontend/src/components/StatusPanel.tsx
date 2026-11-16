@@ -133,7 +133,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
 
   return (
       <header
-      className="flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
+      className="relative flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
       style={{ paddingLeft: titlePaddingLeft }}
       onMouseDown={startWindowDrag}
     >
@@ -164,21 +164,23 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
           </Button>
         )}
         {!centralMode && <Separator orientation="vertical" className="mr-2 h-4" />}
-        {/* 中枢模式：标题与普通模式（含侧栏按钮 + 分隔线）的标题起点对齐，
-            避免紧贴 macOS 红绿灯。宽度 = 按钮 28 + gap 8 + 分隔线 1 + mr 8。 */}
-        {centralMode && <span aria-hidden className="inline-block h-7 w-[45px]" />}
+        {/* 中枢模式：标题绝对居中（用户裁决 2026-11-16）——不占 flex 流，
+            左右控件不受影响；pointer-events-none 保窗口拖拽与点击穿透。 */}
+        {centralMode && (
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-12 items-center justify-center">
+            <span
+              className="animate-central-title-glow text-sm font-medium"
+              data-testid="central-title"
+            >
+              天工·中枢
+            </span>
+          </div>
+        )}
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
-              {centralMode ? (
-                <BreadcrumbPage
-                  className="animate-central-title-glow font-medium"
-                  data-testid="central-title"
-                >
-                  中枢
-                </BreadcrumbPage>
-              ) : (
-                (isNewConversation || activeSession) &&
+              {/* 中枢下不渲染左侧标题（由居中层承担——否则普通标题残留） */}
+              {!centralMode && (isNewConversation || activeSession) &&
                 (isNewConversation ? (
                   <BreadcrumbPage>新对话</BreadcrumbPage>
                 ) : isEditing ? (
@@ -199,9 +201,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
                   >
                     {currentTitle}
                   </BreadcrumbPage>
-                )
-              )
-              )}
+                ))}
             </BreadcrumbItem>
           </BreadcrumbList>
         </Breadcrumb>
