@@ -124,21 +124,38 @@ function ApprovalCard({
   );
 }
 
-/** 决定卡片：等待用户决策的工作（答复经中枢对话，§3.6）。 */
+/**
+ * 决定卡片：等待用户决策的工作（答复经中枢对话，§3.6）。
+ * 用户实测迭代：单行横条会被长任务文本撑爆整行（「一长条」）且只露
+ * 48 字预览看不到征询内容——改为两行卡片：标题行 + 内容行（默认
+ * line-clamp 显示多行，点击展开完整任务文本，再点收起）。
+ */
 function DecisionCard({ work }: { work: WaitingWork }) {
+  const [expanded, setExpanded] = useState(false);
   return (
     <div
       data-testid="central-decision-card"
-      className="flex items-center gap-2.5 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2 text-xs"
+      className="rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2 text-xs"
     >
-      <MessageCircleQuestion className="h-4 w-4 shrink-0 text-primary" />
-      <span className="min-w-0 flex-1">
+      <div className="flex items-center gap-2">
+        <MessageCircleQuestion className="h-4 w-4 shrink-0 text-primary" />
         <span className="font-medium">在等你的决定</span>
-        <span className="ml-2 text-muted-foreground" title={work.task}>
-          {taskPreview(work.task)}
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
+          在下方输入框直接答复即可
         </span>
-      </span>
-      <span className="shrink-0 text-[10px] text-muted-foreground">直接在下方答复即可</span>
+      </div>
+      <button
+        type="button"
+        data-testid="central-decision-card-body"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        title={expanded ? '点击收起' : '点击展开完整内容'}
+        className={`mt-1 block w-full text-left text-muted-foreground ${
+          expanded ? '' : 'line-clamp-3'
+        }`}
+      >
+        {work.task}
+      </button>
     </div>
   );
 }

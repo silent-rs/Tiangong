@@ -124,6 +124,28 @@ describe('CentralCardsBar', () => {
     expect(container.querySelectorAll('[data-testid="central-approval-card"]').length).toBe(1);
   });
 
+  it('决定卡片长任务：默认多行截断（line-clamp），点击展开完整文本', async () => {
+    const longTask = '第三十四轮 review：开发者表示「针对征询进行了优化」，请继续 review feature/central-refactor。' + '细节内容'.repeat(120);
+    statusMock.mockResolvedValue([
+      { work_id: 'w-long', session_id: 's1', task: longTask, state: 'waiting_user' },
+    ]);
+    mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const card = container.querySelector('[data-testid="central-decision-card"]');
+    expect(card).not.toBeNull();
+    const body = container.querySelector<HTMLButtonElement>('[data-testid="central-decision-card-body"]');
+    expect(body).not.toBeNull('内容区必须存在');
+    expect(body!.className).toContain('line-clamp-3', '默认多行截断（不再单行溢出）');
+    expect(body!.textContent).toContain('第三十四轮 review');
+    // 点击展开：clamp 移除、全文显示
+    await act(async () => {
+      body!.click();
+    });
+    expect(body!.className).not.toContain('line-clamp-3');
+    expect(body!.textContent!.length).toBeGreaterThan(500, '展开显示完整任务文本');
+    expect(card!.textContent).toContain('在等你的决定');
+  });
+
   it('决定卡片由 waiting_user 状态驱动；状态变化自动消失', async () => {
     statusMock.mockResolvedValue([
       { work_id: 'w-wait', session_id: 's1', task: '迁移数据库？', state: 'waiting_user' },
