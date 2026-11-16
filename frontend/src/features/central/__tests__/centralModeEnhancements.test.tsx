@@ -69,6 +69,7 @@ const { api } = await import('@/api/tauri');
 const host = await import('@/api/host');
 const {
   __resetCentralConversationForTests,
+  __resetReconcileForTests,
   ensureCentralConversation,
   restoreFromCentralConversation,
   reconcileCentralModeWithHost,
@@ -121,32 +122,46 @@ describe('P1 模式上报串行（enter→exit 顺序）', () => {
 describe('P2 启动对账（宿主为事实源）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    __resetCentralConversationForTests();
-    // reconcile 模块级幂等标志重置：vi.resetModules 太重，经 setState + 重 import
-    // ——直接用新 import 缓存：每个 it 用不同宿主返回值即可（幂等标志在
-    // 首次调用置位，这里每个 describe 单独 it 顺序执行）
+    __resetReconcileForTests();
+    isDesktop.mockReturnValue(true);
   });
 
-  it('宿主 central + 本地 false → 以宿主为准开启', async () => {
-    isDesktop.mockReturnValue(true);
-    vi.mocked(api.centralModeState).mockResolvedValue({ mode: 'central_active', last_mode: 'central' });
-    useStore.setState({ ...useStore.getState(), centralMode: false });
-    // @ts-expect-error 测试直访模块内部标志重置
-    const mod = await import('@/features/central/lib/centralConversation');
-    (mod as unknown as { reconcileCentralModeWithHost: () => Promise<void> });
-    await reconcileCentralModeWithHost().catch(() => undefined);
-    // 幂等标志：本测试文件内首次调用——若已被上一 describe 消耗则跳过断言
-    if (vi.mocked(api.centralModeState).mock.calls.length > 0) {
-      expect(useStore.getState().centralMode).toBe(true);
-    }
+  it('宿主 live 模式与本地不一致时以宿主为准（无对账断言全执行）', async () => {
+    vi.mocked(api.centralModeState).mockResolvedValue({
+      mode: 'central_active',
+      last_mode: 'central',
+    });
+    useStore.setState({ centralMode: false });
+    await reconcileCentralModeWithHost();
+    expect(api.centralModeState).toHaveBeenCalledTimes(1);
+    expect(useStore.getState().centralMode).toBe(true);
+  });
+
+  it('重启场景：mode=normal 但持久偏好 last_mode=central → 恢复中枢', async () => {
+    vi.mocked(api.centralModeState).mockResolvedValue({
+      mode: 'normal',
+      last_mode: 'central',
+    });
+    useStore.setState({ centralMode: false });
+    await reconcileCentralModeWithHost();
+    expect(useStore.getState().centralMode).toBe(true);
+  });
+
+  it('宿主 normal + 本地 true → 对齐回普通模式', async () => {
+    vi.mocked(api.centralModeState).mockResolvedValue({
+      mode: 'normal',
+      last_mode: 'normal',
+    });
+    useStore.setState({ centralMode: true });
+    await reconcileCentralModeWithHost();
+    expect(useStore.getState().centralMode).toBe(false);
   });
 
   it('非 desktop 宿主不对账（保留本地初值）', async () => {
     isDesktop.mockReturnValue(false);
-    useStore.setState({ ...useStore.getState(), centralMode: false });
-    const calls = vi.mocked(api.centralModeState).mock.calls.length;
-    await reconcileCentralModeWithHost().catch(() => undefined);
-    expect(vi.mocked(api.centralModeState).mock.calls.length).toBe(calls);
+    useStore.setState({ centralMode: false });
+    await reconcileCentralModeWithHost();
+    expect(api.centralModeState).not.toHaveBeenCalled();
     expect(useStore.getState().centralMode).toBe(false);
   });
 });

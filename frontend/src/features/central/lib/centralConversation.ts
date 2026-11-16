@@ -173,6 +173,10 @@ export function __resetCentralConversationForTests(): void {
  * 一次。
  */
 let reconciled = false;
+/** 仅测试用：重置幂等标志（每用例独立对账）。 */
+export function __resetReconcileForTests(): void {
+  reconciled = false;
+}
 export async function reconcileCentralModeWithHost(): Promise<void> {
   if (reconciled) return;
   reconciled = true;
@@ -180,7 +184,11 @@ export async function reconcileCentralModeWithHost(): Promise<void> {
   try {
     const state = await api.centralModeState();
     const local = useStore.getState().centralMode;
-    const hostActive = state.mode === 'central_active';
+    // `mode` is the live coordinator state; after a restart it is Normal
+    // until the first command, so the persisted preference is the same
+    // logical state rather than a second independent source of truth.
+    const hostActive =
+      state.mode === 'central_active' || state.last_mode === 'central';
     if (hostActive !== local) {
       useStore.getState().setCentralMode(hostActive);
     }
