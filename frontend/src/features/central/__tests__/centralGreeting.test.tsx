@@ -24,7 +24,19 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@/components/LazyComponents', () => ({
   LazyMessageList: () => <div data-testid="central-message-list">message-list</div>,
   // R7+：输入区复用 MessageInput（中枢形态）——测试以轻量标记替身
-  LazyMessageInput: () => <div data-testid="central-message-input">message-input</div>,
+  // （透传 props 供征询接线断言）
+  LazyMessageInput: (props: Record<string, unknown>) => (
+    <div data-testid="central-message-input" data-props={JSON.stringify({
+      interactionVisible: props.interactionVisible,
+      hasOverlay: !!props.inputOverlay,
+    })} />
+  ),
+}));
+vi.mock('@/components/InteractionPluginHost', () => ({
+  InteractionPluginHost: () => <div data-testid="central-interaction-host" />,
+}));
+vi.mock('@/components/InputOverlayPluginHost', () => ({
+  InputOverlayPluginHost: () => <div data-testid="central-input-overlay" />,
 }));
 
 
@@ -72,6 +84,15 @@ describe('CentralModeView', () => {
     expect(document.querySelector('[data-testid="central-message-list"]')).not.toBeNull();
     // 专属输入区挂载
     expect(document.querySelector('[data-testid="central-message-input"]')).not.toBeNull();
+    // 征询接线（用户实测修复）：宿主与输入覆盖层必须挂载，LazyMessageInput
+    // 收到 interaction props（否则征询只剩消息流一行文本、对话卡死）
+    expect(document.querySelector('[data-testid="central-interaction-host"]')).not.toBeNull();
+    // 覆盖层作为 prop 传入（宿主替身不展开渲染——由 hasOverlay 标记断言）
+    const inputProps = document
+      .querySelector('[data-testid="central-message-input"]')
+      ?.getAttribute('data-props');
+    expect(inputProps).toContain('"hasOverlay":true');
+    expect(inputProps).toContain('"interactionVisible":false');
   });
 
   it('有消息：复用 MessageList 渲染，问候不出现', () => {

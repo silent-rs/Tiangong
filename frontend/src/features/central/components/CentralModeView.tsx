@@ -17,7 +17,10 @@ import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
 import { CentralWorkStatusBar } from '@/features/central/components/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/features/central/components/centralGreeting';
 import { CENTRAL_TRANSITION_PARAMS } from '@/features/central/components/centralTransitionParams';
+import { useCallback, useState } from 'react';
 import { useStore } from '@/store/useStore';
+import { InteractionPluginHost } from '@/components/InteractionPluginHost';
+import { InputOverlayPluginHost } from '@/components/InputOverlayPluginHost';
 
 /** 中枢空对话问候（§4.2 无上下文版本）。 */
 function CentralGreeting() {
@@ -43,6 +46,20 @@ function CentralGreeting() {
 export function CentralModeView() {
   const messageCount = useStore((s) => s.messages.length);
   const runStatus = useStore((s) => s.runStatus);
+  // 征询接线（与 MainApp 普通分支同构——用户实测：中枢缺此接线时征询
+  // 只剩消息流一行文本，无输入区/选项，对话卡死）：interactionVisible
+  // 联动禁用输入；征询宿主绝对定位于输入框上方（inputHeight 实测）。
+  const [interactionVisible, setInteractionVisible] = useState(false);
+  const [inputOverlayVisible, setInputOverlayVisible] = useState(false);
+  const [inputOverlayHint, setInputOverlayHint] = useState<string | null>(null);
+  const [messageInputHeight, setMessageInputHeight] = useState(0);
+  const handleInputOverlayVisibility = useCallback(
+    (visible: boolean, hint: string | null) => {
+      setInputOverlayVisible(visible);
+      setInputOverlayHint(hint);
+    },
+    [],
+  );
   // 空对话且未在生成：中枢问候；生成中（含首条消息已投递）交给 MessageList
   // 的 typing 态承接，有消息后正常渲染对话流。
   const showGreeting = messageCount === 0 && runStatus !== 'executing';
@@ -68,7 +85,23 @@ export function CentralModeView() {
       {/* 输入区复用普通 MessageInput（二十一轮 review 后用户裁决：直接
           复用现有输入组件——模型选择/用量/发送语义全套与普通会话一致；
           centralMode 下隐藏 workspace 目录区与 git 拓展槽）。 */}
-      <LazyMessageInput centralMode />
+      <LazyMessageInput
+        centralMode
+        interactionVisible={interactionVisible}
+        inputOverlayVisible={inputOverlayVisible}
+        inputOverlayHint={inputOverlayHint}
+        inputOverlay={(
+          <InputOverlayPluginHost
+            suppressed={interactionVisible}
+            onVisibilityChange={handleInputOverlayVisibility}
+          />
+        )}
+        onHeightChange={setMessageInputHeight}
+      />
+      <InteractionPluginHost
+        inputHeight={messageInputHeight}
+        onVisibilityChange={setInteractionVisible}
+      />
     </main>
   );
 }
