@@ -1225,12 +1225,27 @@ fn dispatch_work_reused_session_keeps_registration_clean() {
             assert!(request.reused_session);
             assert_eq!(request.session_id, "s0");
             assert_ne!(request.execution_id, "", "复用派发仍是独立执行（R0 契约）");
+            // CC2 插件侧归属（二十一轮 review）：复用派发沿用 owner work_id
+            assert_eq!(
+                request.work_id, owner_id,
+                "复用派发必须沿用 owner work_id（status/control 可达）"
+            );
         }
         other => panic!("应收到 Dispatch，实际 {other:?}"),
     }
-    // 登记无 steer-* 条目（Steer 消息与登记形态已消失）
+    // 登记无 steer-* 条目，且同会话仍只有 owner 一条（无新 id 顶替/翻倍）
     let items = load_work_items(plugin.sessions.storage_root());
     assert!(items.iter().all(|item| !item.work_id.starts_with("steer-")));
+    let s0_entries: Vec<_> = items.iter().filter(|i| i.session_id == "s0").collect();
+    assert_eq!(s0_entries.len(), 1, "同会话登记不因复用派发翻倍");
+    assert_eq!(s0_entries[0].work_id, owner_id);
+    // work status(owner) 可达：不再报「未找到工作」
+    let status = call_tool(
+        &plugin,
+        "work",
+        serde_json::json!({"action": "status", "work_id": owner_id}),
+    );
+    assert!(status.ok, "stderr: {}", status.stderr);
 }
 
 /// 二十一轮 review 修复锁：复用会话带 model = 换模型通道（不再是

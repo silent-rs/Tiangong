@@ -326,3 +326,65 @@ fn second_instance_append_keeps_offsets_continuous() {
         assert!(pair[1].offset > pair[0].offset, "offset 应严格递增");
     }
 }
+
+// ── 二十一轮 review CC3 跨进程实测（三进程并发 append 的 offset 唯一性）──
+
+/// 子进程模式：env 携带日志路径时 append 一条并退出；正常测试运行时 no-op。
+#[test]
+fn multiprocess_child_append() {
+    let Ok(log_path) = std::env::var("CENTRAL_MP_LOG") else {
+        return;
+    };
+    let log = EventLog::open(std::path::Path::new(&log_path)).expect("子进程打开日志");
+    let tag = std::env::var("CENTRAL_MP_TAG").unwrap_or_default();
+    let mut event = event("w-mp", WorkEventType::WorkItemProgress);
+    event.id = format!("ev-mp-{tag}");
+    event.payload = serde_json::json!({ "tag": tag });
+    log.append(event).expect("子进程 append");
+    // 立即退出（不跑后续测试——父进程用 --exact 只选本测试）
+    std::process::exit(0);
+}
+
+/// 三个独立进程并发 append 同一日志：offset 必须互异且严格递增，
+/// 行不交错（review 实测曾三进程全为 offset=1——进程内 cache 假设被证伪，
+/// 修复为 flock + 末行实况基准）。
+#[test]
+fn multiprocess_offsets_are_unique_and_ordered() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let exe = std::env::current_exe().unwrap();
+    let mut children = Vec::new();
+    for tag in ["a", "b", "c"] {
+        children.push(
+            std::process::Command::new(&exe)
+                .arg("--exact")
+                .arg("multiprocess_child_append")
+                .arg("--nocapture")
+                .env("CENTRAL_MP_LOG", &log_path)
+                .env("CENTRAL_MP_TAG", tag)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn 子进程"),
+        );
+    }
+    for mut child in children {
+        let status = child.wait().expect("等待子进程");
+        assert!(status.success(), "子进程应成功退出：{status:?}");
+    }
+    let log = EventLog::open(&log_path).unwrap();
+    let entries = log.load_all().unwrap();
+    assert_eq!(entries.len(), 3, "三进程各一条：{entries:?}");
+    let offsets: Vec<u64> = entries.iter().map(|e| e.offset).collect();
+    let mut sorted = offsets.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 3, "offset 必须互异：{offsets:?}");
+    for pair in entries.windows(2) {
+        assert!(
+            pair[1].offset > pair[0].offset,
+            "按行序严格递增：{offsets:?}"
+        );
+    }
+    // 行完整（无交错损坏）：每行可独立解析（load_all 已验证）✓
+}

@@ -895,7 +895,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 9. **换模型持久化为会话默认**（二十一轮 review CC1，用户裁决 A 2026-11-16）：二十轮裁决原文为「本轮生效、不持久改写」；实现与裁决 B 差异——复用派发带 model 经 `set_core_model_ref` 写入 `Session.model_ref`，该会话此后默认沿用新模型（空闲回收/重启重建不回退）。用户明确选定 A（持久化）为目标语义，设计稿 §5.3 与 persona/spec 措辞已同步；偏离二十轮原文以此条为准。
 
 ### A.3 验证与验收状态
-- 每提交独立可编译、可回滚；**Rust 全量约 730 项 + 前端 586 项（65 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十一轮修复后实测；中枢相关：central-plugin 39 + tiangong-central 36 + central-state 23 + central-host 11 + tiangong-app 宿主/中枢 168）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
+- 每提交独立可编译、可回滚；**Rust 全量约 735 项 + 前端 589 项（66 文件）全绿；`cargo clippy --workspace --all-targets -- -D warnings` 退出 0**（2026-11-16 二十一轮修复后实测；中枢相关：central-plugin 39 + tiangong-central 38（+2 跨进程实测）+ central-state 30 + central-host 11 + tiangong-app lib 123 + 集成 45）。已知无关 flaky：memory 插件（`plugins/tiangong-plugin-memory`）测试在 workspace 并发全量下偶发失败（加密库文件竞争，main 分支同样复现，单跑与 `--test-threads=1` 均全过），与本分支改动无关。
 
 #### A.3.1 行覆盖率实测（cargo-llvm-cov 0.9.1，2026-11-16；同日补测后刷新）
 
@@ -936,7 +936,7 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | mode_commands.rs / work_view.rs | 100% | 命令往返/时间线命令已锁 |
 | （对照）app.rs 全文件 | 约 81% | 含 50 项宿主中枢测试 |
 
-**二十二轮 review 修复 + 中枢视图能力对齐（2026-11-16）**：P1 模式上报串行链（`enqueueModeOp`——enter 的 void 上报与 exit 的取回一律排队，宿主状态机顺序与前端一致，消除「宿主 CentralActive + 前端 normal」分叉，测试锁 enter-done 先于 exit-sent）；P2 启动对账（`reconcileCentralModeWithHost`：desktop 下 MainApp 挂载时调 `central_mode_state`，宿主偏好为事实源、localStorage 兜底；非 desktop 不对账，幂等每进程一次）；canvas 噪音（`src/test-setup.ts` mock `HTMLCanvasElement.getContext`——转场动画已有 try-catch 降级，消音并保「无 Canvas」路径可测；tsconfig exclude 对齐 `features/central/__tests__`）。**新功能**（对齐普通输入框）：`CentralModelPicker`（中枢会话级模型选择——与 ensure_central_core 的 session.model_ref 优先语义契合，切换下一轮生效）、`CentralUsageBar`（tps 实时+持久回退、token 环形进度+总计，中枢固定会话采样）、`CentralStatusBadge`（右上角运行状态徽章：执行中脉动/出错/空闲）。新测试 `centralModeEnhancements`（6 项：串行顺序/对账/非 desktop/三组件渲染）。
+**二十二轮 review 修复 + 中枢输入区形态定稿（2026-11-16）**：P1 模式上报串行链（`enqueueModeOp`——enter/exit 宿主调用排队，后发必等先发，测试锁 enter-done 先于 exit-sent）；P2 启动对账（`reconcileCentralModeWithHost`：desktop 下 MainApp 挂载调 `central_mode_state`，宿主偏好为事实源、localStorage 兜底；**重启场景 mode=Normal 时以 last_mode 判定**，四用例无条件断言锁行为）；canvas 噪音（`src/test-setup.ts` mock getContext + tsconfig exclude 对齐）。**输入区形态经两次推翻后定稿（用户裁决）**：放弃自研 CentralChatInput/ModelPicker/UsageBar 三件套（-590 行含 310 行测试），改为**复用 MessageInput + `centralMode` prop**（隐藏 workspace 目录区[DOM 级条件渲染]与 git 拓展槽 `session.input-status`；模型选择/token·tps/发送语义全套沿用）——行为锁 `centralInputMode.test.tsx` 四断言（目录不渲染/槽不挂载/模型选择保留/非中枢对照）；token 统计进入即从会话存储恢复（`loaded.token_stats`，对齐 hydrateSessionViewCache）；顶栏标题居中「天工·中枢」。
 
 **R7 测试集中（2026-11-16）**：中枢测试从「散落在非中枢模块」全部归位——① 前端 12 个 central*.test 迁 `src/features/central/__tests__/`（vitest 全目录扫描零配置生效）；② tiangong-central 六文件内嵌 mod tests 迁出为 `tests/{event,event_log,tickets,status,ids,risk}.rs`（过期票据测试改真实等待 1.1s——原内嵌版直改私有字段，迁出后不可达）；③ central-plugin 内嵌 33 项迁 `tests/tools.rs`（测试触达面以 `#[doc(hidden)] pub` 放开：五个私有字段 + record_central_event_by_session）；④ app.rs 内嵌 48 个中枢用例整体迁 `src-tauri/tests/central_host_integration.rs`（app.rs 4610→1554 行，仅留 5 个纯宿主通用测试；`new_for_test` 去 cfg(test) 门 + 转发方法/ensure_core/state_ops 以 doc(hidden) pub 供集成测试）。已知无关失败新增一批：`tests/plugin-sidecar-e2e` 的 plugin_creator_e2e 两项（devkit 构建环境相关，main 同样复现）。
 

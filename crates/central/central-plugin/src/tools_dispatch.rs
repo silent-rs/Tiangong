@@ -92,7 +92,21 @@ impl CentralPlugin {
         let session_id = reuse_session.unwrap_or_else(|| scru128::new().to_string());
         // 机制兜底 1：高相似度自动检出（review N2：在登记 upsert **之前**计算并
         // 过滤自身，否则每次派发必命中自己，提示「向刚建的会话重派」）。
-        let pending_work_id = format!("work-{}", scru128::new());
+        // CC2 插件侧归属（二十一轮 review）：复用会话的派发是既有工作的
+        // 延续（引导并入语义，与宿主 steer_merged_into_running / 重启投影
+        // owner 优先一致）——沿用该会话最近登记的 work_id，不再生成新 id
+        // 覆盖（此前新 id 覆盖导致 work status / control(owner) 报
+        // 「未找到工作」、work list 任务文本被引导文本替换）。
+        let pending_work_id = if reused {
+            load_work_items(self.sessions.storage_root())
+                .into_iter()
+                .rev()
+                .find(|item| item.session_id == session_id)
+                .map(|item| item.work_id)
+                .unwrap_or_else(|| format!("work-{}", scru128::new()))
+        } else {
+            format!("work-{}", scru128::new())
+        };
         // 强制复用（用户实测：提示式兜底被模型忽略，仍新建会话）：高相似
         // （任务前 12 字符一致）且未指定 session_id 且任务未标【全新】时
         // 直接拒绝，要求带 session_id 重发——延续性工作必须复用。

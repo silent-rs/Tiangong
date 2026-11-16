@@ -15,7 +15,7 @@
 //! 事实源（§5.3「事件是事实，快照是缓存，UI 是投影」）。
 
 use std::collections::HashSet;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -239,18 +239,37 @@ impl EventLog {
                 }
             }
         }
+        // ── 跨进程正确性（二十一轮 review CC3 实测证伪进程内 cache 假设：
+        //    三进程各写同路径时 offset 全为 1）——写入与 offset 分配收进
+        //    文件锁内，且以**文件末行实况**为基准（cache 仅进程内加速，
+        //    外部写入/手动编辑/恢复备份后仍保持 offset 严格递增）。
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .read(true)
+            .create(true)
+            .open(&self.path)
+            .with_context(|| format!("打开事件日志（追加）失败: {}", self.path.display()))?;
+        let _file_lock = FileLock::acquire(&file)?;
+        // 末行实况 offset：tail 回读（解析末行 JSON 的 offset 字段；空文件/
+        // 解析失败回退 0——不比对 cache，文件是唯一事实源）
+        let tail_offset = Self::tail_last_offset(&mut file)?;
         let offset = {
             let mut cache = self
                 .shared
                 .cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // 基准取实况与缓存的较大者：缓存可能领先文件（同锁区间外无发生
+            // ——防御性保留），实况必然反映其他进程的写入
+            if tail_offset > cache.last_offset {
+                cache.last_offset = tail_offset;
+            }
             cache.last_offset += 1;
             cache.seen_ids.insert(event.id.clone());
             cache.last_offset
         };
         // Z5 轮转：超过阈值归档为 `.1` 重开（offset 连续性由缓存保留）
-        if let Ok(meta) = std::fs::metadata(&self.path)
+        if let Ok(meta) = file.metadata()
             && meta.len() > LOG_ROTATE_BYTES
         {
             let rotated = self.path.with_extension("jsonl.1");
@@ -266,11 +285,6 @@ impl EventLog {
             schema_version: CENTRAL_CONTRACT_SCHEMA_VERSION,
             event,
         };
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.path)
-            .with_context(|| format!("打开事件日志（追加）失败: {}", self.path.display()))?;
         let mut line = serde_json::to_string(&logged)?;
         line.push('\n');
         file.write_all(line.as_bytes())
@@ -278,6 +292,38 @@ impl EventLog {
             .and_then(|_| file.sync_all())
             .with_context(|| format!("事件日志追加失败: {}", self.path.display()))?;
         Ok(offset)
+    }
+
+    /// tail 回读末行 offset：从文件末尾回扫最近若干字节，取最后一个完整
+    /// 行解析其 `offset` 字段（不解析整行事件体——只取编号）。
+    fn tail_last_offset(file: &mut std::fs::File) -> Result<u64> {
+        let size = file.seek(SeekFrom::End(0))?;
+        if size == 0 {
+            return Ok(0);
+        }
+        const TAIL_WINDOW: u64 = 4096;
+        let window = size.min(TAIL_WINDOW);
+        file.seek(SeekFrom::Start(size - window))?;
+        use std::io::Read;
+        let mut buf = vec![0u8; window as usize];
+        let mut read_total = 0usize;
+        while read_total < buf.len() {
+            let n = file.read(&mut buf[read_total..])?;
+            if n == 0 {
+                break;
+            }
+            read_total += n;
+        }
+        buf.truncate(read_total);
+        let text = String::from_utf8_lossy(&buf);
+        // 最后一个完整行（忽略行尾无换行的写一半尾巴）
+        let last_complete = text
+            .rsplit('\n')
+            .filter(|l| !l.trim().is_empty())
+            .find(|l| l.starts_with('{'))
+            .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .and_then(|value| value.get("offset").and_then(|v| v.as_u64()));
+        Ok(last_complete.unwrap_or(0))
     }
 
     /// 读取全部完整事件（投影/对账数据源）。
@@ -399,4 +445,50 @@ pub fn project_work_state(
         states.insert(id, next);
     }
     states
+}
+
+/// 文件级互斥（append 区间）：unix `flock(LOCK_EX)`——跨进程串行化
+/// 「末行读取 + offset 分配 + 写入」整段，防止行交错与 offset 撞号。
+struct FileLock {
+    #[cfg(unix)]
+    fd: std::os::raw::c_int,
+}
+impl FileLock {
+    fn acquire(file: &std::fs::File) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            // EINTR 重试
+            loop {
+                let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                if rc == 0 {
+                    break;
+                }
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(anyhow::anyhow!("事件日志文件锁失败：{err}"));
+                }
+            }
+            // fd 生命周期由调用方 file 保证（Drop 先于 file 释放）
+            Ok(Self { fd })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Ok(Self {})
+        }
+    }
+}
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self.fd, libc::LOCK_UN);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self;
+        }
+    }
 }

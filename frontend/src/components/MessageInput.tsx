@@ -1541,19 +1541,21 @@ export function MessageInput({
             <div className="mt-1.5 flex items-center justify-between gap-2">
               <SessionInputPluginHost slot="session.after-input" />
               <div className="ml-auto flex flex-1 items-center justify-between text-xs text-muted-foreground">
-              {/* 目录块隐藏（中枢）后 justify-between 无第二锚点会整组左移——
-                  右侧状态/提示/用量组自带 ml-auto 兜底恒右对齐 */}
-              <div className="flex items-center gap-3 min-w-0" style={centralMode ? { display: 'none' } : undefined}>
-                <button
-                  onClick={handleChangeCwd}
-                  disabled={!isIdle || isRemoteHost() || (!!hasConversation && !sessionCwd)}
-                  className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
-                  title={openableCwd ? `点击打开目录：${openableCwd}` : hasConversation ? '当前对话未设置目录' : sessionCwd || '点击设置对话目录'}
-                >
-                  <FolderOpen className="w-3 h-3 shrink-0" />
-                  {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
-                </button>
-              </div>
+              {/* 目录块中枢下不渲染（DOM 级移除；justify-between 无第二
+                  锚点由右侧组 ml-auto 兜底恒右对齐） */}
+              {!centralMode && (
+                <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    onClick={handleChangeCwd}
+                    disabled={!isIdle || isRemoteHost() || (!!hasConversation && !sessionCwd)}
+                    className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
+                    title={openableCwd ? `点击打开目录：${openableCwd}` : hasConversation ? '当前对话未设置目录' : sessionCwd || '点击设置对话目录'}
+                  >
+                    <FolderOpen className="w-3 h-3 shrink-0" />
+                    {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
+                  </button>
+                </div>
+              )}
               <div className="ml-auto flex items-center gap-2 shrink-0">
                 {/* 中枢（目录区隐藏）下恒显总计：compact 只为窄会话省空间，
                     中枢输入区对齐普通会话的完整用量显示 */}
