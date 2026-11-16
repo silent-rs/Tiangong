@@ -272,10 +272,15 @@ pub(crate) async fn handle_central_control<R: tauri::Runtime>(
 /// 排队登记（依赖/写入锁共用）：挂起 pending + registry queued + 事件。
 pub(crate) async fn enqueue_central_dispatch(
     state: &TiangongApp,
-    request: crate::central::CentralDispatchRequest,
+    mut request: crate::central::CentralDispatchRequest,
     after: &str,
     cwd: &str,
 ) {
+    // 阻塞源统一写入 after_work_id（批五测试发现：写入锁排队的请求
+    // 原样入队时 after=None——依赖终态后 flush 的匹配条件
+    // `after_work_id == Some(after)` 永不成立，排队项只能等重启重放，
+    // 运行期永久挂起。flush 消费侧投递前已置 None，不影响执行语义）。
+    request.after_work_id = Some(after.to_string());
     state
         .central_pending_dispatches
         .lock()

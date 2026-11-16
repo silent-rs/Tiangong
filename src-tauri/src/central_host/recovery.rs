@@ -82,6 +82,19 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
                 reused_session: record.reused_session,
             })
             .collect();
+    // 重启即中断（对齐快照恢复路径的 6 小时语义）：事件投影产出的
+    // 在途条目（Running/WaitingUser/Paused）迁移为 Interrupted——
+    // Core 已随进程消亡，保持 Running 是徽章幽灵且中断摘要漏报
+    //（批五测试发现：投影路径此前漏迁移）。
+    let entries: Vec<_> = entries
+        .into_iter()
+        .map(|mut entry| {
+            if entry.state.is_inflight() {
+                entry.state = central_state::WorkState::Interrupted;
+            }
+            entry
+        })
+        .collect();
     registry.extend(entries);
     drop(registry);
     for request in queued_replay {

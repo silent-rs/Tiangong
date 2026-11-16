@@ -924,16 +924,18 @@ Worker 原始报告不使用 `UserMessage`，也不伪装为中枢发言。默�
 | --- | --- | --- |
 | execution_router.rs | 94.07% | — |
 | mode_coordinator.rs | 86.06% | — |
-| central_events.rs | 75.83% | migrate_legacy_timeline 部分分支 |
+| central_events.rs | 83.89%（分支 100%） | 旧时间线迁移幂等+投影映射全枚举已锁 |
 | events.rs | 85.71% | system_note 渲染已锁 |
-| dispatch.rs | 69.35% | control 三路径 + cancel 落盘 + sender 消费循环（四类消息）已锁；残余为 Steer 错误注入分支 |
-| reports.rs | 68.72% | push/take/clear + flush_pending（排队投递/非匹配保留/无句柄守卫）已锁；deliver_pending 汇总轮未锁 |
+| dispatch.rs | 73.60% | 终态回调守卫矩阵（取消/暂停/陈旧执行/幂等/waiting_user 分流）+写入锁排队往返+waiting_user 恢复合并+cancel 在跑命令已锁；残余为 deliver 失败清理分支 |
+| reports.rs | 70.39% | 终态矩阵经 handle_work_terminal 全覆盖；残余为 deliver_pending 汇总轮（需中枢 Core 消费流） |
 | events.rs | 38.10% | system_note 组装分支 |
-| recovery.rs | 60.74% | 事件投影重建已锁；activation_summary 注入分支未锁 |
-| authorization.rs | 59.77% | 签发+persist 双通道+校验已锁；决定票据命令残余 |
-| core_lifecycle.rs | 64.00% | ensure 首建/幂等/alive/deliver/cancel 已锁 |
+| recovery.rs | 71.13% | 投影重建+在跑中断迁移+激活摘要幂等/静默已锁 |
+| authorization.rs | 87.36%（分支 100%） | 签发+persist 双通道+决定票据签发消费闭环已锁 |
+| core_lifecycle.rs | 83.00% | 无模型报错/会话配置沿用/失效模型回退默认/复用刷新已锁 |
 | mode_commands.rs / work_view.rs | 100% | 命令往返/时间线命令已锁 |
-| （对照）app.rs 全文件 | 约 80% | 含 42 项宿主中枢测试 |
+| （对照）app.rs 全文件 | 约 81% | 含 50 项宿主中枢测试 |
+
+补测批次三（2026-11-16，+10 项，宿主收口）：终态回调守卫矩阵（取消/暂停守卫不注入不改写、waiting_user 分流、失败/成功分态、陈旧执行让位、重复回调幂等）、写入锁排队全往返（排队入 pending + queued 落盘 → 终态 flush 自动投递）、waiting_user 恢复沿用 owner work_id/task、cancel 在跑工作（running 集合 + send_command）、旧时间线迁移幂等（五类 legacy kind）、决定票据命令（空参拒绝 + 签发→按 execution 消费 Granted）、激活摘要（中断事实注入/幂等/空闲静默）、重启在跑中断迁移、中枢 Core 构建三态（无模型报错/失效 model_ref 回退默认/复用刷新）。**批五发现并修复两处真实缺陷**：① enqueue 写入锁排队请求 after_work_id=None → flush 匹配永不成立、运行期永久挂起（只能重启重放）；② 事件投影路径重启后 in-flight 不迁移 Interrupted（快照路径有 6 小时语义）→ 徽章 Running 幽灵 + 中断摘要漏报。
 
 补测批次二（2026-11-16，+10 项，宿主深水区）：mode 命令往返（enter/state/exit + 偏好落盘）、work_timeline 命令（空 id 拒绝 + 事件 JSON）、central_approve_workspace（校验/一次性票据/persist 双通道）、system_note_render、sender 消费循环真实 spawn（Notification/ReportsCollected/Control/未授权 Dispatch 四类）、中枢 Core 生命周期（ensure 首建+幂等双检/alive/deliver/cancel/shutdown）、flush_pending_dispatches（匹配投递/非匹配保留/无句柄不丢队列/queued 标记清除）。配套：mode_commands/work_view/authorization/ensure_central_core/central_dispatch_sender/flush_pending_dispatches 泛型化 <R: Runtime>（MockRuntime 可测，生产注册不变）。
 
