@@ -132,6 +132,25 @@ function ApprovalCard({
  */
 function DecisionCard({ work }: { work: WaitingWork }) {
   const [expanded, setExpanded] = useState(false);
+  const [answer, setAnswer] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const submit = async () => {
+    const text = answer.trim();
+    if (!text || submitting) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      // 闭环机制化（用户裁决 2026-11-16）：卡片直答 → 宿主构造引导派发
+      // 恢复该工作（merge_waiting_user 沿用 owner）→ 状态 running →
+      // central-work-updated → 本卡片消失。不再依赖中枢模型转发答复。
+      await api.centralAnswerWaiting(work.work_id, text);
+      setAnswer('');
+    } catch (err) {
+      setError(String(err));
+      setSubmitting(false);
+    }
+  };
   return (
     <div
       data-testid="central-decision-card"
@@ -140,9 +159,6 @@ function DecisionCard({ work }: { work: WaitingWork }) {
       <div className="flex items-center gap-2">
         <MessageCircleQuestion className="h-4 w-4 shrink-0 text-primary" />
         <span className="font-medium">在等你的决定</span>
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-          在下方输入框直接答复即可
-        </span>
       </div>
       <button
         type="button"
@@ -156,6 +172,35 @@ function DecisionCard({ work }: { work: WaitingWork }) {
       >
         {work.task}
       </button>
+      <div className="mt-2 flex items-center gap-2">
+        <input
+          data-testid="central-decision-card-input"
+          value={answer}
+          onChange={(event) => setAnswer(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+              void submit();
+            }
+          }}
+          placeholder="输入你的答复…"
+          disabled={submitting}
+          className="min-w-0 flex-1 rounded-md border border-border/70 bg-background px-2 py-1 text-xs outline-none focus:border-primary/50"
+        />
+        <button
+          type="button"
+          data-testid="central-decision-card-submit"
+          onClick={() => void submit()}
+          disabled={submitting || !answer.trim()}
+          className="shrink-0 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {submitting ? '恢复中…' : '提交答复'}
+        </button>
+      </div>
+      {error ? (
+        <p className="mt-1 text-[10px] text-destructive" role="alert">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

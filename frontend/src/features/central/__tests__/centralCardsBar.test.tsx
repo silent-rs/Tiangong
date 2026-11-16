@@ -23,11 +23,14 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 const approveMock = vi.fn();
 const statusMock = vi.fn();
+const answerMock = vi.fn();
 
 vi.mock('@/api/tauri', () => ({
   api: {
     centralApproveWorkspace: (...args: unknown[]) => approveMock(...args),
     getCentralWorkStatus: () => statusMock(),
+    centralAnswerWaiting: (...args: unknown[]) =>
+      answerMock(...(args as [string, string])),
   },
 }));
 
@@ -122,6 +125,44 @@ describe('CentralCardsBar', () => {
       fire('central-approval-required', { cwd: '/ws/d', task: '任务 D', work_id: 'w2' });
     });
     expect(container.querySelectorAll('[data-testid="central-approval-card"]').length).toBe(1);
+  });
+
+  it('卡片直答闭环：输入答复提交 → central_answer_waiting → 状态 running 后卡片消失', async () => {
+    statusMock.mockResolvedValue([
+      { work_id: 'w-wait2', session_id: 's2', task: '迁移数据库？', state: 'waiting_user' },
+    ]);
+    mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const input = container.querySelector<HTMLInputElement>('[data-testid="central-decision-card-input"]');
+    const submit = container.querySelector<HTMLButtonElement>('[data-testid="central-decision-card-submit"]');
+    expect(input).not.toBeNull('卡片必须有输入框');
+    expect(submit).not.toBeNull('卡片必须有提交按钮');
+    expect(submit!.disabled).toBe(true, '空答复不可提交');
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input!, '同意迁移，先备份');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(submit!.disabled).toBe(false);
+    await act(async () => {
+      submit!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(answerMock).toHaveBeenCalledWith('w-wait2', '同意迁移，先备份');
+    // 恢复 running → 状态刷新后卡片消失
+    statusMock.mockResolvedValue([
+      { work_id: 'w-wait2', session_id: 's2', task: '迁移数据库？', state: 'running' },
+    ]);
+    await act(async () => {
+      fire('central-work-updated', undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="central-decision-card"]')).toBeNull('卡片随状态消失');
   });
 
   it('决定卡片长任务：默认多行截断（line-clamp），点击展开完整文本', async () => {
