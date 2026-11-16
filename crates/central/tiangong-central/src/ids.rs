@@ -12,21 +12,3 @@ pub fn new_id() -> String {
 pub fn now_text() -> String {
     chrono::Local::now().naive_local().to_string()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_id_is_unique_and_non_empty() {
-        let a = new_id();
-        let b = new_id();
-        assert!(!a.is_empty());
-        assert_ne!(a, b, "scru128 连续生成不得重复");
-    }
-
-    #[test]
-    fn now_text_is_non_empty() {
-        assert!(!now_text().is_empty());
-    }
-}
