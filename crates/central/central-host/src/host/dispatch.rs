@@ -5,30 +5,25 @@
 
 use central_state::failure_looks_model_related;
 
-use crate::app::TiangongApp;
-
-use super::events::{emit_central_work_updated, emit_central_work_updated_state};
-use super::state_of;
+use crate::host::events::{emit_central_work_updated, emit_central_work_updated_state};
+use crate::state_of_central;
 
 /// 中枢派发执行器通道（惰性启动消费循环）。
-pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
+pub fn central_dispatch_sender<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-) -> tokio::sync::mpsc::UnboundedSender<crate::central::CentralPluginMessage> {
-    use tauri::Manager;
-    let state = app.state::<TiangongApp>();
-    state
-        .inner()
-        .central_dispatch_tx
+) -> tokio::sync::mpsc::UnboundedSender<crate::CentralPluginMessage> {
+    let state = crate::state_of_central(app);
+    state.central_dispatch_tx
         .get_or_init(|| {
             let (tx, mut rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::central::CentralPluginMessage>();
+                tokio::sync::mpsc::unbounded_channel::<crate::CentralPluginMessage>();
             let app = app.clone();
             tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
                     match message {
-                        crate::central::CentralPluginMessage::Dispatch(request) => {
+                        crate::CentralPluginMessage::Dispatch(request) => {
                             if let Err(error) =
-                                handle_central_dispatch(state_of(&app), &app, request.clone()).await
+                                handle_central_dispatch(&state_of_central(&app), &app, request.clone()).await
                             {
                                 tracing::warn!(%error, work_id = %request.work_id, "中枢派发未执行");
                                 // 派发未执行 ≠ 工作失败：不产生终态事件、不进
@@ -52,10 +47,10 @@ pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
                                     )
                                 };
                                 if let Err(deliver_error) =
-                                    state_of(&app).deliver_central_message(
+                                    state_of_central(&app).deliver_central_message(
                                         scru128::new().to_string(),
                                         vec![tiangong_types::ContentBlock::text(note)],
-                                        Some(super::events::system_note_render(
+                                        Some(crate::host::events::system_note_render(
                                             if is_authorization { "approval" } else { "dispatch-note" },
                                         )),
                                     )
@@ -64,11 +59,11 @@ pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
                                 }
                             }
                         }
-                        crate::central::CentralPluginMessage::Steer(request) => {
+                        crate::CentralPluginMessage::Steer(request) => {
                             // 引导消息与派发同路径（登记/回调/回报时机一致），
                             // 仅语义不同：不新建会话、目标必须已存在（插件已校验）。
                             if let Err(error) =
-                                handle_central_dispatch(state_of(&app), &app, request.clone()).await
+                                handle_central_dispatch(&state_of_central(&app), &app, request.clone()).await
                             {
                                 tracing::warn!(%error, work_id = %request.work_id, "中枢引导执行失败");
                                 let notice = format!(
@@ -77,21 +72,21 @@ pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
                                     request.session_id,
                                     request.task
                                 );
-                                state_of(&app)
+                                state_of_central(&app)
                                     .on_central_work_finished(&request, false, &notice);
                             }
                         }
-                        crate::central::CentralPluginMessage::ReportsCollected => {
+                        crate::CentralPluginMessage::ReportsCollected => {
                             // collect_work_reports 已取走全部暂存回报：
                             // 清理状态登记并刷新前端。
-                            let state = state_of(&app);
+                            let state = state_of_central(&app);
                             state.clear_queued_work_reports();
                             emit_central_work_updated(&app);
                         }
-                        crate::central::CentralPluginMessage::Control(control) => {
-                            handle_central_control(state_of(&app), &app, control).await;
+                        crate::CentralPluginMessage::Control(control) => {
+                            handle_central_control(&state_of_central(&app), &app, control).await;
                         }
-                        crate::central::CentralPluginMessage::Notification {
+                        crate::CentralPluginMessage::Notification {
                             title,
                             message,
                             level,
@@ -106,15 +101,15 @@ pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
                                 }),
                             );
                         }
-                        crate::central::CentralPluginMessage::RequestWorkspaceApproval {
+                        crate::CentralPluginMessage::RequestWorkspaceApproval {
                             path,
                             task_fingerprint,
                         } => {
                             // 模型只能「请求」授权（R3 票据化）：触发前端
                             // 授权卡片；票据由用户操作签发（approve 命令）。
-                            super::events::emit_approval_required(
-                                state_of(&app),
-                                super::events::ApprovalRequiredEvent {
+                            crate::host::events::emit_approval_required(
+                                &state_of_central(&app),
+                                crate::host::events::ApprovalRequiredEvent {
                                     cwd: path.clone(),
                                     task: task_fingerprint.clone(),
                                     work_id: String::new(),
@@ -134,7 +129,7 @@ pub(crate) fn central_dispatch_sender<R: tauri::Runtime>(
 }
 
 /// 会话自身的工作目录（复用派发时沿用；会话不存在返回 None）。
-fn self_session_cwd(state: &TiangongApp, session_id: &str) -> Option<String> {
+fn self_session_cwd(state: &crate::CentralHostState, session_id: &str) -> Option<String> {
     state
         .core_manager
         .load_session(session_id)
@@ -148,7 +143,7 @@ fn self_session_cwd(state: &TiangongApp, session_id: &str) -> Option<String> {
 /// Worker 派发指令：身份 + 决策协议（对话式：后台无 UI，关键分叉以标记
 /// 上抛，中枢在对话文本中直接问用户——不依赖 request_user 弹层，用户
 /// 裁决暂缓征询功能）+ 任务。
-pub(crate) fn build_worker_instruction(work_id: &str, task: &str) -> String {
+pub fn build_worker_instruction(work_id: &str, task: &str) -> String {
     format!(
         "[中枢派发的后台工作 {}]\n你是被天工中枢派发的后台工作会话。请独立完成以下任务并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n【用户决策协议】你是后台会话，用户看不到你的界面——不要调用 request_user 等交互工具（无人应答，只会超时失败）。请自主决策完成任务；确因必须由用户决策（审批/确认/选择/补充关键信息）才能继续时：1) 以「【需要用户决策】」开头单独一行，完整写出问题（含背景与选项，一次问全）；2) 写完问题立即结束本轮回复；3) 中枢会在对话中直接询问用户，答复会以下一条消息回到本会话，届时继续任务。除关键分叉外应自主决策，最小化打断用户；无法完成时如实说明，不要虚构结果。\n\n任务：\n{}",
         work_id, task
@@ -156,10 +151,10 @@ pub(crate) fn build_worker_instruction(work_id: &str, task: &str) -> String {
 }
 
 /// 中枢工作控制执行：cancelled/paused 中断运行时，resume 发送继续指令。
-pub(crate) async fn handle_central_control<R: tauri::Runtime>(
-    state: &TiangongApp,
+pub async fn handle_central_control<R: tauri::Runtime>(
+    state: &crate::CentralHostState,
     app: &tauri::AppHandle<R>,
-    control: crate::central::CentralControlRequest,
+    control: crate::CentralControlRequest,
 ) {
     let was_running = state
         .central_running_works
@@ -194,7 +189,7 @@ pub(crate) async fn handle_central_control<R: tauri::Runtime>(
             }
             if control.action == "cancelled" {
                 // 取消是终态：落盘 outcome（重启恢复后显示已取消）
-                if let Err(error) = crate::central::mark_work_item_finished_with_session(
+                if let Err(error) = crate::mark_work_item_finished_with_session(
                     state.core_manager.storage_root(),
                     &control.work_id,
                     Some(&control.session_id),
@@ -203,7 +198,7 @@ pub(crate) async fn handle_central_control<R: tauri::Runtime>(
                     tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
                 }
                 // outcome 目前只有 completed/failed——取消以显式改写 outcome 表达
-                if let Err(error) = crate::central::set_work_item_outcome(
+                if let Err(error) = crate::set_work_item_outcome(
                     state.core_manager.storage_root(),
                     &control.session_id,
                     "cancelled",
@@ -211,7 +206,7 @@ pub(crate) async fn handle_central_control<R: tauri::Runtime>(
                     tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
                 }
             }
-            super::central_events::record_by_session(
+            crate::host::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &control.session_id,
                 if control.action == "cancelled" {
@@ -235,13 +230,13 @@ pub(crate) async fn handle_central_control<R: tauri::Runtime>(
         }
         "resume" => {
             // 恢复：向工作会话发送继续指令（复用 Steer 链路，挂回调走回报）
-            super::central_events::record_by_session(
+            crate::host::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &control.session_id,
                 tiangong_central::event::WorkEventType::WorkItemStarted,
                 "用户恢复：发送继续指令，回到执行中",
             );
-            let request = crate::central::CentralDispatchRequest {
+            let request = crate::CentralDispatchRequest {
                 work_id: control.work_id.clone(),
                 // R0 契约：恢复是一次新执行（§5.4），生成新 execution_id
                 execution_id: tiangong_central::new_execution_id(),
@@ -270,9 +265,9 @@ pub(crate) async fn handle_central_control<R: tauri::Runtime>(
 }
 
 /// 排队登记（依赖/写入锁共用）：挂起 pending + registry queued + 事件。
-pub(crate) async fn enqueue_central_dispatch(
-    state: &TiangongApp,
-    mut request: crate::central::CentralDispatchRequest,
+pub async fn enqueue_central_dispatch(
+    state: &crate::CentralHostState,
+    mut request: crate::CentralDispatchRequest,
     after: &str,
     cwd: &str,
 ) {
@@ -300,7 +295,7 @@ pub(crate) async fn enqueue_central_dispatch(
                     && entry.state == central_state::WorkState::Queued)
         });
         if session_idle {
-            registry.push(crate::central::CentralWorkStatus {
+            registry.push(crate::CentralWorkStatus {
                 work_id: request.work_id.clone(),
                 session_id: request.session_id.clone(),
                 task: format!("[排队] 依赖 {after} 终态后投递：{}", request.task),
@@ -318,7 +313,7 @@ pub(crate) async fn enqueue_central_dispatch(
         }
     }
     // 落盘排队标记（重启恢复重放——否则挂起队列丢失后误显示中断）
-    if let Err(error) = crate::central::mark_work_item_queued(
+    if let Err(error) = crate::mark_work_item_queued(
         state.core_manager.storage_root(),
         &request.session_id,
         after,
@@ -326,7 +321,7 @@ pub(crate) async fn enqueue_central_dispatch(
     ) {
         tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
     }
-    super::central_events::record_by_session(
+    crate::host::central_events::record_by_session(
         state.core_manager.storage_root(),
         &request.session_id,
         tiangong_central::event::WorkEventType::WorkItemProgress,
@@ -338,18 +333,18 @@ pub(crate) async fn enqueue_central_dispatch(
 /// 派发决策结果：Queued = 已入队（执行段不得投递）；Execute = 投递。
 /// Execute 的请求体较大（任务全文），Box 收窄变体尺寸差（clippy
 /// large_enum_variant）。
-pub(crate) enum DispatchPlan {
+pub enum DispatchPlan {
     Queued,
     Execute {
-        merged_work: Box<crate::central::CentralDispatchRequest>,
+        merged_work: Box<crate::CentralDispatchRequest>,
         steer_merged_into_running: bool,
         cwd: String,
     },
 }
 
-pub(crate) async fn plan_central_dispatch(
-    state: &TiangongApp,
-    request: crate::central::CentralDispatchRequest,
+pub async fn plan_central_dispatch(
+    state: &crate::CentralHostState,
+    request: crate::CentralDispatchRequest,
 ) -> Result<DispatchPlan, String> {
     // app 入口目标守卫（机检 1：dispatch_rejects_central_hub_at_app_entry 的
     // 接线）——插件侧已拒，此处兜底拦截绕过插件直入执行器的路径。
@@ -383,11 +378,8 @@ pub(crate) async fn plan_central_dispatch(
             .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
             .await
             .unwrap_or_default();
-        let directory_approved = crate::central::workspace_confirmed(
-            state.core_manager.storage_root(),
-            &default_workspace,
-            &cwd,
-        );
+        let directory_approved =
+            crate::workspace_confirmed(state.core_manager.storage_root(), &default_workspace, &cwd);
         let ticket_granted = !directory_approved
             && state
                 .ticket_registry
@@ -396,9 +388,9 @@ pub(crate) async fn plan_central_dispatch(
         if !directory_approved && !ticket_granted {
             // R5 授权卡片：拒绝事实广播前端（用户真实操作签发票据后
             // 模型重派即过；模型不能自证同意）
-            super::events::emit_approval_required(
+            crate::host::events::emit_approval_required(
                 state,
-                super::events::ApprovalRequiredEvent {
+                crate::host::events::ApprovalRequiredEvent {
                     cwd: cwd.clone(),
                     task: request.task.clone(),
                     work_id: request.work_id.clone(),
@@ -406,7 +398,7 @@ pub(crate) async fn plan_central_dispatch(
             );
             // Z6 审计：拒绝事实入事件日志（唯一事实源——此前授权链路
             // 不留持久轨迹）
-            super::central_events::record_central_event(
+            crate::host::central_events::record_central_event(
                 state.core_manager.storage_root(),
                 &request.work_id,
                 "",
@@ -486,7 +478,7 @@ pub(crate) async fn plan_central_dispatch(
             }
             merged_work.work_id = owner_work_id;
             merged_work.task = owner_task;
-            super::central_events::record_by_session(
+            crate::host::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &sid,
                 tiangong_central::event::WorkEventType::WorkItemStarted,
@@ -537,10 +529,10 @@ pub(crate) async fn plan_central_dispatch(
     })
 }
 
-pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
-    state: &TiangongApp,
+pub async fn handle_central_dispatch<R: tauri::Runtime>(
+    state: &crate::CentralHostState,
     app: &tauri::AppHandle<R>,
-    request: crate::central::CentralDispatchRequest,
+    request: crate::CentralDispatchRequest,
 ) -> Result<(), String> {
     let (merged_work, steer_merged_into_running, cwd) =
         match plan_central_dispatch(state, request.clone()).await? {
@@ -577,15 +569,13 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
         // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
         // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
         // （投递失败经 cancel 清理，不残留）。
-        if let Err(error) = state
-            .deliver_prepared_if_live(
-                &sid,
-                scru128::new().to_string(),
-                prepared,
-                effective_model,
-                None,
-            )
-            .await
+        if let Err(error) = (state.deliver_prepared)(
+            sid.clone(),
+            scru128::new().to_string(),
+            prepared,
+            effective_model.map(str::to_string),
+        )
+        .await
         {
             state.execution_router.cancel(&sid, &request.execution_id);
             return Err(error);
@@ -597,31 +587,28 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
-        let ensured = match state
-            .ensure_core(
-                &sid,
-                Some(cwd.clone()),
-                None,
-                None,
-                effective_model,
-                stream_tx,
-            )
-            .await
+        let is_new = match (state.ensure_core_fn)(
+            sid.clone(),
+            Some(cwd.clone()),
+            effective_model.map(str::to_string),
+            stream_tx,
+        )
+        .await
         {
-            Ok(ensured) => ensured,
+            Ok(is_new) => is_new,
             Err(error) => {
                 state.execution_router.cancel(&sid, &request.execution_id);
                 return Err(error);
             }
         };
-        if !ensured.is_new {
+        if !is_new {
             state.execution_router.cancel(&sid, &request.execution_id);
             return Err(format!(
                 "会话 {} 的 Core 已被并发创建，本次流通道未绑定；请稍后重派",
                 sid
             ));
         }
-        crate::commands::start_stream_consumer(app.clone(), sid.clone(), stream_rx);
+        (state.stream_consumer_starter)(sid.clone(), stream_rx);
         // ensure_core 的 initial_model_ref 只初始化新 Core 端点，不落
         // Session.model_ref——此处补写（Core 刚建必不忙），空闲回收后
         // 重建不再回退旧模型（二十一轮 review 修复的持久化缺口）。
@@ -633,15 +620,13 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
                 tracing::warn!(session_id = %sid, error, "复用派发的模型选择持久化失败");
             }
         }
-        if let Err(error) = state
-            .deliver_prepared_if_live(
-                &sid,
-                scru128::new().to_string(),
-                prepared,
-                effective_model,
-                None,
-            )
-            .await
+        if let Err(error) = (state.deliver_prepared)(
+            sid.clone(),
+            scru128::new().to_string(),
+            prepared,
+            effective_model.map(str::to_string),
+        )
+        .await
         {
             state.execution_router.cancel(&sid, &request.execution_id);
             return Err(error);
@@ -674,12 +659,15 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
             "reused_session": request.reused_session,
             "parallel": request.parallel,
         });
-        super::central_events::record_event(state.core_manager.storage_root(), dispatch_event);
+        crate::host::central_events::record_event(
+            state.core_manager.storage_root(),
+            dispatch_event,
+        );
     }
     // R0 契约：投递成功后同步执行归属到落盘登记——插件侧派发已带同值
     // （幂等），恢复 / 排队重放经此把新 execution_id 写回，事件时间线与
     // 终态日志才能归属到本次执行。
-    if let Err(error) = crate::central::set_work_item_execution(
+    if let Err(error) = crate::set_work_item_execution(
         state.core_manager.storage_root(),
         &sid,
         &request.execution_id,
@@ -731,15 +719,14 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
     }
     // 排队标记清除（第十三轮 P2-1）：进入执行即失效——重放的 DispatchNow
     // 路径不经 flush，若不在此清除，下次重启会再次重放导致重复执行。
-    if let Err(error) = crate::central::clear_work_item_queued(
-        state.core_manager.storage_root(),
-        &request.session_id,
-    ) {
+    if let Err(error) =
+        crate::clear_work_item_queued(state.core_manager.storage_root(), &request.session_id)
+    {
         tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
     }
     // R5 单写：派发事实已由上方 record_for（WorkItemStarted）入事件日志；
     // 此处仅以 note 补充「恢复 / 新任务」语义。
-    super::central_events::record_for(
+    crate::host::central_events::record_for(
         state,
         &merged_work.work_id,
         &request.execution_id,
@@ -757,9 +744,9 @@ pub(crate) async fn handle_central_dispatch<R: tauri::Runtime>(
 
 /// 向执行路由器挂载单个执行的终态回报回调（R1：按 execution_id 路由）。
 fn attach_work_finished_callback<R: tauri::Runtime>(
-    state: &TiangongApp,
+    state: &crate::CentralHostState,
     app: &tauri::AppHandle<R>,
-    work: crate::central::CentralDispatchRequest,
+    work: crate::CentralDispatchRequest,
 ) {
     let callback_app = app.clone();
     let work_for_handler = work.clone();
@@ -767,7 +754,12 @@ fn attach_work_finished_callback<R: tauri::Runtime>(
         &work.session_id,
         &work.execution_id,
         Box::new(move |done: bool, reason: String| {
-            handle_work_terminal(state_of(&callback_app), &work_for_handler, done, &reason);
+            handle_work_terminal(
+                &state_of_central(&callback_app),
+                &work_for_handler,
+                done,
+                &reason,
+            );
         }),
     );
 }
@@ -775,9 +767,9 @@ fn attach_work_finished_callback<R: tauri::Runtime>(
 /// 终态回调核心（host 集成测试的真实被测函数）：T6 归属过滤 + S6 状态
 /// 幂等 + 回报入队 + 依赖 flush——attach 的闭包体纯提取（零行为变化），
 /// 测试直接调用以锁定接线行为（旧代码会红）。
-pub(crate) fn handle_work_terminal(
-    state: &TiangongApp,
-    work: &crate::central::CentralDispatchRequest,
+pub fn handle_work_terminal(
+    state: &crate::CentralHostState,
+    work: &crate::CentralDispatchRequest,
     done: bool,
     reason: &str,
 ) {
@@ -855,8 +847,8 @@ pub(crate) fn handle_work_terminal(
 /// 上限）。将来超长结果的正确形态是「结果落文件 + 注入摘要与引用」
 /// （阶段 2 报告机制），而非拦腰截断。
 fn build_work_notice(
-    state: &TiangongApp,
-    work: &crate::central::CentralDispatchRequest,
+    state: &crate::CentralHostState,
+    work: &crate::CentralDispatchRequest,
     done: bool,
     failed_reason: &str,
 ) -> String {

@@ -7,14 +7,12 @@ use std::sync::Arc;
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::config::core::CoreConfigProvider;
 
-use crate::app::TiangongApp;
+use crate::host::dispatch::central_dispatch_sender;
 
-use super::dispatch::central_dispatch_sender;
-
-impl TiangongApp {
+impl crate::CentralHostState {
     /// 确保中枢 Core 存在：已存在则刷新配置复用，否则直接构造（挂中枢插件）。
     /// 返回是否新建（调用方据此启动流事件消费者）。
-    pub(crate) async fn ensure_central_core<R: tauri::Runtime>(
+    pub async fn ensure_central_core<R: tauri::Runtime>(
         &self,
         app: &tauri::AppHandle<R>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
@@ -32,7 +30,7 @@ impl TiangongApp {
         let mut session_config = app_config.to_core_config();
         let existing_session = self
             .core_manager
-            .load_session(crate::central::CENTRAL_SESSION_ID)
+            .load_session(crate::CENTRAL_SESSION_ID)
             .ok();
         if let Some(session) = &existing_session {
             session_config.trust_mode = session.trust_mode;
@@ -49,7 +47,7 @@ impl TiangongApp {
                 core.set_reasoning_effort(session_config.reasoning_effort);
                 // R0 观测：复用已有中枢 Core（进入中枢模式，无重建）。
                 tracing::info!(
-                    session_id = crate::central::CENTRAL_SESSION_ID,
+                    session_id = crate::CENTRAL_SESSION_ID,
                     "中枢 Core 复用（进入中枢模式，后台工作不受影响）"
                 );
                 return Ok(false);
@@ -96,7 +94,7 @@ impl TiangongApp {
             }
         };
         let core = tiangong_core::core::TiangongCore::builder()
-            .session_id(crate::central::CENTRAL_SESSION_ID.to_string())
+            .session_id(crate::CENTRAL_SESSION_ID.to_string())
             .config(CoreConfigProvider::new(session_config.clone()))
             .trust_mode(session_config.trust_mode)
             .storage_root(self.core_manager.storage_root().to_path_buf())
@@ -105,7 +103,7 @@ impl TiangongApp {
             // 征询功能暂缓（用户裁决 2026-11-11）：只挂中枢插件，不加
             // RuntimeCorePlugin（request_user 通道随之移除）。中枢需要用户
             // 决策时在对话文本中直接询问用户。
-            .plugins(vec![Arc::new(crate::central::CentralPlugin::new(
+            .plugins(vec![Arc::new(crate::CentralPlugin::new(
                 workspace_dir,
                 self.core_manager.clone(),
                 central_dispatch_sender(app),
@@ -121,14 +119,14 @@ impl TiangongApp {
         *guard = Some(core);
         // R0 观测：中枢 Core 创建 = 模式切换的宿主锚点（进入中枢）。
         tracing::info!(
-            session_id = crate::central::CENTRAL_SESSION_ID,
+            session_id = crate::CENTRAL_SESSION_ID,
             "中枢 Core 已创建（进入中枢模式）"
         );
         Ok(true)
     }
 
     /// 向中枢 Core 投递用户消息（prepared blocks）。
-    pub(crate) fn deliver_central_message(
+    pub fn deliver_central_message(
         &self,
         message_id: String,
         prepared: Vec<tiangong_types::ContentBlock>,
@@ -146,7 +144,7 @@ impl TiangongApp {
     }
 
     /// 取消中枢当前 turn。返回是否送达。
-    pub(crate) fn cancel_central_turn(&self) -> bool {
+    pub fn cancel_central_turn(&self) -> bool {
         use tiangong_core::agent_input::{AgentInput, CommandInput};
         self.central_core
             .lock()
@@ -159,7 +157,7 @@ impl TiangongApp {
     }
 
     /// 中枢 Core 是否存活（流事件消费者的存活判定用）。
-    pub(crate) fn central_core_alive(&self) -> bool {
+    pub fn central_core_alive(&self) -> bool {
         self.central_core
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -167,7 +165,7 @@ impl TiangongApp {
     }
 
     /// 关闭并等待中枢 Core 写盘结束（发送失败回滚 / 进程退出）。
-    pub(crate) async fn shutdown_join_central_core(&self) {
+    pub async fn shutdown_join_central_core(&self) {
         let core = self
             .central_core
             .lock()

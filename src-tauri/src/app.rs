@@ -17,6 +17,13 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 /// core_manager: 会话资源与 Core 操作入口
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
+/// 从 AppHandle 取宿主 TiangongApp（中枢编排经闭包回找也用此入口）。
+#[cfg(test)]
+pub(crate) fn state_of<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> &TiangongApp {
+    use tauri::Manager;
+    app.state::<TiangongApp>().inner()
+}
+
 pub struct TiangongApp {
     plugin_preload: tokio::sync::watch::Sender<
         Option<Result<tiangong_plugin_runtime::registry::StartupPluginReadiness, String>>,
@@ -56,39 +63,16 @@ pub struct TiangongApp {
     pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
-    /// 中枢对话 Core（**直接持有，不经 CoreManager**）：中枢需要内置且唯一的
-    /// 中枢插件（`crate::central::CentralPlugin`），CoreManager 的 runtime 聚合
-    /// 桥插件构造与编排不适用；中枢的构造/投递/取消/关闭见下方方法组。
-    pub(crate) central_core: Mutex<Option<tiangong_core::core::TiangongCore>>,
-    /// 中枢派发执行器的请求通道（惰性启动；中枢插件经它派发后台工作）。
-    pub(crate) central_dispatch_tx: std::sync::OnceLock<
-        tokio::sync::mpsc::UnboundedSender<crate::central::CentralPluginMessage>,
-    >,
-    /// 已到达、尚未进入中枢对话的后台工作回报（暂存批量模式：随用户
-    /// 下一条消息一并注入，或由中枢经 collect_work_reports 主动收集；
-    /// 与中枢插件共享同一实例）。
-    pub(crate) central_work_reports: std::sync::Arc<Mutex<Vec<String>>>,
-    /// 在执行中的后台工作会话（dispatch 投递成功插入，终态移除）——
-    /// 回报时机判定的依据：失败必达；成功且仍有任务在跑则暂存，
-    /// 全部结束后汇总一轮（设计稿 §9「关键节点必达 / 适时沉默」）。
-    pub(crate) central_running_works: Mutex<HashSet<String>>,
-    /// 后台工作状态登记（前端「后台工作」状态条数据源；work_id 唯一）。
-    pub(crate) central_work_registry: Mutex<Vec<crate::central::CentralWorkStatus>>,
-    /// 排队依赖的挂起派发（after_work_id 未终态）：依赖终态回调 flush。
-    pub(crate) central_pending_dispatches: Mutex<Vec<crate::central::CentralDispatchRequest>>,
+    /// 中枢宿主状态（R6 抽离：聚合于 central-host crate，共享同一实例）。
+    pub central: std::sync::Arc<central_host::CentralHostState>,
     /// 中枢模型回退通知已发出（抖动控制：每进程一次）。
-    pub(crate) central_model_fallback_notified: std::sync::atomic::AtomicBool,
     /// 激活问候已注入（每进程首次进入中枢模式时注入一次，§4.2/§10.4）。
-    pub(crate) central_activation_greeted: std::sync::atomic::AtomicBool,
     /// 每会话的终态路由（R1：按 execution_id 路由 Worker turn 终态，
     /// 取代 session 级回调槽——快速完成暂存补发、投递失败显式取消）。
-    pub(crate) execution_router: crate::central_host::ExecutionRouter,
     /// 授权票据注册表（R3：WorkspaceApproval / Decision 一次性票据，
     /// 仅宿主 UI 真实用户操作后签发；模型只能请求，不能生成）。
-    pub(crate) ticket_registry: tiangong_central::TicketRegistry,
     /// 模式协调器（R4：中枢/普通切换的宿主状态机与普通上下文快照，
     /// 取代前端模块级变量作为事实源；后台工作不受切换影响）。
-    pub(crate) mode_coordinator: crate::central_host::mode_coordinator::ModeCoordinator,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -189,6 +173,8 @@ impl TiangongApp {
             config: config.clone(),
             storage_root: storage_root.clone(),
         });
+        let central_state =
+            Self::build_central_host(core_manager.clone(), state.clone(), app_handle.clone());
         Self {
             plugin_preload: tokio::sync::watch::channel(Some(Ok(
                 tiangong_plugin_runtime::registry::StartupPluginReadiness::default(),
@@ -210,17 +196,7 @@ impl TiangongApp {
                 storage_root.clone(),
             ),
             core_manager,
-            central_core: Mutex::new(None),
-            central_dispatch_tx: std::sync::OnceLock::new(),
-            central_work_reports: std::sync::Arc::new(Mutex::new(Vec::new())),
-            central_running_works: Mutex::new(HashSet::new()),
-            central_work_registry: Mutex::new(Vec::new()),
-            central_pending_dispatches: Mutex::new(Vec::new()),
-            central_model_fallback_notified: std::sync::atomic::AtomicBool::new(false),
-            central_activation_greeted: std::sync::atomic::AtomicBool::new(false),
-            execution_router: crate::central_host::ExecutionRouter::new(),
-            ticket_registry: tiangong_central::TicketRegistry::new(),
-            mode_coordinator: crate::central_host::mode_coordinator::ModeCoordinator::new(),
+            central: central_state,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -288,8 +264,132 @@ impl TiangongApp {
 
     /// 注入 Tauri 应用句柄（setup 阶段调用，仅一次）。
     /// 已注入的 app_handle（测试环境通常未注入 → None）。
-    pub(crate) fn app_handle_read(&self) -> Option<tauri::AppHandle> {
-        self.app_handle.get().cloned()
+    // ===== 中枢方法转发（R6 抽离：实现在 central-host crate）=====
+    pub(crate) async fn ensure_central_core<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
+    ) -> Result<bool, String> {
+        self.central.ensure_central_core(app, stream_tx).await
+    }
+    pub(crate) fn deliver_central_message(
+        &self,
+        message_id: String,
+        prepared: Vec<tiangong_types::ContentBlock>,
+        render: Option<tiangong_types::MessageRender>,
+    ) -> Result<(), String> {
+        self.central
+            .deliver_central_message(message_id, prepared, render)
+    }
+    pub(crate) fn cancel_central_turn(&self) -> bool {
+        self.central.cancel_central_turn()
+    }
+    pub(crate) async fn shutdown_join_central_core(&self) {
+        self.central.shutdown_join_central_core().await;
+    }
+    pub(crate) fn take_central_work_reports(&self) -> Vec<String> {
+        self.central.take_central_work_reports()
+    }
+    pub(crate) fn push_central_work_reports(&self, notices: Vec<String>) {
+        self.central.push_central_work_reports(notices);
+    }
+    pub(crate) fn clear_queued_work_reports(&self) {
+        self.central.clear_queued_work_reports();
+    }
+    #[cfg(test)]
+    pub(crate) fn flush_pending_dispatches<R: tauri::Runtime>(
+        &self,
+        finished_work_id: &str,
+        finished_session_id: &str,
+        app: Option<tauri::AppHandle<R>>,
+    ) {
+        self.central
+            .flush_pending_dispatches(finished_work_id, finished_session_id, app);
+    }
+    pub(crate) fn central_work_status(&self) -> Vec<crate::central::CentralWorkStatus> {
+        self.central.central_work_status()
+    }
+    #[cfg(test)]
+    pub(crate) fn on_central_work_finished(
+        &self,
+        request: &crate::central::CentralDispatchRequest,
+        done: bool,
+        notice: &str,
+    ) {
+        self.central.on_central_work_finished(request, done, notice);
+    }
+
+    /// 构造中枢宿主状态（R6 抽离）：Core 基础设施（投递/建核）经闭包
+    /// 注入——运行时经 Tauri state 回找宿主自身（串行锁/交接/远端轮
+    /// 守卫都在宿主实现，中枢只表达意图）。
+    fn build_central_host(
+        core_manager: tiangong_core_manager::CoreManager,
+        app_state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
+        app_handle: std::sync::Arc<std::sync::OnceLock<tauri::AppHandle>>,
+    ) -> std::sync::Arc<central_host::CentralHostState> {
+        // 流消费者启动：经 OnceLock 取宿主句柄（setup 后可用）
+        let starter_handle = app_handle.clone();
+        let starter: central_host::StreamConsumerStarter =
+            std::sync::Arc::new(move |session_id, stream_rx| {
+                if let Some(handle) = starter_handle.get() {
+                    crate::commands::start_stream_consumer(handle.clone(), session_id, stream_rx);
+                } else {
+                    // 句柄未就绪（极早期派发）：drain 防发送端阻塞
+                    std::thread::spawn(move || for _ in stream_rx {});
+                }
+            });
+        // 投递 prepared 消息：回找宿主（串行锁 + 交接 + 远端轮守卫）
+        let deliver_handle = app_handle.clone();
+        let deliver: central_host::DeliverPreparedFn =
+            std::sync::Arc::new(move |session_id, message_id, prepared, model_ref| {
+                let handle = deliver_handle.clone();
+                Box::pin(async move {
+                    use tauri::Manager;
+                    let Some(app) = handle.get() else {
+                        return Err("宿主句柄未就绪，无法投递中枢派发消息".to_string());
+                    };
+                    let host = app.state::<TiangongApp>();
+                    host.deliver_prepared_if_live(
+                        &session_id,
+                        message_id,
+                        prepared,
+                        model_ref.as_deref(),
+                        None,
+                    )
+                    .await
+                })
+            });
+        // 确保会话 Core：回找宿主 ensure_core
+        let ensure_handle = app_handle.clone();
+        let ensure: central_host::EnsureCoreFn =
+            std::sync::Arc::new(move |session_id, cwd, model_ref, stream_tx| {
+                let handle = ensure_handle.clone();
+                Box::pin(async move {
+                    use tauri::Manager;
+                    let Some(app) = handle.get() else {
+                        return Err("宿主句柄未就绪，无法创建工作会话 Core".to_string());
+                    };
+                    let host = app.state::<TiangongApp>();
+                    host.ensure_core(
+                        &session_id,
+                        cwd,
+                        None,
+                        None,
+                        model_ref.as_deref(),
+                        stream_tx,
+                    )
+                    .await
+                    .map(|ensured| ensured.is_new)
+                })
+            });
+        std::sync::Arc::new(central_host::CentralHostState::new(
+            core_manager,
+            app_state,
+            app_handle,
+            starter,
+            deliver,
+            ensure,
+        ))
     }
 
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
@@ -906,11 +1006,63 @@ impl TiangongApp {
             pending_turns: Default::default(),
             core_manager: core_manager.clone(),
         };
+        let app_state = std::sync::Arc::new(tokio::sync::Mutex::new(core_state));
+        let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
+        // 测试闭包：直连 CoreManager（不经串行锁/交接——宿主集成细节由
+        // tiangong-app 自身测试覆盖；中枢测试关注编排行为）
+        let cm_deliver = core_manager.clone();
+        let deliver: central_host::DeliverPreparedFn =
+            std::sync::Arc::new(move |session_id, message_id, prepared, model_ref| {
+                let cm = cm_deliver.clone();
+                Box::pin(async move {
+                    cm.deliver_user_message(
+                        &session_id,
+                        tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                            message_id, prepared,
+                        )
+                        .with_model_ref(model_ref),
+                    )
+                    .await
+                })
+            });
+        let cm_ensure = core_manager.clone();
+        let ensure: central_host::EnsureCoreFn =
+            std::sync::Arc::new(move |session_id, cwd, model_ref, stream_tx| {
+                let cm = cm_ensure.clone();
+                Box::pin(async move {
+                    let config = tiangong_core::config::core::CoreConfig::default();
+                    let workspace = cwd.unwrap_or_default();
+                    cm.ensure_core(
+                        &session_id,
+                        config,
+                        workspace,
+                        model_ref.as_deref(),
+                        stream_tx,
+                        Vec::new,
+                    )
+                    .await
+                    .map(|ensured| ensured.is_new)
+                })
+            });
+        let starter: central_host::StreamConsumerStarter =
+            std::sync::Arc::new(move |session_id, stream_rx| {
+                std::thread::spawn(move || for _ in stream_rx {});
+                let _ = session_id;
+            });
+        let central = std::sync::Arc::new(central_host::CentralHostState::new(
+            core_manager.clone(),
+            app_state.clone(),
+            app_handle.clone(),
+            starter,
+            deliver,
+            ensure,
+        ));
         let mut app = Self::new();
-        app.state = std::sync::Arc::new(tokio::sync::Mutex::new(core_state));
+        app.state = app_state;
         app.core_manager = core_manager;
+        app.central = central;
         app.desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
-            app_handle: std::sync::Arc::new(std::sync::OnceLock::new()),
+            app_handle,
             config: tiangong_core::config::core::CoreConfigProvider::new(core_config),
             storage_root,
         });
@@ -1202,12 +1354,12 @@ async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    use super::state_of;
     use crate::central_host::dispatch::{
         build_worker_instruction, enqueue_central_dispatch, handle_central_dispatch,
         handle_work_terminal, plan_central_dispatch,
     };
     use crate::central_host::recovery::build_activation_summary;
-    use crate::central_host::state_of;
     use central_state::{failure_looks_model_related, should_deliver_now, WorkOutcome};
     /// 回报时机判定：失败必达；成功仅在无其他在执行任务时触发汇总轮。
     #[test]
@@ -1474,7 +1626,8 @@ mod tests {
         let app = TiangongApp::new();
         let session = "s-live";
         // registry 预置：该会话当前条目即本执行（归属判定通过）
-        app.central_work_registry
+        app.central
+            .central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(crate::central::CentralWorkStatus {
@@ -1493,8 +1646,8 @@ mod tests {
         {
             let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             let fired_clone = std::sync::Arc::clone(&fired);
-            app.execution_router.register(session, "exec-live");
-            app.execution_router.attach(
+            app.central.execution_router.register(session, "exec-live");
+            app.central.execution_router.attach(
                 session,
                 "exec-live",
                 Box::new(move |done: bool, reason: String| {
@@ -1503,10 +1656,14 @@ mod tests {
                 }),
             );
             // fire（流消费者终态路径等价）：路由给活跃执行的回调
-            app.execution_router.fire(session, true, String::new());
+            app.central
+                .execution_router
+                .fire(session, true, String::new());
             assert_eq!(*fired.lock().unwrap(), vec!["work-live:true:".to_string()]);
             // drain 一次性：再 fire 无回调（重复终态不重复触发）
-            app.execution_router.fire(session, true, String::new());
+            app.central
+                .execution_router
+                .fire(session, true, String::new());
             assert_eq!(
                 fired.lock().unwrap().len(),
                 1,
@@ -1516,6 +1673,7 @@ mod tests {
         // 状态驱动幂等（P1-1 修正后的语义）：在途 → 可处理；已终态 → 跳过
         {
             let mut registry = app
+                .central
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -1647,6 +1805,7 @@ mod tests {
     async fn host_central_core_builds_from_session_and_falls_back() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -1718,24 +1877,30 @@ mod tests {
     async fn host_terminal_callback_matrix() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
         // 取消守卫：Cancelled 条目的流终态不注入回报、不改状态
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-c1",
-            "s-c1",
-            central_state::WorkState::Cancelled,
-            Some("exec-test"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-c1",
+                "s-c1",
+                central_state::WorkState::Cancelled,
+                Some("exec-test"),
+            ));
         crate::central_host::dispatch::handle_work_terminal(
-            state,
+            &state.central,
             &dispatch_request("work-c1", "s-c1", "取消后迟到终态", false),
             true,
             "done",
         );
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let e = registry
                 .iter()
                 .rev()
@@ -1748,20 +1913,25 @@ mod tests {
             "守卫不注入回报"
         );
         // waiting_user 分流：含标记回报 → WaitingUser（未终态）+ 立即注入
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-w1",
-            "s-w1",
-            central_state::WorkState::Running,
-            Some("exec-test"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-w1",
+                "s-w1",
+                central_state::WorkState::Running,
+                Some("exec-test"),
+            ));
         crate::central_host::dispatch::handle_work_terminal(
-            state,
+            &state.central,
             &dispatch_request("work-w1", "s-w1", "等待用户任务", false),
             false,
             "问题：【需要用户决策】要不要继续",
         );
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let e = registry
                 .iter()
                 .rev()
@@ -1770,32 +1940,42 @@ mod tests {
             assert_eq!(e.state, central_state::WorkState::WaitingUser, "决策分流");
         }
         // 失败 → Failed；成功 → ReportQueued（回报入暂存）
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-f1",
-            "s-f1",
-            central_state::WorkState::Running,
-            Some("exec-test"),
-        ));
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-k1",
-            "s-k1",
-            central_state::WorkState::Running,
-            Some("exec-test"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-f1",
+                "s-f1",
+                central_state::WorkState::Running,
+                Some("exec-test"),
+            ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-k1",
+                "s-k1",
+                central_state::WorkState::Running,
+                Some("exec-test"),
+            ));
         crate::central_host::dispatch::handle_work_terminal(
-            state,
+            &state.central,
             &dispatch_request("work-f1", "s-f1", "失败任务", false),
             false,
             "执行失败：超时",
         );
         crate::central_host::dispatch::handle_work_terminal(
-            state,
+            &state.central,
             &dispatch_request("work-k1", "s-k1", "成功任务", false),
             true,
             "全部完成",
         );
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let f = registry
                 .iter()
                 .rev()
@@ -1815,20 +1995,25 @@ mod tests {
             "{reports:?}"
         );
         // 陈旧执行守卫：registry 已被新执行接管（in-flight + 不同 exec）→ 旧回调跳过
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-s1",
-            "s-s1",
-            central_state::WorkState::Running,
-            Some("exec-new"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-s1",
+                "s-s1",
+                central_state::WorkState::Running,
+                Some("exec-new"),
+            ));
         crate::central_host::dispatch::handle_work_terminal(
-            state,
+            &state.central,
             &dispatch_request("work-s1", "s-s1", "旧执行回调", false),
             true,
             "stale",
         );
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let e = registry
                 .iter()
                 .rev()
@@ -1837,20 +2022,25 @@ mod tests {
             assert_eq!(e.state, central_state::WorkState::Running, "陈旧回调不改写");
         }
         // 已终态重复回调跳过（幂等守卫）
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-d1",
-            "s-d1",
-            central_state::WorkState::ReportQueued,
-            Some("exec-test"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-d1",
+                "s-d1",
+                central_state::WorkState::ReportQueued,
+                Some("exec-test"),
+            ));
         crate::central_host::dispatch::handle_work_terminal(
-            state,
+            &state.central,
             &dispatch_request("work-d1", "s-d1", "重复回调", false),
             true,
             "again",
         );
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let e = registry
                 .iter()
                 .rev()
@@ -1870,6 +2060,7 @@ mod tests {
     async fn host_dispatch_queues_on_write_lock_then_delivers() {
         let app = tauri::test::mock_app();
         let (state, ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -1901,6 +2092,7 @@ mod tests {
         let _ = crate::central::add_confirmed_workspace(&storage_root, &ws);
         // 占位：其他会话 Running 同 cwd
         state
+            .central
             .central_work_registry
             .lock()
             .unwrap()
@@ -1933,7 +2125,7 @@ mod tests {
         );
         // 派发 → 排队（不投递）
         crate::central_host::dispatch::handle_central_dispatch(
-            state,
+            &state.central,
             handle,
             crate::central::CentralDispatchRequest {
                 work_id: "work-waiter".into(),
@@ -1950,7 +2142,12 @@ mod tests {
         .await
         .expect("排队派发应成功（不报错）");
         assert_eq!(
-            state.central_pending_dispatches.lock().unwrap().len(),
+            state
+                .central
+                .central_pending_dispatches
+                .lock()
+                .unwrap()
+                .len(),
             1,
             "应入 pending 队列"
         );
@@ -1973,7 +2170,7 @@ mod tests {
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             let delivered = {
-                let registry = state.central_work_registry.lock().unwrap();
+                let registry = state.central.central_work_registry.lock().unwrap();
                 registry.iter().any(|e| {
                     e.session_id == "s-waiter" && e.state == central_state::WorkState::Running
                 })
@@ -1983,7 +2180,7 @@ mod tests {
             }
         }
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             assert!(
                 registry
                     .iter()
@@ -1993,7 +2190,12 @@ mod tests {
             );
         }
         assert!(
-            state.central_pending_dispatches.lock().unwrap().is_empty(),
+            state
+                .central
+                .central_pending_dispatches
+                .lock()
+                .unwrap()
+                .is_empty(),
             "队列清空"
         );
     }
@@ -2003,6 +2205,7 @@ mod tests {
     async fn host_waiting_user_merge_restores_owner() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2031,12 +2234,17 @@ mod tests {
         let _ =
             crate::central::add_confirmed_workspace(&storage_root, std::path::Path::new("/tmp"));
         // owner 挂起等待用户
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-owner9",
-            "s-m9",
-            central_state::WorkState::WaitingUser,
-            Some("exec-owner9"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-owner9",
+                "s-m9",
+                central_state::WorkState::WaitingUser,
+                Some("exec-owner9"),
+            ));
         let _ = crate::central::upsert_work_item(
             &storage_root,
             &crate::central::WorkItemRecord {
@@ -2057,7 +2265,7 @@ mod tests {
         );
         // 用户答复（reused 派发）→ merge_waiting_user 恢复 owner
         crate::central_host::dispatch::handle_central_dispatch(
-            state,
+            &state.central,
             handle,
             crate::central::CentralDispatchRequest {
                 work_id: "work-ans9".into(),
@@ -2073,7 +2281,7 @@ mod tests {
         )
         .await
         .expect("答复派发应成功");
-        let registry = state.central_work_registry.lock().unwrap();
+        let registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
             .iter()
             .rev()
@@ -2089,21 +2297,28 @@ mod tests {
     async fn host_control_cancel_running_work_sends_command() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
         let storage_root = state.core_manager.storage_root().to_path_buf();
         state
+            .central
             .central_running_works
             .lock()
             .unwrap()
             .insert("work-run1".into());
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-run1",
-            "s-run",
-            central_state::WorkState::Running,
-            Some("exec-run1"),
-        ));
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-run1",
+                "s-run",
+                central_state::WorkState::Running,
+                Some("exec-run1"),
+            ));
         let _ = crate::central::upsert_work_item(
             &storage_root,
             &crate::central::WorkItemRecord {
@@ -2123,7 +2338,7 @@ mod tests {
             },
         );
         crate::central_host::dispatch::handle_central_control(
-            state,
+            &state.central,
             handle,
             crate::central::CentralControlRequest {
                 work_id: "work-run1".into(),
@@ -2134,13 +2349,14 @@ mod tests {
         .await;
         assert!(
             !state
+                .central
                 .central_running_works
                 .lock()
                 .unwrap()
                 .contains("work-run1"),
             "running 集合应移除"
         );
-        let registry = state.central_work_registry.lock().unwrap();
+        let registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
             .iter()
             .rev()
@@ -2213,6 +2429,7 @@ mod tests {
     async fn host_resolve_decision_command_issues_ticket() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2248,6 +2465,7 @@ mod tests {
         assert_eq!(issued["chosen_option"], "方案B");
         assert_eq!(
             state
+                .central
                 .ticket_registry
                 .consume_decision_for_execution("exec-dec1"),
             tiangong_central::tickets::TicketVerdict::Granted
@@ -2259,19 +2477,29 @@ mod tests {
     async fn host_activation_summary_idempotent_and_silent_when_idle() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
         // 空闲（无中断/失败/目标）→ 不注入（Ok 且无摘要）
-        assert!(crate::central_host::recovery::inject_central_activation_summary(state).is_ok());
+        assert!(
+            crate::central_host::recovery::inject_central_activation_summary(&state.central)
+                .is_ok()
+        );
         // 有中断事实 → 注入（中枢 Core 缺失时 deliver 报错——注入路径执行）
-        state.central_work_registry.lock().unwrap().push(reg_entry(
-            "work-i1",
-            "s-i1",
-            central_state::WorkState::Interrupted,
-            None,
-        ));
-        let second = crate::central_host::recovery::inject_central_activation_summary(state);
+        state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .push(reg_entry(
+                "work-i1",
+                "s-i1",
+                central_state::WorkState::Interrupted,
+                None,
+            ));
+        let second =
+            crate::central_host::recovery::inject_central_activation_summary(&state.central);
         // 幂等：首次已 swap true，第二次直接 Ok（不再构建）
         assert!(second.is_ok());
         // 事实判断独立验证（build_activation_summary 已有专测）
@@ -2290,6 +2518,7 @@ mod tests {
     async fn host_recover_interrupts_inflight_work() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state_of_handle = state_of(handle);
@@ -2322,7 +2551,11 @@ mod tests {
         std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
         crate::central_host::recover_central_work_state(handle);
         {
-            let registry = state_of_handle.central_work_registry.lock().unwrap();
+            let registry = state_of_handle
+                .central
+                .central_work_registry
+                .lock()
+                .unwrap();
             let run = registry
                 .iter()
                 .rev()
@@ -2364,6 +2597,7 @@ mod tests {
             let _ = ws;
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2400,8 +2634,12 @@ mod tests {
         };
         let _ = crate::central::upsert_work_item(&storage_root, &queued);
         // pending 队列：一条匹配 after=work-dep + 一条不匹配 after=work-other
-        state.central_pending_dispatches.lock().unwrap().push(
-            crate::central::CentralDispatchRequest {
+        state
+            .central
+            .central_pending_dispatches
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralDispatchRequest {
                 work_id: "work-flush".into(),
                 execution_id: "exec-flush".into(),
                 session_id: "s-flush".into(),
@@ -2411,10 +2649,13 @@ mod tests {
                 after_work_id: Some("work-dep".into()),
                 parallel: false,
                 reused_session: false,
-            },
-        );
-        state.central_pending_dispatches.lock().unwrap().push(
-            crate::central::CentralDispatchRequest {
+            });
+        state
+            .central
+            .central_pending_dispatches
+            .lock()
+            .unwrap()
+            .push(crate::central::CentralDispatchRequest {
                 work_id: "work-hold".into(),
                 execution_id: "exec-hold".into(),
                 session_id: "s-hold".into(),
@@ -2424,8 +2665,7 @@ mod tests {
                 after_work_id: Some("work-other".into()),
                 parallel: false,
                 reused_session: false,
-            },
-        );
+            });
         // 无句柄：直接返回，队列不丢
         state.flush_pending_dispatches(
             "work-dep",
@@ -2433,7 +2673,12 @@ mod tests {
             None::<tauri::AppHandle<tauri::test::MockRuntime>>,
         );
         assert_eq!(
-            state.central_pending_dispatches.lock().unwrap().len(),
+            state
+                .central
+                .central_pending_dispatches
+                .lock()
+                .unwrap()
+                .len(),
             2,
             "无句柄不消费"
         );
@@ -2443,7 +2688,7 @@ mod tests {
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             let done = {
-                let registry = state.central_work_registry.lock().unwrap();
+                let registry = state.central.central_work_registry.lock().unwrap();
                 registry.iter().any(|e| e.session_id == "s-flush")
             };
             if done {
@@ -2451,13 +2696,13 @@ mod tests {
             }
         }
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             assert!(
                 registry.iter().any(|e| e.session_id == "s-flush"),
                 "匹配条目应已投递登记"
             );
         }
-        let pending = state.central_pending_dispatches.lock().unwrap();
+        let pending = state.central.central_pending_dispatches.lock().unwrap();
         assert_eq!(pending.len(), 1, "非匹配条目保留");
         assert_eq!(pending[0].work_id, "work-hold");
         drop(pending);
@@ -2492,6 +2737,7 @@ mod tests {
             .unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2499,6 +2745,7 @@ mod tests {
         // 预置：registry 待汇报条目（ReportsCollected 消费对象）+ Running 条目
         //（Control 消费对象）+ 落盘登记（Control cancel 写 outcome）
         state
+            .central
             .central_work_registry
             .lock()
             .unwrap()
@@ -2571,7 +2818,7 @@ mod tests {
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             let done = {
-                let registry = state.central_work_registry.lock().unwrap();
+                let registry = state.central.central_work_registry.lock().unwrap();
                 registry.iter().rev().any(|e| {
                     e.work_id == "work-sender" && e.state == central_state::WorkState::Cancelled
                 })
@@ -2582,7 +2829,7 @@ mod tests {
         }
         // 消费结果断言
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -2608,6 +2855,7 @@ mod tests {
     async fn host_central_core_lifecycle_roundtrip() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2629,11 +2877,11 @@ mod tests {
             .deliver_central_message("m0".into(), vec![], None)
             .is_err());
         assert!(!state.cancel_central_turn());
-        assert!(!state.central_core_alive());
+        assert!(!state.central.central_core_alive());
         // 首建 true；二次 ensure false（并发双检）
         let first = state.ensure_central_core(handle, stream_tx.clone()).await;
         assert!(first.expect("首次创建应成功"), "首次应创建");
-        assert!(state.central_core_alive());
+        assert!(state.central.central_core_alive());
         let second = state.ensure_central_core(handle, stream_tx).await;
         assert!(!second.expect("二次应成功返回 false"), "重复 ensure 幂等");
         // deliver 入队成功 + cancel 送达
@@ -2657,6 +2905,7 @@ mod tests {
     async fn host_mode_commands_roundtrip() {
         let app = tauri::test::mock_app();
         let (state, _ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         // 初始 normal
@@ -2696,6 +2945,7 @@ mod tests {
     async fn host_work_timeline_command_outputs_events() {
         let app = tauri::test::mock_app();
         let (state, ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2729,7 +2979,7 @@ mod tests {
         };
         let _ = crate::central::upsert_work_item(&storage_root, &record);
         crate::central_host::dispatch::handle_central_dispatch(
-            state,
+            &state.central,
             handle,
             crate::central::CentralDispatchRequest {
                 work_id: "work-tlv".into(),
@@ -2771,6 +3021,7 @@ mod tests {
     async fn host_approve_workspace_command_issuance() {
         let app = tauri::test::mock_app();
         let (state, ws) = central_test_app();
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2860,6 +3111,7 @@ mod tests {
             .unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2882,6 +3134,7 @@ mod tests {
         };
         let _ = crate::central::upsert_work_item(&storage_root, &record);
         state
+            .central
             .central_work_registry
             .lock()
             .unwrap()
@@ -2898,7 +3151,7 @@ mod tests {
                 execution_id: Some("exec-ctl1".into()),
             });
         crate::central_host::dispatch::handle_central_control(
-            state,
+            &state.central,
             handle,
             crate::central::CentralControlRequest {
                 work_id: "work-ctl1".into(),
@@ -2908,7 +3161,7 @@ mod tests {
         )
         .await;
         // registry → Cancelled（终态）
-        let registry = state.central_work_registry.lock().unwrap();
+        let registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
             .iter()
             .rev()
@@ -2954,6 +3207,7 @@ mod tests {
             .unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -2991,6 +3245,7 @@ mod tests {
         };
         let _ = crate::central::upsert_work_item(&storage_root, &record);
         state
+            .central
             .central_work_registry
             .lock()
             .unwrap()
@@ -3008,7 +3263,7 @@ mod tests {
             });
         // pause
         crate::central_host::dispatch::handle_central_control(
-            state,
+            &state.central,
             handle,
             crate::central::CentralControlRequest {
                 work_id: "work-res1".into(),
@@ -3018,7 +3273,7 @@ mod tests {
         )
         .await;
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3039,10 +3294,14 @@ mod tests {
             parallel: false,
             reused_session: true,
         };
-        crate::central_host::dispatch::handle_central_dispatch(state, handle, resume_request)
-            .await
-            .expect("resume 派发应成功");
-        let registry = state.central_work_registry.lock().unwrap();
+        crate::central_host::dispatch::handle_central_dispatch(
+            &state.central,
+            handle,
+            resume_request,
+        )
+        .await
+        .expect("resume 派发应成功");
+        let registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
             .iter()
             .rev()
@@ -3071,6 +3330,7 @@ mod tests {
         // Completed，ReportsCollected 消息的状态同步路径），不动回报队列
         state.push_central_work_reports(vec!["工作C完成".to_string()]);
         state
+            .central
             .central_work_registry
             .lock()
             .unwrap()
@@ -3088,7 +3348,7 @@ mod tests {
             });
         state.clear_queued_work_reports();
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3114,6 +3374,7 @@ mod tests {
             let (s, _ws) = central_test_app();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state_of_handle = state_of(handle);
@@ -3154,7 +3415,11 @@ mod tests {
         }
         std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
         crate::central_host::recover_central_work_state(handle);
-        let registry = state_of_handle.central_work_registry.lock().unwrap();
+        let registry = state_of_handle
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap();
         assert_eq!(registry.len(), 2, "事件投影应重建两条登记");
         assert!(registry.iter().any(|e| e.work_id == "work-a"));
         assert!(registry.iter().any(|e| e.work_id == "work-b"));
@@ -3184,11 +3449,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-t1".into(),
                 session_id: "s-t1".into(),
                 task: "任务一".into(),
@@ -3199,11 +3461,12 @@ mod tests {
                 last_activity: None,
                 cwd: None,
                 execution_id: None,
-            });
+            },
+        );
         // 第一 turn：回报含决策标记 → waiting_user（未终态）
-        handle_work_terminal(&state, &request, true, "");
+        handle_work_terminal(&state.central, &request, true, "");
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3217,7 +3480,7 @@ mod tests {
         }
         // 模拟答复送达（merged 路径把 registry 恢复 running）
         {
-            let mut registry = state.central_work_registry.lock().unwrap();
+            let mut registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter_mut()
                 .rev()
@@ -3239,9 +3502,9 @@ mod tests {
         )
         .unwrap();
         // 第二 turn：终态必须被处理（旧集合版在此 return → 红）
-        handle_work_terminal(&state, &request, true, "");
+        handle_work_terminal(&state.central, &request, true, "");
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3253,7 +3516,7 @@ mod tests {
                 "第二 turn 终态必须被处理（旧 central_finished_once 代码在此红）"
             );
         }
-        let reports = state.central_work_reports.lock().unwrap().clone();
+        let reports = state.central.central_work_reports.lock().unwrap().clone();
         assert!(
             reports.len() >= 2,
             "两 turn 的回报都入队（旧代码第二次丢在此红）"
@@ -3266,11 +3529,8 @@ mod tests {
         let (state, _ws) = central_test_app();
         // 路径 A：归属保持（owner 仍是当前条目）→ owner 回调执行
         let owner = dispatch_request("work-owner", "s-own", "原工作", true);
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-owner".into(),
                 session_id: "s-own".into(),
                 task: "原工作".into(),
@@ -3281,10 +3541,11 @@ mod tests {
                 last_activity: None,
                 cwd: None,
                 execution_id: None,
-            });
-        handle_work_terminal(&state, &owner, true, "");
+            },
+        );
+        handle_work_terminal(&state.central, &owner, true, "");
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3297,7 +3558,7 @@ mod tests {
             );
         }
         // 路径 B：归属被 steer 覆盖（旧行为模拟）→ owner 的迟到回调被跳过
-        let mut registry = state.central_work_registry.lock().unwrap();
+        let mut registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
             .iter_mut()
             .rev()
@@ -3307,9 +3568,9 @@ mod tests {
         entry.state = central_state::WorkState::Running;
         drop(registry);
         let stale_owner = dispatch_request("work-owner", "s-own", "原工作", true);
-        let before = state.central_work_reports.lock().unwrap().clone();
-        handle_work_terminal(&state, &stale_owner, true, "");
-        let after = state.central_work_reports.lock().unwrap().clone();
+        let before = state.central.central_work_reports.lock().unwrap().clone();
+        handle_work_terminal(&state.central, &stale_owner, true, "");
+        let after = state.central.central_work_reports.lock().unwrap().clone();
         assert_eq!(
             before.len(),
             after.len(),
@@ -3323,9 +3584,9 @@ mod tests {
         let (state, _ws) = central_test_app();
         // 会话空闲 → 排队登记 Queued
         let queued = dispatch_request("work-q1", "s-q1", "排队任务", false);
-        enqueue_central_dispatch(&state, queued, "work-dep", "/ws").await;
+        enqueue_central_dispatch(&state.central, queued, "work-dep", "/ws").await;
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3338,11 +3599,8 @@ mod tests {
             );
         }
         // 同会话在跑 → 排队不覆盖（W4：旧代码 retain+push 会改成 Queued）
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-run".into(),
                 session_id: "s-run".into(),
                 task: "在跑工作".into(),
@@ -3353,11 +3611,12 @@ mod tests {
                 last_activity: None,
                 cwd: None,
                 execution_id: None,
-            });
+            },
+        );
         let queued2 = dispatch_request("work-q2", "s-run", "第二个排队", false);
-        enqueue_central_dispatch(&state, queued2, "work-dep", "/ws").await;
+        enqueue_central_dispatch(&state.central, queued2, "work-dep", "/ws").await;
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let running = registry
                 .iter()
                 .rev()
@@ -3370,7 +3629,12 @@ mod tests {
             );
         }
         // pending 队列两条都在
-        let pending = state.central_pending_dispatches.lock().unwrap().clone();
+        let pending = state
+            .central
+            .central_pending_dispatches
+            .lock()
+            .unwrap()
+            .clone();
         assert_eq!(pending.len(), 2, "排队请求必须入挂起队列");
     }
 
@@ -3378,11 +3642,8 @@ mod tests {
     #[tokio::test]
     async fn host_terminal_fallback_skips_queued_entry() {
         let (state, _ws) = central_test_app();
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-q9".into(),
                 session_id: "s-mix".into(),
                 task: "排队条目".into(),
@@ -3393,13 +3654,14 @@ mod tests {
                 last_activity: None,
                 cwd: None,
                 execution_id: None,
-            });
+            },
+        );
         // 未知 work_id + 命中 session 的排队条目 → 兜底不得写终态
         let request = dispatch_request("work-unknown", "s-mix", "未知工作", false);
         let notice = "[后台工作失败] work-unknown\n失败原因：超时".to_string();
         state.on_central_work_finished(&request, false, &notice);
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3427,11 +3689,8 @@ mod tests {
             "cwd": ws.to_string_lossy(), "messages": []}).to_string(),
     ).unwrap();
         // Paused 条目：resume 请求 → plan 判定非并入（恢复语义）
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-p".into(),
                 session_id: "s-resume".into(),
                 task: "暂停任务".into(),
@@ -3442,9 +3701,10 @@ mod tests {
                 last_activity: None,
                 cwd: Some(ws.to_string_lossy().to_string()),
                 execution_id: None,
-            });
+            },
+        );
         let resume = dispatch_request("work-p", "s-resume", "继续暂停的任务", true);
-        let plan = plan_central_dispatch(&state, resume)
+        let plan = plan_central_dispatch(&state.central, resume)
             .await
             .expect("plan 应成功");
         let steer_merged = match plan {
@@ -3462,7 +3722,7 @@ mod tests {
         );
         // Running 条目：steer 判为并入
         {
-            let mut registry = state.central_work_registry.lock().unwrap();
+            let mut registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter_mut()
                 .rev()
@@ -3471,7 +3731,7 @@ mod tests {
             entry.state = central_state::WorkState::Running;
         }
         let steer = dispatch_request("steer-x", "s-resume", "补充指令", true);
-        let plan2 = plan_central_dispatch(&state, steer)
+        let plan2 = plan_central_dispatch(&state.central, steer)
             .await
             .expect("plan 应成功");
         let steer_merged2 = match plan2 {
@@ -3499,11 +3759,8 @@ mod tests {
             "cwd": ws.to_string_lossy(), "messages": []}).to_string(),
     ).unwrap();
         // 依赖在途
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-dep".into(),
                 session_id: "s-dep".into(),
                 task: "在跑依赖".into(),
@@ -3514,7 +3771,8 @@ mod tests {
                 last_activity: None,
                 cwd: Some(ws.to_string_lossy().to_string()),
                 execution_id: None,
-            });
+            },
+        );
         let follow = crate::central::CentralDispatchRequest {
             work_id: "work-follow".into(),
             session_id: "s-new-follow".into(),
@@ -3526,7 +3784,7 @@ mod tests {
             reused_session: false,
             execution_id: "exec-test".to_string(),
         };
-        let plan = plan_central_dispatch(&state, follow)
+        let plan = plan_central_dispatch(&state.central, follow)
             .await
             .expect("plan 应成功");
         assert!(
@@ -3534,7 +3792,12 @@ mod tests {
             "依赖在途时必须返回 Queued（执行段不投递）"
         );
         // 排队登记与挂起队列已就绪
-        let pending = state.central_pending_dispatches.lock().unwrap().clone();
+        let pending = state
+            .central
+            .central_pending_dispatches
+            .lock()
+            .unwrap()
+            .clone();
         assert_eq!(pending.len(), 1, "排队请求必须入挂起队列");
     }
     // ============================================================================
@@ -3575,11 +3838,8 @@ mod tests {
         .unwrap();
         let state = state_of(state_arc);
         // 依赖在途（另一会话）
-        state
-            .central_work_registry
-            .lock()
-            .unwrap()
-            .push(crate::central::CentralWorkStatus {
+        state.central.central_work_registry.lock().unwrap().push(
+            crate::central::CentralWorkStatus {
                 work_id: "work-dep".into(),
                 session_id: "s-dep".into(),
                 task: "依赖".into(),
@@ -3590,7 +3850,8 @@ mod tests {
                 last_activity: None,
                 cwd: Some(ws.to_string_lossy().to_string()),
                 execution_id: None,
-            });
+            },
+        );
         let follow = crate::central::CentralDispatchRequest {
             work_id: "work-f".into(),
             session_id: "s-follow".into(),
@@ -3602,7 +3863,7 @@ mod tests {
             reused_session: false,
             execution_id: "exec-test".to_string(),
         };
-        handle_central_dispatch(state, state_arc, follow)
+        handle_central_dispatch(&state.central, state_arc, follow)
             .await
             .expect("排队 dispatch 应成功");
         // 未投递：无 Core、无回调、无 running 登记；挂起队列有
@@ -3611,16 +3872,29 @@ mod tests {
             "排队不得创建 Core"
         );
         assert!(
-            state.execution_router.pending_handler_count("s-follow") == 0,
+            state
+                .central
+                .execution_router
+                .pending_handler_count("s-follow")
+                == 0,
             "排队不得挂回调"
         );
         assert!(!state
+            .central
             .central_running_works
             .lock()
             .unwrap()
             .contains("work-f"));
-        assert_eq!(state.central_pending_dispatches.lock().unwrap().len(), 1);
-        let registry = state.central_work_registry.lock().unwrap();
+        assert_eq!(
+            state
+                .central
+                .central_pending_dispatches
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
+        let registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
             .iter()
             .rev()
@@ -3650,6 +3924,7 @@ mod tests {
         ).unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -3665,7 +3940,7 @@ mod tests {
             reused_session: false,
             execution_id: "exec-test".to_string(),
         };
-        handle_central_dispatch(state, handle, owner)
+        handle_central_dispatch(&state.central, handle, owner)
             .await
             .expect("owner dispatch 应成功");
         assert!(state.core_manager.has_live_core("s-own"), "owner 应建 Core");
@@ -3681,12 +3956,12 @@ mod tests {
             reused_session: true,
             execution_id: "exec-test".to_string(),
         };
-        handle_central_dispatch(state, handle, steer)
+        handle_central_dispatch(&state.central, handle, steer)
             .await
             .expect("steer dispatch 应成功");
         // 归属保持 owner（W2：旧代码 steer upsert 覆盖 → 此断言红）
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3699,7 +3974,10 @@ mod tests {
             assert_eq!(entry.state, central_state::WorkState::Running);
         }
         // 回调只挂 owner（steer 不挂）
-        let handler_count = state.execution_router.pending_handler_count("s-own");
+        let handler_count = state
+            .central
+            .execution_router
+            .pending_handler_count("s-own");
         assert_eq!(handler_count, 1, "只挂 owner 回调（steer 并入不挂）");
     }
 
@@ -3722,6 +4000,7 @@ mod tests {
         ).unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -3754,7 +4033,7 @@ mod tests {
             reused_session: record.reused_session,
             execution_id: "exec-test".to_string(),
         };
-        handle_central_dispatch(state, handle, request)
+        handle_central_dispatch(&state.central, handle, request)
             .await
             .expect("重放投递应成功");
         // queued 标记被清（不清 → 下次重启重复执行）
@@ -3798,6 +4077,7 @@ mod tests {
             .unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -3831,12 +4111,12 @@ mod tests {
             parallel: false,
             reused_session: false,
         };
-        handle_central_dispatch(state, handle, request)
+        handle_central_dispatch(&state.central, handle, request)
             .await
             .expect("派发应成功");
         // 1) 内存登记条目带本次执行归属
         {
-            let registry = state.central_work_registry.lock().unwrap();
+            let registry = state.central.central_work_registry.lock().unwrap();
             let entry = registry
                 .iter()
                 .rev()
@@ -3913,6 +4193,7 @@ mod tests {
             .unwrap();
             s
         };
+        app.manage(state.central.clone());
         app.manage(state);
         let handle = app.handle();
         let state = state_of(handle);
@@ -3929,18 +4210,18 @@ mod tests {
         };
         // 1) 未授权：拒绝且指引等待用户授权
         let storage_root = state.core_manager.storage_root().to_path_buf();
-        let denied = handle_central_dispatch(state, handle, request("发布模块 v2"))
+        let denied = handle_central_dispatch(&state.central, handle, request("发布模块 v2"))
             .await
             .expect_err("未授权工作区必须拒绝");
         assert!(denied.contains("尚未经用户授权"), "拒绝信息：{denied}");
         // 2) 指纹偷换：签发「任务甲」票据，派发「发布模块 v2」→ 拒绝
-        state.ticket_registry.issue_workspace_approval(
+        state.central.ticket_registry.issue_workspace_approval(
             &extra_path,
             "任务甲",
             tiangong_central::tickets::RiskLevel::High,
             600,
         );
-        let swapped = handle_central_dispatch(state, handle, request("发布模块 v2"))
+        let swapped = handle_central_dispatch(&state.central, handle, request("发布模块 v2"))
             .await
             .expect_err("任务指纹不一致必须拒绝（防偷换）");
         assert!(
@@ -3948,10 +4229,10 @@ mod tests {
             "偷换拒绝信息：{swapped}"
         );
         // 3) 匹配票据：放行且一次性（同任务再派拒绝）
-        handle_central_dispatch(state, handle, request("任务甲"))
+        handle_central_dispatch(&state.central, handle, request("任务甲"))
             .await
             .expect("匹配票据应放行派发");
-        let replay = handle_central_dispatch(state, handle, request("任务甲"))
+        let replay = handle_central_dispatch(&state.central, handle, request("任务甲"))
             .await
             .expect_err("票据一次性：同任务重派需要新授权");
         assert!(replay.contains("尚未经用户授权"), "重放拒绝信息：{replay}");

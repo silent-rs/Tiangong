@@ -10,10 +10,9 @@
 //! 前端可保留动画等临时 UI 状态，但模式事实以本组命令为准（§6.3）。
 
 use serde_json::json;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
-use crate::app::TiangongApp;
-use crate::central_host::mode_coordinator::NormalContextSnapshot;
+use crate::host::mode_coordinator::NormalContextSnapshot;
 
 /// 进入中枢：保存普通上下文快照，状态切 CentralActive（幂等，重入合并）。
 #[tauri::command]
@@ -22,7 +21,7 @@ pub async fn central_mode_enter<R: tauri::Runtime>(
     active_session_id: Option<String>,
     new_conversation_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let state = app.state::<TiangongApp>();
+    let state = crate::state_of_central(&app);
     let snapshot = NormalContextSnapshot {
         active_session_id,
         new_conversation_id,
@@ -43,7 +42,7 @@ pub async fn central_mode_enter<R: tauri::Runtime>(
 pub async fn central_mode_exit<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<serde_json::Value, String> {
-    let state = app.state::<TiangongApp>();
+    let state = crate::state_of_central(&app);
     let snapshot = state.mode_coordinator.request_exit();
     state
         .mode_coordinator
@@ -59,11 +58,10 @@ pub async fn central_mode_exit<R: tauri::Runtime>(
 pub async fn central_mode_state<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<serde_json::Value, String> {
-    let state = app.state::<TiangongApp>();
+    let state = crate::state_of_central(&app);
     let mode = state.mode_coordinator.state();
-    let preference = crate::central_host::mode_coordinator::load_mode_preference(
-        state.core_manager.storage_root(),
-    );
+    let preference =
+        crate::host::mode_coordinator::load_mode_preference(state.core_manager.storage_root());
     Ok(json!({
         "mode": mode.as_str(),
         "last_mode": preference.last_mode,

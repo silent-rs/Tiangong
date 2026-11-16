@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::commands::StreamFinishedHandler;
+use crate::StreamFinishedHandler;
 
 /// 单会话的监视状态。
 #[derive(Default)]
@@ -41,7 +41,7 @@ struct SessionWatch {
     active_execution: Option<String>,
 }
 
-/// 全局执行路由器（挂载于 [`crate::app::TiangongApp`]）。
+/// 全局执行路由器（挂载于 [`crate::CentralHostState`]）。
 #[derive(Default)]
 pub struct ExecutionRouter {
     sessions: Mutex<HashMap<String, SessionWatch>>,

@@ -498,7 +498,7 @@ pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_i
 /// CoreManager registry。
 fn session_core_alive(state: &TiangongApp, session_id: &str) -> bool {
     if crate::central::is_central_session(session_id) {
-        state.central_core_alive()
+        state.central.central_core_alive()
     } else {
         state.core_manager.has_live_core(session_id)
     }
@@ -1002,7 +1002,7 @@ pub async fn central_activation_greeting(app: AppHandle) -> Result<(), String> {
             stream_rx,
         );
     }
-    crate::central_host::inject_central_activation_summary(state.inner())
+    crate::central_host::inject_central_activation_summary(&state.inner().central)
 }
 
 fn emit_session_stream_event<R: tauri::Runtime>(
@@ -1085,6 +1085,7 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
             let state = app.state::<TiangongApp>();
             state
                 .inner()
+                .central
                 .execution_router
                 .fire(session_id, done, reason);
         };
@@ -1111,6 +1112,8 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
             let Some(note) = note else { return };
             let state = app.state::<crate::app::TiangongApp>();
             let mut registry = state
+                .inner()
+                .central
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());

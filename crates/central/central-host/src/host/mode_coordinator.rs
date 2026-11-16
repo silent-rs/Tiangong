@@ -69,7 +69,7 @@ pub struct ModePreference {
     pub updated_at: String,
 }
 
-/// 宿主模式协调器（挂 [`crate::app::TiangongApp`]）。
+/// 宿主模式协调器（挂 [`crate::CentralHostState`]）。
 #[derive(Default)]
 pub struct ModeCoordinator {
     inner: Mutex<ModeCoordinatorInner>,

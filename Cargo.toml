@@ -9,6 +9,7 @@ members = [
     "crates/tiangong-core",
     "crates/tiangong-core-manager",
     "crates/central/central-state",
+    "crates/central/central-host",
     "crates/central/central-plugin",
     "crates/central/tiangong-central",
     "crates/tiangong-cli",
@@ -116,6 +117,7 @@ tiangong-plugin-prompt-sidecar = { path = "plugins/tiangong-plugin-prompt/sideca
 tiangong-plugin-runtime = { path = "crates/plugin/tiangong-plugin-runtime" }
 central-state = { path = "crates/central/central-state" }
 central-plugin = { path = "crates/central/central-plugin" }
+central-host = { path = "crates/central/central-host" }
 tiangong-plugin-sidecar = { path = "crates/plugin/tiangong-plugin-sidecar" }
 tiangong-plugin-update = { path = "crates/plugin/tiangong-plugin-update" }
 tiangong-server = { path = "crates/tiangong-server" }

@@ -2,7 +2,7 @@
 
 pub mod app;
 pub mod central;
-pub mod central_host;
+pub use central_host;
 pub mod commands;
 mod config_handoff;
 mod core_factory;

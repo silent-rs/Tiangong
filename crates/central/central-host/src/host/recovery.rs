@@ -1,11 +1,9 @@
 //! 中枢重启恢复与激活摘要（R1 从 app.rs 拆出）：从 work-items.json 重建状态
 //! 登记、排队重放投递、离开期间汇总回报、进入中枢的激活问候注入。
 
-use crate::app::TiangongApp;
-
-use super::dispatch::handle_central_dispatch;
-use super::events::emit_central_work_updated_state;
-use super::state_of;
+use crate::host::dispatch::handle_central_dispatch;
+use crate::host::events::emit_central_work_updated_state;
+use crate::state_of_central;
 
 /// 重启恢复（§15.1 + 徽章「永不消失」）：从 work-items.json 全量重建
 /// 状态登记（completed/failed 按 outcome、legacy 从中枢会话回报推断成败、
@@ -14,18 +12,17 @@ use super::state_of;
 /// ——徽章显示已完成但中枢从未收到结果摘要）。
 /// 幂等：registry 非空时跳过（防 setup 与 lazy 通道双跑重复注入）。
 pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    use tauri::Manager;
-    let state = app.state::<TiangongApp>();
+    let state = crate::state_of_central(app);
+    let state = &*state;
     // R5：登记由事件日志投影重建（唯一事实源重放）；日志为空（R5 前
     // 旧数据）回退 work-items.json 快照重建。
-    let storage_root = state.inner().core_manager.storage_root().to_path_buf();
-    let entries = super::central_events::rebuild_registry_from_log(&storage_root)
-        .unwrap_or_else(|| crate::central::recover_registry_entries(&storage_root));
+    let storage_root = state.core_manager.storage_root().to_path_buf();
+    let entries = crate::host::central_events::rebuild_registry_from_log(&storage_root)
+        .unwrap_or_else(|| crate::recover_registry_entries(&storage_root));
     if entries.is_empty() {
         return;
     }
     let mut registry = state
-        .inner()
         .central_work_registry
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -33,7 +30,9 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
         return; // 已恢复过（双触发幂等）
     }
     // R2：旧工作项时间线一次性迁移至事件日志（幂等：日志非空跳过）。
-    super::central_events::migrate_legacy_timeline(state_of(app).core_manager.storage_root());
+    crate::host::central_events::migrate_legacy_timeline(
+        state_of_central(app).core_manager.storage_root(),
+    );
     // 汇总只在有「需要用户处理/知晓的新事实」时注入：interrupted（结果
     // 未产出，可重派）与 failed（可换模型重派）。completed 不注入——
     // 每次重启都注入全量历史完成数会重复刷屏且数字并非「离开期间」
@@ -64,10 +63,10 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
     // 排队挂起重放：queued 条目重新进入派发链（依赖已终态 → 立即投递；
     // 仍在途 → 重新排队）。内存 pending 队列随重启丢失，落盘标记是唯一
     // 恢复源（review P2：队列不持久导致挂起任务丢失）。
-    let queued_replay: Vec<crate::central::CentralDispatchRequest> =
-        crate::central::queued_work_items(state.inner().core_manager.storage_root())
+    let queued_replay: Vec<crate::CentralDispatchRequest> =
+        crate::queued_work_items(state.core_manager.storage_root())
             .into_iter()
-            .map(|record| crate::central::CentralDispatchRequest {
+            .map(|record| crate::CentralDispatchRequest {
                 work_id: record.work_id,
                 // R0 契约：排队重放是一次新执行（§5.4），旧 execution_id
                 // 留在事件时间线中可追溯，投递用新归属。
@@ -101,7 +100,7 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) =
-                handle_central_dispatch(state_of(&app_handle), &app_handle, request).await
+                handle_central_dispatch(&state_of_central(&app_handle), &app_handle, request).await
             {
                 tracing::warn!(%error, "排队工作重启重放失败");
             }
@@ -117,19 +116,18 @@ pub fn recover_central_work_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
             "[系统中枢] 应用重启恢复：{interrupted_count} 个后台工作中断（结果未产出，可复用原会话重派）。{failed_note}请向用户转述并根据指示处理。"
         );
         state
-            .inner()
             .central_work_reports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(summary);
     }
-    emit_central_work_updated_state(state.inner());
+    emit_central_work_updated_state(state);
 }
 
 /// 激活摘要组装（§4.2 基于可验证上下文生成问候的数据源；纯函数可测）。
-pub(crate) fn build_activation_summary(
-    entries: &[crate::central::CentralWorkStatus],
-    goals: &[crate::central::GoalRecord],
+pub fn build_activation_summary(
+    entries: &[crate::CentralWorkStatus],
+    goals: &[crate::GoalRecord],
 ) -> Option<String> {
     use central_state::WorkState;
     let count = |state: WorkState| entries.iter().filter(|e| e.state == state).count();
@@ -185,7 +183,7 @@ pub(crate) fn build_activation_summary(
 /// 激活问候注入（§4.2）：进入中枢模式时把状态摘要投递给中枢 Core，
 /// 驱动模型主动问候。幂等：每进程仅首次进入注入（避免频繁切换刷屏，
 /// §10.4 频率控制）。中枢 Core 须已 ensure。
-pub(crate) fn inject_central_activation_summary(state: &TiangongApp) -> Result<(), String> {
+pub fn inject_central_activation_summary(state: &crate::CentralHostState) -> Result<(), String> {
     if state
         .central_activation_greeted
         .swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -193,7 +191,7 @@ pub(crate) fn inject_central_activation_summary(state: &TiangongApp) -> Result<(
         return Ok(());
     }
     let entries = state.central_work_status();
-    let goals = crate::central::load_goals(state.core_manager.storage_root());
+    let goals = crate::load_goals(state.core_manager.storage_root());
     // 空闲与纯执行态不注入（适时沉默——用户实测：机械问候无价值）；
     // 仅存在需要用户动作的事实时注入一条自然提醒。
     let Some(summary) = build_activation_summary(&entries, &goals) else {
@@ -202,6 +200,6 @@ pub(crate) fn inject_central_activation_summary(state: &TiangongApp) -> Result<(
     state.deliver_central_message(
         scru128::new().to_string(),
         vec![tiangong_types::ContentBlock::text(summary)],
-        Some(super::events::system_note_render("activation")),
+        Some(crate::host::events::system_note_render("activation")),
     )
 }

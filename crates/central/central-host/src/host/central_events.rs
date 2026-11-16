@@ -5,10 +5,8 @@
 use tiangong_central::event::WorkEventType as E;
 use tiangong_central::{EventLog, WorkEvent};
 
-use crate::app::TiangongApp;
-
 /// 事件日志路径：`{storage_root}/central/events.jsonl`。
-pub(crate) fn event_log_path(storage_root: &std::path::Path) -> std::path::PathBuf {
+pub fn event_log_path(storage_root: &std::path::Path) -> std::path::PathBuf {
     storage_root.join("central").join("events.jsonl")
 }
 
@@ -16,7 +14,7 @@ pub(crate) fn event_log_path(storage_root: &std::path::Path) -> std::path::PathB
 ///
 /// 打开失败或追加失败记 warn——事件日志是事实源，写失败必须显式可见；
 /// 不阻塞主链路（调用方语义与旧时间线一致）。
-pub(crate) fn record_central_event(
+pub fn record_central_event(
     storage_root: &std::path::Path,
     work_item_id: &str,
     execution_id: &str,
@@ -47,7 +45,7 @@ pub(crate) fn record_central_event(
 /// 事件日志为空且 work-items.json 各记录含 `events` 时间线时，把旧事件
 /// 逐条转入事件日志（event_id 重生成 scru128；execution_id 取记录当前值；
 /// 原始 kind/note 保真进 payload）。幂等：日志非空即跳过。
-pub(crate) fn migrate_legacy_timeline(storage_root: &std::path::Path) {
+pub fn migrate_legacy_timeline(storage_root: &std::path::Path) {
     let log = match EventLog::open(&event_log_path(storage_root)) {
         Ok(log) => log,
         Err(error) => {
@@ -63,7 +61,7 @@ pub(crate) fn migrate_legacy_timeline(storage_root: &std::path::Path) {
             return;
         }
     }
-    let records = crate::central::load_work_items(storage_root);
+    let records = crate::load_work_items(storage_root);
     let mut migrated = 0usize;
     for record in &records {
         for legacy in &record.events {
@@ -111,8 +109,8 @@ pub(crate) fn migrate_legacy_timeline(storage_root: &std::path::Path) {
 }
 
 /// 便捷入口：从宿主状态取 storage_root 记录事件。
-pub(crate) fn record_for(
-    state: &TiangongApp,
+pub fn record_for(
+    state: &crate::CentralHostState,
     work_item_id: &str,
     execution_id: &str,
     worker_session_id: &str,
@@ -134,13 +132,13 @@ pub(crate) fn record_for(
 /// 从落盘登记按 `session_id` 解析 work_id 与当前 execution_id，再写入
 /// 事件日志——取代旧的 `append_work_item_event`（work-items.json 内嵌
 /// 时间线的双写路径已删除）。
-pub(crate) fn record_by_session(
+pub fn record_by_session(
     storage_root: &std::path::Path,
     session_id: &str,
     event_type: E,
     note: &str,
 ) {
-    let record = crate::central::load_work_items(storage_root)
+    let record = crate::load_work_items(storage_root)
         .into_iter()
         .rev()
         .find(|item| item.session_id == session_id);
@@ -167,7 +165,7 @@ pub(crate) fn record_by_session(
 /// 返回 (at, kind, note) 列表；事件日志为空时回退读取 work-items.json
 /// 内嵌时间线（R5 前的旧数据，恢复时 migrate_legacy_timeline 已导入，
 /// 此处兜底极端时序）。
-pub(crate) fn work_timeline(
+pub fn work_timeline(
     storage_root: &std::path::Path,
     work_item_id: &str,
 ) -> Vec<(String, String, String)> {
@@ -194,7 +192,7 @@ pub(crate) fn work_timeline(
     if !timeline.is_empty() {
         return timeline;
     }
-    crate::central::load_work_items(storage_root)
+    crate::load_work_items(storage_root)
         .into_iter()
         .rev()
         .find(|item| item.work_id == work_item_id)
@@ -213,9 +211,9 @@ pub(crate) fn work_timeline(
 /// （task/model/cwd/reused_session/execution_id），状态由
 /// [`tiangong_central::project_work_state`] 投影。日志为空返回 None
 /// （调用方回退旧路径 work-items.json——R5 前数据兼容）。
-pub(crate) fn rebuild_registry_from_log(
+pub fn rebuild_registry_from_log(
     storage_root: &std::path::Path,
-) -> Option<Vec<crate::central::CentralWorkStatus>> {
+) -> Option<Vec<crate::CentralWorkStatus>> {
     let log = EventLog::open(&event_log_path(storage_root)).ok()?;
     // R5 对账：宽松读——中段损坏行跳过并 warn（丢失可观测），恢复以
     // 幸存事件为准；open 失败（含尾部修复失败）回退快照路径。
@@ -224,7 +222,7 @@ pub(crate) fn rebuild_registry_from_log(
         return None;
     }
     let states = tiangong_central::project_work_state(&entries);
-    let mut registry: Vec<crate::central::CentralWorkStatus> = Vec::new();
+    let mut registry: Vec<crate::CentralWorkStatus> = Vec::new();
     // 倒序遍历：同会话首条命中即最后一次派发（P1-2 修复）；最终输出
     // 在函数末尾恢复 dispatched_at 升序（Z1 顺序不变量）
     for logged in entries.iter().rev() {
@@ -244,7 +242,7 @@ pub(crate) fn rebuild_registry_from_log(
         };
         let payload = &logged.event.payload;
         let session_id = logged.event.worker_session_id.clone().unwrap_or_default();
-        registry.push(crate::central::CentralWorkStatus {
+        registry.push(crate::CentralWorkStatus {
             work_id: work_id.clone(),
             session_id: session_id.clone(),
             task: payload
@@ -312,7 +310,7 @@ fn project_status_to_work_state(
 
 /// 写入一个已构造好的事件（payload 由调用方定制，R5 派发事件携带
 /// 登记字段供投影重建）。
-pub(crate) fn record_event(storage_root: &std::path::Path, event: tiangong_central::WorkEvent) {
+pub fn record_event(storage_root: &std::path::Path, event: tiangong_central::WorkEvent) {
     let log = match EventLog::open(&event_log_path(storage_root)) {
         Ok(log) => log,
         Err(error) => {

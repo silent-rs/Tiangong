@@ -222,6 +222,9 @@ fn run_gui() {
             // 注入 app_handle（builder 链构造时尚无 handle，setup 阶段补入）。
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
+            // 中枢宿主状态注册（R6 抽离：central-host crate 的 state_of 与
+            // 宿主闭包回找都经 Tauri state——与 TiangongApp.central 同一 Arc）。
+            app.manage(state.central.clone());
 
             // 远程访问：按配置接入中继，向手机 H5 提供对话侧能力。
             app.state::<tiangong_app::remote::RemoteService>()

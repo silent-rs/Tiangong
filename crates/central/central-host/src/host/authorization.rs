@@ -9,9 +9,8 @@
 //! （双通道：目录长期授权 OR 一次性票据；R5 收敛为纯票据）。
 
 use serde_json::json;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
-use crate::app::TiangongApp;
 use tiangong_central::tickets::RiskLevel;
 
 /// 授权票据默认有效期（秒）：10 分钟——足够完成派发，过期不得默认视为同意。
@@ -31,7 +30,7 @@ pub async fn central_approve_workspace<R: tauri::Runtime>(
     persist: Option<bool>,
     ttl_seconds: Option<i64>,
 ) -> Result<serde_json::Value, String> {
-    let state = app.state::<TiangongApp>();
+    let state = crate::state_of_central(&app);
     let path = path.trim().to_string();
     if path.is_empty() {
         return Err("path 不能为空".to_string());
@@ -42,7 +41,7 @@ pub async fn central_approve_workspace<R: tauri::Runtime>(
     }
     if persist.unwrap_or(false) {
         if let Err(error) =
-            crate::central::add_confirmed_workspace(state.core_manager.storage_root(), target)
+            crate::add_confirmed_workspace(state.core_manager.storage_root(), target)
         {
             tracing::warn!(%error, "授权目录长期登记失败（一次性票据仍然生效）");
         }
@@ -60,7 +59,7 @@ pub async fn central_approve_workspace<R: tauri::Runtime>(
         "Workspace 授权票据已签发（用户操作）"
     );
     // Z6 审计：授权事实入事件日志（work_id 空串标记目录级授权）
-    super::central_events::record_central_event(
+    crate::host::central_events::record_central_event(
         state.core_manager.storage_root(),
         &format!("approval-{}", ticket.approval_id),
         &ticket.approval_id,
@@ -82,7 +81,7 @@ pub async fn central_approve_workspace<R: tauri::Runtime>(
     if let Err(error) = state.deliver_central_message(
         scru128::new().to_string(),
         vec![tiangong_types::ContentBlock::text(note)],
-        Some(super::events::system_note_render("approval")),
+        Some(crate::host::events::system_note_render("approval")),
     ) {
         tracing::warn!(%error, "授权完成提示注入中枢失败（用户下次发言时仍可重派）");
     }
@@ -107,7 +106,7 @@ pub async fn central_resolve_decision<R: tauri::Runtime>(
     option: String,
     ttl_seconds: Option<i64>,
 ) -> Result<serde_json::Value, String> {
-    let state = app.state::<TiangongApp>();
+    let state = crate::state_of_central(&app);
     let execution_id = execution_id.trim().to_string();
     let option = option.trim().to_string();
     if execution_id.is_empty() || option.is_empty() {

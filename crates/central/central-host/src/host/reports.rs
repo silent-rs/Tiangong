@@ -5,13 +5,11 @@
 use central_state::{should_deliver_now, transition_on_finished, WorkOutcome};
 use tiangong_core::agent_input::AgentInputKind;
 
-use crate::app::TiangongApp;
+use crate::host::dispatch::handle_central_dispatch;
+use crate::host::events::emit_central_work_updated_state;
+use crate::state_of_central;
 
-use super::dispatch::handle_central_dispatch;
-use super::events::emit_central_work_updated_state;
-use super::state_of;
-
-impl TiangongApp {
+impl crate::CentralHostState {
     /// 向中枢对话注入一条后台工作回报消息（完成/失败），触发中枢自动
     /// 转述（事件驱动汇报的最小闭环）。中枢空闲时开启新 turn；执行中
     /// 作为引导消息排队。
@@ -23,9 +21,9 @@ impl TiangongApp {
     /// - **成功且仍有任务在执行**：仅暂存——与后续任务汇总；
     /// - **成功且是最后一个（无在执行任务）**：注入全部暂存，触发一次
     ///   汇总轮，由中枢区分轻重统一回复。
-    pub(crate) fn on_central_work_finished(
+    pub fn on_central_work_finished(
         &self,
-        request: &crate::central::CentralDispatchRequest,
+        request: &crate::CentralDispatchRequest,
         done: bool,
         notice: &str,
     ) {
@@ -104,7 +102,7 @@ impl TiangongApp {
         if matches!(outcome, WorkOutcome::WaitingUser) {
             // 阻塞必达 + 不落终态（等待用户答复后经引导恢复执行）
             // R5 单写：等待用户事实入事件日志（唯一事实源）。
-            super::central_events::record_for(
+            crate::host::central_events::record_for(
                 self,
                 &request.work_id,
                 &request.execution_id,
@@ -117,7 +115,7 @@ impl TiangongApp {
             return;
         }
         // R5 单写：终态事实入事件日志（唯一事实源，带成败）。
-        super::central_events::record_for(
+        crate::host::central_events::record_for(
             self,
             &request.work_id,
             &request.execution_id,
@@ -130,7 +128,7 @@ impl TiangongApp {
             if done { "工作完成" } else { "工作失败" },
         );
         // 持久化终态与成败（重启后徽章按 outcome 重建 completed/failed 分组）
-        if let Err(error) = crate::central::mark_work_item_finished_with_session(
+        if let Err(error) = crate::mark_work_item_finished_with_session(
             self.core_manager.storage_root(),
             &request.work_id,
             Some(&request.session_id),
@@ -151,7 +149,7 @@ impl TiangongApp {
     /// 依赖终态后投递排队工作（在终态回调路径调用；递归走标准派发链）。
     /// `app`：Some（生产，投递经 spawn 走完整 dispatch 链）/ None（host
     /// 集成测试同步核心：仅取出匹配项并清排队标记，不实际投递）。
-    pub(crate) fn flush_pending_dispatches<R: tauri::Runtime>(
+    pub fn flush_pending_dispatches<R: tauri::Runtime>(
         &self,
         finished_work_id: &str,
         finished_session_id: &str,
@@ -163,7 +161,7 @@ impl TiangongApp {
         if app.is_none() {
             return;
         }
-        let ready: Vec<crate::central::CentralDispatchRequest> = {
+        let ready: Vec<crate::CentralDispatchRequest> = {
             let mut pending = self
                 .central_pending_dispatches
                 .lock()
@@ -178,29 +176,31 @@ impl TiangongApp {
         };
         for mut request in ready {
             // 清除排队落盘标记（已进入投递），再递归走标准链
-            if let Err(error) = crate::central::clear_work_item_queued(
-                self.core_manager.storage_root(),
-                &request.session_id,
-            ) {
+            if let Err(error) =
+                crate::clear_work_item_queued(self.core_manager.storage_root(), &request.session_id)
+            {
                 tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
             }
             request.after_work_id = None;
             let app_handle = app.clone().expect("app 已在函数入口判空，此处必为 Some");
             tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    handle_central_dispatch(state_of(&app_handle), &app_handle, request.clone())
-                        .await
+                if let Err(error) = handle_central_dispatch(
+                    &state_of_central(&app_handle),
+                    &app_handle,
+                    request.clone(),
+                )
+                .await
                 {
                     tracing::warn!(%error, "排队工作投递未执行");
                     // 与派发路径同语义：投递未执行 ≠ 工作失败——不产生终态、
                     // 不伪装失败回报；注入说明（随下一条消息进入中枢对话）。
-                    let state = state_of(&app_handle);
+                    let state = state_of_central(&app_handle);
                     let notice = format!(
                         "[系统中枢] 排队工作 {} 投递未执行：{error}\n没有产生后台工作（不是工作失败）；依赖已终态，可重新派发。",
                         request.work_id
                     );
                     state.push_central_work_reports(vec![notice]);
-                    super::events::emit_central_work_updated_state(state);
+                    crate::host::events::emit_central_work_updated_state(&state);
                 }
             });
         }
@@ -208,7 +208,7 @@ impl TiangongApp {
 
     /// 汇报已消费（注入或收集）：report_queued 转为 completed 保留
     /// （正常完成的工作留在清单可见），超出最近 10 个的旧 completed 移除。
-    pub(crate) fn clear_queued_work_reports(&self) {
+    pub fn clear_queued_work_reports(&self) {
         let mut registry = self
             .central_work_registry
             .lock()
@@ -226,7 +226,7 @@ impl TiangongApp {
     }
 
     /// 后台工作状态登记快照（前端状态条数据源）。
-    pub(crate) fn central_work_status(&self) -> Vec<crate::central::CentralWorkStatus> {
+    pub fn central_work_status(&self) -> Vec<crate::CentralWorkStatus> {
         self.central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -234,7 +234,7 @@ impl TiangongApp {
     }
 
     /// 注入全部暂存回报（第一条开启汇报轮，其余按 Core 原生引导排队）。
-    pub(crate) fn deliver_pending_work_reports(&self) {
+    pub fn deliver_pending_work_reports(&self) {
         use tiangong_core::agent_input::AgentInput;
         // 顺序（review k 项）：先确认 Core 存在再取走——Core 缺失时队列与
         // 状态登记都保持原样，由发送链路 flush 或 collect 兜底。
@@ -253,7 +253,7 @@ impl TiangongApp {
             let prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
             if let Err(error) = core.deliver(
                 AgentInputKind::prepared_with_id(scru128::new().to_string(), prepared)
-                    .with_render(Some(super::events::system_note_render("report"))),
+                    .with_render(Some(crate::host::events::system_note_render("report"))),
             ) {
                 tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列）");
                 failed.push(notice);
@@ -274,7 +274,7 @@ impl TiangongApp {
     /// 取走该会话全部已挂载的终态回调（消费者终态触发用；表取模式使
     /// 任意消费者实例都能触发挂载的回调——见 commands.rs N1 注释）。
     /// 追加回报到暂存队列（投递失败的放回路径）。
-    pub(crate) fn push_central_work_reports(&self, notices: Vec<String>) {
+    pub fn push_central_work_reports(&self, notices: Vec<String>) {
         self.central_work_reports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -282,7 +282,7 @@ impl TiangongApp {
     }
 
     /// 取走全部暂存的后台工作回报（先进先出）。
-    pub(crate) fn take_central_work_reports(&self) -> Vec<String> {
+    pub fn take_central_work_reports(&self) -> Vec<String> {
         let mut reports = self
             .central_work_reports
             .lock()

@@ -7,6 +7,7 @@ export interface MentionRequest {
 }
 
 import { invoke, listen } from './host';
+import { centralApi } from './central';
 
 // ============================================================================
 // 类型定义
@@ -654,6 +655,7 @@ export interface SandboxPolicyView {
 }
 
 export const api = {
+  ...centralApi,
   // ----------------------------------------------------------------
   // 会话管理
   // ----------------------------------------------------------------
@@ -728,59 +730,6 @@ export const api = {
 
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
     invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
-
-  getCentralWorkStatus: (): Promise<
-    Array<{
-      work_id: string;
-      session_id: string;
-      task: string;
-      model: string | null;
-      dispatched_at: string;
-      state: string;
-      reused_session: boolean;
-    }>
-  > => invoke('get_central_work_status'),
-  centralActivationGreeting: (): Promise<void> =>
-    invoke('central_activation_greeting'),
-
-  /** R4 模式协调：进入中枢（上报普通上下文快照，宿主保存为事实源）。 */
-  centralModeEnter: (
-    activeSessionId: string | null,
-    newConversationId: string | null,
-  ): Promise<{ mode: string }> =>
-    invoke('central_mode_enter', { activeSessionId, newConversationId }),
-
-  /** R4 模式协调：退出中枢（宿主归还快照；null = 无恢复点，须显式恢复分支）。 */
-  centralModeExit: (): Promise<{
-    mode: string;
-    snapshot: {
-      active_session_id: string | null;
-      new_conversation_id: string | null;
-      saved_at: string;
-    } | null;
-  }> => invoke('central_mode_exit'),
-
-  /** R4 模式协调：查询模式状态与上次停留偏好（重启恢复依据）。 */
-  centralModeState: (): Promise<{ mode: string; last_mode: string }> =>
-    invoke('central_mode_state'),
-
-  /** R5 授权卡片：用户真实操作签发 Workspace 授权票据（一次性/可记住）。 */
-  centralApproveWorkspace: (
-    path: string,
-    taskFingerprint: string,
-    persist: boolean,
-  ): Promise<{ approval_id: string; workspace_id: string; expires_at: string }> =>
-    invoke('central_approve_workspace', {
-      path,
-      taskFingerprint,
-      persist,
-    }),
-
-  /** R4 工作抽屉：工作项事件时间线（事件日志事实源）。 */
-  centralWorkTimeline: (
-    workId: string,
-  ): Promise<Array<{ at: string; kind: string; note: string }>> =>
-    invoke('central_work_timeline', { workId }),
 
   cancelTurn: (sessionId: string): Promise<boolean> =>
     invoke('cancel_turn', { sessionId }),
