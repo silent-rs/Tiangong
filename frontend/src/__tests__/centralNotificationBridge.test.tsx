@@ -29,7 +29,7 @@ vi.mock('@/components/Toast', () => ({
 }));
 
 const { CentralNotificationBridge } = await import(
-  '@/components/central/CentralNotificationBridge'
+  '@/features/central/components/CentralNotificationBridge'
 );
 
 function mount(): HTMLElement {

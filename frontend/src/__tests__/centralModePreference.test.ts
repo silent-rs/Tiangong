@@ -8,7 +8,7 @@ const {
   readPersistedCentralMode,
   persistCentralMode,
   CENTRAL_MODE_STORAGE_KEY,
-} = await import('@/lib/central/centralModePreference');
+} = await import('@/features/central/lib/centralModePreference');
 
 describe('centralModePreference', () => {
   beforeEach(() => {

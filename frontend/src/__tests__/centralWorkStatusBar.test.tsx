@@ -25,7 +25,7 @@ vi.mock('@/api/tauri', () => ({
   },
 }));
 
-vi.mock('@/lib/central/centralConversation', () => ({
+vi.mock('@/features/central/lib/centralConversation', () => ({
   restoreFromCentralConversation: vi.fn(() => Promise.resolve()),
 }));
 
@@ -53,7 +53,7 @@ vi.mock('@/store/useStore', () => {
 });
 
 const { CentralWorkStatusBar } = await import(
-  '@/components/central/CentralWorkStatusBar'
+  '@/features/central/components/CentralWorkStatusBar'
 );
 
 function makeItem(overrides: Partial<Record<string, unknown>> = {}) {

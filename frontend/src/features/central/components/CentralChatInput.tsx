@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
-import { CENTRAL_SESSION_ID } from '@/lib/central/centralSession';
+import { CENTRAL_SESSION_ID } from '@/features/central/lib/centralSession';
 
 const MAX_INPUT_HEIGHT = 200;
 

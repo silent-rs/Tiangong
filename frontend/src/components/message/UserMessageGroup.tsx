@@ -19,7 +19,7 @@ import { MessageRenderHost } from "../MessageRenderHost";
 import type { HostMessageContext } from "../pluginHostContext";
 import { CollapsibleMarkdownText, CollapsibleUserText } from "./CollapsibleUserText";
 import { useStore } from "@/store/useStore";
-import { CENTRAL_SESSION_ID } from "@/lib/central/centralSession";
+import { CENTRAL_SESSION_ID } from "@/features/central/lib/centralSession";
 
 
 

@@ -11,9 +11,9 @@ import { api } from '@/api/tauri';
 import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
 import { Loader2, Inbox, History, ChevronRight, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
-import { restoreFromCentralConversation } from '@/lib/central/centralConversation';
-import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/components/central/CentralWorkDrawer';
-import { CentralBadgeIcon, type BadgeState } from '@/components/central/CentralBadgeIcon';
+import { restoreFromCentralConversation } from '@/features/central/lib/centralConversation';
+import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/features/central/components/CentralWorkDrawer';
+import { CentralBadgeIcon, type BadgeState } from '@/features/central/components/CentralBadgeIcon';
 
 interface CentralWorkStatus {
   work_id: string;

@@ -8,13 +8,13 @@ import {
   type TabKind,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
-import { CentralModeView } from '@/components/central/CentralModeView';
-import { CentralTransition } from '@/components/central/CentralTransition';
-import { useCentralMode, useCentralModeHotkey } from '@/hooks/useCentralMode';
+import { CentralModeView } from '@/features/central/components/CentralModeView';
+import { CentralTransition } from '@/features/central/components/CentralTransition';
+import { useCentralMode, useCentralModeHotkey } from '@/features/central/hooks/useCentralMode';
 import {
   ensureCentralConversation,
   restoreFromCentralConversation,
-} from '@/lib/central/centralConversation';
+} from '@/features/central/lib/centralConversation';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';

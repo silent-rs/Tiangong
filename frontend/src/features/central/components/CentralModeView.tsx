@@ -13,11 +13,11 @@
  *   ModeCoordinator）。结构化卡片条（CentralCardsBar）渲染授权/决定。
  */
 import { LazyMessageList } from '@/components/LazyComponents';
-import { CentralCardsBar } from '@/components/central/CentralCardsBar';
-import { CentralChatInput } from '@/components/central/CentralChatInput';
-import { CentralWorkStatusBar } from '@/components/central/CentralWorkStatusBar';
-import { CENTRAL_DEFAULT_GREETING } from '@/components/central/centralGreeting';
-import { CENTRAL_TRANSITION_PARAMS } from '@/components/central/centralTransitionParams';
+import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
+import { CentralChatInput } from '@/features/central/components/CentralChatInput';
+import { CentralWorkStatusBar } from '@/features/central/components/CentralWorkStatusBar';
+import { CENTRAL_DEFAULT_GREETING } from '@/features/central/components/centralGreeting';
+import { CENTRAL_TRANSITION_PARAMS } from '@/features/central/components/centralTransitionParams';
 import { useStore } from '@/store/useStore';
 
 /** 中枢空对话问候（§4.2 无上下文版本）。 */

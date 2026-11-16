@@ -7,19 +7,19 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CentralTransition } from '@/components/central/CentralTransition';
+import { CentralTransition } from '@/features/central/components/CentralTransition';
 import {
   CENTRAL_TRANSITION_PARAMS as PARAMS,
   bodyReveal,
   buildTimeline,
   segmentProgress,
-} from '@/components/central/centralTransitionParams';
+} from '@/features/central/components/centralTransitionParams';
 import {
   buildTransitionParticles,
   buildTransitionStars,
   drawTransitionFrame,
   type FrameOptions,
-} from '@/components/central/centralTransitionRender';
+} from '@/features/central/components/centralTransitionRender';
 import { useStore } from '@/store/useStore';
 
 const TIMELINE = buildTimeline(PARAMS);

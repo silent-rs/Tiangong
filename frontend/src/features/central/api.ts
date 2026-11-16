@@ -1,6 +1,6 @@
 // 中枢模式前端 API（R6 抽离）：与后端 central-host crate 的 8 个
 // Tauri command 一一对应。集中于此保持中枢边界清晰。
-import { invoke } from './host';
+import { invoke } from '@/api/host';
 
 export const centralApi = {
   getCentralWorkStatus: (): Promise<

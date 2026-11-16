@@ -7,7 +7,7 @@ export interface MentionRequest {
 }
 
 import { invoke, listen } from './host';
-import { centralApi } from './central';
+import { centralApi } from '../features/central/api';
 
 // ============================================================================
 // 类型定义

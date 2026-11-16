@@ -43,6 +43,27 @@ vi.mock('@/api/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/tauri')>();
   return { ...actual, api: { ...actual.api, ...mocks.api } };
 });
+// R6 抽离后中枢命令在独立模块（features/central/api.ts）——
+// '@/api/tauri' 的 mock 覆盖不到；且 tauri.ts 经 spread centralApi 拿键，
+// 必须提供静态完整键集（Proxy/动态会让 spread 展开为空）
+vi.mock('@/features/central/api', () => ({
+  centralApi: {
+    getCentralWorkStatus: vi.fn(() => Promise.resolve([])),
+    centralActivationGreeting: vi.fn(() => Promise.resolve()),
+    centralModeEnter: vi.fn(() =>
+      Promise.resolve({ mode: 'central_active' }),
+    ),
+    centralModeExit: vi.fn(() =>
+      Promise.resolve({ mode: 'normal', snapshot: null }),
+    ),
+    centralModeState: vi.fn(() =>
+      Promise.resolve({ mode: 'normal', last_mode: 'normal' }),
+    ),
+    centralApproveWorkspace: vi.fn(() => Promise.resolve({})),
+    centralResolveDecision: vi.fn(() => Promise.resolve({})),
+    centralWorkTimeline: vi.fn(() => Promise.resolve([])),
+  },
+}));
 vi.mock('@tauri-apps/api/event', () => ({ listen: mocks.listen }));
 vi.mock('@tauri-apps/api/window', () => ({
   currentMonitor: vi.fn(() => Promise.resolve(null)),
@@ -105,12 +126,12 @@ vi.mock('@/utils/desktopNotification', () => ({
 }));
 
 const { isDesktopHost } = await import('@/api/host');
-const { useCentralMode, useCentralModeHotkey } = await import('@/hooks/useCentralMode');
+const { useCentralMode, useCentralModeHotkey } = await import('@/features/central/hooks/useCentralMode');
 const {
   CENTRAL_MODE_STORAGE_KEY,
   readPersistedCentralMode,
-} = await import('@/lib/central/centralModePreference');
-const { CENTRAL_SESSION_ID } = await import('@/lib/central/centralSession');
+} = await import('@/features/central/lib/centralModePreference');
+const { CENTRAL_SESSION_ID } = await import('@/features/central/lib/centralSession');
 const { useStore } = await import('@/store/useStore');
 
 /** 宿主形态注入：desktop（默认）/ web 配置页 / 远程 H5。 */

@@ -17,7 +17,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isDesktopHost } from '@/api/host';
-import { useCentralMode } from '@/hooks/useCentralMode';
+import { useCentralMode } from '@/features/central/hooks/useCentralMode';
 import {
   CENTRAL_TRANSITION_PARAMS,
   bodyReveal,

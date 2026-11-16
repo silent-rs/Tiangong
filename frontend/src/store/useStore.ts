@@ -1,7 +1,12 @@
 import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
-import { persistCentralMode, readPersistedCentralMode } from '../lib/central/centralModePreference';
-import { CENTRAL_SESSION_ID } from '../lib/central/centralSession';
+// 数据层直连 lib 子模块（不走 index：index 拉入 hooks/components 会与
+// useStore 成环——useCentralMode → useStore）
+import {
+  persistCentralMode,
+  readPersistedCentralMode,
+} from '../features/central/lib/centralModePreference';
+import { CENTRAL_SESSION_ID } from '../features/central/lib/centralSession';
 import { isUserInput, latestTurnAnchorIndex, messageKind, reasoningOf, textTpsOf, toolCallIdOf, turnStatusOf } from '../api/message';
 import { liveTpsTracker } from '../utils/tps';
 import type {

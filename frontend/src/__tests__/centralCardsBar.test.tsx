@@ -8,7 +8,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CentralCardsBar } from '@/components/central/CentralCardsBar';
+import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
 
 type EventCallback = (event: { payload: unknown }) => void;
 const listeners = new Map<string, EventCallback>();

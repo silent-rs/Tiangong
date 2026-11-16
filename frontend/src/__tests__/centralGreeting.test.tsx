@@ -24,13 +24,13 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@/components/LazyComponents', () => ({
   LazyMessageList: () => <div data-testid="central-message-list">message-list</div>,
 }));
-vi.mock('@/components/central/CentralChatInput', () => ({
+vi.mock('@/features/central/components/CentralChatInput', () => ({
   CentralChatInput: () => <div data-testid="central-chat-input">chat-input</div>,
 }));
 
-const { CentralModeView } = await import('@/components/central/CentralModeView');
+const { CentralModeView } = await import('@/features/central/components/CentralModeView');
 const { useStore } = await import('@/store/useStore');
-const { CENTRAL_SESSION_ID } = await import('@/lib/central/centralSession');
+const { CENTRAL_SESSION_ID } = await import('@/features/central/lib/centralSession');
 
 function mountView(): () => void {
   const container = document.createElement('div');

@@ -5,7 +5,8 @@ import { isRemoteHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
 import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle, Sparkles } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
-import { useCentralMode } from '@/hooks/useCentralMode';
+// 直连子模块（不走 index：index 聚合 CentralModeView → LazyComponents → StatusPanel 成环）
+import { useCentralMode } from '@/features/central/hooks/useCentralMode';
 
 import { useSearchStore } from '@/store/useSearchStore';
 import { Separator } from './ui/separator';

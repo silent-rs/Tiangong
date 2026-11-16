@@ -9,7 +9,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CentralWorkDrawer } from '@/components/central/CentralWorkDrawer';
+import { CentralWorkDrawer } from '@/features/central/components/CentralWorkDrawer';
 
 const timelineMock = vi.fn();
 
