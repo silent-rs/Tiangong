@@ -1541,6 +1541,8 @@ export function MessageInput({
             <div className="mt-1.5 flex items-center justify-between gap-2">
               <SessionInputPluginHost slot="session.after-input" />
               <div className="ml-auto flex flex-1 items-center justify-between text-xs text-muted-foreground">
+              {/* 目录块隐藏（中枢）后 justify-between 无第二锚点会整组左移——
+                  右侧状态/提示/用量组自带 ml-auto 兜底恒右对齐 */}
               <div className="flex items-center gap-3 min-w-0" style={centralMode ? { display: 'none' } : undefined}>
                 <button
                   onClick={handleChangeCwd}
@@ -1552,8 +1554,10 @@ export function MessageInput({
                   {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
                 </button>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <TokenStatsBlock compact={compact} />
+              <div className="ml-auto flex items-center gap-2 shrink-0">
+                {/* 中枢（目录区隐藏）下恒显总计：compact 只为窄会话省空间，
+                    中枢输入区对齐普通会话的完整用量显示 */}
+                <TokenStatsBlock compact={centralMode ? false : compact} />
                 {sandboxState?.status === 'failed' && !isRemoteHost() && (
                   <button
                     onClick={() => setPendingSettingsTab('sandbox')}
