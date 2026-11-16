@@ -78,8 +78,10 @@ export async function ensureCentralConversation(): Promise<void> {
     lastDurationMs: null,
     toolCallStartedAt: {},
     toolCallFinished: {},
-    lastUsage: null,
-    tokenStats: null,
+    // 会话存储恢复（对齐普通会话 hydrateSessionViewCache）：中枢进入
+    // 即显示累计 token/上轮用量——不等下一次生成的 usage 流事件。
+    lastUsage: loaded?.last_usage ?? null,
+    tokenStats: loaded?.token_stats ?? null,
     streamingMessageId: null,
     streamingContent: '',
     streamingReasoningContent: '',
