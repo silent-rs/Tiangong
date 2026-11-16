@@ -213,6 +213,10 @@ const SLASH_COMMANDS: MentionCandidate[] = [  {
 export interface MessageInputProps {
   /** 征询交互覆盖整个输入区时为 true：输入区整体不可交互。 */
   interactionVisible?: boolean;
+  /** 中枢模式（复用输入组件时）：隐藏 workspace 目录区与 git 拓展槽
+   *  （session.input-status）——中枢对话是控制面交互，无会话目录切换
+   *  与工作区 git 上下文；模型选择/用量统计/发送语义保持可用。 */
+  centralMode?: boolean;
   /** 输入覆盖层（`session.input-overlay`）接管编辑框时为 true：仅编辑框区域让位，
    *  上方运行状态 / 模型选择与下方目录 / 用量信息保持可用。 */
   inputOverlayVisible?: boolean;
@@ -232,6 +236,8 @@ export function MessageInput({
   inputOverlay,
   inputOverlayHint = null,
   onHeightChange,
+
+  centralMode = false,
 }: MessageInputProps) {
   const cacheKey = useStore(selectCurrentInputCacheKey);
   const inputCache = useStore(selectCurrentInputCache);
@@ -1181,7 +1187,7 @@ export function MessageInput({
               </div>
               <div className="flex items-center gap-0.5 shrink-0">
                 {/* 会话区过窄时隐藏插件拓展 UI，把空间让给左侧运行状态。 */}
-                {!compact && <SessionInputPluginHost slot="session.input-status" />}
+                {!compact && !centralMode && <SessionInputPluginHost slot="session.input-status" />}
                 <Select
                   value={sessionModelRef ?? MODEL_DEFAULT_VALUE}
                   onValueChange={(value) => { void handleSessionModelChange(value); }}
@@ -1535,7 +1541,7 @@ export function MessageInput({
             <div className="mt-1.5 flex items-center justify-between gap-2">
               <SessionInputPluginHost slot="session.after-input" />
               <div className="ml-auto flex flex-1 items-center justify-between text-xs text-muted-foreground">
-              <div className="flex items-center gap-3 min-w-0">
+              <div className="flex items-center gap-3 min-w-0" style={centralMode ? { display: 'none' } : undefined}>
                 <button
                   onClick={handleChangeCwd}
                   disabled={!isIdle || isRemoteHost() || (!!hasConversation && !sessionCwd)}

@@ -23,10 +23,10 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 vi.mock('@/components/LazyComponents', () => ({
   LazyMessageList: () => <div data-testid="central-message-list">message-list</div>,
+  // R7+：输入区复用 MessageInput（中枢形态）——测试以轻量标记替身
+  LazyMessageInput: () => <div data-testid="central-message-input">message-input</div>,
 }));
-vi.mock('@/features/central/components/CentralChatInput', () => ({
-  CentralChatInput: () => <div data-testid="central-chat-input">chat-input</div>,
-}));
+
 
 const { CentralModeView } = await import('@/features/central/components/CentralModeView');
 const { useStore } = await import('@/store/useStore');
@@ -71,7 +71,7 @@ describe('CentralModeView', () => {
     // 消息列表常挂载（覆盖层遮盖），空态仍在 DOM
     expect(document.querySelector('[data-testid="central-message-list"]')).not.toBeNull();
     // 专属输入区挂载
-    expect(document.querySelector('[data-testid="central-chat-input"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="central-message-input"]')).not.toBeNull();
   });
 
   it('有消息：复用 MessageList 渲染，问候不出现', () => {

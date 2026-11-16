@@ -165,30 +165,5 @@ describe('新功能组件渲染', () => {
     view.unmount();
   });
 
-  it('CentralModelPicker 加载模型列表（读中枢会话引用）', async () => {
-    const { CentralModelPicker } = await import(
-      '@/features/central/components/CentralModelPicker'
-    );
-    const view = renderTo(<CentralModelPicker />);
-    // 触发器存在且显示默认模型（列表加载后）
-    await vi.waitFor(() => {
-      expect(vi.mocked(api.listSessionChatModels)).toHaveBeenCalled();
-    });
-    // 切换经 Radix Select 指令交互在 jsdom 较繁——锁 api 契约（读引用/拉列表）
-    expect(vi.mocked(api.getSessionModel)).toHaveBeenCalledWith('central-hub');
-    view.unmount();
-  });
 
-  it('CentralUsageBar 无数据时不渲染', async () => {
-    const { CentralUsageBar } = await import(
-      '@/features/central/components/CentralUsageBar'
-    );
-    useStore.setState({
-      tokenStats: null,
-      messages: [],
-    });
-    const view = renderTo(<CentralUsageBar />);
-    expect(view.container.querySelector('[title*="tokens"]')).toBeNull();
-    view.unmount();
   });
-});

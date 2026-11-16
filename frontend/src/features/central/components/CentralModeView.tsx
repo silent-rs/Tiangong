@@ -4,17 +4,16 @@
  * 消息列表复用基础组件 MessageList（虚拟化、流式、分页、思考块等渲染
  * 能力与普通模式一致，组件本身零改动）；中枢的独立性体现在：
  * - **空态**：无消息且未在生成时呈现中枢默认问候（§4.2），由本视图判断；
- * - **输入区**：CentralChatInput（「你想让我做什么？」），不复用普通
- *   MessageInput；征询（request_user）为后续片工具，接入时按 §5.4 在中枢对话内呈现；
+ * - **输入区**：复用普通 MessageInput（centralMode 形态：隐藏 workspace
+ *   目录与 git 拓展槽；模型选择/用量统计保留）——用户裁决 2026-11-16；
  * - **后台状态**：CentralWorkStatusBar（执行中任务/待汇报条数）；
- * - **数据与执行**：中枢 Core 由宿主直接持有（见
- *   `src-tauri/src/central_host/`），固定 Session ID（lib/centralSession），
- *   切换逻辑独立于共用 store（lib/centralConversation，模式事实在宿主
- *   ModeCoordinator）。结构化卡片条（CentralCardsBar）渲染授权/决定。
+ * - **数据与执行**：中枢 Core 由宿主直接持有，固定 Session ID
+ *   （lib/centralSession），切换逻辑独立于共用 store（lib/centralConversation，
+ *   模式事实在宿主 ModeCoordinator）。结构化卡片条（CentralCardsBar）渲染
+ *   授权/决定。
  */
-import { LazyMessageList } from '@/components/LazyComponents';
+import { LazyMessageInput, LazyMessageList } from '@/components/LazyComponents';
 import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
-import { CentralChatInput } from '@/features/central/components/CentralChatInput';
 import { CentralStatusBadge } from '@/features/central/components/CentralStatusBadge';
 import { CentralWorkStatusBar } from '@/features/central/components/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/features/central/components/centralGreeting';
@@ -68,7 +67,10 @@ export function CentralModeView() {
         ) : null}
       </div>
       <CentralCardsBar />
-      <CentralChatInput />
+      {/* 输入区复用普通 MessageInput（二十一轮 review 后用户裁决：直接
+          复用现有输入组件——模型选择/用量/发送语义全套与普通会话一致；
+          centralMode 下隐藏 workspace 目录区与 git 拓展槽）。 */}
+      <LazyMessageInput centralMode />
     </main>
   );
 }
