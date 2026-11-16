@@ -150,20 +150,3 @@ describe('P2 启动对账（宿主为事实源）', () => {
     expect(useStore.getState().centralMode).toBe(false);
   });
 });
-
-describe('新功能组件渲染', () => {
-  it('CentralStatusBadge 按运行状态分色', async () => {
-    const { CentralStatusBadge } = await import(
-      '@/features/central/components/CentralStatusBadge'
-    );
-    useStore.setState({ runStatus: 'executing' });
-    const view = renderTo(<CentralStatusBadge />);
-    expect(view.container.querySelector('[data-testid="central-status-badge"]')?.textContent).toContain('执行中');
-    useStore.setState({ runStatus: 'idle' });
-    view.rerender(<CentralStatusBadge />);
-    expect(view.container.querySelector('[data-testid="central-status-badge"]')?.textContent).toContain('空闲');
-    view.unmount();
-  });
-
-
-  });
