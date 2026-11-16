@@ -15,6 +15,7 @@
 import { LazyMessageList } from '@/components/LazyComponents';
 import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
 import { CentralChatInput } from '@/features/central/components/CentralChatInput';
+import { CentralStatusBadge } from '@/features/central/components/CentralStatusBadge';
 import { CentralWorkStatusBar } from '@/features/central/components/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/features/central/components/centralGreeting';
 import { CENTRAL_TRANSITION_PARAMS } from '@/features/central/components/centralTransitionParams';
@@ -53,6 +54,7 @@ export function CentralModeView() {
       data-testid="central-mode-view"
       className="relative flex flex-1 min-w-0 flex-col bg-background animate-central-view-in"
     >
+      <CentralStatusBadge />
       <CentralWorkStatusBar />
       {/* 消息列表常挂载（空态由问候覆盖层遮盖）：避免「消息到达才挂载
           列表」的虚拟化首帧定位竞态——中枢无会话切换信号，定位只能走

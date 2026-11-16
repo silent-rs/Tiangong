@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
       JSON.parse(JSON.stringify(cache)),
     )),
     removeInputCache: vi.fn(() => Promise.resolve()),
-    sendMessage: vi.fn(() => Promise.resolve()),
+    sendMessage: vi.fn((..._args: unknown[]) => Promise.resolve()),
     appendMessage: vi.fn(() => Promise.resolve(true)),
     cancelTurn: vi.fn(() => Promise.resolve(true)),
     loadSession: vi.fn(() => Promise.reject(new Error('会话不存在'))),
@@ -35,7 +35,7 @@ const { CentralChatInput } = await import('@/features/central/components/Central
 const { CENTRAL_SESSION_ID } = await import('@/features/central/lib/centralSession');
 const { useStore } = await import('@/store/useStore');
 
-function mountInput(): { unmount: () => void; textarea: () => HTMLTextAreaElement; send: () => void } {
+function mountInput(): { unmount: () => void; textarea: () => HTMLTextAreaElement; send: () => void; sendMessageMock: ReturnType<typeof vi.fn> } {
   const container = document.createElement('div');
   document.body.appendChild(container);
   let root!: Root;

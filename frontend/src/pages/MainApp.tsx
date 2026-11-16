@@ -13,6 +13,7 @@ import { CentralTransition } from '@/features/central/components/CentralTransiti
 import { useCentralMode, useCentralModeHotkey } from '@/features/central/hooks/useCentralMode';
 import {
   ensureCentralConversation,
+  reconcileCentralModeWithHost,
   restoreFromCentralConversation,
 } from '@/features/central/lib/centralConversation';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
@@ -94,6 +95,12 @@ function browserPluginSessionId(sessionId?: string | null): string {
 }
 
 export function MainApp() {
+  // 启动模式对账（二十一轮 review P2）：宿主 mode-preference.json 为事实源，
+  // localStorage 仅兜底——桌面宿主下以 central_mode_state 对齐，幂等每进程一次。
+  useEffect(() => {
+    void reconcileCentralModeWithHost();
+  }, []);
+
   const remote = isRemoteHost();
   // 中枢模式：注册 Cmd/Ctrl+Shift+J 快捷键（仅 desktop），centralActive 驱动布局分支
   useCentralModeHotkey();

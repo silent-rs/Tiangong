@@ -8,6 +8,7 @@
  * 文件只保留最小挂钩（模式开关与列表/通知的两处中枢判定，见 useStore）。
  */
 import { api } from '@/api/tauri';
+import { isDesktopHost } from '@/api/host';
 import { useStore } from '@/store/useStore';
 import { CENTRAL_SESSION_ID } from './centralSession';
 
@@ -19,6 +20,18 @@ let preCentralContext: {
 
 /** 中枢切换竞态版本：快速来回切换模式时作废在途的旧切换。 */
 let centralSwitchVersion = 0;
+/**
+ * 模式宿主上报串行链（二十一轮 review P1）：enter 的 void 上报与
+ * exit 的取回若并发发出，宿主端完成顺序不保证（Enter 晚于 Exit 落地
+ * → 宿主终态 CentralActive 而前端已回普通模式）。所有 enter/exit 宿主
+ * 调用一律入链排队，后发操作必等先发完成——宿主状态机顺序与前端一致。
+ */
+let modeOpChain: Promise<unknown> = Promise.resolve();
+function enqueueModeOp<T>(op: () => Promise<T>): Promise<T> {
+  const run = modeOpChain.then(op, op);
+  modeOpChain = run.catch(() => undefined);
+  return run;
+}
 
 /** 进入中枢模式：确保中枢对话成为当前对话。 */
 export async function ensureCentralConversation(): Promise<void> {
@@ -38,9 +51,11 @@ export async function ensureCentralConversation(): Promise<void> {
   };
   // R4 模式协调：快照上报宿主（事实源；本地副本为过渡兜底，R5 移除）。
   // 失败静默——宿主无快照时退出走「无恢复点」分支，不阻塞切换。
-  void api
-    .centralModeEnter(cur.activeSessionId, cur.newConversationId)
-    .catch(() => undefined);
+  void enqueueModeOp(() =>
+    api
+      .centralModeEnter(cur.activeSessionId, cur.newConversationId)
+      .catch(() => undefined),
+  );
   // 中枢对话历史从中枢存储加载；尚未创建（首次进入）按空对话处理。
   const loaded = await api.loadSession(CENTRAL_SESSION_ID).catch(() => null);
   // 加载期间模式被来回切换：放弃本次写入
@@ -81,7 +96,9 @@ export async function restoreFromCentralConversation(): Promise<void> {
   // 失败）回退本地副本（过渡双源，R5 收敛为纯宿主）。
   let context = preCentralContext;
   preCentralContext = null;
-  const hostSnapshot = await api.centralModeExit().catch(() => null);
+  const hostSnapshot = await enqueueModeOp(() =>
+    api.centralModeExit().catch(() => null),
+  );
   if (hostSnapshot?.snapshot) {
     context = {
       activeSessionId: hostSnapshot.snapshot.active_session_id,
@@ -143,4 +160,29 @@ function restoreDraftConversation(draftId: string): void {
 export function __resetCentralConversationForTests(): void {
   preCentralContext = null;
   centralSwitchVersion = 0;
+}
+
+
+/**
+ * 启动模式对账（二十一轮 review P2）：宿主 mode-preference.json 是
+ * 事实源（R4 ModeCoordinator），localStorage 只是前端快速初值兜底。
+ * 桌面宿主下启动时调用 central_mode_state 对账——宿主与本地不一致时
+ * 以宿主为准；调用失败（宿主未就绪等）静默保留本地初值。幂等：每进程
+ * 一次。
+ */
+let reconciled = false;
+export async function reconcileCentralModeWithHost(): Promise<void> {
+  if (reconciled) return;
+  reconciled = true;
+  if (!isDesktopHost()) return;
+  try {
+    const state = await api.centralModeState();
+    const local = useStore.getState().centralMode;
+    const hostActive = state.mode === 'central_active';
+    if (hostActive !== local) {
+      useStore.getState().setCentralMode(hostActive);
+    }
+  } catch {
+    // 静默：宿主未就绪时保留本地初值（下次模式切换自然重新上报）
+  }
 }

@@ -12,6 +12,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { useStore } from '@/store/useStore';
+import { CentralModelPicker } from '@/features/central/components/CentralModelPicker';
+import { CentralUsageBar } from '@/features/central/components/CentralUsageBar';
 import { api } from '@/api/tauri';
 import { CENTRAL_SESSION_ID } from '@/features/central/lib/centralSession';
 
@@ -178,13 +180,18 @@ export function CentralChatInput({ onHeightChange }: CentralChatInputProps) {
           </button>
         )}
       </div>
-      <p className="mx-auto mt-1.5 max-w-3xl px-2 text-[11px] text-muted-foreground/70">
-        {sendError ? (
-          <span className="text-destructive">{sendError}</span>
-        ) : (
-          'Enter 发送 · Shift+Enter 换行'
-        )}
-      </p>
+      {/* 底部行：模型选择 + 用量（对齐普通输入框能力）；提示文案居中 */}
+      <div className="mx-auto mt-1.5 flex w-full max-w-3xl items-center gap-2 px-2">
+        <CentralModelPicker />
+        <p className="flex-1 text-center text-[11px] text-muted-foreground/70">
+          {sendError ? (
+            <span className="text-destructive">{sendError}</span>
+          ) : (
+            'Enter 发送 · Shift+Enter 换行'
+          )}
+        </p>
+        <CentralUsageBar />
+      </div>
     </div>
   );
 }
