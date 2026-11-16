@@ -236,9 +236,12 @@ function CentralSystemNote({ kind, time, text }: {
   time: string;
   text: string;
 }) {
-  // 征询（decision，waiting_user 回报）默认展开：用户必须读到完整问题
-  // 才能答复——折叠 480 字会让征询「无法查看完整」（用户实测）
-  const [open, setOpen] = useState(kind === 'decision');
+  // 征询默认展开（用户实测「无法查看完整」）：kind=decision（新注入）
+  // 或内容含【需要用户决策】（历史消息兜底——render data 注入时固化，
+  // 旧征询仍是 report，按内容嗅探同样必须展开）。
+  const [open, setOpen] = useState(
+    kind === 'decision' || text.includes('【需要用户决策】'),
+  );
   const kindLabel = kind === 'report'
     ? '工作回报'
     : kind === 'decision'
@@ -271,9 +274,7 @@ function CentralSystemNote({ kind, time, text }: {
             </button>
           ) : null}
         </div>
-        <div
-          className={`whitespace-pre-wrap break-words ${open ? 'max-h-[60vh] overflow-y-auto pr-1' : ''}`}
-        >
+        <div className="whitespace-pre-wrap break-words">
           {shown}
         </div>
       </div>
