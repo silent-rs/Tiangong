@@ -94,6 +94,25 @@ describe('CentralSystemNote 折叠与历史兜底', () => {
     expect(note!.textContent!.length).toBeLessThan(long.length, '可再收起');
   });
 
+  it('征询（kind=decision）默认展开——用户必须读到完整问题才能答复', async () => {
+    const long = '[后台工作中断] work-w\n【需要用户决策】是否采用方案 A？\n' + '问题描述'.repeat(600);
+    renderGroup(makeGroup(long, {
+      plugin: 'central-host',
+      view: 'system-note',
+      data: { kind: 'decision' },
+    }));
+    const note = container.querySelector('[data-testid="central-system-note"]');
+    expect(note).not.toBeNull();
+    expect(note!.textContent).toContain('征询', 'kind 标签');
+    // 默认展开（修复前与 report 一样折叠 480 字——征询「无法查看完整」）
+    expect(note!.textContent!.length).toBeGreaterThan(2000, '默认显示全文');
+    const toggle = container.querySelector('[data-testid="central-system-note-toggle"]');
+    await act(async () => {
+      toggle!.click();
+    });
+    expect(note!.textContent!.length).toBeLessThan(long.length, '可手动收起');
+  });
+
   it('历史兜底：无标记的 [后台工作完成] 全文也按系统条折叠渲染', () => {
     const legacy = '[后台工作完成] work-old\n' + '历史回报'.repeat(800);
     renderGroup(makeGroup(legacy));

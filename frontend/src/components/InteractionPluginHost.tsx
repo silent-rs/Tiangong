@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, type SlotContributionEntry } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
+import { CENTRAL_SESSION_ID } from '@/features/central/lib/centralSession';
 import { PluginSandbox } from './PluginSandbox';
 
 interface ToolRequestedEvent {
@@ -196,7 +197,20 @@ export function InteractionPluginHost({
   const hasPending = currentSessionId
     ? [...invocationSessions.current.values()].some((sessionId) => sessionId === currentSessionId)
     : false;
-  const visible = Boolean(currentSessionId && (hasPending || recentSessions.has(currentSessionId)));
+  // 中枢激活（当前会话 = central-hub）：worker 的征询也在此呈现——
+  // 中枢是所有后台工作的交互面（§5.4），不能按「当前会话匹配」过滤掉
+  // worker 会话的 request_user（用户实测：征询卡片从不出现，输入区只是
+  // 普通消息输入框，答复无通道）。答复经 invocation_id 定向回 worker，
+  // 与显示判定用的 session 无关。
+  const centralActive = activeSessionId === CENTRAL_SESSION_ID;
+  const centralPending = centralActive && invocationSessions.current.size > 0;
+  const centralRecent = centralActive
+    && [...recentSessions].some((sessionId) => sessionId !== CENTRAL_SESSION_ID);
+  const visible = Boolean(
+    (currentSessionId && (hasPending || recentSessions.has(currentSessionId)))
+      || centralPending
+      || centralRecent,
+  );
 
   useLayoutEffect(() => {
     onVisibilityChange?.(visible);

@@ -236,14 +236,18 @@ function CentralSystemNote({ kind, time, text }: {
   time: string;
   text: string;
 }) {
-  const [open, setOpen] = useState(false);
+  // 征询（decision，waiting_user 回报）默认展开：用户必须读到完整问题
+  // 才能答复——折叠 480 字会让征询「无法查看完整」（用户实测）
+  const [open, setOpen] = useState(kind === 'decision');
   const kindLabel = kind === 'report'
     ? '工作回报'
-    : kind === 'approval'
-      ? '授权'
-      : kind === 'activation'
-        ? '中枢'
-        : '系统';
+    : kind === 'decision'
+      ? '征询'
+      : kind === 'approval'
+        ? '授权'
+        : kind === 'activation'
+          ? '中枢'
+          : '系统';
   const collapsible = text.length > CENTRAL_NOTE_PREVIEW_CHARS;
   const shown = collapsible && !open
     ? `${Array.from(text).slice(0, CENTRAL_NOTE_PREVIEW_CHARS).join('')}…`
