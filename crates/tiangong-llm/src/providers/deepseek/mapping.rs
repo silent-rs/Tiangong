@@ -1,7 +1,7 @@
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::{ProviderRequest, ReasoningEffort};
 use crate::response::{ProviderResponse, StopReason};
-use crate::tool::{ToolChoice, ToolSpec, parse_tool_arguments_or_error};
+use crate::tool::{ToolChoice, parse_tool_arguments_or_error};
 use crate::usage::TokenUsageData;
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -10,7 +10,7 @@ use tiangong_deepseek::types::{
     FunctionOutputContent, InputImageBlock, InputMessage, OutputContentBlock, ReasoningConfig,
     ReasoningEffortLevel, ReasoningInputItem, ResponseInput, ResponseInputItem, ResponseObject,
     ResponseOutputItem, ResponseRole, ResponseStatus, ResponsesFunctionTool, ResponsesTool,
-    TextBlock, TextFormat, TextFormatConfig,
+    SafetyCheck, TextBlock, TextFormat, TextFormatConfig,
 };
 
 /// 构建 Responses API 请求（POST /responses）。
@@ -22,9 +22,14 @@ pub fn to_deepseek_request(req: &ProviderRequest) -> Result<CreateResponseReques
     let thinking_enabled = req.reasoning_effort.is_thinking_enabled();
     let mut tool_choice_value = None;
     let mut tools_value = None;
+    let server_tools = server_tool_names(req);
     if !req.tools.is_empty() {
-        tools_value = Some(build_tools(&req.tools));
+        tools_value = Some(build_tools(req));
         tool_choice_value = build_tool_choice(req.tool_choice.as_ref());
+    } else if !server_tools.is_empty() {
+        // 仅声明服务端联网工具：tool_choice 不能指定它们，保持默认（auto）。
+        // 全部为未知名时过滤后为空，等价于未声明任何工具。
+        tools_value = Some(build_tools(req)).filter(|tools| !tools.is_empty());
     }
     let input = build_input(req);
     let instructions = req
@@ -65,6 +70,7 @@ pub fn to_deepseek_request(req: &ProviderRequest) -> Result<CreateResponseReques
         tool_choice: tool_choice_value,
         top_logprobs: None,
         user: req.session_id.clone(),
+        safety_check: build_safety_check(req),
     })
 }
 
@@ -216,8 +222,17 @@ fn build_function_call_outputs(message: &ChatMessage) -> Vec<FunctionCallOutputI
         .collect()
 }
 
-fn build_tools(specs: &[ToolSpec]) -> Vec<ResponsesTool> {
-    specs
+/// 构建 tools：本地函数工具 + metadata 声明的 DeepSeek 服务端联网工具。
+///
+/// 上层暂无专用字段，由调用方在 metadata 写入
+/// `{"deepseek_server_tools": ["deepseek_web_search", "deepseek_read_url"]}`：
+/// - `deepseek_web_search`：联网搜索（关闭思考）/ 深度思考搜索（开启思考）；
+/// - `deepseek_read_url`：阅读用户消息中的链接。
+///
+/// 服务端工具由模型自主决定是否调用，tool_choice 不能指定它们。
+fn build_tools(req: &ProviderRequest) -> Vec<ResponsesTool> {
+    let mut tools: Vec<ResponsesTool> = req
+        .tools
         .iter()
         .map(|spec| {
             ResponsesTool::Function(ResponsesFunctionTool {
@@ -226,7 +241,49 @@ fn build_tools(specs: &[ToolSpec]) -> Vec<ResponsesTool> {
                 parameters: Some(spec.input_schema.clone()),
             })
         })
+        .collect();
+    for name in server_tool_names(req) {
+        match name.as_str() {
+            "deepseek_web_search" => tools.push(ResponsesTool::DeepSeekWebSearch),
+            "deepseek_read_url" => tools.push(ResponsesTool::DeepSeekReadUrl),
+            other => tracing::warn!(tool = other, "未知的 DeepSeek 服务端工具，已忽略"),
+        }
+    }
+    tools
+}
+
+/// 从 metadata 读取声明的服务端工具名列表。
+fn server_tool_names(req: &ProviderRequest) -> Vec<String> {
+    let Some(Value::Array(items)) = req
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("deepseek_server_tools"))
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
         .collect()
+}
+
+/// 从 metadata 提取安全校验档位：
+/// `{"safety_check": "high"}` 开启基础风控（审核模型输入输出，命中风险返回拒答标识），
+/// `"low"` 与不传等价。详见官方「模型内容安全」指南。
+fn build_safety_check(req: &ProviderRequest) -> Option<SafetyCheck> {
+    let level = req.metadata.as_ref()?.get("safety_check")?.as_str()?;
+    match level {
+        "high" => Some(SafetyCheck::high()),
+        "low" => Some(SafetyCheck::low()),
+        other => {
+            tracing::warn!(
+                level = other,
+                "未知的 safety_check 档位，已忽略（仅支持 high/low）"
+            );
+            None
+        }
+    }
 }
 
 /// tool_choice 映射。注意 Responses API 的指定工具形态为
@@ -821,6 +878,70 @@ mod tests {
         assert_eq!(request.text, None);
     }
 
+    #[test]
+    fn app_suite_server_tools_and_safety_check_from_metadata() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "deepseek_server_tools".to_string(),
+            json!(["deepseek_web_search", "deepseek_read_url"]),
+        );
+        metadata.insert("safety_check".to_string(), Value::String("high".into()));
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "最新新闻")]);
+        req.metadata = Some(metadata);
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(
+            request.tools,
+            Some(vec![
+                ResponsesTool::DeepSeekWebSearch,
+                ResponsesTool::DeepSeekReadUrl
+            ])
+        );
+        assert_eq!(
+            request.tool_choice, None,
+            "仅服务端工具时不应注入 tool_choice"
+        );
+        assert_eq!(
+            request.safety_check,
+            Some(tiangong_deepseek::types::SafetyCheck::high())
+        );
+    }
+
+    #[test]
+    fn app_suite_server_tools_merge_with_function_tools() {
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "查天气")]);
+        req.tools = vec![crate::tool::ToolSpec {
+            name: "get_weather".into(),
+            description: "查询天气".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "deepseek_server_tools".to_string(),
+            json!(["deepseek_web_search"]),
+        );
+        req.metadata = Some(metadata);
+        let request = to_deepseek_request(&req).expect("request");
+        let tools = request.tools.expect("tools");
+        assert_eq!(tools.len(), 2);
+        assert!(matches!(tools[0], ResponsesTool::Function(_)));
+        assert_eq!(tools[1], ResponsesTool::DeepSeekWebSearch);
+    }
+
+    #[test]
+    fn app_suite_ignores_unknown_server_tool_and_level() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "deepseek_server_tools".to_string(),
+            json!(["deepseek_unknown"]),
+        );
+        metadata.insert("safety_check".to_string(), Value::String("extreme".into()));
+        let mut req = base_request(vec![ChatMessage::text(MessageRole::User, "你好")]);
+        req.metadata = Some(metadata);
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(request.tools, None);
+        assert_eq!(request.safety_check, None);
+    }
+
     fn response_object(output: Vec<ResponseOutputItem>) -> ResponseObject {
         ResponseObject {
             id: "resp_test".to_string(),
@@ -839,6 +960,7 @@ mod tests {
                 output_tokens: 2,
                 output_tokens_details: None,
                 total_tokens: 102,
+                server_tool_use: None,
             }),
         }
     }

@@ -131,3 +131,78 @@ pub struct FetchResponse {
     #[serde(default)]
     pub content: String,
 }
+
+// ── OCR（`POST /v1/tools/ocr`）────────────────────────────
+
+/// OCR 单文件大小上限：100 MiB。
+pub const MAX_OCR_FILE_BYTES: usize = 100 * 1024 * 1024;
+/// OCR 单文件页数上限。
+pub const MAX_OCR_PAGES: u32 = 1000;
+
+/// OCR 识别方式。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OcrPurpose {
+    /// 不含图片的 Word、PowerPoint 直接提取文字，其他文件逐页识别。
+    #[default]
+    TextRecognition,
+    /// 所有文件都逐页识别，文本保留 `<｜ref｜>`/`<｜box｜>` 等定位标记。
+    RichLayoutRecognition,
+}
+
+impl OcrPurpose {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TextRecognition => "text_recognition",
+            Self::RichLayoutRecognition => "rich_layout_recognition",
+        }
+    }
+}
+
+/// OCR 响应。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrResponse {
+    /// 本次识别的 ID（`ocr-...`）。
+    #[serde(default)]
+    pub id: String,
+    /// 恒为 `ocr.result`。
+    #[serde(default)]
+    pub object: String,
+    #[serde(default)]
+    pub created: u64,
+    /// 请求中的 purpose 原样回显。
+    #[serde(default)]
+    pub purpose: String,
+    /// 页数，等于 `pages` 的长度，按页计费依据。
+    #[serde(default)]
+    pub page_count: u32,
+    #[serde(default)]
+    pub pages: Vec<OcrPage>,
+    /// 所有页的 Token 合计，仅供参考，不用于计费。
+    #[serde(default)]
+    pub usage: OcrUsage,
+}
+
+/// OCR 单页结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrPage {
+    /// 页码，从 0 开始。
+    #[serde(default)]
+    pub index: u32,
+    /// 该页模型原始输出，不做清理。
+    #[serde(default)]
+    pub text: String,
+    /// `stop` 正常；`length` 表示输出达到上限、该页文本不完整。
+    #[serde(default)]
+    pub finish_reason: String,
+}
+
+/// OCR 用量。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OcrUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}

@@ -29,6 +29,30 @@ pub struct FileObject {
 
 // ── 列出文件 ──────────────────────────────────────────────
 
+/// Files API 文档解析方式（上传时指定，见「文件解析」指南）。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileParsePurpose {
+    /// 只有文字：文档里的图表、照片、示意图会被丢弃；适合以文字为主的文档。
+    #[default]
+    #[serde(rename = "text_recognition")]
+    TextRecognition,
+    /// 文字加文档里的图：图表等被裁出并按原位置交给模型；适合需要结合图理解的文档。
+    #[serde(rename = "rich_layout_recognition")]
+    RichLayoutRecognition,
+}
+
+impl FileParsePurpose {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TextRecognition => "text_recognition",
+            Self::RichLayoutRecognition => "rich_layout_recognition",
+        }
+    }
+}
+
+/// 上传并解析文档的文件大小上限：100 MiB。
+pub const MAX_DOCUMENT_FILE_BYTES: usize = 100 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ListFilesParams {
     /// 分页游标：返回排在该 file_id 之后的文件。

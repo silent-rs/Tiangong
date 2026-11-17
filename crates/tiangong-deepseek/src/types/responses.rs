@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::DeepSeekError;
+use crate::types::SafetyCheck;
 
 // ── 支持模型 ──────────────────────────────────────────────
 
@@ -41,6 +42,9 @@ pub struct CreateResponseRequest {
     pub top_logprobs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// 模型内容安全校验；`level: "high"` 开启基础风控。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_check: Option<SafetyCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -105,8 +109,17 @@ pub enum ContentBlock {
     OutputText(TextBlock),
     #[serde(rename = "input_image")]
     InputImage(InputImageBlock),
+    #[serde(rename = "input_file")]
+    InputFile(InputFileBlock),
     #[serde(rename = "reasoning_text")]
     ReasoningText(TextBlock),
+}
+
+/// 文件输入块：引用 Files API 上传（文档解析或 user_data）返回的 `file_id`，
+/// 模型即可基于文档内容作答；每个请求最多引用 20 个文档。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct InputFileBlock {
+    pub file_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -199,6 +212,14 @@ pub enum ResponsesTool {
     WebSearch,
     #[serde(rename = "web_search_2025_08_26")]
     WebSearch20250826,
+    /// DeepSeek 服务端联网搜索：关闭思考时按需搜索并附引用作答，
+    /// 开启思考时模型在多步推理中自主搜索、打开网页、页内查找。
+    #[serde(rename = "deepseek_web_search")]
+    DeepSeekWebSearch,
+    /// DeepSeek 服务端阅读链接：自动识别最后一条用户消息中的 URL，
+    /// 抓取网页内容并结合上下文作答。
+    #[serde(rename = "deepseek_read_url")]
+    DeepSeekReadUrl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -419,6 +440,26 @@ pub struct ResponseUsage {
     pub output_tokens_details: Option<OutputTokensDetails>,
     #[serde(default)]
     pub total_tokens: u64,
+    /// 服务端联网工具用量（DeepSeek 扩展）；计费次数全为 0 时不返回。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_use: Option<ServerToolUseUsage>,
+}
+
+/// Responses API 的服务端工具用量：`tool_search` / `tool_fetch` /
+/// `tool_image_search` 为计费次数，`web_search_requests` / `web_fetch_requests`
+/// 为实际请求数。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerToolUseUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_search: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_fetch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_image_search: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -433,6 +474,9 @@ pub struct OutputTokensDetails {
     /// 思维链 token 数。
     #[serde(default)]
     pub reasoning_tokens: u64,
+    /// 安全审核产生的 token 数（已包含在 output_tokens 中）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_tokens: Option<u64>,
 }
 
 // ── 流式类型 ──────────────────────────────────────────────

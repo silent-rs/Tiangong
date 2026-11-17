@@ -436,6 +436,7 @@ mod buffer_tests {
             prompt_cache_hit_tokens: None,
             prompt_cache_miss_tokens: None,
             completion_tokens_details: None,
+            server_tool_use: None,
         };
         let mut state = BufferState::default();
         let text_events = apply_buffer(&mut state, text_delta(dsml));

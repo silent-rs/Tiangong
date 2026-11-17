@@ -11,6 +11,7 @@ use crate::files::Files;
 use crate::models::Models;
 use crate::responses::Responses;
 use crate::tools::WebTools;
+use crate::{asr::Asr, ocr::Ocr, tts::Tts};
 
 #[derive(Clone)]
 pub struct DeepSeekClient {
@@ -87,6 +88,21 @@ impl DeepSeekClient {
     /// 网页搜索与抓取（`/v1/tools/search`、`/v1/tools/fetch`）。
     pub fn tools(&self) -> WebTools<'_> {
         WebTools::new(self)
+    }
+
+    /// OCR 文字识别（`/v1/tools/ocr`）。
+    pub fn ocr(&self) -> Ocr<'_> {
+        Ocr::new(self)
+    }
+
+    /// 语音识别（`/v1/tools/asr`）。
+    pub fn asr(&self) -> Asr<'_> {
+        Asr::new(self)
+    }
+
+    /// 语音合成（`/v1/tools/tts`，含 WebSocket 流式）。
+    pub fn tts(&self) -> Tts<'_> {
+        Tts::new(self)
     }
 
     // ── 通用 HTTP 方法 ──────────────────────────────────────
@@ -242,11 +258,102 @@ impl DeepSeekClient {
         format!("{}/{}", base, path.trim_start_matches('/'))
     }
 
+    /// 工具接口的 WebSocket URL（如 `wss://api.deepseek.com/v1/tools/tts`）。
+    /// 与 `build_tools_url` 同样兼容 base_url 带 `/v1` 后缀；附加查询参数。
+    pub(crate) fn build_tools_ws_url(&self, path: &str, query: &[(&str, &str)]) -> String {
+        let mut url = self
+            .build_tools_url(path)
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
+        let query: Vec<String> = query
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
+            .collect();
+        if !query.is_empty() {
+            url.push('?');
+            url.push_str(&query.join("&"));
+        }
+        url
+    }
+
+    /// Bearer 鉴权令牌（供 WebSocket 等非 reqwest 通道复用）。
+    pub(crate) fn bearer_token(&self) -> &str {
+        &self.config.api_key
+    }
+
+    /// 工具接口的 multipart 请求（OCR / ASR）。
+    pub(crate) async fn post_tools_multipart<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: &MultipartForm,
+    ) -> Result<T, DeepSeekError> {
+        let url = self.build_tools_url(path);
+        let (content_type, body) = form.encode();
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", content_type)
+            .body(body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| DeepSeekError::Transport(err.to_string()))?;
+        if !status.is_success() {
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            return Err(classify_tools_http_error(status, body_text));
+        }
+        // OCR 识别期间服务端持续发送换行符，属于 JSON 前导空白，可直接解析。
+        serde_json::from_slice(&body).map_err(|err| {
+            DeepSeekError::Serialization(format!(
+                "{err}: {}",
+                String::from_utf8_lossy(&body[..body.len().min(512)])
+            ))
+        })
+    }
+
+    /// 工具接口的流式响应（TTS 整段合成）：成功后返回原始响应，
+    /// 音频由调用方按字节流读取；失败状态按工具接口错误语义分类。
+    pub(crate) async fn post_tools_stream_raw(
+        &self,
+        path: &str,
+        body: &(impl Serialize + ?Sized),
+    ) -> Result<reqwest::Response, DeepSeekError> {
+        let url = self.build_tools_url(path);
+        let response = self
+            .stream_http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        if !response.status().is_success() {
+            return Err(parse_error_response(response).await);
+        }
+        Ok(response)
+    }
+
     fn build_url(&self, path: &str) -> String {
         format!(
             "{}/{}",
             self.config.base_url.trim_end_matches('/'),
             path.trim_start_matches('/')
+        )
+    }
+
+    /// 测试辅助：按 TTS 默认参数构建工具 WebSocket URL。
+    #[cfg(test)]
+    pub(crate) fn client_test_ws_url(&self) -> String {
+        self.build_tools_ws_url(
+            "/v1/tools/tts",
+            &[("voice_id", "stella"), ("format", "pcm")],
         )
     }
 }

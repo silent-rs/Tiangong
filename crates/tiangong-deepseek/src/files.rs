@@ -1,6 +1,9 @@
 use crate::client::{DeepSeekClient, MultipartForm, percent_encode};
 use crate::error::DeepSeekError;
-use crate::types::{DeleteFileResponse, FileObject, ListFilesParams, ListFilesResponse};
+use crate::types::{
+    DeleteFileResponse, FileObject, FileParsePurpose, ListFilesParams, ListFilesResponse,
+    MAX_DOCUMENT_FILE_BYTES,
+};
 
 /// Files API 文件有效期：1 小时至 30 天。
 pub const MIN_EXPIRES_AFTER_SECONDS: u32 = 3600;
@@ -33,6 +36,33 @@ impl<'c> Files<'c> {
                 .field("expires_after[anchor]", "created_at")
                 .field("expires_after[seconds]", &seconds.to_string());
         }
+        self.client.post_multipart("/files", &form).await
+    }
+
+    /// 上传并解析文档（PDF、Word、PowerPoint、图片等），供对话中通过
+    /// `file_id` 引用后基于文档作答。文件在上传时完成解析，解析成功后
+    /// 才返回 `file_id`；调用方超时需覆盖上传加解析时间（各至多 120 秒）。
+    ///
+    /// - 单文件最大 100 MiB、1000 页；解析成功按页数一次性计费。
+    /// - `purpose` 字段必须位于 `file` 之前，multipart 顺序由 SDK 保证。
+    /// - 纯文本 / 表格 / 电子书（txt、md、csv、json、代码、XLSX、XLS、
+    ///   EPUB、MOBI）不需要解析，请继续用 [`Files::upload`]（`user_data`）。
+    pub async fn upload_document(
+        &self,
+        filename: &str,
+        data: Vec<u8>,
+        purpose: FileParsePurpose,
+    ) -> Result<FileObject, DeepSeekError> {
+        if data.len() > MAX_DOCUMENT_FILE_BYTES {
+            return Err(DeepSeekError::InvalidRequest(format!(
+                "file is too large: max {} MiB, got {} bytes",
+                MAX_DOCUMENT_FILE_BYTES / (1024 * 1024),
+                data.len()
+            )));
+        }
+        let form = MultipartForm::new()
+            .field("purpose", purpose.as_str())
+            .file("file", filename, data);
         self.client.post_multipart("/files", &form).await
     }
 

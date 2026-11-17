@@ -19,6 +19,10 @@ use tiangong_plugin_runtime::protocol::RequestInvocationContext;
 use tiangong_plugin_runtime::sidecar::{
     EphemeralCommandConnection, SidecarConfig, SidecarConnection, StdioSidecarConnection,
 };
+/// workspace target/debug 下的二进制（构建与否决定真实 Launcher 用例跑或跳过）。
+fn debug_binary(name: &str) -> Option<PathBuf> {
+    tiangong_plugin_runtime::test_support::debug_binary(name)
+}
 
 const RUN_SHELL_OPERATION: &str = "run_shell";
 #[cfg(windows)]
@@ -69,13 +73,6 @@ struct WindowsSandboxProbeReport {
     policy_envelope_hidden: bool,
     resource_limits_applied: bool,
     child_restrictions_inherited: bool,
-}
-
-fn debug_binary(name: &str) -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let debug_dir = executable.parent()?.parent()?;
-    let candidate = debug_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    candidate.is_file().then_some(candidate)
 }
 
 fn command_sidecar_binary() -> Option<PathBuf> {
