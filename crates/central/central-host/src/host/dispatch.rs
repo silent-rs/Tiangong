@@ -429,6 +429,8 @@ pub async fn plan_central_dispatch(
                 .unwrap_or_else(|e| e.into_inner());
             central_state::queue_decision(
                 &registry,
+                Some(&request.work_id),
+                request.reused_session,
                 request.after_work_id.as_deref(),
                 &request.session_id,
                 &cwd,

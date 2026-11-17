@@ -109,9 +109,26 @@ impl WorkOutcome {
     }
 }
 
-/// 依据回报文本判定结局（Worker 用户决策协议）。
+/// 用户决策协议标记：Worker 征询时须以该标记「开头单独一行」提出
+/// （见 host/dispatch.rs 派发指令的【用户决策协议】）。
+pub const USER_DECISION_MARKER: &str = "【需要用户决策】";
+
+/// 判定回报文本是否为征询（行首标记匹配）。
+///
+/// 协议要求标记出现在行首（前后允许空白缩进）；正文任意位置出现标记
+/// （引用历史裁决记录、报告小节标题等）不是征询——曾用全文子串匹配，
+/// 把 review 报告引用裁决记录的标题（「### 8.5 需要用户决策（…）
+/// 【需要用户决策】」）误判为征询，完整终稿被登记为 waiting_user 永久
+/// 挂起（2026-11-17 用户实测，work-03h8ujgnub0s5jk2iuf，第二十七轮
+/// review 终稿）。行为锁定于 transitions 测试。
+pub fn is_user_decision_inquiry(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with(USER_DECISION_MARKER))
+}
+
+/// 依据回报文本判定结局（Worker 用户决策协议：行首标记为征询）。
 pub fn classify_outcome(notice: &str) -> WorkOutcome {
-    if notice.contains("【需要用户决策】") {
+    if is_user_decision_inquiry(notice) {
         WorkOutcome::WaitingUser
     } else {
         WorkOutcome::Finished
@@ -230,6 +247,8 @@ pub enum QueueDecision {
 #[allow(clippy::too_many_arguments)]
 pub fn queue_decision(
     entries: &[WorkStatus],
+    self_work_id: Option<&str>,
+    reused_session: bool,
     after: Option<&str>,
     session_id: &str,
     cwd: &str,
@@ -251,11 +270,34 @@ pub fn queue_decision(
     // 同会话互斥（用户实测 2026-11-16：日志显示同 session 被反复派发新
     // execution——前一轮在途时又派一轮，两个 turn 并发投递同一 Core，
     // 消息交错/上下文污染。附录 A.2 第 8 条「同会话重派不拦但顺序投递」
-    // 的假设被实测推翻：改为同会话存在 in-flight（running/waiting_user/
-    // paused/queued）时一律排队，等它终态后自动投递）。
+    // 的假设被实测推翻：改为同会话存在在途（running/paused/queued）时
+    // 一律排队，等它终态后自动投递）。互斥意图是拦「会产生并发新 turn
+    // 的派发」，三处豁免（2026-11-17 用户实测反转，第二十七轮 review
+    // P0——0491e250 的无差别互斥把三条合法路径一并死锁，4 项集成
+    // 测试红）：
+    // - **WaitingUser**：征询时 worker 的 turn 已结束、Core 空闲——
+    //   B 语义（征询通道定谳）规定中枢用 dispatch_work(session_id=
+    //   worker) 转发用户答复，计入互斥则 QueueAfter 该 waiting 条目
+    //   自身，要等它终态才 flush，而它正等这条答复才能继续 → 自锁；
+    //   放行后由 merge_waiting_user 恢复（归属沿用主工作）；
+    // - **steer（reused_session × 目标 Running）**：引导并入当前 turn
+    //   （turn 不新增，与互斥的并发意图不冲突），放行给执行段的
+    //   steer_merged_into_running 判定；无差别互斥会把它 QueueAfter
+    //   在跑工作——补充指令永远送不进去；
+    // - **自身条目**：排队项经 flush_pending_dispatches 重入本派发链
+    //   投递时，registry 里它自己的 Queued 条目仍在——计入互斥会
+    //   QueueAfter 自身，依赖已终态、flush 不会再触发 → 排队项永远
+    //   投不出去（host_dispatch_queues_on_write_lock_then_delivers
+    //   实证）。
     if let Some(holder) = entries.iter().rev().find(|entry| {
-        entry.session_id == session_id
-            && (entry.state.is_inflight() || entry.state == WorkState::Queued)
+        if entry.session_id != session_id || Some(entry.work_id.as_str()) == self_work_id {
+            return false;
+        }
+        match entry.state {
+            WorkState::Running => !reused_session,
+            WorkState::Paused | WorkState::Queued => true,
+            _ => false,
+        }
     }) {
         return QueueDecision::QueueAfter(holder.work_id.clone());
     }

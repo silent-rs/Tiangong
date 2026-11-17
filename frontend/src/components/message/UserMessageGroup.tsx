@@ -237,10 +237,15 @@ function CentralSystemNote({ kind, time, text }: {
   text: string;
 }) {
   // 征询默认展开（用户实测「无法查看完整」）：kind=decision（新注入）
-  // 或内容含【需要用户决策】（历史消息兜底——render data 注入时固化，
-  // 旧征询仍是 report，按内容嗅探同样必须展开）。
+  // 或行首含【需要用户决策】标记（历史消息兜底——render data 注入时
+  // 固化，旧征询仍是 report，按内容嗅探同样必须展开）。行首匹配与
+  // 后端 classify_outcome 同源：报告正文引用标记（裁决记录标题等）
+  // 不是征询，不得因此默认展开。
   const [open, setOpen] = useState(
-    kind === 'decision' || text.includes('【需要用户决策】'),
+    kind === 'decision'
+    || text
+      .split('\n')
+      .some((line) => line.trimStart().startsWith('【需要用户决策】')),
   );
   const kindLabel = kind === 'report'
     ? '工作回报'

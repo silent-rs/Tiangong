@@ -251,9 +251,11 @@ impl crate::CentralHostState {
         let mut failed: Vec<String> = Vec::new();
         for notice in notices {
             let prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
-            // 征询（含【需要用户决策】）用专用 kind：前端默认展开——折叠
-            // 480 字会让用户看不到完整问题，答复无从谈起（用户实测）
-            let kind = if notice.contains("【需要用户决策】") {
+            // 征询（行首【需要用户决策】标记）用专用 kind：前端默认展开
+            // ——折叠 480 字会让用户看不到完整问题，答复无从谈起（用户
+            // 实测）。判定与 classify_outcome 同源（行首匹配）：报告正文
+            // 引用标记（裁决记录标题等）不得误标为征询。
+            let kind = if central_state::is_user_decision_inquiry(&notice) {
                 "decision"
             } else {
                 "report"

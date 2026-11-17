@@ -97,20 +97,56 @@ fn queue_decision_combinations() {
     entries[1].cwd = Some("/ws/b".to_string());
 
     assert_eq!(
-        queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false, "普通任务"),
+        queue_decision(
+            &entries,
+            None,
+            false,
+            Some("dep"),
+            "s-new",
+            "/ws/c",
+            false,
+            "普通任务"
+        ),
         QueueDecision::QueueAfter("dep".to_string())
     );
     entries[0].state = WorkState::Completed;
     assert_eq!(
-        queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false, "普通任务"),
+        queue_decision(
+            &entries,
+            None,
+            false,
+            Some("dep"),
+            "s-new",
+            "/ws/c",
+            false,
+            "普通任务"
+        ),
         QueueDecision::DispatchNow
     );
     assert_eq!(
-        queue_decision(&entries, None, "s-new", "/ws/b", false, "普通任务"),
+        queue_decision(
+            &entries,
+            None,
+            false,
+            None,
+            "s-new",
+            "/ws/b",
+            false,
+            "普通任务"
+        ),
         QueueDecision::QueueAfter("other".to_string())
     );
     assert_eq!(
-        queue_decision(&entries, None, "s-new", "/ws/b", true, "普通任务"),
+        queue_decision(
+            &entries,
+            None,
+            false,
+            None,
+            "s-new",
+            "/ws/b",
+            true,
+            "普通任务"
+        ),
         QueueDecision::DispatchNow
     );
     // R3（方案 §3.4）：高风险任务（发布/删除/迁移/覆写）声明 parallel 也
@@ -118,6 +154,8 @@ fn queue_decision_combinations() {
     assert_eq!(
         queue_decision(
             &entries,
+            None,
+            false,
             None,
             "s-new",
             "/ws/b",
@@ -130,6 +168,8 @@ fn queue_decision_combinations() {
     assert_eq!(
         queue_decision(
             &entries,
+            None,
+            false,
             None,
             "s-new",
             "/ws/b",
@@ -145,13 +185,31 @@ fn queue_decision_combinations() {
     );
     // 同会话互斥（用户实测 2026-11-16）：s-other 已在途，再派同会话 → 排队
     assert_eq!(
-        queue_decision(&entries, None, "s-other", "/ws/b", false, "普通任务"),
+        queue_decision(
+            &entries,
+            None,
+            false,
+            None,
+            "s-other",
+            "/ws/b",
+            false,
+            "普通任务"
+        ),
         QueueDecision::QueueAfter("other".to_string())
     );
     for state in [WorkState::WaitingUser, WorkState::Paused, WorkState::Queued] {
         entries[0].state = state;
         assert_eq!(
-            queue_decision(&entries, Some("dep"), "s-new", "/ws/c", false, "普通任务"),
+            queue_decision(
+                &entries,
+                None,
+                false,
+                Some("dep"),
+                "s-new",
+                "/ws/c",
+                false,
+                "普通任务"
+            ),
             QueueDecision::QueueAfter("dep".to_string()),
             "{state:?} 应视为在途依赖"
         );
@@ -202,48 +260,151 @@ fn work_state_str_parse_round_trip_all_variants() {
     assert_eq!(WorkState::parse(""), None);
 }
 
-/// WorkOutcome::as_str 短名；classify_outcome 按标记判定。
+/// WorkOutcome::as_str 短名；classify_outcome 按行首标记判定。
 #[test]
 fn work_outcome_names_and_classifier_boundaries() {
     assert_eq!(WorkOutcome::Finished.as_str(), "finished");
     assert_eq!(WorkOutcome::WaitingUser.as_str(), "waiting_user");
     assert_eq!(classify_outcome("正常完成"), WorkOutcome::Finished);
+    // 行首（含缩进/引用前缀行后换行）→ 征询
+    assert_eq!(
+        classify_outcome("【需要用户决策】要不要继续"),
+        WorkOutcome::WaitingUser
+    );
+    assert_eq!(
+        classify_outcome("[后台工作完成] work-3\n【需要用户决策】\n问题：是否继续？"),
+        WorkOutcome::WaitingUser
+    );
+    assert_eq!(
+        classify_outcome("  【需要用户决策】缩进行首也算"),
+        WorkOutcome::WaitingUser
+    );
+    // 句中/行中引用不是征询（2026-11-17 用户实测回归锁：review 报告
+    // §8.5 标题引用裁决记录「### 8.5 需要用户决策（换模型 A/B/C，
+    // 第七次）【需要用户决策】」被全文子串匹配误判，第二十七轮终稿
+    // 被永久登记为 waiting_user）
     assert_eq!(
         classify_outcome("问题：【需要用户决策】要不要继续"),
-        WorkOutcome::WaitingUser
+        WorkOutcome::Finished
+    );
+    assert_eq!(
+        classify_outcome(
+            "# 第二十七轮 Review\n### 8.5 需要用户决策（换模型 A/B/C，第七次）【需要用户决策】\n背景：用户裁决 A（持久化）"
+        ),
+        WorkOutcome::Finished
     );
     assert_eq!(classify_outcome(""), WorkOutcome::Finished);
 }
 
 /// 同会话互斥锁（用户实测 2026-11-16：日志同 session 反复派发，前一轮
 /// 在途又派一轮 → 两个 turn 并发投递同一 Core，消息交错）。锁定期：
-/// running / waiting_user / paused / queued 一律排队，终态后自动投递。
+/// running / paused / queued 一律排队，终态后自动投递。
+/// WaitingUser 放行（2026-11-17 反转，第二十七轮 review P0）：征询时
+/// worker turn 已结束、Core 空闲——计入互斥会把中枢的答复转发
+/// QueueAfter 到该 waiting 条目自身（等它终态才投递，而它正等答复）
+/// → 自锁；放行后由 merge_waiting_user 恢复（归属沿用主工作）。
 #[test]
 fn same_session_inflight_queues_new_dispatch() {
-    for state in [
-        WorkState::Running,
-        WorkState::WaitingUser,
-        WorkState::Paused,
-        WorkState::Queued,
-    ] {
+    for state in [WorkState::Running, WorkState::Paused, WorkState::Queued] {
         let entries = vec![entry("work-h", "s-busy", state)];
         assert_eq!(
-            queue_decision(&entries, None, "s-busy", "/ws/x", false, "普通任务"),
+            queue_decision(
+                &entries,
+                None,
+                false,
+                None,
+                "s-busy",
+                "/ws/x",
+                false,
+                "普通任务"
+            ),
             QueueDecision::QueueAfter("work-h".to_string()),
             "{:?} 在途时同会话新派发必须排队",
             state
         );
     }
+    // waiting_user 放行：答复转发不得自锁
+    let waiting = vec![entry("work-w", "s-busy", WorkState::WaitingUser)];
+    assert_eq!(
+        queue_decision(
+            &waiting,
+            None,
+            false,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "转发答复"
+        ),
+        QueueDecision::DispatchNow,
+        "waiting_user 不是活跃在途——答复转发/新派发放行（恢复归 merge）"
+    );
+    // 自身条目跳过（flush 重入投递自锁回归锁）：排队项依赖终态后经
+    // flush_pending_dispatches 重入派发链，registry 里它自己的 Queued
+    // 条目仍在——不计入互斥（自身不代表 Core 占用），否则 QueueAfter
+    // 自身永远投不出去。
+    let self_queued = vec![entry("work-me", "s-busy", WorkState::Queued)];
+    assert_eq!(
+        queue_decision(
+            &self_queued,
+            Some("work-me"),
+            false,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "任务"
+        ),
+        QueueDecision::DispatchNow,
+        "flush 重入投递时自身的 Queued 条目不得拦截自己"
+    );
+    // 但同会话**其他**排队项仍保序（后到者排在其后）
+    let two_queued = vec![
+        entry("work-a", "s-busy", WorkState::Queued),
+        entry("work-b", "s-busy", WorkState::Queued),
+    ];
+    assert_eq!(
+        queue_decision(
+            &two_queued,
+            Some("work-b"),
+            false,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "任务"
+        ),
+        QueueDecision::QueueAfter("work-a".to_string()),
+        "同会话其他排队项仍在途——保序排队"
+    );
     // 终态/其他会话不受影响
     let done = vec![entry("work-d", "s-busy", WorkState::Completed)];
     assert_eq!(
-        queue_decision(&done, None, "s-busy", "/ws/x", false, "普通任务"),
+        queue_decision(
+            &done,
+            None,
+            false,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "普通任务"
+        ),
         QueueDecision::DispatchNow,
         "终态后同会话可再派"
     );
     let other = vec![entry("work-o", "s-other", WorkState::Running)];
     assert_eq!(
-        queue_decision(&other, None, "s-busy", "/ws/x", false, "普通任务"),
+        queue_decision(
+            &other,
+            None,
+            false,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "普通任务"
+        ),
         QueueDecision::DispatchNow,
         "不同会话不互斥（写入锁另有判定）"
     );

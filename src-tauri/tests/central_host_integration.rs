@@ -506,7 +506,11 @@ async fn host_terminal_callback_matrix() {
         &state.central,
         &dispatch_request("work-w1", "s-w1", "等待用户任务", false),
         false,
-        "问题：【需要用户决策】要不要继续",
+        // 失败路径 notice 由 build_work_notice 包装为
+        // 「…失败原因：{reason}」——reason 以换行开头使标记保持行首
+        // （真实征询走 done=true 路径，worker 全文按行嵌入 notice，
+        // 协议要求的行首标记天然保留）。
+        "\n【需要用户决策】要不要继续",
     );
     {
         let registry = state.central.central_work_registry.lock().unwrap();
