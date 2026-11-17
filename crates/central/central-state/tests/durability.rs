@@ -240,3 +240,54 @@ fn goals_and_reports_roundtrip_and_corrupt_fallback() {
     assert!(load_goals(base).is_empty());
     assert!(load_reports(base).is_empty());
 }
+
+/// P2-03（第 28 轮 review）：在途引导/恢复的 upsert 保留 owner 原任务
+/// 展示（引导文本/答复不覆盖登记目标）；终态后的复用（S1 新 work_id）
+/// 用新任务文本。
+#[test]
+fn upsert_keeps_owner_task_for_inflight_and_updates_for_new_work() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path();
+    // owner 首派（未终态）
+    let mut owner = record("s-p2", "owner 原目标：完成部署");
+    owner.work_id = "work-owner".into();
+    owner.execution_id = Some("exec-a".into());
+    central_state::persistence::upsert_work_item(base, &owner).unwrap();
+    // 答复转发（同 work_id 在途恢复）：task 是答复文本
+    let mut resume = record("s-p2", "用户答复：选方案 B");
+    resume.work_id = "work-owner".into();
+    resume.reused_session = true;
+    resume.execution_id = Some("exec-b".into());
+    central_state::persistence::upsert_work_item(base, &resume).unwrap();
+    let items = central_state::load_work_items(base);
+    assert_eq!(items.len(), 1, "会话维度一条");
+    assert_eq!(
+        items[0].task, "owner 原目标：完成部署",
+        "在途恢复保留 owner 任务展示"
+    );
+    assert_eq!(
+        items[0].execution_id.as_deref(),
+        Some("exec-b"),
+        "执行归属取新执行"
+    );
+    // 终态后复用（S1：新 work_id）：用新任务文本
+    central_state::persistence::mark_work_item_finished_with_session(
+        base,
+        "work-owner",
+        Some("s-p2"),
+        false,
+    )
+    .unwrap();
+    let mut next = record("s-p2", "全新任务：第二轮部署");
+    next.work_id = "work-next".into();
+    next.reused_session = true;
+    next.execution_id = Some("exec-c".into());
+    central_state::persistence::upsert_work_item(base, &next).unwrap();
+    let items = central_state::load_work_items(base);
+    assert_eq!(items.len(), 1, "会话维度仍一条");
+    assert_eq!(
+        items[0].task, "全新任务：第二轮部署",
+        "终态后的新工作用新任务文本"
+    );
+    assert_eq!(items[0].work_id, "work-next");
+}

@@ -91,16 +91,24 @@ impl CentralPlugin {
                 "status 仅支持 active / achieved / abandoned / archived，收到 {status}"
             ));
         }
-        let mut goals = load_goals(self.sessions.storage_root());
-        let Some(goal) = goals.iter_mut().rev().find(|g| g.goal_id == goal_id) else {
-            return self.error_result(format!("未找到目标 {goal_id}"));
-        };
-        goal.status = status.to_string();
-        let title = goal.title.clone();
-        if let Err(error) = save_goals(self.sessions.storage_root(), &goals) {
-            return self.error_result(format!("目标状态落盘失败（更新未保存）: {error}"));
+        // S4：锁内 RMW（with_goals）——消除锁外 load→mutate→save 丢更新
+        let outcome = central_state::persistence::with_goals(
+            self.sessions.storage_root(),
+            |goals| -> Result<String, ()> {
+                let Some(goal) = goals.iter_mut().rev().find(|g| g.goal_id == goal_id) else {
+                    return Err(());
+                };
+                goal.status = status.to_string();
+                Ok(goal.title.clone())
+            },
+        );
+        match outcome {
+            Ok(Ok(title)) => {
+                self.text_result("目标状态已更新", format!("目标「{title}」→ {status}"))
+            }
+            Ok(Err(())) => self.error_result(format!("未找到目标 {goal_id}")),
+            Err(error) => self.error_result(format!("目标状态落盘失败（更新未保存）: {error}")),
         }
-        self.text_result("目标状态已更新", format!("目标「{title}」→ {status}"))
     }
 
     /// 结构化报告存档（§13.5）。
@@ -125,14 +133,17 @@ impl CentralPlugin {
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         };
         let report_id = report.report_id.clone();
-        let mut reports = load_reports(self.sessions.storage_root());
-        reports.push(report);
-        let overflow = reports.len().saturating_sub(50);
-        if overflow > 0 {
-            reports.drain(..overflow);
-        }
-        if let Err(error) = save_reports(self.sessions.storage_root(), &reports) {
-            // 十九轮 P2-5：reports 无事件日志兜底——写失败显式报错
+        // S4：锁内 RMW（with_reports）——保留上限 50 截断语义；写失败
+        // 显式报错（十九轮 P2-5：reports 无事件日志兜底）
+        let stored =
+            central_state::persistence::with_reports(self.sessions.storage_root(), |reports| {
+                reports.push(report);
+                let overflow = reports.len().saturating_sub(50);
+                if overflow > 0 {
+                    reports.drain(..overflow);
+                }
+            });
+        if let Err(error) = stored {
             return self.error_result(format!("报告存档落盘失败（报告未保存）: {error}"));
         }
         self.text_result(

@@ -436,6 +436,10 @@ pub fn recover_registry_entries(storage_root: &std::path::Path) -> Vec<crate::Wo
 }
 
 /// （终态机制上线前写入）不再每次启动都误报中断。
+/// C03（第 28 轮 review）：排队挂起（queued_at 有值）不是中断——排除；
+/// 进行中的工作在运行期调用时也会命中时间窗，调用方文案不得泛称
+/// 「都是中断」——与运行 registry 的精确对账属后续跨层工作（宿主
+/// 恢复时的 Interrupted 投影才是权威中断集）。
 pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRecord> {
     // dispatched_at 为「%Y-%m-%d %H:%M:%S」本地时间，字典序与时间序一致，
     // 字符串比较近似近 48 小时窗口。
@@ -444,7 +448,11 @@ pub fn interrupted_work_items(storage_root: &std::path::Path) -> Vec<WorkItemRec
         .to_string();
     load_work_items(storage_root)
         .into_iter()
-        .filter(|item| item.finished_at.is_none() && item.dispatched_at.as_str() > cutoff.as_str())
+        .filter(|item| {
+            item.finished_at.is_none()
+                && item.queued_at.is_none()
+                && item.dispatched_at.as_str() > cutoff.as_str()
+        })
         .collect()
 }
 
@@ -460,9 +468,24 @@ pub fn upsert_work_item(
             .iter()
             .position(|item| item.session_id == record.session_id)
         {
+            // P2-03（第 28 轮 review）：在途引导/恢复（同 work_id 且未
+            // 终态——waiting/running 的答复转发与补充指令）保留 owner
+            // 原任务展示，引导文本/答复不覆盖登记目标；execution 与
+            // 派发时间取新执行。终态后的复用是新工作（S1 已分配新
+            // work_id），用新任务文本。
+            let existing = &items[idx];
+            let owner_inflight = existing.work_id == record.work_id
+                && existing.outcome.is_none()
+                && existing.finished_at.is_none();
+            let mut updated = record.clone();
+            if owner_inflight {
+                updated.task = existing.task.clone();
+            }
             items.remove(idx);
+            items.push(updated);
+        } else {
+            items.push(record.clone());
         }
-        items.push(record.clone());
         // 保留上限：登记表只服务「近期派发会话的记忆与复用」（按用户
         // 要求保留 20 个会话条目）；会话文件本身不受影响——那是复用与
         // 复核的真相源。

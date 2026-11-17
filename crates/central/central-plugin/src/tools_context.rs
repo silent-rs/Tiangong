@@ -37,7 +37,7 @@ impl CentralPlugin {
              默认工作区: {workspace}（其他目录派发前需用户授权）\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
              待汇报的后台工作回报: {pending} 条（用 work（action=reports）取回后转述）\n\
-             因应用重启中断的任务: {interrupted} 个（结果未产出，可重派复用原会话）\n\
+             近期未收尾的任务: {interrupted} 个（含进行中与重启中断——含进行中的原因：此处按登记时间窗统计，精确中断集以工作列表为准）\n\
              当前用户目标: {goals}\n\
              当前时间: {now}",
             workspace = self.workspace_dir,

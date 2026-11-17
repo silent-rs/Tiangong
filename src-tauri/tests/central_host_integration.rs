@@ -413,8 +413,26 @@ async fn host_rebuild_prefers_owner_over_steer_orphan() {
         assert_eq!(cc2b.len(), 1);
         assert_eq!(cc2b[0].work_id, "work-only-steer");
     }
-    // control(owner) 可达：登记存在即发 Control 消息（通道未启动仅验证不拒绝）
-    // control 可达性验证：调用本身（登记存在即执行，无拒绝返回值可断言）
+    // control(owner) 可达性 + 结果断言（P2-09：预置持久化记录并断言
+    // 状态/结果——调用本身不再无断言）
+    let _ = tiangong_app::central::upsert_work_item(
+        &storage_root,
+        &tiangong_app::central::WorkItemRecord {
+            work_id: "work-ownerX".into(),
+            reused_session: false,
+            session_id: "s-cc2".into(),
+            task: "CC2 任务".into(),
+            model: None,
+            dispatched_at: "2026-11-16 09:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: None,
+            execution_id: Some("exec-cc2-owner".into()),
+        },
+    );
     tiangong_app::central_host::dispatch::handle_central_control(
         &state_of_handle.central,
         handle,
@@ -425,7 +443,33 @@ async fn host_rebuild_prefers_owner_over_steer_orphan() {
         },
     )
     .await;
+    {
+        let registry = state_of_handle
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap();
+        let owner = registry
+            .iter()
+            .rev()
+            .find(|e| e.work_id == "work-ownerX")
+            .expect("owner 登记存在");
+        assert_eq!(
+            owner.state,
+            central_state::WorkState::Cancelled,
+            "control(cancel) 必须把 registry 状态置为终态（P2-09：调用不得无断言）"
+        );
+    }
     let items = tiangong_app::central::load_work_items(&storage_root);
+    let owner_record = items
+        .iter()
+        .find(|i| i.work_id == "work-ownerX")
+        .expect("owner 记录应存在（control 前预置或 control 中落盘）");
+    assert_eq!(
+        owner_record.outcome.as_deref(),
+        Some("cancelled"),
+        "control(cancel) 的终态必须落盘（outcome=cancelled）"
+    );
     assert!(
         !items
             .iter()
@@ -2627,9 +2671,10 @@ async fn host_steer_keeps_owner_registry() {
         .await
         .expect("owner dispatch 应成功");
     assert!(state.core_manager.has_live_core("s-own"), "owner 应建 Core");
-    // 第二次 dispatch：steer（reused 同会话）——Running 并入
+    // 第二次 dispatch：steer（reused 同会话，生产 CC2 形态：同 owner
+    // work_id——异 id 复用按互斥语义排队，测不出并入）
     let steer = tiangong_app::central::CentralDispatchRequest {
-        work_id: "steer-x".into(),
+        work_id: "work-owner".into(),
         session_id: "s-own".into(),
         task: "补充指令".into(),
         model: None,
@@ -2637,11 +2682,29 @@ async fn host_steer_keeps_owner_registry() {
         after_work_id: None,
         parallel: false,
         reused_session: true,
-        execution_id: "exec-test".to_string(),
+        execution_id: "exec-steer".into(),
     };
     handle_central_dispatch(&state.central, handle, steer)
         .await
         .expect("steer dispatch 应成功");
+    // P2-10：消息真实被 Core 接受（不再「排队没投递也可通过」）——
+    // dispatch 返回 Ok 即 deliver_prepared 成功（Core 接受 prepared，
+    // 忙时按引导语义并入当前 turn）；结合下述「pending 队列空」共同
+    // 证明这是真并入而非排队。投递文本已随 Ok 进入 Core 处理链。
+    assert!(
+        state.core_manager.has_live_core("s-own"),
+        "steer 后 Core 应保持活跃（消息被接受）"
+    );
+    // 队列未被占用（真并入不排队）
+    assert!(
+        state
+            .central
+            .central_pending_dispatches
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "同 id steer 是并入不是排队（P2-10）"
+    );
     // 归属保持 owner（W2：旧代码 steer upsert 覆盖 → 此断言红）
     {
         let registry = state.central.central_work_registry.lock().unwrap();
