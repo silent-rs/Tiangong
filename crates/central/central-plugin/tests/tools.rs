@@ -69,6 +69,9 @@ fn plugin_with_channel(
     tokio::sync::mpsc::UnboundedReceiver<CentralPluginMessage>,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
+    // S3 fail-closed 后默认工作区须真实存在（is_dir）才放行子树——
+    // fixture 统一创建登记目录，保持「默认目录已授权」的测试前提
+    let _ = std::fs::create_dir_all(&workspace_dir);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let reports: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -87,7 +90,9 @@ fn manager_with_session_cwds(
     use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
     let sessions_dir = root.join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
+    // 同上：会话 cwd 真实存在（复用派发的 cwd 沿用会话目录）
     for (index, cwd) in cwds.iter().enumerate() {
+        let _ = std::fs::create_dir_all(cwd);
         let id = format!("s{index}");
         let session = serde_json::json!({
             "id": id,
@@ -957,6 +962,37 @@ fn workspace_confirmation_prefix_and_canonical() {
         root.path(),
         &default,
         &outside_path.to_string_lossy()
+    ));
+}
+
+/// R28-8（第 28 轮 review S3，探针 PR-09）：空默认工作区 fail-closed。
+/// 空默认不得成为空前缀放行任意绝对路径；空 target（上游已解析为合法
+/// 默认后到达）保持放行；不存在的默认路径同样不放行子树。
+#[test]
+fn workspace_confirmation_empty_default_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    // 空默认 + 未登记绝对路径：拒绝（PR-09 场景——此前空字符串前缀
+    // 匹配一切绝对路径）
+    assert!(!workspace_confirmed(root.path(), "", "/tmp"));
+    assert!(!workspace_confirmed(root.path(), "  ", "/tmp/whatever"));
+    // 空 target：保持放行（「使用默认目录」由上游解析；dispatch 规划段
+    // 在 cwd 非空且 is_dir 校验之后才调用本函数）
+    assert!(workspace_confirmed(root.path(), "", ""));
+    assert!(workspace_confirmed(root.path(), "/some/default", "  "));
+    // 默认路径不存在（is_dir false）：子树不放行
+    let ghost_default = root.path().join("ghost-default");
+    let ghost_child = ghost_default.join("child");
+    assert!(!workspace_confirmed(
+        root.path(),
+        &ghost_default.to_string_lossy(),
+        &ghost_child.to_string_lossy()
+    ));
+    // 即便 target 恰好等于不存在的默认路径字符串：也不走默认子树放行
+    // （fail-closed；如确属该目录，需用户显式登记或默认真实存在）
+    assert!(!workspace_confirmed(
+        root.path(),
+        &ghost_default.to_string_lossy(),
+        &ghost_default.to_string_lossy()
     ));
 }
 

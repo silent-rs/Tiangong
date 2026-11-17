@@ -782,7 +782,11 @@ async fn host_dispatch_queues_on_write_lock_then_delivers() {
     );
 }
 
-/// waiting_user 恢复合并：答复轮沿用 owner work_id/task。
+/// waiting_user 恢复链端到端（G1/G2，第 28 轮 review R28-1/R28-2）：
+/// 生产 CC2 形态（答复转发沿用 owner work_id）+ 新 execution——
+/// 下发内容含真实答复（不是旧任务重跑）、终态经路由回调真实到达。
+/// 探针 PR-08 实证旧代码在此形态下 callback=0（steer 误判跳过
+/// register/attach）。
 #[tokio::test]
 async fn host_waiting_user_merge_restores_owner() {
     let app = tauri::test::mock_app();
@@ -845,13 +849,14 @@ async fn host_waiting_user_merge_restores_owner() {
             execution_id: Some("exec-owner9".into()),
         },
     );
-    // 用户答复（reused 派发）→ merge_waiting_user 恢复 owner
+    // 用户答复（reused 派发，生产 CC2 形态：沿用 owner work_id + 新
+    // execution_id）→ merge 恢复 owner，投递组合指令（原目标 + 真实答复）
     tiangong_app::central_host::dispatch::handle_central_dispatch(
         &state.central,
         handle,
         tiangong_app::central::CentralDispatchRequest {
-            work_id: "work-ans9".into(),
-            execution_id: "exec-ans9".into(),
+            work_id: "work-owner9".into(),
+            execution_id: "exec-resume9".into(),
             session_id: "s-m9".into(),
             task: "用户答复：选方案B".into(),
             model: None,
@@ -863,15 +868,74 @@ async fn host_waiting_user_merge_restores_owner() {
     )
     .await
     .expect("答复派发应成功");
-    let registry = state.central.central_work_registry.lock().unwrap();
-    let entry = registry
-        .iter()
-        .rev()
-        .find(|e| e.session_id == "s-m9")
-        .unwrap();
-    assert_eq!(entry.work_id, "work-owner9", "恢复沿用 owner work_id");
-    assert_eq!(entry.task, "任务-work-owner9", "任务沿用 owner 登记条目");
-    assert_eq!(entry.state, central_state::WorkState::Running, "恢复执行中");
+    {
+        let registry = state.central.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter()
+            .rev()
+            .find(|e| e.session_id == "s-m9")
+            .unwrap();
+        assert_eq!(entry.work_id, "work-owner9", "恢复沿用 owner work_id");
+        assert_eq!(
+            entry.task, "任务-work-owner9",
+            "登记展示保留 owner 原目标（不被答复文本覆盖，G1）"
+        );
+        assert_eq!(entry.state, central_state::WorkState::Running, "恢复执行中");
+        assert_eq!(
+            entry.execution_id.as_deref(),
+            Some("exec-resume9"),
+            "恢复登记换上新执行（R0 契约）"
+        );
+    }
+    // G1（R28-1）：Worker 真正收到用户决定——会话消息含真实答复与
+    // 原目标上下文（此前 owner_task 覆盖导致下发旧任务重跑）
+    {
+        let session_text = std::fs::read_to_string(storage_root.join("sessions/s-m9.json"))
+            .expect("Worker 会话应已写入投递消息");
+        let session: serde_json::Value = serde_json::from_str(&session_text).unwrap();
+        let delivered: String = session["messages"]
+            .as_array()
+            .map(|msgs| {
+                msgs.iter()
+                    .map(|m| m["content"].to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        assert!(
+            delivered.contains("选方案B"),
+            "投递内容必须包含真实答复（R28-1），实际：{delivered:.200}"
+        );
+        assert!(
+            delivered.contains("【原目标】"),
+            "恢复指令组合原目标上下文（供 Worker 对齐既定工作）"
+        );
+    }
+    // G2（R28-2）：新 execution 的终态经路由回调真实到达——
+    // register（投递前声明）+ attach（投递成功挂载）后 fire 触发
+    // handle_work_terminal，状态进入终态、完成回报入队。
+    state
+        .central
+        .execution_router
+        .fire("s-m9", true, "完成".to_string());
+    {
+        let registry = state.central.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter()
+            .rev()
+            .find(|e| e.session_id == "s-m9")
+            .unwrap();
+        assert_eq!(
+            entry.state,
+            central_state::WorkState::ReportQueued,
+            "恢复的 turn 终态必须回到 owner 条目（探针 PR-08 旧代码 callback=0）"
+        );
+    }
+    let reports = state.take_central_work_reports();
+    assert!(
+        reports.iter().any(|r| r.contains("后台工作完成")),
+        "完成回报入队（终态回调真实执行）"
+    );
 }
 
 /// cancel 在跑工作：running 集合预置 → send_command 分支 + 状态终态。
@@ -2297,7 +2361,9 @@ async fn host_plan_resume_not_merged_but_steer_is() {
         !steer_merged,
         "Paused 的 resume 不得并入（R1 旧代码 is_inflight 在此红）"
     );
-    // Running 条目：steer 判为并入
+    // Running 条目：steer 判为并入（生产 CC2 形态：复用派发沿用 owner
+    // work_id——异 id 的 reused 引导按新互斥语义排队，防并发 turn 与
+    // 回调归属丢失，P2-02 限缩）
     {
         let mut registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
@@ -2307,7 +2373,7 @@ async fn host_plan_resume_not_merged_but_steer_is() {
             .unwrap();
         entry.state = central_state::WorkState::Running;
     }
-    let steer = dispatch_request("steer-x", "s-resume", "补充指令", true);
+    let steer = dispatch_request("work-p", "s-resume", "补充指令", true);
     let plan2 = plan_central_dispatch(&state.central, steer)
         .await
         .expect("plan 应成功");

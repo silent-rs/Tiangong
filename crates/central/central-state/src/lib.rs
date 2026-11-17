@@ -269,33 +269,34 @@ pub fn queue_decision(
     }
     // 同会话互斥（用户实测 2026-11-16：日志显示同 session 被反复派发新
     // execution——前一轮在途时又派一轮，两个 turn 并发投递同一 Core，
-    // 消息交错/上下文污染。附录 A.2 第 8 条「同会话重派不拦但顺序投递」
-    // 的假设被实测推翻：改为同会话存在在途（running/paused/queued）时
-    // 一律排队，等它终态后自动投递）。互斥意图是拦「会产生并发新 turn
-    // 的派发」，三处豁免（2026-11-17 用户实测反转，第二十七轮 review
-    // P0——0491e250 的无差别互斥把三条合法路径一并死锁，4 项集成
-    // 测试红）：
+    // 消息交错/上下文污染）。互斥意图是拦「会产生并发新 turn 的派发」，
+    // 按状态×id×复用分类放行（第 28 轮 review G0/P2-02 限缩）：
     // - **WaitingUser**：征询时 worker 的 turn 已结束、Core 空闲——
     //   B 语义（征询通道定谳）规定中枢用 dispatch_work(session_id=
     //   worker) 转发用户答复，计入互斥则 QueueAfter 该 waiting 条目
     //   自身，要等它终态才 flush，而它正等这条答复才能继续 → 自锁；
     //   放行后由 merge_waiting_user 恢复（归属沿用主工作）；
-    // - **steer（reused_session × 目标 Running）**：引导并入当前 turn
-    //   （turn 不新增，与互斥的并发意图不冲突），放行给执行段的
-    //   steer_merged_into_running 判定；无差别互斥会把它 QueueAfter
-    //   在跑工作——补充指令永远送不进去；
-    // - **自身条目**：排队项经 flush_pending_dispatches 重入本派发链
-    //   投递时，registry 里它自己的 Queued 条目仍在——计入互斥会
-    //   QueueAfter 自身，依赖已终态、flush 不会再触发 → 排队项永远
-    //   投不出去（host_dispatch_queues_on_write_lock_then_delivers
-    //   实证）。
+    // - **Running × reused × id 一致（steer）**：引导并入当前 turn
+    //   （不新增执行，与并发意图不冲突）；id 不一致的新工作仍排队；
+    // - **Paused/Queued × id 一致**：同 id 恢复（resume）或重放
+    //   （flush 重入自身条目）放行；不同 id 排队/保序
+    //   （host_dispatch_queues_on_write_lock_then_delivers 实证）。
     if let Some(holder) = entries.iter().rev().find(|entry| {
-        if entry.session_id != session_id || Some(entry.work_id.as_str()) == self_work_id {
+        if entry.session_id != session_id {
             return false;
         }
         match entry.state {
-            WorkState::Running => !reused_session,
-            WorkState::Paused | WorkState::Queued => true,
+            // Running：仅「reused 引导且 id 与在跑条目一致」（steer 并入
+            // 当前 turn，不新增执行）放行——reused 但 id 不一致是新工作
+            // 撞在跑会话，排队（防并发 turn 与回调归属丢失，第 28 轮
+            // review P2-02 限缩）；非 reused 一律排队（2026-11-16 语义）。
+            WorkState::Running => !(reused_session && Some(entry.work_id.as_str()) == self_work_id),
+            // Paused：同 id（resume 恢复）放行；不同 id 排队。
+            WorkState::Paused => Some(entry.work_id.as_str()) != self_work_id,
+            // Queued：同 id（flush 重放自身）放行；不同 id 保序排队。
+            WorkState::Queued => Some(entry.work_id.as_str()) != self_work_id,
+            // WaitingUser：无活跃 turn，放行（merge 恢复，答复转发不得
+            // 自锁）。
             _ => false,
         }
     }) {
@@ -314,6 +315,48 @@ pub fn queue_decision(
         }
     }
     QueueDecision::DispatchNow
+}
+
+/// 派发意图（G0，第 28 轮 review）：按 registry **转移前状态**显式分类，
+/// 取代「merge 置 Running 后用 work_id 是否相等反向猜测」——后者把同
+/// owner id 的答复转发误判为 steer，跳过 register/attach，新 execution
+/// 的终态回调无挂载（R28-2，探针 PR-08 callback=0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchIntent {
+    /// 新任务：新会话，或终态后复用会话做新工作（新 execution +
+    /// register/attach + 覆盖登记）。
+    NewExecution,
+    /// waiting_user 恢复：用户/中枢答复经中枢转发到达（架构裁决：Worker
+    /// 的一切消息均由中枢下发）——归属 owner work（新 execution +
+    /// register/attach），下发内容组合原目标上下文与本次答复（R28-1）。
+    ResumeWaiting,
+    /// paused 恢复：覆盖登记 + 挂回调（非并入——R1 深检语义保持）。
+    ResumePaused,
+    /// 运行中引导（steer）：并入当前 turn，不替换活跃执行、不挂新回调
+    ///（终态仍路由到原执行）。
+    SteerRunning,
+}
+
+/// 意图判定（纯函数）：`latest` 为目标会话在 registry 的最新条目
+/// （状态 + work_id）。排队重放（同 id 的 Queued）在上游互斥已放行，
+/// 到达此处按条目实际状态分类；WaitingUser/Paused 不要求 id 一致
+///（中枢复用转发沿用 owner id，其他复用撞上等待/暂停会话同为恢复语义）。
+pub fn classify_dispatch_intent(
+    latest: Option<(WorkState, &str)>,
+    self_work_id: &str,
+    reused_session: bool,
+) -> DispatchIntent {
+    let Some((state, entry_work_id)) = latest else {
+        return DispatchIntent::NewExecution;
+    };
+    match (state, reused_session) {
+        (WorkState::WaitingUser, true) => DispatchIntent::ResumeWaiting,
+        (WorkState::Paused, true) => DispatchIntent::ResumePaused,
+        // Running：仅 reused 且 id 与在跑条目一致才是引导并入；id 不
+        // 一致的复用派发已被互斥排队，到达此处的其余情况按新执行。
+        (WorkState::Running, true) if entry_work_id == self_work_id => DispatchIntent::SteerRunning,
+        _ => DispatchIntent::NewExecution,
+    }
 }
 
 /// 等待用户恢复：目标会话存在 waiting_user 条目时，答复轮的终态应归属

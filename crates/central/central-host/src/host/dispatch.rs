@@ -338,6 +338,12 @@ pub enum DispatchPlan {
     Execute {
         merged_work: Box<crate::CentralDispatchRequest>,
         steer_merged_into_running: bool,
+        /// G1（R28-1）：恢复场景的组合指令（原目标上下文 + 本次答复）；
+        /// None = 常规派发（build_worker_instruction 生成）。
+        instruction_override: Option<String>,
+        /// G1：登记/事件投影显示的任务文本（保持 owner 原目标）；
+        /// None = 常规派发（request.task）。
+        registry_task: Option<String>,
         cwd: String,
     },
 }
@@ -451,11 +457,34 @@ pub async fn plan_central_dispatch(
 
     let sid = request.session_id.clone();
 
-    // 用户答复/引导送达：目标会话存在 waiting_user（等用户决策）条目时，
-    // 本轮终态归属该主 work——恢复 running 并复用其 work_id/task 挂回调
-    // 与登记（不另立条目），回复链完整闭合到原工作。
+    // G0 意图判定（第 28 轮 review，R28-2）：按 registry **转移前状态**
+    // 显式分类——不再在 merge 置 Running 后用「work_id 是否相等」反向
+    // 猜测（同 owner id 的答复转发曾被误判 steer，跳过 register/attach，
+    // 新 execution 终态回调无挂载，探针 PR-08 callback=0）。
+    let intent = {
+        let registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let latest = registry
+            .iter()
+            .rev()
+            .find(|entry| entry.session_id == sid)
+            .map(|entry| (entry.state, entry.work_id.as_str()));
+        central_state::classify_dispatch_intent(latest, &request.work_id, request.reused_session)
+    };
+
+    // 用户答复/引导送达（架构裁决 2026-11-17：Worker 的一切消息均由中枢
+    // 下发，用户不直接与 Worker 交互）：目标会话存在 waiting_user（等
+    // 用户决策）条目时，本轮终态归属该主 work——恢复 running 并复用其
+    // work_id 挂回调与登记（不另立条目），回复链完整闭合到原工作。
     let mut merged_work = request.clone();
-    if request.reused_session {
+    // G1（R28-1）：恢复场景的组合指令（原目标上下文 + 本次答复）——
+    // 不再用 owner_task 覆盖 request.task，Worker 真正收到用户/中枢决定。
+    let mut instruction_override: Option<String> = None;
+    // G1：登记/事件展示用任务文本（保持 owner 原目标，不被答复文本覆盖）。
+    let mut registry_task: Option<String> = None;
+    if request.reused_session && intent == central_state::DispatchIntent::ResumeWaiting {
         let mut registry = state
             .central_work_registry
             .lock()
@@ -478,8 +507,16 @@ pub async fn plan_central_dispatch(
                     "恢复经 DecisionTicket 授权（一次性消费）"
                 );
             }
-            merged_work.work_id = owner_work_id;
-            merged_work.task = owner_task;
+            merged_work.work_id = owner_work_id.clone();
+            // G1（R28-1 核心）：登记与事件投影保留 owner 原目标；投递
+            // 内容组合原目标上下文与本次答复（request.task 不被覆盖——
+            // 此前 owner_task 直接顶替导致 Worker 收到旧任务重跑，用户
+            // 决定丢失）。
+            registry_task = Some(owner_task.clone());
+            instruction_override = Some(format!(
+                "[中枢继续既有工作 {owner_work_id}]\n该工作此前等待用户决策，现已收到答复，请继续执行并给出结论；完成后你的最终答复会被中枢转述给用户。\n\n【原目标】\n{owner_task}\n\n【本次用户/中枢答复】\n{}\n\n（原目标仅供上下文，以本次答复为准继续；后续仍遵循既定的用户决策协议：确需用户决策时以「【需要用户决策】」开头单独一行提出。）",
+                request.task
+            ));
             crate::host::central_events::record_by_session(
                 state.core_manager.storage_root(),
                 &sid,
@@ -490,32 +527,23 @@ pub async fn plan_central_dispatch(
                 execution_id = %request.execution_id,
                 work_id = %merged_work.work_id,
                 session_id = %sid,
-                "等待用户决策的工作已收到答复，恢复执行"
+                "等待用户决策的工作已收到答复，恢复执行（下发内容含真实答复）"
             );
         }
     }
 
-    // 引导并入判定（第十三轮 P1-2）：reused 派发到「仍在跑」的会话 =
-    // 对既有工作的引导补充——registry 归属保持原工作、不挂新回调
-    // （turn 终态由原工作既有回调处理；否则 steer 覆盖归属后原工作
-    // 终态被 T6 过滤跳过，永不终态）。空闲会话的 reused 派发 = 新工作
-    // （覆盖登记 + 挂回调）。
-    let mut steer_merged_into_running = false;
-    if request.reused_session && merged_work.work_id == request.work_id {
+    // G0：steer 并入判定收敛为意图枚举——Running × reused × id 一致
+    // （引导并入当前 turn，归属保持原工作、不挂新回调；turn 终态由原
+    // 工作既有回调处理）。Paused 恢复/新执行均走 register/attach。
+    let steer_merged_into_running = intent == central_state::DispatchIntent::SteerRunning;
+    if steer_merged_into_running {
         let registry = state
             .central_work_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // 仅 Running 并入（turn 在跑，引导并入当前轮）——Paused 必须排除：
-        // resume 走 Steer 到暂停会话，需走恢复语义（覆盖登记 + 挂回调），
-        // 否则状态卡 paused 且恢复的 turn 无回报（深检 R1，第十三轮 P1-2
-        // 曾误用 is_inflight 把 resume 一并吞掉）。WaitingUser 由上方
-        // merged 分支处理，此处不会命中。
-        let running_entry = registry.iter().rev().find(|entry| {
+        if let Some(entry) = registry.iter().rev().find(|entry| {
             entry.session_id == sid && entry.state == central_state::WorkState::Running
-        });
-        if let Some(entry) = running_entry {
-            steer_merged_into_running = true;
+        }) {
             tracing::info!(
                 steer_work = %request.work_id,
                 owner_work = %entry.work_id,
@@ -527,6 +555,8 @@ pub async fn plan_central_dispatch(
     Ok(DispatchPlan::Execute {
         merged_work: Box::new(merged_work),
         steer_merged_into_running,
+        instruction_override,
+        registry_task,
         cwd,
     })
 }
@@ -536,7 +566,7 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     request: crate::CentralDispatchRequest,
 ) -> Result<(), String> {
-    let (merged_work, steer_merged_into_running, cwd) =
+    let (merged_work, steer_merged_into_running, instruction_override, registry_task, cwd) =
         match plan_central_dispatch(state, request.clone()).await? {
             // 排队已在决策段完成登记落盘——执行段到此为止（分离手术曾
             // 丢失此早退语义：返回值被当作投递继续，排队整体失效且无
@@ -545,8 +575,16 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             DispatchPlan::Execute {
                 merged_work,
                 steer_merged_into_running,
+                instruction_override,
+                registry_task,
                 cwd,
-            } => (merged_work, steer_merged_into_running, cwd),
+            } => (
+                merged_work,
+                steer_merged_into_running,
+                instruction_override,
+                registry_task,
+                cwd,
+            ),
         };
     let sid = merged_work.session_id.clone();
     // model 是统一的换模型通道（switch_worker_model 移除后的用户裁决）：
@@ -555,7 +593,11 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
     // turn 沿用当前模型）；无 Core（重启后复用）经 ensure_core 以目标
     // 模型初始化 + 下方 set_core_model_ref 持久化，回收重建不回退。
     let effective_model = merged_work.model.as_deref();
-    let instruction = build_worker_instruction(&merged_work.work_id, &merged_work.task);
+    // G1（R28-1）：恢复场景使用 plan 组合的指令（原目标 + 真实答复）；
+    // 常规派发生成标准工作指令。
+    let resumed_with_answer = instruction_override.is_some();
+    let instruction = instruction_override
+        .unwrap_or_else(|| build_worker_instruction(&merged_work.work_id, &merged_work.task));
     let prepared = vec![tiangong_types::ContentBlock::text(instruction)];
     // 回调槽（每会话一个，可多挂载）：派发与引导共用该会话既有的流消费者，
     // 逐 work 挂各自的终态回调——不再 retire+重建（消除 sidecar 重启与
@@ -655,12 +697,18 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
         .with_worker_session(&sid);
         dispatch_event.payload = serde_json::json!({
             "note": "派发投递成功",
-            "task": request.task,
+            // G1：恢复场景投影显示 owner 原目标（registry_task），并另记
+            // resume_answer 供追溯本次下发的真实答复（R28-1：原目标与
+            // follow_up 都可查询，互不覆盖）。
+            "task": registry_task.as_deref().unwrap_or(&request.task),
             "model": request.model,
             "cwd": cwd,
             "reused_session": request.reused_session,
             "parallel": request.parallel,
         });
+        if resumed_with_answer {
+            dispatch_event.payload["resume_answer"] = serde_json::json!(request.task);
+        }
         crate::host::central_events::record_event(
             state.core_manager.storage_root(),
             dispatch_event,
@@ -704,19 +752,31 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            central_state::upsert_registry_entry(
-                &mut registry,
-                central_state::registry_entry_after_dispatch(
-                    &request.work_id,
-                    &request.session_id,
-                    &request.task,
-                    request.model.as_deref(),
-                    request.reused_session,
-                    Some(cwd.as_str()),
-                    &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                    &request.execution_id,
-                ),
-            );
+            // G2（R28-2.4）：fire-before-attach 缓冲下立即完成的 turn 可
+            // 能在本 upsert 前已落终态——迟到的 Running upsert 不得覆盖
+            // 终态（否则状态机被拉回 running 永久残留）。
+            let already_terminal = registry.iter().rev().any(|entry| {
+                entry.session_id == request.session_id
+                    && entry.work_id == request.work_id
+                    && entry.state.is_terminal()
+            });
+            if !already_terminal {
+                // G1：恢复场景登记显示 owner 原目标（不被答复文本覆盖）
+                let display_task = registry_task.as_deref().unwrap_or(&request.task);
+                central_state::upsert_registry_entry(
+                    &mut registry,
+                    central_state::registry_entry_after_dispatch(
+                        &request.work_id,
+                        &request.session_id,
+                        display_task,
+                        request.model.as_deref(),
+                        request.reused_session,
+                        Some(cwd.as_str()),
+                        &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                        &request.execution_id,
+                    ),
+                );
+            }
         }
     }
     // 排队标记清除（第十三轮 P2-1）：进入执行即失效——重放的 DispatchNow
@@ -727,15 +787,16 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
         tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
     }
     // R5 单写：派发事实已由上方 record_for（WorkItemStarted）入事件日志；
-    // 此处仅以 note 补充「恢复 / 新任务」语义。
+    // 此处仅以 note 补充「恢复 / 新任务」语义（G1：恢复判定不再依赖
+    // work_id 是否改写——插件沿用 owner id 时两者相等，按恢复事实标注）。
     crate::host::central_events::record_for(
         state,
         &merged_work.work_id,
         &request.execution_id,
         &sid,
         tiangong_central::event::WorkEventType::WorkItemProgress,
-        &if merged_work.work_id != request.work_id {
-            "派发执行（等待用户决策后恢复）".to_string()
+        &if resumed_with_answer {
+            "派发执行（等待用户决策后恢复，下发含真实答复）".to_string()
         } else {
             "派发执行（新任务）".to_string()
         },

@@ -639,6 +639,12 @@ pub fn canonical_path_string(path: &str) -> String {
 }
 
 /// canonicalize，符号链接/尾斜杠不产生绕过）。
+///
+/// R28-8（第 28 轮 review S3，探针 PR-09）：空默认工作区不得成为空前缀
+/// 放行任意绝对路径——默认子树放行仅在默认路径非空且真实存在时成立
+/// （fail-closed：授权未知 ≠ 默认允许）。空 target 的放行保持：调用方
+/// 在最终 cwd 非空且 is_dir 校验之后到达此函数（dispatch 规划段），
+/// 「使用默认目录」的空目标由上游解析。
 pub fn workspace_confirmed(
     storage_root: &std::path::Path,
     default_workspace: &str,
@@ -649,14 +655,19 @@ pub fn workspace_confirmed(
         return true;
     }
     let canonical_target = canonical_path_string(target);
-    let canonical_default = canonical_path_string(default_workspace);
-    // 默认工作区子树：canonical 前缀 + '/' 边界（防 /a-b 误匹配 /a）
-    if canonical_target == canonical_default
-        || canonical_target
-            .strip_prefix(&canonical_default)
-            .is_some_and(|rest| rest.starts_with('/'))
-    {
-        return true;
+    let trimmed_default = default_workspace.trim();
+    let default_usable =
+        !trimmed_default.is_empty() && std::path::Path::new(trimmed_default).is_dir();
+    if default_usable {
+        let canonical_default = canonical_path_string(default_workspace);
+        // 默认工作区子树：canonical 前缀 + '/' 边界（防 /a-b 误匹配 /a）
+        if canonical_target == canonical_default
+            || canonical_target
+                .strip_prefix(&canonical_default)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return true;
+        }
     }
     load_confirmed_workspaces(storage_root)
         .iter()

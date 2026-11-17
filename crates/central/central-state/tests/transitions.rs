@@ -339,6 +339,53 @@ fn same_session_inflight_queues_new_dispatch() {
         QueueDecision::DispatchNow,
         "waiting_user 不是活跃在途——答复转发/新派发放行（恢复归 merge）"
     );
+    // Running × reused × id 不一致：新工作撞在跑会话——排队（P2-02
+    // 限缩：防并发 turn 与回调归属丢失）
+    let running = vec![entry("work-r", "s-busy", WorkState::Running)];
+    assert_eq!(
+        queue_decision(
+            &running,
+            Some("work-other"),
+            true,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "引导"
+        ),
+        QueueDecision::QueueAfter("work-r".to_string()),
+        "reused 但 id 与在跑条目不一致必须排队"
+    );
+    // Running × 同 id × 非 reused：排队（新任务带旧 id 撞在跑）
+    assert_eq!(
+        queue_decision(
+            &running,
+            Some("work-r"),
+            false,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "任务"
+        ),
+        QueueDecision::QueueAfter("work-r".to_string()),
+        "非 reused 的同 id 派发不得放行（并发新 turn）"
+    );
+    // Running × reused × 同 id（steer 生产形态）：放行并入
+    assert_eq!(
+        queue_decision(
+            &running,
+            Some("work-r"),
+            true,
+            None,
+            "s-busy",
+            "/ws/x",
+            false,
+            "引导"
+        ),
+        QueueDecision::DispatchNow,
+        "reused 且 id 一致的引导放行（并入当前 turn）"
+    );
     // 自身条目跳过（flush 重入投递自锁回归锁）：排队项依赖终态后经
     // flush_pending_dispatches 重入派发链，registry 里它自己的 Queued
     // 条目仍在——不计入互斥（自身不代表 Core 占用），否则 QueueAfter
@@ -408,4 +455,86 @@ fn same_session_inflight_queues_new_dispatch() {
         QueueDecision::DispatchNow,
         "不同会话不互斥（写入锁另有判定）"
     );
+}
+
+/// G0 意图判定表驱动（第 28 轮 review R28-2）：按转移前状态显式分类，
+/// 取代「merge 置 Running 后 work_id 反猜」（探针 PR-08 的误判形态）。
+#[test]
+fn dispatch_intent_classification_matrix() {
+    use central_state::{classify_dispatch_intent, DispatchIntent};
+    type Case = (
+        Option<(WorkState, &'static str)>,
+        &'static str,
+        bool,
+        DispatchIntent,
+    );
+    let cases: Vec<Case> = vec![
+        // 无条目：新执行
+        (None, "work-x", false, DispatchIntent::NewExecution),
+        (None, "work-x", true, DispatchIntent::NewExecution),
+        // 终态条目：新执行
+        (
+            Some((WorkState::Completed, "work-o")),
+            "work-o",
+            true,
+            DispatchIntent::NewExecution,
+        ),
+        // waiting × reused：恢复（答复转发不要求 id 一致）
+        (
+            Some((WorkState::WaitingUser, "work-o")),
+            "work-o",
+            true,
+            DispatchIntent::ResumeWaiting,
+        ),
+        (
+            Some((WorkState::WaitingUser, "work-o")),
+            "work-other",
+            true,
+            DispatchIntent::ResumeWaiting,
+        ),
+        // waiting × 非 reused：不合并（新工作撞等待会话——上游互斥放行
+        // 后按新执行覆盖登记）
+        (
+            Some((WorkState::WaitingUser, "work-o")),
+            "work-x",
+            false,
+            DispatchIntent::NewExecution,
+        ),
+        // paused × reused：恢复（覆盖登记 + 挂回调）
+        (
+            Some((WorkState::Paused, "work-p")),
+            "work-p",
+            true,
+            DispatchIntent::ResumePaused,
+        ),
+        // running × reused × 同 id：steer 并入（R28-2 曾误判的形态：
+        // merge 已把 waiting 改 Running，同 owner id 的答复转发被吞）
+        (
+            Some((WorkState::Running, "work-r")),
+            "work-r",
+            true,
+            DispatchIntent::SteerRunning,
+        ),
+        // running × reused × 异 id / 非 reused：新执行语义（上游互斥已
+        // 排队，到达此处的其余组合保守按新执行）
+        (
+            Some((WorkState::Running, "work-r")),
+            "work-other",
+            true,
+            DispatchIntent::NewExecution,
+        ),
+        (
+            Some((WorkState::Running, "work-r")),
+            "work-r",
+            false,
+            DispatchIntent::NewExecution,
+        ),
+    ];
+    for (latest, self_id, reused, expect) in cases {
+        assert_eq!(
+            classify_dispatch_intent(latest, self_id, reused),
+            expect,
+            "latest={latest:?} self={self_id} reused={reused}"
+        );
+    }
 }
