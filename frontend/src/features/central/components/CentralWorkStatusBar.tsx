@@ -31,14 +31,31 @@ const STEP_DEFS: { key: string; label: string; kinds: Set<string> }[] = [
 const FAIL_KINDS = new Set(['work_item.failed']);
 const CANCEL_KINDS = new Set(['work_item.cancelled']);
 
-function StepChain({ workId, state }: { workId: string; state: string }) {
+function StepChain({
+  workId,
+  state,
+  executionId,
+}: {
+  workId: string;
+  state: string;
+  executionId?: string | null;
+}) {
   const [kinds, setKinds] = useState<string[] | null>(null);
   useEffect(() => {
     let disposed = false;
     void api
       .centralWorkTimeline(workId)
       .then((timeline) => {
-        if (!disposed) setKinds(timeline.map((entry) => entry.kind));
+        if (disposed) return;
+        // U1（第 28 轮 review）：按当前执行隔离——仅当前 execution 的
+        // 事件决定当前步骤，旧执行的 failed/cancelled 不污染新执行；
+        // 无归属的 legacy 事件（execution 空串）与查询缺执行时按全量。
+        const scoped = executionId
+          ? timeline.filter(
+              (entry) => !entry.execution || entry.execution === executionId,
+            )
+          : timeline;
+        setKinds(scoped.map((entry) => entry.kind));
       })
       .catch(() => {
         if (!disposed) setKinds([]);
@@ -46,7 +63,7 @@ function StepChain({ workId, state }: { workId: string; state: string }) {
     return () => {
       disposed = true;
     };
-  }, [workId]);
+  }, [workId, executionId]);
   if (kinds === null) return null;
   const failed = kinds.some((kind) => FAIL_KINDS.has(kind));
   const cancelled = kinds.some((kind) => CANCEL_KINDS.has(kind));
@@ -131,6 +148,8 @@ interface CentralWorkStatus {
   state: 'running' | 'report_queued' | 'interrupted' | 'completed' | 'failed' | 'waiting_user' | 'paused' | 'cancelled' | 'queued';
   reused_session: boolean;
   last_activity?: string | null;
+  /** 当前执行归属（U1：步骤链按执行隔离的数据源）。 */
+  execution_id?: string | null;
   /** G3（第 28 轮 review）：waiting_user 时的征询问题正文（标记行后
    * 的问题主体，480 字截断）——前端可直接展示待决问题，无需翻消息流。 */
   pending_question?: string | null;
@@ -272,7 +291,7 @@ function WorkItemRow({
           {item.session_id.slice(0, 8)}…/{item.work_id.slice(5, 13)}
         </span>
       </div>
-      <StepChain workId={item.work_id} state={item.state} />
+      <StepChain workId={item.work_id} state={item.state} executionId={item.execution_id} />
     </div>
   );
 }

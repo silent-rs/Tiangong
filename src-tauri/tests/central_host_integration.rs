@@ -1065,13 +1065,15 @@ async fn host_migrate_legacy_timeline_moves_events() {
         tiangong_app::central_host::central_events::work_timeline(&storage_root, "work-legacy2");
     assert!(!after.is_empty(), "迁移后日志有事实");
     assert!(
-        after.iter().any(|(_, kind, _)| kind == "work_item.started"),
+        after
+            .iter()
+            .any(|(_, kind, _, _)| kind == "work_item.started"),
         "{after:?}"
     );
     assert!(
         after
             .iter()
-            .any(|(_, kind, _)| kind == "work_item.completed"),
+            .any(|(_, kind, _, _)| kind == "work_item.completed"),
         "{after:?}"
     );
     // 幂等：再次迁移不重复（日志非空跳过）
@@ -1839,7 +1841,7 @@ async fn host_control_cancel_persists_terminal_state() {
     assert!(
         timeline
             .iter()
-            .any(|(_, kind, _)| kind == "work_item.cancelled"),
+            .any(|(_, kind, _, _)| kind == "work_item.cancelled"),
         "应有取消事件：{timeline:?}"
     );
 }

@@ -60,9 +60,10 @@ export const centralApi = {
       questionVersion,
       option,
     }),
-  /** R4 工作抽屉：工作项事件时间线（事件日志事实源）。 */
+  /** R4 工作抽屉：工作项事件时间线（事件日志事实源）。U1：execution
+   * 携带事件归属的执行 id（legacy 空串）——步骤链按当前执行过滤。 */
   centralWorkTimeline: (
     workId: string,
-  ): Promise<Array<{ at: string; kind: string; note: string }>> =>
+  ): Promise<Array<{ at: string; kind: string; note: string; execution: string }>> =>
     invoke('central_work_timeline', { workId }),
 };

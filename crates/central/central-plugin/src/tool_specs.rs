@@ -26,13 +26,13 @@ impl ToolSpecProvider for CentralPlugin {
             },
             ToolSpec {
                 name: "inspect_context".to_string(),
-                description: "环境感知统一入口。缺省调用返回工作区+近期会话的综合摘要；focus 深入查询：focus=workspace 需带 path（该工作区 git 分支与 worktree 清单）；focus=sessions 完整会话列表（含消息数）；focus=workspaces 完整工作区列表。派发前了解环境优先用本工具。"
+                description: "环境感知统一入口。缺省调用返回工作区+近期会话的综合摘要；focus 深入查询：focus=workspace 查该工作区 git 分支与 worktree 清单（path 缺省用默认工作区）；focus=sessions 完整会话列表（含消息数）；focus=workspaces 完整工作区列表。派发前了解环境优先用本工具。"
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "focus": {"type": "string", "enum": ["workspaces", "workspace", "sessions"], "description": "深入查询维度；缺省给综合摘要"},
-                        "path": {"type": "string", "description": "focus=workspace 时必填：工作区绝对路径"}
+                        "path": {"type": "string", "description": "focus=workspace 时的工作区绝对路径；缺省用默认工作区"}
                     }
                 }),
             },

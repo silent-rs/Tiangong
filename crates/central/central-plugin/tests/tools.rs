@@ -295,7 +295,7 @@ fn dispatch_work_sends_request_and_registers() {
         serde_json::json!({"task": "审查仓库提交", "model": "k3", "cwd": "/tmp"}),
     );
     assert!(result.ok, "stderr: {}", result.stderr);
-    assert!(result.stdout.contains("已派发后台工作"));
+    assert!(result.stdout.contains("已受理派发"));
     let message = dispatch_rx.try_recv().expect("派发请求应经通道发出");
     let request = match message {
         CentralPluginMessage::Dispatch(request) => request,

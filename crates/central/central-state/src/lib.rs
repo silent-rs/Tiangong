@@ -389,8 +389,11 @@ pub fn merge_waiting_user(
 
 /// 派发后的登记条目构造（会话维度 upsert 语义：调用方先移除同会话条目）。
 ///
-/// 复用时 `model` 登记「会话既有模型（已忽略请求的 X）」——执行模型与
-/// 请求模型不一致必须显式可见（review M5/S5），不得谎报请求模型。
+/// G4（第 28 轮 review）：复用派发的模型登记改为**事实回执**——
+/// 「请求 X：空闲复用切换生效（成为会话默认）；执行中引导本轮沿用当前
+/// 模型」。旧文案「已忽略 X」在空闲复用场景撒谎（实际会切换成功），
+/// 先验「切换成功」在执行中引导场景也撒谎（本轮沿用）——按场景可能
+/// 如实描述，不预判结果。
 #[allow(clippy::too_many_arguments)]
 pub fn registry_entry_after_dispatch(
     work_id: &str,
@@ -407,10 +410,12 @@ pub fn registry_entry_after_dispatch(
         session_id: session_id.to_string(),
         task: task.to_string(),
         model: if reused_session {
-            Some(format!(
-                "会话既有模型（已忽略 {}）",
-                requested_model.unwrap_or("默认")
-            ))
+            Some(match requested_model {
+                Some(requested) => format!(
+                    "会话模型（请求 {requested}：空闲复用切换生效并成为默认；执行中引导本轮沿用当前）"
+                ),
+                None => "会话既有模型".to_string(),
+            })
         } else {
             Some(requested_model.unwrap_or("路由默认").to_string())
         },

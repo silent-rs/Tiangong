@@ -19,7 +19,8 @@ fn entry(work_id: &str, session: &str, state: WorkState) -> WorkStatus {
     }
 }
 
-/// 复用派发的登记：模型谎报防线（M5）——执行模型显式标注「已忽略请求的 X」。
+/// 复用派发的登记：模型回执诚实化（M5→G4）——显式标注请求模型与
+/// 场景语义（空闲切换生效/执行中沿用），不谎报也不预判结果。
 #[test]
 fn dispatch_reuse_model_ignored_is_explicit() {
     let entry = registry_entry_after_dispatch(
@@ -34,8 +35,8 @@ fn dispatch_reuse_model_ignored_is_explicit() {
     );
     assert_eq!(
         entry.model.as_deref(),
-        Some("会话既有模型（已忽略 k3）"),
-        "复用登记不得谎报请求模型"
+        Some("会话模型（请求 k3：空闲复用切换生效并成为默认；执行中引导本轮沿用当前）"),
+        "复用登记必须标注请求模型与场景语义（不谎报结果）"
     );
     assert_eq!(entry.state, WorkState::Running);
     let fresh = registry_entry_after_dispatch(

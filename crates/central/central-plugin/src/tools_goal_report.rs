@@ -6,6 +6,12 @@ use tiangong_core::tools::result::ToolResult;
 use crate::CentralPlugin;
 use crate::*;
 
+/// S4：create_goal 的 RMW 结果（幂等命中 / 新建）。
+enum GoalWrite {
+    Duplicate(String),
+    Created(String),
+}
+
 impl CentralPlugin {
     /// 用户目标登记（§13.2）：目标跨工作持续存在，get_context 注入当前目标。
     pub(crate) fn handle_create_goal(
@@ -18,49 +24,56 @@ impl CentralPlugin {
         if title.is_empty() {
             return self.error_result("title 不能为空".to_string());
         }
-        let mut goals = load_goals(self.sessions.storage_root());
-        // 同名幂等：已存在的同名 active 目标直接返回
-        if let Some(existing) = goals
-            .iter()
-            .find(|g| g.status == "active" && g.title == title)
-        {
-            return self.text_result(
+        // S4（第 28 轮 review）：锁内 RMW（with_goals）——消除锁外
+        // load→mutate→save 的并发丢更新；写失败显式报错（保持可重试），
+        // 不再 warn 后谎称「已登记」。
+        let outcome =
+            central_state::persistence::with_goals(self.sessions.storage_root(), |goals| {
+                // 同名幂等：已存在的同名 active 目标直接返回
+                if let Some(existing) = goals
+                    .iter()
+                    .find(|g| g.status == "active" && g.title == title)
+                {
+                    return GoalWrite::Duplicate(existing.goal_id.clone());
+                }
+                let goal = GoalRecord {
+                    goal_id: format!("goal-{}", scru128::new()),
+                    title: title.to_string(),
+                    description: description.trim().to_string(),
+                    workspace: workspace
+                        .map(str::trim)
+                        .filter(|w| !w.is_empty())
+                        .map(str::to_string),
+                    created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    status: "active".to_string(),
+                };
+                let goal_id = goal.goal_id.clone();
+                goals.push(goal);
+                // active 上限 10：最旧的 active 归档为 achieved（不物理删除，留痕）
+                let active_count = goals.iter().filter(|g| g.status == "active").count();
+                if active_count > 10 {
+                    if let Some(position) = goals.iter().position(|g| g.status == "active") {
+                        goals[position].status = "archived".to_string();
+                    }
+                }
+                GoalWrite::Created(goal_id)
+            });
+        match outcome {
+            Ok(GoalWrite::Duplicate(existing_id)) => self.text_result(
                 "目标已存在",
+                format!("目标「{title}」已存在（{existing_id}），无需重复创建。"),
+            ),
+            Ok(GoalWrite::Created(goal_id)) => self.text_result(
+                "目标已登记",
                 format!(
-                    "目标「{title}」已存在（{}），无需重复创建。",
-                    existing.goal_id
+                    "目标「{title}」（{goal_id}）已记录；后续派发与汇报将围绕该目标组织，用户问「我的目标」时可引用。达成或放弃时用 goal（action=set_goal_status）更新。"
                 ),
-            );
-        }
-        let goal = GoalRecord {
-            goal_id: format!("goal-{}", scru128::new()),
-            title: title.to_string(),
-            description: description.trim().to_string(),
-            workspace: workspace
-                .map(str::trim)
-                .filter(|w| !w.is_empty())
-                .map(str::to_string),
-            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            status: "active".to_string(),
-        };
-        let goal_id = goal.goal_id.clone();
-        goals.push(goal);
-        // active 上限 10：最旧的 active 归档为 achieved（不物理删除，留痕）
-        let active_count = goals.iter().filter(|g| g.status == "active").count();
-        if active_count > 10 {
-            if let Some(position) = goals.iter().position(|g| g.status == "active") {
-                goals[position].status = "archived".to_string();
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "目标登记落盘失败（Z4：写失败显式可见）");
+                self.error_result(format!("目标登记落盘失败（目标未保存，可重试）: {error}"))
             }
         }
-        if let Err(error) = save_goals(self.sessions.storage_root(), &goals) {
-            tracing::warn!(%error, "报告存档落盘失败（Z4：写失败显式可见）");
-        }
-        self.text_result(
-            "目标已登记",
-            format!(
-                "目标「{title}」（{goal_id}）已记录；后续派发与汇报将围绕该目标组织，用户问「我的目标」时可引用。达成或放弃时用 goal（action=set_goal_status）更新。"
-            ),
-        )
     }
 
     /// 目标状态更新（achieved / abandoned / archived）。

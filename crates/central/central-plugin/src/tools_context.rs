@@ -24,7 +24,7 @@ impl CentralPlugin {
                 .map(|g| g.title.clone())
                 .collect();
             if active.is_empty() {
-                "无（用户表达目标时请用 create_goal 登记）".to_string()
+                "无（用户表达目标时请用 goal（action=save_goal）登记）".to_string()
             } else {
                 active.join("、")
             }
@@ -36,7 +36,7 @@ impl CentralPlugin {
             "身份: 天工中枢——控制面，理解目标、协调后台工作，不直接执行工作型任务\n\
              默认工作区: {workspace}（其他目录派发前需用户授权）\n\
              已知工作区: {count} 个（list_workspaces 查看路径与 git 分支）\n\
-             待汇报的后台工作回报: {pending} 条（collect_work_reports 收集后转述）\n\
+             待汇报的后台工作回报: {pending} 条（用 work（action=reports）取回后转述）\n\
              因应用重启中断的任务: {interrupted} 个（结果未产出，可重派复用原会话）\n\
              当前用户目标: {goals}\n\
              当前时间: {now}",

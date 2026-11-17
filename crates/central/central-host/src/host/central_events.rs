@@ -162,13 +162,16 @@ pub fn record_by_session(
 
 /// 读一个工作项的事件时间线（R5：事件日志优先，旧时间线兼容读）。
 ///
-/// 返回 (at, kind, note) 列表；事件日志为空时回退读取 work-items.json
-/// 内嵌时间线（R5 前的旧数据，恢复时 migrate_legacy_timeline 已导入，
-/// 此处兜底极端时序）。
+/// 返回 (at, kind, note, execution_id) 列表；事件日志为空时回退读取
+/// work-items.json 内嵌时间线（R5 前的旧数据，恢复时 migrate_legacy_timeline
+/// 已导入，此处兜底极端时序）。
+/// U1（第 28 轮 review）：第 4 元素携带 execution_id——前端步骤链按
+/// 当前执行过滤，旧执行的 failed/cancelled 不污染新执行（legacy 事件
+/// 无 execution 返回空串，前端按「全量」兼容）。
 pub fn work_timeline(
     storage_root: &std::path::Path,
     work_item_id: &str,
-) -> Vec<(String, String, String)> {
+) -> Vec<(String, String, String, String)> {
     let mut timeline = Vec::new();
     if let Ok(log) = EventLog::open(&event_log_path(storage_root)) {
         if let Ok(entries) = log.load_all() {
@@ -184,6 +187,7 @@ pub fn work_timeline(
                         logged.event.created_at.clone(),
                         logged.event.event_type.as_str().to_string(),
                         note.to_string(),
+                        logged.event.execution_id.clone().unwrap_or_default(),
                     ));
                 }
             }
@@ -199,7 +203,16 @@ pub fn work_timeline(
         .map(|item| {
             item.events
                 .iter()
-                .map(|e| (e.at.clone(), e.kind.clone(), e.note.clone()))
+                .map(|e| {
+                    (
+                        e.at.clone(),
+                        e.kind.clone(),
+                        e.note.clone(),
+                        // 旧内嵌时间线无执行归属：取记录当前 execution_id
+                        //（R0 前旧数据可能为空——前端按全量兼容）
+                        item.execution_id.clone().unwrap_or_default(),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default()

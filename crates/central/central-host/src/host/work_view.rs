@@ -21,6 +21,8 @@ pub async fn central_work_timeline<R: tauri::Runtime>(
         crate::host::central_events::work_timeline(state.core_manager.storage_root(), &work_id);
     Ok(timeline
         .into_iter()
-        .map(|(at, kind, note)| json!({ "at": at, "kind": kind, "note": note }))
+        .map(|(at, kind, note, execution)| {
+            json!({ "at": at, "kind": kind, "note": note, "execution": execution })
+        })
         .collect())
 }

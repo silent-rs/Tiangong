@@ -588,6 +588,15 @@ pub fn save_goals(storage_root: &std::path::Path, goals: &[GoalRecord]) -> Resul
         .map_err(|error| format!("目标落盘失败（数据未更新）: {error}"))
 }
 
+/// 无锁 save（with_goals 的 RMW 区间内使用——调用方须已持有
+/// PERSISTENCE_WRITE_LOCK；直接调用 save_goals 会同线程重入死锁）。
+fn save_goals_locked(storage_root: &std::path::Path, goals: &[GoalRecord]) -> Result<(), String> {
+    let path = goals_path(storage_root);
+    let text = serialize_snapshot(goals).map_err(|error| format!("目标序列化失败: {error}"))?;
+    atomic_write_bytes_locked(&path, text.as_bytes())
+        .map_err(|error| format!("目标落盘失败（数据未更新）: {error}"))
+}
+
 /// 结构化报告（§13.5：工作终态的结论/产物/风险结构化存档，供回查）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReportRecord {
@@ -601,6 +610,39 @@ pub struct ReportRecord {
     #[serde(default)]
     pub risks: Vec<String>,
     pub created_at: String,
+}
+
+/// S4（第 28 轮 review）：goals/reports 锁内 RMW 事务——消除锁外的
+/// 「读-改-写」丢更新（两线程并发操作不同条目，后写者的 load 看不到
+/// 前写者的 save）。与 with_work_items 同一静态写锁：同进程内全部中枢
+/// 持久化 RMW 串行（不同文件本可细分锁，但中枢写频率低，粗粒度换
+/// 简单正确）。
+pub fn with_goals<R>(
+    storage_root: &std::path::Path,
+    mutate: impl FnOnce(&mut Vec<GoalRecord>) -> R,
+) -> Result<R, String> {
+    let _guard = PERSISTENCE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut goals = load_goals(storage_root);
+    let result = mutate(&mut goals);
+    save_goals_locked(storage_root, &goals)?;
+    Ok(result)
+}
+
+/// 同 with_goals（reports）。注意：mutate 内**不要**再调用会加同一锁
+/// 的 save_goals/save_reports（死锁）。
+pub fn with_reports<R>(
+    storage_root: &std::path::Path,
+    mutate: impl FnOnce(&mut Vec<ReportRecord>) -> R,
+) -> Result<R, String> {
+    let _guard = PERSISTENCE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut reports = load_reports(storage_root);
+    let result = mutate(&mut reports);
+    save_reports_locked(storage_root, &reports)?;
+    Ok(result)
 }
 
 // ============================================================================
@@ -628,6 +670,17 @@ pub fn save_reports(
     let path = reports_path(storage_root);
     let text = serialize_snapshot(reports).map_err(|error| format!("报告序列化失败: {error}"))?;
     atomic_write_bytes(&path, text.as_bytes())
+        .map_err(|error| format!("报告落盘失败（数据未更新）: {error}"))
+}
+
+/// 无锁 save（with_reports 的 RMW 区间内使用——同 save_goals_locked）。
+fn save_reports_locked(
+    storage_root: &std::path::Path,
+    reports: &[ReportRecord],
+) -> Result<(), String> {
+    let path = reports_path(storage_root);
+    let text = serialize_snapshot(reports).map_err(|error| format!("报告序列化失败: {error}"))?;
+    atomic_write_bytes_locked(&path, text.as_bytes())
         .map_err(|error| format!("报告落盘失败（数据未更新）: {error}"))
 }
 

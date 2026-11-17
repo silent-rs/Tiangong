@@ -247,8 +247,10 @@ impl CentralPlugin {
             (false, _) => format!("{session_id}（新会话；普通模式会话列表可查看）"),
         };
         let body = format!(
-            "已派发后台工作：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
+            "已受理派发（排队/拒绝由宿主决定，状态经 work 可查）：\n- work_id: {work_id}\n- 执行模型: {model_note}\n\
              - 工作会话: {session_note}\n- 任务: {task}\n\n\
+             派发请求已提交宿主：目标在途时自动排队（依赖终态后投递）、目录未授权会被拒——\
+             两者都在本对话可见，被拒后需向用户说明而不是当作工作失败。\
              结果按时机自动回到本对话（失败立即；成功待全部结束后汇总一轮），\
              届时由你向用户转述。执行中如需查看可调 work（action=list）。{prior_note}{registry_note}",
             work_id = record.work_id,
