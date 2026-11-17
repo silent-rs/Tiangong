@@ -15,6 +15,113 @@ import { restoreFromCentralConversation } from '@/features/central/lib/centralCo
 import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/features/central/components/CentralWorkDrawer';
 import { CentralBadgeIcon, type BadgeState } from '@/features/central/components/CentralBadgeIcon';
 
+/**
+ * 工作步骤链（用户裁决 2026-11-16：以 worker 视角做多步骤显示列表，
+ * 不再随处堆放横幅）。从事件时间线（唯一事实源）提取关键步骤点，
+ * 横向链展示：已派发 → 排队 → 执行中 → …（等待用户/阻塞）→ 终态。
+ * 完成步骤实心、当前步骤高亮脉动、未达步骤空心。
+ */
+const STEP_DEFS: { key: string; label: string; kinds: Set<string> }[] = [
+  { key: 'dispatched', label: '派发', kinds: new Set(['work_item.started', 'work_item.created']) },
+  { key: 'queued', label: '排队', kinds: new Set([]) },
+  { key: 'running', label: '执行', kinds: new Set(['work_item.progress', 'work_item.phase_completed']) },
+  { key: 'waiting', label: '等待', kinds: new Set(['work_item.waiting_user', 'work_item.blocked', 'work_item.waiting_resource']) },
+  { key: 'done', label: '完成', kinds: new Set(['work_item.completed']) },
+];
+const FAIL_KINDS = new Set(['work_item.failed']);
+const CANCEL_KINDS = new Set(['work_item.cancelled']);
+
+function StepChain({ workId, state }: { workId: string; state: string }) {
+  const [kinds, setKinds] = useState<string[] | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    void api
+      .centralWorkTimeline(workId)
+      .then((timeline) => {
+        if (!disposed) setKinds(timeline.map((entry) => entry.kind));
+      })
+      .catch(() => {
+        if (!disposed) setKinds([]);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [workId]);
+  if (kinds === null) return null;
+  const failed = kinds.some((kind) => FAIL_KINDS.has(kind));
+  const cancelled = kinds.some((kind) => CANCEL_KINDS.has(kind));
+  const queuedSeen = state === 'queued';
+  // 每步是否已达：由事件种类并集推断；终态覆盖
+  const reached = new Set<string>();
+  reached.add('dispatched');
+  if (queuedSeen) reached.add('queued');
+  if (kinds.some((k) => STEP_DEFS[2].kinds.has(k)) || ['running', 'waiting_user', 'paused', 'report_queued', 'completed', 'failed', 'cancelled'].includes(state)) reached.add('running');
+  if (kinds.some((k) => STEP_DEFS[3].kinds.has(k)) || state === 'waiting_user' || state === 'paused') reached.add('waiting');
+  if (kinds.includes('work_item.completed') || state === 'completed' || state === 'report_queued') reached.add('done');
+  const current =
+    failed || cancelled
+      ? null
+      : state === 'waiting_user' || state === 'paused'
+        ? 'waiting'
+        : state === 'queued'
+          ? 'queued'
+          : state === 'running'
+            ? 'running'
+            : state === 'report_queued' || state === 'completed'
+              ? 'done'
+              : null;
+  return (
+    <div
+      data-testid={`central-work-steps-${workId.slice(5, 13)}`}
+      className="mt-2 flex items-center gap-0"
+      aria-label="工作步骤"
+    >
+      {STEP_DEFS.filter((step) => step.key !== 'queued' || queuedSeen).map((step, index) => {
+        const isReached = reached.has(step.key);
+        const isCurrent = current === step.key;
+        return (
+          <div key={step.key} className="flex items-center">
+            {index > 0 ? (
+              <span
+                className={`h-px w-4 ${isReached ? 'bg-primary/50' : 'bg-border'}`}
+                aria-hidden="true"
+              />
+            ) : null}
+            <span
+              className={`inline-flex items-center gap-1 text-[10px] ${
+                isReached ? 'text-foreground/80' : 'text-muted-foreground/50'
+              }`}
+              title={isCurrent ? '当前步骤' : step.label}
+            >
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  failed && step.key === 'done'
+                    ? 'bg-red-500'
+                    : cancelled && step.key === 'done'
+                      ? 'bg-muted-foreground'
+                      : isCurrent
+                        ? 'animate-pulse bg-primary'
+                        : isReached
+                          ? 'bg-primary/70'
+                          : 'border border-border bg-background'
+                }`}
+                aria-hidden="true"
+              />
+              {step.label}
+            </span>
+          </div>
+        );
+      })}
+      {failed ? (
+        <span className="ml-2 text-[10px] font-medium text-red-600 dark:text-red-400">失败</span>
+      ) : null}
+      {cancelled ? (
+        <span className="ml-2 text-[10px] font-medium text-muted-foreground">已取消</span>
+      ) : null}
+    </div>
+  );
+}
+
 interface CentralWorkStatus {
   work_id: string;
   session_id: string;
@@ -152,6 +259,7 @@ function WorkItemRow({
           {item.session_id.slice(0, 8)}…/{item.work_id.slice(5, 13)}
         </span>
       </div>
+      <StepChain workId={item.work_id} state={item.state} />
     </div>
   );
 }

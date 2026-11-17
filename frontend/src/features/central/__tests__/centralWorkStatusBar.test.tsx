@@ -14,14 +14,12 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 const getCentralWorkStatusMock = vi.fn(() => Promise.resolve([]));
+const timelineMock = vi.fn(() => Promise.resolve([]));
 vi.mock('@/api/tauri', () => ({
   api: {
     getCentralWorkStatus: (...args: unknown[]) => getCentralWorkStatusMock(...args),
-    centralWorkTimeline: () =>
-      Promise.resolve([
-        { at: '2026-11-13 10:00:00', kind: 'work_item.started', note: '派发投递成功' },
-        { at: '2026-11-13 10:05:00', kind: 'work_item.completed', note: '工作完成' },
-      ]),
+    centralWorkTimeline: (...args: unknown[]) =>
+      timelineMock(...(args as [string])),
   },
 }));
 
@@ -383,5 +381,62 @@ describe('CentralWorkStatusBar', () => {
     expect(switchSessionMock).toHaveBeenCalledWith('sess-aaaaaaaa');
     // 抽屉关闭
     expect(container.querySelector('[data-testid="central-work-drawer"]')).toBeNull();
+  });
+});
+
+/// 步骤链（用户裁决：worker 视角多步骤显示列表，不再随处堆放横幅）。
+describe('StepChain（worker 多步骤显示）', () => {
+  let container: HTMLElement | null = null;
+  afterEach(() => {
+    container?.remove();
+    container = null;
+  });
+  it('执行中的工作行内渲染步骤链，当前步骤脉动', async () => {
+    timelineMock.mockResolvedValue([
+      { at: '2026-11-16 13:50:01', kind: 'work_item.started', note: '派发' },
+      { at: '2026-11-16 13:52:00', kind: 'work_item.progress', note: '进行中' },
+    ]);
+    container = await mountWithItems([makeItem()]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }),
+      );
+    });
+    await vi.waitFor(() => {
+      expect(timelineMock).toHaveBeenCalled();
+    });
+    await act(async () => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+    const steps = container.querySelector('[data-testid^="central-work-steps-"]');
+    expect(steps).not.toBeNull('步骤链必须渲染在工作行内');
+    expect(
+      Array.from(steps!.querySelectorAll('span')).some((el) => el.className.includes('animate-pulse')),
+    ).toBe(true, '当前步骤脉动');
+  });
+
+  it('waiting_user：等待为当前步骤', async () => {
+    timelineMock.mockResolvedValue([
+      { at: '2026-11-16 14:00:01', kind: 'work_item.started', note: '' },
+      { at: '2026-11-16 14:05:00', kind: 'work_item.waiting_user', note: '' },
+    ]);
+    const waiting = makeItem({ state: 'waiting_user' });
+    container = await mountWithItems([waiting]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }),
+      );
+    });
+    await vi.waitFor(() => {
+      expect(timelineMock).toHaveBeenCalled();
+    });
+    await act(async () => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    });
+    const steps = container.querySelector('[data-testid^="central-work-steps-"]');
+    expect(steps).not.toBeNull();
+    expect(steps!.textContent).toContain('等待');
   });
 });
