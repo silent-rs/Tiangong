@@ -12,11 +12,40 @@ const TEST_SIGNING_SECRET_KEY: &str = "untrusted comment: rsign encrypted secret
 const TEST_SIGNING_PUBLIC_KEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY3RTZEQzU4NUMyOUNFOTYKUldTV3ppbGNXTnptWjYrZzdaVlpUWlZZNDZiZ2ZnTXF4ekx0SzljUXd5SzdUamg3LzN6eGh4NVEK";
 
 /// workspace target/debug 下的二进制路径（不存在返回 None）。
+///
+/// rustc 1.100 起测试二进制从 `target/debug/deps/` 迁入
+/// `target/debug/build/<pkg>/<hash>/out/`，"测试可执行文件向上两级即
+/// target/debug"的假设不再成立（nextest 暂存目录同理）。因此按优先级
+/// 定位：`CARGO_TARGET_DIR` 显式指定 → 沿测试进程可执行文件向上逐级
+/// 查找 `<dir>/debug/<name>` → 沿编译期 `CARGO_MANIFEST_DIR` 向上兜底。
 pub fn debug_binary(name: &str) -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let debug_dir = executable.parent()?.parent()?;
-    let candidate = debug_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    candidate.is_file().then_some(candidate)
+    let file_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let candidate = Path::new(&target_dir).join("debug").join(&file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let manifest_dir = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    // 上限 8 级足以覆盖 build/<pkg>/<hash>/out/ 与 crate 嵌套，同时避免
+    // 误匹配文件系统深处无关目录。
+    for root in [exe_dir, manifest_dir].into_iter().flatten() {
+        let mut dir: &Path = root.as_ref();
+        for _ in 0..8 {
+            let candidate = dir.join("debug").join(&file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break,
+            }
+        }
+    }
+    None
 }
 
 /// 准备测试 Launcher：复制+签名+写入信任根。Launcher 未构建时返回
