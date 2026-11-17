@@ -14,6 +14,7 @@
  */
 import { LazyMessageInput, LazyMessageList } from '@/components/LazyComponents';
 import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
+import { CentralDecisionOverlay } from '@/features/central/components/CentralDecisionOverlay';
 import { CentralWorkStatusBar } from '@/features/central/components/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/features/central/components/centralGreeting';
 import { CENTRAL_TRANSITION_PARAMS } from '@/features/central/components/centralTransitionParams';
@@ -102,6 +103,9 @@ export function CentralModeView() {
         inputHeight={messageInputHeight}
         onVisibilityChange={setInteractionVisible}
       />
+      {/* waiting_user 决策覆盖层（用户裁决：覆盖输入框防歧义——普通输入
+          框被遮蔽，答题即提交即恢复） */}
+      <CentralDecisionOverlay inputHeight={messageInputHeight} />
     </main>
   );
 }

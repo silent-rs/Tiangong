@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/api/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { ShieldQuestion, MessageCircleQuestion, Check } from 'lucide-react';
+import { ShieldQuestion, Check } from 'lucide-react';
 
 interface ApprovalRequiredEvent {
   cwd: string;
@@ -22,13 +22,6 @@ interface ApprovalRequiredEvent {
 
 interface PendingApproval extends ApprovalRequiredEvent {
   status: 'pending' | 'approved';
-}
-
-interface WaitingWork {
-  work_id: string;
-  session_id: string;
-  task: string;
-  state: string;
 }
 
 /** 任务摘要（一行内展示）。 */
@@ -124,91 +117,10 @@ function ApprovalCard({
   );
 }
 
-/**
- * 决定卡片：等待用户决策的工作（答复经中枢对话，§3.6）。
- * 用户实测迭代：单行横条会被长任务文本撑爆整行（「一长条」）且只露
- * 48 字预览看不到征询内容——改为两行卡片：标题行 + 内容行（默认
- * line-clamp 显示多行，点击展开完整任务文本，再点收起）。
- */
-function DecisionCard({ work }: { work: WaitingWork }) {
-  const [expanded, setExpanded] = useState(false);
-  const [answer, setAnswer] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const submit = async () => {
-    const text = answer.trim();
-    if (!text || submitting) return;
-    setSubmitting(true);
-    setError('');
-    try {
-      // 闭环机制化（用户裁决 2026-11-16）：卡片直答 → 宿主构造引导派发
-      // 恢复该工作（merge_waiting_user 沿用 owner）→ 状态 running →
-      // central-work-updated → 本卡片消失。不再依赖中枢模型转发答复。
-      await api.centralAnswerWaiting(work.work_id, text);
-      setAnswer('');
-    } catch (err) {
-      setError(String(err));
-      setSubmitting(false);
-    }
-  };
-  return (
-    <div
-      data-testid="central-decision-card"
-      className="rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2 text-xs"
-    >
-      <div className="flex items-center gap-2">
-        <MessageCircleQuestion className="h-4 w-4 shrink-0 text-primary" />
-        <span className="font-medium">在等你的决定</span>
-      </div>
-      <button
-        type="button"
-        data-testid="central-decision-card-body"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        title={expanded ? '点击收起' : '点击展开完整内容'}
-        className={`mt-1 block w-full text-left text-muted-foreground ${
-          expanded ? '' : 'line-clamp-3'
-        }`}
-      >
-        {work.task}
-      </button>
-      <div className="mt-2 flex items-center gap-2">
-        <input
-          data-testid="central-decision-card-input"
-          value={answer}
-          onChange={(event) => setAnswer(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-              void submit();
-            }
-          }}
-          placeholder="输入你的答复…"
-          disabled={submitting}
-          className="min-w-0 flex-1 rounded-md border border-border/70 bg-background px-2 py-1 text-xs outline-none focus:border-primary/50"
-        />
-        <button
-          type="button"
-          data-testid="central-decision-card-submit"
-          onClick={() => void submit()}
-          disabled={submitting || !answer.trim()}
-          className="shrink-0 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-        >
-          {submitting ? '恢复中…' : '提交答复'}
-        </button>
-      </div>
-      {error ? (
-        <p className="mt-1 text-[10px] text-destructive" role="alert">
-          {error}
-        </p>
-      ) : null}
-    </div>
-  );
-}
 
 /** 卡片条：授权（事件驱动）+ 等待决定（状态驱动）。 */
 export function CentralCardsBar() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
-  const [waitingWorks, setWaitingWorks] = useState<WaitingWork[]>([]);
   const dismissTimers = useRef(new Map<string, number>());
 
   // 授权请求：宿主事件驱动（拒绝时到达）
@@ -237,37 +149,6 @@ export function CentralCardsBar() {
     };
   }, []);
 
-  // 等待决定：work status 状态驱动（答复后状态变化自动消失）
-  const refreshWaiting = useCallback(() => {
-    void api
-      .getCentralWorkStatus()
-      .then((items) => {
-        setWaitingWorks(
-          items
-            .filter((item) => item.state === 'waiting_user')
-            .map((item) => ({
-              work_id: item.work_id,
-              session_id: item.session_id,
-              task: item.task,
-              state: item.state,
-            })),
-        );
-      })
-      .catch(() => undefined);
-  }, []);
-  useEffect(() => {
-    refreshWaiting();
-    let disposed = false;
-    let unsubscribe: (() => void) | undefined;
-    void listen('central-work-updated', () => refreshWaiting()).then((un) => {
-      if (disposed) un();
-      else unsubscribe = un;
-    });
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-    };
-  }, [refreshWaiting]);
 
   // 已授权卡片短暂展示「正在重新派发」后自动收起（用户实测：长期
   // 占据页面；授权完成的事实已由宿主注入中枢，卡片无需常驻）
@@ -310,7 +191,7 @@ export function CentralCardsBar() {
     });
   }, []);
 
-  if (approvals.length === 0 && waitingWorks.length === 0) return null;
+  if (approvals.length === 0) return null;
 
   return (
     <div data-testid="central-cards-bar" className="space-y-1.5 border-t border-border/60 px-4 py-2">
@@ -320,9 +201,6 @@ export function CentralCardsBar() {
           approval={approval}
           onApproved={handleApproved}
         />
-      ))}
-      {waitingWorks.map((work) => (
-        <DecisionCard key={work.work_id} work={work} />
       ))}
     </div>
   );

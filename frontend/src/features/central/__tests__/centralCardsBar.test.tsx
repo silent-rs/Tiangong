@@ -127,85 +127,9 @@ describe('CentralCardsBar', () => {
     expect(container.querySelectorAll('[data-testid="central-approval-card"]').length).toBe(1);
   });
 
-  it('卡片直答闭环：输入答复提交 → central_answer_waiting → 状态 running 后卡片消失', async () => {
-    statusMock.mockResolvedValue([
-      { work_id: 'w-wait2', session_id: 's2', task: '迁移数据库？', state: 'waiting_user' },
-    ]);
-    mount();
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    const input = container.querySelector<HTMLInputElement>('[data-testid="central-decision-card-input"]');
-    const submit = container.querySelector<HTMLButtonElement>('[data-testid="central-decision-card-submit"]');
-    expect(input).not.toBeNull('卡片必须有输入框');
-    expect(submit).not.toBeNull('卡片必须有提交按钮');
-    expect(submit!.disabled).toBe(true, '空答复不可提交');
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value',
-      )!.set!;
-      setter.call(input!, '同意迁移，先备份');
-      input!.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    expect(submit!.disabled).toBe(false);
-    await act(async () => {
-      submit!.click();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(answerMock).toHaveBeenCalledWith('w-wait2', '同意迁移，先备份');
-    // 恢复 running → 状态刷新后卡片消失
-    statusMock.mockResolvedValue([
-      { work_id: 'w-wait2', session_id: 's2', task: '迁移数据库？', state: 'running' },
-    ]);
-    await act(async () => {
-      fire('central-work-updated', undefined);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(container.querySelector('[data-testid="central-decision-card"]')).toBeNull('卡片随状态消失');
-  });
 
-  it('决定卡片长任务：默认多行截断（line-clamp），点击展开完整文本', async () => {
-    const longTask = '第三十四轮 review：开发者表示「针对征询进行了优化」，请继续 review feature/central-refactor。' + '细节内容'.repeat(120);
-    statusMock.mockResolvedValue([
-      { work_id: 'w-long', session_id: 's1', task: longTask, state: 'waiting_user' },
-    ]);
-    mount();
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    const card = container.querySelector('[data-testid="central-decision-card"]');
-    expect(card).not.toBeNull();
-    const body = container.querySelector<HTMLButtonElement>('[data-testid="central-decision-card-body"]');
-    expect(body).not.toBeNull('内容区必须存在');
-    expect(body!.className).toContain('line-clamp-3', '默认多行截断（不再单行溢出）');
-    expect(body!.textContent).toContain('第三十四轮 review');
-    // 点击展开：clamp 移除、全文显示
-    await act(async () => {
-      body!.click();
-    });
-    expect(body!.className).not.toContain('line-clamp-3');
-    expect(body!.textContent!.length).toBeGreaterThan(500, '展开显示完整任务文本');
-    expect(card!.textContent).toContain('在等你的决定');
-  });
 
-  it('决定卡片由 waiting_user 状态驱动；状态变化自动消失', async () => {
-    statusMock.mockResolvedValue([
-      { work_id: 'w-wait', session_id: 's1', task: '迁移数据库？', state: 'waiting_user' },
-    ]);
-    mount();
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    const decision = container.querySelector('[data-testid="central-decision-card"]');
-    expect(decision).not.toBeNull();
-    expect(decision!.textContent).toContain('迁移数据库？');
 
-    // 答复后状态恢复：刷新无 waiting_user → 卡片消失
-    statusMock.mockResolvedValue([
-      { work_id: 'w-wait', session_id: 's1', task: '迁移数据库？', state: 'running' },
-    ]);
-    await act(async () => {
-      fire('central-work-updated', undefined);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(container.querySelector('[data-testid="central-decision-card"]')).toBeNull();
-  });
+
+
 });
