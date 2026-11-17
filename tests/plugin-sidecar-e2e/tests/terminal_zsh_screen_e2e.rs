@@ -14,13 +14,7 @@ use tiangong_plugin_runtime::protocol::RequestInvocationContext;
 use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
 fn terminal_sidecar_binary() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let debug_dir = executable.parent()?.parent()?;
-    let candidate = debug_dir.join(format!(
-        "tiangong-terminal-sidecar{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    candidate.is_file().then_some(candidate)
+    tiangong_plugin_runtime::test_support::debug_binary("tiangong-terminal-sidecar")
 }
 
 fn zsh_available() -> bool {
