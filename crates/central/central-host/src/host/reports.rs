@@ -9,6 +9,19 @@ use crate::host::dispatch::handle_central_dispatch;
 use crate::host::events::emit_central_work_updated_state;
 use crate::state_of_central;
 
+/// G3（第 28 轮 review）：从征询回报提取问题主体——标记行之后的文本
+///（含背景与选项），上限 480 字（与前端预览长度对齐）；无标记行时
+/// 取全文头部。纯函数可测。
+pub fn extract_pending_question(notice: &str) -> String {
+    let body = if let Some(pos) = notice.find(central_state::USER_DECISION_MARKER) {
+        &notice[pos + central_state::USER_DECISION_MARKER.len()..]
+    } else {
+        notice
+    };
+    let trimmed = body.trim_start_matches(['\n', ' ', '：', ':']).trim();
+    trimmed.chars().take(480).collect()
+}
+
 impl crate::CentralHostState {
     /// 向中枢对话注入一条后台工作回报消息（完成/失败），触发中枢自动
     /// 转述（事件驱动汇报的最小闭环）。中枢空闲时开启新 turn；执行中
@@ -97,19 +110,36 @@ impl crate::CentralHostState {
                 });
             if let Some(position) = position {
                 registry[position].state = next_state;
+                // G3：征询问题结构化登记（waiting_user 时取标记行后的
+                // 问题主体，上限 480 与前端预览对齐）；其余状态清空，
+                // 不复用上轮问题。
+                registry[position].pending_question =
+                    if next_state == central_state::WorkState::WaitingUser {
+                        Some(extract_pending_question(notice))
+                    } else {
+                        None
+                    };
             }
         }
         if matches!(outcome, WorkOutcome::WaitingUser) {
             // 阻塞必达 + 不落终态（等待用户答复后经引导恢复执行）
             // R5 单写：等待用户事实入事件日志（唯一事实源）。
-            crate::host::central_events::record_for(
-                self,
-                &request.work_id,
-                &request.execution_id,
-                &request.session_id,
-                tiangong_central::event::WorkEventType::WorkItemWaitingUser,
-                "提出需要用户决策的问题，工作中挂起",
-            );
+            // G3：事件 payload 携带 pending_question（标记行后的问题
+            // 主体）——重启投影重建时待决问题不丢。
+            {
+                let question = extract_pending_question(notice);
+                let mut event = tiangong_central::WorkEvent::new(
+                    &request.work_id,
+                    tiangong_central::event::WorkEventType::WorkItemWaitingUser,
+                )
+                .with_execution(&request.execution_id)
+                .with_worker_session(&request.session_id);
+                event.payload = serde_json::json!({
+                    "note": "提出需要用户决策的问题，工作中挂起",
+                    "pending_question": question,
+                });
+                crate::host::central_events::record_event(self.core_manager.storage_root(), event);
+            }
             self.deliver_pending_work_reports();
             emit_central_work_updated_state(self);
             return;
@@ -253,13 +283,10 @@ impl crate::CentralHostState {
             let prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
             // 征询（行首【需要用户决策】标记）用专用 kind：前端默认展开
             // ——折叠 480 字会让用户看不到完整问题，答复无从谈起（用户
-            // 实测）。判定与 classify_outcome 同源（行首匹配）：报告正文
+            // 实测）。判定与 classify_outcome 同源（G3 统一入口：
+            // system_note_kind_for，即时/flush 双路径一致）——报告正文
             // 引用标记（裁决记录标题等）不得误标为征询。
-            let kind = if central_state::is_user_decision_inquiry(&notice) {
-                "decision"
-            } else {
-                "report"
-            };
+            let kind = crate::host::events::system_note_kind_for(&notice);
             if let Err(error) = core.deliver(
                 AgentInputKind::prepared_with_id(scru128::new().to_string(), prepared)
                     .with_render(Some(crate::host::events::system_note_render(kind))),

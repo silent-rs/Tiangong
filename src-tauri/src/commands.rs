@@ -800,10 +800,14 @@ async fn send_message_inner(
         let mut flush_failed: Vec<String> = Vec::new();
         for notice in flushed {
             let notice_prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
+            // G3：flush 路径 kind 与即时注入同源（system_note_kind_for）
+            // ——征询回报在用户消息汇入时同样以 decision 展开，双路径
+            // 不再分叉。
+            let kind = crate::central_host::events::system_note_kind_for(&notice);
             if let Err(error) = state.deliver_central_message(
                 scru128::new().to_string(),
                 notice_prepared,
-                Some(crate::central_host::events::system_note_render("report")),
+                Some(crate::central_host::events::system_note_render(kind)),
             ) {
                 tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列，继续投递用户消息）");
                 flush_failed.push(notice);

@@ -50,3 +50,14 @@ pub fn system_note_render(kind: &str) -> tiangong_types::MessageRender {
         data: serde_json::json!({ "kind": kind }),
     }
 }
+
+/// G3（第 28 轮 review）：回报渲染 kind 的唯一判定源——即时注入
+/// （deliver_pending_work_reports）与用户消息 flush（commands.rs）共用，
+/// 消除双路径分叉（一处用行首标记判定、一处固定 report 的不一致）。
+pub fn system_note_kind_for(notice: &str) -> &'static str {
+    if central_state::is_user_decision_inquiry(notice) {
+        "decision"
+    } else {
+        "report"
+    }
+}

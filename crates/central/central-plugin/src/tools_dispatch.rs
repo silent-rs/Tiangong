@@ -97,12 +97,23 @@ impl CentralPlugin {
         // owner 优先一致）——沿用该会话最近登记的 work_id，不再生成新 id
         // 覆盖（此前新 id 覆盖导致 work status / control(owner) 报
         // 「未找到工作」、work list 任务文本被引导文本替换）。
+        // S1（R28-7，探针 PR-04）：仅**未终态**（outcome/finished_at 为空）
+        // 的在途工作沿用 work_id；上一工作已终态的复用是新工作——分配
+        // 新 id。否则投影对同 id 的 Completed/Cancelled 绝对吸收会吞掉
+        // 新 Started（重启后新执行显示旧终态）。
         let pending_work_id = if reused {
             load_work_items(self.sessions.storage_root())
                 .into_iter()
                 .rev()
                 .find(|item| item.session_id == session_id)
-                .map(|item| item.work_id)
+                .map(|item| {
+                    let finished = item.outcome.is_some() || item.finished_at.is_some();
+                    if finished {
+                        format!("work-{}", scru128::new())
+                    } else {
+                        item.work_id
+                    }
+                })
                 .unwrap_or_else(|| format!("work-{}", scru128::new()))
         } else {
             format!("work-{}", scru128::new())

@@ -414,6 +414,7 @@ pub fn recover_registry_entries(storage_root: &std::path::Path) -> Vec<crate::Wo
             last_activity: None,
             cwd: None,
             execution_id: item.execution_id,
+            pending_question: None,
         });
     }
     // 截断：completed/failed 各保留最近 10 条（尾部为最新，从头部移除）

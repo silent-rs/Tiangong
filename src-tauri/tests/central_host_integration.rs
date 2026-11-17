@@ -137,6 +137,7 @@ fn dispatch_reuse_fires_live_slot_callback() {
             last_activity: None,
             cwd: None,
             execution_id: Some("exec-live".to_string()),
+            pending_question: None,
         });
     // 挂载（与 attach_work_finished_callback 同款闭包语义，去掉 app 依赖）
     {
@@ -203,6 +204,7 @@ fn activation_summary_builds_from_verifiable_facts() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         },
         tiangong_app::central::CentralWorkStatus {
             work_id: "w2".into(),
@@ -215,6 +217,7 @@ fn activation_summary_builds_from_verifiable_facts() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         },
     ];
     // R5 用户实测修正：只有需要用户动作的事实才注入（必达），
@@ -238,6 +241,7 @@ fn activation_summary_builds_from_verifiable_facts() {
         last_activity: None,
         cwd: None,
         execution_id: None,
+        pending_question: None,
     }];
     assert!(
         build_activation_summary(&running_only, &[]).is_none(),
@@ -447,6 +451,7 @@ fn reg_entry(
         last_activity: None,
         cwd: None,
         execution_id: exec.map(str::to_string),
+        pending_question: None,
     }
 }
 
@@ -520,6 +525,12 @@ async fn host_terminal_callback_matrix() {
             .find(|e| e.work_id == "work-w1")
             .unwrap();
         assert_eq!(e.state, central_state::WorkState::WaitingUser, "决策分流");
+        // G3：征询问题结构化登记（标记行后的问题主体）
+        assert_eq!(
+            e.pending_question.as_deref(),
+            Some("要不要继续"),
+            "pending_question 登记问题主体（不含标记行）"
+        );
     }
     // 失败 → Failed；成功 → ReportQueued（回报入暂存）
     state
@@ -1402,6 +1413,7 @@ async fn host_sender_channel_consumes_all_message_kinds() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         });
     let record = tiangong_app::central::WorkItemRecord {
         work_id: "work-sender".into(),
@@ -1791,6 +1803,7 @@ async fn host_control_cancel_persists_terminal_state() {
             last_activity: None,
             cwd: None,
             execution_id: Some("exec-ctl1".into()),
+            pending_question: None,
         });
     tiangong_app::central_host::dispatch::handle_central_control(
         &state.central,
@@ -1902,6 +1915,7 @@ async fn host_control_pause_resume_roundtrip() {
             last_activity: None,
             cwd: None,
             execution_id: Some("exec-res1".into()),
+            pending_question: None,
         });
     // pause
     tiangong_app::central_host::dispatch::handle_central_control(
@@ -1987,6 +2001,7 @@ fn host_reports_push_take_clear_cycle() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         });
     state.clear_queued_work_reports();
     {
@@ -2102,6 +2117,7 @@ async fn host_second_turn_after_resume_is_reported() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         },
     );
     // 第一 turn：回报含决策标记 → waiting_user（未终态）
@@ -2182,6 +2198,7 @@ async fn host_owner_callback_respects_ownership_filter() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         },
     );
     handle_work_terminal(&state.central, &owner, true, "");
@@ -2252,6 +2269,7 @@ async fn host_enqueue_preserves_running_entry() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         },
     );
     let queued2 = dispatch_request("work-q2", "s-run", "第二个排队", false);
@@ -2295,6 +2313,7 @@ async fn host_terminal_fallback_skips_queued_entry() {
             last_activity: None,
             cwd: None,
             execution_id: None,
+            pending_question: None,
         },
     );
     // 未知 work_id + 命中 session 的排队条目 → 兜底不得写终态
@@ -2342,6 +2361,7 @@ async fn host_plan_resume_not_merged_but_steer_is() {
             last_activity: None,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
+            pending_question: None,
         },
     );
     let resume = dispatch_request("work-p", "s-resume", "继续暂停的任务", true);
@@ -2416,6 +2436,7 @@ async fn host_plan_queue_decision_returns_queued() {
             last_activity: None,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
+            pending_question: None,
         },
     );
     let follow = tiangong_app::central::CentralDispatchRequest {
@@ -2493,6 +2514,7 @@ async fn host_dispatch_queued_does_not_deliver() {
             last_activity: None,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
+            pending_question: None,
         },
     );
     let follow = tiangong_app::central::CentralDispatchRequest {

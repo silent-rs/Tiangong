@@ -309,6 +309,7 @@ pub async fn enqueue_central_dispatch(
                 last_activity: None,
                 cwd: None,
                 execution_id: Some(request.execution_id.clone()),
+                pending_question: None,
             });
         }
     }

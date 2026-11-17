@@ -131,6 +131,9 @@ interface CentralWorkStatus {
   state: 'running' | 'report_queued' | 'interrupted' | 'completed' | 'failed' | 'waiting_user' | 'paused' | 'cancelled' | 'queued';
   reused_session: boolean;
   last_activity?: string | null;
+  /** G3（第 28 轮 review）：waiting_user 时的征询问题正文（标记行后
+   * 的问题主体，480 字截断）——前端可直接展示待决问题，无需翻消息流。 */
+  pending_question?: string | null;
 }
 
 const PANEL_CLOSE_DELAY_MS = 250;
@@ -241,6 +244,16 @@ function WorkItemRow({
       <p className="mt-1.5 line-clamp-2 text-[13px] leading-snug text-foreground/90">
         {item.task}
       </p>
+      {waitingUserState && item.pending_question ? (
+        // G3（第 28 轮 review）：待决问题结构化展示——用户在中枢答复前
+        // 可直接看到 worker 的问题主体（无需翻消息流找征询原文）
+        <p
+          data-testid="pending-question"
+          className="mt-1.5 line-clamp-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2 py-1 text-[11px] leading-snug text-amber-700 dark:text-amber-300"
+        >
+          {item.pending_question}
+        </p>
+      ) : null}
       {running && item.last_activity ? (
         <p className="mt-1 truncate text-[11px] text-muted-foreground/80">
           {item.last_activity}
@@ -386,10 +399,15 @@ export function CentralWorkStatusBar() {
   const queuedDep = visible.filter((item) => item.state === 'queued');
 
   // 徽章数字口径（实测/十八轮 P3）：只计未终态——completed/failed/
-  // cancelled 属于历史结果（完成即空闲），不与空闲图标并排出现数字
+  // cancelled 属于历史结果（完成即空闲），不与空闲图标并排出现数字。
+  // S2（第 28 轮 review）：interrupted 是「待处理的历史残留」（可取消/
+  // 重派），不是执行中——不占执行数字；中断事实由徽章状态
+  // （badgeState=interrupted）呈现。
   const settled = (item: CentralWorkStatus) =>
     item.state === 'completed' || item.state === 'failed' || item.state === 'cancelled';
-  const activeCount = visible.filter((item) => !settled(item)).length;
+  const activeCount = visible.filter(
+    (item) => !settled(item) && item.state !== 'interrupted',
+  ).length;
   const totalCount = visible.length;
   // 徽章主状态（优先级：等你决定 > 执行中 > 失败 > 中断 > 暂停/排队；
   // completed/待汇报 → idle：完成即空闲，实测七）

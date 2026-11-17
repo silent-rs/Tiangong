@@ -88,6 +88,12 @@ pub struct WorkStatus {
     /// 不再依赖「当前 session 最近一条」。None = 旧登记（字段上线前）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    /// G3（第 28 轮 review）：waiting_user 时的征询问题正文（结构化
+    /// pending_question——用户/中枢不再到消息流里翻找；取标记行后的
+    /// 问题主体，上限 480 字与前端预览对齐）。终态/恢复时清空，不复用
+    /// 上轮问题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<String>,
 }
 
 /// 工作回报结局（终态回调入参的分类）。
@@ -418,6 +424,7 @@ pub fn registry_entry_after_dispatch(
         } else {
             Some(execution_id.to_string())
         },
+        pending_question: None,
     }
 }
 

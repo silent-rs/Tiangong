@@ -15,6 +15,7 @@ fn entry(work_id: &str, session: &str, state: WorkState) -> WorkStatus {
         last_activity: None,
         cwd: None,
         execution_id: None,
+        pending_question: None,
     }
 }
 

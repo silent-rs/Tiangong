@@ -599,3 +599,55 @@ fn multiprocess_duplicate_id_is_idempotent() {
     let entries = log.load_all().unwrap();
     assert_eq!(entries.len(), 1, "同 id 跨进程只允许一条事实：{entries:?}");
 }
+
+/// S1（R28-7，探针 PR-04）：同 work_id「Started→Completed→Started
+/// （新 execution）」——投影必须推进为 Running（旧代码对同 id 的
+/// Completed 绝对吸收，新 Started 被吞，重启后新执行显示旧终态）。
+#[test]
+fn projection_new_execution_after_terminal_not_absorbed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let log = EventLog::open(&path).unwrap();
+    let mut first = event("w-re", WorkEventType::WorkItemStarted);
+    first.id = "ev-re-1".into();
+    first = first.with_execution("exec-a");
+    log.append(first).unwrap();
+    let mut done = event("w-re", WorkEventType::WorkItemCompleted);
+    done.id = "ev-re-2".into();
+    done = done.with_execution("exec-a");
+    log.append(done).unwrap();
+    // 同 work 新 execution 的 Started（旁路/历史形态：终态后复用）
+    let mut second = event("w-re", WorkEventType::WorkItemStarted);
+    second.id = "ev-re-3".into();
+    second = second.with_execution("exec-b");
+    log.append(second).unwrap();
+    let states = project_work_state(&log.load_all().unwrap());
+    use tiangong_central::status::WorkItemStatus;
+    assert_eq!(
+        states.get("w-re"),
+        Some(&WorkItemStatus::Running),
+        "新 execution 的 Started 不被旧终态吞掉"
+    );
+    // 对照：同 execution 的迟到 progress 仍被吸收（保持 Completed）
+    let dir2 = tempfile::tempdir().unwrap();
+    let path2 = dir2.path().join("events.jsonl");
+    let log2 = EventLog::open(&path2).unwrap();
+    let mut s1 = event("w-re2", WorkEventType::WorkItemStarted);
+    s1.id = "ev2-1".into();
+    s1 = s1.with_execution("exec-a");
+    log2.append(s1).unwrap();
+    let mut d1 = event("w-re2", WorkEventType::WorkItemCompleted);
+    d1.id = "ev2-2".into();
+    d1 = d1.with_execution("exec-a");
+    log2.append(d1).unwrap();
+    let mut late = event("w-re2", WorkEventType::WorkItemProgress);
+    late.id = "ev2-3".into();
+    late = late.with_execution("exec-a");
+    log2.append(late).unwrap();
+    let states2 = project_work_state(&log2.load_all().unwrap());
+    assert_eq!(
+        states2.get("w-re2"),
+        Some(&WorkItemStatus::Completed),
+        "同 execution 迟到事件仍被终态吸收"
+    );
+}

@@ -580,12 +580,17 @@ impl EventLog {
 ///
 /// 终态吸收后续事件（迟到 progress 不改写 completed）；未知事件不改变
 /// 当前状态（向前兼容：schema 演进后旧版本读取不崩溃）。
+/// S1（R28-7，探针 PR-04）：吸收仅在**同 execution** 内成立——同 work
+/// 的新 execution（终态后复用会话做新工作的旁路/历史形态）不被旧终态
+/// 吞掉；终态或事件缺 execution_id（legacy 数据）时保守保持旧行为。
 pub fn project_work_state(
     events: &[LoggedEvent],
 ) -> std::collections::HashMap<String, crate::status::WorkItemStatus> {
     use crate::event::WorkEventType as E;
     use crate::status::WorkItemStatus as S;
     let mut states = std::collections::HashMap::new();
+    let mut terminal_executions: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for logged in events {
         let id = logged.event.work_item_id.clone();
         let current = states.get(&id).copied();
@@ -603,9 +608,25 @@ pub fn project_work_state(
             _ => None,
         };
         let Some(next) = next else { continue };
-        // 终态吸收：completed/cancelled 后的迟到事件不改写
+        // 终态吸收：completed/cancelled 后的迟到事件不改写——同 execution
+        // 内吸收；不同 execution 是该 work 的新执行（不吸收，覆盖推进）
         if matches!(current, Some(S::Completed | S::Cancelled)) {
-            continue;
+            let same_execution = match (
+                terminal_executions.get(&id),
+                logged.event.execution_id.as_deref(),
+            ) {
+                (Some(terminal), Some(current_exec)) => terminal == current_exec,
+                // 任一侧缺 execution（legacy/迁移数据）：保守吸收（旧行为）
+                _ => true,
+            };
+            if same_execution {
+                continue;
+            }
+        }
+        if matches!(next, S::Completed | S::Cancelled)
+            && let Some(execution) = &logged.event.execution_id
+        {
+            terminal_executions.insert(id.clone(), execution.clone());
         }
         states.insert(id, next);
     }

@@ -254,8 +254,14 @@ pub fn rebuild_registry_from_log(
             .iter()
             .position(|entry| entry.session_id == current_session)
         {
-            let existing_is_owner = !registry[position].reused_session;
-            if existing_is_owner || !current_is_owner {
+            let existing = &registry[position];
+            let existing_is_owner = !existing.reused_session;
+            // S1（R28-7，探针 PR-04）：owner 优先仅在既有条目**未终态**
+            // （引导并入 owner 语义）时成立；既有已终态说明该会话的
+            // 新工作已接续（终态后复用分配新 id）——保留新条目，旧
+            // owner 不得顶掉（否则新执行显示旧终态）。
+            let existing_inflight = !existing.state.is_terminal();
+            if existing_is_owner || !current_is_owner || !existing_inflight {
                 continue;
             }
             registry.remove(position);
@@ -295,6 +301,16 @@ pub fn rebuild_registry_from_log(
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
             execution_id: logged.event.execution_id.clone(),
+            // G3：投影重建时若终态为 waiting_user，从事件 payload 恢复
+            // pending_question（标记行后的问题主体，重启不丢待决问题）
+            pending_question: if *status == tiangong_central::status::WorkItemStatus::WaitingUser {
+                payload
+                    .get("pending_question")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            } else {
+                None
+            },
         });
     }
     if registry.is_empty() {
