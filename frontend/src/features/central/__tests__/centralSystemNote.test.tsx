@@ -113,8 +113,8 @@ describe('CentralSystemNote 折叠与历史兜底', () => {
     expect(note!.textContent!.length).toBeLessThan(long.length, '可手动收起');
   });
 
-  it('历史兜底：kind=report 但内容含【需要用户决策】→ 同样默认展开（旧注入消息立即生效）', () => {
-    const legacy = '[后台工作中断] work-old\n【需要用户决策】选 A 还是 B？\n' + '细节描述'.repeat(600);
+  it('历史兜底：kind=report 但标记独占行 → 同样默认展开（旧注入消息立即生效）', () => {
+    const legacy = '[后台工作中断] work-old\n【需要用户决策】\n选 A 还是 B？\n' + '细节描述'.repeat(600);
     renderGroup(makeGroup(legacy, {
       plugin: 'central-host',
       view: 'system-note',

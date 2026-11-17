@@ -119,17 +119,16 @@ impl WorkOutcome {
 /// （见 host/dispatch.rs 派发指令的【用户决策协议】）。
 pub const USER_DECISION_MARKER: &str = "【需要用户决策】";
 
-/// 判定回报文本是否为征询（行首标记匹配）。
+/// 判定回报文本是否为征询（标记独占行匹配）。
 ///
-/// 协议要求标记出现在行首（前后允许空白缩进）；正文任意位置出现标记
-/// （引用历史裁决记录、报告小节标题等）不是征询——曾用全文子串匹配，
-/// 把 review 报告引用裁决记录的标题（「### 8.5 需要用户决策（…）
-/// 【需要用户决策】」）误判为征询，完整终稿被登记为 waiting_user 永久
-/// 挂起（2026-11-17 用户实测，work-03h8ujgnub0s5jk2iuf，第二十七轮
-/// review 终稿）。行为锁定于 transitions 测试。
+/// 协议要求标记「开头单独一行」（标记独占该行，问题正文另起）；
+/// 正文任意位置出现标记（引用历史裁决记录、报告小节标题、代码块、
+/// 「【需要用户决策】曾出现在…」式叙述句）不是征询。曾用全文子串
+/// （把第二十七轮 review 终稿 §8.5 标题引用误判，工作永久挂起）与
+/// 行首匹配（把「标记+叙述」引用句误判，P2-01/PR-10 实证），最终
+/// 收敛到独占行协议边界。行为锁定于 transitions 测试。
 pub fn is_user_decision_inquiry(text: &str) -> bool {
-    text.lines()
-        .any(|line| line.trim_start().starts_with(USER_DECISION_MARKER))
+    text.lines().any(|line| line.trim() == USER_DECISION_MARKER)
 }
 
 /// 依据回报文本判定结局（Worker 用户决策协议：行首标记为征询）。

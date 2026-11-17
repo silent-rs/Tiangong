@@ -243,9 +243,7 @@ function CentralSystemNote({ kind, time, text }: {
   // 不是征询，不得因此默认展开。
   const [open, setOpen] = useState(
     kind === 'decision'
-    || text
-      .split('\n')
-      .some((line) => line.trimStart().startsWith('【需要用户决策】')),
+    || text.split('\n').some((line) => line.trim() === '【需要用户决策】'),
   );
   const kindLabel = kind === 'report'
     ? '工作回报'

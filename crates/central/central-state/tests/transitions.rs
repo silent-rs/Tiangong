@@ -267,9 +267,9 @@ fn work_outcome_names_and_classifier_boundaries() {
     assert_eq!(WorkOutcome::Finished.as_str(), "finished");
     assert_eq!(WorkOutcome::WaitingUser.as_str(), "waiting_user");
     assert_eq!(classify_outcome("正常完成"), WorkOutcome::Finished);
-    // 行首（含缩进/引用前缀行后换行）→ 征询
+    // 标记独占行（协议形态，含缩进）→ 征询
     assert_eq!(
-        classify_outcome("【需要用户决策】要不要继续"),
+        classify_outcome("【需要用户决策】\n要不要继续"),
         WorkOutcome::WaitingUser
     );
     assert_eq!(
@@ -277,22 +277,45 @@ fn work_outcome_names_and_classifier_boundaries() {
         WorkOutcome::WaitingUser
     );
     assert_eq!(
-        classify_outcome("  【需要用户决策】缩进行首也算"),
+        classify_outcome("  【需要用户决策】  \n缩进+尾随空白独占行也算"),
         WorkOutcome::WaitingUser
     );
-    // 句中/行中引用不是征询（2026-11-17 用户实测回归锁：review 报告
-    // §8.5 标题引用裁决记录「### 8.5 需要用户决策（换模型 A/B/C，
-    // 第七次）【需要用户决策】」被全文子串匹配误判，第二十七轮终稿
-    // 被永久登记为 waiting_user）
+    // 句中/行中/行首叙述引用不是征询（2026-11-17 用户实测回归锁：
+    // review 报告 §8.5 标题引用裁决记录「### 8.5 需要用户决策（换模型
+    // A/B/C，第七次）【需要用户决策】」被全文子串匹配误判，第二十七
+    // 轮终稿被永久登记为 waiting_user；P2-01/PR-10 又实证「标记+叙述
+    // 文字」的行首形态仍误判——最终收敛到独占行协议边界）
     assert_eq!(
         classify_outcome("问题：【需要用户决策】要不要继续"),
         WorkOutcome::Finished
+    );
+    assert_eq!(
+        classify_outcome("【需要用户决策】要不要继续"),
+        WorkOutcome::Finished,
+        "标记+问题同行的非协议形态按引用叙述处理（漏判可见全文，误判永久挂起）"
     );
     assert_eq!(
         classify_outcome(
             "# 第二十七轮 Review\n### 8.5 需要用户决策（换模型 A/B/C，第七次）【需要用户决策】\n背景：用户裁决 A（持久化）"
         ),
         WorkOutcome::Finished
+    );
+    // P2-01（第 28 轮 review）：真实多行样本保真——现场原文是标题行
+    // 引用 + 叙述句引用形态（此前压缩为同一行，不能称现场原文锁定）。
+    // 已知边界：代码块**内独占一行**的标记文本层无法区分（完整解法为
+    // 结构化 outcome，S2 修法 1 的 render 层方向，属后续工作）。
+    assert_eq!(
+        classify_outcome(
+            "审查完成，结论如下：\n## 8.5 需要用户决策（历史裁决引用）\n【需要用户决策】曾出现在第 20 轮。\n以上均为引用，非当前征询。"
+        ),
+        WorkOutcome::Finished,
+        "标题行/正文句中/行首叙述句的引用都不是征询（独占行才算）"
+    );
+    // 对照：真实征询——独立行首标记 + 问题正文（协议形态）
+    assert_eq!(
+        classify_outcome("【需要用户决策】\n流星锤方案是否继续？背景：测试验证征询闭环。"),
+        WorkOutcome::WaitingUser,
+        "独立行首标记 + 问题正文是真实征询（WU-03 现场形态）"
     );
     assert_eq!(classify_outcome(""), WorkOutcome::Finished);
 }

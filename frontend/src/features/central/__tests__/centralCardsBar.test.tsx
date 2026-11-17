@@ -51,6 +51,9 @@ describe('CentralCardsBar', () => {
     root = createRoot(container);
   });
   afterEach(() => {
+    // C15（第 28 轮 review）：fake timers 无条件恢复——用例中途断言
+    // 失败退出时不再污染后续用例（历史偶发失败与异常耗时相关）
+    vi.useRealTimers();
     act(() => root.unmount());
     container.remove();
   });

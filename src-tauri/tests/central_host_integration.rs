@@ -512,10 +512,10 @@ async fn host_terminal_callback_matrix() {
         &dispatch_request("work-w1", "s-w1", "等待用户任务", false),
         false,
         // 失败路径 notice 由 build_work_notice 包装为
-        // 「…失败原因：{reason}」——reason 以换行开头使标记保持行首
+        // 「…失败原因：{reason}」——reason 以换行开头使标记独占行
         // （真实征询走 done=true 路径，worker 全文按行嵌入 notice，
-        // 协议要求的行首标记天然保留）。
-        "\n【需要用户决策】要不要继续",
+        // 协议要求的独占行标记天然保留）。
+        "\n【需要用户决策】\n要不要继续",
     );
     {
         let registry = state.central.central_work_registry.lock().unwrap();
@@ -529,7 +529,7 @@ async fn host_terminal_callback_matrix() {
         assert_eq!(
             e.pending_question.as_deref(),
             Some("要不要继续"),
-            "pending_question 登记问题主体（不含标记行）"
+            "pending_question 登记问题主体（不含标记独占行）"
         );
     }
     // 失败 → Failed；成功 → ReportQueued（回报入暂存）
@@ -1232,6 +1232,21 @@ async fn host_recover_interrupts_inflight_work() {
             .unwrap();
         assert_eq!(fail.state, central_state::WorkState::Failed);
     }
+    // C16（第 28 轮 review）：摘要文本断言——迁移后的实际数量进入摘要
+    //（不再以「计数变量位置正确」代替文本验证）
+    let summary = tiangong_app::central_host::recovery::build_activation_summary(
+        &state_of_handle.central.central_work_status(),
+        &tiangong_app::central::load_goals(&storage_root),
+    )
+    .expect("有中断+失败事实应产出摘要");
+    assert!(
+        summary.contains("1 个工作中断未收尾"),
+        "摘要应含迁移后的中断数 1：{summary}"
+    );
+    assert!(
+        summary.contains("1 个工作失败未处理"),
+        "摘要应含失败事实计数 1：{summary}"
+    );
 }
 
 /// 排队依赖终态后 flush：pending 投递（after 匹配）、queued 标记清除、
