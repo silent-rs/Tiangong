@@ -338,7 +338,11 @@ fn multiprocess_child_append() {
     let log = EventLog::open(std::path::Path::new(&log_path)).expect("子进程打开日志");
     let tag = std::env::var("CENTRAL_MP_TAG").unwrap_or_default();
     let mut event = event("w-mp", WorkEventType::WorkItemProgress);
-    event.id = format!("ev-mp-{tag}");
+    event.id = if std::env::var("CENTRAL_MP_DUP_ID").is_ok() {
+        "ev-mp-dup".to_string()
+    } else {
+        format!("ev-mp-{tag}")
+    };
     event.payload = serde_json::json!({ "tag": tag });
     log.append(event).expect("子进程 append");
     // 立即退出（不跑后续测试——父进程用 --exact 只选本测试）
@@ -387,4 +391,211 @@ fn multiprocess_offsets_are_unique_and_ordered() {
         );
     }
     // 行完整（无交错损坏）：每行可独立解析（load_all 已验证）✓
+}
+
+// ── 第 28 轮 review 日志链 L1–L5 验收（R28-3~6 + 跨进程幂等）──
+
+/// L1（R28-3，探针 PR-02）：任意长事件（≥8KB / 64KB / Unicode 多行
+/// payload）后模拟新进程 append——offset 必须衔接末行严格递增（旧
+/// 4096 字节固定窗口找不到行首 '{' 退 0，重启后 offset 从 1 重来）。
+#[test]
+fn long_event_tail_offset_survives_restart() {
+    for (label, payload_size) in [("8kb", 8 * 1024), ("64kb", 64 * 1024)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let log = EventLog::open(&path).unwrap();
+        let mut long_event = event(&format!("w-long-{label}"), WorkEventType::WorkItemStarted);
+        long_event.id = format!("ev-long-{label}");
+        // 单行 JSON：任务全文型 payload（含中文与引号转义，JSON 仍单行）
+        long_event.payload = serde_json::json!({
+            "task": "长任务".repeat(payload_size / 12),
+            "note": "unicode 中文 ×2"
+        });
+        let first = log.append(long_event).unwrap();
+        assert_eq!(first, 1);
+        drop(log);
+        // 模拟新进程：重置共享 cache + 全新实例
+        EventLog::force_repair_on_next_open(&path);
+        let reopened = EventLog::open(&path).unwrap();
+        let next = reopened
+            .append(event(
+                &format!("w-next-{label}"),
+                WorkEventType::WorkItemProgress,
+            ))
+            .unwrap();
+        assert_eq!(
+            next, 2,
+            "{label} 长末行后新进程 append 必须衔接（offset==2）"
+        );
+        let entries = reopened.load_all().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].offset > entries[0].offset);
+    }
+}
+
+/// L2（R28-4，探针 PR-05）：轮转全生命周期——触发轮转的事件必须位于
+/// 约定当前文件（当前路径存在），结束后新进程写入 offset 连续，归档
+/// + 当前 id 不重复、不漏触发事件。
+#[test]
+fn rotation_lifecycle_keeps_current_file_and_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    // 小阈值构造（生产 100MB；测试 1KB 足够触发）
+    let log = EventLog::open_with_rotate_threshold(&path, 1024).unwrap();
+    let mut first = event("w-rot", WorkEventType::WorkItemStarted);
+    first.id = "ev-rot-1".into();
+    first.payload = serde_json::json!({ "pad": "x".repeat(2048) });
+    let off1 = log.append(first).unwrap();
+    assert_eq!(off1, 1);
+    // 触发轮转的第二条：必须进入新当前文件，当前路径必须存在
+    let mut second = event("w-rot", WorkEventType::WorkItemCompleted);
+    second.id = "ev-rot-2".into();
+    second.payload = serde_json::json!({ "pad": "y".repeat(64) });
+    let off2 = log.append(second).unwrap();
+    assert_eq!(off2, 2, "轮转后 offset 必须连续（跨代际基准）");
+    assert!(
+        path.exists(),
+        "轮转后当前路径必须存在（旧代码 rename 后向旧 fd 写）"
+    );
+    // 归档存在且含首条；当前含第二条
+    let archived = path.with_extension("jsonl.1");
+    assert!(archived.exists(), "归档应存在");
+    let (entries, _) = {
+        let check = EventLog::open(&path).unwrap();
+        check.load_all_lenient()
+    };
+    let ids: Vec<&str> = entries.iter().map(|e| e.event.id.as_str()).collect();
+    assert!(ids.contains(&"ev-rot-1"), "归档事实可读：{ids:?}");
+    assert!(ids.contains(&"ev-rot-2"), "触发事件不丢：{ids:?}");
+    // 模拟新进程：当前文件只有 1 条，offset 基准应从归档兜底衔接
+    EventLog::force_repair_on_next_open(&path);
+    let reopened = EventLog::open(&path).unwrap();
+    let mut third = event("w-rot", WorkEventType::WorkItemProgress);
+    third.id = "ev-rot-3".into();
+    let off3 = reopened.append(third).unwrap();
+    assert_eq!(
+        off3, 3,
+        "新进程在轮转后当前文件的 offset 必须从归档兜底衔接"
+    );
+}
+
+/// L3（R28-5，探针 PR-06）：恢复宽松读取与严格读取覆盖相同历史——
+/// 只有归档、当前空时归档事实不丢。
+#[test]
+fn lenient_read_includes_archived_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let log = EventLog::open(&path).unwrap();
+    for i in 1..=3 {
+        let mut e = event("w-arch", WorkEventType::WorkItemProgress);
+        e.id = format!("ev-arch-{i}");
+        log.append(e).unwrap();
+    }
+    drop(log);
+    // 手工轮转：归档 3 条、当前空（模拟轮转瞬间的恢复场景）
+    let archived = path.with_extension("jsonl.1");
+    std::fs::rename(&path, &archived).unwrap();
+    std::fs::write(&path, b"").unwrap();
+    let reopened = EventLog::open(&path).unwrap();
+    let (entries, skipped) = reopened.load_all_lenient();
+    assert_eq!(skipped, 0);
+    assert_eq!(
+        entries.len(),
+        3,
+        "归档 3 条必须全部进入恢复投影（旧代码返回 0）"
+    );
+    // 严格读取一致
+    let strict = reopened.load_all().unwrap();
+    assert_eq!(strict.len(), 3, "严格/宽松读取覆盖相同文件范围");
+}
+
+/// L4（R28-6，探针 PR-07）：冷启动「好行→坏行→两条好行」——open 修复
+/// 不得截掉中段坏行后的有效事件（旧代码只剩第一条好行）。
+#[test]
+fn cold_open_keeps_events_after_midfile_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    // 冷文件（不经 open 写入）：好→坏→好→好
+    let good1 = serde_json::to_string(&LoggedEvent {
+        offset: 1,
+        schema_version: 1,
+        event: {
+            let mut e = event("w-cold", WorkEventType::WorkItemStarted);
+            e.id = "ev-cold-1".into();
+            e
+        },
+    })
+    .unwrap();
+    let bad = "{ this is not json at all !!!";
+    let good2 = serde_json::to_string(&LoggedEvent {
+        offset: 2,
+        schema_version: 1,
+        event: {
+            let mut e = event("w-cold", WorkEventType::WorkItemCompleted);
+            e.id = "ev-cold-2".into();
+            e
+        },
+    })
+    .unwrap();
+    let good3 = serde_json::to_string(&LoggedEvent {
+        offset: 3,
+        schema_version: 1,
+        event: {
+            let mut e = event("w-cold2", WorkEventType::WorkItemStarted);
+            e.id = "ev-cold-3".into();
+            e
+        },
+    })
+    .unwrap();
+    std::fs::write(&path, format!("{good1}\n{bad}\n{good2}\n{good3}\n")).unwrap();
+    // 冷启动 open：修复只允许截「末尾写一半」，中段坏行保留原文件
+    let reopened = EventLog::open(&path).unwrap();
+    let (entries, skipped) = reopened.load_all_lenient();
+    assert_eq!(
+        entries.len(),
+        3,
+        "坏行后的两条有效事件必须可见（旧代码被截掉）"
+    );
+    assert_eq!(skipped, 1, "中段坏行计数可观测");
+    // 原文件保留损坏证据（不静默改写）
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("this is not json"), "损坏证据保留在原文件");
+    // 继续追加 offset 衔接（以幸存最大有效 offset 为基准）
+    let mut next = event("w-cold2", WorkEventType::WorkItemProgress);
+    next.id = "ev-cold-4".into();
+    let off = reopened.append(next).unwrap();
+    assert_eq!(off, 4, "追加以幸存事件最大 offset 为基准");
+}
+
+/// L5（探针 PR-03）：两独立进程写相同 event id——最终只有一条事实，
+/// 返回同一既有 offset（跨进程幂等；cache 不含其他进程写入）。
+#[test]
+fn multiprocess_duplicate_id_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("events.jsonl");
+    let exe = std::env::current_exe().unwrap();
+    let mut children = Vec::new();
+    for tag in ["x", "y"] {
+        children.push(
+            std::process::Command::new(&exe)
+                .arg("--exact")
+                .arg("multiprocess_child_append")
+                .arg("--nocapture")
+                .env("CENTRAL_MP_LOG", &log_path)
+                .env("CENTRAL_MP_TAG", tag)
+                // 两进程写同一 id（旧代码：两条 offset 1、2）
+                .env("CENTRAL_MP_DUP_ID", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn 子进程"),
+        );
+    }
+    for mut child in children {
+        let status = child.wait().expect("等待子进程");
+        assert!(status.success(), "子进程应成功退出：{status:?}");
+    }
+    let log = EventLog::open(&log_path).unwrap();
+    let entries = log.load_all().unwrap();
+    assert_eq!(entries.len(), 1, "同 id 跨进程只允许一条事实：{entries:?}");
 }
