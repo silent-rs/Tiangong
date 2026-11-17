@@ -10650,7 +10650,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-central"
-version = "0.17.14"
+version = "0.17.15"
 dependencies = [
  "anyhow",
  "chrono",
