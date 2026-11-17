@@ -51,7 +51,9 @@ fn torn_tail_line_is_repaired_on_open() {
     log.append(event("w1", WorkEventType::WorkItemCompleted))
         .unwrap();
     drop(log);
-    // 同进程共享注册表记住了「已扫描」——重置以模拟新进程崩溃恢复
+    // 同进程共享注册表记住了「已修复/已初始化」——重置以模拟新进程
+    // 崩溃恢复（C9/L5：open 的尾部修复与 append 的冷缓存初始化在真实
+    // 新进程中都会重跑；本测试同进程模拟，靠 force 重置两个门槛）
     EventLog::force_repair_on_next_open(&path);
     // 模拟崩溃：追加半行 JSON（无换行、不完整）
     {
