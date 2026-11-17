@@ -896,7 +896,6 @@ fn run_gui() {
             tiangong_app::central_host::mode_commands::central_mode_exit,
             tiangong_app::central_host::mode_commands::central_mode_state,
             tiangong_app::central_host::work_view::central_work_timeline,
-            tiangong_app::central_host::work_view::central_answer_waiting,
             tiangong_app::commands::get_sessions,
             tiangong_app::commands::get_central_work_status,
             tiangong_app::commands::get_session_meta,

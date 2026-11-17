@@ -65,10 +65,4 @@ export const centralApi = {
     workId: string,
   ): Promise<Array<{ at: string; kind: string; note: string }>> =>
     invoke('central_work_timeline', { workId }),
-  /** 等待用户决策的工作：卡片上直接答复（提交即恢复该工作，卡片消失）。 */
-  centralAnswerWaiting: (
-    workId: string,
-    answer: string,
-  ): Promise<{ work_id: string; state: string }> =>
-    invoke('central_answer_waiting', { workId, answer }),
 };

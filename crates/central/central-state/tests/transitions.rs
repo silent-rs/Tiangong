@@ -143,9 +143,10 @@ fn queue_decision_combinations() {
         !crate::task_is_high_risk("重构解析器并补充测试"),
         "普通开发任务不得误判为高风险"
     );
+    // 同会话互斥（用户实测 2026-11-16）：s-other 已在途，再派同会话 → 排队
     assert_eq!(
         queue_decision(&entries, None, "s-other", "/ws/b", false, "普通任务"),
-        QueueDecision::DispatchNow
+        QueueDecision::QueueAfter("other".to_string())
     );
     for state in [WorkState::WaitingUser, WorkState::Paused, WorkState::Queued] {
         entries[0].state = state;
@@ -212,4 +213,38 @@ fn work_outcome_names_and_classifier_boundaries() {
         WorkOutcome::WaitingUser
     );
     assert_eq!(classify_outcome(""), WorkOutcome::Finished);
+}
+
+/// 同会话互斥锁（用户实测 2026-11-16：日志同 session 反复派发，前一轮
+/// 在途又派一轮 → 两个 turn 并发投递同一 Core，消息交错）。锁定期：
+/// running / waiting_user / paused / queued 一律排队，终态后自动投递。
+#[test]
+fn same_session_inflight_queues_new_dispatch() {
+    for state in [
+        WorkState::Running,
+        WorkState::WaitingUser,
+        WorkState::Paused,
+        WorkState::Queued,
+    ] {
+        let entries = vec![entry("work-h", "s-busy", state)];
+        assert_eq!(
+            queue_decision(&entries, None, "s-busy", "/ws/x", false, "普通任务"),
+            QueueDecision::QueueAfter("work-h".to_string()),
+            "{:?} 在途时同会话新派发必须排队",
+            state
+        );
+    }
+    // 终态/其他会话不受影响
+    let done = vec![entry("work-d", "s-busy", WorkState::Completed)];
+    assert_eq!(
+        queue_decision(&done, None, "s-busy", "/ws/x", false, "普通任务"),
+        QueueDecision::DispatchNow,
+        "终态后同会话可再派"
+    );
+    let other = vec![entry("work-o", "s-other", WorkState::Running)];
+    assert_eq!(
+        queue_decision(&other, None, "s-busy", "/ws/x", false, "普通任务"),
+        QueueDecision::DispatchNow,
+        "不同会话不互斥（写入锁另有判定）"
+    );
 }

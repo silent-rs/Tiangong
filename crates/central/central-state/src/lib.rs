@@ -248,6 +248,17 @@ pub fn queue_decision(
             return QueueDecision::QueueAfter(after.to_string());
         }
     }
+    // 同会话互斥（用户实测 2026-11-16：日志显示同 session 被反复派发新
+    // execution——前一轮在途时又派一轮，两个 turn 并发投递同一 Core，
+    // 消息交错/上下文污染。附录 A.2 第 8 条「同会话重派不拦但顺序投递」
+    // 的假设被实测推翻：改为同会话存在 in-flight（running/waiting_user/
+    // paused/queued）时一律排队，等它终态后自动投递）。
+    if let Some(holder) = entries.iter().rev().find(|entry| {
+        entry.session_id == session_id
+            && (entry.state.is_inflight() || entry.state == WorkState::Queued)
+    }) {
+        return QueueDecision::QueueAfter(holder.work_id.clone());
+    }
     // R3：parallel 豁免不适用于高风险任务（发布/删除/迁移/覆写——保守
     // 启发式判定，宁可串行排队）。
     let parallel_effective = parallel && !task_is_high_risk(task);

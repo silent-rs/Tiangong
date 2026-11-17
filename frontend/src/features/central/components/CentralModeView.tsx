@@ -14,7 +14,7 @@
  */
 import { LazyMessageInput, LazyMessageList } from '@/components/LazyComponents';
 import { CentralCardsBar } from '@/features/central/components/CentralCardsBar';
-import { CentralDecisionOverlay } from '@/features/central/components/CentralDecisionOverlay';
+import { CentralActiveTaskBanner } from '@/features/central/components/CentralActiveTaskBanner';
 import { CentralWorkStatusBar } from '@/features/central/components/CentralWorkStatusBar';
 import { CENTRAL_DEFAULT_GREETING } from '@/features/central/components/centralGreeting';
 import { CENTRAL_TRANSITION_PARAMS } from '@/features/central/components/centralTransitionParams';
@@ -71,6 +71,8 @@ export function CentralModeView() {
       className="relative flex flex-1 min-w-0 flex-col bg-background animate-central-view-in"
     >
       <CentralWorkStatusBar />
+      {/* 当前任务常驻横幅（用户实测结症：正在执行什么必须一眼可见） */}
+      <CentralActiveTaskBanner />
       {/* 消息列表常挂载（空态由问候覆盖层遮盖）：避免「消息到达才挂载
           列表」的虚拟化首帧定位竞态——中枢无会话切换信号，定位只能走
           新消息路径，延迟挂载会让 scrollToIndex 早于测量完成而失效。 */}
@@ -103,9 +105,6 @@ export function CentralModeView() {
         inputHeight={messageInputHeight}
         onVisibilityChange={setInteractionVisible}
       />
-      {/* waiting_user 决策覆盖层（用户裁决：覆盖输入框防歧义——普通输入
-          框被遮蔽，答题即提交即恢复） */}
-      <CentralDecisionOverlay inputHeight={messageInputHeight} />
     </main>
   );
 }
