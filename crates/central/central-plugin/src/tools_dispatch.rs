@@ -269,7 +269,7 @@ impl CentralPlugin {
     }
 
     /// 内存登记 upsert（与持久化同语义：同会话更新，不堆积）。
-    pub(crate) fn upsert_memory_work_item(&self, record: WorkItemRecord) {
+    pub(crate) fn upsert_memory_work_item(&self, mut record: WorkItemRecord) {
         let mut items = self
             .work_items
             .lock()
@@ -278,6 +278,15 @@ impl CentralPlugin {
             .iter()
             .position(|item| item.session_id == record.session_id)
         {
+            // R29 P2：与磁盘 upsert 同语义；同一未终态工作保留 owner
+            // 原目标，list 不能展示引导/答复。新 work_id 使用新任务文本。
+            let existing = &items[idx];
+            if existing.work_id == record.work_id
+                && existing.outcome.is_none()
+                && existing.finished_at.is_none()
+            {
+                record.task = existing.task.clone();
+            }
             items.remove(idx);
         }
         items.push(record);

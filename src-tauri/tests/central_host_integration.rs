@@ -381,7 +381,10 @@ async fn host_rebuild_prefers_owner_over_steer_orphan() {
                     "worker_session_id": session,
                     "payload": {
                         "note": "n", "task": "CC2 任务", "dispatched_at": "2026-11-16 09:00:00",
-                        "reused_session": reused
+                        "reused_session": reused,
+                        // R29-3：旧异 id 引导须有明确 owner 关系；仅 reused
+                        // 无法区分终态后同会话启动的全新工作。
+                        "owner_work_id": if work == "work-steerX" { Some("work-ownerX") } else { None }
                     },
                     "created_at": "2026-11-16 10:00:00"
                 }
@@ -3261,4 +3264,329 @@ async fn central_two_messages_pair_input_send() {
         .with_state(|cs| begin_input_send(cs, sid, 1).map(|_| ()))
         .await
         .expect("释放后第二条 begin 应成功（is_sending 配对闭环）");
+}
+
+// R29 harness：用宿主已有的窄回调注入确定性 deliver；不启动模型/网络。
+fn r29_dispatch_app(
+    immediate: Option<bool>,
+) -> (
+    tauri::App<tauri::test::MockRuntime>,
+    std::sync::Arc<central_host::CentralHostState>,
+    std::path::PathBuf,
+) {
+    let app = tauri::test::mock_app();
+    let (base, ws) = central_test_app();
+    let slot = std::sync::Arc::new(std::sync::OnceLock::<
+        std::sync::Weak<central_host::CentralHostState>,
+    >::new());
+    let deliver_slot = slot.clone();
+    let state = std::sync::Arc::new(central_host::CentralHostState::new(
+        base.core_manager.clone(),
+        base.central.app_state.clone(),
+        base.central.app_handle.clone(),
+        std::sync::Arc::new(|_, _| {}),
+        std::sync::Arc::new(move |sid, _, _, _| {
+            let state = deliver_slot.get().unwrap().upgrade().unwrap();
+            Box::pin(async move {
+                if let Some(done) = immediate {
+                    state.execution_router.fire(
+                        &sid,
+                        done,
+                        "\n【需要用户决策】\n选择 A 还是 B？".into(),
+                    );
+                }
+                Ok(())
+            })
+        }),
+        std::sync::Arc::new(|_, _, _, _| Box::pin(async { Ok(true) })),
+    ));
+    slot.set(std::sync::Arc::downgrade(&state)).unwrap();
+    app.manage(state.clone());
+    (app, state, ws)
+}
+
+/// T1 / R29-1：重启 Interrupted 保留旧 work_id；插件沿用 id 的新 execution
+/// 不能被旧终态挡住 Running upsert / handle_work_terminal 的回报。
+#[tokio::test]
+async fn r29_t1_interrupted_redispatch_reports_new_execution() {
+    let (app, state, ws) = r29_dispatch_app(None);
+    let root = state.core_manager.storage_root();
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::write(
+        root.join("sessions/s-r29.json"),
+        serde_json::json!({
+            "id": "s-r29", "title": "w", "created_at": "2026-11-16 10:00:00",
+            "updated_at": "2026-11-16 10:00:00", "trust_mode": "supervised",
+            "cwd": ws.to_string_lossy(), "messages": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    central_state::upsert_work_item(
+        root,
+        &central_state::WorkItemRecord {
+            work_id: "work-r29".into(),
+            session_id: "s-r29".into(),
+            task: "原目标".into(),
+            reused_session: false,
+            model: None,
+            dispatched_at: "2026-11-16 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: vec![],
+            queued_at: None,
+            after_work_id: None,
+            cwd: Some(ws.to_string_lossy().into()),
+            execution_id: Some("exec-old".into()),
+        },
+    )
+    .unwrap();
+    let mut started = tiangong_central::WorkEvent::new(
+        "work-r29",
+        tiangong_central::event::WorkEventType::WorkItemStarted,
+    )
+    .with_execution("exec-old")
+    .with_worker_session("s-r29");
+    started.payload = serde_json::json!({"task": "原目标"});
+    central_host::central_events::record_event(root, started);
+    central_host::recover_central_work_state(app.handle());
+    assert_eq!(
+        state.central_work_status()[0].state,
+        central_state::WorkState::Interrupted
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let plugin = central_plugin::CentralPlugin::new(
+        ws.to_string_lossy().into(),
+        state.core_manager.clone(),
+        tx,
+        state.central_work_reports.clone(),
+    );
+    use tiangong_core::tools::extension::ToolOverrideHandler;
+    let call = tiangong_llm::tool::ToolCall {
+        id: "r29".into(),
+        name: "dispatch_work".into(),
+        arguments: serde_json::json!({"task": "继续原目标", "session_id": "s-r29"}),
+    };
+    let mut session = tiangong_core::session::Session::new("测试");
+    let result = plugin.handle(&call, &mut session, "test").await.unwrap();
+    assert!(result.ok, "{}", result.stderr);
+    let central_plugin::CentralPluginMessage::Dispatch(request) = rx.try_recv().unwrap() else {
+        panic!("expected dispatch")
+    };
+    assert_eq!(request.work_id, "work-r29");
+    assert_ne!(request.execution_id, "exec-old");
+    handle_central_dispatch(&state, app.handle(), request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.central_work_status()[0].state,
+        central_state::WorkState::Running
+    );
+    state.execution_router.fire("s-r29", true, String::new());
+    assert_eq!(
+        state.central_work_status()[0].state,
+        central_state::WorkState::ReportQueued
+    );
+    assert!(state
+        .take_central_work_reports()
+        .iter()
+        .any(|r| r.contains("后台工作完成")));
+    // 同执行重复 / 旧执行迟到均不得再产出回报。
+    handle_work_terminal(&state, &request, true, "duplicate");
+    let mut old = request;
+    old.execution_id = "exec-old".into();
+    handle_work_terminal(&state, &old, true, "late");
+    assert!(state.take_central_work_reports().is_empty());
+}
+
+/// T2 / R29-2：deliver 内 fire → attach 同步重放已推进状态；尾部不得
+/// 回退为 Running、重新加入 running，或清掉刚登记的 pending_question。
+#[tokio::test]
+async fn r29_t2_fire_before_attach_preserves_callback_state() {
+    for (done, expected) in [
+        (true, central_state::WorkState::ReportQueued),
+        (false, central_state::WorkState::WaitingUser),
+    ] {
+        let (app, state, _) = r29_dispatch_app(Some(done));
+        let mut entry = reg_entry(
+            "work-fast",
+            "s-fast",
+            central_state::WorkState::WaitingUser,
+            Some("exec-old"),
+        );
+        entry.pending_question = Some("旧问题".into());
+        state.central_work_registry.lock().unwrap().push(entry);
+        let request = dispatch_request("work-fast", "s-fast", "用户决定", true);
+        handle_central_dispatch(&state, app.handle(), request)
+            .await
+            .unwrap();
+        let entry = state.central_work_status().pop().unwrap();
+        assert_eq!(entry.state, expected, "attach 重放后的状态不得回退");
+        assert!(!state
+            .central_running_works
+            .lock()
+            .unwrap()
+            .contains("work-fast"));
+        if !done {
+            assert_eq!(entry.pending_question.as_deref(), Some("选择 A 还是 B？"));
+        }
+        let rebuilt = central_host::central_events::rebuild_registry_from_log(
+            state.core_manager.storage_root(),
+        )
+        .unwrap();
+        assert_eq!(
+            rebuilt[0].state,
+            if done {
+                central_state::WorkState::Completed
+            } else {
+                expected
+            }
+        );
+    }
+}
+
+/// T3 / R29-3：旧 owner A 完成后，新 work B 复用会话（Running），
+/// owner 优先不得依据 B 在途而错误移除 B、留下已完成 A。
+#[test]
+fn r29_t3_rebuild_keeps_new_running_work_over_old_owner() {
+    let root = tempfile::tempdir().unwrap();
+    use tiangong_central::{event::WorkEventType as E, WorkEvent};
+    for (work, exec, kind, reused) in [
+        ("A", "exec-A", E::WorkItemStarted, false),
+        ("A", "exec-A", E::WorkItemCompleted, false),
+        ("B", "exec-B", E::WorkItemStarted, true),
+    ] {
+        let mut event = WorkEvent::new(work, kind)
+            .with_execution(exec)
+            .with_worker_session("s-r29");
+        event.payload = serde_json::json!({"task": work, "reused_session": reused});
+        central_host::central_events::record_event(root.path(), event);
+    }
+    let registry = central_host::central_events::rebuild_registry_from_log(root.path()).unwrap();
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry[0].work_id, "B");
+    assert_eq!(registry[0].state, central_state::WorkState::Running);
+    assert_eq!(registry[0].execution_id.as_deref(), Some("exec-B"));
+}
+
+/// R29-9：征询从当前 execution 的 WaitingUser payload 重建，而不是
+/// Started payload；旧执行迟到问题不污染，cancel/完成后清理。
+#[test]
+fn r29_9_pending_question_rebuild_and_terminal_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    use tiangong_central::{event::WorkEventType as E, WorkEvent};
+    let record = |exec: &str, kind, question: Option<&str>| {
+        let mut e = WorkEvent::new("w-question", kind)
+            .with_execution(exec)
+            .with_worker_session("s-question");
+        e.payload = serde_json::json!({"task": "原目标", "pending_question": question});
+        central_host::central_events::record_event(root.path(), e);
+    };
+    record("A", E::WorkItemStarted, None);
+    record("A", E::WorkItemWaitingUser, Some("旧问题"));
+    record("B", E::WorkItemStarted, None);
+    record("B", E::WorkItemWaitingUser, Some("当前问题"));
+    record("A", E::WorkItemWaitingUser, Some("迟到旧问题"));
+    let rebuilt = || {
+        central_host::central_events::rebuild_registry_from_log(root.path())
+            .unwrap()
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(rebuilt().pending_question.as_deref(), Some("当前问题"));
+    assert_eq!(rebuilt().execution_id.as_deref(), Some("B"));
+    record("B", E::WorkItemCancelled, None);
+    assert!(rebuilt().pending_question.is_none());
+    record("C", E::WorkItemStarted, None);
+    record("C", E::WorkItemWaitingUser, Some("第三次问题"));
+    record("C", E::WorkItemCompleted, None);
+    assert!(rebuilt().pending_question.is_none());
+}
+
+/// R29-9：引用中出现标记不可抢占真正的独占协议行；提取与分类同源。
+#[test]
+fn r29_9_question_extraction_uses_standalone_protocol_line() {
+    let notice = "报告标题引用【需要用户决策】不是问题\n【需要用户决策】说明用法\n  【需要用户决策】  \r\n真正的问题：选 A 还是 B？";
+    assert_eq!(
+        central_host::reports::extract_pending_question(notice),
+        "真正的问题：选 A 还是 B？"
+    );
+    assert_eq!(
+        central_host::reports::extract_pending_question("说明【需要用户决策】没有协议行"),
+        "说明【需要用户决策】没有协议行"
+    );
+}
+
+/// R29-9：取消 WaitingUser 时立即清 pending_question（不等重启重建）。
+#[tokio::test]
+async fn r29_9_cancel_clears_pending_question() {
+    let (app, state, _) = r29_dispatch_app(None);
+    let mut entry = reg_entry(
+        "w-qcancel",
+        "s-qcancel",
+        central_state::WorkState::WaitingUser,
+        Some("exec-test"),
+    );
+    entry.pending_question = Some("是否继续？".into());
+    state.central_work_registry.lock().unwrap().push(entry);
+    central_host::dispatch::handle_central_control(
+        &state,
+        app.handle(),
+        central_plugin::CentralControlRequest {
+            work_id: "w-qcancel".into(),
+            session_id: "s-qcancel".into(),
+            action: "cancelled".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        state.central_work_status()[0].state,
+        central_state::WorkState::Cancelled
+    );
+    assert!(state.central_work_status()[0].pending_question.is_none());
+}
+
+/// R29-4 接线边界：真 steer 并入不产生新 execution 的 Started，否则
+/// 投影会把 owner 的完成当迟到事件丢弃（当前执行必须保持 owner）。
+#[tokio::test]
+async fn r29_4_steer_log_keeps_active_owner_execution() {
+    let app = tauri::test::mock_app();
+    let (state, ws) = central_test_app();
+    std::fs::write(
+        state.core_manager.storage_root().join("models.json"),
+        serde_json::json!({
+            "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+            "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+            "routing": {"chat": "k3"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    app.manage(state.central.clone());
+    app.manage(state);
+    let state = state_of(app.handle());
+    let mut owner = dispatch_request("w-steer-log", "s-steer-log", "原目标", false);
+    owner.cwd = Some(ws.to_string_lossy().into());
+    handle_central_dispatch(&state.central, app.handle(), owner.clone())
+        .await
+        .unwrap();
+    let mut steer = owner.clone();
+    steer.execution_id = "exec-steer-message".into();
+    steer.reused_session = true;
+    steer.task = "补充要求".into();
+    handle_central_dispatch(&state.central, app.handle(), steer)
+        .await
+        .unwrap();
+    state
+        .central
+        .execution_router
+        .fire(&owner.session_id, true, String::new());
+    let rebuilt =
+        central_host::central_events::rebuild_registry_from_log(state.core_manager.storage_root())
+            .unwrap();
+    assert_eq!(rebuilt[0].state, central_state::WorkState::Completed);
+    assert_eq!(
+        rebuilt[0].execution_id.as_deref(),
+        Some(owner.execution_id.as_str())
+    );
 }

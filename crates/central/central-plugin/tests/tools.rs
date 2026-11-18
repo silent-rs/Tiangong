@@ -1275,6 +1275,13 @@ fn dispatch_work_reused_session_keeps_registration_clean() {
     let s0_entries: Vec<_> = items.iter().filter(|i| i.session_id == "s0").collect();
     assert_eq!(s0_entries.len(), 1, "同会话登记不因复用派发翻倍");
     assert_eq!(s0_entries[0].work_id, owner_id);
+    // R29 P2/F8：work list 读内存，不应显示刚发的引导/答复文本；
+    // 与磁盘 owner task 必须一致（只测磁盘会漏掉这一缺陷）。
+    assert_eq!(s0_entries[0].task, "原工作");
+    let listed = call_tool(&plugin, "work", serde_json::json!({"action": "list"}));
+    assert!(listed.ok);
+    assert!(listed.stdout.contains("原工作"), "{}", listed.stdout);
+    assert!(!listed.stdout.contains("补充要求"), "{}", listed.stdout);
     // work status(owner) 可达：不再报「未找到工作」
     let status = call_tool(
         &plugin,

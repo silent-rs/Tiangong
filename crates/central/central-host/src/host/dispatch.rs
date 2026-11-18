@@ -185,6 +185,9 @@ pub async fn handle_central_control<R: tauri::Runtime>(
                         "paused" => central_state::WorkState::Paused,
                         _ => central_state::WorkState::Running,
                     };
+                    if control.action == "cancelled" {
+                        entry.pending_question = None;
+                    }
                 }
             }
             if control.action == "cancelled" {
@@ -625,9 +628,7 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             state.execution_router.cancel(&sid, &request.execution_id);
             return Err(error);
         }
-        if !steer_merged_into_running {
-            attach_work_finished_callback(state, app, (*merged_work).clone());
-        }
+        // 成功登记后统一 attach：同步重放不能先于 Started/Running。
     } else {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
@@ -676,7 +677,7 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             state.execution_router.cancel(&sid, &request.execution_id);
             return Err(error);
         }
-        attach_work_finished_callback(state, app, (*merged_work).clone());
+        // 回调统一在成功登记之后挂载（fire 已由 router 暂存）。
     }
     tracing::info!(
         execution_id = %request.execution_id,
@@ -687,6 +688,29 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
         reused_session = request.reused_session,
         "中枢后台工作已派发"
     );
+    // R29-4：引导并入当前 turn，不是新执行。只记录当前 execution 的
+    // Progress；若写新 Started，严格投影将 owner 终态误当迟到事实丢弃。
+    if steer_merged_into_running {
+        if let Some(active_execution) = state.execution_router.active_execution(&sid) {
+            if let Err(error) = crate::set_work_item_execution(
+                state.core_manager.storage_root(),
+                &sid,
+                &active_execution,
+            ) {
+                tracing::warn!(%error, "引导并入的执行归属落盘失败");
+            }
+            crate::host::central_events::record_for(
+                state,
+                &merged_work.work_id,
+                &active_execution,
+                &sid,
+                tiangong_central::event::WorkEventType::WorkItemProgress,
+                "补充指令并入当前执行（归属保持 owner）",
+            );
+        }
+        emit_central_work_updated_state(state);
+        return Ok(());
+    }
     // R5 事件日志（唯一事实源）：派发事实入日志，payload 携带登记字段
     // （registry 投影重建的数据源——重启后从事件重放，不再依赖快照）。
     {
@@ -733,16 +757,6 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             let _ = core.set_title(title, false);
         }
     }
-    // 登记在执行集合与状态登记（running 按 work_id），并通知前端刷新
-    {
-        let mut running = state
-            .central_running_works
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if !steer_merged_into_running {
-            running.insert(merged_work.work_id.clone());
-        }
-    }
     // 状态登记按**会话维度 upsert**（用户实测：同会话重派后旧 interrupted
     // 条目残留、多轮派发显示多条）——一个工作会话在徽章中始终是一条，
     // 重派/引导覆盖更新（work_id/task/时间取最新），中断旧条目自然消失。
@@ -753,15 +767,17 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
                 .central_work_registry
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            // G2（R28-2.4）：fire-before-attach 缓冲下立即完成的 turn 可
-            // 能在本 upsert 前已落终态——迟到的 Running upsert 不得覆盖
-            // 终态（否则状态机被拉回 running 永久残留）。
-            let already_terminal = registry.iter().rev().any(|entry| {
+            // R29-1/2：只保护本次 execution 已推进的状态，旧 Interrupted
+            // 不阻止重派；WaitingUser/ReportQueued 也不可被 Running 回退。
+            let already_advanced = registry.iter().rev().any(|entry| {
                 entry.session_id == request.session_id
-                    && entry.work_id == request.work_id
-                    && entry.state.is_terminal()
+                    && entry.execution_id.as_deref() == Some(&request.execution_id)
+                    && !matches!(
+                        entry.state,
+                        central_state::WorkState::Running | central_state::WorkState::Queued
+                    )
             });
-            if !already_terminal {
+            if !already_advanced {
                 // G1：恢复场景登记显示 owner 原目标（不被答复文本覆盖）
                 let display_task = registry_task.as_deref().unwrap_or(&request.task);
                 central_state::upsert_registry_entry(
@@ -802,6 +818,33 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             "派发执行（新任务）".to_string()
         },
     );
+    // R29-2：登记与 Started 事实先于 attach。attach 可同步重放 fire，
+    // 因此 running 必须先登记；重放之后不再有 Running upsert/集合 insert。
+    // 与终态路径同锁序（running → registry），保护已推进/被接管的执行。
+    if !steer_merged_into_running {
+        let mut running = state
+            .central_running_works
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let registry = state
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if registry
+            .iter()
+            .rev()
+            .find(|entry| entry.session_id == sid)
+            .is_some_and(|entry| {
+                entry.execution_id.as_deref() == Some(&request.execution_id)
+                    && entry.state == central_state::WorkState::Running
+            })
+        {
+            running.insert(merged_work.work_id.clone());
+        }
+        drop(registry);
+        drop(running);
+        attach_work_finished_callback(state, app, (*merged_work).clone());
+    }
     emit_central_work_updated_state(state);
     Ok(())
 }
@@ -839,7 +882,9 @@ pub fn handle_work_terminal(
 ) {
     // 归属过滤（R1 升级）：路由器已保证只有活跃执行的回调被触发；此处
     // 为防御迟到路由再做执行归属校验——registry 当前条目若已是**另一
-    // 个在途执行**（同会话新派发/恢复已接管），本回调属旧执行，跳过。
+    // 个执行**（同会话新派发/恢复已接管，即使新执行也已终态），旧回调
+    // 必须跳过。成功派发先登记本 execution，再 attach，因此旧 Interrupted
+    // 不会在此误挡新执行，旧迟到回调也不能覆盖新执行结果。
     // 按 execution_id 比对取代旧的 work_id 比对：同 work 重派是新执行，
     // 旧回调同样必须让位。
     {
@@ -852,14 +897,11 @@ pub fn handle_work_terminal(
             .rev()
             .find(|entry| entry.session_id == work.session_id);
         let displaced_by_newer_execution = match current {
-            Some(entry) => {
-                let execution_differs = match entry.execution_id.as_deref() {
-                    // 登记缺执行归属（R0 前旧数据）：回退 work_id 比对语义
-                    None => entry.work_id != work.work_id,
-                    Some(current_exec) => current_exec != work.execution_id.as_str(),
-                };
-                execution_differs && entry.state.is_inflight()
-            }
+            Some(entry) => match entry.execution_id.as_deref() {
+                // 登记缺执行归属（R0 前旧数据）：回退 work_id 比对语义
+                None => entry.work_id != work.work_id,
+                Some(current_exec) => current_exec != work.execution_id.as_str(),
+            },
             None => false,
         };
         if displaced_by_newer_execution {
@@ -871,11 +913,8 @@ pub fn handle_work_terminal(
             return;
         }
     }
-    // 一次性守卫（review S6→第十三轮 P1-1 修正）：改为状态驱动幂等——
-    // 该 work 在 registry 中仍在途（running/waiting_user）才处理终态；
-    // 已终态（report_queued/failed/completed）说明已处理过，跳过。
-    // 集合记忆版会误杀同 work_id 的第二个 turn（waiting_user 恢复、
-    // pause→resume 都复用 work_id），导致回报丢失 + running 永久残留。
+    // 登记已由上一守卫确认本 execution；一次性状态保护同执行重复回调，
+    // 不以旧 work_id 的终态误杀新 turn（恢复/重派都生成新 execution）。
     {
         let registry = state
             .central_work_registry
@@ -886,7 +925,13 @@ pub fn handle_work_terminal(
             .rev()
             .find(|entry| entry.work_id == work.work_id);
         match self_entry {
-            Some(entry) if !entry.state.is_inflight() => {
+            Some(entry)
+                if !entry.state.is_inflight()
+                    && entry
+                        .execution_id
+                        .as_deref()
+                        .is_none_or(|exec| exec == work.execution_id) =>
+            {
                 tracing::warn!(
                     work_id = %work.work_id,
                     state = entry.state.as_str(),

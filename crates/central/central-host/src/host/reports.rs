@@ -13,10 +13,18 @@ use crate::state_of_central;
 ///（含背景与选项），上限 480 字（与前端预览长度对齐）；无标记行时
 /// 取全文头部。纯函数可测。
 pub fn extract_pending_question(notice: &str) -> String {
-    let body = if let Some(pos) = notice.find(central_state::USER_DECISION_MARKER) {
-        &notice[pos + central_state::USER_DECISION_MARKER.len()..]
-    } else {
-        notice
+    let mut lines = notice.split_inclusive('\n');
+    let mut consumed = 0;
+    let body = loop {
+        match lines.next() {
+            Some(line) => {
+                consumed += line.len();
+                if line.trim() == central_state::USER_DECISION_MARKER {
+                    break &notice[consumed..];
+                }
+            }
+            None => break notice,
+        }
     };
     let trimmed = body.trim_start_matches(['\n', ' ', '：', ':']).trim();
     trimmed.chars().take(480).collect()

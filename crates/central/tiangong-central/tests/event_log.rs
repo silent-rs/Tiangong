@@ -217,7 +217,7 @@ fn lenient_read_skips_corrupt_lines_and_reports() {
     let path = dir.path().join("events.jsonl");
     // 文件不存在 → 空且 0 跳过
     let missing = EventLog::open(&path).unwrap();
-    let (empty_entries, empty_skipped) = missing.load_all_lenient();
+    let (empty_entries, empty_skipped) = missing.load_all_lenient().unwrap();
     assert!(empty_entries.is_empty());
     assert_eq!(empty_skipped, 0);
     // 1 好 + 1 坏 + 空行 + 1 好 → 2 条 + 1 跳过
@@ -243,7 +243,7 @@ fn lenient_read_skips_corrupt_lines_and_reports() {
     )
     .unwrap();
     let log = EventLog::open(&path).unwrap();
-    let (entries, skipped) = log.load_all_lenient();
+    let (entries, skipped) = log.load_all_lenient().unwrap();
     assert_eq!(entries.len(), 2, "幸存事件为准");
     assert_eq!(skipped, 1, "坏行计入 skipped");
     assert_eq!(entries[0].offset, 0);
@@ -296,12 +296,10 @@ fn project_work_state_maps_event_kinds() {
 }
 
 /// 跨实例 append 的 offset 连续性（二十一轮 review CC3 注释诚实化）：
-/// 同进程内每路径共享 cache（Z5 注册表），第二实例命中共享 cache 不
-/// 重扫——本测试锁定的是「无论实例边界，offset 不与既有行冲突」；
-/// loaded=false 的真实重扫分支由每个**新路径**日志的首次 append
-/// 覆盖（见 append_assigns_increasing_offsets / duplicate_* 系列，
-/// 均在新 tempdir 路径上首 append）。跨进程场景不适用（单实例桌面
-/// 应用，events.jsonl 无跨进程并发写）。
+/// 同进程内每路径共享 cache（Z5 注册表），第二实例命中共享 cache；
+/// 本测试锁定跨实例 offset 连续，不声称覆盖冷缓存重扫或跨进程。
+/// 冷缓存最大值见 r29_7_cold_offset_uses_maximum_not_last_entry；
+/// 跨进程幂等见 multiprocess_duplicate_id_is_idempotent（磁盘锁内查证）。
 #[test]
 fn second_instance_append_keeps_offsets_continuous() {
     let dir = tempfile::tempdir().unwrap();
@@ -310,8 +308,7 @@ fn second_instance_append_keeps_offsets_continuous() {
     first
         .append(event("w-x1", WorkEventType::WorkItemStarted))
         .unwrap();
-    // 新实例（独立 cache）：首次 append 必须先读回文件补 offset，
-    // 否则 offset 从 0 重写会与既有行冲突
+    // 新实例共享路径 cache；锁内磁盘实况与缓存共同保证续写不冲突。
     let second = EventLog::open(&path).unwrap();
     second
         .append(event("w-x2", WorkEventType::WorkItemStarted))
@@ -464,7 +461,7 @@ fn rotation_lifecycle_keeps_current_file_and_offset() {
     assert!(archived.exists(), "归档应存在");
     let (entries, _) = {
         let check = EventLog::open(&path).unwrap();
-        check.load_all_lenient()
+        check.load_all_lenient().unwrap()
     };
     let ids: Vec<&str> = entries.iter().map(|e| e.event.id.as_str()).collect();
     assert!(ids.contains(&"ev-rot-1"), "归档事实可读：{ids:?}");
@@ -499,7 +496,7 @@ fn lenient_read_includes_archived_history() {
     std::fs::rename(&path, &archived).unwrap();
     std::fs::write(&path, b"").unwrap();
     let reopened = EventLog::open(&path).unwrap();
-    let (entries, skipped) = reopened.load_all_lenient();
+    let (entries, skipped) = reopened.load_all_lenient().unwrap();
     assert_eq!(skipped, 0);
     assert_eq!(
         entries.len(),
@@ -552,7 +549,7 @@ fn cold_open_keeps_events_after_midfile_corruption() {
     std::fs::write(&path, format!("{good1}\n{bad}\n{good2}\n{good3}\n")).unwrap();
     // 冷启动 open：修复只允许截「末尾写一半」，中段坏行保留原文件
     let reopened = EventLog::open(&path).unwrap();
-    let (entries, skipped) = reopened.load_all_lenient();
+    let (entries, skipped) = reopened.load_all_lenient().unwrap();
     assert_eq!(
         entries.len(),
         3,
@@ -651,5 +648,128 @@ fn projection_new_execution_after_terminal_not_absorbed() {
         states2.get("w-re2"),
         Some(&WorkItemStatus::Completed),
         "同 execution 迟到事件仍被终态吸收"
+    );
+}
+
+/// T4 / R29-4：同 work 的 A 完成 → B Started 后，A 迟到终态/征询/
+/// progress 仍可留时间线，但不能覆盖当前有效 execution B 的状态。
+#[test]
+fn r29_t4_late_events_do_not_pollute_current_execution() {
+    use WorkEventType as E;
+    use tiangong_central::status::WorkItemStatus as S;
+    for late in [
+        E::WorkItemCompleted,
+        E::WorkItemWaitingUser,
+        E::WorkItemProgress,
+        E::WorkItemFailed,
+        E::WorkItemCancelled,
+    ] {
+        let (_dir, log) = temp_log();
+        for (exec, kind) in [
+            ("A", E::WorkItemStarted),
+            ("A", E::WorkItemCompleted),
+            ("B", E::WorkItemStarted),
+            ("A", late),
+        ] {
+            log.append(event("w-r29", kind).with_execution(exec))
+                .unwrap();
+        }
+        let entries = log.load_all().unwrap();
+        assert_eq!(entries.len(), 4, "迟到事实仍留存");
+        assert_eq!(
+            project_work_state(&entries)["w-r29"],
+            S::Running,
+            "迟到 {late:?} 不得改写 B"
+        );
+    }
+}
+
+/// R29-5：payload 的同名 id（含转义字符）不是 event.id；真实幂等
+/// 查证也须支持 pretty JSON，而非只匹配紧凑格式的子串。
+#[test]
+fn r29_5_idempotency_compares_real_event_id() {
+    let (dir, log) = temp_log();
+    let mut second = event("w-id", WorkEventType::WorkItemProgress);
+    second.id = "target-id".into();
+    let mut first = event("w-id", WorkEventType::WorkItemStarted);
+    first.payload = serde_json::json!({"nested": {"id": second.id}});
+    assert_eq!(log.append(first).unwrap(), 1);
+    assert_eq!(log.append(second.clone()).unwrap(), 2);
+    assert_eq!(log.append(second).unwrap(), 2);
+    let mut escaped = event("w-id", WorkEventType::WorkItemProgress);
+    escaped.id = "escaped-\"id\\中文".into();
+    assert_eq!(log.append(escaped.clone()).unwrap(), 3);
+    assert_eq!(log.append(escaped).unwrap(), 3);
+    // 修改成合法但有空白的单行 JSON，清缓存模拟进程冷启动。
+    let path = dir.path().join("events.jsonl");
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"id\":", "\"id\" : ");
+    std::fs::write(&path, text).unwrap();
+    EventLog::force_repair_on_next_open(&path);
+    let reopened = EventLog::open(&path).unwrap();
+    let stored = reopened.load_all().unwrap();
+    assert_eq!(reopened.append(stored[1].event.clone()).unwrap(), 2);
+    assert_eq!(reopened.load_all().unwrap().len(), 3);
+}
+
+/// R29-6：非法 UTF-8 必须计为坏行并继续，归档+当前都不能静默停读；
+/// 冷重建/追加也不得因 id 扫描遇该坏行而失败。
+#[test]
+fn r29_6_invalid_utf8_is_counted_and_read_continues() {
+    let (dir, log) = temp_log();
+    for _ in 0..3 {
+        log.append(event("w-utf8", WorkEventType::WorkItemProgress))
+            .unwrap();
+    }
+    let path = dir.path().join("events.jsonl");
+    let lines = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<_> = lines.lines().collect();
+    let mut archive = format!("{}\n", lines[0]).into_bytes();
+    archive.extend_from_slice(b"\xff\xfe\n");
+    archive.extend_from_slice(format!("{}\n", lines[1]).as_bytes());
+    std::fs::write(path.with_extension("jsonl.1"), archive).unwrap();
+    let mut current = b"\xff\n".to_vec();
+    current.extend_from_slice(format!("{}\n", lines[2]).as_bytes());
+    std::fs::write(&path, current).unwrap();
+    EventLog::force_repair_on_next_open(&path);
+    let reopened = EventLog::open(&path).unwrap();
+    let (entries, skipped) = reopened.load_all_lenient().unwrap();
+    assert_eq!(skipped, 2);
+    assert_eq!(
+        entries.iter().map(|e| e.offset).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(reopened.load_all().is_err(), "严格读取仍报损坏");
+    assert_eq!(
+        reopened
+            .append(event("w-utf8", WorkEventType::WorkItemCompleted))
+            .unwrap(),
+        4
+    );
+}
+
+/// R29-7：冷缓存基准取所有幸存 entries 的最大 offset，不能只取末条；
+/// fixture 非单调，归档最大值也大于当前末行。
+#[test]
+fn r29_7_cold_offset_uses_maximum_not_last_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let line = |offset| {
+        serde_json::to_string(&LoggedEvent {
+            offset,
+            schema_version: CENTRAL_CONTRACT_SCHEMA_VERSION,
+            event: event("w-max", WorkEventType::WorkItemProgress),
+        })
+        .unwrap()
+            + "\n"
+    };
+    std::fs::write(path.with_extension("jsonl.1"), line(90) + &line(3)).unwrap();
+    std::fs::write(&path, line(15) + &line(2)).unwrap();
+    let log = EventLog::open(&path).unwrap();
+    assert_eq!(
+        log.append(event("w-max", WorkEventType::WorkItemCompleted))
+            .unwrap(),
+        91
     );
 }

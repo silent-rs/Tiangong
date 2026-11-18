@@ -240,8 +240,11 @@ pub fn rebuild_registry_from_log(
 ) -> Option<Vec<crate::CentralWorkStatus>> {
     let log = EventLog::open(&event_log_path(storage_root)).ok()?;
     // R5 对账：宽松读——中段损坏行跳过并 warn（丢失可观测），恢复以
-    // 幸存事件为准；open 失败（含尾部修复失败）回退快照路径。
-    let (entries, _skipped) = log.load_all_lenient();
+    // 幸存事件为准；open 失败（含尾部修复失败）或读取锁失败回退快照。
+    let (entries, _skipped) = log
+        .load_all_lenient()
+        .inspect_err(|error| tracing::warn!(%error, "读取中枢日志失败，回退工作快照"))
+        .ok()?;
     if entries.is_empty() {
         return None;
     }
@@ -254,13 +257,9 @@ pub fn rebuild_registry_from_log(
             continue;
         }
         let work_id = &logged.event.work_item_id;
-        // 会话维度 upsert 语义：同会话保留最后一次 started（倒序遍历，
-        // 首条命中即最新执行）。**归属修正（二十一轮 review CC2）**：已
-        // 命中的条目若是引导派发（reused_session=true），而当前遍历到的
-        // 更早 started 是 owner（reused_session=false）——引导并入 owner
-        // （Z2），owner 优先：移除引导孤儿条目，改留 owner。否则引导
-        // 孤儿会在重启迁移后变成「已中断的假任务（可重派）」——真实
-        // 工作条目消失且 control(owner) 失效。
+        // 会话维度保留最新 Started；只有显式 owner_work_id 或同 execution
+        // 能证明异 id 引导关系时，才让较早 owner 接管。仅 reused=true
+        // 不足以证明引导（可能是上一工作终态后复用会话做新工作）。
         let current_session = logged.event.worker_session_id.as_deref().unwrap_or("");
         let current_is_owner = !payload_is_reused(logged);
         if let Some(position) = registry
@@ -269,12 +268,32 @@ pub fn rebuild_registry_from_log(
         {
             let existing = &registry[position];
             let existing_is_owner = !existing.reused_session;
-            // S1（R28-7，探针 PR-04）：owner 优先仅在既有条目**未终态**
-            // （引导并入 owner 语义）时成立；既有已终态说明该会话的
-            // 新工作已接续（终态后复用分配新 id）——保留新条目，旧
-            // owner 不得顶掉（否则新执行显示旧终态）。
-            let existing_inflight = !existing.state.is_terminal();
-            if existing_is_owner || !current_is_owner || !existing_inflight {
+            // R29-3：最新 Started 默认拥有会话。仅显式 owner 关联或共用
+            // 同一 execution 才证明是引导延续；reused/在途都不能证明归属。
+            // 同 work 的新执行保留最新字段，不能退回旧 owner execution。
+            let linked_steer = entries
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.event.event_type == E::WorkItemStarted
+                        && entry.event.work_item_id == existing.work_id
+                        && entry.event.worker_session_id.as_deref() == Some(current_session)
+                })
+                .is_some_and(|entry| {
+                    entry
+                        .event
+                        .payload
+                        .get("owner_work_id")
+                        .and_then(|v| v.as_str())
+                        == Some(work_id)
+                        || (entry.event.execution_id.is_some()
+                            && entry.event.execution_id == logged.event.execution_id)
+                });
+            if existing.work_id == *work_id
+                || existing_is_owner
+                || !current_is_owner
+                || !linked_steer
+            {
                 continue;
             }
             registry.remove(position);
@@ -317,8 +336,15 @@ pub fn rebuild_registry_from_log(
             // G3：投影重建时若终态为 waiting_user，从事件 payload 恢复
             // pending_question（标记行后的问题主体，重启不丢待决问题）
             pending_question: if *status == tiangong_central::status::WorkItemStatus::WaitingUser {
-                payload
-                    .get("pending_question")
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| {
+                        entry.event.work_item_id == *work_id
+                            && entry.event.execution_id == logged.event.execution_id
+                            && entry.event.event_type == E::WorkItemWaitingUser
+                    })
+                    .and_then(|entry| entry.event.payload.get("pending_question"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             } else {

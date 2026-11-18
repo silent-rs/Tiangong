@@ -23,6 +23,9 @@ use anyhow::{Context, Result};
 
 use crate::event::WorkEvent;
 use crate::execution::CENTRAL_CONTRACT_SCHEMA_VERSION;
+#[cfg(test)]
+#[path = "event_log_tests.rs"]
+mod tests;
 
 /// 日志行：事件 + 存储元数据。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,16 +37,10 @@ pub struct LoggedEvent {
     pub event: WorkEvent,
 }
 
-/// 跨实例共享状态（Z5）：生产代码每次 `EventLog::open` 都是新实例——
-/// 实例级锁无互斥（两实例并发 append 可能交错/offset 重复）。按路径
-/// 注册表共享锁与缓存：
-/// - `append_lock`：同路径全部实例串行；
-/// - `cache`：`last_offset` + 已见事件 id（append 幂等判定免去全量读）。
+/// 同进程按路径共享 append 缓存；生命周期互斥由稳定锁文件提供。
 struct LogShared {
-    append_lock: Mutex<()>,
     cache: Mutex<LogCache>,
 }
-
 #[derive(Default)]
 struct LogCache {
     last_offset: u64,
@@ -91,7 +88,6 @@ impl EventLog {
                 .entry(base.to_path_buf())
                 .or_insert_with(|| {
                     std::sync::Arc::new(LogShared {
-                        append_lock: Mutex::new(()),
                         cache: Mutex::new(LogCache::default()),
                     })
                 })
@@ -107,15 +103,7 @@ impl EventLog {
         // 的 open 不得把残行判为崩溃残片并截断，丢失刚写入的事件）；
         // 每路径每进程仅首次 open 修复一次（性能优化保持）。
         {
-            let lock_path = log.lock_file_path();
-            let lock_file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .with_context(|| format!("创建事件日志锁文件失败: {}", lock_path.display()))?;
-            let _file_lock = FileLock::acquire(&lock_file)?;
+            let _lifecycle_lock = log.lock_lifecycle(true)?;
             let need_repair = {
                 let mut cache = log
                     .shared
@@ -235,19 +223,11 @@ impl EventLog {
     ///
     /// L2/L5（R28-4 + 跨进程幂等，第 28 轮 review）：「末行读取 + offset
     /// 分配 + 轮转判定 + 写入 + fsync」整段收进**跨 rename 稳定的锁文件**
-    ///（同目录 `.jsonl.lock`，unix flock）——此前锁在当前日志 inode 上，
+    ///（同目录 `.jsonl.lock`）——此前锁在当前日志 inode 上，
     /// 轮转 rename 后旧 fd 持锁、新文件无锁，跨进程编号回退；幂等在锁内
     /// 对磁盘做 id 查证（cache 仅进程内加速，不含其他进程写入的事实）。
     pub fn append(&self, event: WorkEvent) -> Result<u64> {
-        let lock_path = self.lock_file_path();
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .with_context(|| format!("打开事件日志锁文件失败: {}", lock_path.display()))?;
-        let _file_lock = FileLock::acquire(&lock_file)?;
+        let _lifecycle_lock = self.lock_lifecycle(true)?;
         // 确保当前文件存在（append+create 幂等）——后续 id 查证与冷重建
         // 的行级读取依赖文件已创建（新建日志的首次 append）。
         let mut file = std::fs::OpenOptions::new()
@@ -277,15 +257,7 @@ impl EventLog {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !cache.loaded {
-                let mut entries = Vec::new();
-                let mut skipped = 0usize;
-                let archived = self.path.with_extension("jsonl.1");
-                if archived.exists() {
-                    skipped += Self::parse_lenient_into(&archived, &mut entries);
-                }
-                if self.path.exists() {
-                    skipped += Self::parse_lenient_into(&self.path, &mut entries);
-                }
+                let (entries, skipped) = self.load_all_lenient_locked();
                 if skipped > 0 {
                     tracing::warn!(
                         path = %self.path.display(),
@@ -293,7 +265,11 @@ impl EventLog {
                         "冷重建跳过损坏行（基准取幸存事件最大 offset）"
                     );
                 }
-                cache.last_offset = entries.last().map(|logged| logged.offset).unwrap_or(0);
+                cache.last_offset = entries
+                    .iter()
+                    .map(|logged| logged.offset)
+                    .max()
+                    .unwrap_or(0);
                 cache.seen_ids = entries
                     .iter()
                     .map(|logged| logged.event.id.clone())
@@ -302,7 +278,7 @@ impl EventLog {
             }
             if cache.seen_ids.contains(&event.id) {
                 // 幂等：已见事件 id → 返回既有 offset（一次查询）
-                let entries = self.load_all_inner()?;
+                let entries = self.load_all_locked()?;
                 if let Some(existing) = entries.iter().find(|logged| logged.event.id == event.id) {
                     return Ok(existing.offset);
                 }
@@ -370,6 +346,35 @@ impl EventLog {
         Ok(offset)
     }
 
+    /// R29-8：读共享、写/修复独占。先锁稳定文件，再访问日志代际或 cache；
+    /// 已持锁的代码不得调用公开读入口。每次独立 open，File drop 即解锁。
+    /// 标准库在 Unix 使用原有 flock 协议，在 Windows 使用 LockFileEx。
+    fn lock_lifecycle(&self, exclusive: bool) -> Result<std::fs::File> {
+        let path = self.lock_file_path();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("打开事件日志锁文件失败: {}", path.display()))?;
+        loop {
+            let result = if exclusive {
+                file.lock()
+            } else {
+                file.lock_shared()
+            };
+            match result {
+                Ok(()) => return Ok(file),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("获取事件日志生命周期锁失败: {}", path.display())
+                    });
+                }
+            }
+        }
+    }
     /// 锁文件路径：与日志同目录的 `<name>.jsonl.lock`——跨 rename 稳定
     ///（L2：锁当前 inode 会在轮转后分裂，新文件/新进程失去互斥）。
     fn lock_file_path(&self) -> PathBuf {
@@ -384,36 +389,30 @@ impl EventLog {
 
     /// 按事件 id 查既有 offset（归档 + 当前，行级扫描；未找到 None）。
     fn find_offset_by_event_id(&self, event_id: &str) -> Result<Option<u64>> {
-        let needle = format!("\"id\":\"{event_id}\"");
         let archived = self.path.with_extension("jsonl.1");
         if archived.exists()
-            && let Some(offset) = Self::scan_offset_where(&archived, &needle)?
+            && let Some(offset) = Self::scan_offset_by_event_id(&archived, event_id)?
         {
             return Ok(Some(offset));
         }
         if self.path.exists() {
-            return Self::scan_offset_where(&self.path, &needle);
+            return Self::scan_offset_by_event_id(&self.path, event_id);
         }
         Ok(None)
     }
 
-    /// 逐行扫描：行含 `needle` 子串时解析该行 offset（行级顺序读，
-    /// 不整体载入内存——大日志下成本可控且仅在低频 append 路径）。
-    fn scan_offset_where(path: &Path, needle: &str) -> Result<Option<u64>> {
+    /// R29-5/6：按字节行解析真实 event.id（支持转义/空白），不匹配
+    /// payload 同名 id；损坏/非法 UTF-8 行跳过，I/O 失败显式返回。
+    fn scan_offset_by_event_id(path: &Path, event_id: &str) -> Result<Option<u64>> {
         let file = std::fs::File::open(path)
             .with_context(|| format!("打开事件日志失败: {}", path.display()))?;
         let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
+        for line in reader.split(b'\n') {
             let line = line.with_context(|| "读取事件日志行失败")?;
-            if !line.contains(needle) {
-                continue;
-            }
-            let trimmed = line.trim();
-            if let Some(offset) = serde_json::from_str::<serde_json::Value>(trimmed)
-                .ok()
-                .and_then(|value| value.get("offset").and_then(|v| v.as_u64()))
+            if let Ok(logged) = serde_json::from_slice::<LoggedEvent>(&line)
+                && logged.event.id == event_id
             {
-                return Ok(Some(offset));
+                return Ok(Some(logged.offset));
             }
         }
         Ok(None)
@@ -475,14 +474,10 @@ impl EventLog {
         }
     }
 
-    /// 读取全部完整事件（投影/对账数据源）。
+    /// 在同一生命周期锁内读取归档与当前事件（投影/对账数据源）。
     pub fn load_all(&self) -> Result<Vec<LoggedEvent>> {
-        let _guard = self
-            .shared
-            .append_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.load_all_inner()
+        let _lifecycle_lock = self.lock_lifecycle(false)?;
+        self.load_all_locked()
     }
 
     /// 宽松读取（R5 recover 对账）：跳过中段损坏行并记 warn 计数，
@@ -492,27 +487,31 @@ impl EventLog {
     /// L3（R28-5，探针 PR-06）：与严格读取共享文件范围（归档 `.1` 在前、
     /// 当前在后）。此前只读当前文件，轮转后恢复投影丢失全部归档事实
     /// （归档 3 条、当前空时返回 0 条）。
-    pub fn load_all_lenient(&self) -> (Vec<LoggedEvent>, usize) {
-        let _guard = self
-            .shared
-            .append_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut entries = Vec::new();
-        let mut skipped = 0usize;
-        let archived = self.path.with_extension("jsonl.1");
-        if archived.exists() {
-            skipped += Self::parse_lenient_into(&archived, &mut entries);
-        }
-        if self.path.exists() {
-            skipped += Self::parse_lenient_into(&self.path, &mut entries);
-        }
+    /// 取锁失败时返回错误，不以无锁读取或空日志掩盖失败。
+    pub fn load_all_lenient(&self) -> Result<(Vec<LoggedEvent>, usize)> {
+        let _lifecycle_lock = self.lock_lifecycle(false)?;
+        let (entries, skipped) = self.load_all_lenient_locked();
         if skipped > 0 {
             tracing::warn!(
                 path = %self.path.display(),
                 skipped,
                 "事件日志存在损坏行（已跳过；事实源不完整，恢复以幸存事件为准）"
             );
+        }
+        Ok((entries, skipped))
+    }
+    /// 调用方已持生命周期锁（公开读或 append 的冷缓存重建）。
+    fn load_all_lenient_locked(&self) -> (Vec<LoggedEvent>, usize) {
+        let mut entries = Vec::new();
+        let mut skipped = 0usize;
+        let archived = self.path.with_extension("jsonl.1");
+        if archived.exists() {
+            skipped += Self::parse_lenient_into(&archived, &mut entries);
+        }
+        #[cfg(test)]
+        tests::after_archive();
+        if self.path.exists() {
+            skipped += Self::parse_lenient_into(&self.path, &mut entries);
         }
         (entries, skipped)
     }
@@ -524,20 +523,26 @@ impl EventLog {
         };
         let reader = std::io::BufReader::new(file);
         let mut skipped = 0usize;
-        for line in reader.lines().map_while(Result::ok) {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<LoggedEvent>(trimmed) {
-                Ok(logged) => entries.push(logged),
-                Err(_) => skipped += 1,
+        // R29-6：按换行字节扫描；非法 UTF-8 是单行损坏，不是 EOF。
+        for line in reader.split(b'\n') {
+            match line {
+                Ok(line) if line.iter().all(u8::is_ascii_whitespace) => {}
+                Ok(line) => match serde_json::from_slice::<LoggedEvent>(&line) {
+                    Ok(logged) => entries.push(logged),
+                    Err(_) => skipped += 1,
+                },
+                Err(error) => {
+                    skipped += 1;
+                    tracing::warn!(%error, path = %path.display(), "宽松读取遇 I/O 失败，停止该文件读取");
+                    break;
+                }
             }
         }
         skipped
     }
 
-    fn load_all_inner(&self) -> Result<Vec<LoggedEvent>> {
+    /// 调用方已持生命周期锁（公开读或 append 的幂等查证）。
+    fn load_all_locked(&self) -> Result<Vec<LoggedEvent>> {
         // 十九轮 P2-1：轮转读回——归档 `.1` 在前、当前文件在后拼接
         // （offset 天然递增；此前轮转只写不读，重启后历史只剩轮转后事件）
         let archived = self.path.with_extension("jsonl.1");
@@ -545,6 +550,8 @@ impl EventLog {
         if archived.exists() {
             self.parse_file_into(&archived, &mut entries)?;
         }
+        #[cfg(test)]
+        tests::after_archive();
         self.parse_file_into(&self.path, &mut entries)?;
         Ok(entries)
     }
@@ -591,8 +598,22 @@ pub fn project_work_state(
     let mut states = std::collections::HashMap::new();
     let mut terminal_executions: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut current_executions = std::collections::HashMap::<String, String>::new();
     for logged in events {
         let id = logged.event.work_item_id.clone();
+        // R29-4：只有 Started 能切换有效 execution。非当前执行的迟到
+        // 事实保留在日志，不得重新接管投影；无 Started 的 legacy 仍可读。
+        let execution = logged.event.execution_id.as_deref();
+        if logged.event.event_type == E::WorkItemStarted {
+            if let Some(execution) = execution {
+                current_executions.insert(id.clone(), execution.to_string());
+            }
+        } else if current_executions
+            .get(&id)
+            .is_some_and(|active| Some(active.as_str()) != execution)
+        {
+            continue;
+        }
         let current = states.get(&id).copied();
         let next = match logged.event.event_type {
             E::WorkItemCreated => Some(S::Draft),
@@ -631,50 +652,4 @@ pub fn project_work_state(
         states.insert(id, next);
     }
     states
-}
-
-/// 文件级互斥（append 区间）：unix `flock(LOCK_EX)`——跨进程串行化
-/// 「末行读取 + offset 分配 + 写入」整段，防止行交错与 offset 撞号。
-struct FileLock {
-    #[cfg(unix)]
-    fd: std::os::raw::c_int,
-}
-impl FileLock {
-    fn acquire(file: &std::fs::File) -> Result<Self> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = file.as_raw_fd();
-            // EINTR 重试
-            loop {
-                let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                if rc == 0 {
-                    break;
-                }
-                let err = std::io::Error::last_os_error();
-                if err.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(anyhow::anyhow!("事件日志文件锁失败：{err}"));
-                }
-            }
-            // fd 生命周期由调用方 file 保证（Drop 先于 file 释放）
-            Ok(Self { fd })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = file;
-            Ok(Self {})
-        }
-    }
-}
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            libc::flock(self.fd, libc::LOCK_UN);
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = self;
-        }
-    }
 }
