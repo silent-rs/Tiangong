@@ -38,6 +38,10 @@
 - **授权可控**：默认工作区之外的目录派发前需经你授权（票据化、任务指纹绑定、不可偷换）。
 - **事实不丢**：派发、进度、征询、终态全部写入追加式事件日志；应用重启后自动对账恢复，中断与失败如实呈现，每个工作的完整时间线随时可查。
 
+演示：一键切换中枢模式（19 秒）：
+
+![中枢模式演示](docs/readme/video/central-mode-demo.gif)
+
 设计稿与开发文档见 [docs/central/](docs/central/)。
 
 ## 强烈推荐的插件
@@ -77,9 +81,9 @@ macOS 首次使用需授予天工「辅助功能」与「屏幕录制」权限�
 打开飞书日历，看看我明天下午有哪些会
 ```
 
-演示：Agent 通过 Computer Use 操作「计算器」。以下为 macOS 系统录屏（Cmd+Shift+5）的真实画面，2 倍速播放：Agent 唤起应用、点击按键、键入数字，天工虚拟指针与按键 HUD 全程显示操作位置，左侧对话区同步展示每一次工具调用（点击图片查看演示视频）：
+演示：Agent 通过 Computer Use 操作「计算器」。以下为 macOS 系统录屏（Cmd+Shift+5）的真实画面，2 倍速播放：Agent 唤起应用、点击按键、键入数字，天工虚拟指针与按键 HUD 全程显示操作位置，左侧对话区同步展示每一次工具调用：
 
-[![Computer Use 操作计算器演示](docs/readme/screenshots/computer-use.jpg)](docs/readme/video/computer-use-calculator.mp4)
+![Computer Use 操作计算器演示](docs/readme/video/computer-use-calculator.gif)
 
 ### 嵌入式浏览器（`browser`）：与你共用同一个页面
 
