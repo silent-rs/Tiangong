@@ -1,0 +1,544 @@
+//! 中枢模式状态机（纯逻辑，无宿主依赖）。
+//!
+//! 从 `tiangong-app` 的中枢实现中抽离的可测试核心：后台工作的状态集、
+//! 终态转移规则（取消/暂停守卫、等待用户分流）、登记保留策略、回报
+//! 时机判定与失败分类。宿主（app.rs 执行器）只做 IO 与投递，全部状态
+//! 决策经本 crate——组合路径可在无 tauri 环境下全量测试。
+
+use serde::{Deserialize, Serialize};
+
+pub mod persistence;
+pub use persistence::*;
+
+/// 后台工作状态（设计稿 §8.1 的实现子集 + 控制态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkState {
+    Running,
+    ReportQueued,
+    Completed,
+    Failed,
+    Interrupted,
+    WaitingUser,
+    Paused,
+    Cancelled,
+    Queued,
+}
+
+impl WorkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::ReportQueued => "report_queued",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::WaitingUser => "waiting_user",
+            Self::Paused => "paused",
+            Self::Cancelled => "cancelled",
+            Self::Queued => "queued",
+        }
+    }
+
+    /// 是否终态（不再转移，除非重派覆盖）。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+
+    /// 是否「在途」（占用执行资源：依赖判定视为未终态）。
+    pub fn is_inflight(self) -> bool {
+        matches!(self, Self::Running | Self::WaitingUser | Self::Paused)
+    }
+
+    /// 解析持久化字符串（未知值归 None，调用方决定回退）。
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "running" => Self::Running,
+            "report_queued" => Self::ReportQueued,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "interrupted" => Self::Interrupted,
+            "waiting_user" => Self::WaitingUser,
+            "paused" => Self::Paused,
+            "cancelled" => Self::Cancelled,
+            "queued" => Self::Queued,
+            _ => return None,
+        })
+    }
+}
+
+/// 状态登记条目（徽章与决策的数据源；宿主附加 IO 字段）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkStatus {
+    pub work_id: String,
+    pub session_id: String,
+    pub task: String,
+    pub model: Option<String>,
+    pub dispatched_at: String,
+    pub state: WorkState,
+    pub reused_session: bool,
+    #[serde(default)]
+    pub last_activity: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// 当前执行的归属（R0 契约，§5.4）：终态回调与日志据此唯一定位，
+    /// 不再依赖「当前 session 最近一条」。None = 旧登记（字段上线前）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    /// G3（第 28 轮 review）：waiting_user 时的征询问题正文（结构化
+    /// pending_question——用户/中枢不再到消息流里翻找；取标记行后的
+    /// 问题主体，上限 480 字与前端预览对齐）。终态/恢复时清空，不复用
+    /// 上轮问题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<String>,
+}
+
+/// 工作回报结局（终态回调入参的分类）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkOutcome {
+    /// 正常终态（成功或失败由 `done` 区分）。
+    Finished,
+    /// 等待用户决策：回报含【需要用户决策】标记，工作未终态。
+    WaitingUser,
+}
+
+impl WorkOutcome {
+    /// 日志用短名（R0 观测）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Finished => "finished",
+            Self::WaitingUser => "waiting_user",
+        }
+    }
+}
+
+/// 用户决策协议标记：Worker 征询时须以该标记「开头单独一行」提出
+/// （见 host/dispatch.rs 派发指令的【用户决策协议】）。
+pub const USER_DECISION_MARKER: &str = "【需要用户决策】";
+
+/// 判定回报文本是否为征询（标记独占行匹配）。
+///
+/// 协议要求标记「开头单独一行」（标记独占该行，问题正文另起）；
+/// 正文任意位置出现标记（引用历史裁决记录、报告小节标题、代码块、
+/// 「【需要用户决策】曾出现在…」式叙述句）不是征询。曾用全文子串
+/// （把第二十七轮 review 终稿 §8.5 标题引用误判，工作永久挂起）与
+/// 行首匹配（把「标记+叙述」引用句误判，P2-01/PR-10 实证），最终
+/// 收敛到独占行协议边界。行为锁定于 transitions 测试。
+pub fn is_user_decision_inquiry(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == USER_DECISION_MARKER)
+}
+
+/// 依据回报文本判定结局（Worker 用户决策协议：行首标记为征询）。
+pub fn classify_outcome(notice: &str) -> WorkOutcome {
+    if is_user_decision_inquiry(notice) {
+        WorkOutcome::WaitingUser
+    } else {
+        WorkOutcome::Finished
+    }
+}
+
+/// 终态转移决策：综合当前状态、回报结局与成败，给出登记应进入的状态。
+///
+/// 规则（行为锁定）：
+/// - `cancelled`/`paused`：用户控制优先，流终态（Cancel→Done）不得覆盖。
+/// - `waiting_user` 结局：进入 `waiting_user`（未终态，答复后恢复）。
+/// - 否则按成败：成功 → `report_queued`，失败 → `failed`。
+pub fn transition_on_finished(
+    current: Option<WorkState>,
+    outcome: WorkOutcome,
+    done: bool,
+) -> WorkState {
+    match current {
+        // 已终态幂等守卫（深检 R2）：迟到的旧回调不得改写已完成/失败/
+        // 取消/中断的条目（含 Cancelled）——此前靠时序不触发，机制保证。
+        Some(state) if state.is_terminal() => state,
+        Some(WorkState::Paused) => WorkState::Paused,
+        _ => match outcome {
+            WorkOutcome::WaitingUser => WorkState::WaitingUser,
+            WorkOutcome::Finished => {
+                if done {
+                    WorkState::ReportQueued
+                } else {
+                    WorkState::Failed
+                }
+            }
+        },
+    }
+}
+
+/// 回报注入时机：失败必达；成功仅在无其他在执行任务时触发汇总轮。
+pub fn should_deliver_now(done: bool, has_running_work: bool) -> bool {
+    !done || !has_running_work
+}
+
+/// 登记保留策略：completed 与 failed 各保留最近 `keep` 条（从最旧移除）。
+/// 返回应移除的条目索引（升序；宿主按索引删除）。
+pub fn retention_removals(entries: &[WorkStatus], keep: usize) -> Vec<usize> {
+    let mut removals = Vec::new();
+    for state in [WorkState::Completed, WorkState::Failed] {
+        let indexes: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.state == state)
+            .map(|(index, _)| index)
+            .collect();
+        if indexes.len() > keep {
+            let overflow = indexes.len() - keep;
+            removals.extend(indexes.into_iter().take(overflow));
+        }
+    }
+    removals.sort_unstable();
+    removals
+}
+
+/// 高风险任务启发式（R3，方案 §3.4）：发布/删除/迁移/覆写类任务禁止
+/// 通过 `parallel` 豁免写入锁——宁可串行，不可并发写坏。
+///
+/// 关键词来自方案的明示清单（发布、迁移、删除 + 等价的英文命令词）；
+/// 判定是保守偏严的：命中即视为高风险，漏判由 Workspace 锁兜底。
+pub fn task_is_high_risk(task: &str) -> bool {
+    const HIGH_RISK_MARKERS: &[&str] = &[
+        "发布",
+        "上线",
+        "deploy",
+        "release",
+        "publish",
+        "推送",
+        "push",
+        "强制推送",
+        "force push",
+        "删除",
+        "delete",
+        "drop",
+        "truncate",
+        "purge",
+        "清空",
+        "rm -rf",
+        "迁移",
+        "migrate",
+        "覆写",
+        "overwrite",
+        "格式化",
+        "reset --hard",
+        "卸载",
+    ];
+    let task = task.to_lowercase();
+    HIGH_RISK_MARKERS.iter().any(|marker| task.contains(marker))
+}
+
+/// 派发排队决策：依赖（after_work_id）与同目录写入锁的统一判定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueDecision {
+    /// 立即派发。
+    DispatchNow,
+    /// 排队：等待 `work_id` 终态后投递。
+    QueueAfter(String),
+}
+
+/// 判定新派发是否需要排队。
+///
+/// - 显式依赖 `after` 在途（running/waiting_user/paused/queued）→ 排队跟随；
+/// - 写入锁：同 `cwd` 已有其他 running 工作（未声明 `parallel` 豁免、
+///   非同会话重派）→ 排队跟随占用者；
+/// - `parallel` 豁免收紧（R3，方案 §3.4）：高风险任务（发布/删除/迁移/
+///   覆写类）即使声明 `parallel` 也不豁免写入锁——用户说「并行」不能
+///   绕过冲突保护；
+/// - 其余 → 立即派发。
+// 派发上下文参数为宿主派发链原生形态；聚合为 struct 会连动 6 处
+// 调用点与全部排队测试，暂以原形态保留。
+#[allow(clippy::too_many_arguments)]
+pub fn queue_decision(
+    entries: &[WorkStatus],
+    self_work_id: Option<&str>,
+    reused_session: bool,
+    after: Option<&str>,
+    session_id: &str,
+    cwd: &str,
+    parallel: bool,
+    task: &str,
+) -> QueueDecision {
+    if let Some(after) = after.map(str::trim).filter(|id| !id.is_empty()) {
+        let dependency = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.work_id == after || entry.session_id == after);
+        let dependency_inflight = dependency
+            .map(|entry| entry.state.is_inflight() || entry.state == WorkState::Queued)
+            .unwrap_or(false);
+        if dependency_inflight {
+            return QueueDecision::QueueAfter(after.to_string());
+        }
+    }
+    // 同会话互斥（用户实测 2026-11-16：日志显示同 session 被反复派发新
+    // execution——前一轮在途时又派一轮，两个 turn 并发投递同一 Core，
+    // 消息交错/上下文污染）。互斥意图是拦「会产生并发新 turn 的派发」，
+    // 按状态×id×复用分类放行（第 28 轮 review G0/P2-02 限缩）：
+    // - **WaitingUser**：征询时 worker 的 turn 已结束、Core 空闲——
+    //   B 语义（征询通道定谳）规定中枢用 dispatch_work(session_id=
+    //   worker) 转发用户答复，计入互斥则 QueueAfter 该 waiting 条目
+    //   自身，要等它终态才 flush，而它正等这条答复才能继续 → 自锁；
+    //   放行后由 merge_waiting_user 恢复（归属沿用主工作）；
+    // - **Running × reused × id 一致（steer）**：引导并入当前 turn
+    //   （不新增执行，与并发意图不冲突）；id 不一致的新工作仍排队；
+    // - **Paused/Queued × id 一致**：同 id 恢复（resume）或重放
+    //   （flush 重入自身条目）放行；不同 id 排队/保序
+    //   （host_dispatch_queues_on_write_lock_then_delivers 实证）。
+    if let Some(holder) = entries.iter().rev().find(|entry| {
+        if entry.session_id != session_id {
+            return false;
+        }
+        match entry.state {
+            // Running：仅「reused 引导且 id 与在跑条目一致」（steer 并入
+            // 当前 turn，不新增执行）放行——reused 但 id 不一致是新工作
+            // 撞在跑会话，排队（防并发 turn 与回调归属丢失，第 28 轮
+            // review P2-02 限缩）；非 reused 一律排队（2026-11-16 语义）。
+            WorkState::Running => !(reused_session && Some(entry.work_id.as_str()) == self_work_id),
+            // Paused：同 id（resume 恢复）放行；不同 id 排队。
+            WorkState::Paused => Some(entry.work_id.as_str()) != self_work_id,
+            // Queued：同 id（flush 重放自身）放行；不同 id 保序排队。
+            WorkState::Queued => Some(entry.work_id.as_str()) != self_work_id,
+            // WaitingUser：无活跃 turn，放行（merge 恢复，答复转发不得
+            // 自锁）。
+            _ => false,
+        }
+    }) {
+        return QueueDecision::QueueAfter(holder.work_id.clone());
+    }
+    // R3：parallel 豁免不适用于高风险任务（发布/删除/迁移/覆写——保守
+    // 启发式判定，宁可串行排队）。
+    let parallel_effective = parallel && !task_is_high_risk(task);
+    if !parallel_effective {
+        if let Some(holder) = entries.iter().rev().find(|entry| {
+            entry.state == WorkState::Running
+                && entry.cwd.as_deref() == Some(cwd)
+                && entry.session_id != session_id
+        }) {
+            return QueueDecision::QueueAfter(holder.work_id.clone());
+        }
+    }
+    QueueDecision::DispatchNow
+}
+
+/// 派发意图（G0，第 28 轮 review）：按 registry **转移前状态**显式分类，
+/// 取代「merge 置 Running 后用 work_id 是否相等反向猜测」——后者把同
+/// owner id 的答复转发误判为 steer，跳过 register/attach，新 execution
+/// 的终态回调无挂载（R28-2，探针 PR-08 callback=0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchIntent {
+    /// 新任务：新会话，或终态后复用会话做新工作（新 execution +
+    /// register/attach + 覆盖登记）。
+    NewExecution,
+    /// waiting_user 恢复：用户/中枢答复经中枢转发到达（架构裁决：Worker
+    /// 的一切消息均由中枢下发）——归属 owner work（新 execution +
+    /// register/attach），下发内容组合原目标上下文与本次答复（R28-1）。
+    ResumeWaiting,
+    /// paused 恢复：覆盖登记 + 挂回调（非并入——R1 深检语义保持）。
+    ResumePaused,
+    /// 运行中引导（steer）：并入当前 turn，不替换活跃执行、不挂新回调
+    ///（终态仍路由到原执行）。
+    SteerRunning,
+}
+
+/// 意图判定（纯函数）：`latest` 为目标会话在 registry 的最新条目
+/// （状态 + work_id）。排队重放（同 id 的 Queued）在上游互斥已放行，
+/// 到达此处按条目实际状态分类；WaitingUser/Paused 不要求 id 一致
+///（中枢复用转发沿用 owner id，其他复用撞上等待/暂停会话同为恢复语义）。
+pub fn classify_dispatch_intent(
+    latest: Option<(WorkState, &str)>,
+    self_work_id: &str,
+    reused_session: bool,
+) -> DispatchIntent {
+    let Some((state, entry_work_id)) = latest else {
+        return DispatchIntent::NewExecution;
+    };
+    match (state, reused_session) {
+        (WorkState::WaitingUser, true) => DispatchIntent::ResumeWaiting,
+        (WorkState::Paused, true) => DispatchIntent::ResumePaused,
+        // Running：仅 reused 且 id 与在跑条目一致才是引导并入；id 不
+        // 一致的复用派发已被互斥排队，到达此处的其余情况按新执行。
+        (WorkState::Running, true) if entry_work_id == self_work_id => DispatchIntent::SteerRunning,
+        _ => DispatchIntent::NewExecution,
+    }
+}
+
+/// 等待用户恢复：目标会话存在 waiting_user 条目时，答复轮的终态应归属
+/// 该主工作——返回其 (work_id, task)；否则 None（常规派发/引导）。
+pub fn merge_waiting_user(
+    entries: &mut [WorkStatus],
+    session_id: &str,
+    resuming_execution_id: Option<&str>,
+) -> Option<(String, String)> {
+    let position = entries.iter().rposition(|entry| {
+        entry.session_id == session_id && entry.state == WorkState::WaitingUser
+    })?;
+    entries[position].state = WorkState::Running;
+    // R0 契约：恢复是一次新执行——登记条目换上新 execution_id，
+    // 后续终态路由与归属校验以新执行为准。
+    if let Some(execution_id) = resuming_execution_id.filter(|id| !id.is_empty()) {
+        entries[position].execution_id = Some(execution_id.to_string());
+    }
+    Some((
+        entries[position].work_id.clone(),
+        entries[position].task.clone(),
+    ))
+}
+
+/// 派发后的登记条目构造（会话维度 upsert 语义：调用方先移除同会话条目）。
+///
+/// G4（第 28 轮 review）：复用派发的模型登记改为**事实回执**——
+/// 「请求 X：空闲复用切换生效（成为会话默认）；执行中引导本轮沿用当前
+/// 模型」。旧文案「已忽略 X」在空闲复用场景撒谎（实际会切换成功），
+/// 先验「切换成功」在执行中引导场景也撒谎（本轮沿用）——按场景可能
+/// 如实描述，不预判结果。
+#[allow(clippy::too_many_arguments)]
+pub fn registry_entry_after_dispatch(
+    work_id: &str,
+    session_id: &str,
+    task: &str,
+    requested_model: Option<&str>,
+    reused_session: bool,
+    cwd: Option<&str>,
+    now: &str,
+    execution_id: &str,
+) -> WorkStatus {
+    WorkStatus {
+        work_id: work_id.to_string(),
+        session_id: session_id.to_string(),
+        task: task.to_string(),
+        model: if reused_session {
+            Some(match requested_model {
+                Some(requested) => format!(
+                    "会话模型（请求 {requested}：空闲复用切换生效并成为默认；执行中引导本轮沿用当前）"
+                ),
+                None => "会话既有模型".to_string(),
+            })
+        } else {
+            Some(requested_model.unwrap_or("路由默认").to_string())
+        },
+        dispatched_at: now.to_string(),
+        state: WorkState::Running,
+        reused_session,
+        last_activity: None,
+        cwd: cwd.map(str::to_string),
+        execution_id: if execution_id.is_empty() {
+            None
+        } else {
+            Some(execution_id.to_string())
+        },
+        pending_question: None,
+    }
+}
+
+/// 会话维度 upsert：同会话既有条目（含 interrupted/report_queued 残留）
+/// 被新派发覆盖——一个会话在徽章中始终一条。
+pub fn upsert_registry_entry(entries: &mut Vec<WorkStatus>, entry: WorkStatus) {
+    entries.retain(|existing| existing.session_id != entry.session_id);
+    entries.push(entry);
+}
+
+/// 派发目标校验（app 入口守卫的判定核）：中枢会话不得作为工作目标。
+pub fn validate_dispatch_target(session_id: &str) -> Result<(), String> {
+    if session_id == "central-hub" {
+        return Err("中枢对话自身不能作为工作会话（派发被拒绝）".to_string());
+    }
+    Ok(())
+}
+
+/// 排队投递匹配：依赖声明（work_id 或会话 ID）与刚终态工作的双字段比对
+/// （与 [`queue_decision`] 的依赖查找口径一致——否则以 session_id 声明
+/// 的依赖永远等不到 flush，工作永久 queued）。
+pub fn flush_matches(after: &str, finished_work_id: &str, finished_session_id: &str) -> bool {
+    let after = after.trim();
+    !after.is_empty() && (after == finished_work_id || after == finished_session_id)
+}
+
+/// 失败原因是否疑似模型/网络类（值得换模型重派）。
+///
+/// 状态码按「词边界 + HTTP 语境窗口」匹配（「500 个文件」不误判）。
+pub fn failure_looks_model_related(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "timeout",
+        "超时",
+        "rate limit",
+        "rate_limit",
+        "限流",
+        "quota",
+        "配额",
+        "unauthorized",
+        "authentication",
+        "认证",
+        "connection",
+        "连接",
+        "eof",
+        "dns",
+        "tls",
+        "ssl",
+        "网络",
+        "provider error",
+        "model not",
+        "context length",
+        "上下文长度",
+        "overloaded",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "too many requests",
+        "请求过于频繁",
+        "服务器错误",
+    ];
+    if MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    const CODES: &[&str] = &["429", "401", "403", "500", "502", "503", "504"];
+    const CONTEXT: &[&str] = &[
+        "http",
+        "api",
+        "status",
+        "code",
+        "error",
+        "错误",
+        "状态码",
+        "服务器",
+        "请求",
+    ];
+    let bytes = lower.as_bytes();
+    CODES.iter().any(|code| {
+        lower.match_indices(code).any(|(idx, matched)| {
+            let before_ok = idx == 0 || !lower[..idx].ends_with(|c: char| c.is_ascii_digit());
+            let end = idx + matched.len();
+            let after_ok =
+                end >= lower.len() || !lower[end..].starts_with(|c: char| c.is_ascii_digit());
+            if !(before_ok && after_ok) {
+                return false;
+            }
+            let window_start = char_safe_start(&lower, idx.saturating_sub(16));
+            let window_end = char_safe_end(&lower, (end + 16).min(lower.len()));
+            let window = &lower[window_start..window_end];
+            let _ = bytes;
+            CONTEXT.iter().any(|context| window.contains(context))
+        })
+    })
+}
+
+/// 字节偏移回退到最近的 UTF-8 字符边界。
+fn char_safe_start(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// 字节偏移前进到最近的 UTF-8 字符边界。
+fn char_safe_end(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset < text.len() && !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}

@@ -1,0 +1,8 @@
+<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 中枢角标 · 断链（中断）：大缺口环 + 断头方点 + 空心核 -->
+  <path d="M15.5 4.2 A8.3 8.3 0 1 0 17.9 9.4" stroke="#94a3b8" stroke-opacity="0.6" stroke-width="1.7" stroke-linecap="round"/>
+  <rect x="14.9" y="3.2" width="2.4" height="2.4" rx="0.5" transform="rotate(45 16.1 4.4)" fill="#94a3b8" fill-opacity="0.75"/>
+  <rect x="17.2" y="8.6" width="2.4" height="2.4" rx="0.5" transform="rotate(15 18.4 9.8)" fill="#94a3b8" fill-opacity="0.75"/>
+  <circle cx="11" cy="11" r="2.4" stroke="#94a3b8" stroke-opacity="0.65" stroke-width="1.4"/>
+  <circle cx="11" cy="11" r="0.7" fill="#94a3b8" fill-opacity="0.4"/>
+</svg>

@@ -8,6 +8,10 @@ members = [
     "crates/tiangong-app-state",
     "crates/tiangong-core",
     "crates/tiangong-core-manager",
+    "crates/central/central-state",
+    "crates/central/central-host",
+    "crates/central/central-plugin",
+    "crates/central/tiangong-central",
     "crates/tiangong-cli",
     "crates/tiangong-entry",
     "crates/tiangong-server",
@@ -70,6 +74,7 @@ version = "0.17.15"
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
 tiangong-app-state = { path = "crates/tiangong-app-state" }
 tiangong-cli = { path = "crates/tiangong-cli" }
+tiangong-central = { path = "crates/central/tiangong-central" }
 tiangong-deepseek = { path = "crates/tiangong-deepseek" }
 tiangong-config = { path = "crates/tiangong-config" }
 tiangong-core = { path = "crates/tiangong-core" }
@@ -110,6 +115,9 @@ tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
 tiangong-plugin-prompt-sidecar = { path = "plugins/tiangong-plugin-prompt/sidecar" }
 tiangong-plugin-runtime = { path = "crates/plugin/tiangong-plugin-runtime" }
+central-state = { path = "crates/central/central-state" }
+central-plugin = { path = "crates/central/central-plugin" }
+central-host = { path = "crates/central/central-host" }
 tiangong-plugin-sidecar = { path = "crates/plugin/tiangong-plugin-sidecar" }
 tiangong-plugin-update = { path = "crates/plugin/tiangong-plugin-update" }
 tiangong-server = { path = "crates/tiangong-server" }

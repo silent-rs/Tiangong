@@ -1,0 +1,245 @@
+//! 目标与报告工具（R5 从 lib.rs 拆出）：create_goal / update_goal_status /
+//! create_report / list_reports（§13.2 / §13.5）。
+
+use tiangong_core::tools::result::ToolResult;
+
+use crate::CentralPlugin;
+use crate::*;
+
+/// S4：create_goal 的 RMW 结果（幂等命中 / 新建）。
+enum GoalWrite {
+    Duplicate(String),
+    Created(String),
+}
+
+impl CentralPlugin {
+    /// 用户目标登记（§13.2）：目标跨工作持续存在，get_context 注入当前目标。
+    pub(crate) fn handle_create_goal(
+        &self,
+        title: &str,
+        description: &str,
+        workspace: Option<&str>,
+    ) -> Option<ToolResult> {
+        let title = title.trim();
+        if title.is_empty() {
+            return self.error_result("title 不能为空".to_string());
+        }
+        // S4（第 28 轮 review）：锁内 RMW（with_goals）——消除锁外
+        // load→mutate→save 的并发丢更新；写失败显式报错（保持可重试），
+        // 不再 warn 后谎称「已登记」。
+        let outcome =
+            central_state::persistence::with_goals(self.sessions.storage_root(), |goals| {
+                // 同名幂等：已存在的同名 active 目标直接返回
+                if let Some(existing) = goals
+                    .iter()
+                    .find(|g| g.status == "active" && g.title == title)
+                {
+                    return GoalWrite::Duplicate(existing.goal_id.clone());
+                }
+                let goal = GoalRecord {
+                    goal_id: format!("goal-{}", scru128::new()),
+                    title: title.to_string(),
+                    description: description.trim().to_string(),
+                    workspace: workspace
+                        .map(str::trim)
+                        .filter(|w| !w.is_empty())
+                        .map(str::to_string),
+                    created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    status: "active".to_string(),
+                };
+                let goal_id = goal.goal_id.clone();
+                goals.push(goal);
+                // active 上限 10：最旧的 active 归档为 achieved（不物理删除，留痕）
+                let active_count = goals.iter().filter(|g| g.status == "active").count();
+                if active_count > 10 {
+                    if let Some(position) = goals.iter().position(|g| g.status == "active") {
+                        goals[position].status = "archived".to_string();
+                    }
+                }
+                GoalWrite::Created(goal_id)
+            });
+        match outcome {
+            Ok(GoalWrite::Duplicate(existing_id)) => self.text_result(
+                "目标已存在",
+                format!("目标「{title}」已存在（{existing_id}），无需重复创建。"),
+            ),
+            Ok(GoalWrite::Created(goal_id)) => self.text_result(
+                "目标已登记",
+                format!(
+                    "目标「{title}」（{goal_id}）已记录；后续派发与汇报将围绕该目标组织，用户问「我的目标」时可引用。达成或放弃时用 goal（action=set_goal_status）更新。"
+                ),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "目标登记落盘失败（Z4：写失败显式可见）");
+                self.error_result(format!("目标登记落盘失败（目标未保存，可重试）: {error}"))
+            }
+        }
+    }
+
+    /// 目标状态更新（achieved / abandoned / archived）。
+    pub(crate) fn handle_update_goal_status(
+        &self,
+        goal_id: &str,
+        status: &str,
+    ) -> Option<ToolResult> {
+        let goal_id = goal_id.trim();
+        if goal_id.is_empty() {
+            return self.error_result("goal_id 不能为空".to_string());
+        }
+        if !["achieved", "abandoned", "archived", "active"].contains(&status) {
+            return self.error_result(format!(
+                "status 仅支持 active / achieved / abandoned / archived，收到 {status}"
+            ));
+        }
+        // S4：锁内 RMW（with_goals）——消除锁外 load→mutate→save 丢更新
+        let outcome = central_state::persistence::with_goals(
+            self.sessions.storage_root(),
+            |goals| -> Result<String, ()> {
+                let Some(goal) = goals.iter_mut().rev().find(|g| g.goal_id == goal_id) else {
+                    return Err(());
+                };
+                goal.status = status.to_string();
+                Ok(goal.title.clone())
+            },
+        );
+        match outcome {
+            Ok(Ok(title)) => {
+                self.text_result("目标状态已更新", format!("目标「{title}」→ {status}"))
+            }
+            Ok(Err(())) => self.error_result(format!("未找到目标 {goal_id}")),
+            Err(error) => self.error_result(format!("目标状态落盘失败（更新未保存）: {error}")),
+        }
+    }
+
+    /// 结构化报告存档（§13.5）。
+    pub(crate) fn handle_create_report(
+        &self,
+        work_id: &str,
+        summary: &str,
+        artifacts: &[String],
+        risks: &[String],
+    ) -> Option<ToolResult> {
+        let work_id = work_id.trim();
+        let summary = summary.trim();
+        if work_id.is_empty() || summary.is_empty() {
+            return self.error_result("work_id 与 summary 不能为空".to_string());
+        }
+        let report = ReportRecord {
+            report_id: format!("report-{}", scru128::new()),
+            work_id: work_id.to_string(),
+            summary: summary.to_string(),
+            artifacts: artifacts.to_vec(),
+            risks: risks.to_vec(),
+            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        };
+        let report_id = report.report_id.clone();
+        // S4：锁内 RMW（with_reports）——保留上限 50 截断语义；写失败
+        // 显式报错（十九轮 P2-5：reports 无事件日志兜底）
+        let stored =
+            central_state::persistence::with_reports(self.sessions.storage_root(), |reports| {
+                reports.push(report);
+                let overflow = reports.len().saturating_sub(50);
+                if overflow > 0 {
+                    reports.drain(..overflow);
+                }
+            });
+        if let Err(error) = stored {
+            return self.error_result(format!("报告存档落盘失败（报告未保存）: {error}"));
+        }
+        self.text_result(
+            "报告已存档",
+            format!(
+                "报告 {report_id}（工作 {work_id}）已持久化；产物 {} 项、风险 {} 项。用户需要历史结论时可查询。",
+                artifacts.len(),
+                risks.len()
+            ),
+        )
+    }
+
+    /// 报告查询（全部或按 work_id 过滤）。
+    pub(crate) fn handle_list_reports(&self, work_id: Option<&str>) -> Option<ToolResult> {
+        let reports = load_reports(self.sessions.storage_root());
+        if reports.is_empty() {
+            return self.text_result("报告存档", "暂无已存档报告。".to_string());
+        }
+        let filtered: Vec<&ReportRecord> = match work_id.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(work) => reports.iter().filter(|r| r.work_id == work).collect(),
+            None => reports.iter().collect(),
+        };
+        if filtered.is_empty() {
+            return self.text_result("报告存档", format!("工作 {work_id:?} 没有已存档报告。"));
+        }
+        let lines: Vec<String> = filtered
+            .iter()
+            .rev()
+            .map(|r| {
+                format!(
+                    "- {}（{}，工作 {}）：{}{}{}",
+                    r.report_id,
+                    r.created_at,
+                    r.work_id,
+                    r.summary,
+                    if r.artifacts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；产物：{}", r.artifacts.join("、"))
+                    },
+                    if r.risks.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；风险：{}", r.risks.join("、"))
+                    }
+                )
+            })
+            .collect();
+        self.text_result(
+            "报告存档",
+            format!("共 {} 份：\n{}", filtered.len(), lines.join("\n")),
+        )
+    }
+
+    /// 目标与报告统一入口（二十轮合并：create_goal / update_goal_status /
+    /// create_report / list_reports → goal）。
+    pub(crate) fn handle_goal(
+        &self,
+        call: &tiangong_llm::tool::ToolCall,
+        action: &str,
+    ) -> Option<ToolResult> {
+        let arg = |key: &str| {
+            call.arguments
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        };
+        match action {
+            "save_goal" => {
+                let ws = arg("workspace");
+                let ws_opt = if ws.trim().is_empty() { None } else { Some(ws) };
+                self.handle_create_goal(arg("title"), arg("description"), ws_opt)
+            },
+            "set_goal_status" => self.handle_update_goal_status(arg("goal_id"), arg("status")),
+            "save_report" => {
+                let artifacts = call
+                    .arguments
+                    .get("artifacts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>())
+                    .unwrap_or_default();
+                let risks = call
+                    .arguments
+                    .get("risks")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>())
+                    .unwrap_or_default();
+                self.handle_create_report(arg("work_id"), arg("summary"), &artifacts, &risks)
+            },
+            "list_reports" => {
+                let wid = arg("work_id");
+                self.handle_list_reports(if wid.trim().is_empty() { None } else { Some(wid) })
+            }
+            _ => self.error_result(format!(
+                "action 必须是 save_goal / set_goal_status / save_report / list_reports（收到：{action}）"
+            )),
+        }
+    }
+}

@@ -1248,6 +1248,61 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
+name = "central-host"
+version = "0.17.14"
+dependencies = [
+ "anyhow",
+ "central-plugin",
+ "central-state",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tempfile",
+ "tiangong-app-state",
+ "tiangong-central",
+ "tiangong-config",
+ "tiangong-core",
+ "tiangong-core-manager",
+ "tiangong-llm",
+ "tiangong-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "central-plugin"
+version = "0.17.14"
+dependencies = [
+ "central-state",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-central",
+ "tiangong-config",
+ "tiangong-core",
+ "tiangong-core-manager",
+ "tiangong-llm",
+ "tiangong-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "central-state"
+version = "0.17.14"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10524,6 +10579,9 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "base64-url",
+ "central-host",
+ "central-plugin",
+ "central-state",
  "chrono",
  "clap",
  "flate2",
@@ -10558,6 +10616,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tiangong-app-state",
+ "tiangong-central",
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
@@ -10587,6 +10646,19 @@ dependencies = [
  "tiangong-core",
  "tiangong-core-manager",
  "tiangong-media-archive",
+]
+
+[[package]]
+name = "tiangong-central"
+version = "0.17.15"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

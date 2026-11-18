@@ -213,6 +213,10 @@ const SLASH_COMMANDS: MentionCandidate[] = [  {
 export interface MessageInputProps {
   /** 征询交互覆盖整个输入区时为 true：输入区整体不可交互。 */
   interactionVisible?: boolean;
+  /** 中枢模式（复用输入组件时）：隐藏 workspace 目录区与 git 拓展槽
+   *  （session.input-status）——中枢对话是控制面交互，无会话目录切换
+   *  与工作区 git 上下文；模型选择/用量统计/发送语义保持可用。 */
+  centralMode?: boolean;
   /** 输入覆盖层（`session.input-overlay`）接管编辑框时为 true：仅编辑框区域让位，
    *  上方运行状态 / 模型选择与下方目录 / 用量信息保持可用。 */
   inputOverlayVisible?: boolean;
@@ -232,6 +236,8 @@ export function MessageInput({
   inputOverlay,
   inputOverlayHint = null,
   onHeightChange,
+
+  centralMode = false,
 }: MessageInputProps) {
   const cacheKey = useStore(selectCurrentInputCacheKey);
   const inputCache = useStore(selectCurrentInputCache);
@@ -1181,7 +1187,7 @@ export function MessageInput({
               </div>
               <div className="flex items-center gap-0.5 shrink-0">
                 {/* 会话区过窄时隐藏插件拓展 UI，把空间让给左侧运行状态。 */}
-                {!compact && <SessionInputPluginHost slot="session.input-status" />}
+                {!compact && !centralMode && <SessionInputPluginHost slot="session.input-status" />}
                 <Select
                   value={sessionModelRef ?? MODEL_DEFAULT_VALUE}
                   onValueChange={(value) => { void handleSessionModelChange(value); }}
@@ -1535,19 +1541,25 @@ export function MessageInput({
             <div className="mt-1.5 flex items-center justify-between gap-2">
               <SessionInputPluginHost slot="session.after-input" />
               <div className="ml-auto flex flex-1 items-center justify-between text-xs text-muted-foreground">
-              <div className="flex items-center gap-3 min-w-0">
-                <button
-                  onClick={handleChangeCwd}
-                  disabled={!isIdle || isRemoteHost() || (!!hasConversation && !sessionCwd)}
-                  className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
-                  title={openableCwd ? `点击打开目录：${openableCwd}` : hasConversation ? '当前对话未设置目录' : sessionCwd || '点击设置对话目录'}
-                >
-                  <FolderOpen className="w-3 h-3 shrink-0" />
-                  {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
-                </button>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <TokenStatsBlock compact={compact} />
+              {/* 目录块中枢下不渲染（DOM 级移除；justify-between 无第二
+                  锚点由右侧组 ml-auto 兜底恒右对齐） */}
+              {!centralMode && (
+                <div className="flex items-center gap-3 min-w-0">
+                  <button
+                    onClick={handleChangeCwd}
+                    disabled={!isIdle || isRemoteHost() || (!!hasConversation && !sessionCwd)}
+                    className={`flex items-center gap-1 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-default disabled:hover:text-muted-foreground shrink-0 ${compact ? '' : 'truncate max-w-[300px]'}`}
+                    title={openableCwd ? `点击打开目录：${openableCwd}` : hasConversation ? '当前对话未设置目录' : sessionCwd || '点击设置对话目录'}
+                  >
+                    <FolderOpen className="w-3 h-3 shrink-0" />
+                    {!compact && <span className="truncate">{displayCwd || '设置对话目录'}</span>}
+                  </button>
+                </div>
+              )}
+              <div className="ml-auto flex items-center gap-2 shrink-0">
+                {/* 中枢（目录区隐藏）下恒显总计：compact 只为窄会话省空间，
+                    中枢输入区对齐普通会话的完整用量显示 */}
+                <TokenStatsBlock compact={centralMode ? false : compact} />
                 {sandboxState?.status === 'failed' && !isRemoteHost() && (
                   <button
                     onClick={() => setPendingSettingsTab('sandbox')}

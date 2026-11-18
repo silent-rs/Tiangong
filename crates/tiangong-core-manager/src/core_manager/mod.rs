@@ -98,7 +98,9 @@ impl CoreManager {
     ///
     /// - `config`：全局配置模板 provider，用于 `ensure_core` 的 base 快照与
     ///   `sync_config` 的模板替换
-    /// - `storage_root`：session 文件根（形如 `~/.tiangong`）
+    /// - `storage_root`：session 文件根（形如 `~/.tiangong`）；中枢对话等
+    ///   特殊 Core 的单独存储规则内建于 `Session::session_file_path`，
+    ///   由同一管理器统一托管
     pub fn new(
         config: tiangong_core::config::core::CoreConfigProvider,
         storage_root: impl Into<PathBuf>,

@@ -77,7 +77,12 @@ function shortDir(path: string): string {
   return parts.slice(-2).join('/');
 }
 
-export function MessageList() {
+export function MessageList({
+  suppressWelcome = false,
+}: {
+  /** 抑制内置空态欢迎语（中枢模式由问候覆盖层承担——避免双份 DOM） */
+  suppressWelcome?: boolean;
+} = {}) {
   const messages = useStore(s => s.messages);
   const workspaceDir = useStore(s => s.workspaceDir);
   const sessionCwd = useStore(s => s.sessionCwd);
@@ -563,21 +568,30 @@ export function MessageList() {
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
         // 滚动到虚拟列表最后一项
+        const scrollToLast = () => virtualizer.scrollToIndex(completedGroups.length - 1, {
+          behavior: "auto",
+          align: "end",
+        });
         requestAnimationFrame(() => {
           // 帧执行前重跑的 effect 已作废本次定位（如回复在排队期间完成），
           // 回复完成后不再拉底
           if (cancelled) return;
           // 跟随滚动用瞬时定位：平滑动画期间内容持续增长会让滚动事件
           // 误判"离开底部"而中断跟随
-          virtualizer.scrollToIndex(completedGroups.length - 1, {
-            behavior: "auto",
-            align: "end",
+          scrollToLast();
+          // 挂载即有批量消息的场景（如中枢模式进入）：虚拟化首帧测量可能
+          // 晚于本帧，补一帧幂等定位兜底
+          requestAnimationFrame(() => {
+            if (!cancelled) scrollToLast();
           });
         });
       } else if (streamingGroup) {
         requestAnimationFrame(() => {
           if (cancelled) return;
           scrollRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+          requestAnimationFrame(() => {
+            if (!cancelled) scrollRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+          });
         });
       }
     }
@@ -1249,7 +1263,7 @@ export function MessageList() {
     <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div className="p-4">
         <div className="max-w-3xl mx-auto space-y-2">
-          {messages.length === 0 && !isThinking && !(remoteHost && switchingSessionId) ? (
+          {messages.length === 0 && !isThinking && !suppressWelcome && !(remoteHost && switchingSessionId) ? (
             <div className="flex flex-col items-center justify-center h-full text-center py-20">
               <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mb-4">
                 <Cpu className="w-8 h-8 text-primary-foreground" />

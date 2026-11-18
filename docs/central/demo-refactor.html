@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>天工中枢模式 · 产品交互 Demo</title>
+<style>
+:root {
+  --bg: #0e1118;
+  --surface: #151922;
+  --surface-2: #1b2130;
+  --surface-3: #222a3a;
+  --line: rgba(160, 174, 200, .16);
+  --line-strong: rgba(160, 174, 200, .28);
+  --text: #e8edf6;
+  --muted: #8994a8;
+  --muted-2: #667287;
+  --primary: #8fd7ea;
+  --primary-bg: rgba(91, 184, 211, .14);
+  --violet: #c3a5ff;
+  --green: #83d6a6;
+  --amber: #e9bc73;
+  --red: #ee929d;
+  --shadow: 0 20px 60px rgba(0,0,0,.34);
+}
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body {
+  color: var(--text);
+  background: var(--bg);
+  font: 13px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button, textarea { font: inherit; }
+button { color: inherit; }
+button:focus-visible, textarea:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.app { display: grid; grid-template-rows: 48px 1fr; width: 100%; height: 100%; }
+.topbar {
+  display: flex; align-items: center; gap: 8px; padding: 0 16px 0 80px;
+  border-bottom: 1px solid var(--line); background: rgba(14,17,24,.96); user-select: none;
+}
+.window-lights { position: absolute; left: 16px; display: flex; gap: 8px; }
+.window-lights i { display: block; width: 11px; height: 11px; border-radius: 50%; }
+.window-lights i:nth-child(1) { background: #ff5f57; }
+.window-lights i:nth-child(2) { background: #febc2e; }
+.window-lights i:nth-child(3) { background: #28c840; }
+.icon-btn {
+  display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.icon-btn:hover { color: var(--text); background: rgba(255,255,255,.06); }
+.title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.title-name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title-central { display: none; color: var(--violet); font-weight: 600; }
+.top-spacer { flex: 1; }
+.version { padding: 2px 7px; border-radius: 5px; background: #168ac0; color: white; font-size: 10px; }
+.top-actions { display: flex; align-items: center; gap: 7px; }
+.main { position: relative; min-height: 0; display: flex; }
+.sidebar {
+  display: flex; flex: 0 0 256px; flex-direction: column; gap: 4px; padding: 14px 10px;
+  border-right: 1px solid var(--line); background: #11151e;
+}
+.search { height: 32px; display: flex; align-items: center; padding: 0 10px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted-2); }
+.group-label { padding: 8px 10px 4px; color: var(--muted-2); font-size: 10px; letter-spacing: .08em; }
+.session { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 10px; border-radius: 7px; color: var(--muted); cursor: pointer; }
+.session:hover { background: rgba(255,255,255,.04); }
+.session.active { background: rgba(73, 113, 155, .24); color: var(--text); }
+.avatar { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; border-radius: 5px; background: rgba(140,160,190,.14); color: #aebbd0; font-size: 10px; }
+.session .mark { margin-left: auto; color: var(--muted-2); }
+.normal-content, .central-content { min-width: 0; flex: 1; }
+.normal-content { display: flex; flex-direction: column; }
+.messages { min-height: 0; flex: 1; overflow: auto; padding: 7vh 10% 3vh; }
+.message { max-width: 760px; margin: 0 auto 22px; }
+.message.user { display: flex; justify-content: flex-end; }
+.message.user .bubble { max-width: 76%; background: #253d69; border-color: rgba(104,155,224,.24); }
+.message.assistant { display: flex; gap: 10px; align-items: flex-start; }
+.message-avatar { display: inline-grid; place-items: center; width: 23px; height: 23px; flex: 0 0 23px; margin-top: 3px; border-radius: 6px; background: rgba(125, 211, 232, .13); color: var(--primary); font-size: 10px; }
+.bubble { padding: 11px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: #d2dae7; line-height: 1.7; }
+.bubble .muted { color: var(--muted); }
+.composer-wrap { padding: 10px 10% 18px; border-top: 1px solid rgba(160,174,200,.10); }
+.composer { display: flex; align-items: flex-end; gap: 8px; max-width: 760px; margin: auto; padding: 8px 9px 8px 14px; border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface); }
+.composer textarea { min-height: 34px; max-height: 130px; flex: 1; resize: none; padding: 6px 0; border: 0; outline: 0; background: transparent; color: var(--text); }
+.composer textarea::placeholder { color: var(--muted-2); }
+.send { display: inline-grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; background: #5d7398; color: #eff6ff; cursor: pointer; }
+.send:hover { background: #7390bc; }
+/* 中枢视图：对应 CentralModeView / CentralChatInput / CentralWorkStatusBar */
+.central-content { display: flex; flex-direction: column; background: #10141d; }
+.central-status { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 20px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.status-label { color: #b5c0d1; }
+.status-count { color: var(--primary); }
+.status-separator { color: var(--muted-2); }
+.work-trigger { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; padding: 6px 10px; border: 1px solid rgba(143,215,234,.22); border-radius: 8px; background: rgba(143,215,234,.06); color: #a8e4f0; cursor: pointer; }
+.work-trigger:hover { border-color: rgba(143,215,234,.52); background: rgba(143,215,234,.12); }
+.pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 10px rgba(143,215,234,.8); }
+.central-messages { min-height: 0; flex: 1; overflow: auto; padding: 4vh 10% 2vh; }
+.central-empty { display: flex; min-height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 15px; padding: 20px; text-align: center; }
+.central-symbol { display: grid; place-items: center; width: 58px; height: 58px; border: 1px solid rgba(195,165,255,.34); border-radius: 50%; background: rgba(195,165,255,.09); color: var(--violet); font-size: 24px; box-shadow: 0 0 35px rgba(195,165,255,.11); }
+.central-greeting { max-width: 580px; margin: 0; color: #a5b0c2; line-height: 1.85; }
+.central-explain { max-width: 610px; padding: 9px 14px; border: 1px dashed rgba(160,174,200,.25); border-radius: 8px; color: var(--muted-2); font-size: 11px; }
+.central-message { max-width: 760px; margin: 0 auto 18px; animation: message-in .25s ease both; }
+.central-message.user { display: flex; justify-content: flex-end; }
+.central-message.user .central-bubble { background: #253d69; border-color: rgba(104,155,224,.24); }
+.supervisor-activity { max-width: 620px; }
+.supervisor-activity .central-bubble { border-color: rgba(195,165,255,.22); background: rgba(66, 49, 94, .18); }
+.central-bubble { max-width: 80%; padding: 11px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: #d2dae7; line-height: 1.7; }
+.central-role { margin-bottom: 4px; color: var(--muted-2); font-size: 10px; }
+.central-composer-wrap { position: relative; padding: 10px 10% 17px; border-top: 1px solid var(--line); }
+.central-composer { display: flex; align-items: flex-end; gap: 8px; max-width: 760px; margin: auto; padding: 8px 9px 8px 14px; border: 1px solid var(--line-strong); border-radius: 13px; background: var(--surface); }
+.central-composer textarea { min-height: 34px; max-height: 160px; flex: 1; resize: none; padding: 6px 0; border: 0; outline: 0; background: transparent; color: var(--text); }
+.central-composer textarea::placeholder { color: var(--muted-2); }
+.central-help { max-width: 760px; margin: 5px auto 0; padding: 0 4px; color: var(--muted-2); font-size: 10px; }
+/* 工作抽屉 */
+.drawer-backdrop { display: none; position: absolute; inset: 0; z-index: 10; background: rgba(0,0,0,.18); }
+.drawer-backdrop.open { display: block; }
+.drawer { position: absolute; top: 0; right: 0; bottom: 0; z-index: 11; width: min(420px, 92vw); padding: 18px; overflow: auto; border-left: 1px solid var(--line-strong); background: rgba(20,25,36,.98); box-shadow: var(--shadow); transform: translateX(100%); transition: transform .25s ease; }
+.drawer.open { transform: translateX(0); }
+.drawer-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; font-size: 15px; font-weight: 600; }
+.close { border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.work-card { padding: 13px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.025); }
+.work-card.selected { border-color: rgba(143,215,234,.38); background: rgba(143,215,234,.055); }
+.work-card-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.work-card h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.work-status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: var(--primary); font-size: 10px; }
+.work-status.waiting { color: var(--amber); }
+.work-status.done { color: var(--green); }
+.work-status.failed { color: var(--red); }
+.work-card p { margin: 8px 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.work-card-meta { display: flex; flex-wrap: wrap; gap: 5px; color: var(--muted-2); font-size: 10px; }
+.tag { padding: 2px 6px; border-radius: 4px; background: rgba(140,160,190,.12); }
+.drawer-actions { display: flex; gap: 6px; margin-top: 10px; }
+.small-btn { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: #aab8ca; cursor: pointer; font-size: 10px; }
+.small-btn:hover { border-color: var(--line-strong); background: rgba(255,255,255,.05); }
+.timeline { display: none; margin-top: 10px; padding: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+.timeline.open { display: block; }
+.timeline-row { display: flex; gap: 8px; padding: 4px 0; }
+.timeline-row b { color: var(--muted-2); font-weight: 400; }
+.decision { display: none; margin-top: 10px; padding: 11px; border: 1px solid rgba(233,188,115,.36); border-radius: 8px; background: rgba(116,77,29,.14); color: #d9c39c; font-size: 11px; line-height: 1.6; }
+.decision.open { display: block; }
+.decision-buttons { display: flex; gap: 6px; margin-top: 9px; }
+.decision-buttons button { padding: 5px 8px; border: 1px solid rgba(233,188,115,.3); border-radius: 6px; background: transparent; color: #e9c98e; cursor: pointer; font-size: 10px; }
+/* toast / view switching */
+.toast { position: absolute; top: 13px; left: 50%; z-index: 30; padding: 7px 12px; border: 1px solid var(--line-strong); border-radius: 7px; background: #1b2433; color: #c9d7e9; opacity: 0; transform: translate(-50%,-8px); transition: .2s; pointer-events: none; font-size: 11px; }
+.toast.show { opacity: 1; transform: translate(-50%,0); }
+.hidden { display: none !important; }
+@keyframes message-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="window-lights"><i></i><i></i><i></i></div>
+    <button class="icon-btn normal-only" id="sidebar-toggle" aria-label="切换侧边栏">☰</button>
+    <span class="normal-only" style="width:1px;height:16px;background:var(--line);margin-right:4px"></span>
+    <div class="title">
+      <span class="title-name normal-only" id="normal-title">产品周报 · 会话</span>
+      <span class="title-central" id="central-title">中枢</span>
+    </div>
+    <div class="top-spacer"></div>
+    <span class="version">v0.10.2</span>
+    <div class="top-actions">
+      <button class="icon-btn" id="mode-toggle" title="进入中枢模式">✦</button>
+      <button class="icon-btn normal-only" title="搜索消息">⌕</button>
+      <button class="icon-btn normal-only" title="插件管理">▦</button>
+      <button class="icon-btn normal-only" title="拓展区">⊞</button>
+      <button class="icon-btn" title="主题">◐</button>
+    </div>
+  </header>
+  <main class="main">
+    <aside class="sidebar" id="sidebar">
+      <div class="search">⌕　搜索会话</div>
+      <div class="group-label">今天</div>
+      <div class="session active"><span class="avatar">周</span>产品周报整理<span class="mark">·</span></div>
+      <div class="session"><span class="avatar">接</span>接口联调记录</div>
+      <div class="session"><span class="avatar">设</span>设计稿评审</div>
+      <div class="group-label">更早</div>
+      <div class="session"><span class="avatar">迁</span>数据库迁移方案</div>
+      <div class="session"><span class="avatar">发</span>发布清单 v2.3</div>
+      <div class="session"><span class="avatar">周</span>上周复盘</div>
+    </aside>
+    <section class="normal-content" id="normal-view">
+      <div class="messages" id="normal-messages">
+        <div class="message user"><div class="bubble">帮我整理一下这周的进展，按项目分组。</div></div>
+        <div class="message assistant"><span class="message-avatar">天</span><div class="bubble">好的，已汇总 3 个项目的进展：<br><span class="muted">支付服务、桌面客户端、数据库迁移。</span></div></div>
+        <div class="message user"><div class="bubble">再加一版给管理层的摘要，简短一点。</div></div>
+      </div>
+      <div class="composer-wrap"><div class="composer"><textarea id="normal-input" rows="1" placeholder="输入消息…"></textarea><button class="send" id="normal-send">↑</button></div></div>
+    </section>
+    <section class="central-content hidden" id="central-view">
+      <div class="central-status"><span class="status-label">后台工作</span><span class="status-separator">·</span><span class="status-count">执行中 1</span><span class="status-separator">·</span><span class="status-count" style="color:var(--amber)">等用户 1</span><button class="work-trigger" id="work-trigger"><span class="pulse"></span>后台工作 <span>›</span></button></div>
+      <div class="central-messages" id="central-messages">
+        <div class="central-empty" id="central-empty"><div class="central-symbol">✦</div><p class="central-greeting">你好，我是天工中枢。<br>你可以直接告诉我目标，我会判断需要哪个 Workspace、安排后台工作、跟踪进展，并在关键节点向你汇报。</p><div class="central-explain">中枢只负责协调；具体文件、命令、浏览器和验证工作由后台 Worker 执行。</div></div>
+      </div>
+      <div class="central-composer-wrap"><div class="central-composer"><textarea id="central-input" rows="1" placeholder="你想让我做什么？" aria-label="中枢对话输入"></textarea><button class="send" id="central-send" disabled>↑</button></div><div class="central-help">Enter 发送 · Shift+Enter 换行</div></div>
+    </section>
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+    <aside class="drawer" id="drawer" aria-label="后台工作详情">
+      <div class="drawer-header"><span>后台工作</span><button class="close" id="drawer-close">关闭 ×</button></div>
+      <div class="work-card selected">
+        <div class="work-card-title"><h3>支付服务超时分析</h3><span class="work-status"><span class="pulse"></span>执行中</span></div>
+        <p>正在读取日志、指标和现有测试，暂不修改文件。最近活动：分析数据库连接池等待。</p>
+        <div class="work-card-meta"><span class="tag">payment-service</span><span class="tag">只读</span><span class="tag">复用会话</span></div>
+        <div class="drawer-actions"><button class="small-btn" data-timeline="timeline-a">查看时间线</button><button class="small-btn" data-action="pause">暂停</button><button class="small-btn" data-action="cancel">取消</button></div>
+        <div class="timeline" id="timeline-a"><div class="timeline-row"><b>10:21</b><span>Worker 阶段报告已到达</span></div><div class="timeline-row"><b>10:22</b><span>Supervisor 已读取报告并检查证据</span></div><div class="timeline-row"><b>10:23</b><span>Supervisor 已指导 Worker 补充连接池配置验证</span></div></div>
+      </div>
+      <div class="work-card">
+        <div class="work-card-title"><h3>数据库迁移方案</h3><span class="work-status waiting">● 等用户决定</span></div>
+        <p>已完成风险分析。继续执行会修改 staging 数据库，需要你的明确决定。</p>
+        <div class="work-card-meta"><span class="tag">staging</span><span class="tag">高风险</span><span class="tag">等待确认</span></div>
+        <div class="drawer-actions"><button class="small-btn" id="decision-open">处理决定</button><button class="small-btn" data-timeline="timeline-b">查看时间线</button></div>
+        <div class="decision" id="decision">是否允许继续 staging 迁移？<br><span style="color:#a89778">选择将绑定到这次执行，不会被其他 Worker 复用。</span><div class="decision-buttons"><button data-choice="继续">继续</button><button data-choice="暂停">暂停</button><button data-choice="取消">取消</button></div></div>
+        <div class="timeline" id="timeline-b"><div class="timeline-row"><b>09:48</b><span>Worker 阶段报告已到达，包含 staging 写入风险</span></div><div class="timeline-row"><b>09:49</b><span>Supervisor 判定必须升级为用户决定</span></div><div class="timeline-row"><b>09:51</b><span>等待用户决定票据</span></div></div>
+      </div>
+    </aside>
+    <div class="toast" id="toast"></div>
+  </main>
+</div>
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const body = document.body;
+  const normalView = $('#normal-view');
+  const centralView = $('#central-view');
+  const sidebar = $('#sidebar');
+  const toggle = $('#mode-toggle');
+  const drawer = $('#drawer');
+  const backdrop = $('#drawer-backdrop');
+  const centralMessages = $('#central-messages');
+  const centralEmpty = $('#central-empty');
+  const centralInput = $('#central-input');
+  const centralSend = $('#central-send');
+  let central = false;
+  let normalSidebar = true;
+  let draft = '';
+  function toast(text) {
+    const node = $('#toast'); node.textContent = text; node.classList.add('show');
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('show'), 1600);
+  }
+  function setCentral(next) {
+    central = next;
+    normalView.classList.toggle('hidden', central);
+    centralView.classList.toggle('hidden', !central);
+    sidebar.classList.toggle('hidden', central || !normalSidebar);
+    document.querySelectorAll('.normal-only').forEach(node => node.classList.toggle('hidden', central));
+    $('#central-title').style.display = central ? 'inline' : 'none';
+    toggle.title = central ? '退出中枢模式' : '进入中枢模式';
+    toggle.style.color = central ? 'var(--violet)' : '';
+    toggle.style.textShadow = central ? '0 0 12px rgba(195,165,255,.7)' : '';
+    if (central) {
+      centralInput.focus();
+      toast('已进入中枢模式，后台工作继续运行');
+    } else {
+      toast('已退出中枢模式，恢复普通会话');
+      closeDrawer();
+    }
+  }
+  function closeDrawer() { drawer.classList.remove('open'); backdrop.classList.remove('open'); }
+  function openDrawer() { drawer.classList.add('open'); backdrop.classList.add('open'); }
+  function addCentralMessage(role, text) {
+    centralEmpty.style.display = 'none';
+    const node = document.createElement('div');
+    node.className = `central-message ${role === 'user' ? 'user' : ''}`;
+    node.innerHTML = `<div class="central-role">${role === 'user' ? '你' : '天工中枢'}</div><div class="central-bubble"></div>`;
+    node.querySelector('.central-bubble').textContent = text;
+    centralMessages.appendChild(node);
+    centralMessages.scrollTop = centralMessages.scrollHeight;
+  }
+  function addSupervisorActivity(title, detail) {
+    centralEmpty.style.display = 'none';
+    const node = document.createElement('div');
+    node.className = 'central-message supervisor-activity';
+    node.innerHTML = `<div class="central-role">后台监督活动</div><div class="central-bubble"><strong>${title}</strong><br><span style="color:var(--muted)">${detail}</span></div>`;
+    centralMessages.appendChild(node);
+    centralMessages.scrollTop = centralMessages.scrollHeight;
+  }
+  function sendCentral() {
+    const value = centralInput.value.trim();
+    if (!value) return;
+    addCentralMessage('user', value); centralInput.value = ''; resizeCentralInput(); centralSend.disabled = true;
+    setTimeout(() => {
+      addCentralActivityDemo();
+    }, 420);
+  }
+  function addCentralActivityDemo() {
+    addSupervisorActivity('已收到 Worker 阶段报告', 'Supervisor 正在检查“连接池等待”证据，原始 Worker 报告已收进后台监督通道。');
+    setTimeout(() => addSupervisorActivity('已向 Worker 发出下一步指导', '补充连接池配置验证，并确认 staging 与生产配置差异；暂不修改文件。'), 520);
+    setTimeout(() => addCentralMessage('assistant', '我已经读取到 Worker 的阶段结果。当前证据指向连接池等待，我已要求它补充配置差异验证，验证完成后再向你汇报结论。'), 980);
+  }
+  function resizeCentralInput() { centralInput.style.height = 'auto'; centralInput.style.height = `${Math.min(160, centralInput.scrollHeight)}px`; }
+  toggle.addEventListener('click', () => setCentral(!central));
+  $('#sidebar-toggle').addEventListener('click', () => { normalSidebar = !normalSidebar; sidebar.classList.toggle('hidden', !normalSidebar || central); });
+  $('#work-trigger').addEventListener('click', openDrawer);
+  $('#drawer-close').addEventListener('click', closeDrawer);
+  backdrop.addEventListener('click', closeDrawer);
+  $('#central-send').addEventListener('click', sendCentral);
+  centralInput.addEventListener('input', () => { resizeCentralInput(); centralSend.disabled = !centralInput.value.trim(); });
+  centralInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendCentral(); } });
+  $('#normal-send').addEventListener('click', () => { const input = $('#normal-input'); if (!input.value.trim()) return; const node = document.createElement('div'); node.className = 'message user'; node.innerHTML = '<div class="bubble"></div>'; node.querySelector('.bubble').textContent = input.value.trim(); $('#normal-messages').appendChild(node); input.value = ''; });
+  $('#decision-open').addEventListener('click', () => $('#decision').classList.add('open'));
+  document.querySelectorAll('[data-timeline]').forEach(button => button.addEventListener('click', () => $('#' + button.dataset.timeline).classList.toggle('open')));
+  document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => { toast(button.dataset.action === 'pause' ? '已发送暂停指令' : '已发送取消指令'); }));
+  document.querySelectorAll('[data-choice]').forEach(button => button.addEventListener('click', () => { const choice = button.dataset.choice; $('#decision').classList.remove('open'); addCentralMessage('user', `决定：${choice}`); setTimeout(() => addCentralMessage('assistant', `已记录“${choice}”，决定票据已绑定到数据库迁移方案这次执行。`), 250); }));
+  window.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); setCentral(!central); } if (e.key === 'Escape') closeDrawer(); });
+  $('#central-title').style.display = 'none';
+})();
+</script>
+</body>
+</html>

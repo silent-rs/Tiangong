@@ -56,7 +56,23 @@ export default {
   			lg: 'var(--radius)',
   			md: 'calc(var(--radius) - 2px)',
   			sm: 'calc(var(--radius) - 4px)'
-  		}
+  		},
+  keyframes: {
+  // 中枢标题呼吸微光（静态标题的轻量样式，非切换动画）
+  'central-title-glow': {
+  '0%, 100%': { textShadow: '0 0 10px rgba(34,211,238,.55)' },
+  '50%': { textShadow: '0 0 18px rgba(34,211,238,.95), 0 0 34px rgba(167,139,250,.5)' },
+  },
+  // 中枢视图入场（基础淡入，非高级转换效果）
+  'central-view-in': {
+  '0%': { opacity: '0', transform: 'scale(.985) translateY(6px)' },
+  '100%': { opacity: '1', transform: 'scale(1) translateY(0)' },
+  },
+  },
+  animation: {
+  'central-title-glow': 'central-title-glow 2s ease-in-out 1',
+  'central-view-in': 'central-view-in 450ms cubic-bezier(.2,.7,.3,1) both',
+  },
   	}
   },
   plugins: [require("tailwindcss-animate")],

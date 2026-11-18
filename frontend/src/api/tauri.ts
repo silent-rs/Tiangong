@@ -7,6 +7,7 @@ export interface MentionRequest {
 }
 
 import { invoke, listen } from './host';
+import { centralApi } from '../features/central/api';
 
 // ============================================================================
 // 类型定义
@@ -654,6 +655,7 @@ export interface SandboxPolicyView {
 }
 
 export const api = {
+  ...centralApi,
   // ----------------------------------------------------------------
   // 会话管理
   // ----------------------------------------------------------------

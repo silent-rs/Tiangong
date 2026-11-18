@@ -492,3 +492,19 @@
   background-color: hsl(50 95% 55%);
   box-shadow: 0 0 0 2px hsl(50 95% 55% / 0.4);
 }
+
+/* 中枢模式切换动画（CentralTransition）：仅在转场期间给主体容器加视觉变换。
+   结束即移除 class，避免长期 transform 改变内部 fixed 元素的包含块。 */
+html.central-transition-active [data-central-body] {
+  opacity: var(--central-body-opacity, 1);
+  filter: blur(var(--central-body-blur, 0px));
+  transform: translateY(var(--central-body-shift, 0px)) scale(var(--central-body-scale, 1));
+  transform-origin: 50% 50%;
+}
+
+/* 转场期间渐显完全由时间轴驱动：禁用 CentralModeView 自带的 450ms 入场动画，
+   否则两次淡入时段错开（挂载即播放 vs in 段才渐显）。
+   非转场路径（如重启直入中枢）仍保留该轻量动画。 */
+html.central-transition-active [data-central-body] .animate-central-view-in {
+  animation: none;
+}

@@ -13,6 +13,7 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    setupFiles: ['src/test-setup.ts'],
   },
   // Tauri 需要使用 1337 端口或自定义端口
   server: {

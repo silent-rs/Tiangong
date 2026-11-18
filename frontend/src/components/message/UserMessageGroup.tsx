@@ -4,7 +4,7 @@ import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
 import { MentionChip } from "../MentionChip";
 import { MentionEditor, type MentionEditorHandle } from "../MentionEditor";
-import { Clock3, Webhook as WebhookIcon, X, Paperclip } from "lucide-react";
+import { Clock3, Webhook as WebhookIcon, X, Paperclip, Info } from "lucide-react";
 import { resolveAttachmentUrl, type Attachment } from "@/utils/attachments";
 import { parseScheduledTaskMessage } from "@/utils/scheduledTaskMessage";
 import { parseWebhookMessage } from "@/utils/webhookMessage";
@@ -18,6 +18,8 @@ import { MessagePluginHost } from "../MessagePluginHost";
 import { MessageRenderHost } from "../MessageRenderHost";
 import type { HostMessageContext } from "../pluginHostContext";
 import { CollapsibleMarkdownText, CollapsibleUserText } from "./CollapsibleUserText";
+import { useStore } from "@/store/useStore";
+import { CENTRAL_SESSION_ID } from "@/features/central/lib/centralSession";
 
 
 
@@ -224,6 +226,65 @@ function SubagentReportCard({ agentName, status, content, contentOffset, time, o
   );
 }
 
+
+/// 宿主系统注入条（R5 P1-3）：回报/授权/派发说明/激活摘要。
+/// 长回报默认折叠（Worker 全文动辄数万字——用户实测要求收缩能力），
+/// 展开态限高内部滚动。
+const CENTRAL_NOTE_PREVIEW_CHARS = 480;
+function CentralSystemNote({ kind, time, text }: {
+  kind?: string;
+  time: string;
+  text: string;
+}) {
+  // 征询默认展开（用户实测「无法查看完整」）：kind=decision（新注入）
+  // 或行首含【需要用户决策】标记（历史消息兜底——render data 注入时
+  // 固化，旧征询仍是 report，按内容嗅探同样必须展开）。行首匹配与
+  // 后端 classify_outcome 同源：报告正文引用标记（裁决记录标题等）
+  // 不是征询，不得因此默认展开。
+  const [open, setOpen] = useState(
+    kind === 'decision'
+    || text.split('\n').some((line) => line.trim() === '【需要用户决策】'),
+  );
+  const kindLabel = kind === 'report'
+    ? '工作回报'
+    : kind === 'decision'
+      ? '征询'
+      : kind === 'approval'
+        ? '授权'
+        : kind === 'activation'
+          ? '中枢'
+          : '系统';
+  const collapsible = text.length > CENTRAL_NOTE_PREVIEW_CHARS;
+  const shown = collapsible && !open
+    ? `${Array.from(text).slice(0, CENTRAL_NOTE_PREVIEW_CHARS).join('')}…`
+    : text;
+  return (
+    <div className="flex justify-start" data-testid="central-system-note">
+      <div className={`flex max-w-[85%] flex-col rounded-xl border border-border/60 bg-muted/[0.25] px-3.5 py-2 text-xs leading-relaxed text-muted-foreground ${open ? 'w-full' : ''}`}>
+        <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          <Info className="h-3 w-3" aria-hidden="true" />
+          {kindLabel}
+          <span className="ml-1 font-normal normal-case tracking-normal">{time}</span>
+          {collapsible ? (
+            <button
+              type="button"
+              data-testid="central-system-note-toggle"
+              aria-expanded={open}
+              onClick={() => setOpen(!open)}
+              className="ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/10"
+            >
+              {open ? '收起' : `展开全文（${text.length.toLocaleString()} 字）`}
+            </button>
+          ) : null}
+        </div>
+        <div className="whitespace-pre-wrap break-words">
+          {shown}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
   runStatus: string;
@@ -257,7 +318,17 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
   // 显示（含附件，插件从消息上下文读取）；插件缺失时按下方默认规则渲染，
   // 附件与用户上传的同类文件一致显示。
   const render = message.meta?.render;
-  const withPluginRender = (fallback: React.ReactNode) => render
+  // 宿主系统注入（central-host/system-note，R5 P1-3）：回报/授权/派发
+  // 说明/激活摘要不伪装为用户消息（方案 §6.2）——渲染为左侧系统条。
+  const activeSessionId = useStore((state) => state.activeSessionId);
+  const isCentralSystemNote =
+    (render?.plugin === 'central-host' && render?.view === 'system-note')
+    // 历史兜底（仅限中枢会话）：render 标记上线前的注入消息按系统条
+    // 渲染——前缀匹配限定 CENTRAL_SESSION_ID，普通会话用户手打同前缀
+    // 不受影响（十八轮 P3：内容耦合回流）
+    || (activeSessionId === CENTRAL_SESSION_ID
+      && /^\[后台工作(完成|失败)\]|^\[系统中枢\]/.test(messageText));
+  const withPluginRender = (fallback: React.ReactNode) => render && !isCentralSystemNote
     ? (
       <MessageRenderHost
         render={render}
@@ -378,6 +449,12 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, editingMess
             </div>
           </div>
         </div>
+      ) : isCentralSystemNote ? (
+        <CentralSystemNote
+          kind={(render?.data as { kind?: string } | undefined)?.kind}
+          time={formatMessageTime(message.created_at)}
+          text={messageText}
+        />
       ) : (
         <div className="flex justify-end">
           {withPluginRender(subagentTaskMatch ? (() => {

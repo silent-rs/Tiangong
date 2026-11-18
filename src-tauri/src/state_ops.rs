@@ -27,7 +27,8 @@ pub(crate) fn set_input_cache(
     Ok((cache, true))
 }
 
-pub(crate) fn begin_input_send(state: &mut TiangongState, key: &str, revision: u64) -> Result<()> {
+#[doc(hidden)]
+pub fn begin_input_send(state: &mut TiangongState, key: &str, revision: u64) -> Result<()> {
     let cache = state.input_caches.entry(key.to_string()).or_default();
     if cache.revision < revision {
         return Err(anyhow!(
@@ -42,7 +43,8 @@ pub(crate) fn begin_input_send(state: &mut TiangongState, key: &str, revision: u
     Ok(())
 }
 
-pub(crate) fn finish_input_send(
+#[doc(hidden)]
+pub fn finish_input_send(
     state: &mut TiangongState,
     key: &str,
     revision: u64,

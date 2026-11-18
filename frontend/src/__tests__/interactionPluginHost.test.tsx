@@ -127,6 +127,32 @@ afterEach(async () => {
 });
 
 describe('InteractionPluginHost', () => {
+  it('中枢激活（当前会话=central-hub）时 worker 的征询也显示（中枢是所有后台工作的交互面）', async () => {
+    const onVisibilityChange = await renderHost();
+    const dialog = container!.querySelector<HTMLElement>('[role="dialog"]')!;
+    const sandbox = container!.querySelector<HTMLElement>('[data-testid="plugin-sandbox"]')!;
+    // 中枢激活：当前会话切到 central-hub
+    await act(async () => {
+      useStore.setState({ activeSessionId: 'central-hub' });
+    });
+    expect(dialog.getAttribute('aria-hidden')).toBe('true');
+    // worker 会话（非 central-hub）发起征询 → 必须可见（修复前被
+    // 「当前会话匹配」过滤——征询卡片从不出现，输入区只是普通输入框）
+    await act(async () => {
+      emit('tool.requested', { invocation_id: 'inv-w', session_id: 'worker-1' });
+    });
+    expect(dialog.getAttribute('aria-hidden')).toBe('false');
+    expect(onVisibilityChange).toHaveBeenLastCalledWith(true);
+    // sandbox 传 worker 会话（插件 UI 据此过滤征询——传 central-hub 会
+    // 过滤恒空、卡片只剩一行空态）
+    expect(sandbox!.dataset.sessionId).toBe('worker-1');
+    // 关闭后进入近期关闭集合（1.6s 反馈动画窗口内保持可见）
+    await act(async () => {
+      emit('tool.closed', { invocation_id: 'inv-w', status: 'answered' });
+    });
+    expect(dialog.getAttribute('aria-hidden')).toBe('false');
+  });
+
   it('动态加载 Shadow 处理器，并按当前会话显示独立自适应弹层', async () => {
     const onVisibilityChange = await renderHost();
     const dialog = container!.querySelector<HTMLElement>('[role="dialog"]')!;

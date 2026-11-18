@@ -195,12 +195,25 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
     .map_err(|error| format!("等待会话列表加载失败：{error}"))
 }
 
+/// 中枢后台工作状态（前端「后台工作」状态条数据源）。
+#[tauri::command]
+pub async fn get_central_work_status(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<crate::central::CentralWorkStatus>, String> {
+    Ok(state.inner().central_work_status())
+}
+
 /// 获取单个会话的元数据（精确更新列表时使用，避免全量刷新）。
 #[tauri::command]
 pub async fn get_session_meta(
     session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Option<SessionListItem>, String> {
+    // 中枢对话不属于普通会话列表（单独存储）：无列表元数据可更新，
+    // 返回 None 防止前端把中枢条目追加进普通列表。
+    if crate::central::is_central_session(&session_id) {
+        return Ok(None);
+    }
     let manager = state.core_manager.clone();
     tokio::task::spawn_blocking(move || {
         let meta = tiangong_core_manager::SessionMetadata::load_from_storage(
@@ -471,8 +484,23 @@ pub async fn delete_sessions_by_cwd(
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
 /// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
 pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_id: &str) {
+    // 中枢 Core 由 app 直接持有，回滚走中枢关闭路径
+    if crate::central::is_central_session(session_id) {
+        state.shutdown_join_central_core().await;
+        return;
+    }
     if let Err(error) = state.core_manager.retire_core(session_id, false).await {
         tracing::warn!(%session_id, %error, "失败回滚时关闭 Core 失败");
+    }
+}
+
+/// 会话 Core 存活判定：中枢对话由 app 直接持有的中枢 Core 回答，其余走
+/// CoreManager registry。
+fn session_core_alive(state: &TiangongApp, session_id: &str) -> bool {
+    if crate::central::is_central_session(session_id) {
+        state.central.central_core_alive()
+    } else {
+        state.core_manager.has_live_core(session_id)
     }
 }
 
@@ -642,6 +670,12 @@ async fn send_message_inner(
     }
 
     if let Some(command) = parse_context_slash_command(&content) {
+        // 中枢对话不支持上下文管理命令（review i 项）：经 run_context_slash_command
+        // 会无条件走普通 ensure_core，为 central-hub 创建带全插件的第二个 Core，
+        // 绕过 §5 权限边界并与中枢自身事件消费者双写。
+        if crate::central::is_central_session(&session_id) {
+            return Err("中枢对话不支持上下文管理命令".to_string());
+        }
         let active_id = state
             .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
             .await?;
@@ -736,6 +770,82 @@ async fn send_message_inner(
     // 获取或创建 TiangongCore(Core 的 deliver 负责 load session + 追加消息 +
     // persist,host 不再预写——issue #245 整改方案)。
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
+
+    // 中枢对话（crate::central）不经 CoreManager：中枢 Core 由 app 直接构造
+    // 与投递（内置且唯一的中枢插件），模型 = 设置的主对话模型（§15.12）。
+    if crate::central::is_central_session(&session_id) {
+        let is_new = match state.ensure_central_core(&app, stream_tx).await {
+            Ok(is_new) => is_new,
+            Err(error) => {
+                let _ =
+                    restore_failed_user_message_state(state, &session_id, &user_message_id).await;
+                cleanup_unreferenced_input_attachments(
+                    state,
+                    raw_attachments_for_paths(created_paths),
+                )
+                .await;
+                abort_session_send(state, &session_id, revision, true).await;
+                return Err(error);
+            }
+        };
+        if is_new {
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
+        }
+        // 暂存的后台工作回报随用户消息一并进入对话（批量汇报模式）：
+        // 先逐条注入回报，再投用户消息——中枢空闲时回报开启汇报 turn、
+        // 用户消息按 Core 原生引导语义并入同一轮；执行中则按序排队。
+        // 与 deliver_pending_work_reports 同语义（review k 残余）：
+        // 投递失败的放回队列并保留待汇报登记；全部成功才清状态。
+        let flushed = state.take_central_work_reports();
+        let mut flush_failed: Vec<String> = Vec::new();
+        for notice in flushed {
+            let notice_prepared = vec![tiangong_types::ContentBlock::text(notice.clone())];
+            // G3：flush 路径 kind 与即时注入同源（system_note_kind_for）
+            // ——征询回报在用户消息汇入时同样以 decision 展开，双路径
+            // 不再分叉。
+            let kind = crate::central_host::events::system_note_kind_for(&notice);
+            if let Err(error) = state.deliver_central_message(
+                scru128::new().to_string(),
+                notice_prepared,
+                Some(crate::central_host::events::system_note_render(kind)),
+            ) {
+                tracing::warn!(%error, "后台工作回报注入中枢失败（放回队列，继续投递用户消息）");
+                flush_failed.push(notice);
+            }
+        }
+        if flush_failed.is_empty() {
+            state.clear_queued_work_reports();
+            crate::central_host::events::emit_central_work_updated(&app);
+        } else {
+            state.push_central_work_reports(flush_failed);
+        }
+        if let Err(error) =
+            state.deliver_central_message(user_message_id.clone(), prepared.clone(), render)
+        {
+            if matches!(delivery_kind, UserMessageDeliveryKind::NewTurn) {
+                state.shutdown_join_central_core().await;
+            }
+            let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
+            cleanup_unreferenced_input_attachments(state, raw_attachments_for_paths(created_paths))
+                .await;
+            abort_session_send(state, &session_id, revision, true).await;
+            return Err(error);
+        }
+        state.mark_input_revision_delivered(&session_id, revision);
+        // 与普通路径同口径的发送态收尾（review a 项）：缺它则 begin_input_send
+        // 里的 is_sending 永真，中枢第二条消息会被「已有消息正在准备发送」拒绝。
+        let finish_result = state
+            .with_state(|core_state| {
+                crate::state_ops::finish_input_send(core_state, &session_id, revision, true)
+            })
+            .await;
+        if let Err(error) = finish_result {
+            tracing::error!(session_id, revision, error = %error, "中枢消息已发送，但输入缓存终态更新失败");
+        }
+        release_input_send_claim_and_cleanup(state, &session_id, revision).await;
+        return Ok(());
+    }
+
     let workspace_dir = if state.core_manager.session_exists(&session_id) {
         None
     } else {
@@ -859,19 +969,15 @@ pub(crate) async fn restore_failed_user_message_state(
     session_id: &str,
     message_id: &str,
 ) -> Result<(), String> {
+    let manager = state.core_manager.clone();
     state
         .with_state(|core_state| {
-            if core_state
-                .core_manager
+            if manager
                 .list_session_metadata()
                 .iter()
                 .any(|m| m.id == session_id)
             {
-                crate::session_ops::remove_failed_message(
-                    &state.core_manager,
-                    session_id,
-                    message_id,
-                )?;
+                crate::session_ops::remove_failed_message(&manager, session_id, message_id)?;
                 crate::state_ops::remove_pending_message(core_state, session_id, message_id);
                 Ok(())
             } else {
@@ -881,8 +987,30 @@ pub(crate) async fn restore_failed_user_message_state(
         .await
 }
 
-fn emit_session_stream_event(
-    app: &AppHandle,
+/// 进入中枢模式的激活问候（§4.2）：ensure 中枢 Core 后注入状态摘要，
+/// 驱动模型主动问候。幂等（每进程首次）。前端切换流程尾部调用，失败静默
+/// （问候是增强体验，不阻塞模式切换）。
+#[tauri::command]
+pub async fn central_activation_greeting(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app.state::<TiangongApp>();
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+    let is_new = state
+        .ensure_central_core(&app, stream_tx)
+        .await
+        .map_err(|error| format!("中枢 Core 不可用：{error}"))?;
+    if is_new {
+        start_stream_consumer(
+            app.clone(),
+            crate::central::CENTRAL_SESSION_ID.to_string(),
+            stream_rx,
+        );
+    }
+    crate::central_host::inject_central_activation_summary(&state.inner().central)
+}
+
+fn emit_session_stream_event<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     session_id: &str,
     event: &tiangong_types::StreamEvent,
 ) {
@@ -934,11 +1062,80 @@ fn forward_session_event_to_plugins(session_id: &str, event: &tiangong_types::St
 }
 
 /// 消费 StreamEvent：按会话转发给前端，并维护消息投递边界。
-pub(crate) fn start_stream_consumer(
-    app: AppHandle,
+/// 流终态回调（一次性）：首个 Done/Error/流关闭时触发，done 表示是否
+/// 正常完成、reason 携带失败原因。中枢派发用它接收 Worker 终态（替代
+/// 此前的专用 watcher——其会 break 丢弃 receiver，令会话事件流无人消费）。
+pub type StreamFinishedHandler = Box<dyn Fn(bool, String) + Send>;
+/// 终态回调槽（每会话一个，可多挂载）：每次 turn 终态触发并清空全部
+/// 已挂回调——派发与引导共用同一消费者流，逐 work 挂载各自的回报回调。
+pub type StreamFinishedSlot = std::sync::Arc<std::sync::Mutex<Vec<StreamFinishedHandler>>>;
+// T6 实现口径（第十四轮 W8 说明）：未采用 FinishedCtx 类型改造——流
+// 终态事件不携带 work_id，fire 侧无法精确归属；改为回调侧归属过滤
+// （attach 时闭包携带 work，fire 时查 registry 当前条目判定），与 S6
+// 状态幂等守卫构成双重防线（见 app.rs handle_work_terminal）。
+
+pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
 ) {
+    // 回调统一走执行路由器（R1）：终态按 session 的活跃 execution 路由，
+    // 回调未挂时暂存（投递后瞬间完成的 turn 不丢终态）。路由器挂载于
+    // app 全局状态（同 review N1 语义：不依赖消费者创建时闭包携带槽，
+    // 会话被普通模式激活后挂载的回调同样可被触发）。
+    let fire_session_finished =
+        |app: &tauri::AppHandle<R>, session_id: &str, done: bool, reason: String| {
+            use tauri::Manager;
+            let state = app.state::<TiangongApp>();
+            state
+                .inner()
+                .central
+                .execution_router
+                .fire(session_id, done, reason);
+        };
+    // 中枢工作进度可见（§9.1）：中枢派发会话的 PhaseChanged / ToolStart /
+    // ToolFinished 事件更新 registry 最近动作（徽章实时显示 Worker 在干嘛）。
+    // 普通会话零成本：registry 无该 session 的 running 条目即返回。
+    // 进度广播节流声明（深检 E）
+    let last_activity_emit = std::sync::Arc::new(std::sync::Mutex::new(
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    ));
+    let update_central_activity =
+        move |app: &tauri::AppHandle<R>, session_id: &str, event: &tiangong_types::StreamEvent| {
+            use tauri::Manager;
+            let note = match event {
+                tiangong_types::StreamEvent::PhaseChanged { phase, iteration } => {
+                    Some(format!("阶段 {phase}（第 {iteration} 轮）"))
+                }
+                tiangong_types::StreamEvent::ToolStart { name, .. } => Some(format!("执行 {name}")),
+                tiangong_types::StreamEvent::ToolFinished { name, ok, .. } => {
+                    Some(format!("{name} {}", if *ok { "完成" } else { "失败" }))
+                }
+                _ => None,
+            };
+            let Some(note) = note else { return };
+            let state = app.state::<crate::app::TiangongApp>();
+            let mut registry = state
+                .inner()
+                .central
+                .central_work_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = registry.iter_mut().rev().find(|entry| {
+                entry.session_id == session_id && entry.state == central_state::WorkState::Running
+            }) {
+                entry.last_activity = Some(note);
+                drop(registry);
+                // 节流（深检 E）：高频工具事件 2 秒至多广播一次，防前端风暴
+                let mut last = last_activity_emit.lock().unwrap();
+                if last.elapsed() >= std::time::Duration::from_secs(2) {
+                    *last = std::time::Instant::now();
+                    drop(last);
+                    crate::central_host::emit_central_work_updated(app);
+                }
+            }
+        };
+
     use tiangong_types::StreamEvent;
 
     let rt = tokio::runtime::Handle::current();
@@ -946,7 +1143,7 @@ pub(crate) fn start_stream_consumer(
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
-                if app_state.core_manager.has_live_core(&session_id) {
+                if session_core_alive(app_state.inner(), &session_id) {
                     emit_session_stream_event(&app, &session_id, &session_event);
                 }
                 continue;
@@ -973,15 +1170,17 @@ pub(crate) fn start_stream_consumer(
                     | StreamEvent::ModelSwitchStarted { .. }
                     | StreamEvent::ModelSwitched { .. }
             ) {
-                if app_state.core_manager.has_live_core(&session_id) {
+                if session_core_alive(app_state.inner(), &session_id) {
                     emit_session_stream_event(&app, &session_id, &session_event);
                 }
                 continue;
             }
 
+            update_central_activity(&app, &session_id, &session_event);
+
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
-            if !app_state.core_manager.has_live_core(&session_id) {
+            if !session_core_alive(app_state.inner(), &session_id) {
                 // 已退役 Core 的缓冲事件不得修改同会话新实例的 pending、消息或 UI。
                 continue;
             }
@@ -1017,6 +1216,12 @@ pub(crate) fn start_stream_consumer(
             }
 
             if is_done || is_error {
+                // 一次性终态回调（中枢派发监听 Worker 完成；普通会话为 None）
+                let callback_reason = match &event {
+                    StreamEvent::Error { message } => message.clone(),
+                    _ => String::new(),
+                };
+                fire_session_finished(&app, &session_id, is_done, callback_reason);
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
@@ -1043,12 +1248,13 @@ pub(crate) fn start_stream_consumer(
         let _eof_guard = rt.block_on(eof_lock.lock_owned());
         // 通道关闭说明持有该发送端的 Core 已被显式移除。若同会话已经创建了新 Core，
         // 这是旧消费者的正常退出，不能按 session_id 清理新实例或覆盖新一轮状态。
-        if !app_state.core_manager.has_live_core(&session_id) {
+        if !session_core_alive(app_state.inner(), &session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 crate::state_ops::clear_pending_turn(core_state, &session_id);
                 Ok(())
             }));
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
+            fire_session_finished(&app, &session_id, false, "Core 事件流已关闭".to_string());
             emit_session_stream_event(
                 &app,
                 &session_id,
@@ -1103,11 +1309,12 @@ pub async fn edit_and_resend(
     // 无需在此全量加载所有 session metadata（与 send_message 同理）。
 
     // 第一遍只读校验发生在任何附件 IO 之前。
+    let edit_manager = state.core_manager.clone();
     state
         .with_state_read(|core_state| {
             // 会话存在性用单文件存在性判定（O(1)），避免遍历解析全部会话文件；
             // 校验本身用从磁盘 load 的最新 session（issue #245：真相源归磁盘）。
-            if !core_state.core_manager.session_exists(&session_id) {
+            if !edit_manager.session_exists(&session_id) {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
             if crate::state_ops::has_pending_turn(core_state, &session_id) {
@@ -1174,7 +1381,7 @@ pub async fn edit_and_resend(
     // 编辑重发流程已校验无活跃 turn，Core 不会主动写盘，不存在旧 Core 覆盖编辑结果的
     // 风险。编辑重发复用现有 Core，不重复执行会话级初始化（on_session_ready 仅在该
     // Core 首次 turn 执行一次）；新一轮 turn 通过 on_turn_started 拿到截断后的最新
-    // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM 插件重新
+    // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与插件桥重新
     // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     // 编辑重发不改变模型：沿用会话已记录的选择策略。
@@ -1183,6 +1390,42 @@ pub async fn edit_and_resend(
         .load_session(&session_id)
         .ok()
         .and_then(|session| session.model_ref);
+    // 中枢对话（crate::central）：编辑重发走中枢 Core 直接投递，不经 CoreManager。
+    if crate::central::is_central_session(&session_id) {
+        let is_new = match state.ensure_central_core(&app, stream_tx).await {
+            Ok(is_new) => is_new,
+            Err(error) => {
+                restore_edited_session(state.inner(), &session_id, original_session).await;
+                cleanup_unreferenced_input_attachments(
+                    state.inner(),
+                    raw_attachments_for_paths(created_paths.clone()),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if is_new {
+            start_stream_consumer(app.clone(), session_id.clone(), stream_rx);
+        }
+        if let Err(error) =
+            state.deliver_central_message(message_id.clone(), prepared.clone(), None)
+        {
+            restore_edited_session(state.inner(), &session_id, original_session).await;
+            cleanup_unreferenced_input_attachments(
+                state.inner(),
+                raw_attachments_for_paths(created_paths.clone()),
+            )
+            .await;
+            return Err(error);
+        }
+        let _ = session_model_ref;
+        cleanup_unreferenced_input_attachments(
+            state.inner(),
+            raw_attachments_for_paths(created_paths),
+        )
+        .await;
+        return Ok(());
+    }
     let ensured = state
         .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await;
@@ -1292,6 +1535,14 @@ pub async fn cancel_turn(
     // 且新对话首轮投递完成前尚未切换过去，按它取消会命中错误（空闲）会话。
     if session_id.trim().is_empty() {
         return Err("取消目标会话 ID 不能为空".to_string());
+    }
+    // 中枢对话：直接向 app 持有的中枢 Core 发送取消
+    if crate::central::is_central_session(&session_id) {
+        if state.cancel_central_turn() {
+            return Ok(true);
+        }
+        // Core 尚未创建（从未发送）：无可取消的执行
+        return Ok(false);
     }
     if state.inner().core_manager.cancel_core(&session_id) {
         return Ok(true);
@@ -4413,7 +4664,7 @@ pub async fn uninstall_plugin(
     Ok(())
 }
 
-/// 从已安装目录读取新制品并原子替换全部存活 WASM 实例。
+/// 从已安装目录读取新制品并原子替换全部存活插件实例（历史命名保留）。
 #[tauri::command]
 pub async fn reload_plugin(
     plugin_id: String,

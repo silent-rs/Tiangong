@@ -56,6 +56,16 @@ pub struct TiangongApp {
     pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
+    /// 中枢宿主状态（R6 抽离：聚合于 central-host crate，共享同一实例）。
+    pub central: std::sync::Arc<central_host::CentralHostState>,
+    /// 中枢模型回退通知已发出（抖动控制：每进程一次）。
+    /// 激活问候已注入（每进程首次进入中枢模式时注入一次，§4.2/§10.4）。
+    /// 每会话的终态路由（R1：按 execution_id 路由 Worker turn 终态，
+    /// 取代 session 级回调槽——快速完成暂存补发、投递失败显式取消）。
+    /// 授权票据注册表（R3：WorkspaceApproval / Decision 一次性票据，
+    /// 仅宿主 UI 真实用户操作后签发；模型只能请求，不能生成）。
+    /// 模式协调器（R4：中枢/普通切换的宿主状态机与普通上下文快照，
+    /// 取代前端模块级变量作为事实源；后台工作不受切换影响）。
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -156,6 +166,8 @@ impl TiangongApp {
             config: config.clone(),
             storage_root: storage_root.clone(),
         });
+        let central_state =
+            Self::build_central_host(core_manager.clone(), state.clone(), app_handle.clone());
         Self {
             plugin_preload: tokio::sync::watch::channel(Some(Ok(
                 tiangong_plugin_runtime::registry::StartupPluginReadiness::default(),
@@ -177,6 +189,7 @@ impl TiangongApp {
                 storage_root.clone(),
             ),
             core_manager,
+            central: central_state,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
             pending_snapshots: std::sync::Arc::new(Mutex::new(HashMap::new())),
@@ -243,6 +256,143 @@ impl TiangongApp {
     }
 
     /// 注入 Tauri 应用句柄（setup 阶段调用，仅一次）。
+    /// 已注入的 app_handle（测试环境通常未注入 → None）。
+    // ===== 中枢方法转发（R6 抽离：实现在 central-host crate）=====
+    #[doc(hidden)]
+    pub async fn ensure_central_core<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
+    ) -> Result<bool, String> {
+        self.central.ensure_central_core(app, stream_tx).await
+    }
+    #[doc(hidden)]
+    pub fn deliver_central_message(
+        &self,
+        message_id: String,
+        prepared: Vec<tiangong_types::ContentBlock>,
+        render: Option<tiangong_types::MessageRender>,
+    ) -> Result<(), String> {
+        self.central
+            .deliver_central_message(message_id, prepared, render)
+    }
+    #[doc(hidden)]
+    pub fn cancel_central_turn(&self) -> bool {
+        self.central.cancel_central_turn()
+    }
+    #[doc(hidden)]
+    pub async fn shutdown_join_central_core(&self) {
+        self.central.shutdown_join_central_core().await;
+    }
+    #[doc(hidden)]
+    pub fn take_central_work_reports(&self) -> Vec<String> {
+        self.central.take_central_work_reports()
+    }
+    #[doc(hidden)]
+    pub fn push_central_work_reports(&self, notices: Vec<String>) {
+        self.central.push_central_work_reports(notices);
+    }
+    #[doc(hidden)]
+    pub fn clear_queued_work_reports(&self) {
+        self.central.clear_queued_work_reports();
+    }
+    #[doc(hidden)]
+    pub fn flush_pending_dispatches<R: tauri::Runtime>(
+        &self,
+        finished_work_id: &str,
+        finished_session_id: &str,
+        app: Option<tauri::AppHandle<R>>,
+    ) {
+        self.central
+            .flush_pending_dispatches(finished_work_id, finished_session_id, app);
+    }
+    #[doc(hidden)]
+    pub fn central_work_status(&self) -> Vec<crate::central::CentralWorkStatus> {
+        self.central.central_work_status()
+    }
+    #[doc(hidden)]
+    pub fn on_central_work_finished(
+        &self,
+        request: &crate::central::CentralDispatchRequest,
+        done: bool,
+        notice: &str,
+    ) {
+        self.central.on_central_work_finished(request, done, notice);
+    }
+
+    /// 构造中枢宿主状态（R6 抽离）：Core 基础设施（投递/建核）经闭包
+    /// 注入——运行时经 Tauri state 回找宿主自身（串行锁/交接/远端轮
+    /// 守卫都在宿主实现，中枢只表达意图）。
+    fn build_central_host(
+        core_manager: tiangong_core_manager::CoreManager,
+        app_state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
+        app_handle: std::sync::Arc<std::sync::OnceLock<tauri::AppHandle>>,
+    ) -> std::sync::Arc<central_host::CentralHostState> {
+        // 流消费者启动：经 OnceLock 取宿主句柄（setup 后可用）
+        let starter_handle = app_handle.clone();
+        let starter: central_host::StreamConsumerStarter =
+            std::sync::Arc::new(move |session_id, stream_rx| {
+                if let Some(handle) = starter_handle.get() {
+                    crate::commands::start_stream_consumer(handle.clone(), session_id, stream_rx);
+                } else {
+                    // 句柄未就绪（极早期派发）：drain 防发送端阻塞
+                    std::thread::spawn(move || for _ in stream_rx {});
+                }
+            });
+        // 投递 prepared 消息：回找宿主（串行锁 + 交接 + 远端轮守卫）
+        let deliver_handle = app_handle.clone();
+        let deliver: central_host::DeliverPreparedFn =
+            std::sync::Arc::new(move |session_id, message_id, prepared, model_ref| {
+                let handle = deliver_handle.clone();
+                Box::pin(async move {
+                    use tauri::Manager;
+                    let Some(app) = handle.get() else {
+                        return Err("宿主句柄未就绪，无法投递中枢派发消息".to_string());
+                    };
+                    let host = app.state::<TiangongApp>();
+                    host.deliver_prepared_if_live(
+                        &session_id,
+                        message_id,
+                        prepared,
+                        model_ref.as_deref(),
+                        None,
+                    )
+                    .await
+                })
+            });
+        // 确保会话 Core：回找宿主 ensure_core
+        let ensure_handle = app_handle.clone();
+        let ensure: central_host::EnsureCoreFn =
+            std::sync::Arc::new(move |session_id, cwd, model_ref, stream_tx| {
+                let handle = ensure_handle.clone();
+                Box::pin(async move {
+                    use tauri::Manager;
+                    let Some(app) = handle.get() else {
+                        return Err("宿主句柄未就绪，无法创建工作会话 Core".to_string());
+                    };
+                    let host = app.state::<TiangongApp>();
+                    host.ensure_core(
+                        &session_id,
+                        cwd,
+                        None,
+                        None,
+                        model_ref.as_deref(),
+                        stream_tx,
+                    )
+                    .await
+                    .map(|ensured| ensured.is_new)
+                })
+            });
+        std::sync::Arc::new(central_host::CentralHostState::new(
+            core_manager,
+            app_state,
+            app_handle,
+            starter,
+            deliver,
+            ensure,
+        ))
+    }
+
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
         let _ = self.app_handle.set(handle);
     }
@@ -763,7 +913,8 @@ impl TiangongApp {
     /// `initial_model_ref` 是本次发送携带的模型选择：新建 Core 时直接以该
     /// 模型初始化，避免新对话首条消息先按默认模型建 Core、投递时再触发一次
     /// 多余切换。为 `None` 时沿用 Session.model_ref / 路由默认。
-    pub(crate) async fn ensure_core(
+    #[doc(hidden)]
+    pub async fn ensure_core(
         &self,
         session_id: &str,
         workspace_dir: Option<String>,
@@ -772,6 +923,13 @@ impl TiangongApp {
         initial_model_ref: Option<&str>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> Result<tiangong_core_manager::EnsuredCore, String> {
+        // 机制守卫（review S9，先于一切副作用）：中枢对话误经此入口会创建
+        // 挂全插件的中枢 Core（破坏白名单隔离）——必须走 ensure_central_core。
+        if crate::central::is_central_session(session_id) {
+            return Err(format!(
+                "中枢对话（{session_id}）必须经 ensure_central_core 构造，误入 ensure_core 已拦截"
+            ));
+        }
         self.wait_plugin_preload().await?;
         let (app_config, agent_config, default_workspace_dir) = self
             .with_state_read(|state| {
@@ -800,7 +958,8 @@ impl TiangongApp {
         }
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
-        // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
+        // 避免每次发送消息都重复构造插件集合（桌面插件桥实例化）。
+        //
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
         self.core_manager
@@ -813,6 +972,103 @@ impl TiangongApp {
                 || factory.build_plugins_sync(session_id, models),
             )
             .await
+    }
+
+    // =========================================================================
+    // 中枢对话 Core：直接构造与管理（不经 CoreManager）
+    //
+    // 中枢需要内置且唯一的中枢插件（crate::central::CentralPlugin：人设 +
+    // §5.3 白名单工具集），CoreManager 的 runtime 聚合桥插件构造与会话
+    // 编排不适用。中枢 Core 单实例常驻（进程生命周期），模型直接使用设置
+    // 的主对话模型（§15.12；中枢 session.model_ref 优先）；压缩由 Core
+    // 内部自治。
+    // =========================================================================
+
+    /// 测试构造：隔离 storage root 与工作区（host 集成测试用——避免读写
+    /// 真实 ~/.tiangong；生产代码不得调用）。
+    #[doc(hidden)]
+    pub fn new_for_test(storage_root: std::path::PathBuf, workspace_dir: String) -> Self {
+        let config = tiangong_config::registry::init_from_dir(&storage_root);
+        let core_config = config.to_core_config();
+        let core_manager = tiangong_core_manager::CoreManager::new(
+            tiangong_core::config::core::CoreConfigProvider::new(core_config.clone()),
+            storage_root.clone(),
+        );
+        let core_state = tiangong_app_state::app_state::TiangongState {
+            config,
+            active_session_id: String::new(),
+            workspace_dir: workspace_dir.clone(),
+            input_caches: Default::default(),
+            model_list: Vec::new(),
+            agent_config: tiangong_core::config::agent::AgentConfig {
+                trust_mode: core_config.trust_mode,
+                default_trust_mode: core_config.default_trust_mode,
+                reasoning_effort: core_config.reasoning_effort,
+            },
+            pending_turns: Default::default(),
+            core_manager: core_manager.clone(),
+        };
+        let app_state = std::sync::Arc::new(tokio::sync::Mutex::new(core_state));
+        let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
+        // 测试闭包：直连 CoreManager（不经串行锁/交接——宿主集成细节由
+        // tiangong-app 自身测试覆盖；中枢测试关注编排行为）
+        let cm_deliver = core_manager.clone();
+        let deliver: central_host::DeliverPreparedFn =
+            std::sync::Arc::new(move |session_id, message_id, prepared, model_ref| {
+                let cm = cm_deliver.clone();
+                Box::pin(async move {
+                    cm.deliver_user_message(
+                        &session_id,
+                        tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                            message_id, prepared,
+                        )
+                        .with_model_ref(model_ref),
+                    )
+                    .await
+                })
+            });
+        let cm_ensure = core_manager.clone();
+        let ensure: central_host::EnsureCoreFn =
+            std::sync::Arc::new(move |session_id, cwd, model_ref, stream_tx| {
+                let cm = cm_ensure.clone();
+                Box::pin(async move {
+                    let config = tiangong_core::config::core::CoreConfig::default();
+                    let workspace = cwd.unwrap_or_default();
+                    cm.ensure_core(
+                        &session_id,
+                        config,
+                        workspace,
+                        model_ref.as_deref(),
+                        stream_tx,
+                        Vec::new,
+                    )
+                    .await
+                    .map(|ensured| ensured.is_new)
+                })
+            });
+        let starter: central_host::StreamConsumerStarter =
+            std::sync::Arc::new(move |session_id, stream_rx| {
+                std::thread::spawn(move || for _ in stream_rx {});
+                let _ = session_id;
+            });
+        let central = std::sync::Arc::new(central_host::CentralHostState::new(
+            core_manager.clone(),
+            app_state.clone(),
+            app_handle.clone(),
+            starter,
+            deliver,
+            ensure,
+        ));
+        let mut app = Self::new();
+        app.state = app_state;
+        app.core_manager = core_manager;
+        app.central = central;
+        app.desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
+            app_handle,
+            config: tiangong_core::config::core::CoreConfigProvider::new(core_config),
+            storage_root,
+        });
+        app
     }
 
     /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：
@@ -1091,6 +1347,12 @@ async fn run_launcher_auto_update(app_handle: tauri::AppHandle) {
         }
     }
 }
+
+// =========================================================================
+// 中枢派发执行器（自由函数）：中枢插件经 unbounded channel 提交后台工作
+// 请求；执行器创建 Worker 会话（普通能力、全插件、指定模型）投递任务，
+// 并在终态把结果注入中枢对话（事件驱动汇报的最小闭环）。
+// =========================================================================
 
 #[cfg(test)]
 mod tests {

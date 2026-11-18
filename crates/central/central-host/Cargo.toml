@@ -1,0 +1,31 @@
+[package]
+name = "central-host"
+version = "0.17.14"
+edition = "2021"
+description = "中枢宿主编排层：派发执行器/执行路由/模式协调/授权/事件（Tauri 绑定，聚合 CentralHostState）"
+
+[lib]
+name = "central_host"
+path = "src/lib.rs"
+
+[dependencies]
+central-plugin = { workspace = true }
+central-state = { workspace = true }
+tiangong-central = { workspace = true }
+tiangong-core = { workspace = true }
+tiangong-core-manager = { workspace = true }
+tiangong-app-state = { workspace = true }
+tiangong-types = { workspace = true }
+tiangong-config = { workspace = true }
+tiangong-llm = { workspace = true }
+tauri = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+scru128 = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,198 @@
+/**
+ * 中枢对话的会话切换（独立于共用 store 的中枢逻辑，见 lib/centralSession）。
+ *
+ * 中枢对话固定 Session ID、单独存储（后端 `src-tauri central.rs`）；进入
+ * 中枢模式时成为当前对话，退出时恢复进入前的普通模式上下文。切换状态
+ * （进入前上下文、竞态版本）保存在本模块，不进入共用 AppState——中枢
+ * 相关逻辑全部收敛在 `lib/central*` 与 `components/central/`，普通模式
+ * 文件只保留最小挂钩（模式开关与列表/通知的两处中枢判定，见 useStore）。
+ */
+import { api } from '@/api/tauri';
+import { isDesktopHost } from '@/api/host';
+import { useStore } from '@/store/useStore';
+import { CENTRAL_SESSION_ID } from './centralSession';
+
+/** 进入中枢前的普通模式上下文（内存态）；null 表示无记录。 */
+let preCentralContext: {
+  activeSessionId: string | null;
+  newConversationId: string | null;
+} | null = null;
+
+/** 中枢切换竞态版本：快速来回切换模式时作废在途的旧切换。 */
+let centralSwitchVersion = 0;
+/**
+ * 模式宿主上报串行链（二十一轮 review P1）：enter 的 void 上报与
+ * exit 的取回若并发发出，宿主端完成顺序不保证（Enter 晚于 Exit 落地
+ * → 宿主终态 CentralActive 而前端已回普通模式）。所有 enter/exit 宿主
+ * 调用一律入链排队，后发操作必等先发完成——宿主状态机顺序与前端一致。
+ */
+let modeOpChain: Promise<unknown> = Promise.resolve();
+function enqueueModeOp<T>(op: () => Promise<T>): Promise<T> {
+  const run = modeOpChain.then(op, op);
+  modeOpChain = run.catch(() => undefined);
+  return run;
+}
+
+/** 进入中枢模式：确保中枢对话成为当前对话。 */
+export async function ensureCentralConversation(): Promise<void> {
+  const version = ++centralSwitchVersion;
+  const cur = useStore.getState();
+  // 已在中枢对话（含 turn 进行中重复进入）：仅确保上下文已记录（幂等）
+  if (cur.activeSessionId === CENTRAL_SESSION_ID) {
+    if (!preCentralContext) {
+      preCentralContext = { activeSessionId: null, newConversationId: null };
+    }
+    return;
+  }
+  // 记录进入前的普通模式上下文（退出中枢时恢复）
+  preCentralContext = {
+    activeSessionId: cur.activeSessionId,
+    newConversationId: cur.newConversationId,
+  };
+  // R4 模式协调：快照上报宿主（事实源；本地副本为过渡兜底，R5 移除）。
+  // 失败静默——宿主无快照时退出走「无恢复点」分支，不阻塞切换。
+  void enqueueModeOp(() =>
+    api
+      .centralModeEnter(cur.activeSessionId, cur.newConversationId)
+      .catch(() => undefined),
+  );
+  // 中枢对话历史从中枢存储加载；尚未创建（首次进入）按空对话处理。
+  const loaded = await api.loadSession(CENTRAL_SESSION_ID).catch(() => null);
+  // 加载期间模式被来回切换：放弃本次写入
+  if (version !== centralSwitchVersion) return;
+  // 激活问候（§4.2，Z7 移至加载后）：先加载落位 messages 再触发——
+  // 此前问候先 fire（中枢 turn 产生流事件），后到的 loaded 覆盖式
+  // setState 会吞掉问候期间的流式消息（十八轮 Z7 竞态）。后端幂等，
+  // 每进程首次；失败静默不阻塞切换。
+  void api.centralActivationGreeting().catch(() => undefined);
+  const knownRunStatus = useStore.getState().sessionRunStatuses[CENTRAL_SESSION_ID];
+  useStore.setState({
+    isNewConversation: false,
+    activeSessionId: CENTRAL_SESSION_ID,
+    newConversationId: null,
+    messages: loaded?.messages ?? [],
+    historyStart: 0,
+    userOutline: null,
+    runStatus: knownRunStatus || 'idle',
+    runSummary: knownRunStatus ? '正在处理' : '',
+    lastDurationMs: null,
+    toolCallStartedAt: {},
+    toolCallFinished: {},
+    // 会话存储恢复（对齐普通会话 hydrateSessionViewCache）：中枢进入
+    // 即显示累计 token/上轮用量——不等下一次生成的 usage 流事件。
+    lastUsage: loaded?.last_usage ?? null,
+    tokenStats: loaded?.token_stats ?? null,
+    streamingMessageId: null,
+    streamingContent: '',
+    streamingReasoningContent: '',
+    sessionCwd: useStore.getState().workspaceDir,
+    agents: [],
+  });
+}
+
+/** 退出中枢模式：恢复进入前的普通模式会话（原会话或原新对话草稿）。 */
+export async function restoreFromCentralConversation(): Promise<void> {
+  // 作废在途的 ensure；后续切回动作由 store 自身的版本控制保证时序。
+  ++centralSwitchVersion;
+  // R4 模式协调：宿主快照优先（事实源）；宿主无记录（异常进入/调用
+  // 失败）回退本地副本（过渡双源，R5 收敛为纯宿主）。
+  let context = preCentralContext;
+  preCentralContext = null;
+  const hostSnapshot = await enqueueModeOp(() =>
+    api.centralModeExit().catch(() => null),
+  );
+  if (hostSnapshot?.snapshot) {
+    context = {
+      activeSessionId: hostSnapshot.snapshot.active_session_id,
+      newConversationId: hostSnapshot.snapshot.new_conversation_id,
+    };
+  }
+  if (!context) return;
+  if (context.activeSessionId) {
+    const cur = useStore.getState();
+    if (cur.activeSessionId === context.activeSessionId) return;
+    // 列表尚未加载（空）时不能断定原会话已被删除：先刷新一次再判定，
+    // 否则会误丢用户原会话、落到无关的新对话。
+    let sessions = cur.sessions;
+    if (!sessions.length) {
+      await useStore.getState().loadSessions();
+      sessions = useStore.getState().sessions;
+    }
+    if (sessions.some((session) => session.id === context.activeSessionId)) {
+      await useStore.getState().switchSession(context.activeSessionId);
+      return;
+    }
+    await useStore.getState().startNewConversation();
+    return;
+  }
+  if (context.newConversationId) {
+    // 进入前是新对话：恢复原草稿 ID。中枢对话自身的草稿缓存一并保留
+    // （不清理任何 inputCaches 键）。
+    restoreDraftConversation(context.newConversationId);
+    return;
+  }
+  await useStore.getState().startNewConversation();
+}
+
+/** 以既有草稿 ID 恢复普通新对话态（不动任何输入缓存）。 */
+function restoreDraftConversation(draftId: string): void {
+  useStore.setState({
+    isNewConversation: true,
+    activeSessionId: null,
+    newConversationId: draftId,
+    messages: [],
+    historyStart: 0,
+    userOutline: null,
+    runStatus: 'idle',
+    runSummary: '',
+    lastDurationMs: null,
+    toolCallStartedAt: {},
+    toolCallFinished: {},
+    lastUsage: null,
+    tokenStats: null,
+    streamingMessageId: null,
+    streamingContent: '',
+    streamingReasoningContent: '',
+    sessionCwd: useStore.getState().workspaceDir,
+    agents: [],
+  });
+}
+
+/** 仅测试用：重置模块级上下文与版本。 */
+export function __resetCentralConversationForTests(): void {
+  preCentralContext = null;
+  centralSwitchVersion = 0;
+}
+
+
+/**
+ * 启动模式对账（二十一轮 review P2）：宿主 mode-preference.json 是
+ * 事实源（R4 ModeCoordinator），localStorage 只是前端快速初值兜底。
+ * 桌面宿主下启动时调用 central_mode_state 对账——宿主与本地不一致时
+ * 以宿主为准；调用失败（宿主未就绪等）静默保留本地初值。幂等：每进程
+ * 一次。
+ */
+let reconciled = false;
+/** 仅测试用：重置幂等标志（每用例独立对账）。 */
+export function __resetReconcileForTests(): void {
+  reconciled = false;
+}
+export async function reconcileCentralModeWithHost(): Promise<void> {
+  if (reconciled) return;
+  reconciled = true;
+  if (!isDesktopHost()) return;
+  try {
+    const state = await api.centralModeState();
+    const local = useStore.getState().centralMode;
+    // `mode` is the live coordinator state; after a restart it is Normal
+    // until the first command, so the persisted preference is the same
+    // logical state rather than a second independent source of truth.
+    const hostActive =
+      state.mode === 'central_active' || state.last_mode === 'central';
+    if (hostActive !== local) {
+      useStore.getState().setCentralMode(hostActive);
+    }
+  } catch {
+    // 静默：宿主未就绪时保留本地初值（下次模式切换自然重新上报）
+  }
+}

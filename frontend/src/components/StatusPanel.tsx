@@ -3,8 +3,11 @@ import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { isRemoteHost } from '@/api/host';
 import { startWindowDrag } from '@/lib/windowDrag';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Grid3x3, ArrowUpCircle, Search, Puzzle, Sparkles } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
+// 直连子模块（不走 index：index 聚合 CentralModeView → LazyComponents → StatusPanel 成环）
+import { useCentralMode } from '@/features/central/hooks/useCentralMode';
+
 import { useSearchStore } from '@/store/useSearchStore';
 import { Separator } from './ui/separator';
 import { GlobalStatusPluginHost } from './GlobalStatusPluginHost';
@@ -55,6 +58,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   const savingRef = useRef(false);
 
   const { theme, setTheme } = useTheme();
+  const { centralMode, canUseCentral, toggleCentral } = useCentralMode();
   const remote = isRemoteHost();
   const { toggleSidebar, open: sidebarOpen } = useSidebar();
   const activeSession = isNewConversation ? null : sessions.find((s) => s.id === activeSessionId);
@@ -79,6 +83,14 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   useEffect(() => {
     setIsEditing(false);
   }, [activeSessionId]);
+
+  // 中枢模式下标题固定为「中枢」，退出可能残留的标题编辑态
+  useEffect(() => {
+    if (centralMode) {
+      setIsEditing(false);
+      savingRef.current = false;
+    }
+  }, [centralMode]);
 
   const startEditing = () => {
     if (!activeSession) return;
@@ -121,22 +133,25 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
 
   return (
       <header
-      className="flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
+      className="relative flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
       style={{ paddingLeft: titlePaddingLeft }}
       onMouseDown={startWindowDrag}
     >
       <div className="flex items-center gap-2">
-        <Button
-          data-no-drag
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={toggleSidebar}
-        >
-          <PanelLeft className="h-4 w-4" />
-          <span className="sr-only">切换侧边栏</span>
-        </Button>
-        {!sidebarOpen && (
+        {/* 中枢模式：隐藏侧栏开关与新对话（单一中枢对话，会话操作不在此进行） */}
+        {!centralMode && (
+          <Button
+            data-no-drag
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={toggleSidebar}
+          >
+            <PanelLeft className="h-4 w-4" />
+            <span className="sr-only">切换侧边栏</span>
+          </Button>
+        )}
+        {!centralMode && !sidebarOpen && (
           <Button
             data-no-drag
             variant="ghost"
@@ -148,12 +163,25 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <SquarePen className="h-4 w-4" />
           </Button>
         )}
-        <Separator orientation="vertical" className="mr-2 h-4" />
+        {!centralMode && <Separator orientation="vertical" className="mr-2 h-4" />}
+        {/* 中枢模式：标题绝对居中（用户裁决 2026-11-16）——不占 flex 流，
+            左右控件不受影响；pointer-events-none 保窗口拖拽与点击穿透。 */}
+        {centralMode && (
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-12 items-center justify-center">
+            <span
+              className="animate-central-title-glow text-sm font-medium"
+              data-testid="central-title"
+            >
+              天工·中枢
+            </span>
+          </div>
+        )}
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
-              {(isNewConversation || activeSession) && (
-                isNewConversation ? (
+              {/* 中枢下不渲染左侧标题（由居中层承担——否则普通标题残留） */}
+              {!centralMode && (isNewConversation || activeSession) &&
+                (isNewConversation ? (
                   <BreadcrumbPage>新对话</BreadcrumbPage>
                 ) : isEditing ? (
                   <input
@@ -173,8 +201,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
                   >
                     {currentTitle}
                   </BreadcrumbPage>
-                )
-              )}
+                ))}
             </BreadcrumbItem>
           </BreadcrumbList>
         </Breadcrumb>
@@ -196,8 +223,26 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <span>v{updateAvailable.version}</span>
           </button>
         )}
-        {!remote && <SearchButton />}
-        {!remote && (
+        {/* 中枢模式入口：仅 desktop 宿主提供（设计稿 §4.1；浏览器配置页与远程 H5 不提供）。
+            进入与退出复用同一按钮（toggle）。 */}
+        {canUseCentral && (
+          <button
+            data-no-drag
+            onClick={toggleCentral}
+            className={`transition-colors ${
+              centralMode
+                ? 'text-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            title={centralMode ? '退出中枢模式（Cmd/Ctrl+Shift+J）' : '进入中枢模式（Cmd/Ctrl+Shift+J）'}
+            aria-label={centralMode ? '退出中枢模式' : '进入中枢模式'}
+          >
+            <Sparkles className="w-4 h-4" />
+          </button>
+        )}
+        {/* 中枢模式为单一对话：搜索 / 插件管理 / 拓展区均不在中枢内操作 */}
+        {!centralMode && !remote && <SearchButton />}
+        {!centralMode && !remote && (
           <button
             data-no-drag
             onClick={() => setPendingSettingsTab('plugin-manager')}
@@ -207,7 +252,7 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
             <Puzzle className="w-4 h-4" />
           </button>
         )}
-        {onToggleExtension && !remote && (
+        {onToggleExtension && !remote && !centralMode && (
           <button
             data-no-drag
             onClick={onToggleExtension}

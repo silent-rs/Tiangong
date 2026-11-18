@@ -31,16 +31,9 @@ pub use workspace::resolve_effective_cwd;
 
 use std::path::{Path, PathBuf};
 
-/// 校验 session_id 为单个安全路径片段（拒绝 `..`、绝对路径、路径分隔符），
-/// 返回 `{storage_root}/sessions/{id}.json`。
+/// 会话文件路径：委托 [`tiangong_core::session::Session::session_file_path`]，
+/// 读取、持久化、元数据与回收站共用同一规则（含中枢对话的单独存储规则，
+/// 见 `tiangong_types::central_session`）。
 fn session_file_path(storage_root: &Path, session_id: &str) -> Result<PathBuf, String> {
-    let mut components = Path::new(session_id).components();
-    let valid_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none();
-    if !valid_id {
-        return Err("会话 ID 必须是单个安全路径片段".to_string());
-    }
-    Ok(storage_root
-        .join("sessions")
-        .join(format!("{session_id}.json")))
+    tiangong_core::session::Session::session_file_path(storage_root, session_id)
 }
