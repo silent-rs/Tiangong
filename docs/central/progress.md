@@ -2,14 +2,14 @@
 
 > 分支：`feature/central-refactor`（worktree `.worktrees/central-refactor`）
 > 本文档由本地 PLAN.md 迁入版本控制（第十八轮 Z3④）——重构分支的进度
-> 与验证基线以本文档与 docs/central-refactor-plan.md 附录 A 为准。
+> 与验证基线以本文档与 docs/central/plan.md 附录 A 为准。
 > 基线：`develop/central-mode`（设计定稿，Issue #773）+ POC 实现（`poc/central-mode` 合入）
-> 方案：`docs/central-refactor-plan.md`（阶段 R0～R5）｜设计：`docs/central-mode-design-draft.md`
+> 方案：`docs/central/plan.md`（阶段 R0～R5）｜设计：`docs/central/design-draft.md`
 
-## 当前状态（2026-11-17 第 28 轮全量修复后刷新）
-R0～R5 全部完成；第 28 轮 review（`docs/central-refactor-review-and-fix-plan.md`）的八项 P1 合入阻断（R28-1~8）与五组闭环主体已修复：恢复链（意图显式化/答复真实送达/新 execution 终态可达）、日志链（长行/轮转/归档/冷损坏/跨进程幂等）、状态链（生命周期统一/pending_question）、授权 fail-closed、persona 裁决同步。
-剩余：I2 真实 main 合并树验证、I3 实机回归十步（需真实桌面环境）、结构化 outcome（render 层征询标注——当前文本 fallback 的已知边界）、P2 群深水区（P2-08~12 测试保真、C05/C06/C13 工程债）。
-全部提交独立可编译、可测试、可回滚。
+## 当前状态（2026-11-18 R29-8 专项补修后刷新）
+R0～R5 主体完成；R29 的 Interrupted 重派、attach 同步重放、owner 重建、迟到 execution 隔离及日志幂等/非法 UTF-8/最大 offset、pending_question/内存 owner task 已按 TDD 修复。R29-8 的严格/宽松读与 append/轮转已共用稳定生命周期锁，并验证了同进程独立实例及跨进程的读-轮转快照。详细红转绿、实测与已知边界见 `docs/central/fix-report-28.md` §7–8；五组链路均为“自动回归通过但仍有缺口”，不宣称全闭合。
+剩余：I3 实机回归、真实模型与失败回滚完整矩阵、多写者在阈值边界竞争轮转及轮转失败注入、结构化 outcome、票据/授权/取消重派 UI、事件刷新时序和 C 系列工程债。main 合并为 R28 历史事实，本轮不重复声称 I2 未做。
+本轮改动留工作区供用户审阅，未 commit、未 push。
 | 阶段 | 状态 | 提交 | 说明 |
 | --- | --- | --- | --- |
 | R0 冻结契约与观测 | ✅ 完成 | `bbbb67f9` | Execution 契约、execution_id 三处一致（登记/落盘/时间线）、观测日志、旧数据兼容与行为基线测试 |
@@ -19,16 +19,16 @@ R0～R5 全部完成；第 28 轮 review（`docs/central-refactor-review-and-fix
 | R4 ModeCoordinator 与前端 | ✅ | `120ef2bb` `1cf0fe61` | 宿主模式状态机 + 快照归还 + 偏好持久化 + 前端接线（宿主快照优先，本地兜底过渡）；前端工作视图（抽屉/卡片）待做 |
 | R5 清理 POC 兼容层 | ✅ | `0ea3293e` `fd7f9cab` `d0ace0a7` `13704405` `5cd27fb6` | 时间线双写消除（事件日志唯一事实源、旧数据迁移+兼容读）；插件压缩/快照 envelope/实机验收待做 |
 
-## 验证基线（2026-11-17 第 28 轮修复后刷新）
-- `cargo clippy --workspace --all-targets -- -D warnings` 退出 0（CI 口径）
-- `cargo test -p tiangong-central -p central-state -p central-plugin -p central-host -p tiangong-app` 全绿（38+19 集成 / 32 / 40 / 11 / lib 123+bin 1+集成 45——中枢五包合计 309；历史口径 36+23+39+11+168 为二十一轮快照）
-- 覆盖率（llvm-cov）：核心三包 94.41%（分支 84.41%）；central-host 全文件 ≥70%（mode_commands/work_view 100%、authorization 87%、core_lifecycle 83%、central_events 85%）
-- 前端：`tsc --noEmit` 0 错误；Vitest 586/586（65 文件，中枢 12 文件 94 用例）
-- clippy / fmt 干净（仓库余 warning 均为 POC 既有 workspace 依赖声明，非本分支引入）
-- 前端已完成 R4/R6b：模式切换/工作视图/抽屉/卡片 + features/central 特性模块化
+## 验证基线（2026-11-18 R29-8 工作区实测）
+- `cargo clippy --workspace --all-targets --tests -- -D warnings` 通过；0 Clippy error，仍有 Cargo manifest 依赖声明 warning。
+- `cargo test -p tiangong-central -p central-state -p central-plugin -p central-host -p tiangong-app` **313/313**（tiangong-central 53 / central-state 33 / central-plugin 40 / central-host 11 / tiangong-app 176=lib123+bin1+集成52）；上轮 308，本轮新增 4 项快照回归和 1 个子进程辅助项，R28 历史基线 297。不称全 workspace 测试。
+- 覆盖率：下项为历史测量，本轮未重测；核心三包94.41%（分支84.41%），central-host全文件≥70%。
+- 前端：`npx tsc --noEmit` 0错误；`yarn vitest run --configLoader runner` **593/593（66文件）**。
+- `cargo fmt --check` / `git diff --check` 通过；原始日志路径与红转绿断言见修复报告§7–8。
+- 前端已完成 R4/R6b：模式切换/工作视图/抽屉/卡片+特性模块化；票据决定/授权等缺口见下文，不以已有UI笼统代称闭合。
 ## R4 剩余要点（方案 §4 / §6）
 
-1. DecisionTicket 消费点接线：等待用户 → 用户选择 → 恢复同一 execution 的链路校验（决定卡片触发）。
+1. DecisionTicket 消费点接线：等待用户→用户选择→恢复新 execution 的链路校验（决定卡片触发；真 steer 并入才保持当前 execution）。
 2. 前端授权卡片（consume approve_workspace 命令）与决定卡片（consume resolve_decision）。
 3. 工作抽屉、报告卡片、Supervisor 活动时间线（方案 §6.1 组件树）。
 4. ModeSnapshot 前端消费 + 快速切换/恢复失败交互（§8.5 测试矩阵）。

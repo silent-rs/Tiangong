@@ -155,7 +155,7 @@ frontend/src/features/central   中枢前端 API、切换、展示与测试
 | D05 | 2026-11-15，`56451176` | 移除独立 switch_worker_model，换模型通过 dispatch_work 的 session_id+model。工具先从 22 减到 21。 | 有效；`tool_specs.rs:47-61`。不得把“移除模型工具”写成底层所有 switch_model 函数已删除。 |
 | D06 | 2026-11-15，`c024ea13` | 21→10 工具统一入口：inspect_context、dispatch_work、control、work、goal 等。 | 有效；`tool_specs.rs:17-154`，spec/handler 锁 `central-plugin/tests/tools.rs:142-195`。send_to_worker 是历史名称，不是当前可调用工具。 |
 | D07 | 第 20 轮“仅本轮”历史口径，2026-11-15 前后 | 模型覆盖曾按仅本轮、不持久改写解释。 | 历史语义；当前实现实际持久化，不能作为现行已实现事实。 |
-| D08 | 2026-11-16，`defa2485` 及 `docs/central-refactor-plan.md:895` | 文档记“用户裁决 A：持久化会话默认”，persona/spec 同步。 | **来源存疑**：本审查会话未取得用户明确选择的原始答复，不得把仓库记载直接升级为已核实授权。当前代码确实持久化，见 `ensure.rs:309-320`，这是实现事实而不是裁决证明。 |
+| D08 | 2026-11-16，`defa2485` 及 `docs/central/plan.md:895` | 文档记“用户裁决 A：持久化会话默认”，persona/spec 同步。 | **来源存疑**：本审查会话未取得用户明确选择的原始答复，不得把仓库记载直接升级为已核实授权。当前代码确实持久化，见 `ensure.rs:309-320`，这是实现事实而不是裁决证明。 |
 | D09 | 2026-11-16，`872ccb73` | 中枢输入区不再自建整套输入组件，直接复用 MessageInput。 | 有效；`CentralModeView.tsx:85-104`；模型、用量、发送能力沿用普通组件，中枢隐藏目录/特定槽。 |
 | D10 | 2026-11-16，第 24 轮 `c3f94026` | 补 InteractionPluginHost/InputOverlayPluginHost 接线。 | 是实现/缺陷修复，不自动构成“恢复全部征询产品语义”的用户裁决。`CentralModeView.tsx:49-104`。 |
 | D11 | 2026-11-16，第 25 轮 `10c4210d` | 中枢显示 Worker 征询容器，decision 默认展开。 | 当时沙箱会话未改，卡片内容为空的风险成立；随后 D12 修复。不能把这一提交写成已端到端成功。 |
@@ -249,7 +249,7 @@ P1 表示需在合入前解决的功能/数据完整性或授权边界问题，�
 | P2-11 | 生产装配和测试装配不同，关键接线漏测。 | `src-tauri/src/app.rs:326-394/990-1058/1189-1210`；真实边界探针，不仅验证 mock closure。 |
 | P2-12 | StepChain 只依 workId 拉一次；同 id 多 execution 的旧失败/取消污染新执行；曾排队在 state 变化后消失。 | `frontend/src/features/central/components/CentralWorkStatusBar.tsx:34-79`；按 execution/revision 刷新及隔离。 |
 | P2-13 | 步骤链固定种类并集不是事件顺序；“等待当前”测试只检查始终存在的等待文字。 | `frontend/src/features/central/components/CentralWorkStatusBar.tsx:54-79`；`__tests__/centralWorkStatusBar.test.tsx:394-441`。 |
-| P2-14 | 历史 docs 混当前态：横幅、覆盖层、直通命令三段仍在。 | `docs/central-refactor-plan.md:941-945`；旧版应标废弃，并有当前态唯一入口。 |
+| P2-14 | 历史 docs 混当前态：横幅、覆盖层、直通命令三段仍在。 | `docs/central/plan.md:941-945`；旧版应标废弃，并有当前态唯一入口。 |
 | P2-15 | 中断条目仍计入 activeCount，UI 缺确认/取消入口及真实状态解释。 | `frontend/src/features/central/components/CentralWorkStatusBar.tsx:388-405/663-684`；`recovery.rs:84-99`。 |
 | P2-16 | 决策票据过渡：命令能签发，前端无实际使用；恢复按新 execution 消费，未闭合问题版本与答复对象。 | `crates/central/central-host/src/host/authorization.rs:96-132`；`dispatch.rs:467-479`；`frontend/src/features/central/api.ts:47-63`。不要把 UI helper 声明等同实际入口。 |
 | P2-17 | 跨进程幂等未成立，cache 先登记后写入的失败语义也需整理。 | `crates/central/tiangong-central/src/event_log.rs:219-269/288-293`；PR-03；和日志组一起修。 |
@@ -716,12 +716,12 @@ P1 表示需在合入前解决的功能/数据完整性或授权边界问题，�
 
 | 文件位置 | 应改内容 |
 |---|---|
-| `docs/central-refactor-plan.md:894-898` | 当前 work/execution 偏差与模型裁决来源；验证数字按新快照。 |
-| `docs/central-refactor-plan.md:929/932` | 合并 events.rs 重复覆盖率，旧测量注明时间，不冒充新覆盖率。 |
-| `docs/central-refactor-plan.md:941-945` | 横幅/覆盖层/直通段落标废弃并指向最新 B+步骤链；可保留沿革但不能三段同时称当前定稿。 |
-| `docs/central-refactor-plan.md:959/963-968` | 前端用例和矩阵按真实行为证据更新；恢复闭环未验证前不要打全绿。 |
-| `docs/central-refactor-progress.md:9-34` | 阶段、当前功能、五包统计与实机状态一致；删除已删决定卡片的完成声明。 |
-| `docs/central-mode-design-draft.md:338/356-388/1152-1167/1371-1375` | 统一征询、B 决策与模型口径；派发带 model 是助手入口，底层可复用模型编排，不能把底层函数误写成助手可调用工具。 |
+| `docs/central/plan.md:894-898` | 当前 work/execution 偏差与模型裁决来源；验证数字按新快照。 |
+| `docs/central/plan.md:929/932` | 合并 events.rs 重复覆盖率，旧测量注明时间，不冒充新覆盖率。 |
+| `docs/central/plan.md:941-945` | 横幅/覆盖层/直通段落标废弃并指向最新 B+步骤链；可保留沿革但不能三段同时称当前定稿。 |
+| `docs/central/plan.md:959/963-968` | 前端用例和矩阵按真实行为证据更新；恢复闭环未验证前不要打全绿。 |
+| `docs/central/progress.md:9-34` | 阶段、当前功能、五包统计与实机状态一致；删除已删决定卡片的完成声明。 |
+| `docs/central/design-draft.md:338/356-388/1152-1167/1371-1375` | 统一征询、B 决策与模型口径；派发带 model 是助手入口，底层可复用模型编排，不能把底层函数误写成助手可调用工具。 |
 | `crates/central/central-plugin/src/tools_context.rs:27/38/39` | 面向模型的旧工具名改为真实十工具+action。 |
 | `frontend/src/features/central/components/CentralCardsBar.tsx:1-10` | 删已撤决定卡片的当前态注释。 |
 | `crates/central/tiangong-central/tests/event_log.rs:296-312` | 注释说明同进程 cache 测试与进程重启测试各覆盖什么。 |

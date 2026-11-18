@@ -1,5 +1,5 @@
 /**
- * 中枢模式切换动画的 Canvas 2D 绘制（从 docs/central-demo.html 调参台移植）。
+ * 中枢模式切换动画的 Canvas 2D 绘制（从 docs/central/demo-poc.html 调参台移植）。
  *
  * 与调参台的差别：app 内只用一层覆盖画布（主体之上、顶栏之下），
  * 所有绘制额外乘以 `alpha`（sin(π·t/T) 曲线），使转场两端完全透明、

@@ -1397,7 +1397,7 @@ completed 不注入恢复汇总——登记为滚动 20 条，无法区分本次
 ## §20 实现态与已裁决偏差（2026-11-13）
 
 > 本设计稿为需求基线；实现进度、与稿件的偏差及实测反馈修复记录统一维护在
-> `docs/central-refactor-plan.md` 附录 A（重构分支 `feature/central-refactor`），
+> `docs/central/plan.md` 附录 A（重构分支 `feature/central-refactor`），
 > 不在本文件重复。已裁决要点：事件枚举无 queued/paused（以 progress/blocked +
 > note 承载）；Workspace 授权双通道（一次性票据 + 可记住目录）；决定票据签发
 > 通道就绪、消费点待消息结构化；激活问候按「适时沉默」收敛（空闲不注入）。

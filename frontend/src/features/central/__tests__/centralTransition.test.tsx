@@ -1,5 +1,5 @@
 /**
- * 中枢模式切换动画测试（设计稿 §4.1；参数来自 docs/central-demo.html 调参台）。
+ * 中枢模式切换动画测试（设计稿 §4.1；参数来自 docs/central/demo-poc.html 调参台）。
  *
  * 覆盖：定型参数与时间轴、首次挂载/重启直入不播放、desktop 守卫、
  * reduced-motion、转场结束清理、Canvas 缺失时的静默降级、绘制函数边界。

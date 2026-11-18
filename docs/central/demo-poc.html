@@ -436,12 +436,12 @@
   // 只统计本页脚本异常：宿主/浏览器注入脚本在 file:// 下产生的 rejection
   // （例如跨域 fetch）不属于 demo 自身错误，避免状态栏「错误」计数误报。
   window.addEventListener('error', e => {
-    if (e.filename && !/central-demo\.html/.test(e.filename)) return;
+    if (e.filename && !/demo-poc\.html/.test(e.filename)) return;
     errors.push(String(e.message));
   });
   window.addEventListener('unhandledrejection', e => {
     const msg = String((e.reason && e.reason.message) || e.reason);
-    if (/__centralDemo|central-demo\.html/.test(msg)) errors.push('rejection: ' + msg);
+    if (/__centralDemo|demo-poc\.html/.test(msg)) errors.push('rejection: ' + msg);
   });
 
   const bg = $('#bg'), fx = $('#fx');

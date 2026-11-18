@@ -1,5 +1,5 @@
 /**
- * 中枢模式切换动画参数与时间轴（设计稿 §4.1；实现来源 docs/central-demo.html）。
+ * 中枢模式切换动画参数与时间轴（设计稿 §4.1；实现来源 docs/central/demo-poc.html）。
  *
  * 参数来自用户在调参台确认的 orbit 预设链接：
  * bg #070a12 / accent #b15400 / accent2 #e6beb6，

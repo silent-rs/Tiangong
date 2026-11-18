@@ -778,7 +778,7 @@ export function MainApp() {
         <div className="flex flex-1 min-h-0" data-central-body>
           {/* centralActive 已含 desktop 宿主判定，非 desktop 即使 store 被置位也不切换。
               切换转场见 CentralTransition：仅叠加视觉层，布局仍由 React 立即切换，
-              参数来自 docs/central-demo.html 调参台定型的 orbit 预设。 */}
+              参数来自 docs/central/demo-poc.html 调参台定型的 orbit 预设。 */}
           {centralActive ? (
             <CentralModeView />
           ) : (

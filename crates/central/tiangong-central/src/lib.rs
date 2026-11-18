@@ -1,6 +1,6 @@
 //! 中枢模式契约层（重构分支 `feature/central-refactor` 的 central-contract）。
 //!
-//! 依据 `docs/central-refactor-plan.md` §5.1：纯数据结构、契约与规则——
+//! 依据 `docs/central/plan.md` §5.1：纯数据结构、契约与规则——
 //! - 执行归属（`execution.rs`：Execution / execution_id / 契约版本）；
 //! - 事件（`event.rs`：22 种工作事件）与追加式事件日志
 //!   （`event_log.rs`：崩溃恢复 / 幂等 / 投影）；
