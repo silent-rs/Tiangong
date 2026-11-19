@@ -15,18 +15,14 @@ use tiangong_deepseek::types::{ResponseObject, ResponseOutputItem, ResponsesStre
 /// 内置缓冲并合成结构化 function_call 事件组），本函数只做事件类型转换。
 /// `tools_enabled` 与请求是否携带 tools 一致：completed 兜底补发正文时，
 /// 仅在启用工具的场景剥离文本协议块（无 tools 时协议文本按普通正文保留）。
-/// `historical_call_ids` 为本次请求历史中已回传过的调用 id（流式接收层
-/// 冲突检测：官方要求 call_id 全局唯一，网关局部编号/漏发 call_id 的
-/// 重复 id 当场换全局唯一 id，见 [`resolve_call_id`]）。
+///
+/// call_id 的全局唯一化不在本函数（纯映射，不感知请求历史），由上层
+/// [`ensure_unique_call_ids`] 包装统一事件流完成。
 pub fn map_deepseek_stream(
     event_stream: tiangong_deepseek::types::ResponsesEventStream,
     tools_enabled: bool,
-    historical_call_ids: std::collections::HashSet<String>,
 ) -> super::client::DeepSeekStream {
-    let state = StreamState {
-        used_call_ids: historical_call_ids,
-        ..StreamState::default()
-    };
+    let state = StreamState::default();
     let mapped = event_stream.scan(state, move |state, result| {
         std::future::ready(Some(match result {
             Ok(event) => map_event(state, event, tools_enabled)
@@ -37,6 +33,82 @@ pub fn map_deepseek_stream(
         }))
     });
     Box::pin(mapped.flat_map(stream::iter))
+}
+
+/// 统一事件流上的 call_id 全局唯一化（接收层冲突检测，流式）。
+///
+/// 官方 Responses API 要求 call_id 唯一（历史每轮全量回传），但部分
+/// 网关/端点的 function_call 不带 call_id（映射层回退 item id，每轮
+/// 局部编号）或每轮使用固定编号（`call_0`）——重复 id 已失去区分价值
+/// （服务端日志中其本身就歧义），保留必致回传 400。本包装器持有
+/// `historical_call_ids`（本次请求历史中已回传过的调用 id，见
+/// mapping::historical_call_ids），对流上的工具调用事件做换发：
+///
+/// - `ToolCallStart`：id 为空或与历史/本轮已分配 id 冲突 → 换发全局
+///   唯一 `textcall_<scru128>` 并记录原始 id → 新 id 映射；首次出现
+///   且非空 → **保留 server 原值**（以 server 为主，可与服务端日志
+///   对账，历史前缀稳定利于 context caching）。
+/// - `ToolCallDelta` / `ToolCallEnd`：call_id 经同一映射改写，与 Start
+///   保持一致（同一调用各事件不得漂移）。
+/// - 非工具调用事件与错误原样透传。
+///
+/// 与映射层（[`map_deepseek_stream`]）的分工：映射层做纯事件转换
+/// （不感知请求历史），唯一化作为独立包装层叠加。回传层
+/// （mapping `build_input`）另有一道按需重写兜底，覆盖接收层上线前
+/// 遗留的旧会话重复数据。
+pub(super) fn ensure_unique_call_ids(
+    stream: super::client::DeepSeekStream,
+    historical_call_ids: HashSet<String>,
+) -> super::client::DeepSeekStream {
+    #[derive(Default)]
+    struct UniqueState {
+        /// 历史 ∪ 本轮已分配（含保留原值）的 id。
+        used: HashSet<String>,
+        /// 原始 id → 换发 id（Delta / End 复用，各事件一致）。
+        remap: HashMap<String, String>,
+    }
+    let state = UniqueState {
+        used: historical_call_ids,
+        ..UniqueState::default()
+    };
+    let mapped = stream.scan(state, |state, result| {
+        std::future::ready(Some(match result {
+            Ok(ProviderStreamEvent::ToolCallStart(mut call)) => {
+                if !call.id.trim().is_empty() && state.used.insert(call.id.clone()) {
+                    // 首次出现：保留 server 原值。
+                } else if let Some(rewritten) = state.remap.get(&call.id).cloned() {
+                    call.id = rewritten;
+                } else {
+                    let unique = tiangong_deepseek::dsml::next_text_call_id();
+                    tracing::warn!(
+                        original = %call.id,
+                        rewritten = %unique,
+                        "function call id 与历史冲突（网关局部编号或漏发 call_id），换全局唯一 id"
+                    );
+                    state.remap.insert(call.id.clone(), unique.clone());
+                    state.used.insert(unique.clone());
+                    call.id = unique;
+                }
+                Ok(ProviderStreamEvent::ToolCallStart(call))
+            }
+            Ok(ProviderStreamEvent::ToolCallDelta {
+                call_id,
+                partial_json,
+            }) => {
+                let call_id = state.remap.get(&call_id).cloned().unwrap_or(call_id);
+                Ok(ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                })
+            }
+            Ok(ProviderStreamEvent::ToolCallEnd { call_id }) => {
+                let call_id = state.remap.get(&call_id).cloned().unwrap_or(call_id);
+                Ok(ProviderStreamEvent::ToolCallEnd { call_id })
+            }
+            other => other,
+        }))
+    });
+    Box::pin(mapped)
 }
 
 /// 流式映射状态。
@@ -52,16 +124,6 @@ struct StreamState {
     started_call_ids: HashSet<String>,
     /// 已收到过参数增量的 call_id（done / completed 兜底补发完整参数时去重）。
     received_argument_deltas: HashSet<String>,
-    /// 请求历史中已回传过的调用 id ∪ 本轮已分配的 id：官方要求
-    /// call_id 全局唯一，新解析的 id 与之冲突时当场换发
-    /// （见 [`resolve_call_id`]）。
-    used_call_ids: HashSet<String>,
-    /// 本轮已分配出去的最终 id（added 首次分配时登记）：done / completed
-    /// 对同一调用重复解析时原样复用，不得误判为冲突再次换发。
-    assigned_call_ids: HashSet<String>,
-    /// 原始 id → 换发 id：同一调用的 added / done / completed 事件
-    /// 各自重复解析时复用首次换发的值，保证各事件解析出同一 id。
-    remapped_call_ids: HashMap<String, String>,
     /// 是否收到过正文 / 思考增量（completed 兜底补发时去重）。
     has_text_delta: bool,
     has_reasoning_delta: bool,
@@ -86,7 +148,7 @@ fn map_event(
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = resolve_call_id(state, &call, output_index);
+                let call_id = call_id_or_placeholder(state, &call, output_index);
                 if let Some(item_id) = call.id.as_deref() {
                     state
                         .item_call_ids
@@ -127,7 +189,7 @@ fn map_event(
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = resolve_call_id(state, &call, output_index);
+                let call_id = call_id_or_placeholder(state, &call, output_index);
                 let mut events = Vec::new();
                 // 网关在 added item 携带完整参数、且未发任何增量事件时，
                 // 在 done 补发一次完整参数，确保工具参数不丢失。
@@ -178,7 +240,7 @@ fn map_event(
             // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
             for (output_index, item) in response.output.iter().enumerate() {
                 if let ResponseOutputItem::FunctionCall(call) = item {
-                    let call_id = resolve_call_id(state, call, output_index as u32);
+                    let call_id = call_id_or_placeholder(state, call, output_index as u32);
                     if !state.started_call_ids.contains(&call_id) {
                         state.started_call_ids.insert(call_id.clone());
                         events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
@@ -295,49 +357,6 @@ fn call_id_or_placeholder(
     }
 }
 
-/// 解析 call_id 并保证全局唯一（接收层冲突检测）。
-///
-/// 官方 Responses API 要求 call_id 唯一（历史每轮全量回传），但部分
-/// 网关/端点的 function_call 不带 call_id（回退 item id，每轮局部编号）
-/// 或每轮使用固定编号（`call_0`）——重复的 id 已失去区分价值（服务端
-/// 日志中其本身就歧义），保留必致回传 400。行为：
-///
-/// - 首次出现且非空 → **保留 server 原值**（权威标识，与服务端日志
-///   可对账，历史前缀稳定利于 context caching）；
-/// - 同一调用在 done / completed 中重复解析 → 复用本轮已分配的 id
-///   （`assigned_call_ids` / `remapped_call_ids` 命中），各事件 id 一致；
-/// - 与请求历史冲突、或解析为空 → 换发全局唯一 `textcall_<scru128>`。
-///
-/// 回传层（mapping `build_input`）另有一道按需重写兜底：接收层上线前
-/// 遗留的旧会话重复数据仍可在请求构造时修正。
-fn resolve_call_id(
-    state: &mut StreamState,
-    call: &tiangong_deepseek::types::OutputFunctionCall,
-    output_index: u32,
-) -> String {
-    let raw = call_id_or_placeholder(state, call, output_index);
-    if let Some(remapped) = state.remapped_call_ids.get(&raw) {
-        return remapped.clone();
-    }
-    if state.assigned_call_ids.contains(&raw) {
-        return raw;
-    }
-    if !raw.trim().is_empty() && state.used_call_ids.insert(raw.clone()) {
-        state.assigned_call_ids.insert(raw.clone());
-        return raw;
-    }
-    let unique = tiangong_deepseek::dsml::next_text_call_id();
-    state.remapped_call_ids.insert(raw.clone(), unique.clone());
-    state.used_call_ids.insert(unique.clone());
-    state.assigned_call_ids.insert(unique.clone());
-    tracing::warn!(
-        original = %raw,
-        rewritten = %unique,
-        "function call id 与历史冲突（网关局部编号或漏发 call_id），换全局唯一 id"
-    );
-    unique
-}
-
 /// 收集全部 message item 的输出文本（等价 SDK 的 `output_text` 便捷访问）。
 fn collect_message_text(response: &ResponseObject) -> String {
     response
@@ -408,6 +427,8 @@ mod tests {
     ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
         collect_with_history(events, tools_enabled, Default::default()).await
     }
+    /// 映射层 + call_id 唯一化包装层的组合（与 provider.stream 生产路径
+    /// 一致），`historical_call_ids` 模拟请求历史中已回传的调用 id。
     async fn collect_with_history(
         events: Vec<Result<ResponsesStreamEvent, tiangong_deepseek::DeepSeekError>>,
         tools_enabled: bool,
@@ -415,9 +436,12 @@ mod tests {
     ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
         let stream: tiangong_deepseek::types::ResponsesEventStream =
             Box::pin(futures_util::stream::iter(events));
-        map_deepseek_stream(stream, tools_enabled, historical_call_ids)
-            .collect()
-            .await
+        ensure_unique_call_ids(
+            map_deepseek_stream(stream, tools_enabled),
+            historical_call_ids,
+        )
+        .collect()
+        .await
     }
 
     fn text_event(delta: &str) -> ResponsesStreamEvent {
@@ -611,7 +635,7 @@ mod tests {
         );
     }
 
-    /// 接收层冲突检测（层 1）：请求历史已回传过 `fc_1`（网关每轮局部
+    /// 接收层冲突检测（层 1，唯一化包装层）：请求历史已回传过 `fc_1`（网关每轮局部
     /// 编号的 item id），本轮响应又解析出 `fc_1` → 当场换发全局唯一
     /// textcall id；且 added / delta / done / completed 各事件对同一
     /// 调用解析出**同一个**换发 id（不因重复解析再次换发）。
