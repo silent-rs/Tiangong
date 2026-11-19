@@ -7,21 +7,6 @@ use tiangong_types::StreamEvent;
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-/// 修复持久化历史后，把同一批修改同步给已经加载会话的客户端。
-pub(super) fn repair_tool_call_history(
-    ctx: &mut crate::turn_context::TurnContext,
-) -> Result<(), String> {
-    for index in ctx.session.repair_tool_call_history()? {
-        let mut message = ctx.session.messages[index].clone();
-        message.clear_transient_data();
-        let _ = ctx.stream_tx.send(StreamEvent::SessionMessageUpsert {
-            message,
-            deferred_tool_injections: None,
-        });
-    }
-    Ok(())
-}
-
 pub(crate) fn emit_session_message_upsert(
     ctx: &crate::turn_context::TurnContext,
     message_id: &str,

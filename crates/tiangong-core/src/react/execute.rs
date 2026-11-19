@@ -601,9 +601,6 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
-    if let Err(error) = repair_tool_call_history(ctx) {
-        return TurnExecutionResult::failed(TokenUsage::default(), error);
-    }
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
     let context_organizer = ContextOrganizer::new(context_limit);

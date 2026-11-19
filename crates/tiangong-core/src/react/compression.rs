@@ -349,10 +349,6 @@ pub(crate) async fn run_manual_context_compression(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     notice: String,
 ) -> ManualCompressionOutcome {
-    if let Err(error) = super::message::repair_tool_call_history(&mut ctx) {
-        notify_manual_failure(&ctx, &TokenUsage::default(), &error);
-        return ManualCompressionOutcome::Failed(error);
-    }
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
 
