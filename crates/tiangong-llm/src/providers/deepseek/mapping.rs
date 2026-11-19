@@ -74,6 +74,29 @@ pub fn to_deepseek_request(req: &ProviderRequest) -> Result<CreateResponseReques
     })
 }
 
+/// 收集本次请求历史中已回传过的调用 id（assistant 的 ToolCall 与
+/// Tool 消息的 ToolResult 两侧）。接收层冲突检测用：官方 Responses
+/// API 要求 call_id 全局唯一，新解析出的调用 id 与历史重复时当场换发
+/// 全局唯一 id（首次出现保留 server 原值，见 stream::resolve_call_id
+/// 与 from_deepseek_response）。
+pub(super) fn historical_call_ids(req: &ProviderRequest) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for message in &req.messages {
+        for content in &message.content {
+            match content {
+                MessageContent::ToolCall(call) if !call.id.is_empty() => {
+                    ids.insert(call.id.clone());
+                }
+                MessageContent::ToolResult(result) if !result.tool_call_id.is_empty() => {
+                    ids.insert(result.tool_call_id.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    ids
+}
+
 /// 消息流 → `input` item 列表。
 ///
 /// 跨轮重复的 call_id 在此重写为全局唯一：官方 Responses API 要求
@@ -423,6 +446,7 @@ fn extract_text(message: &ChatMessage) -> String {
 pub fn from_deepseek_response(
     response: ResponseObject,
     tools_enabled: bool,
+    historical_call_ids: &std::collections::HashSet<String>,
 ) -> Result<ProviderResponse> {
     // failed 属于请求级错误（服务端在 error 字段给出原因），恢复 chat 版
     // 行为直接报错，避免退化为「空回复 + Other("failed")」被上层当作正常
@@ -444,6 +468,10 @@ pub fn from_deepseek_response(
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls = Vec::new();
+    // 已用调用 id（历史 ∪ 本响应已分配）：接收层冲突检测，官方要求
+    // call_id 全局唯一。首次出现保留 server 原值；与历史冲突或为空时
+    // 换发全局唯一 id（空 id 会在请求清洗层连同结果被剔除，调用丢失）。
+    let mut used_call_ids = historical_call_ids.clone();
     for item in &response.output {
         match item {
             ResponseOutputItem::Message(message) => {
@@ -466,14 +494,25 @@ pub fn from_deepseek_response(
                 }
             }
             ResponseOutputItem::FunctionCall(call) => {
+                let call_id = if !call.call_id.trim().is_empty()
+                    && used_call_ids.insert(call.call_id.clone())
+                {
+                    call.call_id.clone()
+                } else {
+                    let fallback = tiangong_deepseek::dsml::next_text_call_id();
+                    tracing::warn!(
+                        original = %call.call_id,
+                        item_id = ?call.id,
+                        fallback = %fallback,
+                        "function call id 为空或与历史冲突，换全局唯一 id"
+                    );
+                    used_call_ids.insert(fallback.clone());
+                    fallback
+                };
                 tool_calls.push(crate::tool::ToolCall {
-                    id: call.call_id.clone(),
+                    id: call_id.clone(),
                     name: call.name.clone(),
-                    arguments: parse_tool_arguments_or_error(
-                        &call.name,
-                        &call.call_id,
-                        &call.arguments,
-                    ),
+                    arguments: parse_tool_arguments_or_error(&call.name, &call_id, &call.arguments),
                 });
             }
             ResponseOutputItem::CustomToolCall(_)
@@ -967,6 +1006,36 @@ mod tests {
         assert_eq!(request.safety_check, None);
     }
 
+    /// 接收层冲突检测（层 1，非流式）：响应的 call_id 与请求历史已回传的
+    /// id 重复（网关每轮固定编号）→ 换发全局唯一 textcall id；首次出现的
+    /// server id 保留原值。
+    #[test]
+    fn conflicting_call_id_with_history_is_rewritten() {
+        let history: std::collections::HashSet<String> =
+            ["call_0".to_string()].into_iter().collect();
+        let response = response_object(vec![
+            function_call_item("call_0", "read_file", "{\"a\":1}"),
+            function_call_item("call_9", "write_file", "{\"b\":2}"),
+        ]);
+        let result = from_deepseek_response(response, true, &history).expect("response");
+        let ids: Vec<&str> = result
+            .assistant_message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                MessageContent::ToolCall(call) => Some(call.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(
+            ids[0].starts_with("textcall_"),
+            "与历史冲突的 call_0 应换发全局唯一 id：{}",
+            ids[0]
+        );
+        assert_eq!(ids[1], "call_9", "首次出现的 server id 保留原值");
+    }
+
     fn response_object(output: Vec<ResponseOutputItem>) -> ResponseObject {
         ResponseObject {
             id: "resp_test".to_string(),
@@ -1007,7 +1076,7 @@ mod tests {
             "read_file",
             "{\"path\":",
         )]);
-        let result = from_deepseek_response(response, true).expect("response");
+        let result = from_deepseek_response(response, true, &Default::default()).expect("response");
         let MessageContent::ToolCall(call) = &result.assistant_message.content[0] else {
             panic!("expected tool call");
         };
@@ -1022,7 +1091,7 @@ mod tests {
     #[test]
     fn empty_tool_arguments_become_empty_object() {
         let response = response_object(vec![function_call_item("call_empty", "read_file", "")]);
-        let result = from_deepseek_response(response, true).expect("response");
+        let result = from_deepseek_response(response, true, &Default::default()).expect("response");
         let MessageContent::ToolCall(call) = &result.assistant_message.content[0] else {
             panic!("expected tool call");
         };
@@ -1046,7 +1115,8 @@ mod tests {
                 })],
             },
         )]);
-        let result = from_deepseek_response(response, false).expect("response");
+        let result =
+            from_deepseek_response(response, false, &Default::default()).expect("response");
         let usage = result.usage.expect("usage");
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 2);
@@ -1075,7 +1145,8 @@ mod tests {
                 })],
             }),
         ]);
-        let result = from_deepseek_response(response, false).expect("response");
+        let result =
+            from_deepseek_response(response, false, &Default::default()).expect("response");
         assert_eq!(result.reasoning_content.as_deref(), Some("思考过程"));
         let MessageContent::Text(text) = &result.assistant_message.content[0] else {
             panic!("应为纯文本");
@@ -1096,7 +1167,8 @@ mod tests {
                 })],
             },
         )]);
-        let result = from_deepseek_response(response, false).expect("response");
+        let result =
+            from_deepseek_response(response, false, &Default::default()).expect("response");
         assert_eq!(result.assistant_message.content.len(), 1);
         let MessageContent::Text(text) = &result.assistant_message.content[0] else {
             panic!("应为纯文本");
@@ -1117,7 +1189,7 @@ mod tests {
                 })],
             },
         )]);
-        let result = from_deepseek_response(response, true).expect("response");
+        let result = from_deepseek_response(response, true, &Default::default()).expect("response");
         let MessageContent::ToolCall(call) = &result.assistant_message.content[1] else {
             panic!("应兜底解析出工具调用：{:?}", result.assistant_message);
         };
@@ -1144,7 +1216,8 @@ mod tests {
         response.incomplete_details = Some(tiangong_deepseek::types::IncompleteDetails {
             reason: Some("max_output_tokens".to_string()),
         });
-        let result = from_deepseek_response(response, false).expect("response");
+        let result =
+            from_deepseek_response(response, false, &Default::default()).expect("response");
         assert_eq!(result.stop_reason, Some(StopReason::MaxTokens));
     }
 
@@ -1158,7 +1231,8 @@ mod tests {
             code: Some("server_error".to_string()),
             message: Some("内部错误".to_string()),
         });
-        let err = from_deepseek_response(response, false).expect_err("应返回错误");
+        let err =
+            from_deepseek_response(response, false, &Default::default()).expect_err("应返回错误");
         assert!(
             err.to_string().contains("failed") && err.to_string().contains("内部错误"),
             "错误信息应包含状态与详情：{err}"
@@ -1196,7 +1270,8 @@ mod tests {
         });
         let response: ResponseObject =
             serde_json::from_value(raw).expect("未知 item 不应导致解析失败");
-        let result = from_deepseek_response(response, false).expect("response");
+        let result =
+            from_deepseek_response(response, false, &Default::default()).expect("response");
         let MessageContent::Text(text) = &result.assistant_message.content[0] else {
             panic!("应为纯文本");
         };

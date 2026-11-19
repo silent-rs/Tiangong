@@ -1,6 +1,6 @@
 use super::client::{DeepSeekClient, NativeDeepSeekTransport};
 use super::config::DeepSeekConfig;
-use super::mapping::{from_deepseek_response, to_deepseek_request};
+use super::mapping::{from_deepseek_response, historical_call_ids, to_deepseek_request};
 use super::stream::map_deepseek_stream;
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
@@ -44,10 +44,12 @@ where
         let request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let response = self.client.create(request).await?;
-        from_deepseek_response(response, !req.tools.is_empty()).map_err(|err| LlmError::Provider {
-            provider: "deepseek",
-            message: err.to_string(),
-        })
+        from_deepseek_response(response, !req.tools.is_empty(), &historical_call_ids(&req)).map_err(
+            |err| LlmError::Provider {
+                provider: "deepseek",
+                message: err.to_string(),
+            },
+        )
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
@@ -56,7 +58,11 @@ where
         // Responses 模式下 stream 标志由 SDK 在 create_stream 内强制开启
         // （语义化 SSE，终止事件后无 [DONE] 标记），无需在此设置。
         let event_stream = self.client.create_stream(request).await?;
-        Ok(map_deepseek_stream(event_stream, !req.tools.is_empty()))
+        Ok(map_deepseek_stream(
+            event_stream,
+            !req.tools.is_empty(),
+            historical_call_ids(&req),
+        ))
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {

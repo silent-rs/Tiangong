@@ -353,3 +353,132 @@ async fn deepseek_history_repeated_call_id_passes_through() {
         "output 的 call_id 必须与 function_call 一一同步（含重写）"
     );
 }
+
+/// 双策略端到端（层 1 接收 + 层 2 回传）：网关每轮返回相同 call_id
+/// （fc_1，无 item id）。第一轮无历史冲突 → 保留 server 原值 fc_1；
+/// 第二轮请求历史已含 fc_1，响应又解析出 fc_1 → 接收层当场换发全局
+/// 唯一 textcall id；回传 input 中 fc_1 仅一份、新调用唯一，无重复。
+#[tokio::test]
+async fn deepseek_two_rounds_conflicting_id_stays_unique() {
+    let added = json!({
+        "type": "response.output_item.added",
+        "sequence_number": 1, "output_index": 0,
+        "item": {"type": "function_call", "call_id": "fc_1", "name": "read_file", "arguments": ""}
+    });
+    let delta = json!({
+        "type": "response.function_call_arguments.delta",
+        "sequence_number": 2, "item_id": "fc_1", "output_index": 0,
+        "delta": "{\"path\":\"/tmp/x\"}"
+    });
+    let completed = json!({
+        "type": "response.completed", "sequence_number": 3,
+        "response": {
+            "id": "resp_round", "object": "response", "created_at": 0,
+            "status": "completed", "model": "test-model",
+            "output": [{"type": "function_call", "call_id": "fc_1", "name": "read_file",
+                        "arguments": "{\"path\":\"/tmp/x\"}"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }
+    });
+    let body = format!("data: {added}\n\ndata: {delta}\n\ndata: {completed}\n\n");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let tools = vec![ToolSpec {
+        name: "read_file".into(),
+        description: "读取".into(),
+        input_schema: json!({"type": "object"}),
+    }];
+
+    // 第一轮：无历史 → 保留 server 原值 fc_1（以 server 为主）。
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let first = client
+        .clone()
+        .stream_async(
+            ModelRequest {
+                tools: tools.clone(),
+                ..request("two-rounds")
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.tool_calls[0].id, "fc_1");
+
+    // 第二轮：历史含第一轮的 fc_1 调用与结果，响应又是 fc_1 → 换发唯一 id。
+    let tool_call = |id: &str| {
+        LlmMessageContent::ToolCall(ToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "/tmp/x"}),
+        })
+    };
+    let tool_result = |id: &str| {
+        LlmMessageContent::ToolResult(LlmToolResult {
+            tool_call_id: id.to_string(),
+            content: LlmToolResultContent::Text("ok".to_string()),
+            is_error: false,
+        })
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let second = client
+        .stream_async(
+            ModelRequest {
+                tools,
+                messages: vec![
+                    ChatMessage::text(LlmMessageRole::User, "读文件"),
+                    ChatMessage::new(LlmMessageRole::Assistant, vec![tool_call("fc_1")]),
+                    ChatMessage::new(LlmMessageRole::Tool, vec![tool_result("fc_1")]),
+                ],
+                ..request("two-rounds")
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        second.tool_calls[0].id.starts_with("textcall_"),
+        "第二轮与历史冲突的 fc_1 应换发唯一 id：{}",
+        second.tool_calls[0].id
+    );
+
+    // 第二次请求的回传 input：fc_1 仅一份（首个保留），新调用唯一，无重复。
+    let requests = server.received_requests().await.expect("应捕获请求");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[1].body).expect("请求体应为 JSON");
+    let items = body["input"]["0"]
+        .as_array()
+        .or_else(|| body["input"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let call_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .filter_map(|item| item["call_id"].as_str().map(str::to_string))
+        .collect();
+    let mut unique = call_ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        call_ids.len(),
+        unique.len(),
+        "回传 call_id 不得重复：{call_ids:?}"
+    );
+    assert!(
+        call_ids.contains(&"fc_1".to_string()),
+        "首个 server id 保留"
+    );
+}
