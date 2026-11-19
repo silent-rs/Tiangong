@@ -338,7 +338,7 @@ async fn deepseek_history_repeated_call_id_passes_through() {
         "首个出现的 call_id 保留原值（稳定前缀）"
     );
     assert!(
-        call_ids[1].starts_with("textcall_") && call_ids[1] != "fc_1",
+        call_ids[1].starts_with("call_") && call_ids[1] != "fc_1",
         "后续重复 call_id 应重写为全局唯一 id，实际: {}",
         call_ids[1]
     );
@@ -450,7 +450,7 @@ async fn deepseek_two_rounds_conflicting_id_stays_unique() {
         .await
         .unwrap();
     assert!(
-        second.tool_calls[0].id.starts_with("textcall_"),
+        second.tool_calls[0].id.starts_with("call_"),
         "第二轮与历史冲突的 fc_1 应换发唯一 id：{}",
         second.tool_calls[0].id
     );
