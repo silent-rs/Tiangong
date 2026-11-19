@@ -75,8 +75,20 @@ pub fn to_deepseek_request(req: &ProviderRequest) -> Result<CreateResponseReques
 }
 
 /// 消息流 → `input` item 列表。
+///
+/// 跨轮重复的 call_id 在此重写为全局唯一：官方 Responses API 要求
+/// call_id 唯一（历史每轮全量回传），但部分网关/端点的 function_call
+/// 不带 call_id 或每轮使用局部编号（`fc_1` / `call_0`），客户端兜底 id
+/// 会跨轮重复，直接回传将触发服务端「function call 与 output 不匹配」
+/// 类 400。首个出现的 call_id 保留原值（稳定前缀，利于服务端缓存），
+/// 后续重复出现时，该轮 function_call 与紧随其后的 function_call_output
+/// 同步重写为唯一 id。
 fn build_input(req: &ProviderRequest) -> ResponseInput {
     let mut items = Vec::new();
+    // 已回传的 call_id（含重写后的新 id）。
+    let mut seen_call_ids = std::collections::HashSet::new();
+    // 当前 assistant 批次的 old_id → 重写 id（供紧随的 Tool 消息对齐）。
+    let mut pending_remap = std::collections::HashMap::<String, String>::new();
     for message in &req.messages {
         match message.role {
             // 系统指令统一走 instructions（Responses API 无消息内 system 语义，
@@ -96,14 +108,27 @@ fn build_input(req: &ProviderRequest) -> ResponseInput {
                 if let Some(item) = build_assistant_message(message) {
                     items.push(ResponseInputItem::Message(item));
                 }
-                for call in build_function_calls(message) {
+                pending_remap.clear();
+                for mut call in build_function_calls(message) {
+                    let resolved = if seen_call_ids.contains(&call.call_id) {
+                        let rewritten = tiangong_deepseek::dsml::next_text_call_id();
+                        pending_remap.insert(call.call_id.clone(), rewritten.clone());
+                        rewritten
+                    } else {
+                        seen_call_ids.insert(call.call_id.clone());
+                        call.call_id.clone()
+                    };
+                    call.call_id = resolved;
                     items.push(ResponseInputItem::FunctionCall(call));
                 }
             }
             MessageRole::Tool => {
                 // 每个工具结果映射为 function_call_output item；
                 // 官方要求每个 function_call 必须有对应的 function_call_output。
-                for output in build_function_call_outputs(message) {
+                for mut output in build_function_call_outputs(message) {
+                    if let Some(rewritten) = pending_remap.get(&output.call_id) {
+                        output.call_id = rewritten.clone();
+                    }
                     items.push(ResponseInputItem::FunctionCallOutput(output));
                 }
             }

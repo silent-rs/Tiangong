@@ -12,8 +12,12 @@ use crate::ModelEndpoint;
 use crate::ModelRequest;
 use crate::ProviderProtocol;
 use crate::SingleProviderClient;
-use crate::message::{ChatMessage, MessageRole as LlmMessageRole};
-use crate::tool::{ToolCall, ToolSpec};
+use crate::message::{
+    ChatMessage, MessageContent as LlmMessageContent, MessageRole as LlmMessageRole,
+};
+use crate::tool::{
+    ToolCall, ToolResult as LlmToolResult, ToolResultContent as LlmToolResultContent, ToolSpec,
+};
 
 /// 与 session_tests 同形的最小请求（固定系统提示 + 单条用户消息）。
 fn request(session_id: &str) -> ModelRequest {
@@ -196,4 +200,156 @@ async fn deepseek_malformed_protocol_stream_discards_text() {
         response.text
     );
     assert!(response.tool_calls.is_empty(), "残缺协议不得转出工具调用");
+}
+
+/// 服务端 function_call 不带 call_id、只带 item id（fc_1，每轮局部编号）
+/// 时，流式聚合回退用 item id 作为调用 id。两轮流各自回退到同一个
+/// `fc_1` → 跨轮重复。此测试固定该回退行为，供跨轮重复回归测试引用。
+#[tokio::test]
+async fn deepseek_stream_call_id_missing_falls_back_to_item_id() {
+    let added = json!({
+        "type": "response.output_item.added",
+        "sequence_number": 1,
+        "output_index": 0,
+        "item": {"type": "function_call", "id": "fc_1", "name": "read_file", "arguments": ""}
+    });
+    let delta = json!({
+        "type": "response.function_call_arguments.delta",
+        "sequence_number": 2,
+        "item_id": "fc_1",
+        "output_index": 0,
+        "delta": "{\"path\":\"/tmp/x\"}"
+    });
+    let completed = json!({
+        "type": "response.completed",
+        "sequence_number": 3,
+        "response": {
+            "id": "resp_fb", "object": "response", "created_at": 0,
+            "status": "completed", "model": "test-model",
+            "output": [{"type": "function_call", "id": "fc_1", "name": "read_file",
+                        "arguments": "{\"path\":\"/tmp/x\"}"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }
+    });
+    let body = format!("data: {added}\n\ndata: {delta}\n\ndata: {completed}\n\n");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let req = ModelRequest {
+        tools: vec![ToolSpec {
+            name: "read_file".into(),
+            description: "读取".into(),
+            input_schema: json!({"type": "object"}),
+        }],
+        ..request("call-id-fallback")
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let response = client.stream_async(req, tx).await.unwrap();
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(
+        response.tool_calls[0].id, "fc_1",
+        "call_id 缺失时回退用 item id（每轮局部编号，跨轮重复）"
+    );
+}
+
+/// 两轮工具调用历史携带重复 call_id（服务端每轮局部编号 / 网关固定 id）
+/// 时，回传构造必须重写后续重复：首个 call_id 保留原值，之后重复的
+/// function_call 与对应 function_call_output 同步改写为全局唯一 id
+/// （官方 Responses API 要求 call_id 唯一，历史每轮全量回传不得重复，
+/// 见 dsml.rs 文本调用注释；重复直接透传会触发服务端
+/// 「function call 与 output 不匹配」类 400）。
+#[tokio::test]
+async fn deepseek_history_repeated_call_id_passes_through() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp_repeat", "object": "response", "created_at": 0,
+            "status": "completed", "model": "test-model",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let tool_call = |id: &str| {
+        LlmMessageContent::ToolCall(ToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "/tmp/x"}),
+        })
+    };
+    let tool_result = |id: &str| {
+        LlmMessageContent::ToolResult(LlmToolResult {
+            tool_call_id: id.to_string(),
+            content: LlmToolResultContent::Text(format!("result-{id}")),
+            is_error: false,
+        })
+    };
+    // 两轮工具调用：fc_1 各出现一次（各自成对，sanitize 不会剔除）。
+    let req = ModelRequest {
+        messages: vec![
+            ChatMessage::text(LlmMessageRole::User, "读文件"),
+            ChatMessage::new(LlmMessageRole::Assistant, vec![tool_call("fc_1")]),
+            ChatMessage::new(LlmMessageRole::Tool, vec![tool_result("fc_1")]),
+            ChatMessage::new(LlmMessageRole::Assistant, vec![tool_call("fc_1")]),
+            ChatMessage::new(LlmMessageRole::Tool, vec![tool_result("fc_1")]),
+        ],
+        ..request("repeat-call-id")
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    client.stream_async(req, tx).await.unwrap();
+
+    let requests = server.received_requests().await.expect("应捕获到请求");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("请求体应为 JSON");
+    // input 序列化形态为字符串简写或 items 数组，两种都兼容取数组。
+    let items = body["input"]["0"]
+        .as_array()
+        .or_else(|| body["input"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let call_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .filter_map(|item| item["call_id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(call_ids.len(), 2, "两轮调用都应保留");
+    assert_eq!(
+        call_ids[0], "fc_1",
+        "首个出现的 call_id 保留原值（稳定前缀）"
+    );
+    assert!(
+        call_ids[1].starts_with("textcall_") && call_ids[1] != "fc_1",
+        "后续重复 call_id 应重写为全局唯一 id，实际: {}",
+        call_ids[1]
+    );
+    // 对应的 function_call_output 必须同步重写，否则仍不成对。
+    let output_ids: Vec<String> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .filter_map(|item| item["call_id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        output_ids, call_ids,
+        "output 的 call_id 必须与 function_call 一一同步（含重写）"
+    );
 }
