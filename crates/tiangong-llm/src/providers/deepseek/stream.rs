@@ -69,7 +69,21 @@ fn map_event(
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = call_id_or_placeholder(state, &call, output_index);
+                let mut call_id = call_id_or_placeholder(state, &call, output_index);
+                // 同轮内多个输出项共用同一 call_id（不同 item_id）时按
+                // 出现序派生区分（`{raw}-{n}`，确定性）：否则两个调用的
+                // 参数增量都挂同一 id，上层聚合按 id 合并会静默丢失调用。
+                if state.started_call_ids.contains(&call_id) {
+                    let mut n = 2usize;
+                    loop {
+                        let derived = format!("{call_id}-{n}");
+                        if !state.started_call_ids.contains(&derived) {
+                            call_id = derived;
+                            break;
+                        }
+                        n += 1;
+                    }
+                }
                 if let Some(item_id) = call.id.as_deref() {
                     state
                         .item_call_ids
@@ -532,6 +546,80 @@ mod tests {
         assert_eq!(
             argument_deltas,
             vec![("call_1".to_string(), "{\"path\":\"/tmp\"}".to_string())]
+        );
+    }
+
+    /// 同轮两个输出项（fc_1 / fc_2）共用同一 call_id（X）时，映射层
+    /// 按出现序派生区分（X、X-2），两个调用都转出且参数各归各——
+    /// 否则上层聚合按 id 合并会静默丢一个调用。
+    #[tokio::test]
+    async fn same_call_id_across_items_is_disambiguated() {
+        let call_item = |item_id: &str| {
+            ResponseOutputItem::FunctionCall(OutputFunctionCall {
+                id: Some(item_id.to_string()),
+                status: None,
+                call_id: "X".to_string(),
+                name: "read_file".to_string(),
+                arguments: String::new(),
+            })
+        };
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: call_item("fc_1"),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 2,
+                item_id: "fc_1".to_string(),
+                output_index: 0,
+                delta: "{\"a\":1}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 3,
+                output_index: 1,
+                item: call_item("fc_2"),
+            }),
+            Ok(ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number: 4,
+                item_id: "fc_2".to_string(),
+                output_index: 1,
+                delta: "{\"b\":2}".to_string(),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 5,
+                response: completed_response(Vec::new()),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let starts: Vec<String> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallStart(call) => Some(call.id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2, "两个输出项都应转出：{starts:?}");
+        assert_eq!(starts[0], "X", "首个保留原 call_id");
+        assert_eq!(starts[1], "X-2", "第二个按出现序派生区分");
+        let args_by_id: Vec<(String, String)> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                } => Some((call_id.clone(), partial_json.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            args_by_id,
+            vec![
+                ("X".to_string(), "{\"a\":1}".to_string()),
+                ("X-2".to_string(), "{\"b\":2}".to_string()),
+            ],
+            "参数增量各归各，不得并入同一调用"
         );
     }
 
