@@ -482,3 +482,171 @@ async fn deepseek_two_rounds_conflicting_id_stays_unique() {
         "首个 server id 保留"
     );
 }
+
+/// 三轮回传验收：轮 1 保留 server id（fc_1）；轮 2 历史已占用 → 分配
+/// 新 id（call_<scru>）；轮 3 请求回传中，function_call 与
+/// function_call_output **都原样使用**轮 2 的新 id（成对、无改写），
+/// 且调用数量与实际参数正确（不只看前缀）。
+#[tokio::test]
+async fn deepseek_three_round_roundtrip_uses_assigned_id_verbatim() {
+    let sse = |resp_id: &str| {
+        let added = json!({
+            "type": "response.output_item.added",
+            "sequence_number": 1, "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "fc_1",
+                     "name": "read_file", "arguments": ""}
+        });
+        let delta = json!({
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 2, "item_id": "fc_1", "output_index": 0,
+            "delta": "{\"path\":\"/tmp/x\"}"
+        });
+        let completed = json!({
+            "type": "response.completed", "sequence_number": 3,
+            "response": {
+                "id": resp_id, "object": "response", "created_at": 0,
+                "status": "completed", "model": "test-model",
+                "output": [{"type": "function_call", "id": "fc_1", "call_id": "fc_1",
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"/tmp/x\"}"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            }
+        });
+        format!("data: {added}\n\ndata: {delta}\n\ndata: {completed}\n\n")
+    };
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse("resp_3r")),
+        )
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::DeepSeek,
+        ..Default::default()
+    });
+    let tools = vec![ToolSpec {
+        name: "read_file".into(),
+        description: "读取".into(),
+        input_schema: json!({"type": "object"}),
+    }];
+    let tool_call = |id: &str| {
+        LlmMessageContent::ToolCall(ToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "/tmp/x"}),
+        })
+    };
+    let tool_result = |id: &str| {
+        LlmMessageContent::ToolResult(LlmToolResult {
+            tool_call_id: id.to_string(),
+            content: LlmToolResultContent::Text("ok".to_string()),
+            is_error: false,
+        })
+    };
+
+    // 轮 1：无历史 → 保留 fc_1。
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let round1 = client
+        .clone()
+        .stream_async(
+            ModelRequest {
+                tools: tools.clone(),
+                ..request("three-rounds")
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(round1.tool_calls.len(), 1);
+    assert_eq!(round1.tool_calls[0].id, "fc_1");
+    assert_eq!(
+        round1.tool_calls[0].arguments,
+        json!({"path": "/tmp/x"}),
+        "参数完整，不只看 id"
+    );
+
+    // 轮 2：历史含 fc_1 → call_id 与 item_id 均占用 → 新 id。
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let round2 = client
+        .clone()
+        .stream_async(
+            ModelRequest {
+                tools: tools.clone(),
+                messages: vec![
+                    ChatMessage::text(LlmMessageRole::User, "读文件"),
+                    ChatMessage::new(LlmMessageRole::Assistant, vec![tool_call("fc_1")]),
+                    ChatMessage::new(LlmMessageRole::Tool, vec![tool_result("fc_1")]),
+                ],
+                ..request("three-rounds")
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(round2.tool_calls.len(), 1, "调用数量为 1");
+    let assigned = round2.tool_calls[0].id.clone();
+    assert!(
+        assigned.starts_with("call_") && assigned != "fc_1",
+        "历史占用后应分配新 id：{assigned}"
+    );
+    assert_eq!(
+        round2.tool_calls[0].arguments,
+        json!({"path": "/tmp/x"}),
+        "新 id 调用参数完整"
+    );
+
+    // 轮 3：完整历史回传，新 id 必须原样出现在 function_call 与 output。
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let _round3 = client
+        .stream_async(
+            ModelRequest {
+                tools,
+                messages: vec![
+                    ChatMessage::text(LlmMessageRole::User, "读文件"),
+                    ChatMessage::new(LlmMessageRole::Assistant, vec![tool_call("fc_1")]),
+                    ChatMessage::new(LlmMessageRole::Tool, vec![tool_result("fc_1")]),
+                    ChatMessage::new(LlmMessageRole::Assistant, vec![tool_call(&assigned)]),
+                    ChatMessage::new(LlmMessageRole::Tool, vec![tool_result(&assigned)]),
+                ],
+                ..request("three-rounds")
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.expect("应捕获请求");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[2].body).expect("第三轮请求体应为 JSON");
+    let items = body["input"]["0"]
+        .as_array()
+        .or_else(|| body["input"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let calls: Vec<(&str, &str)> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .filter_map(|item| Some((item["call_id"].as_str()?, item["arguments"].as_str()?)))
+        .collect();
+    let outputs: Vec<(&str, &str)> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .filter_map(|item| Some((item["call_id"].as_str()?, item["output"].as_str()?)))
+        .collect();
+    assert_eq!(calls.len(), 2, "两轮调用各一条：{calls:?}");
+    assert_eq!(
+        calls[0],
+        ("fc_1", "{\"path\":\"/tmp/x\"}"),
+        "首个 server id 原样回传（含参数）"
+    );
+    assert_eq!(calls[1].0, assigned, "轮 2 分配的新 id 原样回传（不改写）");
+    assert_eq!(outputs.len(), 2, "两个结果各一条");
+    assert_eq!(outputs[0].0, "fc_1", "结果与调用成对");
+    assert_eq!(outputs[1].0, assigned, "结果与新调用成对");
+    assert_eq!(outputs[1].1, "ok", "结果内容原样");
+}

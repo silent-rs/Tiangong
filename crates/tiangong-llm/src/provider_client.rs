@@ -912,9 +912,17 @@ fn dedupe_call_ids_across_rounds(messages: &mut [ChatMessage]) {
                         if seen == 1 && !call.id.trim().is_empty() && used.insert(call.id.clone()) {
                             continue; // 首次出现：保留 server 原值。
                         }
-                        let rewritten = format!("call_dedupe_{seen}_{}", call.id);
+                        // 候选本身已被历史占用（如旧会话恰好用过该派生值）
+                        // 时递增序号重试，保证确定性且不冲突。
+                        let mut n = seen;
+                        let rewritten = loop {
+                            let candidate = format!("call_dedupe_{n}_{}", call.id);
+                            if used.insert(candidate.clone()) {
+                                break candidate;
+                            }
+                            n += 1;
+                        };
                         remap_batch.insert(call.id.clone(), rewritten.clone());
-                        used.insert(rewritten.clone());
                         call.id = rewritten;
                     }
                 }
@@ -1827,6 +1835,53 @@ mod tests {
         );
         // 同一响应内两个换发值互不相同。
         assert_ne!(response.tool_calls[0].id, response.tool_calls[2].id);
+    }
+
+    /// 旧历史派生值撞车：历史中真实存在 call_dedupe_2_fc_1 时，fc_1
+    /// 第二次出现的候选被占用，递增序号改用 call_dedupe_3_fc_1。
+    #[test]
+    fn dedupe_call_ids_candidate_collision_increments() {
+        let mut messages = vec![
+            ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("fc_1")]),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("fc_1")]),
+            // 旧会话遗留：恰好占用派生候选 call_dedupe_2_fc_1。
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![provider_tool_call("call_dedupe_2_fc_1")],
+            ),
+            ChatMessage::new(
+                LlmMessageRole::Tool,
+                vec![provider_tool_result("call_dedupe_2_fc_1")],
+            ),
+            // fc_1 第二次出现：候选撞车 → 递增。
+            ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("fc_1")]),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("fc_1")]),
+        ];
+        dedupe_call_ids_across_rounds(&mut messages);
+        let rewritten = match &messages[4].content[0] {
+            LlmMessageContent::ToolCall(call) => call.id.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            rewritten, "call_dedupe_3_fc_1",
+            "候选 call_dedupe_2_fc_1 被历史占用时应递增序号"
+        );
+        assert_eq!(
+            match &messages[5].content[0] {
+                LlmMessageContent::ToolResult(result) => result.tool_call_id.clone(),
+                _ => String::new(),
+            },
+            rewritten,
+            "结果与新调用 id 同步"
+        );
+        // 已占用的历史派生值本身保留原样（它是首次出现的真实 id）。
+        assert_eq!(
+            match &messages[2].content[0] {
+                LlmMessageContent::ToolCall(call) => call.id.clone(),
+                _ => String::new(),
+            },
+            "call_dedupe_2_fc_1"
+        );
     }
 
     /// 同一历史重复发送：重写结果必须幂等（相同输入产出相同 id），

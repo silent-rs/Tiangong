@@ -18,8 +18,12 @@ use tiangong_deepseek::types::{ResponseObject, ResponseOutputItem, ResponsesStre
 pub fn map_deepseek_stream(
     event_stream: tiangong_deepseek::types::ResponsesEventStream,
     tools_enabled: bool,
+    used_ids: std::collections::HashSet<String>,
 ) -> super::client::DeepSeekStream {
-    let state = StreamState::default();
+    let state = StreamState {
+        used_ids,
+        ..StreamState::default()
+    };
     let mapped = event_stream.scan(state, move |state, result| {
         std::future::ready(Some(match result {
             Ok(event) => map_event(state, event, tools_enabled)
@@ -31,24 +35,129 @@ pub fn map_deepseek_stream(
     });
     Box::pin(mapped.flat_map(stream::iter))
 }
+/// 单个输出项（function_call item）的解析状态。
+///
+/// 事件按**输出项**关联（output_index 定位，item_id 辅助），不按原始
+/// call_id 去重——同一响应内多个输出项共用同一 call_id（如 fc_a/fc_b
+/// 都带 X）时各自保留为独立调用，参数各归各。最终 id 在首见时经
+/// [`super::mapping::resolve_call_id`] 分配一次，此后 added / delta /
+/// done / completed 各事件一律复用记录值，不再读取原始 call_id 覆盖。
+#[derive(Default)]
+struct OutputItemCall {
+    /// 分配后的最终调用 id（None = 尚未见 added/done，delta 先到暂存）。
+    final_id: Option<String>,
+    /// 工具名（补发 Start 用，来自 added / done / completed 的 item）。
+    name: Option<String>,
+    /// 已发出 ToolCallStart。
+    started: bool,
+    /// 已收到参数（增量或完整快照），done / completed 不再重复补发。
+    has_arguments: bool,
+    /// Start 之前到达的参数增量暂存（added/done 注册时冲刷下发）。
+    pending_arguments: String,
+}
 
 /// 流式映射状态。
 #[derive(Default)]
 struct StreamState {
-    /// output item 的服务端 id（如 `fc_1`）→ 回传用 call_id。
-    /// 参数增量事件只携带 item_id，需要由此还原 call_id。
-    item_call_ids: HashMap<String, String>,
-    /// output_index → call_id：部分网关的增量事件不带（或带不同的）
-    /// item_id，以输出序号双键关联兜底。
-    index_call_ids: HashMap<u32, String>,
-    /// 已发过 ToolCallStart 的 call_id（completed 统一转出时去重）。
-    started_call_ids: HashSet<String>,
-    /// 已收到过参数增量的 call_id（done / completed 兜底补发完整参数时去重）。
-    received_argument_deltas: HashSet<String>,
+    /// output_index → 输出项状态（同一响应内定位调用）。
+    items: HashMap<u32, OutputItemCall>,
+    /// item_id → output_index（delta 事件只带 item_id 时辅助定位）。
+    item_index: HashMap<String, u32>,
+    /// ID 分配器占用集（由本次请求实际回传的历史 id 初始化）。
+    used_ids: HashSet<String>,
     /// 是否收到过正文 / 思考增量（completed 兜底补发时去重）。
     has_text_delta: bool,
     has_reasoning_delta: bool,
 }
+
+impl StreamState {
+    /// 定位或注册输出项：delta 可能先于 added 到达（病态流），此时按
+    /// 输出项暂存，注册动作留给携带工具名的 added / done / completed。
+    fn item_mut(&mut self, item_id: Option<&str>, output_index: u32) -> &mut OutputItemCall {
+        if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+            self.item_index
+                .entry(item_id.to_string())
+                .or_insert(output_index);
+        }
+        self.items.entry(output_index).or_default()
+    }
+
+    /// 按输出项解析定位（delta 只带 item_id 或 output_index 均可）。
+    fn locate(&mut self, item_id: &str, output_index: u32) -> &mut OutputItemCall {
+        let index = self
+            .item_index
+            .get(item_id)
+            .copied()
+            .unwrap_or(output_index);
+        self.items.entry(index).or_default()
+    }
+
+    /// 注册输出项（首见）：分配最终 id、记录工具名、发一次 Start，
+    /// 并冲刷此前暂存的参数增量。已有记录（delta 先到）复用，不改写。
+    fn register_call(
+        &mut self,
+        output_index: u32,
+        item_id: Option<&str>,
+        call_id: &str,
+        name: &str,
+    ) -> Vec<ProviderStreamEvent> {
+        if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+            self.item_index.insert(item_id.to_string(), output_index);
+        }
+        let item = self.items.entry(output_index).or_default();
+        let final_id = match item.final_id.clone() {
+            Some(existing) => existing,
+            None => {
+                let assigned =
+                    super::mapping::resolve_call_id(&mut self.used_ids, call_id, item_id);
+                item.final_id = Some(assigned.clone());
+                assigned
+            }
+        };
+        if item.name.is_none() {
+            item.name = Some(name.to_string());
+        }
+        let mut events = Vec::new();
+        if !item.started {
+            item.started = true;
+            events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
+                id: final_id.clone(),
+                name: item.name.clone().unwrap_or_default(),
+                arguments: serde_json::json!({}),
+            }));
+        }
+        let pending = std::mem::take(&mut item.pending_arguments);
+        if !pending.is_empty() {
+            item.has_arguments = true;
+            events.push(ProviderStreamEvent::ToolCallDelta {
+                call_id: final_id,
+                partial_json: pending,
+            });
+        }
+        events
+    }
+
+    /// done / completed 携带完整参数时的按需补发（未收到过增量才发）。
+    fn backfill_arguments(
+        &mut self,
+        output_index: u32,
+        arguments: &str,
+    ) -> Vec<ProviderStreamEvent> {
+        let Some(item) = self.items.get_mut(&output_index) else {
+            return Vec::new();
+        };
+        if item.has_arguments || arguments.trim().is_empty() {
+            return Vec::new();
+        }
+        item.has_arguments = true;
+        let call_id = item.final_id.clone().unwrap_or_default();
+        vec![ProviderStreamEvent::ToolCallDelta {
+            call_id,
+            partial_json: arguments.to_string(),
+        }]
+    }
+}
+
 fn map_event(
     state: &mut StreamState,
     event: ResponsesStreamEvent,
@@ -69,36 +178,11 @@ fn map_event(
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let mut call_id = call_id_or_placeholder(state, &call, output_index);
-                // 同轮内多个输出项共用同一 call_id（不同 item_id）时按
-                // 出现序派生区分（`{raw}-{n}`，确定性）：否则两个调用的
-                // 参数增量都挂同一 id，上层聚合按 id 合并会静默丢失调用。
-                if state.started_call_ids.contains(&call_id) {
-                    let mut n = 2usize;
-                    loop {
-                        let derived = format!("{call_id}-{n}");
-                        if !state.started_call_ids.contains(&derived) {
-                            call_id = derived;
-                            break;
-                        }
-                        n += 1;
-                    }
-                }
-                if let Some(item_id) = call.id.as_deref() {
-                    state
-                        .item_call_ids
-                        .insert(item_id.to_string(), call_id.clone());
-                }
-                state.index_call_ids.insert(output_index, call_id.clone());
-                state.started_call_ids.insert(call_id.clone());
-                // 不在 added 时下发参数：部分网关在 added item 携带完整参数后
-                // 仍会跟增量事件，立即下发会重复拼接；完整参数统一在
-                // done / completed 按需补发（增量以先到者为准）。
-                vec![ProviderStreamEvent::ToolCallStart(ToolCall {
-                    id: call_id,
-                    name: call.name.clone(),
-                    arguments: serde_json::json!({}),
-                })]
+                // 首见注册：分配最终 id 并发一次 Start；此前先到的参数
+                // 增量一并冲刷。不在 added 时下发完整参数：部分网关在
+                // added item 携带完整参数后仍会跟增量事件，立即下发会
+                // 重复拼接；完整参数统一在 done / completed 按需补发。
+                state.register_call(output_index, call.id.as_deref(), &call.call_id, &call.name)
             }
             _ => Vec::new(),
         },
@@ -108,35 +192,42 @@ fn map_event(
             delta,
             ..
         } => {
-            let call_id = state
-                .item_call_ids
-                .get(&item_id)
-                .or_else(|| state.index_call_ids.get(&output_index))
-                .cloned()
-                .unwrap_or(item_id);
-            state.received_argument_deltas.insert(call_id.clone());
-            vec![ProviderStreamEvent::ToolCallDelta {
-                call_id,
-                partial_json: delta,
-            }]
+            // 按输出项定位：已注册则直接下发；先于 Start 到达（病态流）
+            // 则按输出项暂存，注册时统一冲刷。
+            let item = state.locate(&item_id, output_index);
+            match item.final_id.clone() {
+                Some(call_id) => {
+                    item.has_arguments = true;
+                    vec![ProviderStreamEvent::ToolCallDelta {
+                        call_id,
+                        partial_json: delta,
+                    }]
+                }
+                None => {
+                    item.pending_arguments.push_str(&delta);
+                    Vec::new()
+                }
+            }
         }
         ResponsesStreamEvent::OutputItemDone {
             output_index, item, ..
         } => match item {
             ResponseOutputItem::FunctionCall(call) => {
-                let call_id = call_id_or_placeholder(state, &call, output_index);
-                let mut events = Vec::new();
-                // 网关在 added item 携带完整参数、且未发任何增量事件时，
-                // 在 done 补发一次完整参数，确保工具参数不丢失。
-                if !call.arguments.trim().is_empty()
-                    && !state.received_argument_deltas.contains(&call_id)
-                {
-                    state.received_argument_deltas.insert(call_id.clone());
-                    events.push(ProviderStreamEvent::ToolCallDelta {
-                        call_id: call_id.clone(),
-                        partial_json: call.arguments.clone(),
-                    });
-                }
+                // 已有记录（added 首见）复用最终 id，不读原始 call_id 覆盖；
+                // 网关省略 added 时在此注册并补发 Start。完整参数仅在未收
+                // 到过增量时补发一次。
+                let mut events = state.register_call(
+                    output_index,
+                    call.id.as_deref(),
+                    &call.call_id,
+                    &call.name,
+                );
+                events.extend(state.backfill_arguments(output_index, &call.arguments));
+                let call_id = state
+                    .items
+                    .get(&output_index)
+                    .and_then(|item| item.final_id.clone())
+                    .unwrap_or_default();
                 events.push(ProviderStreamEvent::ToolCallEnd { call_id });
                 events
             }
@@ -170,28 +261,19 @@ fn map_event(
                 }
             }
             // 终止事件统一转出工具调用：一次性 JSON 合成流与不发增量事件的
-            // 网关只在此处携带完整 function_call items。未发过 Start 的调用
-            // 先补 Start（携带工具名），再按需补发完整参数；上层聚合依赖
-            // Start 登记工具名，缺 Start 会导致整个调用被丢弃。
+            // 网关只在此处携带完整 function_call items。按输出项注册（已有
+            // 记录复用最终 id，Start 只补缺），完整参数按需补发一次；上层
+            // 聚合依赖 Start 登记工具名，缺 Start 会导致整个调用被丢弃。
             for (output_index, item) in response.output.iter().enumerate() {
                 if let ResponseOutputItem::FunctionCall(call) = item {
-                    let call_id = call_id_or_placeholder(state, call, output_index as u32);
-                    if !state.started_call_ids.contains(&call_id) {
-                        state.started_call_ids.insert(call_id.clone());
-                        events.push(ProviderStreamEvent::ToolCallStart(ToolCall {
-                            id: call_id.clone(),
-                            name: call.name.clone(),
-                            arguments: serde_json::json!({}),
-                        }));
-                    }
-                    if !call.arguments.trim().is_empty()
-                        && !state.received_argument_deltas.contains(&call_id)
-                    {
-                        events.push(ProviderStreamEvent::ToolCallDelta {
-                            call_id,
-                            partial_json: call.arguments.clone(),
-                        });
-                    }
+                    let output_index = output_index as u32;
+                    events.extend(state.register_call(
+                        output_index,
+                        call.id.as_deref(),
+                        &call.call_id,
+                        &call.name,
+                    ));
+                    events.extend(state.backfill_arguments(output_index, &call.arguments));
                 }
             }
             if let Some(usage) = &response.usage {
@@ -259,29 +341,6 @@ fn map_event(
         | ResponsesStreamEvent::WebSearchCallSearching { .. }
         | ResponsesStreamEvent::WebSearchCallCompleted { .. }
         | ResponsesStreamEvent::Unknown { .. } => Vec::new(),
-    }
-}
-
-/// 解析回传用 call_id。优先级：`call_id` 字段 → added 阶段按输出序号
-/// 登记的映射（`index_call_ids`，网关在 done / completed 省略 item id 时
-/// 由此还原同一 id）→ item 的服务端 id → 输出序号占位
-/// （`item_{output_index}`）。added / done / completed 三处共用同一规则，
-/// 保证同一调用在各事件中解析出相同 id——去重集合（started /
-/// received_argument_deltas）依赖此一致性，id 漂移会导致参数重复补发
-/// 或同一调用重复转出。
-fn call_id_or_placeholder(
-    state: &StreamState,
-    call: &tiangong_deepseek::types::OutputFunctionCall,
-    output_index: u32,
-) -> String {
-    if !call.call_id.trim().is_empty() {
-        call.call_id.clone()
-    } else if let Some(mapped) = state.index_call_ids.get(&output_index) {
-        mapped.clone()
-    } else {
-        call.id
-            .clone()
-            .unwrap_or_else(|| format!("item_{output_index}"))
     }
 }
 
@@ -355,7 +414,9 @@ mod tests {
     ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
         let stream: tiangong_deepseek::types::ResponsesEventStream =
             Box::pin(futures_util::stream::iter(events));
-        map_deepseek_stream(stream, tools_enabled).collect().await
+        map_deepseek_stream(stream, tools_enabled, Default::default())
+            .collect()
+            .await
     }
 
     fn text_event(delta: &str) -> ResponsesStreamEvent {
@@ -552,6 +613,59 @@ mod tests {
     /// 同轮两个输出项（fc_1 / fc_2）共用同一 call_id（X）时，映射层
     /// 按出现序派生区分（X、X-2），两个调用都转出且参数各归各——
     /// 否则上层聚合按 id 合并会静默丢一个调用。
+    /// 参数只在 done 出现（added 无参数、无任何增量）：done 补发一次
+    /// 完整参数并收 End，completed 不再重复。
+    #[tokio::test]
+    async fn arguments_only_in_done_are_backfilled_once() {
+        let bare = |arguments: &str| {
+            ResponseOutputItem::FunctionCall(OutputFunctionCall {
+                id: Some("fc_1".to_string()),
+                status: None,
+                call_id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                arguments: arguments.to_string(),
+            })
+        };
+        let events = vec![
+            Ok(ResponsesStreamEvent::OutputItemAdded {
+                sequence_number: 1,
+                output_index: 0,
+                item: bare(""),
+            }),
+            Ok(ResponsesStreamEvent::OutputItemDone {
+                sequence_number: 2,
+                output_index: 0,
+                item: bare("{\"path\":\"/tmp\"}"),
+            }),
+            Ok(ResponsesStreamEvent::ResponseCompleted {
+                sequence_number: 3,
+                response: completed_response(vec![bare("{\"path\":\"/tmp\"}")]),
+            }),
+        ];
+        let out = collect(events).await;
+        let flattened: Vec<_> = out.into_iter().map(|e| e.expect("ok")).collect();
+        let argument_deltas: Vec<(String, String)> = flattened
+            .iter()
+            .filter_map(|event| match event {
+                ProviderStreamEvent::ToolCallDelta {
+                    call_id,
+                    partial_json,
+                } => Some((call_id.clone(), partial_json.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            argument_deltas,
+            vec![("call_1".to_string(), "{\"path\":\"/tmp\"}".to_string())],
+            "完整参数只在 done 补发一次，completed 不得重复"
+        );
+        let ends = flattened
+            .iter()
+            .filter(|event| matches!(event, ProviderStreamEvent::ToolCallEnd { .. }))
+            .count();
+        assert_eq!(ends, 1, "End 恰好一次");
+    }
+
     #[tokio::test]
     async fn same_call_id_across_items_is_disambiguated() {
         let call_item = |item_id: &str| {
@@ -602,7 +716,10 @@ mod tests {
             .collect();
         assert_eq!(starts.len(), 2, "两个输出项都应转出：{starts:?}");
         assert_eq!(starts[0], "X", "首个保留原 call_id");
-        assert_eq!(starts[1], "X-2", "第二个按出现序派生区分");
+        assert_eq!(
+            starts[1], "fc_2",
+            "第二个的 call_id 已占用，沿用未占用的 item id 区分"
+        );
         let args_by_id: Vec<(String, String)> = flattened
             .iter()
             .filter_map(|event| match event {
@@ -617,7 +734,7 @@ mod tests {
             args_by_id,
             vec![
                 ("X".to_string(), "{\"a\":1}".to_string()),
-                ("X-2".to_string(), "{\"b\":2}".to_string()),
+                ("fc_2".to_string(), "{\"b\":2}".to_string()),
             ],
             "参数增量各归各，不得并入同一调用"
         );
