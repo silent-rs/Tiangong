@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -35,6 +35,15 @@ pub fn atomic_replace_file(path: &Path, content: &[u8]) -> io::Result<()> {
     temp_file.as_file().sync_all()?;
     temp_file.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+fn fresh_tool_call_id(used: &mut HashSet<String>) -> String {
+    loop {
+        let id = format!("call_{}", scru128::new());
+        if used.insert(id.clone()) {
+            return id;
+        }
+    }
 }
 
 /// 会话工作目录模式
@@ -240,6 +249,98 @@ impl Session {
         }
         session.bind_storage_root(storage_root.to_path_buf());
         Ok(session)
+    }
+
+    fn tool_call_ids(&self) -> HashSet<String> {
+        self.messages
+            .iter()
+            .flat_map(|message| {
+                message
+                    .tool_calls()
+                    .iter()
+                    .map(|call| call.id.as_str())
+                    .chain(message.tool_call_id())
+            })
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// 在发布工具事件、追加历史和执行之前，为新批次固定会话内唯一的 ID。
+    pub(crate) fn assign_tool_call_ids(&self, calls: &mut [tiangong_llm::tool::ToolCall]) {
+        let mut used = self.tool_call_ids();
+        for call in calls {
+            if call.id.trim().is_empty() || !used.insert(call.id.clone()) {
+                call.id = fresh_tool_call_id(&mut used);
+            }
+        }
+    }
+
+    /// 修复旧会话的跨批次重复，返回变更消息的索引。
+    fn migrate_duplicate_tool_call_ids(&mut self) -> Vec<usize> {
+        let mut reserved = self.tool_call_ids();
+        let mut previous_ids = HashSet::new();
+        let mut remap = HashMap::<String, String>::new();
+        let mut changed = Vec::new();
+        for (index, message) in self.messages.iter_mut().enumerate() {
+            match &mut message.role {
+                Role::Assistant { tool_calls, .. } => {
+                    remap.clear();
+                    for call in tool_calls.iter() {
+                        if !call.id.trim().is_empty() && previous_ids.contains(&call.id) {
+                            // 老数据可能在同一批内有多个同 ID 的调用。整组换号，
+                            // 不猜测哪条结果属于哪次调用；请求层已有批内配对过滤。
+                            remap
+                                .entry(call.id.clone())
+                                .or_insert_with(|| fresh_tool_call_id(&mut reserved));
+                        }
+                    }
+                    for call in tool_calls {
+                        if let Some(id) = remap.get(&call.id) {
+                            call.id.clone_from(id);
+                        }
+                        if !call.id.trim().is_empty() {
+                            previous_ids.insert(call.id.clone());
+                        }
+                    }
+                    if !remap.is_empty() {
+                        changed.push(index);
+                    }
+                }
+                Role::Tool { tool_call_id, .. } => {
+                    if let Some(id) = remap.get(tool_call_id) {
+                        tool_call_id.clone_from(id);
+                        changed.push(index);
+                    }
+                }
+                // 这两类消息不进入模型上下文，不切断调用和结果的关联。
+                Role::System | Role::Notice { .. } => {}
+                _ => remap.clear(),
+            }
+        }
+        changed
+    }
+
+    /// 只由持有活动会话写入权的任务调用；普通只读加载不产生写入。
+    pub(crate) fn repair_tool_call_history(&mut self) -> Result<Vec<usize>, String> {
+        let mut seen = HashSet::new();
+        if !self
+            .messages
+            .iter()
+            .flat_map(Message::tool_calls)
+            .any(|call| !call.id.trim().is_empty() && !seen.insert(call.id.as_str()))
+        {
+            return Ok(Vec::new());
+        }
+        let mut candidate = self.clone();
+        let changed = candidate.migrate_duplicate_tool_call_ids();
+        if !changed.is_empty() {
+            candidate
+                .try_persist_to_disk()
+                .map_err(|error| format!("保存工具调用 ID 修复失败：{error}"))?;
+            *self = candidate;
+        }
+        Ok(changed)
     }
 
     /// 会话文件路径：`{storage_root}/sessions/{id}.json`。
@@ -574,6 +675,111 @@ mod persistence_tests {
         assert_eq!(entries.len(), 1, "成功替换后不应遗留临时文件");
         assert_eq!(entries[0].path(), target);
         Ok(())
+    }
+
+    /// 一次性迁移：跨轮重复的调用 id 修复（首次保留、后续换唯一），
+    /// 对应 Tool 结果同步；幂等（干净会话再跑无变更）。
+    #[test]
+    fn migrate_duplicate_tool_call_ids_fixes_and_syncs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut session = Session::new("migrate-ids").with_storage_root(root.path());
+        let call = |id: &str| MessageToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        // 两轮同 id（fc_1）+ 一轮唯一 id（call_9）。
+        session
+            .messages
+            .push(Message::new(MessageRole::Assistant, "").with_tool_calls(vec![call("fc_1")]));
+        session
+            .messages
+            .push(Message::tool_result("fc_1", "read_file", "ok-1", false));
+        session
+            .messages
+            .push(Message::new(MessageRole::Assistant, "").with_tool_calls(vec![call("fc_1")]));
+        session
+            .messages
+            .push(Message::tool_result("fc_1", "read_file", "ok-2", false));
+        session
+            .messages
+            .push(Message::new(MessageRole::Assistant, "").with_tool_calls(vec![call("call_9")]));
+        session
+            .messages
+            .push(Message::tool_result("call_9", "read_file", "ok-9", false));
+
+        session.try_persist_to_disk().unwrap();
+        let path = Session::session_file_path(root.path(), &session.id).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut session = Session::load_from_storage(root.path(), &session.id).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "只读加载不得迁移写盘"
+        );
+        crate::core::test_support::fail_next_persistence_for_session(&session.id);
+        assert!(session.repair_tool_call_history().is_err());
+        assert_eq!(
+            session.messages[2].tool_calls()[0].id,
+            "fc_1",
+            "写失败不得提交内存改写"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(session.repair_tool_call_history().unwrap(), vec![2, 3]);
+        let mut session = Session::load_from_storage(root.path(), &session.id).unwrap();
+        let ids: Vec<String> = session
+            .messages
+            .iter()
+            .filter_map(|m| match &m.role {
+                Role::Assistant { tool_calls, .. } => Some(tool_calls[0].id.clone()),
+                Role::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids[0], "fc_1", "首次出现保留原值（前缀稳定）");
+        assert_eq!(ids[1], "fc_1", "首轮结果同步原值");
+        assert!(
+            ids[2].starts_with("call_") && ids[2] != "fc_1",
+            "第二轮重复换唯一 id：{}",
+            ids[2]
+        );
+        assert_eq!(ids[3], ids[2], "第二轮结果同步新 id");
+        assert_eq!(ids[4], "call_9", "唯一 id 不动");
+        assert_eq!(ids[5], "call_9");
+
+        let repaired = std::fs::read(&path).unwrap();
+        assert!(session.repair_tool_call_history().unwrap().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+    }
+
+    #[test]
+    fn new_tool_batch_does_not_reuse_ids_from_folded_history_or_itself() {
+        let mut session = Session::new("assign-ids");
+        session.messages.push(
+            Message::new(MessageRole::Assistant, "").with_tool_calls(vec![MessageToolCall {
+                id: "folded".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({}),
+            }]),
+        );
+        session.summary_up_to = session.messages.len();
+        let mut calls = ["folded", "fresh", "fresh", "  "].map(|id| tiangong_llm::tool::ToolCall {
+            id: id.to_owned(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": id}),
+        });
+        session.assign_tool_call_ids(&mut calls);
+        assert_eq!(calls[1].id, "fresh");
+        let ids: HashSet<_> = calls.iter().map(|call| call.id.as_str()).collect();
+        assert_eq!(ids.len(), calls.len());
+        assert!(!ids.contains("folded"));
+        for (position, original) in ["folded", "fresh", "fresh", "  "].into_iter().enumerate() {
+            assert!(!calls[position].id.trim().is_empty());
+            assert_eq!(
+                calls[position].arguments,
+                serde_json::json!({"path": original})
+            );
+        }
     }
 
     #[test]

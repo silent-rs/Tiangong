@@ -419,7 +419,6 @@ pub fn from_deepseek_response(
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls = Vec::new();
-    let mut local_id_allocator = crate::tool::ToolCallIdAllocator::default();
     for item in &response.output {
         match item {
             ResponseOutputItem::Message(message) => {
@@ -442,12 +441,14 @@ pub fn from_deepseek_response(
                 }
             }
             ResponseOutputItem::FunctionCall(call) => {
-                // 轮内区分（同轮重复 id 换发）；跨轮唯一由统一出口归一。
-                let call_id = local_id_allocator.allocate(&call.call_id, call.id.as_deref());
                 tool_calls.push(crate::tool::ToolCall {
-                    id: call_id.clone(),
+                    id: call.call_id.clone(),
                     name: call.name.clone(),
-                    arguments: parse_tool_arguments_or_error(&call.name, &call_id, &call.arguments),
+                    arguments: parse_tool_arguments_or_error(
+                        &call.name,
+                        &call.call_id,
+                        &call.arguments,
+                    ),
                 });
             }
             ResponseOutputItem::CustomToolCall(_)

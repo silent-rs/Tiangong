@@ -120,7 +120,8 @@ fn record_tool_calls(
     text_elapsed_ms: Option<u64>,
     ttft_ms: Option<u64>,
 ) -> Vec<ToolCall> {
-    let calls = response.tool_calls.clone();
+    let mut calls = response.tool_calls.clone();
+    ctx.session.assign_tool_call_ids(&mut calls);
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
 
     let tool_names = calls
@@ -600,6 +601,9 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
+    if let Err(error) = repair_tool_call_history(ctx) {
+        return TurnExecutionResult::failed(TokenUsage::default(), error);
+    }
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
     let context_organizer = ContextOrganizer::new(context_limit);
