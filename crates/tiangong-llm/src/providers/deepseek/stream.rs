@@ -18,12 +18,8 @@ use tiangong_deepseek::types::{ResponseObject, ResponseOutputItem, ResponsesStre
 pub fn map_deepseek_stream(
     event_stream: tiangong_deepseek::types::ResponsesEventStream,
     tools_enabled: bool,
-    used_ids: std::collections::HashSet<String>,
 ) -> super::client::DeepSeekStream {
-    let state = StreamState {
-        used_ids,
-        ..StreamState::default()
-    };
+    let state = StreamState::default();
     let mapped = event_stream.scan(state, move |state, result| {
         std::future::ready(Some(match result {
             Ok(event) => map_event(state, event, tools_enabled)
@@ -40,7 +36,7 @@ pub fn map_deepseek_stream(
 /// 事件按**输出项**关联（output_index 定位，item_id 辅助），不按原始
 /// call_id 去重——同一响应内多个输出项共用同一 call_id（如 fc_a/fc_b
 /// 都带 X）时各自保留为独立调用，参数各归各。最终 id 在首见时经
-/// [`super::mapping::resolve_call_id`] 分配一次，此后 added / delta /
+/// 分配器分配一次（轮内唯一，跨轮由统一出口归一），此后 added / delta /
 /// done / completed 各事件一律复用记录值，不再读取原始 call_id 覆盖。
 #[derive(Default)]
 struct OutputItemCall {
@@ -63,8 +59,9 @@ struct StreamState {
     items: HashMap<u32, OutputItemCall>,
     /// item_id → output_index（delta 事件只带 item_id 时辅助定位）。
     item_index: HashMap<String, u32>,
-    /// ID 分配器占用集（由本次请求实际回传的历史 id 初始化）。
-    used_ids: HashSet<String>,
+    /// ID 分配器（空占用集：本层只做**轮内**区分——同轮多输出项共用
+    /// call_id 时换发；跨轮唯一性由 provider_client 统一出口归一）。
+    id_allocator: crate::tool::ToolCallIdAllocator,
     /// 是否收到过正文 / 思考增量（completed 兜底补发时去重）。
     has_text_delta: bool,
     has_reasoning_delta: bool,
@@ -108,8 +105,7 @@ impl StreamState {
         let final_id = match item.final_id.clone() {
             Some(existing) => existing,
             None => {
-                let assigned =
-                    super::mapping::resolve_call_id(&mut self.used_ids, call_id, item_id);
+                let assigned = self.id_allocator.allocate(call_id, item_id);
                 item.final_id = Some(assigned.clone());
                 assigned
             }
@@ -414,9 +410,7 @@ mod tests {
     ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
         let stream: tiangong_deepseek::types::ResponsesEventStream =
             Box::pin(futures_util::stream::iter(events));
-        map_deepseek_stream(stream, tools_enabled, Default::default())
-            .collect()
-            .await
+        map_deepseek_stream(stream, tools_enabled).collect().await
     }
 
     fn text_event(delta: &str) -> ResponsesStreamEvent {

@@ -388,7 +388,7 @@ impl SingleProviderClient {
             .await
             .map_err(map_llm_error)?;
         let mut model_response = convert_provider_response(response);
-        // 响应中的工具调用 id 唯一分配（首次保留 server 原值）。
+        // 跨轮唯一性统一归一（见 assign_unique_call_ids）。
         assign_unique_call_ids(&mut model_response, &request.messages);
         filter_invalid_openai_tool_calls(self.protocol(), &tools, model_response)
     }
@@ -941,40 +941,16 @@ fn dedupe_call_ids_across_rounds(messages: &mut [ChatMessage]) {
     }
 }
 
-/// 全局唯一调用 id（scru128 时间有序 + 随机，跨进程天然唯一）。
-fn unique_call_id() -> String {
-    format!("call_{}", scru128::new())
-}
-
-/// 消息历史中已回传过的调用 id（assistant 调用与工具结果两侧）。
-fn used_call_ids(messages: &[ChatMessage]) -> std::collections::HashSet<String> {
-    let mut used = std::collections::HashSet::new();
-    for message in messages {
-        for content in &message.content {
-            match content {
-                LlmMessageContent::ToolCall(call) if !call.id.is_empty() => {
-                    used.insert(call.id.clone());
-                }
-                LlmMessageContent::ToolResult(result) if !result.tool_call_id.is_empty() => {
-                    used.insert(result.tool_call_id.clone());
-                }
-                _ => {}
-            }
-        }
-    }
-    used
-}
-
-/// 响应中工具调用的 id 唯一分配：与请求历史冲突或为空时换发全局唯一
-/// id（首次出现保留 server 原值，以 server 为主）；流式聚合产出的
-/// tool_calls 与非流式解析同在此归一。会话历史与后续回传均使用最终 id。
+/// 响应中工具调用的 id 跨轮归一：provider 解析层只负责按输出项 / 内容
+/// 块识别调用（轮内区分，用上游 id，可能缺失或与历史冲突），跨轮唯一
+/// 性在此统一保证——首次出现保留 server 原值（可与服务端日志对账，
+/// 历史前缀稳定利于缓存）；为空或与本次请求历史/本轮已分配冲突时经
+/// [`crate::tool::ToolCallIdAllocator`] 换发全局唯一 id。流式聚合与非
+/// 流式解析的出口同在此归一；会话历史与后续回传均使用最终 id。
 fn assign_unique_call_ids(response: &mut ModelResponse, messages: &[ChatMessage]) {
-    let mut used = used_call_ids(messages);
+    let mut allocator = crate::tool::ToolCallIdAllocator::from_messages(messages);
     for call in &mut response.tool_calls {
-        if call.id.trim().is_empty() || used.contains(call.id.as_str()) {
-            call.id = unique_call_id();
-        }
-        used.insert(call.id.clone());
+        call.id = allocator.allocate(&call.id, None);
     }
 }
 
@@ -1746,95 +1722,6 @@ mod tests {
             name: "read_file".to_string(),
             arguments: serde_json::json!({"path": id}),
         })
-    }
-
-    /// 跨轮重复调用 id：首个保留原值、后续换发全局唯一，对应结果同步。
-    #[test]
-    fn dedupe_call_ids_rewrites_repeats_across_rounds() {
-        let mut messages = vec![
-            ChatMessage::new(
-                LlmMessageRole::User,
-                vec![LlmMessageContent::Text("go".to_string())],
-            ),
-            ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("fc_1")]),
-            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("fc_1")]),
-            ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("fc_1")]),
-            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("fc_1")]),
-        ];
-        dedupe_call_ids_across_rounds(&mut messages);
-        let first = match &messages[1].content[0] {
-            LlmMessageContent::ToolCall(call) => call.id.clone(),
-            _ => String::new(),
-        };
-        let (second_call, second_result) = (
-            match &messages[3].content[0] {
-                LlmMessageContent::ToolCall(call) => call.id.clone(),
-                _ => String::new(),
-            },
-            match &messages[4].content[0] {
-                LlmMessageContent::ToolResult(result) => result.tool_call_id.clone(),
-                _ => String::new(),
-            },
-        );
-        assert_eq!(first, "fc_1", "首个出现的 id 保留 server 原值");
-        assert!(
-            second_call.starts_with("call_") && second_call != "fc_1",
-            "后续重复换发全局唯一：{second_call}"
-        );
-        assert_eq!(
-            second_call, second_result,
-            "重写后的调用与结果必须同步（配对不破坏）"
-        );
-    }
-
-    /// 响应中的调用 id：首次保留；与历史冲突或为空时换发全局唯一。
-    #[test]
-    fn assign_unique_call_ids_keeps_fresh_and_rewrites_conflicts() {
-        let history = vec![
-            ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("fc_1")]),
-            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("fc_1")]),
-        ];
-        let mut response = ModelResponse {
-            text: String::new(),
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            stop_reason: None,
-            usage: Default::default(),
-            tool_calls: vec![
-                crate::tool::ToolCall {
-                    id: "fc_1".to_string(), // 与历史冲突
-                    name: "read_file".to_string(),
-                    arguments: json!({}),
-                },
-                crate::tool::ToolCall {
-                    id: "call_9".to_string(), // 首次出现
-                    name: "write_file".to_string(),
-                    arguments: json!({}),
-                },
-                crate::tool::ToolCall {
-                    id: String::new(), // 空 id（网关漏发）
-                    name: "run".to_string(),
-                    arguments: json!({}),
-                },
-            ],
-            invalid_tool_calls: Vec::new(),
-            output_elapsed_ms: None,
-            reasoning_elapsed_ms: None,
-            ttft_ms: None,
-        };
-        assign_unique_call_ids(&mut response, &history);
-        assert!(
-            response.tool_calls[0].id.starts_with("call_") && response.tool_calls[0].id != "fc_1",
-            "与历史冲突的 id 换发：{}",
-            response.tool_calls[0].id
-        );
-        assert_eq!(response.tool_calls[1].id, "call_9", "首次出现保留原值");
-        assert!(
-            response.tool_calls[2].id.starts_with("call_"),
-            "空 id 换发唯一值"
-        );
-        // 同一响应内两个换发值互不相同。
-        assert_ne!(response.tool_calls[0].id, response.tool_calls[2].id);
     }
 
     /// 旧历史派生值撞车：历史中真实存在 call_dedupe_2_fc_1 时，fc_1
