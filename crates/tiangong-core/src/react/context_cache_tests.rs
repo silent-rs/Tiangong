@@ -441,6 +441,83 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
     assert_eq!(server.received_requests().await.unwrap().len(), 12);
 }
 
+#[tokio::test]
+async fn repeated_tool_call_ids_stay_paired_across_model_requests() {
+    for protocol in [ProviderProtocol::DeepSeek, ProviderProtocol::OpenAi] {
+        let server = MockServer::start().await;
+        mount_responses(&server, vec![call("call_0", 1, false, false)], 0, true).await;
+        mount_responses(&server, vec![call("call_0", 2, false, false)], 0, false).await;
+        mount_responses(&server, vec![answer("已完成")], 0, true).await;
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let tool: Arc<dyn ToolOverrideHandler> = Arc::new(CacheProbeTool {
+            completed: completed.clone(),
+        });
+        let mut endpoint = endpoint_with_protocol(&server, protocol);
+        endpoint.model = "deepseek-v4-pro".into();
+        let mut harness = TestHarness::new_with_client(
+            SingleProviderClient::new(endpoint),
+            vec![tool_spec("cache_probe")],
+            HashMap::from([("cache_probe".to_string(), tool)]),
+            Vec::new(),
+        );
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "{protocol:?}: {result:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        let executed = completed.lock().unwrap().clone();
+        assert_eq!(executed.len(), 2);
+        assert_eq!(executed[0], "call_0");
+        assert_ne!(executed[0], executed[1]);
+        let published = harness
+            .stream_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolCalls { calls, .. } => Some(calls.into_iter().map(|call| call.id)),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(published, executed);
+
+        let second = responses_request(&server, 1).await;
+        let third = responses_request(&server, 2).await;
+        assert_request_prefix(&second, &third);
+        let items = third["input"].as_array().unwrap();
+        let ids = |kind| {
+            items
+                .iter()
+                .filter(|item| item["type"] == kind)
+                .map(|item| item["call_id"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("function_call"), executed);
+        assert_eq!(ids("function_call_output"), executed);
+
+        let restored =
+            Session::load_from_storage(&harness.storage_root, &harness.ctx.session.id).unwrap();
+        assert_eq!(
+            restored
+                .messages
+                .iter()
+                .flat_map(Message::tool_calls)
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            executed
+        );
+        assert_eq!(
+            restored
+                .messages
+                .iter()
+                .filter_map(Message::tool_call_id)
+                .collect::<Vec<_>>(),
+            executed
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_steering_preserves_the_inflight_request_prefix() {
     let server = MockServer::builder().start().await;

@@ -120,7 +120,8 @@ fn record_tool_calls(
     text_elapsed_ms: Option<u64>,
     ttft_ms: Option<u64>,
 ) -> Vec<ToolCall> {
-    let calls = response.tool_calls.clone();
+    let mut calls = response.tool_calls.clone();
+    ctx.session.assign_tool_call_ids(&mut calls);
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
 
     let tool_names = calls
