@@ -136,6 +136,16 @@ impl TurnContext {
         Ok(())
     }
 
+    /// 发布后续请求的不可变配置快照；旧请求/派生压缩客户端不受影响。
+    pub(crate) fn configure_client(&mut self) {
+        let mut options = self.client.options().clone();
+        options.tools = self.tools.clone();
+        options.reasoning_effort = self.agent_config.reasoning_effort;
+        options.max_output_tokens =
+            crate::config::max_output::max_output_tokens(self.client.model_name());
+        options.cache_key = Some(self.session.id.clone());
+        self.client = self.client.clone().with_options(options);
+    }
     // ===== 能力 accessor =====
 
     pub fn client(&self) -> &SingleProviderClient {

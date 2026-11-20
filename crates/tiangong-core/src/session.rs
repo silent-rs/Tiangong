@@ -121,7 +121,7 @@ pub struct Session {
     /// 缓存的 system prompt 消息（role=System）。
     ///
     /// 在新对话、压缩对话、清空上下文时由外部调用 `rebuild_system_prompt()` 重建。
-    /// `context()` 返回时会将其置于消息列表头部，经 `IntoModelRequest::into_model_request` 提取为 system prompt。
+    /// `context()` 返回时会将其置于消息列表头部，由 llm 的轻量转换提取为 system prompt。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_message: Option<Message>,
     pub created_at: String,
@@ -533,8 +533,8 @@ impl Session {
     /// 构建 LLM 请求上下文
     ///
     /// 返回 system_prompt_message（如有）+ `summary_up_to` 之后的对话消息，
-    /// 顺序即模型请求顺序；经 `IntoModelRequest::into_model_request` 转为
-    /// 模型请求，System 消息被提取为 system prompt。
+    /// 顺序即模型请求顺序；在 Core 完成图片准备，LLM stream 内部
+    /// 仅做纯数据映射与 System 提取，不读文件。
     pub fn context(&self) -> Vec<Message> {
         let mut context = Vec::new();
         if let Some(ref msg) = self.system_prompt_message {
@@ -551,7 +551,7 @@ impl Session {
                 })
                 .cloned(),
         );
-        context
+        crate::context::model_request::prepare_context(context)
     }
 
     /// 截断指定消息之后的所有消息（保留该消息本身），返回移除数量
@@ -813,7 +813,7 @@ mod ready_content_tests {
         session.clear_transient_content_for_message("message-1");
         assert!(matches!(
             &session.context()[0].content[1],
-            ContentBlock::Image { data: None, .. }
+            ContentBlock::Text { text } if text.contains("image unavailable")
         ));
     }
 }

@@ -1,13 +1,13 @@
 //! Analyze-Attachment sidecar 业务服务。
 //!
-//! 读取图片文件 → 构造多模态 ModelRequest → 调 SingleProviderClient → 返回分析文本。
+//! 准备图片内容 → 消息列表 → 配置好的 client.stream → 返回分析文本。
 
 use anyhow::{Context, Result};
-use tiangong_core::context::model_request::IntoModelRequest;
+use tiangong_core::context::model_request::prepare_messages;
 use tiangong_core::session::{Message, MessageRole};
 use tiangong_llm::{
-    ModelCapability, ModelEndpoint, ModelEntry, ModelRequest, ModelsConfig, ResolvedModel,
-    RoutingSlot, SingleProviderClient,
+    ModelCapability, ModelEndpoint, ModelEntry, ModelsConfig, Options, ResolvedModel, RoutingSlot,
+    SingleProviderClient,
 };
 use tiangong_plugin_analyze_attachment_protocol::{
     ATTACHMENT_PROTOCOL_VERSION, AnalyzeRequest, AnalyzeResponse, PLUGIN_ID, PLUGIN_VERSION,
@@ -143,18 +143,15 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
     }
     context.push(user_message);
 
-    let request = ModelRequest {
-        session_id: None,
-        reasoning_effort: tiangong_llm::request::ReasoningEffort::None,
-        max_output_tokens: None,
-        ..context.into_model_request()?
-    };
-
-    let response = client
-        .collect_async(request)
+    let client = client.with_options(Options {
+        reasoning_effort: tiangong_llm::ReasoningEffort::None,
+        ..Default::default()
+    });
+    let response: tiangong_llm::ModelResponse = client
+        .stream(prepare_messages(context))?
+        .collect()
         .await
-        .map_err(|e| anyhow::anyhow!("多模态模型调用失败：{e}"))?;
-
+        .map_err(|error| anyhow::anyhow!("多模态模型调用失败：{error}"))?;
     Ok(AnalyzeResponse {
         text: response.text,
         prompt_tokens: response.usage.prompt_tokens as u64,

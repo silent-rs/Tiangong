@@ -1,6 +1,7 @@
 //! 真实本地 HTTP 流：轻量请求、尾部用量、取消与超时契约。
 use std::{sync::Arc, time::Duration};
-use tiangong_llm::{ModelEndpoint, ModelRequest, SingleProviderClient, TextRequest};
+use tiangong_llm::{ModelEndpoint, Options, SingleProviderClient};
+use tiangong_types::{Message, MessageRole};
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 fn client(url: String) -> SingleProviderClient {
@@ -31,16 +32,14 @@ async fn lightweight_title_is_streamed_once_without_session_history() {
         .mount(&server)
         .await;
     let title = client(server.uri())
-        .stream(
-            TextRequest {
-                instruction: "生成标题",
-                input: "输入文本",
-            },
-            &ModelRequest {
-                max_output_tokens: Some(20),
-                ..Default::default()
-            },
-        )
+        .with_options(Options {
+            max_output_tokens: 20,
+            ..Default::default()
+        })
+        .stream(vec![
+            Message::new(MessageRole::System, "生成标题"),
+            Message::new(MessageRole::User, "输入文本"),
+        ])
         .unwrap()
         .collect_text()
         .await
@@ -101,13 +100,10 @@ async fn dropping_collector_closes_blocked_http_body() {
     let client = client(format!("http://{addr}"));
     let task = tokio::spawn(async move {
         client
-            .stream(
-                TextRequest {
-                    instruction: "标题",
-                    input: "输入",
-                },
-                &ModelRequest::default(),
-            )
+            .stream(vec![
+                Message::new(MessageRole::System, "标题"),
+                Message::new(MessageRole::User, "输入"),
+            ])
             .unwrap()
             .collect_text()
             .await
@@ -130,20 +126,30 @@ async fn response_header_timeout_is_bounded_and_does_not_succeed() {
     let result = tokio::time::timeout(
         Duration::from_secs(12),
         client(server.uri())
-            .stream(
-                TextRequest {
-                    instruction: "标题",
-                    input: "输入",
-                },
-                &ModelRequest {
-                    timeout_ms: Some(20),
-                    ..Default::default()
-                },
-            )
+            .with_options(Options {
+                timeout_ms: Some(20),
+                ..Default::default()
+            })
+            .stream(vec![
+                Message::new(MessageRole::System, "标题"),
+                Message::new(MessageRole::User, "输入"),
+            ])
             .unwrap()
             .collect_text(),
     )
     .await;
     assert!(result.is_ok(), "重试必须有限");
     assert!(result.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn conversion_failure_never_reaches_server() {
+    let server = MockServer::start().await;
+    let client = client(server.uri());
+    assert!(
+        client
+            .stream(vec![Message::new(MessageRole::Notice, "not model input")])
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

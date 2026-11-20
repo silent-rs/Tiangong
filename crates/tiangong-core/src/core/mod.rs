@@ -419,7 +419,7 @@ impl TiangongCore {
             .filter(|message| message.turn_status() == Some(tiangong_types::TurnStatus::Processing))
             .map(|message| message.id.clone());
 
-        Ok(TurnContext::builder()
+        let mut ctx = TurnContext::builder()
             .turn_id(turn_id)
             .client(client)
             .session(session)
@@ -441,7 +441,9 @@ impl TiangongCore {
             .trust_mode(trust_mode)
             .tool_overrides(prepared_plugins.tool_overrides)
             .tools(prepared_plugins.tools)
-            .build())
+            .build();
+        ctx.configure_client();
+        Ok(ctx)
     }
 
     fn plugin_instances(&self) -> Vec<Arc<dyn Plugin>> {

@@ -20,8 +20,8 @@ use crate::runtime::LlmOutputRecord;
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
+use tiangong_llm::InvalidToolCall;
 use tiangong_llm::tool::{ToolCall, ToolChoice};
-use tiangong_llm::{InvalidToolCall, ModelRequest};
 use tiangong_types::TokenUsage;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
@@ -423,16 +423,12 @@ fn start_llm_request(
 ) -> ActiveLlm {
     // 由当前会话上下文构造请求；转换失败（如缺少 system prompt）时由请求
     // 任务返回错误，与模型请求失败走同一条恢复/失败链路。
-    let options = ModelRequest {
-        reasoning_effort: ctx.agent_config.reasoning_effort,
-        max_output_tokens: Some(crate::config::max_output::max_output_tokens(
-            ctx.client().model_name(),
-        )),
-        tools: ctx.tools.clone(),
-        tool_choice,
-        ..Default::default()
+    let client = ctx.client().clone().with_tool_choice(tool_choice);
+    let generation = if ctx.session.system_prompt_message.is_none() {
+        Err(anyhow::anyhow!("模型上下文缺少 System 消息"))
+    } else {
+        client.stream(ctx.session.context())
     };
-    let generation = ctx.client().stream(&ctx.session, &options);
     let pending_msg_id = scru128::new().to_string();
     let sink = ThrottledStreamSink::with_text_kind(
         pending_msg_id.clone(),
@@ -713,6 +709,7 @@ pub(super) async fn execute_turn(
                         iteration: (state.budget.request_round + 1) as u32,
                     });
                 }
+                ctx.configure_client();
                 let active = start_llm_request(
                     ctx,
                     LlmPurpose::React {

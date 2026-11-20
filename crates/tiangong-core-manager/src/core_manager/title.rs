@@ -44,16 +44,20 @@ impl CoreManager {
         let sid = session_id.to_string();
         let input = text.to_string();
         tokio::spawn(async move {
-            let client = SingleProviderClient::new(endpoint).with_session_id(sid.clone());
+            let client = SingleProviderClient::new(endpoint).with_options(tiangong_llm::Options {
+                cache_key: Some(sid.clone()),
+                reasoning_effort: tiangong_llm::ReasoningEffort::None,
+                max_output_tokens: 200,
+                temperature: Some(0.3),
+                timeout_ms: Some(120_000),
+                ..Default::default()
+            });
             let title = async {
-                client.stream(tiangong_llm::TextRequest {
-                    instruction: "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了",
-                    input: &input,
-                }, &tiangong_llm::ModelRequest {
-                    reasoning_effort: tiangong_llm::ReasoningEffort::None,
-                    max_output_tokens: Some(200), temperature: Some(0.3), timeout_ms: Some(120_000),
-                    ..Default::default()
-                })?.collect_text().await
+                let messages = vec![
+                    tiangong_types::Message::new(tiangong_types::MessageRole::System, "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了"),
+                    tiangong_types::Message::new(tiangong_types::MessageRole::User, input),
+                ];
+                client.stream(messages)?.collect_text().await
             }.await.ok();
             let Some(title) = title else {
                 return;

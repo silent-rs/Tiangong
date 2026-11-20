@@ -787,6 +787,10 @@ mod tests {
             timeout_ms: 1_000,
             options: serde_json::Value::Object(serde_json::Map::new()),
             context_window: None,
+        })
+        .with_options(tiangong_llm::Options {
+            max_retries: 0,
+            ..Default::default()
         });
         let ctx = TurnContext::builder()
             .client(client)

@@ -1,7 +1,10 @@
+#[cfg(test)]
 use crate::context::model_request::IntoModelRequest;
 use crate::session::{Message, MessageRole, Session, UserSource};
+#[cfg(test)]
+use tiangong_llm::ModelRequest;
 use tiangong_llm::tool::ToolSpec;
-use tiangong_llm::{ModelRequest, ReasoningEffort, SingleProviderClient, StopReason};
+use tiangong_llm::{ReasoningEffort, SingleProviderClient, StopReason};
 use tiangong_types::TokenUsage;
 
 /// 判断消息是否为可压缩的有效消息。
@@ -105,20 +108,19 @@ impl ContextCompressor {
         }
 
         let boundary_message_id = self.session.messages[split_point - 1].id.clone();
-        let request = Self::summary_request(
-            &self.session,
-            split_point,
-            max_output_tokens,
-            self.reasoning_effort,
-        )
-        .map_err(|error| CompressionError::new(error.to_string()))?;
-        // 工具声明与 tool_choice 保持与主循环一致（未指定 → 有工具即 auto）：
-        // 多数 provider 的缓存键/对话模板包含 tool_choice，改为 none 会使
-        // 整段前缀缓存失效。是否调用工具由压缩指令约束，返回工具调用时
-        // 下方拒绝提交摘要。
-        let response = self
-            .client
-            .collect_async(request.with_tools(self.tools, None))
+        let messages = Self::summary_messages(&self.session, split_point, max_output_tokens);
+        // 保留主循环声明/思考/缓存前缀，只在派生client中调整压缩输出预算。
+        let mut options = self.client.options().clone();
+        options.cache_key = Some(self.session.id.clone());
+        options.reasoning_effort = self.reasoning_effort;
+        options.tools = self.tools;
+        options.tool_choice = None;
+        options.max_output_tokens = max_output_tokens;
+        let client = self.client.with_options(options);
+        let response: crate::model_output::CoreModelOutput = client
+            .stream(messages)
+            .map_err(|error| CompressionError::new(error.to_string()))?
+            .collect()
             .await
             .map_err(|error| CompressionError::new(error.to_string()))?;
         let usage = response.usage.clone();
@@ -152,6 +154,23 @@ impl ContextCompressor {
         })
     }
 
+    fn summary_messages(
+        session: &Session,
+        split_point: usize,
+        max_output_tokens: u32,
+    ) -> Vec<Message> {
+        let mut messages = session.context();
+        messages.push(Message::new(
+            MessageRole::User,
+            Self::compress_instruction(
+                session,
+                split_point.min(session.messages.len()),
+                max_output_tokens,
+            ),
+        ));
+        messages
+    }
+    #[cfg(test)]
     fn summary_request(
         session: &Session,
         split_point: usize,

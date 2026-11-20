@@ -11,13 +11,13 @@
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tiangong_core::context::model_request::IntoModelRequest;
+use tiangong_core::context::model_request::prepare_context;
 use tiangong_core::session::{
     ContentBlock, MediaKind, Message, MessageRole, MessageToolCall, Role, StoredAsset, UserSource,
 };
 use tiangong_llm::tool::ToolSpec;
 use tiangong_llm::{
-    ModelEndpoint, ModelRequest, ProviderProtocol, ReasoningEffort, SingleProviderClient,
+    ModelEndpoint, Options, ProviderProtocol, ReasoningEffort, SingleProviderClient,
 };
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -223,11 +223,11 @@ fn protocol_name(protocol: ProviderProtocol) -> &'static str {
     }
 }
 
-fn build_request(context: &[Message]) -> ModelRequest {
-    ModelRequest {
-        session_id: Some("snapshot-session".to_string()),
+fn options() -> Options {
+    Options {
+        cache_key: Some("snapshot-session".to_string()),
         reasoning_effort: ReasoningEffort::High,
-        max_output_tokens: Some(1024),
+        max_output_tokens: 1024,
         temperature: Some(0.2),
         timeout_ms: Some(5_000),
         tools: vec![ToolSpec {
@@ -239,7 +239,7 @@ fn build_request(context: &[Message]) -> ModelRequest {
                 "required": ["path"]
             }),
         }],
-        ..context.to_vec().into_model_request().unwrap()
+        ..Default::default()
     }
 }
 
@@ -274,7 +274,10 @@ async fn provider_request_bodies_match_snapshots() {
                 ..Default::default()
             });
             client
-                .collect_async(build_request(&context))
+                .with_options(options())
+                .stream(prepare_context(context))
+                .unwrap()
+                .collect::<tiangong_llm::ModelResponse>()
                 .await
                 .unwrap_or_else(|error| panic!("{case}/{protocol:?} 请求失败：{error}"));
             let requests = server.received_requests().await.unwrap();

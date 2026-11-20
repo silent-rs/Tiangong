@@ -29,6 +29,7 @@ async fn compression_request_keeps_every_cache_relevant_param_of_main_loop() {
         } else {
             mount_completion(&server, "正常回复", "stop", 100, 10, None).await;
         }
+        harness.ctx.configure_client();
         // 走主循环真实的请求构造路径（只读会话，不改动 session）。
         let active = super::super::start_llm_request(
             &harness.ctx,

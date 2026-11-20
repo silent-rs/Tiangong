@@ -1,49 +1,20 @@
-//! 输入适配在调用方实现；网络等待前准备独立请求，不借用会话。
-use crate::{ModelRequest, ModelResponse, ModelStreamChunk, SingleProviderClient};
+//! 配置好的 client 只接收已准备的消息；轻量映射与请求装配在 LLM 内完成。
+use crate::request::ProviderRequest;
+use crate::{ModelResponse, ModelStreamChunk, SingleProviderClient};
 use anyhow::Result;
+use tiangong_types::Message;
 
-pub trait IntoModelInput {
-    fn into_model_input(self, options: &ModelRequest) -> Result<ModelRequest>;
-}
-impl IntoModelInput for ModelRequest {
-    fn into_model_input(self, _options: &ModelRequest) -> Result<ModelRequest> {
-        Ok(self)
-    }
-}
-
-/// 无会话的轻量生成输入；提示词策略由调用方决定。
-pub struct TextRequest<'a> {
-    pub instruction: &'a str,
-    pub input: &'a str,
-}
-impl IntoModelInput for TextRequest<'_> {
-    fn into_model_input(self, options: &ModelRequest) -> Result<ModelRequest> {
-        Ok(ModelRequest {
-            system: self.instruction.to_owned(),
-            messages: vec![crate::message::ChatMessage::text(
-                crate::message::MessageRole::User,
-                self.input,
-            )],
-            ..options.clone()
-        })
-    }
-}
-
-/// 一条流的一次消费，包含共享组装与可选实时观察。
+/// 一次逻辑生成拥有的请求与配置快照，不借用 Session 或调用方消息。
 pub struct Generation {
     client: SingleProviderClient,
-    request: ModelRequest,
+    request: ProviderRequest,
 }
 impl SingleProviderClient {
-    /// 同步完成输入准备；返回值不借用 Session，适合直接交给 tokio::spawn。
-    pub fn stream<I: IntoModelInput>(
-        &self,
-        input: I,
-        options: &ModelRequest,
-    ) -> Result<Generation> {
+    pub fn stream(&self, messages: Vec<Message>) -> Result<Generation> {
+        let request = self.request_from_messages(messages)?;
         Ok(Generation {
             client: self.clone(),
-            request: input.into_model_input(options)?,
+            request,
         })
     }
 }
@@ -57,7 +28,9 @@ impl Generation {
         O::Error: std::error::Error + Send + Sync + 'static,
     {
         Ok(O::try_from(
-            self.client.stream_async(self.request, chunks).await?,
+            self.client
+                .consume_request(self.request, Some(chunks))
+                .await?,
         )?)
     }
     pub async fn collect<O>(self) -> Result<O>
@@ -65,12 +38,13 @@ impl Generation {
         O: TryFrom<ModelResponse>,
         O::Error: std::error::Error + Send + Sync + 'static,
     {
-        // 不创建无人读取的无界通道；直接使用同一 collector。
-        Ok(O::try_from(self.client.collect_async(self.request).await?)?)
+        Ok(O::try_from(
+            self.client.consume_request(self.request, None).await?,
+        )?)
     }
     pub async fn collect_text(self) -> Result<String> {
-        let response = self.client.collect_async(self.request).await?;
-        if response.status != crate::collect::CompletionStatus::Complete
+        let response: ModelResponse = self.collect().await?;
+        if response.status != crate::CompletionStatus::Complete
             || !response.invalid_tool_calls.is_empty()
             || !response.tool_calls.is_empty()
         {
@@ -78,48 +52,108 @@ impl Generation {
         }
         Ok(response.text)
     }
+    pub async fn collect_text_with_usage(self) -> Result<(String, Option<crate::TokenUsageData>)> {
+        let response: ModelResponse = self.collect().await?;
+        if response.status != crate::CompletionStatus::Complete
+            || !response.invalid_tool_calls.is_empty()
+            || !response.tool_calls.is_empty()
+        {
+            anyhow::bail!("纯文本生成未完整结束或包含工具调用");
+        }
+        Ok((response.text, response.provider_usage))
+    }
 }
 
 #[cfg(test)]
-mod input_tests {
+mod tests {
     use super::*;
-    #[test]
-    fn prepared_generation_does_not_borrow_input_and_options_survive() {
-        let client = SingleProviderClient::new(crate::ModelEndpoint::default());
-        let generation = {
-            let text = String::from("标题输入");
-            client
-                .stream(
-                    TextRequest {
-                        instruction: "标题",
-                        input: &text,
-                    },
-                    &ModelRequest {
-                        max_output_tokens: Some(12),
-                        temperature: Some(0.3),
-                        ..Default::default()
-                    },
-                )
-                .unwrap()
-        };
-        assert_eq!(generation.request.max_output_tokens, Some(12));
-        assert_eq!(generation.request.temperature, Some(0.3));
-        assert_eq!(generation.request.messages.len(), 1);
-        assert!(generation.request.tools.is_empty());
+    use crate::{ModelEndpoint, Options, ReasoningEffort, tool::ToolSpec};
+    use tiangong_types::{ContentBlock, MediaKind, MessageRole, StoredAsset};
+
+    fn messages() -> Vec<Message> {
+        vec![
+            Message::new(MessageRole::System, "fixed"),
+            Message::new(MessageRole::User, "hello"),
+        ]
     }
-    #[tokio::test]
-    async fn failed_input_conversion_does_not_start_network() {
-        struct InvalidInput;
-        impl IntoModelInput for InvalidInput {
-            fn into_model_input(self, _: &ModelRequest) -> Result<ModelRequest> {
-                anyhow::bail!("输入无法转换")
-            }
-        }
-        let client = SingleProviderClient::new(crate::ModelEndpoint::default());
+    fn client() -> SingleProviderClient {
+        SingleProviderClient::new(ModelEndpoint {
+            model: "model".into(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn options_are_captured_once_and_derived_client_does_not_mutate_original() {
+        let base = client().with_options(Options {
+            max_output_tokens: 100,
+            temperature: Some(0.3),
+            cache_key: Some("session-a".into()),
+            tools: vec![ToolSpec {
+                name: "read".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            }],
+            ..Default::default()
+        });
+        let before = base.stream(messages()).unwrap();
+        let mut options = base.options().clone();
+        options.max_output_tokens = 20;
+        options.tools.clear();
+        options.reasoning_effort = ReasoningEffort::None;
+        options.cache_key = Some("session-b".into());
+        let derived = base.clone().with_options(options);
+        let after = derived.stream(messages()).unwrap();
+        assert_eq!(before.request.max_tokens, 100);
+        assert_eq!(base.options().max_output_tokens, 100);
+        assert_eq!(after.request.max_tokens, 20);
+        assert_eq!(before.request.tools.len(), 1);
+        assert!(after.request.tools.is_empty());
+        assert_eq!(before.request.session_id.as_deref(), Some("session-a"));
+        assert_eq!(after.request.session_id.as_deref(), Some("session-b"));
+    }
+    #[test]
+    fn invalid_input_fails_before_any_network_and_no_system_is_required_for_plain_prompt() {
+        assert!(client().stream(Vec::new()).is_err());
         assert!(
-            client
-                .stream(InvalidInput, &ModelRequest::default())
+            client()
+                .stream(vec![Message::new(MessageRole::Notice, "notice")])
                 .is_err()
         );
+        assert!(
+            client()
+                .stream(vec![Message::new(MessageRole::User, "hello")])
+                .is_ok()
+        );
+    }
+    #[test]
+    fn local_image_is_not_read_by_llm_even_when_file_exists() {
+        let path = std::env::temp_dir().join(format!("llm-no-read-{}.png", scru128::new()));
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        let mut message = Message::new(MessageRole::User, "image");
+        message.content.push(ContentBlock::Image {
+            asset: StoredAsset {
+                asset_id: "image".into(),
+                local_path: path.to_string_lossy().into(),
+                original_name: "image.png".into(),
+                mime_type: "image/png".into(),
+                size: 3,
+                kind: MediaKind::Image,
+            },
+            data: None,
+        });
+        let error = client()
+            .stream(vec![message.clone()])
+            .err()
+            .expect("LLM 不可读取本地文件");
+        assert!(error.to_string().contains("图片尚未准备"));
+        if let ContentBlock::Image { data, .. } = &mut message.content[1] {
+            *data = Some("AQID".into());
+        }
+        let generation = client().stream(vec![message]).unwrap();
+        assert!(
+            matches!(&generation.request.messages[0].content[1],crate::message::MessageContent::Image(image) if image.data=="data:image/png;base64,AQID")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -1,16 +1,5 @@
-//! 单 provider 客户端：把扁平的 [`ModelEndpoint`] 包装成同步/流式 LLM 调用入口。
-//!
-//! 这里聚合了：
-//! - [`ModelClient`] trait、[`ModelRequest`] / [`ModelResponse`] / [`ModelStreamChunk`] 等数据类型
-//! - [`SingleProviderClient`]：持有 [`ModelEndpoint`]，按 `protocol` 分发到 Anthropic / OpenAI / DeepSeek provider
-//! - provider 构造辅助、协议约束修正（tool_call 配对）、流式消费、错误映射等私有逻辑
-//!
-//! 会话消息到 [`ChatMessage`] 的组装由调用方（core）负责，本模块不理解宿主
-//! 消息格式，也不读取本地文件。
-//!
-//! 迁移自 `tiangong-core/src/model.rs`，已移除 `ModelProviderConfig` 依赖，直接消费
-//! [`ModelEndpoint`]（`base_url` / `api_key` / `model` / `protocol` / `timeout_ms` / `options`）。
-
+//! 配置好的生成客户端：stream(Vec<Message>) 在 LLM 内进行纯转换与 ProviderRequest 装配。
+//! 不理解 Session、不读取文件；调用方准备媒体与会话策略。旧请求类型/执行桥仅用于回归基线。
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -99,6 +88,16 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
+    pub fn from_messages(messages: Vec<tiangong_types::Message>) -> Result<Self> {
+        let (system, messages) = crate::input::convert_messages(messages)?;
+        Ok(Self {
+            system: system.unwrap_or_default(),
+            messages,
+            ..Default::default()
+        })
+    }
+}
+impl ModelRequest {
     pub fn with_tools(mut self, tools: Vec<ToolSpec>, tool_choice: Option<ToolChoice>) -> Self {
         self.tools = tools;
         self.tool_choice = tool_choice;
@@ -113,6 +112,7 @@ impl ModelRequest {
 
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
+    pub provider_usage: Option<TokenUsageData>,
     /// 权威模型内容；便捷字段用于旧调用方迁移。
     pub output: Vec<LlmMessageContent>,
     pub status: crate::collect::CompletionStatus,
@@ -171,8 +171,10 @@ pub trait ModelClient {
     fn api_base_url(&self) -> &str;
     fn api_timeout_ms(&self) -> u64;
     fn api_model(&self) -> &str;
+    #[cfg(test)]
     fn complete(&self, req: ModelRequest) -> Result<ModelResponse>;
     /// 流式调用，通过 on_delta 实时回调内容和用量。
+    #[cfg(test)]
     fn complete_stream(
         &self,
         req: ModelRequest,
@@ -192,6 +194,7 @@ pub struct SingleProviderClient {
     /// 重试时的回调通知（可选）
     on_retry: Option<OnRetryCallback>,
     providers: ProviderCache,
+    options: crate::Options,
 }
 
 impl std::fmt::Debug for SingleProviderClient {
@@ -204,7 +207,94 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
+    pub fn with_options(mut self, options: crate::Options) -> Self {
+        self.options = options;
+        self
+    }
+    pub fn with_tool_choice(mut self, tool_choice: Option<ToolChoice>) -> Self {
+        self.options.tool_choice = tool_choice;
+        self
+    }
+    pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
+        self.options.max_output_tokens = max_tokens;
+        self
+    }
+    pub fn options(&self) -> &crate::Options {
+        &self.options
+    }
+    pub(crate) fn request_from_messages(
+        &self,
+        messages: Vec<tiangong_types::Message>,
+    ) -> Result<ProviderRequest> {
+        if self.cfg.model.trim().is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
+        }
+        let (system, messages) = crate::input::convert_messages(messages)?;
+        let messages = sanitize_provider_messages(messages);
+        if messages.is_empty() {
+            return Err(anyhow!("模型请求缺少有效消息"));
+        }
+        Ok(ProviderRequest {
+            model: self.cfg.model.trim().to_owned(),
+            system,
+            messages,
+            session_id: self
+                .options
+                .cache_key
+                .clone()
+                .or_else(|| Some(self.session_id.clone())),
+            tools: self.options.tools.clone(),
+            tool_choice: self
+                .options
+                .tool_choice
+                .clone()
+                .or_else(|| (!self.options.tools.is_empty()).then_some(LlmToolChoice::Auto)),
+            max_tokens: self.options.max_output_tokens,
+            temperature: self.options.temperature,
+            top_p: self.options.top_p,
+            stop_sequences: self.options.stop_sequences.clone(),
+            metadata: None,
+            reasoning_effort: self.options.reasoning_effort,
+        })
+    }
+    pub(crate) async fn consume_request(
+        &self,
+        request: ProviderRequest,
+        chunks: Option<tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>>,
+    ) -> Result<ModelResponse> {
+        let timeout = self
+            .options
+            .timeout_ms
+            .unwrap_or_else(|| function_timeout_ms(self.cfg.timeout_ms));
+        let provider = self.build_provider_dispatch(
+            timeout,
+            request.session_id.as_deref(),
+            self.options.max_retries,
+        )?;
+        let mut observe = |chunk: &ModelStreamChunk| {
+            if let Some(tx) = &chunks {
+                let _ = tx.send(chunk.clone());
+            }
+        };
+        if let Some(tx) = &chunks {
+            tokio::select! {
+                biased;
+                _ = tx.closed() => Err(anyhow!("流式消费者已关闭")),
+                result = consume_stream_with_retry(&provider, &request, &mut observe, true, self.on_retry.clone()) => result,
+            }
+        } else {
+            consume_stream_with_retry(
+                &provider,
+                &request,
+                &mut observe,
+                true,
+                self.on_retry.clone(),
+            )
+            .await
+        }
+    }
     /// 按值消费请求：消息直接移入 provider 请求，不复制消息内容。
+    #[cfg(test)]
     fn build_provider_request(&self, req: ModelRequest) -> Result<ProviderRequest> {
         let model = self.cfg.model.trim();
         if model.is_empty() {
@@ -237,6 +327,7 @@ impl SingleProviderClient {
     }
 
     /// 构建拥有所有输入的统一请求；业务工具校验由 Core 完成。
+    #[cfg(test)]
     fn prepare_request(&self, req: ModelRequest) -> Result<(ProviderHandle, ProviderRequest)> {
         let timeout_ms = req
             .timeout_ms
@@ -255,6 +346,7 @@ impl SingleProviderClient {
         self.cfg.model.trim()
     }
     /// 收集唯一流式生成链路；保留完整性状态和用量。
+    #[cfg(test)]
     pub async fn collect_async(&self, req: ModelRequest) -> Result<ModelResponse> {
         let (provider, request) = self.prepare_request(req)?;
         let preserve_order = true;
@@ -270,6 +362,7 @@ impl SingleProviderClient {
     }
 
     /// 观察并收集同一条流；取消 future 时关闭底层 HTTP 读取。
+    #[cfg(test)]
     pub async fn stream_async(
         self,
         req: ModelRequest,
@@ -303,6 +396,10 @@ impl SingleProviderClient {
             cfg,
             on_retry: None,
             providers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            options: crate::Options {
+                temperature: configured_temperature_f32(),
+                ..Default::default()
+            },
         }
     }
 
@@ -537,6 +634,7 @@ impl SingleProviderClient {
         Ok(provider)
     }
 
+    #[cfg(test)]
     fn block_on_llm<F, T>(&self, future: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>> + Send,
@@ -562,83 +660,62 @@ impl SingleProviderClient {
         runtime.block_on(future)
     }
 
-    /// 标题生成仅提供任务参数，复用统一非流式请求。
+    #[cfg(test)]
     pub fn complete_lite(&self, prompt: &str) -> Result<String> {
-        self.complete_lite_request(
-            "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了",
-            prompt,
-            0.3,
-        )
+        self.complete_lite_with_system("你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了", prompt)
     }
-
+    #[cfg(test)]
     pub fn complete_lite_with_system(&self, system: &str, prompt: &str) -> Result<String> {
-        self.complete_lite_request(system, prompt, 0.1)
-    }
-
-    fn complete_lite_request(
-        &self,
-        system: &str,
-        prompt: &str,
-        temperature: f32,
-    ) -> Result<String> {
-        let request = ModelRequest {
-            system: system.to_string(),
-            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
-            max_output_tokens: Some(MAX_TOKENS_LITE),
+        let client = self.clone().with_options(crate::Options {
             reasoning_effort: ReasoningEffort::None,
-            temperature: Some(temperature),
+            max_output_tokens: 200,
+            temperature: Some(0.3),
             timeout_ms: Some(120_000),
             ..Default::default()
-        };
-        let response = self.complete(request)?;
-        Ok(if self.protocol() == ProviderProtocol::Anthropic {
-            strip_think_tags(&response.text).trim().to_string()
-        } else {
-            response.text
+        });
+        self.block_on_llm(async {
+            client
+                .stream(vec![
+                    tiangong_types::Message::new(tiangong_types::MessageRole::System, system),
+                    tiangong_types::Message::new(tiangong_types::MessageRole::User, prompt),
+                ])?
+                .collect_text()
+                .await
         })
     }
 }
-
 impl ModelClient for SingleProviderClient {
     fn api_base_url(&self) -> &str {
         &self.cfg.base_url
     }
-
     fn api_timeout_ms(&self) -> u64 {
         self.cfg.timeout_ms
     }
-
     fn api_model(&self) -> &str {
         &self.cfg.model
     }
-
+    #[cfg(test)]
     fn complete_stream(
         &self,
         req: ModelRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse> {
         let (provider, request) = self.prepare_request(req)?;
-        let response =
-            block_on_provider_stream(provider, request, on_delta, self.on_retry.clone())?;
-        Ok(response)
+        block_on_provider_stream(provider, request, on_delta, self.on_retry.clone())
     }
-
+    #[cfg(test)]
     fn complete(&self, req: ModelRequest) -> Result<ModelResponse> {
         self.block_on_llm(self.collect_async(req))
     }
 }
-
 /// 主模型请求最大输出 token 数。
 ///
 /// 规划/执行/响应等主模型请求统一使用此值。
 /// thinking 模式下 thinking tokens 与 output tokens 共享此预算，
 /// 因此 32k 确保 thinking 消耗 15-20k 后仍有 12-17k 给实际输出。
 /// 此值从 tiangong-core 到 tiangong-llm 再到 provider 逐层透传，不做任何修改。
+#[cfg(test)]
 const MAX_TOKENS_MAIN: u32 = 32_768;
-
-/// 轻量级任务（标题生成、分类判断等）最大输出 token 数。
-/// 任务输出通常不超过几十个字，200 足够且能有效控制成本。
-const MAX_TOKENS_LITE: u32 = 200;
 
 fn build_anthropic_provider_from_config(
     cfg: &ModelEndpoint,
@@ -879,6 +956,7 @@ fn is_empty_provider_message(message: &ChatMessage) -> bool {
 
 fn convert_provider_response(response: ProviderResponse) -> ModelResponse {
     ModelResponse {
+        provider_usage: response.usage.clone(),
         output: response.assistant_message.content.clone(),
         status: crate::collect::CompletionStatus::Complete,
         text: collect_provider_text(&response).trim().to_string(),
@@ -1190,6 +1268,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
 }
 
 pub(crate) type ProviderHandle = Arc<dyn LlmProvider>;
+#[cfg(test)]
 fn block_on_provider_stream(
     provider: ProviderHandle,
     request: ProviderRequest,
@@ -1262,26 +1341,6 @@ fn map_llm_error(error: crate::error::LlmError) -> anyhow::Error {
 
 /// 最大重试次数
 const MAX_RETRIES: u32 = 3;
-
-/// 清理非流式响应中的 `<think>...</think>` 标签
-///
-/// 部分模型即使设置了 `thinking.type=disabled`，仍在 content 中输出 `<think>` 标签。
-/// 此函数移除所有 `<think>...</think>` 块，返回纯文本内容。
-fn strip_think_tags(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut remaining = text;
-    while let Some(start) = remaining.find("<think>") {
-        result.push_str(&remaining[..start]);
-        if let Some(end) = remaining[start..].find("</think>") {
-            remaining = &remaining[start + end + 8..];
-        } else {
-            // 没有闭合标签，丢弃从 <think> 开始的所有内容
-            return result;
-        }
-    }
-    result.push_str(remaining);
-    result
-}
 
 fn configured_temperature_number() -> Option<serde_json::Number> {
     let raw = std::env::var("API_TEMPERATURE").unwrap_or_else(|_| "0.2".to_string());

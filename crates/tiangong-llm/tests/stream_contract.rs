@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
-use tiangong_llm::message::{ChatMessage, MessageRole};
 use tiangong_llm::tool::ToolSpec;
-use tiangong_llm::{ModelEndpoint, ModelRequest, ProviderProtocol, SingleProviderClient};
+use tiangong_llm::{ModelEndpoint, ProviderProtocol, SingleProviderClient};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -72,33 +71,30 @@ async fn probe(
         timeout_ms: 5_000,
         ..Default::default()
     });
-    let request = ModelRequest {
-        messages: vec![ChatMessage::text(MessageRole::User, "读取两个文件")],
-        tools: vec![ToolSpec {
-            name: "read_file".into(),
-            description: "读取".into(),
-            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
-        }],
-        max_output_tokens: Some(256),
-        ..Default::default()
-    };
-    let result = if stream {
+    let client=client.with_options(tiangong_llm::Options {
+        tools:vec![ToolSpec { name:"read_file".into(), description:"读取".into(), input_schema:json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}) }],
+        max_output_tokens:256, ..Default::default()
+    });
+    let messages = vec![tiangong_types::Message::new(
+        tiangong_types::MessageRole::User,
+        "读取两个文件",
+    )];
+    let generation = client.stream(messages).unwrap();
+    let result: tiangong_llm::ModelResponse = if stream {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            client.stream_async(request, tx),
+            generation.collect_with(tx),
         )
         .await
+        .unwrap()
         .unwrap()
     } else {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.collect_async(request),
-        )
-        .await
-        .unwrap()
+        tokio::time::timeout(std::time::Duration::from_secs(10), generation.collect())
+            .await
+            .unwrap()
+            .unwrap()
     };
-    let result = result.unwrap();
     let requests = server.received_requests().await.unwrap();
     let request_body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(

@@ -2,7 +2,7 @@
 
 > 状态：**已授权实施；按最新范围保持适配器在 llm 内，取消独立 adapters crate 拆分。**
 >
-> 本轮修订：对话支持直接传入 `&Session` 和本轮选项；标题等简单任务直接传入轻量请求；全部生成只走 `stream`，一次性结果由公共 collector 收集并适配为调用方类型。
+> 最新修订：client 构建持有 Options，唯一入口为 `stream(Vec<Message>)`；LLM 内部做轻量转换并直接装配 ProviderRequest。Core 准备会话/图片/任务消息并转换结果，不再传 Session 或第二个 options 参数。
 >
 > 现场基线：`598a7ab55be2aebc7fd4a200c8ccea55f38fb93c`，调查分支 `fix/stream-tool-call-parsing`。
 >
@@ -22,7 +22,7 @@
 4. 统一响应组装、错误语义和请求执行机制，保留薄协议适配器。
 5. SDK、认证、transport、配置装配和其他服务保持现有 crate，通过内部模块隔离职责。
 6. 分阶段迁移，先建立正确性回归，再迁移 API 和目录；不进行一次性全量重写。
-7. Core 可直接传入借用的 Session；标题等任务使用轻量请求，不创建 Session。统一请求/结果是内部规范化边界，不要求业务流程显式拼装每层转换。
+7. Core 传入 Session.context() 取出的消息列表；标题等任务直接构造消息、不创建 Session。Options 存 client，不随 stream 重复传递。
 
 ### 1.2 推荐的范围选择
 
@@ -104,7 +104,7 @@
 对调用方，生成只有一个概念：
 
 ```text
-Session / 轻量请求 → 输入适配 → 一次 stream 调用 → 实时消费 / 收集并转换结果
+Core 准备 messages → 配置好的 client.stream(messages) → 实时消费 / 收集并转换结果
 ```
 
 “单次调用”是逻辑操作，不代表一定只有一次 HTTP 请求；明确配置的安全重试可以发生，但不得扩展为多轮 Agent 流程。
@@ -113,7 +113,7 @@ Session / 轻量请求 → 输入适配 → 一次 stream 调用 → 实时消�
 
 - 只有一个 stream 生成接口、一套内部请求、事件、收集结果、错误和终态语义。
 - SSE、WS（适用时）与网关 JSON 合成流输出等价语义，不新增非流式执行链路。
-- Session、标题等输入共享同一路径；调用方结果适配不要求生成层依赖 Core。
+- 会话、标题、压缩等任务共享消息列表入口；结果适配不要求生成层依赖 Core。
 - 调用方无需按 SDK 分支处理模型内容。
 - 上游调用 ID 冲突不会导致调用覆盖；历史唯一化边界不变。
 - 适配器只映射协议和错误，不各自复制执行框架。
@@ -134,7 +134,7 @@ Session / 轻量请求 → 输入适配 → 一次 stream 调用 → 实时消�
 
 | 层 | 负责 | 不负责 |
 | --- | --- | --- |
-| Core / Context / Tool runtime | 实现 Session 输入与 Core 输出适配、上下文预算、系统提示策略、工具校验与执行、调用 ID 唯一化、多轮循环 | SDK 类型、HTTP/SSE 帧解析 |
+| Core / Context / Tool runtime | 选取/准备会话与任务消息、媒体读取与降级、配置 ctx.client、Core 输出转换、工具校验与执行、ID 唯一化 | SDK 类型、ProviderRequest 装配、HTTP/SSE 帧解析 |
 | `tiangong-llm` | 单一 stream 契约、输入输出适配契约、统一事件、错误语义、响应内身份、共享组装器与 collector | 理解或依赖 Core Session、凭据、模型注册表、路由、工具执行、SDK client 构建 |
 | 集成层 | 适配器工厂、端点配置、SDK 映射、共享请求执行策略、模型目录、认证接入、embedding/rerank 独立接口 | 会话流程、业务提示词、工具执行 |
 | SDK / transport | 原始协议类型、HTTP/SSE/WS、厂商协议解码、私有文本协议兼容 | Core 会话类型、工具运行时、业务路由 |
@@ -157,7 +157,7 @@ Core / CLI / Server / App / Memory
 
 依赖与职责仍应分离：
 
-- `tiangong-llm` 不依赖 Core；Session 输入适配与 Core 输出转换留在 Core。
+- `tiangong-llm` 不依赖 Core；上下文/媒体准备与 Core 输出转换留在 Core，轻量消息映射在 llm。
 - 原生 SDK 不反向依赖 `tiangong-llm`；统一类型与 SDK 类型映射留在现有 provider 模块。
 - Core 通过 client facade 接入单一 stream；只在装配位置选择具体协议。
 - 模型目录、配置、认证、embedding/rerank 保留当前模块位置，不加入生成 trait。
@@ -188,65 +188,55 @@ pub trait Llm: Send + Sync {
 - `capabilities` 只说明适配器支持的生成行为；模型级实际能力由构建时配置或已知元信息约束，不能把“协议支持”当作“所有模型都支持”。
 - `list_models` 改成独立 `ModelCatalog`；协议枚举留在工厂/配置处，不另用枚举重复转发生成方法。
 
-#### 5.1.1 转换驱动的输入输出
+#### 5.1.1 消息列表输入与 client 配置
 
-此前 `Into<dyn Request>`、`From<dyn Response>` 是转换边界的伪代码意图，不是要求所有请求/响应都成为运行时 trait object。
+最终策略不使用 Session 适配或输入转换器注入。`stream` 只接收 `Vec<tiangong_types::Message>`：
 
 ```text
-Core 的 &Session + 本轮选项 ── Core 输入适配 ──┐
-简单文本请求 + 生成选项 ───── 轻量输入适配 ───┤
-                                           ▼
-                              client facade → LlmRequest
-                                           │
-                                    唯一 Llm::stream
-                                           │
-                                       LlmStream
-                           ┌───────────────┴──────────────┐
-                     实时事件映射                     统一 collector
-                           │                              │
-                   Core/界面可消费事件            内部 LlmResponse
-                                                          │ 输出适配
-                                              CoreModelOutput / 文本结果
+Session.context() / Core 标题、压缩、附件消息
+                   │ Core 完成媒体准备与上下文策略
+                   ▼
+                Vec<Message>
+                   │
+     已配置 Options 的 client.stream(messages)
+                   │ llm 纯数据转换 + client options
+                   ▼
+             ProviderRequest
+                   │ SDK/协议映射
+                   ▼
+             统一流 / collector
+                   │ Core 输出转换
+                   ▼
+             CoreModelOutput
 ```
 
-- 无损且不会失败的转换用 From/Into；可能缺字段或不支持时用 TryFrom/TryInto。需要本轮选项和资源准备时用显式本地适配 trait/mapper，不强迫统一语法。
-- Session 输入适配由 Core 实现；client 调用契约，但 LLM crate 不认识 Session，不承担会话存储。Core 不再在 ReAct 流程中显式拼装每层中间模型。
-- Core 定义自己的结果和事件转换；收集/映射层返回 Core 可直接处理的类型，不要求 Core 分支识别 SDK。
-- 标准转换受孤儿规则限制时采用本地 mapper/newtype，不为转换反向引入 Core 依赖。
-- 输入准备完成后不长期借用 Session，不跨网络等待持有会话锁，不为转换复制整个 Session；Send/lifetime 与附件准备在 P0 编译样例中验证。
-- 内部规范化模型仍是权威边界；不是通过 Any/downcast 在 Core 中操作 SDK 请求。
+- Options 不包含 messages/system；由 client 的构建/with_options 固定。派生配置不修改原 client，底层 provider/HTTP pool 继续共享。
+- LLM 内部转换角色、文本、已准备图片、思考签名、工具调用和结果，装配 ProviderRequest；不读文件、不理解 Session、不执行工具、不改历史 ID。
+- Core 图片读取、失败降级及会话规则保留在原 context 模块，Session.context() 返回本次待提交消息副本。通用 LLM 不强制所有轻量任务都有 system 或 User 兜底。
+- 转换失败在 stream 返回错误，不发网络请求；输入准备是同步的，网络流在消费时惰性执行，不长期持有 Session 借用。
+- 输出通过 TryFrom/From 适配 Core 数据。ProviderRequest 不再是 Core 的调用契约，旧 ModelRequest 不参与生产请求链。
 
-#### 5.1.2 对话与简单任务的调用体验
-
-以下是目标体验示意，不代表已实现 API。对话直接传借用的 Session 和本轮选项，在同一次流消费中展示增量并收集 Core 结果：
+#### 5.1.2 对话、压缩与标题示例
 
 ```rust
-let output: CoreModelOutput = client
-    .stream(&session, &turn_options)?
-    .collect_with(on_event)
+// ctx 构建/安全请求边界已同步工具、思考、预算和缓存键。
+let output: CoreModelOutput = ctx.client
+    .stream(ctx.session.context())?
+    .collect_with(event_sink)
     .await?;
+
+// 压缩只在派生 client 中调整预算，消息尾部指令由 Core 构造。
+let summary_client = ctx.client.clone().with_max_output_tokens(summary_budget);
+let summary: CoreModelOutput = summary_client
+    .stream(summary_messages)?
+    .collect()
+    .await?;
+
+// 标题由 Core Manager 构造 system/user 消息，不创建临时 Session。
+let title = title_client.stream(title_messages)?.collect_text().await?;
 ```
 
-`turn_options` 提供可用工具、tool choice、思考强度、输出预算等不全部属于 Session 的信息。结果到达后由 Core 校验、分配最终调用 ID、写入会话和执行工具；转换不自动修改 Session。
-
-标题等任务不创建临时 Session：
-
-```rust
-let title = client
-    .stream(
-        TextRequest {
-            instruction: "生成一个简短的标题",
-            input: source_text,
-        },
-        &title_options,
-    )?
-    .collect_text()
-    .await?;
-```
-
-标题任务默认不声明工具，不携带完整历史、权限或 Agent 状态；可显式关闭思考和限制预算，不套用对话主任务的隐式默认。标题清洗、长度规则、空结果回退属于标题模块，不进入 collector。
-
-**简单任务等待最终结果，不代表非流式调用；不展示增量也不需要把请求或结果放入 Session。**
+CoreManager 的标题、压缩边界和指令、附件读取与结果写回仍由对应业务层决定。文本 helper 可以保留稳定外部签名，但内部必须构建配置好的 client 并走 stream(messages)，不能另造 ProviderRequest/执行路径。
 
 #### 5.1.3 公共 collector 与输出契约
 
@@ -258,32 +248,16 @@ let title = client
 - String helper 可以存在；需用量的任务选择带元信息的结果，不因隐藏增量而丢 usage 或伪造零值。
 - observer 失败与取消应传播并停止读取；不后台继续生成，不无界缓存。缓冲/背压按消费者能力在 P0 定稿。
 
-### 5.2 内部规范化请求与请求执行选项分开
+### 5.2 Options 与规范化请求
 
-```rust
-pub struct LlmRequest {
-    pub model: String,
-    pub system: Option<String>,
-    pub messages: Vec<ChatMessage>,
-    pub tools: Vec<ToolSpec>,
-    pub tool_choice: Option<ToolChoice>,
-    pub generation: GenerationOptions,
-    pub hints: RequestHints,
-}
-```
+`Options` 由 client 持有：reasoning_effort、max_output_tokens、tools/tool_choice、temperature/top_p、stop_sequences、cache_key、timeout_ms、max_retries。模型、base URL、凭据、headers 保留在 client endpoint 配置。
 
-建议：
-
-- 复用 `ChatMessage`、内容块、`ToolSpec`、`ToolChoice` 和 `ReasoningEffort`。
-- `LlmRequest` 是输入适配后的内部结构，不要求 Core 业务逐字段构造；轻量请求复用公共适配，Session 适配由 Core 实现。
-- `generation` 包括 max output tokens、temperature、top_p、stop sequences、reasoning effort 等已有语义。
-- model 在请求中显式给出；旧 `SingleProviderClient` 的绑定模型由兼容包装填入，避免请求与 client 两处互相覆盖。
-- `system` 暂保留独立入口；历史 System role 的规范化沿用已有映射，不能在迁移中悄悄改变提示词优先级。
-- 原 `session_id` 的缓存路由用途映射为 `hints.cache_key`；它是调用方提供的不可解释标识，不代表 LLM 持有会话。追踪标识与缓存键分离。
-- api key、base URL、代理、HTTP headers、重试和超时不进入模型消息，归 client 构建配置/执行选项。
-- 请求级 timeout 需求通过单独的 execution options 或已配置 client 包装保留，不删除原能力。初期兼容旧调用签名，最终 API 具体传递方式在阶段 P0 固定。
-- 不默认从环境变量读取温度或 token 上限。旧入口先保持原有默认解析，迁移后由装配层显式提供，并用快照证明等价。
-- 附件内容由 Core/调用方准备；LLM 不读取本地文件、不提取 system prompt、不增加业务兜底 User 消息。
+- Options 不含消息；with_options 按值发布新配置快照，运行中请求不受之后更新影响。
+- 默认温度只在 client 创建时解析现有环境配置；stream 不再次读取环境变量。明确 options 的优先级，不隐式覆盖显式参数。
+- Core 在 ctx 构建及后续模型请求边界同步动态思考和工具集；工具校验仍使用同一声明来源。
+- ProviderRequest 保留内部协议映射所需字段，直接由纯消息转换及 client Options 装配；生产路径不经过 ModelRequest。
+- 缓存键是独立请求提示，不要求提交 Session；默认会话路由兼容保留。临时标题任务也不把会话历史带入输入。
+- 更细 ExecutionOptions 的 deadline/读空闲等仍见第 8 节及第 15.2 节，不在本轮输入策略调整中夹带默认行为改变。
 
 ### 5.3 流收集结果应完整，不构成第二种生成接口
 
@@ -333,7 +307,7 @@ pub struct LlmResponse {
 
 | 当前字段/行为 | 目标归属 | 迁移要求 |
 | --- | --- | --- |
-| `ModelRequest` → `ProviderRequest` | 一套 `LlmRequest` | 包装层处理旧默认值，不能长期保留双权威模型 |
+| `ModelRequest` → `ProviderRequest` | Options + Vec<Message> 直接构造 ProviderRequest | 旧 ModelRequest 仅供回归基线，无生产执行入口 |
 | `ModelResponse.text/tool_calls/reasoning_*` | output 派生访问 | 保留顺序、签名及现有消费语义 |
 | `ProviderResponse.raw` | 可选诊断设施 | 非稳定业务依赖，不默认记录敏感内容 |
 | `TokenUsage` 与 `TokenUsageData` 转换 | 调用方兼容/观测层 | 不丢 cache hit/miss 等已有字段 |
@@ -342,7 +316,7 @@ pub struct LlmResponse {
 | `ModelStreamChunk` | 统一事件到旧 callback 的桥接 | 不更改旧界面事件协议 |
 | `api_base_url/api_timeout_ms/api_model` | client 配置描述或上层已知配置 | 不要求生成 trait 暴露凭据/连接细节 |
 | `complete_text*` | `stream + collect_text` 的临时兼容包装 | 不调用非流式 SDK；迁移完成后删除旧命名入口 |
-| `Session.context().into_model_request()` | Core 实现输入适配，client facade 自动调用 | 上下文/附件/文件读取逻辑不搬入 LLM |
+| `Session.context().into_model_request()` | Session.context() 准备消息，stream 内纯转换 | Core 保留媒体准备，不再构造请求 |
 | SDK 非流式 complete | 从本项目生成执行路径移除 | SDK API 本身不要求删除；JSON 解码仅为 stream 兼容保留 |
 | 标题等轻量调用 | 简单输入 → stream → collector → 业务结果 | 不创建/写入 Session，不要求 UI 展示增量 |
 
@@ -537,7 +511,7 @@ Finished { stop_reason, status }
 
 已定位的主要调用位置：
 
-- [Core 请求组装](../crates/tiangong-core/src/context/model_request.rs)：转换实现留在 Core，接入 Session 输入适配；业务流程直接调用 client.stream(&session, options)，不显式维护中间转换链。
+- [Core 上下文准备](../crates/tiangong-core/src/context/model_request.rs)：仅保留媒体准备/降级与会话恢复规则；生产流程调用配置好的 client.stream(session.context())，纯数据映射在 llm。
 - [Core 压缩](../crates/tiangong-core/src/context/compressor.rs)：显式保留 token 预算、tool choice 和思考选项。
 - [Core runtime](../crates/tiangong-core/src/runtime.rs)、[turn context](../crates/tiangong-core/src/turn_context.rs)、[Core 构建](../crates/tiangong-core/src/core/mod.rs)：使用带输入转换的 client facade；内部唯一 stream + collector/observer，返回 Core 可消费的数据与事件。
 - [ReAct 工具记录](../crates/tiangong-core/src/react/execute.rs)、[Session 唯一化](../crates/tiangong-core/src/session.rs)：保持 ID 职责不变；业务工具校验迁入时建立独立回归。
@@ -576,10 +550,10 @@ Finished { stop_reason, status }
 
 | 阶段 | 工作内容 | 依赖 | 可验证完成标准 |
 | --- | --- | --- | --- |
-| P0：冻结契约与基线 | 补齐标题等直接调用；确定单一 stream、Session/轻量输入、Core 输出与 collector 的编译样例；固定错误/终态/执行选项；快照与异常场景 | 实施授权 | 输入适配和对象安全样例通过；新旧流标志差异明确；异常可稳定复现 |
+| P0：冻结契约与基线 | 补齐标题等直接调用；确定单一 stream、消息列表输入、Core 输出与 collector 的编译样例；固定错误/终态/执行选项；快照与异常场景 | 实施授权 | 输入适配和对象安全样例通过；新旧流标志差异明确；异常可稳定复现 |
 | P1：修复响应内身份 | 新 CallKey；更新协议事件映射；覆盖 JSON 合成流；稳定补全元数据 | P0 身份契约 | 原重复 ID/ID 后到问题不再覆盖、串扰；Core ID 逻辑不变 |
 | P2：统一流消费与响应组装 | 共享增量/快照/终态状态机；collector/text collector/observer 复用；替换 Codex 重复收集；无效候选 | P1 | 实时消费和收集结果等价；中断不伪成功；事件、签名、usage、顺序不回归 |
-| P3：统一 stream 与类型适配 | 演进现有 trait；合并内部双模型；Session/轻量输入和 Core 输出转换；迁移标题/文本任务及校验/观测；旧 complete 转发 stream 后删除 | P2、P0 API 定稿 | 所有生成仅走 stream；标题不建 Session；Core 直接消费结果；无非流式 SDK 请求与重复收集器 |
+| P3：统一 stream 与类型适配 | 演进现有 trait；合并内部双模型；消息列表输入和 Core 输出转换；迁移标题/文本任务及校验/观测；旧 complete 转发 stream 后删除 | P2、P0 API 定稿 | 所有生成仅走 stream；标题不建 Session；Core 直接消费结果；无非流式 SDK 请求与重复收集器 |
 | P4：共享执行策略 | 单次尝试边界、共同预算、超时、取消、错误分类、client 复用 | P3，可提前做只读盘点 | 实际网络尝试数可断言；取消/超时/部分输出重试测试通过；默认变化单独获批 |
 | P5：内部模块与依赖收敛 | 保留现有 crate；catalog/非生成模块职责分离；删除重复 dispatch 和迁移遗留 | P3/P4 | 无 adapters crate、无全仓机械 import 迁移、无反向 Core 依赖，相关消费方编译 |
 | P6：清理与文档同步 | 删除旧包装；更新架构约束、调用说明和测试命令；最终依赖审查 | P5 | 无遗留同义 API；能力保持；全量相关检查通过，已知风险明确 |
@@ -598,7 +572,7 @@ P1/P2 可以作为独立正确性修复先交付，不必等待所有 API/目录
 | --- | --- | --- |
 | 正常生成 | 正文、纯工具、多工具、正文+工具、思考+正文 | 内容、顺序、usage、停止原因完整 |
 | 流式输入形态 | SSE、适用的 WS、stream=true 收到 JSON | 等价调用不丢失；JSON 兼容不额外发请求 |
-| 输入适配 | 借用 Session + 本轮选项、标题轻量请求、转换失败 | Core 无 SDK 分支，简单任务不创建/写入 Session，错误明确 |
+| 输入适配 | 会话 messages、标题消息、client Options 快照、转换失败 | Core 无 SDK 分支，简单任务不创建/写入 Session，错误明确 |
 | 消费方式 | 实时 observer、完整 collector、text collector、Core 输出转换 | 同一流只读一次，内容和元信息等价，不再发 complete |
 | 标题等简单任务 | 正常短文本、中断、截断、空内容、意外工具、usage 尾部 | 严格识别终态；业务清洗/回退留在调用方，不静默接受 partial |
 | 重复 ID | 不同 index/item 共用 call_id、同名称同参数、占位 ID 与上游 ID 同值 | 独立调用全部保留，不能按字符串覆盖 |
@@ -635,7 +609,7 @@ git diff --check
 ### 12.3 最终验收清单
 
 - [ ] 一个权威生成 trait，仅有 stream 生成方法；旧 complete/helper 只可临时包装 stream，最终删除旧入口。
-- [ ] Session 与轻量请求经转换接入；标题不创建/写入 Session，Core 不显式操作 SDK 请求。
+- [ ] stream 只接收 Vec<Message>，Options 存 client；标题不创建 Session，Core 不构造 ProviderRequest。
 - [ ] Core 直接获得本地可消费的结果/事件；输入输出转换不自动修改会话或执行工具。
 - [ ] 完整、文本收集和实时观察复用同一组装器；中断/截断不被 collect_text 当作成功。
 - [ ] Core 不依赖 SDK 类型，不执行 LLM 内部的协议分支。
@@ -657,7 +631,7 @@ git diff --check
 | --- | --- | --- |
 | 双请求模型合并改变默认值 | 思考、温度、token 上限或缓存失效 | 先冻结请求快照；兼容入口显式解析旧默认；按阶段回退映射 |
 | 简单任务由非流式迁到流式 | 端点不支持、usage 缺失、流中断使标题不完整 | 验证端点能力/尾部 usage/严格 collector；不静默 fallback；提示词和预算变化显式列出 |
-| 转换入口隐含会话生命周期 | 复制整个 Session、跨网络持锁、转换失败被吞 | Core 本地适配，准备后释放借用；编译与取消测试；错误保留 |
+| 转换入口隐含会话生命周期 | 复制整个 Session、跨网络持锁、转换失败被吞 | Core 准备拥有的消息副本；llm 纯映射，Generation 持有快照，错误不吞 |
 | 统一 Responses 状态机误伤方言 | DeepSeek/Codex 事件或参数语义变化 | 共享语义不共享未经证明的原始字段；独立 fixtures |
 | 工具校验移到 Core | 原有恢复链路失效或坏调用被执行 | 先桥接旧 InvalidToolCall；迁移校验与执行门禁同批测试 |
 | 重试收敛改变体验/请求量 | 失败率、等待时间、重复生成或费用变化 | 新旧策略对照，保留显式兼容模式，不隐式改变默认 |
@@ -679,8 +653,8 @@ git diff --check
 以下方向已由讨论确认并授权实施（最新范围不拆 crate）：
 
 - 生成只保留 stream；一次性结果由 collector 获得，不再独立调用 complete。
-- 对话支持直接传入借用的 Session 和本轮选项，转换逻辑仍由 Core 实现。
-- 标题等简单任务直接提交轻量请求，不创建 Session，也不必展示增量。
+- 对话传 Session.context() 的 messages；client 持有 Options；纯数据转换在 llm，Core 保留资源/业务准备。
+- 标题等简单任务直接提交消息列表，不创建 Session，也不必展示增量。
 - 输出经转换返回 Core 可处理的数据；流式工具调用的正确性与 Core 唯一化边界不变。
 - 保留 stream=true 收到 JSON 的兼容解析，不把它发展为主动非流式回退。
 - 适配器继续放在 llm crate，本轮取消独立 adapters crate 拆分。
@@ -707,21 +681,19 @@ git diff --check
 
 ### 15.1 已落地的接口与边界
 
-- `LlmProvider` 仅保留 stream 生成方法，模型目录由独立 `ModelCatalog` 承担；五种 provider、认证和 transport 保持在现有 llm crate。
-- `SingleProviderClient::stream(input, options)` **同步完成输入准备**并返回拥有请求的 `Generation`。因此调用写法是 `.stream(...)?.collect_with(...).await?`，不是在准备入口额外 `.await`；不跨网络借用 Session。
-- `IntoModelInput` 支持 Core 的 `&Session`、轻量 `TextRequest` 和现有 `ModelRequest`；输出 collector 支持 TryFrom 转换，Core 消费本地 `CoreModelOutput`。
-- 正文、工具调用、思考签名、redacted thinking、usage 和终态经共享 `ResponseAccumulator` 收集；旧按 call_id 聚合的工具事件已移除，使用 CallKey、Metadata、Delta、Snapshot、Finished。
-- 标题使用轻量请求 + collect_text，不创建临时 Session，不再 spawn_blocking 调用独立生成路径。标题是否写回和 only_if_default 仍由 Core Manager 控制。
-- Core 负责所有协议的工具 schema 校验，保留合法并行调用；中断/截断文本保留可见内容与用量但不当作完整成功。压缩拒绝不完整摘要。
-- Responses/DeepSeek/Chat SSE 和 JSON 合成流覆盖相同的响应内身份、终态和参数规则；网关 JSON 不触发第二次非流式请求。
-- 公共重试执行器复用退避/通知与分类，在逻辑生成异步作用域内共用有限预算；Codex 开流也计入预算。保留连接失败直连的原范围，不扩展网络回退。
-- 同一 client 复用按 timeout/缓存路由键/重试配置区分的 provider；OpenAI client 复用 HTTP 连接池。WS 仍按原会话连接管理，取消丢弃不完整连接。
+- 原提交 `0d9bd1fa` 为前一阶段基线；本轮将 Session + options 的外层包装替换为 client 持有 Options、stream(Vec<Message>)。
+- `IntoModelInput` 和 `TextRequest` 删除；生产 ModelRequest/stream_async/collect_async 入口关闭，旧请求类型和桥接仅支持历史回归测试，不参与生产。
+- Core context 模块保留媒体读取/降级与会话恢复规则；llm input 模块只有纯映射，stream 直接合并 options 装配 ProviderRequest。
+- 主循环、压缩、标题、附件分析和文本 helper 均走该入口。文本 helper 保留签名兼容记忆调用，但没有独立 provider 请求构造或 collector 执行路径。
+- ctx 持有已配置 client，安全请求边界刷新思考/工具配置；标题与压缩派生 client，不改主 client。配置和 Generation 均按值捕获。
+- Core 输出转换和工具校验仍留 Core；新增 provider_usage 保留服务端 usage 缺失语义，文本带用量收集不再假装零用量。
+- 已有 CallKey、参数快照、终态、重试预算与 HTTP/WS 生命周期修复继续保持；不拆 crate、不改历史 ID、不迁移会话数据。
 
 ### 15.2 兼容保留与未扩展项
 
-为避免再次扩大调用方改动，本轮暂保留 `ModelRequest`/`ProviderRequest`、`ModelResponse` 便捷字段，以及旧同步 `ModelClient`、complete_lite/complete_text helper 名称；**它们只包装 stream + 同一组装器，不存在独立非流式生成执行器**。完整 JSON response decoder 继续用于网关兼容；部分旧响应映射仅供历史单测基线，不发请求。
+生产路径仅有消息列表 + client Options → ProviderRequest。ModelRequest、旧同步 complete/complete_lite 等只作回归测试桥；ModelResponse 便捷字段和 complete_text helper 外部签名暂保留，但 helper 已统一经 stream(messages) 执行。完整 JSON decoder 继续用于网关兼容，不额外发请求。
 
-以下属于后续扩展，不作为本轮已实现能力：统一请求字段彻底合并、移除所有外部兼容方法、全协议 Retry-After 元信息、可配置读空闲/总 deadline、可配置内容大小上限，以及更严格的思考输出后重放策略。现有默认温度/超时和思考重试口径先保留；改变这些默认行为须单独评估。
+以下属于后续扩展，不作为本轮已实现能力：统一结果便捷字段进一步收敛、移除文本 helper 外部兼容名称、全协议 Retry-After 元信息、可配置读空闲/总 deadline、可配置内容大小上限，以及更严格的思考输出后重放策略。现有默认温度/超时和思考重试口径先保留；改变这些默认行为须单独评估。
 
 当前完成性以正式测试、编译、Clippy 和实际 diff 核验，不以阶段表或示意 API 存在作证。真实付费 API 与真实 Codex 登录调用未执行；本地 HTTP/WS fixtures 不等同线上保证。
 

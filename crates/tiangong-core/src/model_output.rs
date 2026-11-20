@@ -75,6 +75,7 @@ mod validation_tests {
     #[test]
     fn validation_is_protocol_independent_and_retains_valid_parallel_calls() {
         let response = tiangong_llm::ModelResponse {
+            provider_usage: None,
             output: Vec::new(),
             status: tiangong_llm::CompletionStatus::Complete,
             text: String::new(),

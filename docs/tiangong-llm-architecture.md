@@ -10,11 +10,15 @@
 
 ## 依赖与输入输出
 
-- Core 可以通过 client facade 直接传 `&Session` 和本轮选项；输入转换由 Core 实现 `IntoModelInput`，LLM 不依赖 Core、不读取 Session 或本地附件文件。
-- 标题、改写等简单任务用 `TextRequest`，不创建临时 Session；是否写回由业务调用方决定。
-- `Generation` 完成输入准备后拥有请求，不跨网络等待持有会话锁；输出可通过 TryFrom 转成 Core 本地结果。
-- `ModelRequest`/`ProviderRequest`、旧同步 helper 暂作兼容，均走同一 stream + 组装器。删除兼容 API 或合并字段须覆盖实际消费者，不能新增同义执行路径。
-- 第三方 SDK 类型不暴露给 Core，协议配置只在装配/映射处使用。
+- 对外生成入口为配置好的 `SingleProviderClient::stream(Vec<tiangong_types::Message>)`，不接收 Session，不接收第二个 options 参数。
+- `Options` 在 client 构建/派生时设置，包含思考、输出预算、tools/tool_choice、缓存键、timeout 和重试次数；配置不可变，派生 client 不改变原实例，共享底层连接资源。
+- Core 的 `TurnContext` 持有配置好的 client；构建时及后续请求边界同步运行中工具/思考配置。压缩和标题使用独立配置快照，避免污染主请求。
+- `Session::context()` 继续选取上下文，并在 Core 准备图片、降级不可读资源、处理前置孤立消息/无用户上下文兜底；均作用于消息副本，不写回历史。
+- LLM stream 内部只做消息角色/内容的纯映射与 options 装配，直接生成 `ProviderRequest`。未准备的本地图片明确报错，不读文件。
+- 标题/摘要指令由 Core/业务模块构造为消息。简单任务不创建 Session；文本 helper 仅配置 client 并调用相同 stream/collector，不自行构造 provider 请求。
+- `Generation` 拥有输入和 client 快照，不跨网络借用 Core；输出由 Core 实现 TryFrom/From，仍由 Core 校验和执行工具。
+- 旧 `ModelRequest`/同步执行桥仅用于旧回归测试，不提供生产执行入口；生产 ReAct、压缩、附件分析和文本 helper 均不使用它们。消息转换与 SDK 规范化请求不再经过双请求模型。
+- `ProviderRequest` 为 LLM/适配器内部规范化边界；Core 生产路径不构造该结构，不暴露第三方 SDK 类型。
 
 ## 当前协议
 
