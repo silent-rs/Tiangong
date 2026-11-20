@@ -117,7 +117,7 @@ async fn 代理不可达时各类请求直连重试成功() {
             .await;
         let cfg = endpoint(&server, protocol);
         let response = SingleProviderClient::new(cfg.clone())
-            .complete_async(request())
+            .collect_async(request())
             .await
             .unwrap_or_else(|error| panic!("{protocol:?} 对话应直连成功：{error:#}"));
         assert_eq!(response.text, "OK", "{protocol:?}");

@@ -2,7 +2,7 @@
 //! 全部交互从 `deliver()` 发起，断言公开可见结果（事件流 + 磁盘终态）。
 //!
 //! 主对话成功响应使用多帧 OpenAI SSE；路由按最新用户 prompt、工具调用结果或
-//! 压缩指令选择响应，不依赖 mock 挂载顺序。压缩沿生产接口使用非流式 completion。
+//! 压缩指令选择响应，不依赖 mock 挂载顺序。压缩统一使用 stream + collector。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +39,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
             assert_eq!(index,4);
             return ResponseTemplate::new(200).set_body_json(json!({"id":"summary","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"[[SUMMARY]]\n已完成前两轮，第三轮流中断后按截断内容收尾。"}],"stop_reason":"end_turn","usage":usage}));
         }
-        let block = if index==0 { json!({"type":"tool_use","id":"probe-call","name":"usage-probe__probe","input":{}}) } else { json!({"type":"text","text":"完成"}) };
+        let block = if index==0 { json!({"type":"tool_use","id":"probe-call","name":"usage-probe__probe","input":{}}) } else { json!({"type":"text","text":if index==4 {"[[SUMMARY]]\n已完成前两轮，第三轮流中断后保留部分内容。"} else {"完成"}}) };
         let mut events = vec![
             json!({"type":"message_start","message":{"id":format!("m{index}"),"model":"glm-5.3-flash","role":"assistant","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}),
             json!({"type":"content_block_start","index":0,"content_block":block}),
@@ -50,8 +50,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
             events.insert(2, json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}));
         }
         if index==3 {
-            // 文本流出后流内报错：llm 层截断定稿（issue #551），core 按正常
-            // 完成的响应接受，本轮仍 Success。
+            // 部分输出与用量保留，但 Interrupted 不得冒充成功。
             events.push(json!({"type":"error","error":{"type":"api_error","message":"测试请求中断"}}));
         } else {
             events.push(json!({"type":"message_delta","delta":{"stop_reason":if index==0 {"tool_use"} else {"end_turn"}},"usage":usage}));
@@ -149,7 +148,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
     send_message(&core, "usage-truncated", "再次继续");
     assert_eq!(
         wait_turn_status(&env, &sid, "usage-truncated").await,
-        TurnStatus::Success
+        TurnStatus::Failed
     );
     wait_idle(&sid).await;
     assert_totals(&[10000, 10020, 10050, 10055], &[20, 30, 10, 3]);
@@ -866,10 +865,7 @@ async fn high_pressure_triggers_pre_request_compression() {
         compression.allows_tool_calls(),
         "压缩沿用主循环 tool_choice，避免前缀缓存失效"
     );
-    assert!(
-        !compression.is_stream(),
-        "压缩沿生产接口使用非流式 completion"
-    );
+    assert!(compression.is_stream(), "压缩统一使用 stream + collector");
     let post = chat_request_at(&server, 2).await;
     assert!(post.any_message_contains("压缩后的历史摘要"));
     assert!(post.role_message_contains("user", "AUTO-COMPRESS-SECOND"));
@@ -911,7 +907,7 @@ async fn manual_compression_applies_summary() {
 
     let compression = chat_request_at(&server, 0).await;
     assert!(compression.any_message_contains("第一条问题"));
-    assert!(!compression.is_stream());
+    assert!(compression.is_stream());
     let session = env.load_session(&sid);
     assert_eq!(session.context_summary.as_deref(), Some("手动压缩摘要内容"));
     assert_eq!(session.summary_up_to, event_boundary);

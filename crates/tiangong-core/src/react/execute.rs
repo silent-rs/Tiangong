@@ -3,12 +3,12 @@
 //! 本模块只负责从已构建的 TurnContext 执行模型请求、工具调用与总结阶段；
 //! turn 的插件生命周期、状态提交和最终持久化由 react/turn.rs 负责。
 
+use crate::model_output::CoreModelOutput as ModelResponse;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::context::model_request::IntoModelRequest;
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -21,7 +21,7 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
 use tiangong_llm::tool::{ToolCall, ToolChoice};
-use tiangong_llm::{InvalidToolCall, ModelRequest, ModelResponse};
+use tiangong_llm::{InvalidToolCall, ModelRequest};
 use tiangong_types::TokenUsage;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
@@ -423,18 +423,16 @@ fn start_llm_request(
 ) -> ActiveLlm {
     // 由当前会话上下文构造请求；转换失败（如缺少 system prompt）时由请求
     // 任务返回错误，与模型请求失败走同一条恢复/失败链路。
-    let request = ctx
-        .session
-        .context()
-        .into_model_request()
-        .map(|request| ModelRequest {
-            session_id: Some(ctx.session.id.clone()),
-            reasoning_effort: ctx.agent_config.reasoning_effort,
-            max_output_tokens: Some(crate::config::max_output::max_output_tokens(
-                ctx.client().model_name(),
-            )),
-            ..request
-        });
+    let options = ModelRequest {
+        reasoning_effort: ctx.agent_config.reasoning_effort,
+        max_output_tokens: Some(crate::config::max_output::max_output_tokens(
+            ctx.client().model_name(),
+        )),
+        tools: ctx.tools.clone(),
+        tool_choice,
+        ..Default::default()
+    };
+    let generation = ctx.client().stream(&ctx.session, &options);
     let pending_msg_id = scru128::new().to_string();
     let sink = ThrottledStreamSink::with_text_kind(
         pending_msg_id.clone(),
@@ -442,14 +440,8 @@ fn start_llm_request(
         text_kind,
     );
     let (chunk_tx, chunk_rx) = tokio_mpsc::unbounded_channel();
-    let client = ctx.client().clone();
-    let tools = ctx.tools.clone();
-    let task = tokio::spawn(async move {
-        client
-            .stream_async(request?.with_tools(tools, tool_choice), chunk_tx)
-            .await
-    });
-
+    let task =
+        tokio::spawn(async move { generation?.collect_with::<ModelResponse>(chunk_tx).await });
     ActiveLlm {
         purpose,
         pending_msg_id,
@@ -544,6 +536,10 @@ fn handle_react_text_response(
     );
     ctx.session.persist_to_disk();
 
+    // 保留部分输出与用量，但中断/截断不能冒充正常完成。
+    if response.status != tiangong_llm::CompletionStatus::Complete {
+        return ReactTextDisposition::InvalidOutput;
+    }
     // 附件内容不进入模型请求（模型看不见），自然会调用读取插件处理——
     // 工具使用由模型基于上下文自主决策（Agent 的根基），Loop 不做义务门控。
     if is_need_more_work_text(&response.text) {
@@ -914,7 +910,18 @@ fn complete_llm_request(
                 ttft_ms,
             );
             let mut response = match response_result {
-                Ok(response) => response,
+                Ok(mut response) => {
+                    if let Err(error) = response.validate_tools(&ctx.tools) {
+                        persist_error(ctx, format!("工具定义校验失败：{error}"));
+                        return NextStep::Phase(ExecutionPhase::PendingFinish(
+                            TurnExecutionResult::failed(
+                                state.accumulated_usage.clone(),
+                                error.to_string(),
+                            ),
+                        ));
+                    }
+                    response
+                }
                 Err(error) => {
                     state.accumulated_usage.accumulate(&streaming_usage);
                     super::context::record_call_usage(
@@ -1003,7 +1010,7 @@ fn complete_llm_request(
                 NextStep::ExecuteTools(ToolBatchState {
                     calls: calls.into_iter().enumerate().collect(),
                     ready_tools: Vec::new(),
-                    invalid_tool_calls: response.invalid_tool_calls,
+                    invalid_tool_calls: std::mem::take(&mut response.invalid_tool_calls),
                     response_usage: response.usage.clone(),
                 })
             };

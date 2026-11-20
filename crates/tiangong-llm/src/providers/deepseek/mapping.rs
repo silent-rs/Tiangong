@@ -1,16 +1,22 @@
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::{ProviderRequest, ReasoningEffort};
+#[cfg(test)]
 use crate::response::{ProviderResponse, StopReason};
-use crate::tool::{ToolChoice, parse_tool_arguments_or_error};
+use crate::tool::ToolChoice;
+#[cfg(test)]
+use crate::tool::parse_tool_arguments_or_error;
 use crate::usage::TokenUsageData;
 use anyhow::Result;
 use serde_json::{Value, json};
 use tiangong_deepseek::types::{
     ContentBlock, CreateResponseRequest, FunctionCallInputItem, FunctionCallOutputInputItem,
-    FunctionOutputContent, InputImageBlock, InputMessage, OutputContentBlock, ReasoningConfig,
-    ReasoningEffortLevel, ReasoningInputItem, ResponseInput, ResponseInputItem, ResponseObject,
-    ResponseOutputItem, ResponseRole, ResponseStatus, ResponsesFunctionTool, ResponsesTool,
-    SafetyCheck, TextBlock, TextFormat, TextFormatConfig,
+    FunctionOutputContent, InputImageBlock, InputMessage, ReasoningConfig, ReasoningEffortLevel,
+    ReasoningInputItem, ResponseInput, ResponseInputItem, ResponseRole, ResponsesFunctionTool,
+    ResponsesTool, SafetyCheck, TextBlock, TextFormat, TextFormatConfig,
+};
+#[cfg(test)]
+use tiangong_deepseek::types::{
+    OutputContentBlock, ResponseObject, ResponseOutputItem, ResponseStatus,
 };
 
 /// 构建 Responses API 请求（POST /responses）。
@@ -395,6 +401,7 @@ fn extract_text(message: &ChatMessage) -> String {
 /// 输出 item 按类型分流：message 的 output_text 拼接为正文，reasoning 的
 /// reasoning_text 拼接为思考内容，function_call 映射为工具调用；
 /// web_search_call / custom_tool_call / 未知 item 忽略（上层未声明这类工具）。
+#[cfg(test)]
 pub fn from_deepseek_response(
     response: ResponseObject,
     tools_enabled: bool,
@@ -526,6 +533,7 @@ pub fn from_deepseek_response(
 /// Responses API 没有 finish_reason 字段：completed 状态下有 function_call
 /// item 视为工具调用轮，否则视为自然结束；incomplete 按
 /// incomplete_details.reason 细分；failed 归入 Other。
+#[cfg(test)]
 fn map_stop_reason(response: &ResponseObject) -> StopReason {
     match response.status {
         ResponseStatus::Completed => {

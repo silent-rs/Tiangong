@@ -379,3 +379,103 @@ mod tests {
         assert!(!super::is_clean_terminal(&delta));
     }
 }
+
+#[cfg(test)]
+mod local_lifecycle_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    #[tokio::test]
+    async fn clean_stream_reuses_socket_but_cancelled_stream_does_not() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let key = format!("ws-local-{}", scru128::new());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(socket).await.unwrap();
+            // 两次正常请求必须来自同一条连接。
+            for _ in 0..2 {
+                assert!(ws.next().await.unwrap().unwrap().is_text());
+                ws.send(Message::text(
+                    r#"{"type":"response.completed","response":{"output":[]}}"#,
+                ))
+                .await
+                .unwrap();
+            }
+            // 第三次已发内容但未发终态，客户端丢弃后连接必须关闭。
+            assert!(ws.next().await.unwrap().unwrap().is_text());
+            ws.send(Message::text(
+                r#"{"type":"response.output_text.delta","delta":"partial"}"#,
+            ))
+            .await
+            .unwrap();
+            let close = tokio::time::timeout(Duration::from_secs(3), ws.next())
+                .await
+                .expect("取消未关闭 WS");
+            assert!(
+                close.is_none()
+                    || close.as_ref().is_some_and(
+                        |result| result.is_err() || matches!(result, Ok(Message::Close(_)))
+                    )
+            );
+            // 下一次必须建立新连接，不能复用带残留输出的 socket。
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(socket).await.unwrap();
+            assert!(ws.next().await.unwrap().unwrap().is_text());
+            ws.send(Message::text(
+                r#"{"type":"response.completed","response":{"output":[]}}"#,
+            ))
+            .await
+            .unwrap();
+        });
+        let url = format!("ws://{address}");
+        for _ in 0..2 {
+            let mut response = request(
+                Some(&key),
+                &url,
+                &[],
+                serde_json::json!({"type":"response.create"}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.events.next().await.unwrap().unwrap()["type"],
+                "response.completed"
+            );
+            assert!(response.events.next().await.is_none());
+            drop(response);
+        }
+        let mut response = request(
+            Some(&key),
+            &url,
+            &[],
+            serde_json::json!({"type":"response.create"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.events.next().await.unwrap().unwrap()["delta"],
+            "partial"
+        );
+        drop(response);
+        let mut response = request(
+            Some(&key),
+            &url,
+            &[],
+            serde_json::json!({"type":"response.create"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.events.next().await.unwrap().unwrap()["type"],
+            "response.completed"
+        );
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        discard_connection(&key);
+    }
+}

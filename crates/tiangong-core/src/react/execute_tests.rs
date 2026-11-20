@@ -1902,8 +1902,11 @@ async fn inject_during_compression_cancels_and_restarts_without_applying_summary
         "引导消息应保存进 session"
     );
     assert!(
-        ctx.session.context_summary.is_none(),
-        "被中断压缩的迟到结果不得应用（context_summary 应为空）"
+        !ctx.session
+            .context_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("旧摘要")),
+        "被中断压缩的迟到旧摘要不得应用；重启后合法流式压缩允许产生新摘要"
     );
 }
 

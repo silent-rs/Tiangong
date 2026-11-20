@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use crate::endpoint::ModelEndpoint;
 use crate::error::LlmError;
-use crate::message::{ChatMessage, MessageContent, MessageRole};
+use crate::message::{ChatMessage, MessageRole};
 use crate::model::ProviderProtocol;
-use crate::provider_client::{ProviderDispatch, SingleProviderClient};
+use crate::provider_client::{ProviderHandle, SingleProviderClient};
 use crate::request::ProviderRequest;
 use crate::request::ReasoningEffort;
 
@@ -82,11 +82,13 @@ pub async fn complete_text_with_usage(
         metadata: None,
         reasoning_effort: ReasoningEffort::None,
     };
-    let response = provider.complete(request).await?;
-    Ok((message_text(&response.assistant_message), response.usage))
+    crate::retry::with_budget(10, async {
+        crate::collect::collect_text(provider.stream(request).await?).await
+    })
+    .await
 }
 
-fn build_provider(config: &LlmEndpointConfig) -> Result<ProviderDispatch, LlmError> {
+fn build_provider(config: &LlmEndpointConfig) -> Result<ProviderHandle, LlmError> {
     let timeout_ms = config.timeout.as_millis().min(u64::MAX as u128) as u64;
     SingleProviderClient::new(ModelEndpoint {
         api_key: config.api_key.clone(),
@@ -103,16 +105,4 @@ fn build_provider(config: &LlmEndpointConfig) -> Result<ProviderDispatch, LlmErr
             .cloned()
             .unwrap_or_else(|| LlmError::Configuration(error.to_string()))
     })
-}
-
-fn message_text(message: &ChatMessage) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            MessageContent::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
 }

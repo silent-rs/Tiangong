@@ -274,11 +274,15 @@ async fn provider_request_bodies_match_snapshots() {
                 ..Default::default()
             });
             client
-                .complete_async(build_request(&context))
+                .collect_async(build_request(&context))
                 .await
                 .unwrap_or_else(|error| panic!("{case}/{protocol:?} 请求失败：{error}"));
             let requests = server.received_requests().await.unwrap();
-            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let mut body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["stream"], true, "所有生成必须请求流式");
+            // 原快照冻结生成内容，不掩盖其他字段变化；仅剔除已评审的传输差异。
+            body.as_object_mut().unwrap().remove("stream");
+            body.as_object_mut().unwrap().remove("stream_options");
             let actual = serde_json::to_string_pretty(&body).unwrap() + "\n";
 
             let path = snapshot_dir().join(format!("{}__{case}.json", protocol_name(protocol)));
@@ -289,6 +293,10 @@ async fn provider_request_bodies_match_snapshots() {
             }
             let expected = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("缺少快照 {}：{error}", path.display()));
+            let mut expected: Value = serde_json::from_str(&expected).unwrap();
+            expected.as_object_mut().unwrap().remove("stream");
+            expected.as_object_mut().unwrap().remove("stream_options");
+            let expected = serde_json::to_string_pretty(&expected).unwrap() + "\n";
             if expected != actual {
                 mismatches.push(format!(
                     "{}\n--- expected\n{expected}\n--- actual\n{actual}",

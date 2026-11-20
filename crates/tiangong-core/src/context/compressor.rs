@@ -118,7 +118,7 @@ impl ContextCompressor {
         // 下方拒绝提交摘要。
         let response = self
             .client
-            .complete_async(request.with_tools(self.tools, None))
+            .collect_async(request.with_tools(self.tools, None))
             .await
             .map_err(|error| CompressionError::new(error.to_string()))?;
         let usage = response.usage.clone();
@@ -131,6 +131,12 @@ impl ContextCompressor {
         if response.stop_reason == Some(StopReason::MaxTokens) {
             return Err(CompressionError::with_usage(
                 "上下文压缩输出达到最大 token 限制，拒绝提交截断摘要",
+                usage,
+            ));
+        }
+        if response.status != tiangong_llm::CompletionStatus::Complete {
+            return Err(CompressionError::with_usage(
+                "上下文压缩未完整结束，拒绝提交部分摘要",
                 usage,
             ));
         }

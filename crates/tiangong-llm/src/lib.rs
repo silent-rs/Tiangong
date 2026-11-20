@@ -1,4 +1,10 @@
+//! 统一流式生成、类型适配与 SDK 集成。
+mod call_state;
 pub mod client;
+pub mod generation;
+mod retry;
+pub use generation::{Generation, IntoModelInput, TextRequest};
+pub mod collect;
 pub mod embedding;
 pub mod endpoint;
 pub mod error;
@@ -17,8 +23,13 @@ pub mod stream;
 pub mod text;
 pub mod tool;
 pub mod usage;
-
+pub use client::rerank_provider_from_config;
+pub use embedding::{
+    EmbeddingEndpointConfig, EmbeddingProvider, OpenAiEmbeddingProvider,
+    embedding_provider_from_config,
+};
 pub use endpoint::ModelEndpoint;
+pub use model::{ProviderModelInfo, ProviderProtocol};
 pub use models_config::{
     ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, ProviderReferences, ResolvedModel,
     RoutingSlot,
@@ -27,13 +38,6 @@ pub use provider_client::{
     InvalidToolCall, ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, OnRetryCallback,
     SingleProviderClient,
 };
-
-pub use client::rerank_provider_from_config;
-pub use embedding::{
-    EmbeddingEndpointConfig, EmbeddingProvider, OpenAiEmbeddingProvider,
-    embedding_provider_from_config,
-};
-pub use model::{ProviderModelInfo, ProviderProtocol};
 pub use request::ReasoningEffort;
 pub use rerank::{
     RerankEndpointConfig, RerankProvider, RerankRequest, RerankResponse, RerankResult,
@@ -41,3 +45,7 @@ pub use rerank::{
 pub use response::StopReason;
 pub use text::{LlmEndpointConfig, complete_text, complete_text_with_usage};
 pub use usage::TokenUsageData;
+
+pub use collect::{CollectedResponse, CompletionStatus};
+pub use provider::LlmProvider;
+pub use stream::{CallKey, ProviderStream, ProviderStreamEvent};

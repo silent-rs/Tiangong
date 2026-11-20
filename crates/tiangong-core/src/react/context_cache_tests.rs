@@ -204,9 +204,11 @@ async fn mount_responses(server: &MockServer, output: Vec<Value>, cached: u64, a
         ResponseTemplate::new(200).set_body_json(body)
     } else {
         let mut chunks = vec![json!({"type":"response.created", "response":{"id":body["id"]}})];
-        for item in body["output"].as_array().unwrap() {
+        for (index, item) in body["output"].as_array().unwrap().iter().enumerate() {
             if item["type"] == "function_call" {
-                chunks.push(json!({"type":"response.output_item.added", "item":item}));
+                chunks.push(
+                    json!({"type":"response.output_item.added", "output_index":index, "item":item}),
+                );
             }
         }
         chunks.push(json!({"type":"response.completed", "response":body}));
@@ -678,7 +680,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
     use crate::react::execute::{AgentLoopState, ToolInjectionBuffer};
     use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
-    use tiangong_llm::{ModelResponse, ModelStreamChunk};
+    use tiangong_llm::ModelStreamChunk;
 
     let server = MockServer::builder().start().await;
     let mut harness = TestHarness::new_with_protocol(
@@ -717,7 +719,9 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
             StreamTextKind::React,
         ),
         chunk_rx: rx,
-        task: tokio::spawn(std::future::pending::<anyhow::Result<ModelResponse>>()),
+        task: tokio::spawn(std::future::pending::<
+            anyhow::Result<crate::model_output::CoreModelOutput>,
+        >()),
         streamed_text: String::new(),
         streamed_reasoning: String::new(),
         streaming_usage: TokenUsage {

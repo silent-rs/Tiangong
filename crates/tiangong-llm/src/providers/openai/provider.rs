@@ -4,9 +4,8 @@ use serde_json::Value;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
-use crate::provider::{LlmProvider, ProviderCapabilities};
+use crate::provider::{LlmProvider, ModelCatalog, ProviderCapabilities};
 use crate::request::ProviderRequest;
-use crate::response::ProviderResponse;
 use crate::stream::{ProviderStream, ProviderStreamEvent};
 
 use super::client::ResponsesClient;
@@ -58,17 +57,6 @@ impl LlmProvider for OpenAiResponsesProvider {
         }
     }
 
-    async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError> {
-        let model = req.model.clone();
-        let payload = build_request_json(&req, false)
-            .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
-        let response = self.client.complete(&model, payload).await?;
-        parse_complete_response(&response).map_err(|err| LlmError::Provider {
-            provider: "openai",
-            message: err.to_string(),
-        })
-    }
-
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
         let model = req.model.clone();
         let payload = build_request_json(&req, true)
@@ -90,7 +78,9 @@ impl LlmProvider for OpenAiResponsesProvider {
         };
         Ok(map_responses_stream(stream))
     }
-
+}
+#[async_trait]
+impl ModelCatalog for OpenAiResponsesProvider {
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
     }
@@ -124,6 +114,7 @@ pub(crate) fn map_responses_stream(stream: super::client::ResponsesByotStream) -
             if let Some(fallback) =
                 maybe_completed_reasoning(&raw_payload, received_reasoning_delta)
             {
+                received_reasoning_delta = true;
                 events.insert(0, Ok(fallback));
             }
         } else if events
@@ -248,7 +239,7 @@ mod tests {
         while let Some(event) = response_stream.next().await {
             match event.expect("流事件应无错误") {
                 ProviderStreamEvent::TextDelta(delta) => text.push_str(&delta),
-                ProviderStreamEvent::ToolCallStart(_) => tool_calls += 1,
+                ProviderStreamEvent::ToolCallMetadata { .. } => tool_calls += 1,
                 _ => {}
             }
         }

@@ -151,7 +151,7 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
     };
 
     let response = client
-        .complete_async(request)
+        .collect_async(request)
         .await
         .map_err(|e| anyhow::anyhow!("多模态模型调用失败：{e}"))?;
 

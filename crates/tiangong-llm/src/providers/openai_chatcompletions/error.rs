@@ -2,43 +2,39 @@ use crate::error::LlmError;
 
 pub fn map_openai_error(error: &async_openai::error::OpenAIError) -> LlmError {
     let text = format_error_with_sources(error);
-    if text.contains("401") {
-        return LlmError::Authentication(text);
+    use async_openai::error::OpenAIError;
+    match error {
+        OpenAIError::JSONDeserialize(..) => {
+            return LlmError::Serialization("上游返回了无效 JSON".into());
+        }
+        OpenAIError::InvalidArgument(_) => return LlmError::InvalidRequest(text),
+        OpenAIError::Reqwest(error) if error.is_timeout() => return LlmError::Timeout(0),
+        OpenAIError::Reqwest(error) if error.is_decode() || error.is_builder() => {
+            return LlmError::Serialization("请求或响应编码无效".into());
+        }
+        OpenAIError::ApiError(response) => {
+            let status = response.status_code;
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return LlmError::Authentication(text);
+            }
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
+                return LlmError::RateLimited(text);
+            }
+            if status == reqwest::StatusCode::REQUEST_TIMEOUT {
+                return LlmError::Timeout(0);
+            }
+            if status.is_client_error() {
+                return LlmError::InvalidRequest(text);
+            }
+        }
+        _ => {}
     }
     if is_rate_limited_text(&text) {
         return LlmError::RateLimited(text);
     }
-    if text.contains("400") {
-        return LlmError::InvalidRequest(text);
-    }
-    if text.contains("timeout") {
-        return LlmError::Timeout(0);
-    }
     LlmError::Transport(text)
-}
-
-pub fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
-    // 只重试真正可能恢复的传输层故障（连接被重置/断开、DNS 抖动等）。
-    // reqwest 的 Display 只有 "error sending request for url (...)"，
-    // 底层原因藏在 source 链里，无法靠字符串匹配识别。
-    // 构建失败、超时、响应体解析失败、重定向错误都是确定性失败，重试无益：
-    // 格式错误的响应重发只会重复计费并推迟报错。
-    if let async_openai::error::OpenAIError::Reqwest(e) = err
-        && !e.is_builder()
-        && !e.is_timeout()
-        && !e.is_decode()
-        && !e.is_redirect()
-    {
-        return true;
-    }
-    let text = format_error_with_sources(err);
-    is_rate_limited_text(&text)
-        || text.contains("500 Internal Server Error")
-        || text.contains("502 Bad Gateway")
-        || text.contains("503 Service Unavailable")
-        || text.contains("504 Gateway Timeout")
-        || text.contains("connection reset")
-        || text.contains("connection refused")
 }
 
 /// 拼接错误与其 source 链：reqwest 的 Display 不含底层原因，

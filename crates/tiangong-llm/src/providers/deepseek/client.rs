@@ -4,8 +4,7 @@ use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use async_trait::async_trait;
 use futures_util::Stream;
-use std::time::Duration;
-use tiangong_deepseek::types::{CreateResponseRequest, ResponseObject, ResponsesEventStream};
+use tiangong_deepseek::types::{CreateResponseRequest, ResponsesEventStream};
 
 pub type DeepSeekStream = std::pin::Pin<
     Box<dyn Stream<Item = Result<crate::stream::ProviderStreamEvent, LlmError>> + Send>,
@@ -13,7 +12,6 @@ pub type DeepSeekStream = std::pin::Pin<
 
 #[async_trait]
 pub(crate) trait DeepSeekTransport: Send + Sync {
-    async fn create(&self, request: CreateResponseRequest) -> Result<ResponseObject, LlmError>;
     async fn create_stream(
         &self,
         request: CreateResponseRequest,
@@ -63,14 +61,6 @@ impl NativeDeepSeekTransport {
 
 #[async_trait]
 impl DeepSeekTransport for NativeDeepSeekTransport {
-    async fn create(&self, request: CreateResponseRequest) -> Result<ResponseObject, LlmError> {
-        self.with_direct_retry(|client| {
-            let request = request.clone();
-            async move { client.responses().create(request).await }
-        })
-        .await
-    }
-
     async fn create_stream(
         &self,
         request: CreateResponseRequest,
@@ -115,15 +105,6 @@ impl<T> DeepSeekClient<T>
 where
     T: DeepSeekTransport,
 {
-    pub async fn create(&self, request: CreateResponseRequest) -> Result<ResponseObject, LlmError> {
-        let model = request.model.clone();
-        self.run_with_retry("deepseek_complete", &model, false, || {
-            let request = request.clone();
-            async { self.transport.create(request).await }
-        })
-        .await
-    }
-
     pub async fn create_stream(
         &self,
         request: CreateResponseRequest,
@@ -148,69 +129,20 @@ where
         operation: &'static str,
         model: &str,
         stream: bool,
-        mut f: F,
+        f: F,
     ) -> Result<R, LlmError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<R, LlmError>>,
     {
-        let mut attempt = 0u32;
-        let mut delay_ms = 1000u64;
-        loop {
-            let start = std::time::Instant::now();
-            tracing::info!(
-                operation,
-                provider = "deepseek",
-                model,
-                stream,
-                attempt,
-                "开始 DeepSeek 请求"
-            );
-            match f().await {
-                Ok(result) => {
-                    tracing::info!(
-                        operation,
-                        provider = "deepseek",
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        "DeepSeek 请求完成"
-                    );
-                    return Ok(result);
-                }
-                Err(err) if err.is_retryable() && attempt < self.config.max_retries => {
-                    attempt += 1;
-                    tracing::warn!(
-                        operation,
-                        provider = "deepseek",
-                        model,
-                        stream,
-                        attempt,
-                        delay_ms,
-                        error = %err,
-                        "DeepSeek 请求失败，准备重试"
-                    );
-                    if let Some(notifier) = &self.config.retry_notifier {
-                        notifier(attempt, self.config.max_retries, delay_ms, &err.to_string());
-                    }
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= 2;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        operation,
-                        provider = "deepseek",
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        error = %err,
-                        "DeepSeek 请求失败"
-                    );
-                    return Err(err);
-                }
-            }
-        }
+        let _ = stream;
+        crate::retry::run(
+            operation,
+            model,
+            self.config.max_retries,
+            self.config.retry_notifier.as_ref(),
+            f,
+        )
+        .await
     }
 }

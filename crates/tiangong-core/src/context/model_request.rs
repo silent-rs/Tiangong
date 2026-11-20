@@ -237,6 +237,18 @@ fn escape_asset_text(value: &str) -> String {
         .collect()
 }
 
+impl tiangong_llm::IntoModelInput for &crate::session::Session {
+    fn into_model_input(self, options: &ModelRequest) -> anyhow::Result<ModelRequest> {
+        let context = self.context().into_model_request()?;
+        Ok(ModelRequest {
+            system: context.system,
+            messages: context.messages,
+            session_id: Some(self.id.clone()),
+            ..options.clone()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

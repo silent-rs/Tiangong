@@ -4,6 +4,7 @@
 //! 所有权模式（take/install）与取消方式已由任务 02 原型验证，
 //! 结论见 design.md 3.1；任务 04 起在此数据模型上接入正式 `ExecutionPhase` 驱动。
 
+use crate::model_output::CoreModelOutput as ModelResponse;
 use std::collections::VecDeque;
 
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -11,7 +12,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::outcome::TurnExecutionResult;
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_llm::tool::ToolCall;
-use tiangong_llm::{InvalidToolCall, ModelResponse, ModelStreamChunk};
+use tiangong_llm::{InvalidToolCall, ModelStreamChunk};
 use tiangong_types::TokenUsage;
 
 /// 执行阶段：任意时刻当前阶段唯一（ALR-001）。

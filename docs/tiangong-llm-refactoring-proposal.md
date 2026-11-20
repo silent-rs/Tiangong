@@ -1,12 +1,12 @@
 # tiangong-llm 单次生成边界与 SDK 适配重构方案
 
-> 状态：**修订评估稿；单一 stream、输入输出适配及简单任务无 Session 的方向已由讨论确认，尚未授权代码实施**。
+> 状态：**已授权实施；按最新范围保持适配器在 llm 内，取消独立 adapters crate 拆分。**
 >
 > 本轮修订：对话支持直接传入 `&Session` 和本轮选项；标题等简单任务直接传入轻量请求；全部生成只走 `stream`，一次性结果由公共 collector 收集并适配为调用方类型。
 >
 > 现场基线：`598a7ab55be2aebc7fd4a200c8ccea55f38fb93c`，调查分支 `fix/stream-tool-call-parsing`。
 >
-> 本文是调整方案，不代表目标接口、目录、迁移和测试已经实现。本轮仅修订本文，不修改生产代码，不提交或推送，不替换现有架构约束。后续实施前应重新核验主线和工作区。
+> 方案初版独立提交为 `70bceefd`；当前分支 `refactor/llm-stream-generation`。设计示例与实际落地差异见第 15 节，不能把所有扩展建议都视为已实现。
 
 ## 1. 评审摘要
 
@@ -20,7 +20,7 @@
 2. 保留文本、工具调用、思考、签名、usage、停止原因和中断状态等必要语义。
 3. 用响应内调用身份关联流事件，不再把上游 `call_id` 当作聚合主键。
 4. 统一响应组装、错误语义和请求执行机制，保留薄协议适配器。
-5. 将 SDK、认证、transport、配置装配和其他模型服务移出纯生成边界。
+5. SDK、认证、transport、配置装配和其他服务保持现有 crate，通过内部模块隔离职责。
 6. 分阶段迁移，先建立正确性回归，再迁移 API 和目录；不进行一次性全量重写。
 7. Core 可直接传入借用的 Session；标题等任务使用轻量请求，不创建 Session。统一请求/结果是内部规范化边界，不要求业务流程显式拼装每层转换。
 
@@ -140,32 +140,29 @@ Session / 轻量请求 → 输入适配 → 一次 stream 调用 → 实时消�
 | SDK / transport | 原始协议类型、HTTP/SSE/WS、厂商协议解码、私有文本协议兼容 | Core 会话类型、工具运行时、业务路由 |
 | 调用观测包装层 | 延迟、重试通知、日志、流速统计和界面事件转换 | 改写模型输出、吞掉模型错误 |
 
-### 4.2 推荐的物理结构
+### 4.2 本轮保持单 crate，通过内部模块分层
 
-**推荐最终增加一个集成 crate，暂名 `tiangong-llm-adapters`；不是第一阶段就搬文件，也不再同时增加 config/auth/catalog 等多个 crate。** 新 crate 的价值是让生成契约不反向依赖所有 SDK，而不只是换目录。
+**按最新范围决定：不新增 `tiangong-llm-adapters` crate，provider、SDK、配置、认证与 transport 暂时保留在 `tiangong-llm` 内。** 撤销为物理拆分产生的全仓 import、manifest 和目录迁移，不以跨 crate 纯依赖隔离作为本轮验收条件。
 
 ```text
-Core / CLI / Server / App / Memory 调用方
-    ├── tiangong-llm：请求、响应、流、错误、组装器
-    └── tiangong-llm-adapters：在装配位置创建具体 client
-            ├── tiangong-llm
-            ├── tiangong-anthropic
-            ├── tiangong-deepseek
-            └── async-openai / 必要 transport
+Core / CLI / Server / App / Memory
+                │
+                ▼
+         tiangong-llm
+         ├── 生成契约、输入输出适配、collector
+         ├── client facade、配置与执行策略
+         ├── 薄 provider / SDK mapping
+         └── 现有 SDK、认证、HTTP/SSE/WS 集成
 ```
 
-依赖要求：
+依赖与职责仍应分离：
 
-- `tiangong-llm` 不依赖 adapters、Core 或第三方 SDK。
-- 原生 SDK 不反向依赖 `tiangong-llm`；统一类型到 SDK 类型的实现放在 adapters，避免循环依赖。
-- Core 执行路径使用带输入/输出适配的 client facade，其内部持有 `Arc<dyn Llm>`；Session 和 Core 输出转换实现留在 Core，只有创建 SDK client 的装配位置依赖 adapters。
-- 配置解析与模型注册表暂集中到 adapters 的配置模块；“选哪个模型”的业务决定仍由上层完成。
-- embedding/rerank、模型目录暂放在同一集成 crate 的独立模块和 trait 中，不加入 `Llm`。
-- 不把无明确归属的配置和认证塞进 `tiangong-types`。
-
-此布局相对现有文档的变化是：`tiangong-llm` 从“契约 + provider facade”进一步收敛为“契约 + 无供应商依赖的响应组装”。需要评审同意后才调整既有架构规范。
-
-SDK transport 暂无独立承载位置时，可以先留在 adapters 的私有 transport 模块，不为搬代码新写 SDK。OpenAI transport 是否另拆 crate，应在复用需求和 API 稳定后决定，不作为本次前置条件。
+- `tiangong-llm` 不依赖 Core；Session 输入适配与 Core 输出转换留在 Core。
+- 原生 SDK 不反向依赖 `tiangong-llm`；统一类型与 SDK 类型映射留在现有 provider 模块。
+- Core 通过 client facade 接入单一 stream；只在装配位置选择具体协议。
+- 模型目录、配置、认证、embedding/rerank 保留当前模块位置，不加入生成 trait。
+- 不为重构移动共享业务类型或引入 `tiangong-types → tiangong-llm` 反向依赖。
+- 后续若确需物理拆分，需另行评估和授权，不能在本轮恢复该迁移。
 
 ## 5. 统一生成接口
 
@@ -215,7 +212,7 @@ Core 的 &Session + 本轮选项 ── Core 输入适配 ──┐
 - 无损且不会失败的转换用 From/Into；可能缺字段或不支持时用 TryFrom/TryInto。需要本轮选项和资源准备时用显式本地适配 trait/mapper，不强迫统一语法。
 - Session 输入适配由 Core 实现；client 调用契约，但 LLM crate 不认识 Session，不承担会话存储。Core 不再在 ReAct 流程中显式拼装每层中间模型。
 - Core 定义自己的结果和事件转换；收集/映射层返回 Core 可直接处理的类型，不要求 Core 分支识别 SDK。
-- 第三方 SDK 与统一类型都不是 adapters 的本地类型时，标准转换可能受孤儿规则限制；使用本地 mapper/newtype，不反向引入 Core 依赖。
+- 标准转换受孤儿规则限制时采用本地 mapper/newtype，不为转换反向引入 Core 依赖。
 - 输入准备完成后不长期借用 Session，不跨网络等待持有会话锁，不为转换复制整个 Session；Send/lifetime 与附件准备在 P0 编译样例中验证。
 - 内部规范化模型仍是权威边界；不是通过 Any/downcast 在 Core 中操作 SDK 请求。
 
@@ -225,8 +222,7 @@ Core 的 &Session + 本轮选项 ── Core 输入适配 ──┐
 
 ```rust
 let output: CoreModelOutput = client
-    .stream(&session, &turn_options)
-    .await?
+    .stream(&session, &turn_options)?
     .collect_with(on_event)
     .await?;
 ```
@@ -243,8 +239,7 @@ let title = client
             input: source_text,
         },
         &title_options,
-    )
-    .await?
+    )?
     .collect_text()
     .await?;
 ```
@@ -554,7 +549,7 @@ Finished { stop_reason, status }
 ### 10.2 分两种兼容，避免循环依赖
 
 1. **同 crate 过渡期**：增加单一 stream 实现；旧 `SingleProviderClient`/`ModelClient` 和 complete_text 只转发 stream + collector。旧 complete 签名可以短暂兼容，不得保留非流式请求执行。
-2. **拆 crate 时**：批量更新工作区 import 和装配入口，将兼容包装一并移入 adapters。纯 `tiangong-llm` 不反向 re-export adapters，否则形成循环依赖。
+2. **内部模块收敛时**：保留现有 crate/import，删除重复执行与转换路径；不新增 adapters 依赖，不迁移认证或配置的外部接口。
 
 这是内部 Rust 源码 API 迁移，允许在同一受控阶段更新工作区调用方；不承诺外部 Rust 使用者零 import 改动。若存在工作区外消费者，应先公布迁移说明和版本策略。
 
@@ -577,7 +572,7 @@ Finished { stop_reason, status }
 
 ## 11. 分阶段实施与交付门槛
 
-代码阶段均**未开始，仍需实施授权**；单一 stream、Session/轻量请求输入和调用方输出适配的设计方向已确认。每阶段独立审查，不把方向确认写成实现完成。
+用户已授权实施。P0–P3 的核心路径及 P4/P5 的内部收敛已进入实现；独立 crate 拆分取消。准确落地范围、兼容入口和后续事项见第 15 节。
 
 | 阶段 | 工作内容 | 依赖 | 可验证完成标准 |
 | --- | --- | --- | --- |
@@ -586,7 +581,7 @@ Finished { stop_reason, status }
 | P2：统一流消费与响应组装 | 共享增量/快照/终态状态机；collector/text collector/observer 复用；替换 Codex 重复收集；无效候选 | P1 | 实时消费和收集结果等价；中断不伪成功；事件、签名、usage、顺序不回归 |
 | P3：统一 stream 与类型适配 | 演进现有 trait；合并内部双模型；Session/轻量输入和 Core 输出转换；迁移标题/文本任务及校验/观测；旧 complete 转发 stream 后删除 | P2、P0 API 定稿 | 所有生成仅走 stream；标题不建 Session；Core 直接消费结果；无非流式 SDK 请求与重复收集器 |
 | P4：共享执行策略 | 单次尝试边界、共同预算、超时、取消、错误分类、client 复用 | P3，可提前做只读盘点 | 实际网络尝试数可断言；取消/超时/部分输出重试测试通过；默认变化单独获批 |
-| P5：物理拆分与非生成迁移 | 新 adapters crate；搬 SDK/配置/catalog/auth/embedding/rerank；删除重复 dispatch | P3/P4 | 依赖无环；纯生成 crate 无 SDK/transport/业务类型依赖；所有工作区消费方编译 |
+| P5：内部模块与依赖收敛 | 保留现有 crate；catalog/非生成模块职责分离；删除重复 dispatch 和迁移遗留 | P3/P4 | 无 adapters crate、无全仓机械 import 迁移、无反向 Core 依赖，相关消费方编译 |
 | P6：清理与文档同步 | 删除旧包装；更新架构约束、调用说明和测试命令；最终依赖审查 | P5 | 无遗留同义 API；能力保持；全量相关检查通过，已知风险明确 |
 
 P1/P2 可以作为独立正确性修复先交付，不必等待所有 API/目录迁移。P1 的失败场景回归与修复应一并合入，不将红色测试提交到公共主线。
@@ -633,7 +628,7 @@ cargo clippy --locked -p tiangong-llm -p tiangong-core --all-targets -- -D warni
 git diff --check
 ```
 
-新增 adapters crate 后把它加入上述检查；同步验证 CLI/Server/App 和记忆插件各自 manifest/CI 规定的构建范围。独立 workspace 或平台专属 target 按各自规则验证，不假设一次 `--workspace` 覆盖全部。
+不新增 crate；同步验证 CLI/Server/App 和记忆插件各自 manifest/CI 规定的构建范围。独立 workspace 或平台专属 target 按各自规则验证，不假设一次 `--workspace` 覆盖全部。
 
 真实 API smoke 需要凭据、网络及可能的费用授权；本地 mock 是合入前必要项，真实 smoke 是补充，不用真实调用代替确定性异常测试。没有凭据时明确标记未测，不伪称 SDK 全链路线上稳定。
 
@@ -644,7 +639,7 @@ git diff --check
 - [ ] Core 直接获得本地可消费的结果/事件；输入输出转换不自动修改会话或执行工具。
 - [ ] 完整、文本收集和实时观察复用同一组装器；中断/截断不被 collect_text 当作成功。
 - [ ] Core 不依赖 SDK 类型，不执行 LLM 内部的协议分支。
-- [ ] `tiangong-llm` 不依赖各 SDK、HTTP/WS、Core 或业务 `TokenUsage` 类型。
+- [ ] SDK/配置/认证保持在现有 llm crate；无 adapters crate、无 Core 反向依赖或无关全仓 import 改动。
 - [ ] 不再存在多份完整的重试日志退避循环或工具流收集器。
 - [ ] SSE、适用的 WS 与 JSON 合成流均保留独立输出项；JSON 兼容不触发非流式重发。
 - [ ] ID 后到、缺失中间事件、增量+快照有确定处理，无静默覆盖。
@@ -666,7 +661,7 @@ git diff --check
 | 统一 Responses 状态机误伤方言 | DeepSeek/Codex 事件或参数语义变化 | 共享语义不共享未经证明的原始字段；独立 fixtures |
 | 工具校验移到 Core | 原有恢复链路失效或坏调用被执行 | 先桥接旧 InvalidToolCall；迁移校验与执行门禁同批测试 |
 | 重试收敛改变体验/请求量 | 失败率、等待时间、重复生成或费用变化 | 新旧策略对照，保留显式兼容模式，不隐式改变默认 |
-| 拆 crate 出现循环依赖 | 无法编译、纯接口反向依赖实现 | 先画依赖和迁移 import；不从 llm re-export adapters |
+| 内部分层发生反向耦合 | 生成模块依赖 Session，职责再次混杂 | 不拆 crate；通过模块契约约束，无 Core 反向依赖 |
 | 连接池/WS 复用混淆会话 | 缓存串扰、帧串入下一请求 | 显式请求归属、真实取消/复用测试；可先保持原生命周期 |
 | 终态不完整被当成功 | 执行截断参数 | 显式 status 和单调用完整性门禁 |
 | 日志增加敏感输出 | 参数、提示词、凭据泄露 | 只记计数和分类，诊断显式启用与脱敏 |
@@ -681,13 +676,14 @@ git diff --check
 
 ## 14. 已确认方向与待评审决策
 
-以下方向已由讨论确认，尚不代表授权实施：
+以下方向已由讨论确认并授权实施（最新范围不拆 crate）：
 
 - 生成只保留 stream；一次性结果由 collector 获得，不再独立调用 complete。
 - 对话支持直接传入借用的 Session 和本轮选项，转换逻辑仍由 Core 实现。
 - 标题等简单任务直接提交轻量请求，不创建 Session，也不必展示增量。
 - 输出经转换返回 Core 可处理的数据；流式工具调用的正确性与 Core 唯一化边界不变。
 - 保留 stream=true 收到 JSON 的兼容解析，不把它发展为主动非流式回退。
+- 适配器继续放在 llm crate，本轮取消独立 adapters crate 拆分。
 
 下表是其余实施评估项和建议默认，不要求逐个命名细节审批。
 
@@ -696,7 +692,7 @@ git diff --check
 | 是否采用单次生成边界 | 是 | 与 Core 职责分离，消除双模型和多入口 |
 | 是否保留薄协议适配器 | 是 | 差异真实存在，强行消除会变成大分支实现 |
 | 是否分离响应内身份与 call_id | 是，优先实施 | 已有确定性丢调用证据 |
-| 是否增加一个集成 crate | 是，在 P5 进行 | 真正隔离依赖，不一开始大搬家 |
+| 是否增加一个集成 crate | **否，本轮已明确取消** | 保持适配器在 llm 内，避免大范围目录/依赖迁移 |
 | 是否把 SDK 全部重写 | 否 | 不解决核心身份问题，增加不必要风险 |
 | 是否统一所有原始协议解析器 | 否 | 统一语义状态，保留协议/方言解码 |
 | 是否把工具 schema/权限校验留在 LLM | 否，移到 Core/工具层 | 是执行安全与业务职责，不应只对部分协议生效 |
@@ -705,11 +701,28 @@ git diff --check
 | 是否现在同步现有架构规范 | 草案期不替换，批准后同步 | 避免建议被误当作当前强制规则 |
 | 是否处理旧会话/历史 ID | 否 | 明确不在本次范围 |
 
-**推荐下一步：基于已确认方向决定是否授权 P0–P2，再根据 API 编译样例、调用方清单和测试结果确认 P3–P6。** 这样尽早修复正确性问题，同时控制 API 与目录迁移范围。
+**交付原则：按已授权范围完成内部重构和验证，不恢复独立 crate 迁移；未落地的扩展选项明确列为后续，不伪称全量支持。**
 
-## 15. 本文交付说明
+## 15. 当前实现与设计示意的对应
 
-- 本轮仅按已确认讨论修订设计文档，不是代码实施授权，也不代表问题已修复。
-- 初版已核对现场源码和历史探针统计；本轮检查文档及 Git 范围，不重跑探针、不修改生产代码、不调用真实 API。
-- Coding 工作流工具在本环境报告内部“未知的 Coding 操作”，未能提供自动上下文/预检；采用直接读取源码、Git 和文档结构检查补充核验。自动审查若同样失败，应如实披露，不记为通过。
-- 后续实施采用本方案批准的阶段范围，再建立实际 PLAN/TODO 或遵循当时仓库流程；本次不为评估文档额外创建开发任务文件。
+### 15.1 已落地的接口与边界
+
+- `LlmProvider` 仅保留 stream 生成方法，模型目录由独立 `ModelCatalog` 承担；五种 provider、认证和 transport 保持在现有 llm crate。
+- `SingleProviderClient::stream(input, options)` **同步完成输入准备**并返回拥有请求的 `Generation`。因此调用写法是 `.stream(...)?.collect_with(...).await?`，不是在准备入口额外 `.await`；不跨网络借用 Session。
+- `IntoModelInput` 支持 Core 的 `&Session`、轻量 `TextRequest` 和现有 `ModelRequest`；输出 collector 支持 TryFrom 转换，Core 消费本地 `CoreModelOutput`。
+- 正文、工具调用、思考签名、redacted thinking、usage 和终态经共享 `ResponseAccumulator` 收集；旧按 call_id 聚合的工具事件已移除，使用 CallKey、Metadata、Delta、Snapshot、Finished。
+- 标题使用轻量请求 + collect_text，不创建临时 Session，不再 spawn_blocking 调用独立生成路径。标题是否写回和 only_if_default 仍由 Core Manager 控制。
+- Core 负责所有协议的工具 schema 校验，保留合法并行调用；中断/截断文本保留可见内容与用量但不当作完整成功。压缩拒绝不完整摘要。
+- Responses/DeepSeek/Chat SSE 和 JSON 合成流覆盖相同的响应内身份、终态和参数规则；网关 JSON 不触发第二次非流式请求。
+- 公共重试执行器复用退避/通知与分类，在逻辑生成异步作用域内共用有限预算；Codex 开流也计入预算。保留连接失败直连的原范围，不扩展网络回退。
+- 同一 client 复用按 timeout/缓存路由键/重试配置区分的 provider；OpenAI client 复用 HTTP 连接池。WS 仍按原会话连接管理，取消丢弃不完整连接。
+
+### 15.2 兼容保留与未扩展项
+
+为避免再次扩大调用方改动，本轮暂保留 `ModelRequest`/`ProviderRequest`、`ModelResponse` 便捷字段，以及旧同步 `ModelClient`、complete_lite/complete_text helper 名称；**它们只包装 stream + 同一组装器，不存在独立非流式生成执行器**。完整 JSON response decoder 继续用于网关兼容；部分旧响应映射仅供历史单测基线，不发请求。
+
+以下属于后续扩展，不作为本轮已实现能力：统一请求字段彻底合并、移除所有外部兼容方法、全协议 Retry-After 元信息、可配置读空闲/总 deadline、可配置内容大小上限，以及更严格的思考输出后重放策略。现有默认温度/超时和思考重试口径先保留；改变这些默认行为须单独评估。
+
+当前完成性以正式测试、编译、Clippy 和实际 diff 核验，不以阶段表或示意 API 存在作证。真实付费 API 与真实 Codex 登录调用未执行；本地 HTTP/WS fixtures 不等同线上保证。
+
+Coding 工作流工具在本环境仍报告内部“未知的 Coding 操作”；自动审查不可用时用实际 Git/编译/测试与人工 diff 审查补充，不记录为自动审查通过。

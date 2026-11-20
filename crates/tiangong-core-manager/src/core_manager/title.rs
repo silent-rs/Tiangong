@@ -44,17 +44,17 @@ impl CoreManager {
         let sid = session_id.to_string();
         let input = text.to_string();
         tokio::spawn(async move {
-            let sid_for_client = sid.clone();
-            let title = tokio::task::spawn_blocking(move || {
-                // 绑定会话 id：自定义 header 的 ${session_id} 模板与缓存键依赖它
-                //（与迁移前 ctx.lite_client().with_session_id 行为对齐）。
-                SingleProviderClient::new(endpoint)
-                    .with_session_id(sid_for_client)
-                    .complete_lite(&input)
-            })
-            .await
-            .ok()
-            .and_then(|result| result.ok());
+            let client = SingleProviderClient::new(endpoint).with_session_id(sid.clone());
+            let title = async {
+                client.stream(tiangong_llm::TextRequest {
+                    instruction: "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了",
+                    input: &input,
+                }, &tiangong_llm::ModelRequest {
+                    reasoning_effort: tiangong_llm::ReasoningEffort::None,
+                    max_output_tokens: Some(200), temperature: Some(0.3), timeout_ms: Some(120_000),
+                    ..Default::default()
+                })?.collect_text().await
+            }.await.ok();
             let Some(title) = title else {
                 return;
             };
