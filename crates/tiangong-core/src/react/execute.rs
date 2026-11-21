@@ -727,6 +727,8 @@ pub(super) async fn execute_turn(
                         iteration: (state.budget.request_round + 1) as u32,
                     });
                 }
+                // 压缩先沿用上次主请求的配置快照，避免切换思考档位破坏 KV 缓存复用；
+                // 运行中更新的档位只在发送下一次正式 ReAct 请求前生效。
                 ctx.configure_client();
                 let active = start_llm_request(
                     ctx,

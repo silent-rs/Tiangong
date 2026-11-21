@@ -134,7 +134,6 @@ async-channel = "2"
 async-lock = "3"
 async-openai = "0.41"
 async-trait = "0.1"
-backoff = "0.4"
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false }
 clap = "4"

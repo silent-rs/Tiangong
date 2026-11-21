@@ -133,6 +133,83 @@ async fn compression_request_keeps_every_cache_relevant_param_of_main_loop() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compression_keeps_previous_effort_before_react_uses_new_effort() {
+    use tiangong_llm::ReasoningEffort;
+
+    let server = MockServer::builder().start().await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_1", "paused_probe", "{}"),
+            usage_chunk(185_900, 5),
+        ],
+    )
+    .await;
+    mount_completion(&server, "[[SUMMARY]]\n历史摘要", "stop", 100, 20, None).await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("已完成。"), usage_chunk(30, 5)],
+    )
+    .await;
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut harness = TestHarness::new(
+        &server,
+        vec![tool_spec("paused_probe")],
+        HashMap::from([(
+            "paused_probe".into(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }) as Arc<dyn ToolOverrideHandler>,
+        )]),
+    );
+    harness.ctx.agent_config.reasoning_effort = ReasoningEffort::Medium;
+    let cmd_tx = harness.cmd_tx.clone();
+    let update_effort = async move {
+        started.notified().await;
+        cmd_tx
+            .send(Command::SetReasoningEffort(ReasoningEffort::Max))
+            .unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            execute_turn(&mut harness.ctx, &mut harness.cmd_rx),
+            update_effort
+        )
+    })
+    .await
+    .expect("应完成工具、自动压缩和下一次 ReAct 请求");
+
+    assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+    assert_eq!(
+        harness.ctx.session.context_summary.as_deref(),
+        Some("历史摘要")
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let [before, compression, after] = std::array::from_fn::<_, 3, _>(|index| {
+        serde_json::from_slice::<Value>(&requests[index].body).unwrap()
+    });
+    assert_eq!(before["reasoning_effort"], "medium");
+    assert_eq!(compression["reasoning_effort"], "medium");
+    assert_eq!(after["reasoning_effort"], "max");
+    assert_eq!(compression["max_tokens"], 9_999);
+    assert_ne!(before["max_tokens"], compression["max_tokens"]);
+    assert_eq!(after["max_tokens"], before["max_tokens"]);
+    // 工具批次增加了历史消息；除消息列表和输出预算外，压缩仍使用原请求配置。
+    let request_options = |body: &Value| {
+        let mut options = body.as_object().unwrap().clone();
+        options.remove("messages");
+        options.remove("max_tokens");
+        options
+    };
+    assert_eq!(request_options(&compression), request_options(&before));
+}
+
 #[tokio::test]
 async fn compression_rejects_unexpected_tool_calls() {
     let server = MockServer::builder().start().await;

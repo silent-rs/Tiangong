@@ -12,7 +12,7 @@
 
 - 对外生成入口为配置好的 `SingleProviderClient::stream(Vec<tiangong_types::Message>)`，不接收 Session，不接收第二个 options 参数。
 - `Options` 在 client 构建/派生时设置，包含思考、输出预算、tools/tool_choice、缓存键、timeout 和重试次数；配置不可变，派生 client 不改变原实例，共享底层连接资源。
-- Core 的 `TurnContext` 持有配置好的 client；构建时及后续请求边界同步运行中工具/思考配置。压缩严格继承该 client 的全部 Options，仅覆盖 `max_output_tokens`，不重新设置 tools、tool_choice、reasoning_effort 或 cache_key；标题使用自己的配置快照，均不污染主请求。
+- Core 的 `TurnContext` 持有配置好的 client；构建时及下一次正式 ReAct 请求前同步运行中的工具/思考配置。请求前压缩先使用现有快照，仅覆盖 `max_output_tokens`。如果运行中切换 `ReasoningEffort`，压缩仍沿用旧档位以尽量复用服务端 KV 缓存，新档位在其后的正式 ReAct 请求中生效。压缩和标题均使用独立快照，不污染主请求。
 - `Session::context()` 保持原有消息选择语义：系统提示 + 摘要边界后的消息，排除持久化 System/Notice，保留其余顺序和数量。仅通过 Core 私有的单图片处理补齐历史图片/失败降级，不过滤前置消息、不插入兜底、不写回历史。
 - 不提供公开通用 `prepare_messages`/`prepare_context` 层。前置非 User 消息沿用 LLM 现有协议请求清理；无有效 User 的旧恢复策略只在 Core 主请求发起时追加，不属于 context()。附件分析构造 Image 时自行读入数据，不依赖 Core 准备接口。
 - LLM stream 内部只做消息角色/内容的纯映射与 options 装配，直接生成 `ProviderRequest`。未准备的本地图片明确报错，不读文件。
@@ -33,7 +33,7 @@ Anthropic、DeepSeek 继续使用独立原生 SDK；私有文本工具协议兜�
 - Metadata 更新不得清空参数。Delta 与完整 Snapshot 区分；终态快照定稿，重复相同快照幂等，冲突调用显式无效。
 - completed-only、参数先于名称、ID 后到、缺失部分中间事件，必须在仍有 item/index 身份信息的层处理，不能依赖 Core 恢复已丢失调用。
 - SSE 请求收到完整 JSON 时在同一次请求内合成统一流；保留解码器不等于保留主动非流式路径。
-- collector 保留正文、工具、思考/签名、redacted thinking、usage 和完成状态。中断/截断不能冒充完整成功。
+- collector 保留正文、工具、思考/签名、redacted thinking、usage 和完成状态。相较于 #551 中“保留已产出内容且不让整轮失败”的行为，ReAct 的纯文本分支仍持久化部分正文和用量，但不把中断或截断当作正常完成。压缩不提交非 `Complete` 的摘要（输出达到 `MaxTokens` 的拒绝逻辑原已存在）。
 - Core 保持新增工具调用同批/跨轮唯一化；不改历史、不做旧会话迁移、不在请求副本重写历史 ID。
 
 ## 执行与业务边界

@@ -254,7 +254,7 @@ CoreManager 的标题、压缩边界和指令、附件读取与结果写回仍�
 
 - Options 不含消息；with_options 按值发布新配置快照，运行中请求不受之后更新影响。
 - 默认温度只在 client 创建时解析现有环境配置；stream 不再次读取环境变量。明确 options 的优先级，不隐式覆盖显式参数。
-- Core 在 ctx 构建及后续模型请求边界同步动态思考和工具集；工具校验仍使用同一声明来源。
+- Core 在 ctx 构建及正式 ReAct 请求前同步动态思考和工具集；工具校验仍使用同一声明来源。请求前压缩发生在快照刷新之前：只覆盖输出 token 预算，仍用旧思考档位，以尽量复用服务端的 KV 缓存。
 - ProviderRequest 保留内部协议映射所需字段，直接由纯消息转换及 client Options 装配；生产路径不经过 ModelRequest。
 - 缓存键是独立请求提示，不要求提交 Session；默认会话路由兼容保留。临时标题任务也不把会话历史带入输入。
 - 更细 ExecutionOptions 的 deadline/读空闲等仍见第 8 节及第 15.2 节，不在本轮输入策略调整中夹带默认行为改变。
@@ -686,7 +686,7 @@ git diff --check
 - Core context 私有模块仅保留单图片读取/降级；Session.context() 恢复原消息选择数量与顺序。公开 prepare_messages/prepare_context 删除，无 User 请求兜底在 Core 主请求边界。llm input 模块仍只有纯映射，stream 直接合并 options 装配 ProviderRequest。
 - 附件分析在构造 Image 时自行读入数据，移除对 Core 的直接依赖；不再调用共享消息准备函数。历史图片补齐只作用于上下文副本，重载后仍可补齐，不把图片数据写入持久化历史。
 - 主循环、压缩、标题、附件分析和文本 helper 均走该入口。文本 helper 保留签名兼容记忆调用，但没有独立 provider 请求构造或 collector 执行路径。
-- ctx 持有已配置 client，安全请求边界刷新思考/工具配置；标题与压缩派生 client，不改主 client。配置和 Generation 均按值捕获。
+- ctx 持有已配置 client，在下一次正式 ReAct 请求前刷新思考/工具配置。请求前压缩使用刷新前的快照，只派生输出预算；标题使用独立配置。两者不改主 client，配置和 Generation 均按值捕获。
 - Core 输出转换和工具校验仍留 Core；新增 provider_usage 保留服务端 usage 缺失语义，文本带用量收集不再假装零用量。
 - 已有 CallKey、参数快照、终态、重试预算与 HTTP/WS 生命周期修复继续保持；不拆 crate、不改历史 ID、不迁移会话数据。
 
