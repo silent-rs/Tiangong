@@ -2,9 +2,8 @@
 use crate::context::model_request::IntoModelRequest;
 use crate::session::{Message, MessageRole, Session, UserSource};
 #[cfg(test)]
-use tiangong_llm::ModelRequest;
-use tiangong_llm::tool::ToolSpec;
-use tiangong_llm::{ReasoningEffort, SingleProviderClient, StopReason};
+use tiangong_llm::{ModelRequest, ReasoningEffort};
+use tiangong_llm::{SingleProviderClient, StopReason};
 use tiangong_types::TokenUsage;
 
 /// 判断消息是否为可压缩的有效消息。
@@ -21,8 +20,6 @@ pub(crate) fn is_compressible(message: &Message) -> bool {
 pub struct ContextCompressor {
     session: Session,
     client: SingleProviderClient,
-    tools: Vec<ToolSpec>,
-    reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Debug, Clone)]
@@ -65,18 +62,8 @@ impl std::fmt::Display for CompressionError {
 impl std::error::Error for CompressionError {}
 
 impl ContextCompressor {
-    pub fn new(
-        session: Session,
-        client: SingleProviderClient,
-        tools: Vec<ToolSpec>,
-        reasoning_effort: ReasoningEffort,
-    ) -> Self {
-        Self {
-            session,
-            client,
-            tools,
-            reasoning_effort,
-        }
+    pub fn new(session: Session, client: SingleProviderClient) -> Self {
+        Self { session, client }
     }
 
     pub fn has_pending_messages(&self) -> bool {
@@ -109,14 +96,8 @@ impl ContextCompressor {
 
         let boundary_message_id = self.session.messages[split_point - 1].id.clone();
         let messages = Self::summary_messages(&self.session, split_point, max_output_tokens);
-        // 保留主循环声明/思考/缓存前缀，只在派生client中调整压缩输出预算。
-        let mut options = self.client.options().clone();
-        options.cache_key = Some(self.session.id.clone());
-        options.reasoning_effort = self.reasoning_effort;
-        options.tools = self.tools;
-        options.tool_choice = None;
-        options.max_output_tokens = max_output_tokens;
-        let client = self.client.with_options(options);
+        // 仅覆盖压缩输出预算，其余 Options 严格继承客户端快照。
+        let client = self.client.with_max_output_tokens(max_output_tokens);
         let response: crate::model_output::CoreModelOutput = client
             .stream(messages)
             .map_err(|error| CompressionError::new(error.to_string()))?

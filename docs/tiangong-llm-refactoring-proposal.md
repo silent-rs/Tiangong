@@ -512,7 +512,7 @@ Finished { stop_reason, status }
 已定位的主要调用位置：
 
 - [Core 私有图片补齐](../crates/tiangong-core/src/context/model_request.rs)：仅处理单个历史图片块，不提供公开 prepare_messages/prepare_context。Session.context() 保持原选择行为；无 User 兜底在 Core 请求发起处，纯数据映射和现有协议清理在 llm。
-- [Core 压缩](../crates/tiangong-core/src/context/compressor.rs)：显式保留 token 预算、tool choice 和思考选项。
+- [Core 压缩](../crates/tiangong-core/src/context/compressor.rs)：直接继承 client 的全部 Options，仅覆盖 max_output_tokens；不单独接收或重设工具声明、工具策略、思考配置和缓存键。
 - [Core runtime](../crates/tiangong-core/src/runtime.rs)、[turn context](../crates/tiangong-core/src/turn_context.rs)、[Core 构建](../crates/tiangong-core/src/core/mod.rs)：使用带输入转换的 client facade；内部唯一 stream + collector/observer，返回 Core 可消费的数据与事件。
 - [ReAct 工具记录](../crates/tiangong-core/src/react/execute.rs)、[Session 唯一化](../crates/tiangong-core/src/session.rs)：保持 ID 职责不变；业务工具校验迁入时建立独立回归。
 - [桌面命令](../src-tauri/src/commands.rs)、[Web 配置命令](../src-tauri/src/web_config/commands.rs)：切换模型目录入口，不改变外部命令响应。

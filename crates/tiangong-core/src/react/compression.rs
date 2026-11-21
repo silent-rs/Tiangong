@@ -116,12 +116,7 @@ impl ContextCompression {
         notify_started(ctx);
         Self {
             task: start_task(
-                ContextCompressor::new(
-                    ctx.session.clone(),
-                    ctx.client.clone(),
-                    ctx.tools.clone(),
-                    ctx.agent_config.reasoning_effort,
-                ),
+                ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
                 organizer,
                 observed_tokens,
                 compression_split_point(&ctx.session),
@@ -352,12 +347,7 @@ pub(crate) async fn run_manual_context_compression(
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
 
-    let compressor = ContextCompressor::new(
-        ctx.session.clone(),
-        ctx.client.clone(),
-        ctx.tools.clone(),
-        ctx.agent_config.reasoning_effort,
-    );
+    let compressor = ContextCompressor::new(ctx.session.clone(), ctx.client.clone());
     if !compressor.has_pending_messages() {
         notify_result(&ctx, ContextCompressAction::Noop);
         return ManualCompressionOutcome::Noop;
