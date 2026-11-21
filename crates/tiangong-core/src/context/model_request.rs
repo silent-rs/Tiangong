@@ -1,61 +1,26 @@
-//! 宿主上下文准备：图片读取/失败降级与会话规则在 Core；轻量类型映射在 LLM。
-use crate::session::{ContentBlock, Message, MessageRole, StoredAsset};
+//! Core 私有历史图片补齐；不负责消息选择、兜底或模型请求组装。
+use crate::session::{ContentBlock, StoredAsset};
+#[cfg(test)]
+use crate::session::{Message, MessageRole};
 use base64::{Engine as _, engine::general_purpose};
 use std::path::Path;
 use tiangong_llm::message::ImageContent;
 
-pub const FALLBACK_USER_TEXT: &str = "请继续处理当前任务。";
-
-/// 只处理本次拥有的消息副本，不修改 Session/历史，也不构造 LLM 请求。
-pub fn prepare_messages(mut messages: Vec<Message>) -> Vec<Message> {
-    for message in &mut messages {
-        for block in &mut message.content {
-            if let ContentBlock::Image { asset, data } = block {
-                *block = match ready_image(asset, data.take()) {
-                    Some(image) => ContentBlock::Image {
-                        asset: asset.clone(),
-                        data: Some(image.data),
-                    },
-                    None => ContentBlock::text(format!(
-                        "[image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
-                        asset.asset_id,
-                        escape_asset_text(&asset.local_path)
-                    )),
-                };
-            }
-        }
+/// 仅补齐单个历史图片块；由 Session 对请求副本调用，不构造/过滤消息。
+pub(crate) fn resolve_history_image(block: &mut ContentBlock) {
+    if let ContentBlock::Image { asset, data } = block {
+        *block = match ready_image(asset, data.take()) {
+            Some(image) => ContentBlock::Image {
+                asset: asset.clone(),
+                data: Some(image.data),
+            },
+            None => ContentBlock::text(format!(
+                "[image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
+                asset.asset_id,
+                escape_asset_text(&asset.local_path)
+            )),
+        };
     }
-    messages
-}
-
-/// Session 的上下文恢复规则，不应用到无会话的通用 LLM 入口。
-pub fn prepare_context(messages: Vec<Message>) -> Vec<Message> {
-    let mut messages = prepare_messages(messages);
-    let first_user = messages.iter().position(|message| {
-        message.role == MessageRole::User
-            && message.content.iter().any(|block| match block {
-                ContentBlock::Text { text } | ContentBlock::ModelInstruction { text } => {
-                    !text.trim().is_empty()
-                }
-                ContentBlock::Image { .. } => true,
-                _ => false,
-            })
-    });
-    match first_user {
-        Some(index) => {
-            messages = messages
-                .into_iter()
-                .enumerate()
-                .filter(|(i, message)| *i >= index || message.role == MessageRole::System)
-                .map(|(_, message)| message)
-                .collect();
-        }
-        None => {
-            messages.retain(|message| message.role == MessageRole::System);
-            messages.push(Message::new(MessageRole::User, FALLBACK_USER_TEXT));
-        }
-    }
-    messages
 }
 fn ready_image(asset: &StoredAsset, runtime_data: Option<String>) -> Option<ImageContent> {
     if let Some(data) = runtime_data.filter(|data| !data.trim().is_empty()) {
@@ -128,12 +93,23 @@ impl IntoModelRequest for Vec<Message> {
         {
             anyhow::bail!("模型上下文缺少 System 消息");
         }
-        ModelRequest::from_messages(prepare_context(self))
+        let mut messages = self;
+        for message in &mut messages {
+            for block in &mut message.content {
+                resolve_history_image(block);
+            }
+        }
+        ModelRequest::from_messages(messages)
     }
 }
 #[cfg(test)]
 fn chat_message(message: Message) -> Option<ChatMessage> {
-    let messages = prepare_messages(vec![Message::new(MessageRole::User, "start"), message]);
+    let mut messages = vec![Message::new(MessageRole::User, "start"), message];
+    for message in &mut messages {
+        for block in &mut message.content {
+            resolve_history_image(block);
+        }
+    }
     ModelRequest::from_messages(messages)
         .ok()?
         .messages
@@ -236,30 +212,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_user_falls_back_to_continue_text() {
-        let assistant = Message::new(MessageRole::Assistant, "孤立回答");
-        let request = assemble(vec![system_message("系统"), assistant]).unwrap();
-        assert_eq!(
-            request.messages,
-            vec![ChatMessage::text(LlmMessageRole::User, FALLBACK_USER_TEXT)]
-        );
-    }
-
-    #[test]
-    fn leading_non_user_messages_are_skipped() {
-        let request = assemble(vec![
-            system_message("系统"),
-            Message::new(MessageRole::Assistant, "截断前回答"),
-            Message::tool_result("call_old", "read_file", "截断前结果", false),
+    fn context_does_not_insert_fallback_or_drop_leading_assistant() {
+        let mut session = crate::session::Session::new("unchanged-context");
+        session.system_prompt_message = Some(system_message("系统"));
+        session.messages = vec![
+            Message::new(MessageRole::Assistant, "孤立回答"),
             Message::new(MessageRole::User, "继续"),
-        ])
-        .unwrap();
-        assert_eq!(
-            request.messages,
-            vec![ChatMessage::text(LlmMessageRole::User, "继续")]
-        );
+        ];
+        let before = serde_json::to_value(&session).unwrap();
+        let context = session.context();
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[1].role, MessageRole::Assistant);
+        assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        session.messages.clear();
+        assert_eq!(session.context().len(), 1);
     }
-
     #[test]
     fn tool_result_keeps_call_id_and_error_flag() {
         let request = assemble(vec![

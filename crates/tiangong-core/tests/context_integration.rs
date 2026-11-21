@@ -106,14 +106,7 @@ fn new_path_system_prompt_includes_summary() {
         "system prompt 应包含摘要标签"
     );
     // 后续消息应只有 summary_up_to 之后的
-    // context 已是待提交上下文：摘要边界后的前置孤立 assistant/tool 被跳过。
-    let remaining = &session.messages[4..];
-    let first_user = remaining
-        .iter()
-        .position(|message| message.role == MessageRole::User)
-        .unwrap();
-    assert_eq!(context.len(), 1 + remaining.len() - first_user);
-    assert!(total >= context.len());
+    assert_eq!(context.len(), 1 + (total - 4));
     for msg in &context[1..] {
         assert_ne!(msg.role, MessageRole::System);
     }
@@ -162,7 +155,7 @@ fn new_path_messages_increment_across_turns() {
     rebuild_session(&mut session);
     // 初始：system_prompt_message + 0 条消息
     let ctx0 = session.context();
-    assert_eq!(ctx0.len(), 2); // system + 无用户消息时的请求兜底
+    assert_eq!(ctx0.len(), 1); // 只有 system prompt message
     // 第 1 轮
     session.append_message(MessageRole::User, "你好");
     let ctx1 = session.context();
@@ -305,11 +298,7 @@ fn new_path_clear_and_rebuild_system_prompt() {
     let context_after = session.context();
     // system prompt 仍在，但对话消息为空
     assert_eq!(context_after[0].role, MessageRole::System);
-    assert_eq!(
-        context_after.len(),
-        2,
-        "清空后 system + 请求兜底，不写入 Session"
-    );
+    assert_eq!(context_after.len(), 1, "清空后只有 system prompt message");
     // 摘要段不应出现
     assert!(
         !context_after[0]

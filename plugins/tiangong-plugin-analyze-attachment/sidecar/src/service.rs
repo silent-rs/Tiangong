@@ -3,8 +3,7 @@
 //! 准备图片内容 → 消息列表 → 配置好的 client.stream → 返回分析文本。
 
 use anyhow::{Context, Result};
-use tiangong_core::context::model_request::prepare_messages;
-use tiangong_core::session::{Message, MessageRole};
+use base64::{Engine as _, engine::general_purpose};
 use tiangong_llm::{
     ModelCapability, ModelEndpoint, ModelEntry, ModelsConfig, Options, ResolvedModel, RoutingSlot,
     SingleProviderClient,
@@ -17,7 +16,7 @@ use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
-use tiangong_types::{ContentBlock, MediaKind, StoredAsset};
+use tiangong_types::{ContentBlock, MediaKind, Message, MessageRole, StoredAsset};
 
 pub struct AttachmentService;
 
@@ -136,10 +135,7 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
 
     // 读取每张图片，构造 ContentBlock::Image。
     for image_path in &req.images {
-        let asset = asset_from_path(image_path)?;
-        user_message
-            .content
-            .push(ContentBlock::Image { asset, data: None });
+        user_message.content.push(image_from_path(image_path)?);
     }
     context.push(user_message);
 
@@ -148,7 +144,7 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
         ..Default::default()
     });
     let response: tiangong_llm::ModelResponse = client
-        .stream(prepare_messages(context))?
+        .stream(context)?
         .collect()
         .await
         .map_err(|error| anyhow::anyhow!("多模态模型调用失败：{error}"))?;
@@ -191,6 +187,21 @@ fn resolve_entry(models: &ModelsConfig, entry: &ModelEntry) -> Option<ResolvedMo
     })
 }
 
+/// 读取本地图片，在构造消息时直接准备模型输入数据。
+fn image_from_path(path: &str) -> Result<ContentBlock> {
+    let asset = asset_from_path(path)?;
+    let bytes = std::fs::read(&asset.local_path)
+        .with_context(|| format!("读取图片失败：{}", asset.local_path))?;
+    let data = format!(
+        "data:{};base64,{}",
+        asset.mime_type,
+        general_purpose::STANDARD.encode(bytes)
+    );
+    Ok(ContentBlock::Image {
+        asset,
+        data: Some(data),
+    })
+}
 /// 从图片路径构造 StoredAsset（读取文件元信息推断 MIME）。
 fn asset_from_path(path: &str) -> Result<StoredAsset> {
     let path_trimmed = path.trim();
@@ -313,6 +324,30 @@ fn tool_failure(message: &str) -> serde_json::Value {
 mod tool_tests {
     use super::*;
 
+    #[test]
+    fn 构造附件消息时直接准备图片数据() {
+        let path = std::env::temp_dir().join(format!("attachment-ready-{}.png", scru128::new()));
+        std::fs::write(&path, [1u8, 2, 3, 4]).unwrap();
+        let block = image_from_path(path.to_str().unwrap()).unwrap();
+        assert!(
+            matches!(&block,ContentBlock::Image {asset,data:Some(data)} if asset.mime_type=="image/png" && data=="data:image/png;base64,AQIDBA==")
+        );
+        std::fs::remove_file(&path).unwrap();
+        // 已构造的消息拥有数据，后续流式转换不依赖原文件。
+        let client = SingleProviderClient::new(ModelEndpoint {
+            model: "test".into(),
+            ..Default::default()
+        });
+        assert!(
+            client
+                .stream(vec![Message::with_role(
+                    tiangong_types::Role::user(),
+                    vec![block]
+                )])
+                .is_ok()
+        );
+        assert!(image_from_path(path.to_str().unwrap()).is_err());
+    }
     #[test]
     fn 图片路径直接来自本次工具参数() {
         let paths = vec!["/tmp/旧图.png", "/tmp/新图 \"带引号\".png"];

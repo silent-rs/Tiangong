@@ -212,7 +212,7 @@ Session.context() / Core 标题、压缩、附件消息
 
 - Options 不包含 messages/system；由 client 的构建/with_options 固定。派生配置不修改原 client，底层 provider/HTTP pool 继续共享。
 - LLM 内部转换角色、文本、已准备图片、思考签名、工具调用和结果，装配 ProviderRequest；不读文件、不理解 Session、不执行工具、不改历史 ID。
-- Core 图片读取、失败降级及会话规则保留在原 context 模块，Session.context() 返回本次待提交消息副本。通用 LLM 不强制所有轻量任务都有 system 或 User 兜底。
+- Session.context() 恢复原消息选择语义，不删除前置消息、不插入 User 兜底；仅由 Core 私有单图片处理补齐历史数据/失败降级。没有公开通用消息准备层。前置过滤沿用 LLM 现有请求清理，无有效 User 的旧兜底仅在 Core 主请求发起时处理。附件分析构造图片时自行准备数据。
 - 转换失败在 stream 返回错误，不发网络请求；输入准备是同步的，网络流在消费时惰性执行，不长期持有 Session 借用。
 - 输出通过 TryFrom/From 适配 Core 数据。ProviderRequest 不再是 Core 的调用契约，旧 ModelRequest 不参与生产请求链。
 
@@ -511,7 +511,7 @@ Finished { stop_reason, status }
 
 已定位的主要调用位置：
 
-- [Core 上下文准备](../crates/tiangong-core/src/context/model_request.rs)：仅保留媒体准备/降级与会话恢复规则；生产流程调用配置好的 client.stream(session.context())，纯数据映射在 llm。
+- [Core 私有图片补齐](../crates/tiangong-core/src/context/model_request.rs)：仅处理单个历史图片块，不提供公开 prepare_messages/prepare_context。Session.context() 保持原选择行为；无 User 兜底在 Core 请求发起处，纯数据映射和现有协议清理在 llm。
 - [Core 压缩](../crates/tiangong-core/src/context/compressor.rs)：显式保留 token 预算、tool choice 和思考选项。
 - [Core runtime](../crates/tiangong-core/src/runtime.rs)、[turn context](../crates/tiangong-core/src/turn_context.rs)、[Core 构建](../crates/tiangong-core/src/core/mod.rs)：使用带输入转换的 client facade；内部唯一 stream + collector/observer，返回 Core 可消费的数据与事件。
 - [ReAct 工具记录](../crates/tiangong-core/src/react/execute.rs)、[Session 唯一化](../crates/tiangong-core/src/session.rs)：保持 ID 职责不变；业务工具校验迁入时建立独立回归。
@@ -683,7 +683,8 @@ git diff --check
 
 - 原提交 `0d9bd1fa` 为前一阶段基线；本轮将 Session + options 的外层包装替换为 client 持有 Options、stream(Vec<Message>)。
 - `IntoModelInput` 和 `TextRequest` 删除；生产 ModelRequest/stream_async/collect_async 入口关闭，旧请求类型和桥接仅支持历史回归测试，不参与生产。
-- Core context 模块保留媒体读取/降级与会话恢复规则；llm input 模块只有纯映射，stream 直接合并 options 装配 ProviderRequest。
+- Core context 私有模块仅保留单图片读取/降级；Session.context() 恢复原消息选择数量与顺序。公开 prepare_messages/prepare_context 删除，无 User 请求兜底在 Core 主请求边界。llm input 模块仍只有纯映射，stream 直接合并 options 装配 ProviderRequest。
+- 附件分析在构造 Image 时自行读入数据，移除对 Core 的直接依赖；不再调用共享消息准备函数。历史图片补齐只作用于上下文副本，重载后仍可补齐，不把图片数据写入持久化历史。
 - 主循环、压缩、标题、附件分析和文本 helper 均走该入口。文本 helper 保留签名兼容记忆调用，但没有独立 provider 请求构造或 collector 执行路径。
 - ctx 持有已配置 client，安全请求边界刷新思考/工具配置；标题与压缩派生 client，不改主 client。配置和 Generation 均按值捕获。
 - Core 输出转换和工具校验仍留 Core；新增 provider_usage 保留服务端 usage 缺失语义，文本带用量收集不再假装零用量。

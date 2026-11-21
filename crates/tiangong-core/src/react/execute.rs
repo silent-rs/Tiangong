@@ -427,7 +427,25 @@ fn start_llm_request(
     let generation = if ctx.session.system_prompt_message.is_none() {
         Err(anyhow::anyhow!("模型上下文缺少 System 消息"))
     } else {
-        client.stream(ctx.session.context())
+        let mut messages = ctx.session.context();
+        if !messages.iter().any(|message| {
+            message.role == crate::session::MessageRole::User
+                && message.content.iter().any(|block| match block {
+                    crate::session::ContentBlock::Text { text }
+                    | crate::session::ContentBlock::ModelInstruction { text } => {
+                        !text.trim().is_empty()
+                    }
+                    crate::session::ContentBlock::Image { .. } => true,
+                    _ => false,
+                })
+        }) {
+            // 无有效 User 的请求恢复策略，不属于 context() 的消息选择职责。
+            messages.push(crate::session::Message::new(
+                crate::session::MessageRole::User,
+                "请继续处理当前任务。",
+            ));
+        }
+        client.stream(messages)
     };
     let pending_msg_id = scru128::new().to_string();
     let sink = ThrottledStreamSink::with_text_kind(

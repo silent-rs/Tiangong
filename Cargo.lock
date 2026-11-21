@@ -10870,7 +10870,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-config",
- "tiangong-core",
  "tiangong-llm",
  "tiangong-plugin-analyze-attachment-protocol",
  "tiangong-plugin-sidecar",

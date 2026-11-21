@@ -11,7 +11,6 @@
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tiangong_core::context::model_request::prepare_context;
 use tiangong_core::session::{
     ContentBlock, MediaKind, Message, MessageRole, MessageToolCall, Role, StoredAsset, UserSource,
 };
@@ -273,9 +272,31 @@ async fn provider_request_bodies_match_snapshots() {
                 protocol,
                 ..Default::default()
             });
+            let mut session = tiangong_core::session::Session::new("snapshot");
+            session.messages = context;
+            let mut context = session.context();
+            // snapshot fixtures include explicit System messages; preserve them as originally prepared.
+            let systems = session
+                .messages
+                .iter()
+                .filter(|message| message.role == MessageRole::System)
+                .cloned();
+            context.splice(0..0, systems);
+            if !context.iter().any(|message| {
+                message.role == MessageRole::User
+                    && message.content.iter().any(|block| match block {
+                        ContentBlock::Text { text } | ContentBlock::ModelInstruction { text } => {
+                            !text.trim().is_empty()
+                        }
+                        ContentBlock::Image { .. } => true,
+                        _ => false,
+                    })
+            }) {
+                context.push(Message::new(MessageRole::User, "请继续处理当前任务。"));
+            }
             client
                 .with_options(options())
-                .stream(prepare_context(context))
+                .stream(context)
                 .unwrap()
                 .collect::<tiangong_llm::ModelResponse>()
                 .await

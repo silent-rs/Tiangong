@@ -13,7 +13,8 @@
 - 对外生成入口为配置好的 `SingleProviderClient::stream(Vec<tiangong_types::Message>)`，不接收 Session，不接收第二个 options 参数。
 - `Options` 在 client 构建/派生时设置，包含思考、输出预算、tools/tool_choice、缓存键、timeout 和重试次数；配置不可变，派生 client 不改变原实例，共享底层连接资源。
 - Core 的 `TurnContext` 持有配置好的 client；构建时及后续请求边界同步运行中工具/思考配置。压缩和标题使用独立配置快照，避免污染主请求。
-- `Session::context()` 继续选取上下文，并在 Core 准备图片、降级不可读资源、处理前置孤立消息/无用户上下文兜底；均作用于消息副本，不写回历史。
+- `Session::context()` 保持原有消息选择语义：系统提示 + 摘要边界后的消息，排除持久化 System/Notice，保留其余顺序和数量。仅通过 Core 私有的单图片处理补齐历史图片/失败降级，不过滤前置消息、不插入兜底、不写回历史。
+- 不提供公开通用 `prepare_messages`/`prepare_context` 层。前置非 User 消息沿用 LLM 现有协议请求清理；无有效 User 的旧恢复策略只在 Core 主请求发起时追加，不属于 context()。附件分析构造 Image 时自行读入数据，不依赖 Core 准备接口。
 - LLM stream 内部只做消息角色/内容的纯映射与 options 装配，直接生成 `ProviderRequest`。未准备的本地图片明确报错，不读文件。
 - 标题/摘要指令由 Core/业务模块构造为消息。简单任务不创建 Session；文本 helper 仅配置 client 并调用相同 stream/collector，不自行构造 provider 请求。
 - `Generation` 拥有输入和 client 快照，不跨网络借用 Core；输出由 Core 实现 TryFrom/From，仍由 Core 校验和执行工具。
