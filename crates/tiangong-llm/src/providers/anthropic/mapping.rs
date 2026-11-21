@@ -1,20 +1,27 @@
+#[cfg(test)]
+use crate::{
+    message::ThinkingContent,
+    response::ProviderResponse,
+    tool::{ToolCall, ToolResult},
+};
 use std::collections::BTreeMap;
+#[cfg(test)]
+use tiangong_anthropic::types::{ContentBlock, MessagesCreateResponse};
 
 use serde_json::Value;
 use tiangong_anthropic::types::{
-    CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
-    EffortLevel, ImageSourceParam, Message as AnthropicMessage,
-    MessageRole as AnthropicMessageRole, MessagesCreateRequest, MessagesCreateResponse,
-    OutputConfig, StreamEvent, SystemContent, TextBlock, ThinkingConfig, Tool as AnthropicTool,
-    ToolChoice as AnthropicToolChoice, Usage,
+    CacheControl, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData, EffortLevel,
+    ImageSourceParam, Message as AnthropicMessage, MessageRole as AnthropicMessageRole,
+    MessagesCreateRequest, OutputConfig, StreamEvent, SystemContent, TextBlock, ThinkingConfig,
+    Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
 };
 
 use crate::error::LlmError;
-use crate::message::{ChatMessage, MessageContent, MessageRole, ThinkingContent};
+use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::{ProviderRequest, ReasoningEffort};
-use crate::response::{ProviderResponse, StopReason};
+use crate::response::StopReason;
 use crate::stream::ProviderStreamEvent;
-use crate::tool::{ToolCall, ToolChoice, ToolResult, ToolResultContent};
+use crate::tool::{ToolChoice, ToolResultContent};
 use crate::usage::TokenUsageData;
 
 pub(super) fn to_anthropic_request(
@@ -254,6 +261,7 @@ fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> 
     }
 }
 
+#[cfg(test)]
 pub(super) fn from_anthropic_response(
     response: MessagesCreateResponse,
 ) -> Result<ProviderResponse, LlmError> {
@@ -285,6 +293,7 @@ pub(super) fn from_anthropic_response(
     })
 }
 
+#[cfg(test)]
 fn from_content(
     content: ContentBlock,
     reasoning_chunks: &mut Vec<String>,
@@ -355,7 +364,7 @@ fn map_usage(usage: Usage) -> TokenUsageData {
 
 #[derive(Default)]
 pub(super) struct AnthropicStreamState {
-    tool_calls: BTreeMap<usize, ToolCallAccumulator>,
+    tool_calls: BTreeMap<usize, ()>,
     usage: Usage,
 }
 
@@ -379,11 +388,6 @@ impl AnthropicStreamState {
     }
 }
 
-#[derive(Default)]
-struct ToolCallAccumulator {
-    id: String,
-}
-
 pub(super) fn map_stream_event(
     state: &mut AnthropicStreamState,
     event: StreamEvent,
@@ -402,14 +406,26 @@ pub(super) fn map_stream_event(
         } => {
             match content_block {
                 ContentBlockStartData::ToolUse { id, name, input } => {
-                    state
-                        .tool_calls
-                        .insert(index, ToolCallAccumulator { id: id.clone() });
-                    Ok(vec![ProviderStreamEvent::ToolCallStart(ToolCall {
-                        id,
-                        name,
-                        arguments: input,
-                    })])
+                    state.tool_calls.insert(index, ());
+                    if input.is_null() || input == serde_json::json!({}) {
+                        Ok(vec![ProviderStreamEvent::ToolCallMetadata {
+                            key: crate::stream::CallKey(index as u64),
+                            id,
+                            name,
+                        }])
+                    } else {
+                        Ok(vec![
+                            ProviderStreamEvent::ToolCallMetadata {
+                                key: crate::stream::CallKey(index as u64),
+                                id,
+                                name,
+                            },
+                            ProviderStreamEvent::ToolArgumentsSnapshot {
+                                key: crate::stream::CallKey(index as u64),
+                                arguments: input.to_string(),
+                            },
+                        ])
+                    }
                 }
                 ContentBlockStartData::Thinking {
                     thinking,
@@ -424,7 +440,9 @@ pub(super) fn map_stream_event(
                 ContentBlockStartData::Thinking { signature, .. } if !signature.is_empty() => Ok(
                     vec![ProviderStreamEvent::ReasoningSignatureDelta(signature)],
                 ),
-                ContentBlockStartData::RedactedThinking { .. } => Ok(Vec::new()),
+                ContentBlockStartData::RedactedThinking { data } => {
+                    Ok(vec![ProviderStreamEvent::RedactedThinking(data)])
+                }
                 ContentBlockStartData::Text { text } if !text.is_empty() => {
                     Ok(vec![ProviderStreamEvent::TextDelta(text)])
                 }
@@ -436,14 +454,9 @@ pub(super) fn map_stream_event(
                 Ok(vec![ProviderStreamEvent::TextDelta(text)])
             }
             ContentBlockDeltaData::InputJsonDelta { partial_json } => {
-                let call_id = state
-                    .tool_calls
-                    .get(&index)
-                    .map(|call| call.id.clone())
-                    .unwrap_or_else(|| format!("tool_call_{index}"));
-                Ok(vec![ProviderStreamEvent::ToolCallDelta {
-                    call_id,
-                    partial_json,
+                Ok(vec![ProviderStreamEvent::ToolArgumentsDelta {
+                    key: crate::stream::CallKey(index as u64),
+                    fragment: partial_json,
                 }])
             }
             ContentBlockDeltaData::ThinkingDelta { thinking } => {
@@ -457,8 +470,10 @@ pub(super) fn map_stream_event(
             ContentBlockDeltaData::Unknown => Ok(Vec::new()),
         },
         StreamEvent::ContentBlockStop { index } => {
-            if let Some(call) = state.tool_calls.remove(&index) {
-                Ok(vec![ProviderStreamEvent::ToolCallEnd { call_id: call.id }])
+            if state.tool_calls.remove(&index).is_some() {
+                Ok(vec![ProviderStreamEvent::ToolCallFinished {
+                    key: crate::stream::CallKey(index as u64),
+                }])
             } else {
                 Ok(Vec::new())
             }

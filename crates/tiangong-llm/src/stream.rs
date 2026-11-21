@@ -4,24 +4,35 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
-use crate::tool::ToolCall;
 use crate::usage::TokenUsageData;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallKey(pub u64);
 
 /// 统一流式事件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderStreamEvent {
+    ToolCallMetadata {
+        key: CallKey,
+        id: String,
+        name: String,
+    },
+    ToolArgumentsDelta {
+        key: CallKey,
+        fragment: String,
+    },
+    ToolArgumentsSnapshot {
+        key: CallKey,
+        arguments: String,
+    },
+    ToolCallFinished {
+        key: CallKey,
+    },
+    RedactedThinking(String),
     MessageStart,
     ReasoningDelta(String),
     ReasoningSignatureDelta(String),
     TextDelta(String),
-    ToolCallStart(ToolCall),
-    ToolCallDelta {
-        call_id: String,
-        partial_json: String,
-    },
-    ToolCallEnd {
-        call_id: String,
-    },
     MessageEnd {
         stop_reason: Option<crate::response::StopReason>,
     },
@@ -35,7 +46,7 @@ pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ProviderStreamEvent, 
 ///
 /// 服务端忽略 stream 参数返回普通 JSON 时，复用非流式解析结果，
 /// 让流式消费方无差别处理。
-pub(crate) fn complete_response_events(
+pub fn complete_response_events(
     response: crate::response::ProviderResponse,
 ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
     use crate::message::MessageContent;
@@ -50,14 +61,44 @@ pub(crate) fn complete_response_events(
             reasoning.to_string(),
         )));
     }
-    for block in &response.assistant_message.content {
+    for (index, block) in response.assistant_message.content.iter().enumerate() {
         match block {
             MessageContent::Text(text) if !text.trim().is_empty() => {
                 events.push(Ok(ProviderStreamEvent::TextDelta(text.clone())));
             }
-            // 完整参数直接放在 ToolCallStart，无需再跟 Delta 分片。
+            // 完整参数为快照，每个列表项有独立键，不按上游 ID 去重。
             MessageContent::ToolCall(call) => {
-                events.push(Ok(ProviderStreamEvent::ToolCallStart(call.clone())));
+                let key = CallKey(index as u64);
+                events.push(Ok(ProviderStreamEvent::ToolCallMetadata {
+                    key,
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                }));
+                events.push(Ok(ProviderStreamEvent::ToolArgumentsSnapshot {
+                    key,
+                    arguments: call
+                        .arguments
+                        .get("__raw_args_preview")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| call.arguments.to_string()),
+                }));
+                events.push(Ok(ProviderStreamEvent::ToolCallFinished { key }));
+            }
+            MessageContent::Thinking(thinking) => {
+                if response.reasoning_content.is_none() && !thinking.thinking.is_empty() {
+                    events.push(Ok(ProviderStreamEvent::ReasoningDelta(
+                        thinking.thinking.clone(),
+                    )));
+                }
+                if let Some(signature) = &thinking.signature {
+                    events.push(Ok(ProviderStreamEvent::ReasoningSignatureDelta(
+                        signature.clone(),
+                    )));
+                }
+            }
+            MessageContent::RedactedThinking(data) => {
+                events.push(Ok(ProviderStreamEvent::RedactedThinking(data.clone())))
             }
             _ => {}
         }
@@ -77,7 +118,7 @@ pub(crate) fn complete_response_events(
 /// - `server_is_overloaded`：降载（节点/桶级状态，重发可能落到其他节点）；
 /// - `server_error`：上游内部错误，实测消息自带 "You can retry your request"；
 /// - 消息含 "retry your request" / "overload" 的变体（无错误码的裸 error 事件）。
-pub(crate) fn retryable_stream_error_signature(code: &str, message: &str) -> bool {
+pub fn retryable_stream_error_signature(code: &str, message: &str) -> bool {
     let lower_code = code.to_ascii_lowercase();
     let lower = message.to_ascii_lowercase();
     // 错误码按子串匹配，覆盖各家族命名：server_is_overloaded（OpenAI/Codex）、
@@ -88,7 +129,7 @@ pub(crate) fn retryable_stream_error_signature(code: &str, message: &str) -> boo
         || lower.contains("retry your request")
 }
 /// 已组装为 `[code] message` 的错误文案是否为瞬时错误（流中段统一重试判定用）。
-pub(crate) fn retryable_stream_error_message(message: &str) -> bool {
+pub fn retryable_stream_error_message(message: &str) -> bool {
     match message
         .strip_prefix('[')
         .and_then(|rest| rest.split_once(']'))

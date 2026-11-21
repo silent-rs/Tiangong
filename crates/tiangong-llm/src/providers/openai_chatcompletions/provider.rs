@@ -4,10 +4,9 @@ use serde::Deserialize;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
-use crate::provider::{LlmProvider, ProviderCapabilities};
+use crate::provider::{LlmProvider, ModelCatalog, ProviderCapabilities};
 use crate::request::ProviderRequest;
 use crate::rerank::{RerankProvider, RerankRequest, RerankResponse, RerankResult};
-use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 
 use super::client::OpenAiClient;
@@ -67,17 +66,6 @@ impl LlmProvider for OpenAiChatCompletionsProvider {
         }
     }
 
-    async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError> {
-        let model = req.model.clone();
-        let payload = build_request_json(&req, false)
-            .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
-        let response = self.client.complete(&model, payload).await?;
-        parse_complete_response(&response).map_err(|err| LlmError::Provider {
-            provider: "openai",
-            message: err.to_string(),
-        })
-    }
-
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
         let model = req.model.clone();
         let payload = build_request_json(&req, true)
@@ -107,7 +95,9 @@ impl LlmProvider for OpenAiChatCompletionsProvider {
             }
         }
     }
-
+}
+#[async_trait]
+impl ModelCatalog for OpenAiChatCompletionsProvider {
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
     }

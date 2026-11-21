@@ -1,12 +1,11 @@
 use super::client::{DeepSeekClient, NativeDeepSeekTransport};
 use super::config::DeepSeekConfig;
-use super::mapping::{from_deepseek_response, to_deepseek_request};
+use super::mapping::to_deepseek_request;
 use super::stream::map_deepseek_stream;
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
-use crate::provider::{LlmProvider, ProviderCapabilities};
+use crate::provider::{LlmProvider, ModelCatalog, ProviderCapabilities};
 use crate::request::ProviderRequest;
-use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 use async_trait::async_trait;
 
@@ -40,16 +39,6 @@ where
         }
     }
 
-    async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError> {
-        let request =
-            to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
-        let response = self.client.create(request).await?;
-        from_deepseek_response(response, !req.tools.is_empty()).map_err(|err| LlmError::Provider {
-            provider: "deepseek",
-            message: err.to_string(),
-        })
-    }
-
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
         let request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
@@ -58,7 +47,9 @@ where
         let event_stream = self.client.create_stream(request).await?;
         Ok(map_deepseek_stream(event_stream, !req.tools.is_empty()))
     }
-
+}
+#[async_trait]
+impl<T: super::client::DeepSeekTransport> ModelCatalog for DeepSeekProvider<T> {
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
     }

@@ -1,14 +1,11 @@
-use std::time::Duration;
-
 use futures_util::Stream;
 use serde_json::Value;
-use tokio::time::timeout;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 
 use super::config::OpenAiResponsesConfig;
-use super::error::{is_retryable_responses_error, map_responses_error};
+use super::error::map_responses_error;
 use super::mapping::normalize_api_base;
 
 pub(crate) type ResponsesByotStream =
@@ -20,40 +17,21 @@ pub enum ResponsesStreamResponse {
     Complete(Value),
 }
 
-const INITIAL_RETRY_DELAY_MS: u64 = 1000;
-
 #[derive(Clone)]
 pub struct ResponsesClient {
+    http: Result<reqwest::Client, String>,
     config: OpenAiResponsesConfig,
 }
 
 impl ResponsesClient {
     pub fn new(config: OpenAiResponsesConfig) -> Self {
-        Self { config }
-    }
-
-    pub async fn complete(&self, model: &str, payload: Value) -> Result<Value, LlmError> {
-        use crate::providers::openai_chatcompletions::client::{parse_complete_body, send_request};
-        let base = normalize_api_base(&self.config.base_url)
-            .map_err(|error| LlmError::Configuration(error.to_string()))?;
-        let url = format!("{base}/responses");
-        timeout(
-            self.config.timeout,
-            self.with_retry("openai_complete", model, false, || async {
-                let response = send_request(
-                    &url,
-                    &self.config.api_key,
-                    &self.config.headers,
-                    &payload,
-                    self.config.timeout,
-                    false,
-                )
-                .await?;
-                parse_complete_body(&response.bytes().await?)
-            }),
-        )
-        .await
-        .map_err(|_| LlmError::Timeout(self.config.timeout.as_millis() as u64))?
+        Self {
+            http: crate::providers::openai_chatcompletions::client::build_http_client(
+                &config.headers,
+            )
+            .map_err(|error| error.to_string()),
+            config,
+        }
     }
 
     pub async fn stream(
@@ -67,17 +45,24 @@ impl ResponsesClient {
         let api_key = self.config.api_key.clone();
         let request_timeout = self.config.timeout;
         let headers = self.config.headers.clone();
+        let http = self
+            .http
+            .as_ref()
+            .map_err(|error| LlmError::Configuration(error.clone()))?
+            .clone();
         self.with_retry("openai_stream", model, true, move || {
             let url = url.clone();
             let api_key = api_key.clone();
             let payload = payload.clone();
             let request_timeout = request_timeout;
             let headers = headers.clone();
+            let http = http.clone();
             async move {
                 use crate::providers::openai_chatcompletions::client::{
                     StreamBody, resolve_stream_body,
                 };
                 let response = crate::providers::openai_chatcompletions::client::send_request(
+                    &http,
                     &url,
                     &api_key,
                     &headers,
@@ -128,64 +113,17 @@ impl ResponsesClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, async_openai::error::OpenAIError>>,
     {
-        let mut attempt = 0u32;
-        let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-        let max_retries = self.config.max_retries;
-        loop {
-            let start = std::time::Instant::now();
-            tracing::info!(
-                operation,
-                provider = "openai",
-                model,
-                stream,
-                attempt,
-                "开始 OpenAI Responses 请求"
-            );
-            match f().await {
-                Ok(value) => {
-                    tracing::info!(
-                        operation,
-                        provider = "openai",
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        "OpenAI Responses 请求完成"
-                    );
-                    return Ok(value);
-                }
-                Err(err) if attempt < max_retries && is_retryable_responses_error(&err) => {
-                    attempt += 1;
-                    if let Some(notifier) = &self.config.retry_notifier {
-                        notifier(attempt, max_retries, delay_ms, &err.to_string());
-                    }
-                    tracing::warn!(
-                        operation,
-                        provider = "openai",
-                        model,
-                        stream,
-                        attempt,
-                        delay_ms,
-                        error = %err,
-                        "OpenAI Responses 请求失败，准备重试"
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= 2;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        operation,
-                        provider = "openai",
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        error = %err,
-                        "OpenAI Responses 请求失败"
-                    );
-                    return Err(map_responses_error(&err));
-                }
-            }
-        }
+        let _ = stream;
+        crate::retry::run(
+            operation,
+            model,
+            self.config.max_retries,
+            self.config.retry_notifier.as_ref(),
+            || {
+                let future = f();
+                async move { future.await.map_err(|error| map_responses_error(&error)) }
+            },
+        )
+        .await
     }
 }

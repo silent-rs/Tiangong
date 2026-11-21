@@ -1,198 +1,33 @@
-//! 会话上下文 → 模型请求：[`IntoModelRequest`] 把 `Session::context()` 返回的
-//! 有序消息列表按值转换为 llm 层的 [`ModelRequest`]（`system` + `messages`），
-//! 消息内容直接移动，不再额外拷贝。
-//!
-//! 消息的选取与顺序（system prompt + 摘要边界之后的对话，排除持久化 System
-//! 与 Notice）已在 `Session::context()` 中确定，这里只做内容转换。宿主会话
-//! 语义只在这里处理（issue #691），llm 层不理解宿主消息格式、不读取本地文件：
-//! - system prompt 取自 `MessageRole::System` 消息，缺少即视为调用方错误；
-//! - 没有配对调用（`tool_call_id` 为空）的 Tool 消息不进入请求（仅存在于 #77 之前的旧会话）；
-//! - 模型指令与用户文本同样进入请求，附件引用与旧格式媒体不进入请求；
-//! - 图片按当前请求数据 → 远程 URL → 本地文件的顺序取用，文件不可读时降级为文字说明；
-//! - 截断导致的开头非 User 消息被跳过，没有 User 消息时补兜底用户文本。
-
-use std::path::Path;
-
-use anyhow::bail;
+//! Core 私有历史图片补齐；不负责消息选择、兜底或模型请求组装。
+use crate::session::{ContentBlock, StoredAsset};
+#[cfg(test)]
+use crate::session::{Message, MessageRole};
 use base64::{Engine as _, engine::general_purpose};
-use tiangong_llm::ModelRequest;
-use tiangong_llm::message::{
-    ChatMessage, ImageContent, MessageContent, MessageRole as LlmMessageRole, ThinkingContent,
-};
-use tiangong_llm::tool::{ToolCall, ToolResult, ToolResultContent};
+use std::path::Path;
+use tiangong_llm::message::ImageContent;
 
-use crate::session::{ContentBlock, Message, MessageRole, Role, StoredAsset};
-
-/// 上下文中没有任何 User 消息时补发的兜底用户文本。
-pub const FALLBACK_USER_TEXT: &str = "请继续处理当前任务。";
-
-/// 把有序会话消息转换为模型请求。
-///
-/// `ModelRequest` 与 `Vec<Message>` 都不是 core 定义的类型，孤儿规则不允许在
-/// core 中为它们实现 `TryFrom`；由 core 自定义该 trait 承载转换。
-pub trait IntoModelRequest {
-    /// 只填充 `system` 与 `messages`，其余请求参数（会话 ID、思考强度、输出
-    /// 上限等）由调用方用结构体更新语法补充。
-    fn into_model_request(self) -> anyhow::Result<ModelRequest>;
-}
-
-impl IntoModelRequest for Vec<Message> {
-    fn into_model_request(self) -> anyhow::Result<ModelRequest> {
-        // System prompt 必须由 core 显式注入（session.system_prompt_message）：
-        // context 缺 System 角色消息视为调用方错误，fail-fast。文本允许为空
-        //（core 不再生产 prompt 内容，无插件段落且无摘要时为空，请求即不带 system）。
-        let mut system_texts: Vec<String> = Vec::new();
-        let mut has_system_message = false;
-        let mut messages = Vec::with_capacity(self.len());
-        for message in self {
-            if message.role == MessageRole::System {
-                has_system_message = true;
-                let text = plain_text(message.content);
-                let text = text.trim();
-                if !text.is_empty() {
-                    system_texts.push(text.to_string());
-                }
-                continue;
-            }
-            if let Some(message) = chat_message(message) {
-                messages.push(message);
-            }
-        }
-
-        if !has_system_message {
-            bail!(
-                "模型上下文缺少 System 消息。system prompt 应由 core 显式注入（session.system_prompt_message）。"
-            );
-        }
-
-        match messages
-            .iter()
-            .position(|message| message.role == LlmMessageRole::User)
-        {
-            // 跳过开头的非 User 消息（summary_up_to 截断可能导致以 Assistant/Tool 开头）
-            Some(index) if index > 0 => {
-                tracing::debug!(
-                    skipped = index,
-                    "跳过消息列表开头的非 User 消息（可能是 summary 截断导致）"
-                );
-                messages.drain(..index);
-            }
-            Some(_) => {}
-            // 没有 User 消息时其余消息都无法构成合法请求，只保留兜底文本。
-            None => {
-                messages = vec![ChatMessage::text(LlmMessageRole::User, FALLBACK_USER_TEXT)];
-            }
-        }
-
-        Ok(ModelRequest {
-            system: system_texts.join("\n"),
-            messages,
-            ..Default::default()
-        })
+/// 仅补齐单个历史图片块；由 Session 对请求副本调用，不构造/过滤消息。
+pub(crate) fn resolve_history_image(block: &mut ContentBlock) {
+    if let ContentBlock::Image { asset, data } = block {
+        *block = match ready_image(asset, data.take()) {
+            Some(image) => ContentBlock::Image {
+                asset: asset.clone(),
+                data: Some(image.data),
+            },
+            None => ContentBlock::text(format!(
+                "[image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
+                asset.asset_id,
+                escape_asset_text(&asset.local_path)
+            )),
+        };
     }
 }
-
-/// 拼接 `Text` 内容块（不含模型指令、附件等其他内容块）。
-fn plain_text(content: Vec<ContentBlock>) -> String {
-    content
-        .into_iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text),
-            _ => None,
-        })
-        .collect()
-}
-
-fn chat_message(message: Message) -> Option<ChatMessage> {
-    let Message { role, content, .. } = message;
-    let (role, reasoning, signature, tool_calls) = match role {
-        Role::User { .. } => (LlmMessageRole::User, String::new(), None, Vec::new()),
-        Role::Assistant {
-            reasoning_content,
-            reasoning_signature,
-            tool_calls,
-            ..
-        } => (
-            LlmMessageRole::Assistant,
-            reasoning_content,
-            reasoning_signature,
-            tool_calls,
-        ),
-        Role::Tool {
-            tool_call_id,
-            is_error,
-            ..
-        } => {
-            // 旧版本曾把运行时轨迹写成无配对调用的 Tool 消息（#77 起只记日志），
-            // 它不是任何调用的结果，不进入请求。
-            if tool_call_id.is_empty() {
-                return None;
-            }
-            return Some(ChatMessage::new(
-                LlmMessageRole::Tool,
-                vec![MessageContent::ToolResult(ToolResult {
-                    tool_call_id,
-                    content: ToolResultContent::Text(plain_text(content)),
-                    is_error,
-                })],
-            ));
-        }
-        Role::System => return None,
-        // Notice 是系统发给用户的通知，任何路径都不得进入模型请求。
-        Role::Notice { .. } => return None,
-    };
-
-    let mut parts = Vec::new();
-    if !reasoning.trim().is_empty() {
-        parts.push(MessageContent::Thinking(ThinkingContent {
-            thinking: reasoning,
-            signature,
-        }));
-    }
-
-    for block in content {
-        match block {
-            ContentBlock::Text { text } | ContentBlock::ModelInstruction { text } => {
-                if !text.trim().is_empty() {
-                    parts.push(MessageContent::Text(text));
-                }
-            }
-            ContentBlock::Image { asset, data } => parts.push(image_content(&asset, data)),
-            ContentBlock::Media { .. } | ContentBlock::AssetReference { .. } => {}
-        }
-    }
-
-    parts.extend(tool_calls.into_iter().map(|call| {
-        MessageContent::ToolCall(ToolCall {
-            id: call.id,
-            name: call.name,
-            arguments: call.arguments,
-        })
-    }));
-    if parts.is_empty() {
-        return None;
-    }
-
-    Some(ChatMessage::new(role, parts))
-}
-
-fn image_content(asset: &StoredAsset, runtime_data: Option<String>) -> MessageContent {
-    match ready_image(asset, runtime_data) {
-        Some(image) => MessageContent::Image(image),
-        // 图片文件缺失（被清理/声明失效）时降级为文字说明，不让整个
-        // 请求失败——否则该会话之后每一轮请求都会报错。路径可能来自
-        // 工具可控字段，净化后拼接。
-        None => MessageContent::Text(format!(
-            "[image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
-            asset.asset_id,
-            escape_asset_text(&asset.local_path)
-        )),
-    }
-}
-
 fn ready_image(asset: &StoredAsset, runtime_data: Option<String>) -> Option<ImageContent> {
     if let Some(data) = runtime_data.filter(|data| !data.trim().is_empty()) {
-        let data = if data.trim_start().starts_with("data:") {
+        let data = if data.trim_start().starts_with("data:")
+            || data.starts_with("https://")
+            || data.starts_with("http://")
+        {
             data
         } else {
             format!("data:{};base64,{data}", asset.mime_type)
@@ -237,6 +72,50 @@ fn escape_asset_text(value: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
+use crate::session::Role;
+#[cfg(test)]
+use tiangong_llm::{
+    ModelRequest,
+    message::{ChatMessage, MessageContent, MessageRole as LlmMessageRole, ThinkingContent},
+    tool::{ToolCall, ToolResult, ToolResultContent},
+};
+#[cfg(test)]
+pub trait IntoModelRequest {
+    fn into_model_request(self) -> anyhow::Result<ModelRequest>;
+}
+#[cfg(test)]
+impl IntoModelRequest for Vec<Message> {
+    fn into_model_request(self) -> anyhow::Result<ModelRequest> {
+        if !self
+            .iter()
+            .any(|message| message.role == MessageRole::System)
+        {
+            anyhow::bail!("模型上下文缺少 System 消息");
+        }
+        let mut messages = self;
+        for message in &mut messages {
+            for block in &mut message.content {
+                resolve_history_image(block);
+            }
+        }
+        ModelRequest::from_messages(messages)
+    }
+}
+#[cfg(test)]
+fn chat_message(message: Message) -> Option<ChatMessage> {
+    let mut messages = vec![Message::new(MessageRole::User, "start"), message];
+    for message in &mut messages {
+        for block in &mut message.content {
+            resolve_history_image(block);
+        }
+    }
+    ModelRequest::from_messages(messages)
+        .ok()?
+        .messages
+        .into_iter()
+        .nth(1)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,30 +212,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_user_falls_back_to_continue_text() {
-        let assistant = Message::new(MessageRole::Assistant, "孤立回答");
-        let request = assemble(vec![system_message("系统"), assistant]).unwrap();
-        assert_eq!(
-            request.messages,
-            vec![ChatMessage::text(LlmMessageRole::User, FALLBACK_USER_TEXT)]
-        );
-    }
-
-    #[test]
-    fn leading_non_user_messages_are_skipped() {
-        let request = assemble(vec![
-            system_message("系统"),
-            Message::new(MessageRole::Assistant, "截断前回答"),
-            Message::tool_result("call_old", "read_file", "截断前结果", false),
+    fn context_does_not_insert_fallback_or_drop_leading_assistant() {
+        let mut session = crate::session::Session::new("unchanged-context");
+        session.system_prompt_message = Some(system_message("系统"));
+        session.messages = vec![
+            Message::new(MessageRole::Assistant, "孤立回答"),
             Message::new(MessageRole::User, "继续"),
-        ])
-        .unwrap();
-        assert_eq!(
-            request.messages,
-            vec![ChatMessage::text(LlmMessageRole::User, "继续")]
-        );
+        ];
+        let before = serde_json::to_value(&session).unwrap();
+        let context = session.context();
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[1].role, MessageRole::Assistant);
+        assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        session.messages.clear();
+        assert_eq!(session.context().len(), 1);
     }
-
     #[test]
     fn tool_result_keeps_call_id_and_error_flag() {
         let request = assemble(vec![

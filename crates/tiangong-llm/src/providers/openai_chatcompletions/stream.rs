@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::stream::CallKey;
 use crate::stream::ProviderStreamEvent;
-use crate::tool::ToolCall;
 
 #[derive(Default)]
 pub(super) struct OpenAiStreamDecoder {
     tool_calls: BTreeMap<usize, PendingToolCall>,
+    next_key: u64,
+    ended: bool,
 }
 
 #[derive(Default)]
@@ -23,6 +25,22 @@ impl OpenAiStreamDecoder {
         payload: &Value,
     ) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
         let mut events = Vec::new();
+        if payload.get("__stream_done").and_then(Value::as_bool) == Some(true) {
+            if !self.ended {
+                let tools = !self.tool_calls.is_empty();
+                events.extend(self.flush_tool_calls());
+                events.push(Ok(ProviderStreamEvent::MessageEnd {
+                    stop_reason: Some(if tools {
+                        crate::response::StopReason::ToolUse
+                    } else {
+                        crate::response::StopReason::EndTurn
+                    }),
+                }));
+                self.ended = true;
+            }
+            return events;
+        }
+
         // 流内错误载荷：OpenAI 兼容网关会在流中以 data:{"error":{...}} 推送
         // 错误；此前 payload 无 choices/usage 被静默丢弃，空回复表现为
         // 「正常」结束。统一转 Error 事件（错误码进文案），交给消费层的
@@ -48,6 +66,9 @@ impl OpenAiStreamDecoder {
         }
         if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
             for choice in choices {
+                if choice.get("index").and_then(Value::as_u64).unwrap_or(0) != 0 {
+                    continue;
+                }
                 let delta = choice.get("delta").unwrap_or(&Value::Null);
                 if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str)
                     && !reasoning.is_empty()
@@ -98,7 +119,21 @@ impl OpenAiStreamDecoder {
                     .get("finish_reason")
                     .is_some_and(|reason| !reason.is_null())
                 {
+                    self.ended = true;
                     events.extend(self.flush_tool_calls());
+                    let reason = match choice
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                    {
+                        "tool_calls" | "function_call" => crate::response::StopReason::ToolUse,
+                        "length" => crate::response::StopReason::MaxTokens,
+                        "stop" => crate::response::StopReason::EndTurn,
+                        other => crate::response::StopReason::Other(other.to_owned()),
+                    };
+                    events.push(Ok(ProviderStreamEvent::MessageEnd {
+                        stop_reason: Some(reason),
+                    }));
                 }
             }
         }
@@ -108,26 +143,23 @@ impl OpenAiStreamDecoder {
     fn flush_tool_calls(&mut self) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
         let mut events = Vec::new();
         for (index, pending) in std::mem::take(&mut self.tool_calls) {
-            if pending.name.trim().is_empty() {
-                tracing::warn!(index, tool_call_id = %pending.id, "忽略缺少名称的 OpenAI 流式工具调用");
-                continue;
-            }
             let id = if pending.id.trim().is_empty() {
                 format!("tool_call_{index}")
             } else {
                 pending.id
             };
-            events.push(Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                id: id.clone(),
+            let key = CallKey(self.next_key);
+            self.next_key += 1;
+            events.push(Ok(ProviderStreamEvent::ToolCallMetadata {
+                key,
+                id,
                 name: pending.name,
-                arguments: serde_json::json!({}),
-            })));
-            if !pending.arguments.is_empty() {
-                events.push(Ok(ProviderStreamEvent::ToolCallDelta {
-                    call_id: id,
-                    partial_json: pending.arguments,
-                }));
-            }
+            }));
+            events.push(Ok(ProviderStreamEvent::ToolArgumentsSnapshot {
+                key,
+                arguments: pending.arguments,
+            }));
+            events.push(Ok(ProviderStreamEvent::ToolCallFinished { key }));
         }
         events
     }
@@ -135,20 +167,7 @@ impl OpenAiStreamDecoder {
 
 impl PendingToolCall {
     fn push_arguments(&mut self, partial: &str) {
-        if partial.is_empty() || self.arguments == partial {
-            return;
-        }
-        if self.arguments.is_empty() {
-            self.arguments.push_str(partial);
-            return;
-        }
-
-        let combined = format!("{}{}", self.arguments, partial);
-        if serde_json::from_str::<Value>(&combined).is_ok()
-            || serde_json::from_str::<Value>(&self.arguments).is_err()
-        {
-            self.arguments = combined;
-        }
+        self.arguments.push_str(partial);
     }
 }
 
@@ -231,27 +250,29 @@ mod tests {
             }),
         );
 
-        let calls = finished
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|events| match (&events[0], &events[1]) {
-                (
-                    ProviderStreamEvent::ToolCallStart(call),
-                    ProviderStreamEvent::ToolCallDelta {
-                        call_id,
-                        partial_json,
-                    },
-                ) => (call.id.as_str(), call_id.as_str(), partial_json.as_str()),
-                _ => panic!("应按 Start + Delta 输出完整工具调用"),
+        let mut state = crate::collect::ResponseAccumulator::default();
+        for event in finished {
+            state.push(event);
+        }
+        let result = state.finish();
+        assert!(result.invalid_tool_calls.is_empty());
+        let calls: Vec<_> = result
+            .response
+            .assistant_message
+            .content
+            .into_iter()
+            .filter_map(|block| {
+                if let crate::message::MessageContent::ToolCall(call) = block {
+                    Some(call)
+                } else {
+                    None
+                }
             })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            calls,
-            vec![
-                ("call_a", "call_a", r#"{"path":"a"}"#),
-                ("call_b", "call_b", r#"{"path":"b"}"#),
-            ]
-        );
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(calls[0].arguments, serde_json::json!({"path":"a"}));
+        assert_eq!(calls[1].arguments, serde_json::json!({"path":"b"}));
     }
 }

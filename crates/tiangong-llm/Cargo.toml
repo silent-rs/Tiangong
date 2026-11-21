@@ -17,11 +17,9 @@ async-trait = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model", "responses"] }
 eventsource-stream = { workspace = true }
 bytes = "1"
-backoff = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "net", "io-util", "macros"] }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 futures-util = { workspace = true }
-jsonschema = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
 # Codex（ChatGPT 账号）OAuth 登录：PKCE 随机数、S256 摘要、回调参数解析、凭据时间戳

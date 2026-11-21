@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use serde_json::json;
 use tiangong_llm::ModelEndpoint;
+use tiangong_llm::Options;
 use tiangong_llm::SingleProviderClient;
 use tiangong_llm::embedding::{EmbeddingEndpointConfig, embedding_provider_from_config};
-use tiangong_llm::message::{ChatMessage, MessageRole};
 use tiangong_llm::model::ProviderProtocol;
-use tiangong_llm::provider_client::ModelRequest;
 use tiangong_llm::rerank::{RerankEndpointConfig, RerankRequest};
 use tiangong_llm::rerank_provider_from_config;
+use tiangong_types::{Message, MessageRole};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -48,15 +48,12 @@ fn endpoint(server: &MockServer, protocol: ProviderProtocol) -> ModelEndpoint {
     }
 }
 
-fn request() -> ModelRequest {
-    ModelRequest {
-        system: "系统提示".to_string(),
-        messages: vec![ChatMessage::text(MessageRole::User, "回答 OK")],
-        max_output_tokens: Some(16),
-        ..Default::default()
-    }
+fn request() -> Vec<Message> {
+    vec![
+        Message::new(MessageRole::System, "系统提示"),
+        Message::new(MessageRole::User, "回答 OK"),
+    ]
 }
-
 fn chat_reply(protocol: ProviderProtocol) -> serde_json::Value {
     match protocol {
         ProviderProtocol::Anthropic => json!({
@@ -117,7 +114,13 @@ async fn 代理不可达时各类请求直连重试成功() {
             .await;
         let cfg = endpoint(&server, protocol);
         let response = SingleProviderClient::new(cfg.clone())
-            .complete_async(request())
+            .with_options(Options {
+                max_output_tokens: 16,
+                ..Default::default()
+            })
+            .stream(request())
+            .unwrap()
+            .collect::<tiangong_llm::ModelResponse>()
             .await
             .unwrap_or_else(|error| panic!("{protocol:?} 对话应直连成功：{error:#}"));
         assert_eq!(response.text, "OK", "{protocol:?}");

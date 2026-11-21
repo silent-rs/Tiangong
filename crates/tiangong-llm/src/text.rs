@@ -7,11 +7,10 @@ use std::time::Duration;
 
 use crate::endpoint::ModelEndpoint;
 use crate::error::LlmError;
-use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::model::ProviderProtocol;
-use crate::provider_client::{ProviderDispatch, SingleProviderClient};
-use crate::request::ProviderRequest;
+use crate::provider_client::SingleProviderClient;
 use crate::request::ReasoningEffort;
+use tiangong_types::{Message, MessageRole};
 
 #[derive(Debug, Clone)]
 pub struct LlmEndpointConfig {
@@ -67,28 +66,8 @@ pub async fn complete_text_with_usage(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<(String, Option<crate::usage::TokenUsageData>), LlmError> {
-    let provider = build_provider(config)?;
-    let request = ProviderRequest {
-        session_id: None,
-        model: config.model.clone(),
-        system: Some(system.to_string()),
-        messages: vec![ChatMessage::text(MessageRole::User, prompt)],
-        tools: Vec::new(),
-        tool_choice: None,
-        max_tokens,
-        temperature: Some(0.2),
-        top_p: None,
-        stop_sequences: Vec::new(),
-        metadata: None,
-        reasoning_effort: ReasoningEffort::None,
-    };
-    let response = provider.complete(request).await?;
-    Ok((message_text(&response.assistant_message), response.usage))
-}
-
-fn build_provider(config: &LlmEndpointConfig) -> Result<ProviderDispatch, LlmError> {
     let timeout_ms = config.timeout.as_millis().min(u64::MAX as u128) as u64;
-    SingleProviderClient::new(ModelEndpoint {
+    let client = SingleProviderClient::new(ModelEndpoint {
         api_key: config.api_key.clone(),
         base_url: config.base_url.clone(),
         model: config.model.clone(),
@@ -96,23 +75,28 @@ fn build_provider(config: &LlmEndpointConfig) -> Result<ProviderDispatch, LlmErr
         timeout_ms,
         ..Default::default()
     })
-    .build_provider_dispatch(timeout_ms, None, config.max_retries)
-    .map_err(|error| {
-        error
-            .downcast_ref::<LlmError>()
-            .cloned()
-            .unwrap_or_else(|| LlmError::Configuration(error.to_string()))
-    })
+    .with_options(crate::Options {
+        reasoning_effort: ReasoningEffort::None,
+        max_output_tokens: max_tokens,
+        temperature: Some(0.2),
+        timeout_ms: Some(timeout_ms),
+        max_retries: config.max_retries,
+        ..Default::default()
+    });
+    let messages = vec![
+        Message::new(MessageRole::System, system),
+        Message::new(MessageRole::User, prompt),
+    ];
+    client
+        .stream(messages)
+        .map_err(map_error)?
+        .collect_text_with_usage()
+        .await
+        .map_err(map_error)
 }
-
-fn message_text(message: &ChatMessage) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            MessageContent::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
+fn map_error(error: anyhow::Error) -> LlmError {
+    error
+        .downcast_ref::<LlmError>()
+        .cloned()
+        .unwrap_or_else(|| LlmError::InvalidRequest(error.to_string()))
 }

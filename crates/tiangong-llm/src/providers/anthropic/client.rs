@@ -1,8 +1,6 @@
-use std::time::Duration;
-
 use async_trait::async_trait;
 use tiangong_anthropic::AnthropicClient as NativeAnthropicClient;
-use tiangong_anthropic::types::{EventStream, MessagesCreateRequest, MessagesCreateResponse};
+use tiangong_anthropic::types::{EventStream, MessagesCreateRequest};
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
@@ -11,11 +9,6 @@ use crate::providers::anthropic::error::map_anthropic_error;
 
 #[async_trait]
 pub(crate) trait AnthropicTransport: Send + Sync {
-    async fn create(
-        &self,
-        request: MessagesCreateRequest,
-    ) -> Result<MessagesCreateResponse, LlmError>;
-
     async fn create_stream(&self, request: MessagesCreateRequest) -> Result<EventStream, LlmError>;
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError>;
@@ -67,17 +60,6 @@ impl NativeAnthropicTransport {
 
 #[async_trait]
 impl AnthropicTransport for NativeAnthropicTransport {
-    async fn create(
-        &self,
-        request: MessagesCreateRequest,
-    ) -> Result<MessagesCreateResponse, LlmError> {
-        self.with_direct_retry(|client| {
-            let request = request.clone();
-            async move { client.create(request).await }
-        })
-        .await
-    }
-
     async fn create_stream(&self, request: MessagesCreateRequest) -> Result<EventStream, LlmError> {
         self.with_direct_retry(|client| {
             let request = request.clone();
@@ -124,18 +106,6 @@ where
         Self { transport, config }
     }
 
-    pub async fn create(
-        &self,
-        request: MessagesCreateRequest,
-    ) -> Result<MessagesCreateResponse, LlmError> {
-        let model = request.model.clone();
-        self.run_with_retry("anthropic_complete", "anthropic", &model, false, || {
-            let request = request.clone();
-            async move { self.transport.create(request).await }
-        })
-        .await
-    }
-
     pub async fn create_stream(
         &self,
         request: MessagesCreateRequest,
@@ -165,70 +135,20 @@ where
         provider: &'static str,
         model: &str,
         stream: bool,
-        mut f: F,
+        f: F,
     ) -> Result<R, LlmError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<R, LlmError>>,
     {
-        let mut attempt = 0u32;
-        let mut delay_ms = 1000u64;
-
-        loop {
-            let start = std::time::Instant::now();
-            tracing::info!(
-                operation,
-                provider,
-                model,
-                stream,
-                attempt,
-                "开始 Anthropic 请求"
-            );
-            match f().await {
-                Ok(result) => {
-                    tracing::info!(
-                        operation,
-                        provider,
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        "Anthropic 请求完成"
-                    );
-                    return Ok(result);
-                }
-                Err(err) if err.is_retryable() && attempt < self.config.max_retries => {
-                    attempt += 1;
-                    tracing::warn!(
-                        operation,
-                        provider,
-                        model,
-                        stream,
-                        attempt,
-                        delay_ms,
-                        error = %err,
-                        "Anthropic 请求失败，准备重试"
-                    );
-                    if let Some(notifier) = &self.config.retry_notifier {
-                        notifier(attempt, self.config.max_retries, delay_ms, &err.to_string());
-                    }
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= 2;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        operation,
-                        provider,
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        error = %err,
-                        "Anthropic 请求失败"
-                    );
-                    return Err(err);
-                }
-            }
-        }
+        let _ = (provider, stream);
+        crate::retry::run(
+            operation,
+            model,
+            self.config.max_retries,
+            self.config.retry_notifier.as_ref(),
+            f,
+        )
+        .await
     }
 }

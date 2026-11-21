@@ -4,109 +4,210 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn compression_request_keeps_every_cache_relevant_param_of_main_loop() {
     use crate::context::compressor::ContextCompressor;
-    for protocol in [
-        ProviderProtocol::OpenAi,
-        ProviderProtocol::OpenAiChatCompletions,
+    for tool_choice in [
+        None,
+        Some(tiangong_llm::tool::ToolChoice::Auto),
+        Some(tiangong_llm::tool::ToolChoice::None),
+        Some(tiangong_llm::tool::ToolChoice::Any),
+        Some(tiangong_llm::tool::ToolChoice::Tool("snapshot_tool".into())),
     ] {
-        let server = MockServer::builder().start().await;
-        let mut harness = TestHarness::new_with_protocol(
-            &server,
-            protocol,
-            vec![tool_spec("read_file")],
-            HashMap::new(),
-            Vec::new(),
-        );
-        harness.ctx.agent_config.reasoning_effort = tiangong_llm::ReasoningEffort::High;
-        harness.ctx.session.messages.push(Message::with_reasoning(
-            MessageRole::Assistant,
-            "先前结论",
-            "保留这段历史思考",
-        ));
-        harness.start_turn_with("最新问题仍需原样保留");
-        let before_session = serde_json::to_vec(&harness.ctx.session).unwrap();
-        if protocol == ProviderProtocol::OpenAi {
-            mount_responses(&server, vec![answer("正常回复")], 0, true).await;
-        } else {
-            mount_completion(&server, "正常回复", "stop", 100, 10, None).await;
-        }
-        // 走主循环真实的请求构造路径（只读会话，不改动 session）。
-        let active = super::super::start_llm_request(
-            &harness.ctx,
-            crate::react::phase::LlmPurpose::React {
-                request_injection_generation: 0,
-            },
-            crate::stream_throttle::StreamTextKind::React,
-            None,
-        );
-        active.task.await.unwrap().unwrap();
-        if protocol == ProviderProtocol::OpenAi {
-            mount_responses(
+        for protocol in [
+            ProviderProtocol::OpenAi,
+            ProviderProtocol::OpenAiChatCompletions,
+        ] {
+            let server = MockServer::builder().start().await;
+            let mut harness = TestHarness::new_with_protocol(
                 &server,
-                vec![answer("[[SUMMARY]]\n先前结论摘要")],
-                3904,
-                true,
-            )
-            .await;
-        } else {
-            mount_completion(&server, "[[SUMMARY]]\n先前结论摘要", "stop", 100, 10, None).await;
+                protocol,
+                vec![tool_spec("read_file")],
+                HashMap::new(),
+                Vec::new(),
+            );
+            harness.ctx.agent_config.reasoning_effort = tiangong_llm::ReasoningEffort::High;
+            harness.ctx.session.messages.push(Message::with_reasoning(
+                MessageRole::Assistant,
+                "先前结论",
+                "保留这段历史思考",
+            ));
+            harness.start_turn_with("最新问题仍需原样保留");
+            let before_session = serde_json::to_vec(&harness.ctx.session).unwrap();
+            if protocol == ProviderProtocol::OpenAi {
+                mount_responses(&server, vec![answer("正常回复")], 0, true).await;
+            } else {
+                mount_completion(&server, "正常回复", "stop", 100, 10, None).await;
+            }
+            harness.ctx.configure_client();
+            // 使用区别于 session/TurnContext 的配置，防止压缩器重新推导或覆盖。
+            let options = tiangong_llm::Options {
+                reasoning_effort: tiangong_llm::ReasoningEffort::Medium,
+                max_output_tokens: 8192,
+                tools: vec![tool_spec("snapshot_tool")],
+                tool_choice: tool_choice.clone(),
+                temperature: Some(0.4),
+                top_p: Some(0.8),
+                stop_sequences: vec!["END_SUMMARY".into()],
+                cache_key: Some("client-cache-not-session-id".into()),
+                timeout_ms: Some(10_000),
+                max_retries: 0,
+            };
+            harness.ctx.client = harness.ctx.client.clone().with_options(options);
+            let before_options = format!("{:?}", harness.ctx.client.options());
+            // 走主循环真实的请求构造路径（只读会话，不改动 session）。
+            let active = super::super::start_llm_request(
+                &harness.ctx,
+                crate::react::phase::LlmPurpose::React {
+                    request_injection_generation: 0,
+                },
+                crate::stream_throttle::StreamTextKind::React,
+                tool_choice.clone(),
+            );
+            active.task.await.unwrap().unwrap();
+            if protocol == ProviderProtocol::OpenAi {
+                mount_responses(
+                    &server,
+                    vec![answer("[[SUMMARY]]\n先前结论摘要")],
+                    3904,
+                    true,
+                )
+                .await;
+            } else {
+                mount_completion(&server, "[[SUMMARY]]\n先前结论摘要", "stop", 100, 10, None).await;
+            }
+            let update =
+                ContextCompressor::new(harness.ctx.session.clone(), harness.ctx.client.clone())
+                    .compress(2, 4096)
+                    .await
+                    .unwrap();
+            assert_eq!(update.summary, "先前结论摘要");
+            assert_eq!(
+                format!("{:?}", harness.ctx.client.options()),
+                before_options
+            );
+            assert_eq!(update.summary_up_to, 2);
+            assert_eq!(
+                harness.ctx.agent_config.reasoning_effort,
+                tiangong_llm::ReasoningEffort::High
+            );
+            assert_eq!(
+                serde_json::to_vec(&harness.ctx.session).unwrap(),
+                before_session
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 2);
+            let before: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let after: Value = serde_json::from_slice(&requests[1].body).unwrap();
+            assert_eq!(before["model"], after["model"]);
+            // 除输出上限与末尾压缩指令外，所有请求参数必须与主循环完全一致：
+            // tool_choice / thinking / effort 等可能影响 provider 前缀缓存，
+            // 压缩器不得重新推导或覆盖客户端的现有配置。
+            let (input_field, budget_field) = if protocol == ProviderProtocol::OpenAi {
+                ("input", "max_output_tokens")
+            } else {
+                ("messages", "max_tokens")
+            };
+            assert_eq!(before[budget_field], 8192);
+            assert_eq!(after[budget_field], 4096);
+            assert!(after["tools"].to_string().contains("snapshot_tool"));
+            assert!(!after["tools"].to_string().contains("read_file"));
+            let strip = |value: &Value| {
+                let mut object = value.as_object().unwrap().clone();
+                object.remove(input_field);
+                object.remove(budget_field);
+                object
+            };
+            assert_eq!(strip(&before), strip(&after));
+            if protocol == ProviderProtocol::OpenAi {
+                assert_eq!(after["reasoning"]["effort"], "medium");
+            } else {
+                assert_eq!(after["reasoning_effort"], "medium");
+            }
+            let field = input_field;
+            let old = before[field].as_array().unwrap();
+            let new = after[field].as_array().unwrap();
+            assert_eq!(new.len(), old.len() + 1);
+            assert_eq!(&new[..old.len()], old.as_slice());
+            assert!(new.last().unwrap().to_string().contains("先前结论"));
+            assert!(new.last().unwrap().to_string().contains("不要调用工具"));
+            assert!(new.last().unwrap().to_string().contains("尽量缩短思考"));
         }
-        let update = ContextCompressor::new(
-            harness.ctx.session.clone(),
-            harness.ctx.client.clone(),
-            harness.ctx.tools.clone(),
-            harness.ctx.agent_config.reasoning_effort,
-        )
-        .compress(2, 4096)
-        .await
-        .unwrap();
-        assert_eq!(update.summary, "先前结论摘要");
-        assert_eq!(update.summary_up_to, 2);
-        assert_eq!(
-            harness.ctx.agent_config.reasoning_effort,
-            tiangong_llm::ReasoningEffort::High
-        );
-        assert_eq!(
-            serde_json::to_vec(&harness.ctx.session).unwrap(),
-            before_session
-        );
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        let before: Value = serde_json::from_slice(&requests[0].body).unwrap();
-        let after: Value = serde_json::from_slice(&requests[1].body).unwrap();
-        assert_eq!(before["model"], after["model"]);
-        // 除输出上限与末尾压缩指令外，所有请求参数必须与主循环完全一致：
-        // tool_choice / thinking / effort 等参与 provider 缓存键与模板渲染，
-        // 任何差异都会让整段历史前缀缓存失效。
-        let (input_field, budget_field) = if protocol == ProviderProtocol::OpenAi {
-            ("input", "max_output_tokens")
-        } else {
-            ("messages", "max_tokens")
-        };
-        assert_eq!(after[budget_field], 4096);
-        let strip = |value: &Value| {
-            let mut object = value.as_object().unwrap().clone();
-            object.remove(input_field);
-            object.remove(budget_field);
-            // 传输层字段（流式与否）不参与 prompt 前缀缓存。
-            object.remove("stream");
-            object.remove("stream_options");
-            object
-        };
-        assert_eq!(strip(&before), strip(&after));
-        if protocol == ProviderProtocol::OpenAi {
-            assert_eq!(after["reasoning"]["effort"], "high");
-        } else {
-            assert_eq!(after["reasoning_effort"], "high");
-        }
-        let field = input_field;
-        let old = before[field].as_array().unwrap();
-        let new = after[field].as_array().unwrap();
-        assert_eq!(new.len(), old.len() + 1);
-        assert_eq!(&new[..old.len()], old.as_slice());
-        assert!(new.last().unwrap().to_string().contains("先前结论"));
-        assert!(new.last().unwrap().to_string().contains("不要调用工具"));
-        assert!(new.last().unwrap().to_string().contains("尽量缩短思考"));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compression_keeps_previous_effort_before_react_uses_new_effort() {
+    use tiangong_llm::ReasoningEffort;
+
+    let server = MockServer::builder().start().await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_1", "paused_probe", "{}"),
+            usage_chunk(185_900, 5),
+        ],
+    )
+    .await;
+    mount_completion(&server, "[[SUMMARY]]\n历史摘要", "stop", 100, 20, None).await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("已完成。"), usage_chunk(30, 5)],
+    )
+    .await;
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut harness = TestHarness::new(
+        &server,
+        vec![tool_spec("paused_probe")],
+        HashMap::from([(
+            "paused_probe".into(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }) as Arc<dyn ToolOverrideHandler>,
+        )]),
+    );
+    harness.ctx.agent_config.reasoning_effort = ReasoningEffort::Medium;
+    let cmd_tx = harness.cmd_tx.clone();
+    let update_effort = async move {
+        started.notified().await;
+        cmd_tx
+            .send(Command::SetReasoningEffort(ReasoningEffort::Max))
+            .unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            execute_turn(&mut harness.ctx, &mut harness.cmd_rx),
+            update_effort
+        )
+    })
+    .await
+    .expect("应完成工具、自动压缩和下一次 ReAct 请求");
+
+    assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+    assert_eq!(
+        harness.ctx.session.context_summary.as_deref(),
+        Some("历史摘要")
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let [before, compression, after] = std::array::from_fn::<_, 3, _>(|index| {
+        serde_json::from_slice::<Value>(&requests[index].body).unwrap()
+    });
+    assert_eq!(before["reasoning_effort"], "medium");
+    assert_eq!(compression["reasoning_effort"], "medium");
+    assert_eq!(after["reasoning_effort"], "max");
+    assert_eq!(compression["max_tokens"], 9_999);
+    assert_ne!(before["max_tokens"], compression["max_tokens"]);
+    assert_eq!(after["max_tokens"], before["max_tokens"]);
+    // 工具批次增加了历史消息；除消息列表和输出预算外，压缩仍使用原请求配置。
+    let request_options = |body: &Value| {
+        let mut options = body.as_object().unwrap().clone();
+        options.remove("messages");
+        options.remove("max_tokens");
+        options
+    };
+    assert_eq!(request_options(&compression), request_options(&before));
 }
 
 #[tokio::test]
@@ -132,8 +233,6 @@ async fn compression_rejects_unexpected_tool_calls() {
     let result = crate::context::compressor::ContextCompressor::new(
         harness.ctx.session.clone(),
         harness.ctx.client.clone(),
-        harness.ctx.tools.clone(),
-        tiangong_llm::ReasoningEffort::High,
     )
     .compress(1, 4096)
     .await;
@@ -152,8 +251,6 @@ async fn compression_empty_output_keeps_usage_and_original_session() {
     let result = crate::context::compressor::ContextCompressor::new(
         harness.ctx.session.clone(),
         harness.ctx.client.clone(),
-        harness.ctx.tools.clone(),
-        tiangong_llm::ReasoningEffort::High,
     )
     .compress(1, 4096)
     .await;
@@ -204,9 +301,11 @@ async fn mount_responses(server: &MockServer, output: Vec<Value>, cached: u64, a
         ResponseTemplate::new(200).set_body_json(body)
     } else {
         let mut chunks = vec![json!({"type":"response.created", "response":{"id":body["id"]}})];
-        for item in body["output"].as_array().unwrap() {
+        for (index, item) in body["output"].as_array().unwrap().iter().enumerate() {
             if item["type"] == "function_call" {
-                chunks.push(json!({"type":"response.output_item.added", "item":item}));
+                chunks.push(
+                    json!({"type":"response.output_item.added", "output_index":index, "item":item}),
+                );
             }
         }
         chunks.push(json!({"type":"response.completed", "response":body}));
@@ -678,7 +777,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
     use crate::react::execute::{AgentLoopState, ToolInjectionBuffer};
     use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
-    use tiangong_llm::{ModelResponse, ModelStreamChunk};
+    use tiangong_llm::ModelStreamChunk;
 
     let server = MockServer::builder().start().await;
     let mut harness = TestHarness::new_with_protocol(
@@ -717,7 +816,9 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
             StreamTextKind::React,
         ),
         chunk_rx: rx,
-        task: tokio::spawn(std::future::pending::<anyhow::Result<ModelResponse>>()),
+        task: tokio::spawn(std::future::pending::<
+            anyhow::Result<crate::model_output::CoreModelOutput>,
+        >()),
         streamed_text: String::new(),
         streamed_reasoning: String::new(),
         streaming_usage: TokenUsage {
