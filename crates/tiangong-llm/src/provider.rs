@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
 use crate::request::ProviderRequest;
-use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 
 /// Provider 能力说明。
@@ -20,9 +19,9 @@ pub struct ProviderCapabilities {
 pub trait LlmProvider: Send + Sync {
     fn capabilities(&self) -> ProviderCapabilities;
 
-    async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError>;
-
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError>;
-
+}
+#[async_trait]
+pub trait ModelCatalog: Send + Sync {
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError>;
 }

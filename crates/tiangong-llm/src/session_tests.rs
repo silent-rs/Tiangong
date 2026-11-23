@@ -79,7 +79,7 @@ async fn anthropic_usage_keeps_cache_fields_across_partial_and_repeated_frames()
             ..Default::default()
         });
         let req = request("cache-usage");
-        let ordinary = client.complete_async(req.clone()).await.unwrap();
+        let ordinary = client.collect_async(req.clone()).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let streamed = client.stream_async(req, tx).await.unwrap();
         let mut snapshots = TokenUsage::default();
@@ -197,7 +197,7 @@ async fn unified_sync_async_and_stream_requests_preserve_parameters_and_usage() 
             timeout_ms: Some(5_000),
             ..request("unified-session")
         };
-        let first = client.complete_async(req.clone()).await.unwrap();
+        let first = client.collect_async(req.clone()).await.unwrap();
         let sync_client = client.clone();
         let sync_req = req.clone();
         let second = tokio::task::spawn_blocking(move || sync_client.complete(sync_req))
@@ -231,6 +231,7 @@ async fn unified_sync_async_and_stream_requests_preserve_parameters_and_usage() 
         for request in requests {
             assert_eq!(request.headers.get("x-session").unwrap(), "unified-session");
             let mut payload: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(payload["stream"], true);
             payload.as_object_mut().unwrap().remove("stream");
             payload.as_object_mut().unwrap().remove("stream_options");
             if let Some(previous) = previous {
@@ -256,7 +257,7 @@ async fn empty_truncated_response_preserves_stop_reason_and_usage_in_both_modes(
         ..Default::default()
     });
     let req = request("empty-response");
-    let first = client.complete_async(req.clone()).await.unwrap();
+    let first = client.collect_async(req.clone()).await.unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let second = client.stream_async(req, tx).await.unwrap();
     for response in [first, second] {
@@ -381,7 +382,7 @@ async fn session_headers_reach_streaming_and_non_streaming_openai_requests() {
             ..Default::default()
         });
         let req = request(&session_id);
-        let response = client.complete_async(req.clone()).await.unwrap();
+        let response = client.collect_async(req.clone()).await.unwrap();
         assert_eq!(response.text, "OK");
         assert_eq!(response.usage.prompt_cache_hit_tokens, Some(80));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -616,7 +617,7 @@ async fn deepseek_uses_user_and_openai_uses_prompt_cache_key() {
             ..Default::default()
         });
         for id in ["session_one", "session_two"] {
-            client.complete_async(request(id)).await.unwrap();
+            client.collect_async(request(id)).await.unwrap();
         }
         for (request, id) in server
             .received_requests()
@@ -753,7 +754,7 @@ async fn live_session_routing_smoke() {
     );
     for round in 1..=2 {
         let response =
-            tokio::time::timeout(Duration::from_secs(35), client.complete_async(req.clone()))
+            tokio::time::timeout(Duration::from_secs(35), client.collect_async(req.clone()))
                 .await
                 .unwrap()
                 .unwrap();

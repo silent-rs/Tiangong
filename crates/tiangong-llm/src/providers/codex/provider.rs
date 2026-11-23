@@ -6,15 +6,19 @@ use reqwest::header::HeaderMap;
 use serde_json::Value;
 
 use crate::error::LlmError;
-use crate::message::{ChatMessage, MessageContent, MessageRole, ThinkingContent};
+#[cfg(test)]
+use crate::message::MessageContent;
 use crate::model::ProviderModelInfo;
-use crate::provider::{LlmProvider, ProviderCapabilities};
+use crate::provider::{LlmProvider, ModelCatalog, ProviderCapabilities};
 use crate::providers::openai::error_event_fields;
 use crate::providers::openai::map_responses_stream;
 use crate::providers::openai::mapping::build_request_json;
 use crate::request::ProviderRequest;
+#[cfg(test)]
 use crate::response::ProviderResponse;
-use crate::stream::{ProviderStream, ProviderStreamEvent};
+use crate::stream::ProviderStream;
+#[cfg(test)]
+use crate::stream::ProviderStreamEvent;
 
 use super::client::CodexClient;
 use super::config::CodexConfig;
@@ -136,6 +140,7 @@ impl CodexProvider {
         let mut last_error: Option<LlmError> = None;
         let mut attempt = 0;
         while attempt < max_attempts {
+            crate::retry::take_attempt()?;
             attempt += 1;
             if attempt > 1 {
                 tokio::time::sleep(std::cmp::min(
@@ -271,83 +276,14 @@ fn adapt_payload(payload: &mut Value) {
     }
 }
 
-/// 把统一流事件聚合为完整响应（Codex 后端只接受流式请求，`complete` 经此实现）。
-async fn collect_stream_response(mut stream: ProviderStream) -> Result<ProviderResponse, LlmError> {
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut calls: Vec<(String, String, String)> = Vec::new();
-    let mut usage = None;
-    let mut stop_reason = None;
-    while let Some(event) = stream.next().await {
-        match event? {
-            ProviderStreamEvent::TextDelta(delta) => text.push_str(&delta),
-            ProviderStreamEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
-            ProviderStreamEvent::ToolCallStart(call) => {
-                let args = if call.arguments.is_null() || call.arguments == serde_json::json!({}) {
-                    String::new()
-                } else {
-                    call.arguments.to_string()
-                };
-                calls.push((call.id, call.name, args));
-            }
-            ProviderStreamEvent::ToolCallDelta {
-                call_id,
-                partial_json,
-            } => {
-                if let Some(entry) = calls.iter_mut().find(|(id, _, _)| *id == call_id) {
-                    entry.2.push_str(&partial_json);
-                }
-            }
-            ProviderStreamEvent::Usage(value) => usage = Some(value),
-            ProviderStreamEvent::MessageEnd {
-                stop_reason: reason,
-            } => {
-                if reason.is_some() {
-                    stop_reason = reason;
-                }
-            }
-            ProviderStreamEvent::Error(message) => {
-                return Err(LlmError::Provider {
-                    provider: "codex",
-                    message,
-                });
-            }
-            _ => {}
-        }
+#[cfg(test)]
+async fn collect_stream_response(stream: ProviderStream) -> Result<ProviderResponse, LlmError> {
+    let collected = crate::collect::collect_response(stream).await;
+    if let Some(error) = collected.error {
+        return Err(error);
     }
-    let mut content = Vec::new();
-    if !reasoning.trim().is_empty() {
-        content.push(MessageContent::Thinking(ThinkingContent {
-            thinking: reasoning.clone(),
-            signature: None,
-        }));
-    }
-    if !text.trim().is_empty() {
-        content.push(MessageContent::Text(text.trim().to_string()));
-    }
-    for (id, name, args) in calls {
-        let arguments = if args.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}))
-        };
-        content.push(MessageContent::ToolCall(crate::tool::ToolCall {
-            id,
-            name,
-            arguments,
-        }));
-    }
-    Ok(ProviderResponse {
-        id: None,
-        model: None,
-        assistant_message: ChatMessage::new(MessageRole::Assistant, content),
-        reasoning_content: (!reasoning.trim().is_empty()).then_some(reasoning),
-        stop_reason,
-        usage,
-        raw: None,
-    })
+    Ok(collected.response)
 }
-
 #[async_trait]
 impl LlmProvider for CodexProvider {
     fn capabilities(&self) -> ProviderCapabilities {
@@ -357,10 +293,6 @@ impl LlmProvider for CodexProvider {
             system_prompt: true,
             list_models: true,
         }
-    }
-
-    async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError> {
-        collect_stream_response(self.stream(req).await?).await
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
@@ -396,7 +328,9 @@ impl LlmProvider for CodexProvider {
             .filter(|s| !s.is_empty());
         self.stream_via_ws(session_id, &payload).await
     }
-
+}
+#[async_trait]
+impl ModelCatalog for CodexProvider {
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
     }
@@ -435,18 +369,24 @@ mod tests {
             Ok(ProviderStreamEvent::ReasoningDelta("想".to_string())),
             Ok(ProviderStreamEvent::TextDelta("你".to_string())),
             Ok(ProviderStreamEvent::TextDelta("好".to_string())),
-            Ok(ProviderStreamEvent::ToolCallStart(crate::tool::ToolCall {
-                id: "c1".to_string(),
-                name: "get_time".to_string(),
-                arguments: serde_json::json!({}),
-            })),
-            Ok(ProviderStreamEvent::ToolCallDelta {
-                call_id: "c1".to_string(),
-                partial_json: r#"{"tz":"#.to_string(),
+            Ok(ProviderStreamEvent::ToolCallMetadata {
+                key: crate::CallKey(0),
+                id: "c1".into(),
+                name: "get_time".into(),
             }),
-            Ok(ProviderStreamEvent::ToolCallDelta {
-                call_id: "c1".to_string(),
-                partial_json: r#""UTC"}"#.to_string(),
+            Ok(ProviderStreamEvent::ToolArgumentsDelta {
+                key: crate::CallKey(0),
+                fragment: r#"{"tz":"#.into(),
+            }),
+            Ok(ProviderStreamEvent::ToolArgumentsDelta {
+                key: crate::CallKey(0),
+                fragment: r#""UTC"}"#.into(),
+            }),
+            Ok(ProviderStreamEvent::ToolCallFinished {
+                key: crate::CallKey(0),
+            }),
+            Ok(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(crate::response::StopReason::ToolUse),
             }),
         ];
         let response = collect_stream_response(Box::pin(stream::iter(events)))

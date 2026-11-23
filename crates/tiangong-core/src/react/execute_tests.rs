@@ -1902,8 +1902,11 @@ async fn inject_during_compression_cancels_and_restarts_without_applying_summary
         "引导消息应保存进 session"
     );
     assert!(
-        ctx.session.context_summary.is_none(),
-        "被中断压缩的迟到结果不得应用（context_summary 应为空）"
+        !ctx.session
+            .context_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("旧摘要")),
+        "被中断压缩的迟到旧摘要不得应用；重启后合法流式压缩允许产生新摘要"
     );
 }
 
@@ -2969,4 +2972,40 @@ async fn tool_call_round_persists_decode_tps() {
         .expect("最终文本消息应存在");
     assert!(text_round.text_elapsed_ms().is_some());
     assert!(text_round.ttft_ms().is_some_and(|ttft| ttft > 0));
+}
+
+#[tokio::test]
+async fn missing_user_fallback_is_request_only_and_does_not_change_context() {
+    let server = MockServer::start().await;
+    mount_completion(&server, "完成", "stop", 3, 1, None).await;
+    let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    harness.ctx.session.messages.clear();
+    harness.ctx.configure_client();
+    let before = serde_json::to_value(&harness.ctx.session).unwrap();
+    assert_eq!(harness.ctx.session.context().len(), 1);
+    let active = super::start_llm_request(
+        &harness.ctx,
+        crate::react::phase::LlmPurpose::React {
+            request_injection_generation: 0,
+        },
+        crate::stream_throttle::StreamTextKind::React,
+        None,
+    );
+    // 接收端保持存活，避免把调用方提前关闭当作取消。
+    let _receiver = active.chunk_rx;
+    let output = tokio::time::timeout(Duration::from_secs(3), active.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.text, "完成");
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(
+        body["messages"].as_array().unwrap().iter().any(
+            |message| message["role"] == "user" && message["content"] == "请继续处理当前任务。"
+        )
+    );
+    assert_eq!(harness.ctx.session.context().len(), 1);
+    assert_eq!(serde_json::to_value(&harness.ctx.session).unwrap(), before);
 }

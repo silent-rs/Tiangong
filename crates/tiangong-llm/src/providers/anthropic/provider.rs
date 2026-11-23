@@ -2,13 +2,12 @@ use async_trait::async_trait;
 
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
-use crate::provider::{LlmProvider, ProviderCapabilities};
+use crate::provider::{LlmProvider, ModelCatalog, ProviderCapabilities};
 use crate::providers::anthropic::client::{AnthropicClient, NativeAnthropicTransport};
 use crate::providers::anthropic::config::AnthropicConfig;
-use crate::providers::anthropic::mapping::{from_anthropic_response, to_anthropic_request};
+use crate::providers::anthropic::mapping::to_anthropic_request;
 use crate::providers::anthropic::stream::map_anthropic_stream;
 use crate::request::ProviderRequest;
-use crate::response::ProviderResponse;
 use crate::stream::ProviderStream;
 
 #[derive(Clone)]
@@ -45,18 +44,14 @@ where
         }
     }
 
-    async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, LlmError> {
-        let request = to_anthropic_request(&req)?;
-        let response = self.client.create(request).await?;
-        from_anthropic_response(response)
-    }
-
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
         let request = to_anthropic_request(&req)?;
         let stream = self.client.create_stream(request).await?;
         Ok(map_anthropic_stream(stream))
     }
-
+}
+#[async_trait]
+impl<T: super::client::AnthropicTransport> ModelCatalog for AnthropicProvider<T> {
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         self.client.list_models().await
     }

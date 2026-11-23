@@ -11,7 +11,7 @@ use tiangong_anthropic::types::{
 };
 
 use crate::message::{ChatMessage, MessageContent, MessageRole};
-use crate::provider::LlmProvider;
+use crate::provider::{LlmProvider, ModelCatalog};
 use crate::providers::anthropic::client::{AnthropicClient, AnthropicTransport};
 use crate::providers::anthropic::config::AnthropicConfig;
 use crate::providers::anthropic::provider::AnthropicProvider;
@@ -21,19 +21,11 @@ use crate::tool::{ToolChoice, ToolResult, ToolResultContent, ToolSpec};
 
 #[derive(Clone, Default)]
 struct MockAnthropicTransport {
-    response: Option<MessagesCreateResponse>,
     stream_events: Vec<Result<StreamEvent, crate::error::LlmError>>,
 }
 
 #[async_trait]
 impl AnthropicTransport for MockAnthropicTransport {
-    async fn create(
-        &self,
-        _request: MessagesCreateRequest,
-    ) -> Result<MessagesCreateResponse, crate::error::LlmError> {
-        Ok(self.response.clone().expect("mock response"))
-    }
-
     async fn create_stream(
         &self,
         _request: MessagesCreateRequest,
@@ -377,23 +369,6 @@ fn test_tool_and_thinking_mapping_back_to_message_content() {
 
 #[tokio::test]
 async fn test_provider_complete_and_stream_behavior() {
-    let response = MessagesCreateResponse {
-        id: "msg_1".to_string(),
-        kind: "message".to_string(),
-        role: tiangong_anthropic::types::MessageRole::Assistant,
-        content: vec![ContentBlock::Text {
-            text: "你好，世界".to_string(),
-        }],
-        model: "claude-3-7-sonnet".to_string(),
-        stop_reason: Some("end_turn".to_string()),
-        stop_sequence: None,
-        usage: Some(Usage {
-            input_tokens: Some(10),
-            output_tokens: Some(4),
-            ..Default::default()
-        }),
-    };
-
     let stream_events = vec![
         Ok(StreamEvent::MessageStart {
             message: MessageStartData {
@@ -426,10 +401,7 @@ async fn test_provider_complete_and_stream_behavior() {
         Ok(StreamEvent::MessageStop),
     ];
 
-    let transport = MockAnthropicTransport {
-        response: Some(response),
-        stream_events,
-    };
+    let transport = MockAnthropicTransport { stream_events };
     let provider = AnthropicProvider::new(AnthropicClient::new(
         transport,
         AnthropicConfig {
@@ -444,8 +416,11 @@ async fn test_provider_complete_and_stream_behavior() {
         },
     ));
 
-    let complete = provider.complete(sample_request()).await.expect("complete");
-    assert_eq!(complete.assistant_message.content.len(), 1);
+    let complete =
+        crate::collect::collect_response(provider.stream(sample_request()).await.expect("stream"))
+            .await
+            .response;
+    assert_eq!(complete.assistant_message.content.len(), 2);
 
     let mut stream = provider.stream(sample_request()).await.expect("stream");
     let mut seen = Vec::new();

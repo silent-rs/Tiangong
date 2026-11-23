@@ -10,7 +10,7 @@ use crate::model::ProviderModelInfo;
 use crate::rerank::RerankRequest;
 
 use super::config::OpenAiChatConfig;
-use super::error::{is_retryable_openai_error, map_openai_error};
+use super::error::map_openai_error;
 use super::mapping::normalize_api_base;
 
 type OpenAiByotStream =
@@ -42,7 +42,10 @@ where
     byte_stream.eventsource().filter_map(|event| async move {
         match event {
             Ok(message) => {
-                if message.data == "[DONE]" || message.event == "keepalive" {
+                if message.data == "[DONE]" {
+                    return Some(Ok(serde_json::json!({"__stream_done": true})));
+                }
+                if message.event == "keepalive" {
                     return None;
                 }
                 Some(serde_json::from_str::<Value>(&message.data).map_err(|err| {
@@ -167,8 +170,17 @@ pub(crate) fn parse_complete_body(bytes: &[u8]) -> Result<Value, async_openai::e
     })
 }
 
-/// 流式和非流式共用单次发送；重试由调用方统一控制，避免 SDK 再次重试。
+pub(crate) fn build_http_client(
+    headers: &reqwest::header::HeaderMap,
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .default_headers(headers.clone())
+        .retry(reqwest::retry::never())
+        .build()
+}
+/// 单次流请求发送；连接池随 provider 复用，取消仍关闭本次读取。
 pub(crate) async fn send_request(
+    client: &reqwest::Client,
     url: &str,
     api_key: &str,
     headers: &reqwest::header::HeaderMap,
@@ -176,10 +188,6 @@ pub(crate) async fn send_request(
     request_timeout: Duration,
     stream: bool,
 ) -> Result<reqwest::Response, async_openai::error::OpenAIError> {
-    let client = reqwest::Client::builder()
-        .default_headers(headers.clone())
-        .retry(reqwest::retry::never())
-        .build()?;
     let mut request = client
         .post(url)
         .header(
@@ -226,39 +234,18 @@ pub(crate) async fn send_request(
     Ok(response)
 }
 
-const INITIAL_RETRY_DELAY_MS: u64 = 1000;
-
 #[derive(Clone)]
 pub struct OpenAiClient {
+    http: Result<reqwest::Client, String>,
     config: OpenAiChatConfig,
 }
 
 impl OpenAiClient {
     pub fn new(config: OpenAiChatConfig) -> Self {
-        Self { config }
-    }
-
-    pub async fn complete(&self, model: &str, payload: Value) -> Result<Value, LlmError> {
-        let base = normalize_api_base(&self.config.base_url)
-            .map_err(|error| LlmError::Configuration(error.to_string()))?;
-        let url = format!("{base}/chat/completions");
-        timeout(
-            self.config.timeout,
-            self.with_retry("openai_complete", model, false, || async {
-                let response = send_request(
-                    &url,
-                    &self.config.api_key,
-                    &self.config.headers,
-                    &payload,
-                    self.config.timeout,
-                    false,
-                )
-                .await?;
-                parse_complete_body(&response.bytes().await?)
-            }),
-        )
-        .await
-        .map_err(|_| LlmError::Timeout(self.config.timeout.as_millis() as u64))?
+        Self {
+            http: build_http_client(&config.headers).map_err(|error| error.to_string()),
+            config,
+        }
     }
 
     pub async fn stream(
@@ -272,15 +259,29 @@ impl OpenAiClient {
         let api_key = self.config.api_key.clone();
         let request_timeout = self.config.timeout;
         let headers = self.config.headers.clone();
+        let http = self
+            .http
+            .as_ref()
+            .map_err(|error| LlmError::Configuration(error.clone()))?
+            .clone();
         self.with_retry("openai_stream", model, true, move || {
             let url = url.clone();
             let api_key = api_key.clone();
             let payload = payload.clone();
             let request_timeout = request_timeout;
             let headers = headers.clone();
+            let http = http.clone();
             async move {
-                let response =
-                    send_request(&url, &api_key, &headers, &payload, request_timeout, true).await?;
+                let response = send_request(
+                    &http,
+                    &url,
+                    &api_key,
+                    &headers,
+                    &payload,
+                    request_timeout,
+                    true,
+                )
+                .await?;
                 match resolve_stream_body(response, request_timeout).await? {
                     StreamBody::Sse(stream) => Ok(OpenAiStreamResponse::Sse(stream)),
                     StreamBody::Complete(value) => {
@@ -402,65 +403,18 @@ impl OpenAiClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, async_openai::error::OpenAIError>>,
     {
-        let mut attempt = 0u32;
-        let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-        let max_retries = self.config.max_retries;
-        loop {
-            let start = std::time::Instant::now();
-            tracing::info!(
-                operation,
-                provider = "openai",
-                model,
-                stream,
-                attempt,
-                "开始 OpenAI 兼容请求"
-            );
-            match f().await {
-                Ok(value) => {
-                    tracing::info!(
-                        operation,
-                        provider = "openai",
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        "OpenAI 兼容请求完成"
-                    );
-                    return Ok(value);
-                }
-                Err(err) if attempt < max_retries && is_retryable_openai_error(&err) => {
-                    attempt += 1;
-                    if let Some(notifier) = &self.config.retry_notifier {
-                        notifier(attempt, max_retries, delay_ms, &err.to_string());
-                    }
-                    tracing::warn!(
-                        operation,
-                        provider = "openai",
-                        model,
-                        stream,
-                        attempt,
-                        delay_ms,
-                        error = %err,
-                        "OpenAI 兼容请求失败，准备重试"
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms *= 2;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        operation,
-                        provider = "openai",
-                        model,
-                        stream,
-                        attempt,
-                        latency_ms = start.elapsed().as_millis() as u64,
-                        error = %err,
-                        "OpenAI 兼容请求失败"
-                    );
-                    return Err(map_openai_error(&err));
-                }
-            }
-        }
+        let _ = stream;
+        crate::retry::run(
+            operation,
+            model,
+            self.config.max_retries,
+            self.config.retry_notifier.as_ref(),
+            || {
+                let future = f();
+                async move { future.await.map_err(|error| map_openai_error(&error)) }
+            },
+        )
+        .await
     }
 }
 

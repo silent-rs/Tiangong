@@ -2,48 +2,35 @@
 //!
 //! Responses SSE 事件以 `type` 字段区分，解析为统一 `ProviderStreamEvent`。
 
-use std::collections::{HashMap, HashSet};
+use crate::call_state::CallRegistry;
 
 use serde_json::Value;
 
 use crate::stream::ProviderStreamEvent;
-use crate::tool::ToolCall;
 
 use super::mapping::{extract_reasoning_text, parse_usage};
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ResponsesStreamParser {
-    item_call_ids: HashMap<String, String>,
-    received_argument_deltas: HashSet<String>,
+    calls: CallRegistry,
+    has_text: bool,
 }
-
 impl ResponsesStreamParser {
     pub fn parse_event(
         &mut self,
         payload: &Value,
     ) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
-        parse_stream_event_with_state(
-            payload,
-            &mut self.item_call_ids,
-            &mut self.received_argument_deltas,
-        )
+        parse_stream_event_with_state(payload, &mut self.calls, &mut self.has_text)
     }
 }
-
-/// 解析单条 Responses 流式事件（已反序列化为 `Value`）。
-///
-/// 返回零到多个统一事件：文本增量、思考增量、工具调用增量、用量与结束。
 #[cfg(test)]
 fn parse_stream_event(payload: &Value) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
-    let mut item_call_ids = HashMap::new();
-    let mut received_argument_deltas = HashSet::new();
-    parse_stream_event_with_state(payload, &mut item_call_ids, &mut received_argument_deltas)
+    ResponsesStreamParser::default().parse_event(payload)
 }
-
 fn parse_stream_event_with_state(
     payload: &Value,
-    item_call_ids: &mut HashMap<String, String>,
-    received_argument_deltas: &mut HashSet<String>,
+    calls: &mut CallRegistry,
+    has_text: &mut bool,
 ) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
     let mut events = Vec::new();
     let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
@@ -55,6 +42,7 @@ fn parse_stream_event_with_state(
             if let Some(delta) = payload.get("delta").and_then(Value::as_str)
                 && !delta.is_empty()
             {
+                *has_text = true;
                 events.push(Ok(ProviderStreamEvent::TextDelta(delta.to_string())));
             }
         }
@@ -88,40 +76,59 @@ fn parse_stream_event_with_state(
             }
         }
         "response.function_call_arguments.delta" => {
-            let call_id = response_tool_call_id(payload, item_call_ids);
-            if let Some(partial) = payload.get("delta").and_then(Value::as_str)
-                && !partial.is_empty()
-            {
-                if !call_id.is_empty() {
-                    received_argument_deltas.insert(call_id.clone());
-                }
-                events.push(Ok(ProviderStreamEvent::ToolCallDelta {
-                    call_id,
-                    partial_json: partial.to_string(),
-                }));
+            match calls.resolve(
+                payload.get("item_id").and_then(Value::as_str),
+                payload.get("output_index").and_then(Value::as_u64),
+            ) {
+                Ok(key) => events.push(Ok(ProviderStreamEvent::ToolArgumentsDelta {
+                    key,
+                    fragment: payload
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                })),
+                Err(error) => events.push(Err(error)),
             }
         }
-        "response.output_item.added" => {
+        "response.output_item.added" | "response.output_item.done" => {
             if let Some(item) = payload.get("item")
                 && item.get("type").and_then(Value::as_str) == Some("function_call")
-                && let Some(call) = parse_function_call_item(item)
             {
-                if let Some(item_id) = item.get("id").and_then(Value::as_str)
-                    && !item_id.is_empty()
-                {
-                    item_call_ids.insert(item_id.to_string(), call.call_id.clone());
+                match calls.item_events(
+                    item.get("id").and_then(Value::as_str),
+                    payload.get("output_index").and_then(Value::as_u64),
+                    item.get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    item.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    if event_type.ends_with(".done") {
+                        item.get("arguments").and_then(Value::as_str)
+                    } else {
+                        None
+                    },
+                    event_type.ends_with(".done"),
+                ) {
+                    Ok(mapped) => events.extend(mapped.into_iter().map(Ok)),
+                    Err(error) => events.push(Err(error)),
                 }
-                events.push(Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                    id: call.call_id,
-                    name: call.name,
-                    arguments: serde_json::json!({}),
-                })));
             }
         }
         "response.function_call_arguments.done" => {
-            let call_id = response_tool_call_id(payload, item_call_ids);
-            if !call_id.is_empty() {
-                events.push(Ok(ProviderStreamEvent::ToolCallEnd { call_id }));
+            match calls.resolve(
+                payload.get("item_id").and_then(Value::as_str),
+                payload.get("output_index").and_then(Value::as_u64),
+            ) {
+                Ok(key) => {
+                    if let Some(arguments) = payload.get("arguments").and_then(Value::as_str) {
+                        events.push(Ok(ProviderStreamEvent::ToolArgumentsSnapshot {
+                            key,
+                            arguments: arguments.to_owned(),
+                        }));
+                    }
+                    events.push(Ok(ProviderStreamEvent::ToolCallFinished { key }));
+                }
+                Err(error) => events.push(Err(error)),
             }
         }
         "response.completed" => {
@@ -130,28 +137,43 @@ fn parse_stream_event_with_state(
             {
                 events.push(Ok(ProviderStreamEvent::Usage(parse_usage(usage))));
             }
-            // 兜底提取 function_call 的完整 arguments。
-            // 某些中转/模型不发 function_call_arguments.delta，导致流式拼接的
-            // arguments 为空。response.completed 的 output 里含完整 function_call
-            // items（带 arguments），此处补发确保工具参数不丢失。
             if let Some(output) = payload
                 .get("response")
                 .and_then(|r| r.get("output"))
                 .and_then(Value::as_array)
             {
-                for item in output {
-                    if item.get("type").and_then(Value::as_str) == Some("function_call")
-                        && let Some(call) = parse_function_call_item(item)
-                        && let Some(args) = call.arguments
-                        && !args.trim().is_empty()
-                        && !received_argument_deltas.contains(&call.call_id)
+                for (index, item) in output.iter().enumerate() {
+                    if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                        match calls.item_events(
+                            item.get("id").and_then(Value::as_str),
+                            Some(index as u64),
+                            item.get("call_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            item.get("name").and_then(Value::as_str).unwrap_or_default(),
+                            item.get("arguments").and_then(Value::as_str),
+                            true,
+                        ) {
+                            Ok(mapped) => events.extend(mapped.into_iter().map(Ok)),
+                            Err(error) => events.push(Err(error)),
+                        }
+                    } else if !*has_text
+                        && item.get("type").and_then(Value::as_str) == Some("message")
+                        && let Some(content) = item.get("content").and_then(Value::as_array)
                     {
-                        events.push(Ok(ProviderStreamEvent::ToolCallDelta {
-                            call_id: call.call_id,
-                            partial_json: args,
-                        }));
+                        for block in content {
+                            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                events.push(Ok(ProviderStreamEvent::TextDelta(text.to_owned())));
+                            }
+                        }
                     }
                 }
+            }
+            if events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderStreamEvent::TextDelta(_))))
+            {
+                *has_text = true;
             }
             // 兜底解析 reasoning 由 provider 层根据"是否收到过 delta"决定，
             // 避免此处无条件补发导致与流式增量重复。
@@ -175,7 +197,25 @@ fn parse_stream_event_with_state(
                 stop_reason: Some(crate::response::StopReason::Other(event_type.to_string())),
             }));
         }
-        "response.failed" | "response.incomplete" => {
+        "response.incomplete" => {
+            if let Some(usage) = payload.get("response").and_then(|r| r.get("usage")) {
+                events.push(Ok(ProviderStreamEvent::Usage(parse_usage(usage))));
+            }
+            let reason = payload
+                .get("response")
+                .and_then(|r| r.get("incomplete_details"))
+                .and_then(|d| d.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("incomplete");
+            events.push(Ok(ProviderStreamEvent::MessageEnd {
+                stop_reason: Some(if reason == "max_output_tokens" {
+                    crate::response::StopReason::MaxTokens
+                } else {
+                    crate::response::StopReason::Other(reason.to_owned())
+                }),
+            }));
+        }
+        "response.failed" => {
             if let Some(usage) = payload
                 .get("response")
                 .and_then(|response| response.get("usage"))
@@ -196,7 +236,7 @@ fn parse_stream_event_with_state(
         }
         // P2：未处理的 reasoning 事件打 debug 日志，便于确认服务端实际返回结构。
         _ if event_type.contains("reasoning") => {
-            tracing::debug!(event_type, payload = %payload, "未处理的 Responses reasoning 事件");
+            tracing::debug!(event_type, "未处理的 Responses reasoning 事件");
         }
         _ => {}
     }
@@ -242,24 +282,6 @@ fn completed_stop_reason(payload: &Value) -> Option<crate::response::StopReason>
     })
 }
 
-fn response_tool_call_id(payload: &Value, item_call_ids: &HashMap<String, String>) -> String {
-    if let Some(call_id) = payload
-        .get("call_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    {
-        return call_id.to_string();
-    }
-    let item_id = payload
-        .get("item_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    item_call_ids
-        .get(item_id)
-        .cloned()
-        .unwrap_or_else(|| item_id.to_string())
-}
-
 /// 从 `response.completed` 事件的 payload 中提取最终 reasoning 文本。
 ///
 /// 由 provider 层在有状态 stream mapper 中调用：仅当本次流式过程中
@@ -282,26 +304,6 @@ pub(super) fn extract_completed_reasoning(payload: &Value) -> Option<String> {
     } else {
         Some(parts.join("\n"))
     }
-}
-
-pub(super) struct ParsedFunctionCall {
-    pub(super) call_id: String,
-    pub(super) name: String,
-    pub(super) arguments: Option<String>,
-}
-
-pub(super) fn parse_function_call_item(item: &Value) -> Option<ParsedFunctionCall> {
-    let call_id = item.get("call_id").and_then(Value::as_str)?.to_string();
-    let name = item.get("name").and_then(Value::as_str)?.to_string();
-    let arguments = item
-        .get("arguments")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    Some(ParsedFunctionCall {
-        call_id,
-        name,
-        arguments,
-    })
 }
 
 #[cfg(test)]
@@ -495,8 +497,8 @@ mod tests {
         let has_tool_delta = events.iter().any(|e| {
             matches!(
                 e,
-                Ok(ProviderStreamEvent::ToolCallDelta { call_id, partial_json })
-                    if call_id == "call_abc" && partial_json.contains("python3")
+                Ok(ProviderStreamEvent::ToolArgumentsSnapshot { arguments, .. })
+                    if arguments.contains("python3")
             )
         });
         assert!(
@@ -525,7 +527,7 @@ mod tests {
         let events = parse_stream_event(&payload);
         let has_tool_delta = events
             .iter()
-            .any(|e| matches!(e, Ok(ProviderStreamEvent::ToolCallDelta { .. })));
+            .any(|e| matches!(e, Ok(ProviderStreamEvent::ToolArgumentsDelta { .. })));
         assert!(!has_tool_delta, "空 arguments 不应补发 ToolCallDelta");
     }
 
@@ -555,7 +557,7 @@ mod tests {
 
         let added_events = parser.parse_event(&added);
         assert!(added_events.iter().any(
-            |e| matches!(e, Ok(ProviderStreamEvent::ToolCallStart(call)) if call.id == "call_real")
+            |e| matches!(e, Ok(ProviderStreamEvent::ToolCallMetadata { id, .. }) if id == "call_real")
         ));
 
         let delta_events = parser.parse_event(&delta);
@@ -563,8 +565,8 @@ mod tests {
             delta_events.iter().any(|e| {
                 matches!(
                     e,
-                    Ok(ProviderStreamEvent::ToolCallDelta { call_id, partial_json })
-                        if call_id == "call_real" && partial_json.contains("pwd")
+                    Ok(ProviderStreamEvent::ToolArgumentsDelta { fragment, .. })
+                        if fragment.contains("pwd")
                 )
             }),
             "delta 应使用真实 call_id: {delta_events:?}"
@@ -572,9 +574,9 @@ mod tests {
 
         let done_events = parser.parse_event(&done);
         assert!(
-            done_events.iter().any(|e| {
-                matches!(e, Ok(ProviderStreamEvent::ToolCallEnd { call_id }) if call_id == "call_real")
-            }),
+            done_events
+                .iter()
+                .any(|e| { matches!(e, Ok(ProviderStreamEvent::ToolCallFinished { .. })) }),
             "done 应使用真实 call_id: {done_events:?}"
         );
     }
@@ -618,7 +620,7 @@ mod tests {
         let completed_events = parser.parse_event(&completed);
         let tool_delta_count = completed_events
             .iter()
-            .filter(|e| matches!(e, Ok(ProviderStreamEvent::ToolCallDelta { .. })))
+            .filter(|e| matches!(e, Ok(ProviderStreamEvent::ToolArgumentsDelta { .. })))
             .count();
         assert_eq!(
             tool_delta_count, 0,

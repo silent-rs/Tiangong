@@ -1,29 +1,20 @@
-//! 单 provider 客户端：把扁平的 [`ModelEndpoint`] 包装成同步/流式 LLM 调用入口。
-//!
-//! 这里聚合了：
-//! - [`ModelClient`] trait、[`ModelRequest`] / [`ModelResponse`] / [`ModelStreamChunk`] 等数据类型
-//! - [`SingleProviderClient`]：持有 [`ModelEndpoint`]，按 `protocol` 分发到 Anthropic / OpenAI / DeepSeek provider
-//! - provider 构造辅助、协议约束修正（tool_call 配对）、流式消费、错误映射等私有逻辑
-//!
-//! 会话消息到 [`ChatMessage`] 的组装由调用方（core）负责，本模块不理解宿主
-//! 消息格式，也不读取本地文件。
-//!
-//! 迁移自 `tiangong-core/src/model.rs`，已移除 `ModelProviderConfig` 依赖，直接消费
-//! [`ModelEndpoint`]（`base_url` / `api_key` / `model` / `protocol` / `timeout_ms` / `options`）。
-
+//! 配置好的生成客户端：stream(Vec<Message>) 在 LLM 内进行纯转换与 ProviderRequest 装配。
+//! 不理解 Session、不读取文件；调用方准备媒体与会话策略。旧请求类型/执行桥仅用于回归基线。
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 use crate::endpoint::ModelEndpoint;
 use crate::message::{
     ChatMessage, MessageContent as LlmMessageContent, MessageRole as LlmMessageRole,
 };
 use crate::model::ProviderProtocol;
-use crate::provider::LlmProvider;
+use crate::provider::{LlmProvider, ModelCatalog};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::codex::{CodexConfig, CodexProvider};
 use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
@@ -41,6 +32,7 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 pub use crate::request::ReasoningEffort;
 
+#[cfg(test)]
 fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
     current.prompt_tokens = current.prompt_tokens.max(next.prompt_tokens);
     current.completion_tokens = current.completion_tokens.max(next.completion_tokens);
@@ -57,47 +49,7 @@ fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
     }
 }
 
-fn collect_openai_stream_tool_calls(
-    mut calls: std::collections::BTreeMap<String, (String, String)>,
-    order: Vec<String>,
-) -> Vec<ToolCall> {
-    let mut ordered_ids = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for id in order {
-        if !id.is_empty() && seen.insert(id.clone()) {
-            ordered_ids.push(id);
-        }
-    }
-    for id in calls.keys() {
-        if !id.is_empty() && seen.insert(id.clone()) {
-            ordered_ids.push(id.clone());
-        }
-    }
-
-    ordered_ids
-        .into_iter()
-        .filter_map(|id| {
-            let (name, raw_args) = calls.remove(&id)?;
-            if name.trim().is_empty() {
-                return None;
-            }
-            let raw_args_preview: String = raw_args.chars().take(256).collect();
-            tracing::info!(
-                tool_call_id = %id,
-                tool_name = %name,
-                raw_args_len = raw_args.len(),
-                %raw_args_preview,
-                "解析 tool call arguments"
-            );
-            Some(ToolCall {
-                arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
-                id,
-                name,
-            })
-        })
-        .collect()
-}
-
+#[cfg(test)]
 fn append_stream_tool_call_arguments(raw_args: &mut String, partial_json: &str) {
     if raw_args.trim().is_empty() || serde_json::from_str::<Value>(raw_args).is_err() {
         raw_args.push_str(partial_json);
@@ -136,6 +88,16 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
+    pub fn from_messages(messages: Vec<tiangong_types::Message>) -> Result<Self> {
+        let (system, messages) = crate::input::convert_messages(messages)?;
+        Ok(Self {
+            system: system.unwrap_or_default(),
+            messages,
+            ..Default::default()
+        })
+    }
+}
+impl ModelRequest {
     pub fn with_tools(mut self, tools: Vec<ToolSpec>, tool_choice: Option<ToolChoice>) -> Self {
         self.tools = tools;
         self.tool_choice = tool_choice;
@@ -150,6 +112,10 @@ impl ModelRequest {
 
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
+    pub provider_usage: Option<TokenUsageData>,
+    /// 权威模型内容；便捷字段用于旧调用方迁移。
+    pub output: Vec<LlmMessageContent>,
+    pub status: crate::collect::CompletionStatus,
     pub text: String,
     pub reasoning_content: String,
     pub reasoning_signature: Option<String>,
@@ -186,97 +152,6 @@ pub struct InvalidToolCall {
     pub reason: String,
 }
 
-fn filter_invalid_openai_tool_calls(
-    protocol: ProviderProtocol,
-    functions: &[ToolSpec],
-    mut response: ModelResponse,
-) -> Result<ModelResponse> {
-    if !matches!(
-        protocol,
-        ProviderProtocol::OpenAi
-            | ProviderProtocol::OpenAiChatCompletions
-            | ProviderProtocol::Codex
-    ) || response.tool_calls.is_empty()
-    {
-        return Ok(response);
-    }
-
-    let original_count = response.tool_calls.len();
-    let mut valid_calls = Vec::with_capacity(original_count);
-    for call in response.tool_calls {
-        let validation_error =
-            if let Some(message) = call.arguments.get("__parse_error").and_then(Value::as_str) {
-                Some(message.to_string())
-            } else {
-                match functions.iter().find(|function| function.name == call.name) {
-                    None => Some(format!("工具 {} 不在本次 tools 定义中", call.name)),
-                    Some(spec) if spec.input_schema.is_null() => None,
-                    Some(spec) => {
-                        let validator = jsonschema::validator_for(&spec.input_schema)
-                            .with_context(|| format!("工具 {} 的 input_schema 无效", spec.name))?;
-                        let errors = validator
-                        .iter_errors(&call.arguments)
-                        .take(3)
-                        .map(|error| {
-                            let instance_path = if error.instance_path().as_str().is_empty() {
-                                "$".to_string()
-                            } else {
-                                format!("${}", error.instance_path())
-                            };
-                            let schema_path = if error.schema_path().as_str().is_empty() {
-                                "#".to_string()
-                            } else {
-                                format!("#{}", error.schema_path())
-                            };
-                            format!(
-                                "参数位置={instance_path}，schema 位置={schema_path}，原因={error}"
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                        (!errors.is_empty())
-                            .then(|| format!("参数不符合 schema：{}", errors.join("；")))
-                    }
-                }
-            };
-
-        if let Some(reason) = validation_error {
-            tracing::warn!(
-                tool_call_id = %call.id,
-                tool_name = %call.name,
-                %reason,
-                "剔除不符合本次 tools 定义的 OpenAI 工具调用"
-            );
-            let arguments = if call.arguments.get("__parse_error").is_some() {
-                call.arguments
-                    .get("__raw_args_preview")
-                    .cloned()
-                    .unwrap_or_else(|| Value::String(String::new()))
-            } else {
-                call.arguments
-            };
-            response.invalid_tool_calls.push(InvalidToolCall {
-                id: call.id,
-                name: call.name,
-                arguments,
-                reason,
-            });
-        } else {
-            valid_calls.push(call);
-        }
-    }
-    response.tool_calls = valid_calls;
-
-    let invalid_count = original_count - response.tool_calls.len();
-    if invalid_count > 0 {
-        tracing::warn!(
-            invalid_count,
-            valid_count = response.tool_calls.len(),
-            "OpenAI 工具调用异常项已剔除"
-        );
-    }
-    Ok(response)
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ModelStreamChunk {
     pub content: String,
@@ -296,8 +171,10 @@ pub trait ModelClient {
     fn api_base_url(&self) -> &str;
     fn api_timeout_ms(&self) -> u64;
     fn api_model(&self) -> &str;
+    #[cfg(test)]
     fn complete(&self, req: ModelRequest) -> Result<ModelResponse>;
     /// 流式调用，通过 on_delta 实时回调内容和用量。
+    #[cfg(test)]
     fn complete_stream(
         &self,
         req: ModelRequest,
@@ -308,12 +185,16 @@ pub trait ModelClient {
 /// 重试回调类型：(attempt, max_attempts, delay_ms, error_text)
 pub type OnRetryCallback = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
 
+type ProviderCache =
+    Arc<std::sync::Mutex<std::collections::HashMap<(u64, String, u32), ProviderHandle>>>;
 #[derive(Clone)]
 pub struct SingleProviderClient {
     session_id: String,
     cfg: ModelEndpoint,
     /// 重试时的回调通知（可选）
     on_retry: Option<OnRetryCallback>,
+    providers: ProviderCache,
+    options: crate::Options,
 }
 
 impl std::fmt::Debug for SingleProviderClient {
@@ -326,7 +207,94 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
+    pub fn with_options(mut self, options: crate::Options) -> Self {
+        self.options = options;
+        self
+    }
+    pub fn with_tool_choice(mut self, tool_choice: Option<ToolChoice>) -> Self {
+        self.options.tool_choice = tool_choice;
+        self
+    }
+    pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
+        self.options.max_output_tokens = max_tokens;
+        self
+    }
+    pub fn options(&self) -> &crate::Options {
+        &self.options
+    }
+    pub(crate) fn request_from_messages(
+        &self,
+        messages: Vec<tiangong_types::Message>,
+    ) -> Result<ProviderRequest> {
+        if self.cfg.model.trim().is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
+        }
+        let (system, messages) = crate::input::convert_messages(messages)?;
+        let messages = sanitize_provider_messages(messages);
+        if messages.is_empty() {
+            return Err(anyhow!("模型请求缺少有效消息"));
+        }
+        Ok(ProviderRequest {
+            model: self.cfg.model.trim().to_owned(),
+            system,
+            messages,
+            session_id: self
+                .options
+                .cache_key
+                .clone()
+                .or_else(|| Some(self.session_id.clone())),
+            tools: self.options.tools.clone(),
+            tool_choice: self
+                .options
+                .tool_choice
+                .clone()
+                .or_else(|| (!self.options.tools.is_empty()).then_some(LlmToolChoice::Auto)),
+            max_tokens: self.options.max_output_tokens,
+            temperature: self.options.temperature,
+            top_p: self.options.top_p,
+            stop_sequences: self.options.stop_sequences.clone(),
+            metadata: None,
+            reasoning_effort: self.options.reasoning_effort,
+        })
+    }
+    pub(crate) async fn consume_request(
+        &self,
+        request: ProviderRequest,
+        chunks: Option<tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>>,
+    ) -> Result<ModelResponse> {
+        let timeout = self
+            .options
+            .timeout_ms
+            .unwrap_or_else(|| function_timeout_ms(self.cfg.timeout_ms));
+        let provider = self.build_provider_dispatch(
+            timeout,
+            request.session_id.as_deref(),
+            self.options.max_retries,
+        )?;
+        let mut observe = |chunk: &ModelStreamChunk| {
+            if let Some(tx) = &chunks {
+                let _ = tx.send(chunk.clone());
+            }
+        };
+        if let Some(tx) = &chunks {
+            tokio::select! {
+                biased;
+                _ = tx.closed() => Err(anyhow!("流式消费者已关闭")),
+                result = consume_stream_with_retry(&provider, &request, &mut observe, true, self.on_retry.clone()) => result,
+            }
+        } else {
+            consume_stream_with_retry(
+                &provider,
+                &request,
+                &mut observe,
+                true,
+                self.on_retry.clone(),
+            )
+            .await
+        }
+    }
     /// 按值消费请求：消息直接移入 provider 请求，不复制消息内容。
+    #[cfg(test)]
     fn build_provider_request(&self, req: ModelRequest) -> Result<ProviderRequest> {
         let model = self.cfg.model.trim();
         if model.is_empty() {
@@ -358,19 +326,16 @@ impl SingleProviderClient {
         })
     }
 
-    /// 返回 provider、provider 请求与本次工具定义（响应侧校验工具调用用）。
-    fn prepare_request(
-        &self,
-        req: ModelRequest,
-    ) -> Result<(ProviderDispatch, ProviderRequest, Vec<ToolSpec>)> {
+    /// 构建拥有所有输入的统一请求；业务工具校验由 Core 完成。
+    #[cfg(test)]
+    fn prepare_request(&self, req: ModelRequest) -> Result<(ProviderHandle, ProviderRequest)> {
         let timeout_ms = req
             .timeout_ms
             .unwrap_or_else(|| function_timeout_ms(self.cfg.timeout_ms));
         let provider =
             self.build_provider_dispatch(timeout_ms, req.session_id.as_deref(), MAX_RETRIES)?;
         let request = self.build_provider_request(req)?;
-        let tools = request.tools.clone();
-        Ok((provider, request, tools))
+        Ok((provider, request))
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -380,41 +345,49 @@ impl SingleProviderClient {
     pub fn model_name(&self) -> &str {
         self.cfg.model.trim()
     }
-    /// 可取消的非流式调用；完整保留终态和用量，由业务调用方判断内容是否有效。
-    pub async fn complete_async(&self, req: ModelRequest) -> Result<ModelResponse> {
-        let (provider, request, tools) = self.prepare_request(req)?;
-        let response = provider.complete(request).await.map_err(map_llm_error)?;
-        filter_invalid_openai_tool_calls(
-            self.protocol(),
-            &tools,
-            convert_provider_response(response),
+    /// 收集唯一流式生成链路；保留完整性状态和用量。
+    #[cfg(test)]
+    pub async fn collect_async(&self, req: ModelRequest) -> Result<ModelResponse> {
+        let (provider, request) = self.prepare_request(req)?;
+        let preserve_order = true;
+        let response = consume_stream_with_retry(
+            &provider,
+            &request,
+            &mut |_| {},
+            preserve_order,
+            self.on_retry.clone(),
         )
+        .await?;
+        Ok(response)
     }
 
-    /// 流式与非流式消费同一请求，取消 future 时关闭底层 HTTP 流。
+    /// 观察并收集同一条流；取消 future 时关闭底层 HTTP 读取。
+    #[cfg(test)]
     pub async fn stream_async(
         self,
         req: ModelRequest,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelResponse> {
-        let (provider, request, tools) = self.prepare_request(req)?;
+        let (provider, request) = self.prepare_request(req)?;
         let preserve_tool_call_order = matches!(
             self.protocol(),
             ProviderProtocol::OpenAi
                 | ProviderProtocol::OpenAiChatCompletions
                 | ProviderProtocol::Codex
         );
-        let response = consume_stream_with_retry(
-            &provider,
-            &request,
-            &mut |chunk: &ModelStreamChunk| {
-                let _ = chunk_tx.send(chunk.clone());
-            },
-            preserve_tool_call_order,
-            self.on_retry.clone(),
-        )
-        .await?;
-        filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
+        let mut on_chunk = |chunk: &ModelStreamChunk| {
+            let _ = chunk_tx.send(chunk.clone());
+        };
+        let response = tokio::select! {
+            biased;
+            _ = chunk_tx.closed() => return Err(anyhow!("流式消费者已关闭")),
+            response = consume_stream_with_retry(
+                &provider, &request,
+                &mut on_chunk,
+                preserve_tool_call_order, self.on_retry.clone(),
+            ) => response?,
+        };
+        Ok(response)
     }
 
     pub fn new(cfg: ModelEndpoint) -> Self {
@@ -422,12 +395,18 @@ impl SingleProviderClient {
             session_id: scru128::new().to_string(),
             cfg,
             on_retry: None,
+            providers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            options: crate::Options {
+                temperature: configured_temperature_f32(),
+                ..Default::default()
+            },
         }
     }
 
     /// 设置重试回调
     pub fn with_on_retry(mut self, cb: OnRetryCallback) -> Self {
         self.on_retry = Some(cb);
+        self.providers = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         self
     }
 
@@ -605,51 +584,57 @@ impl SingleProviderClient {
         timeout_ms: u64,
         session_id: Option<&str>,
         max_retries: u32,
-    ) -> Result<ProviderDispatch> {
+    ) -> Result<ProviderHandle> {
         let session_id = session_id.unwrap_or(&self.session_id);
-        match self.protocol() {
-            ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
-                build_anthropic_provider_from_config(
-                    &self.cfg,
-                    timeout_ms,
-                    self.on_retry.clone(),
-                    session_id,
-                    max_retries,
-                )?,
-            ))),
-            ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
-                build_openai_responses_provider_from_config(
-                    &self.cfg,
-                    timeout_ms,
-                    self.on_retry.clone(),
-                    session_id,
-                    max_retries,
-                )?,
-            ))),
-            ProviderProtocol::Codex => Ok(ProviderDispatch::Codex(Box::new(
-                build_codex_provider_from_config(&self.cfg, timeout_ms, session_id)?,
-            ))),
-            ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
-                build_openai_provider_from_config(
-                    &self.cfg,
-                    timeout_ms,
-                    self.on_retry.clone(),
-                    session_id,
-                    max_retries,
-                )?,
-            ))),
-            ProviderProtocol::DeepSeek => Ok(ProviderDispatch::DeepSeek(Box::new(
-                build_deepseek_provider_from_config(
-                    &self.cfg,
-                    timeout_ms,
-                    self.on_retry.clone(),
-                    session_id,
-                    max_retries,
-                )?,
-            ))),
+        let key = (timeout_ms, session_id.to_owned(), max_retries);
+        let mut providers = self
+            .providers
+            .lock()
+            .map_err(|_| anyhow!("模型客户端缓存锁不可用"))?;
+        if let Some(provider) = providers.get(&key) {
+            return Ok(provider.clone());
         }
+        let provider: ProviderHandle = match self.protocol() {
+            ProviderProtocol::Anthropic => Arc::new(build_anthropic_provider_from_config(
+                &self.cfg,
+                timeout_ms,
+                self.on_retry.clone(),
+                session_id,
+                max_retries,
+            )?),
+            ProviderProtocol::OpenAi => Arc::new(build_openai_responses_provider_from_config(
+                &self.cfg,
+                timeout_ms,
+                self.on_retry.clone(),
+                session_id,
+                max_retries,
+            )?),
+            ProviderProtocol::Codex => Arc::new(build_codex_provider_from_config(
+                &self.cfg, timeout_ms, session_id,
+            )?),
+            ProviderProtocol::OpenAiChatCompletions => Arc::new(build_openai_provider_from_config(
+                &self.cfg,
+                timeout_ms,
+                self.on_retry.clone(),
+                session_id,
+                max_retries,
+            )?),
+            ProviderProtocol::DeepSeek => Arc::new(build_deepseek_provider_from_config(
+                &self.cfg,
+                timeout_ms,
+                self.on_retry.clone(),
+                session_id,
+                max_retries,
+            )?),
+        };
+        if providers.len() >= 16 {
+            providers.clear();
+        }
+        providers.insert(key, provider.clone());
+        Ok(provider)
     }
 
+    #[cfg(test)]
     fn block_on_llm<F, T>(&self, future: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>> + Send,
@@ -675,83 +660,62 @@ impl SingleProviderClient {
         runtime.block_on(future)
     }
 
-    /// 标题生成仅提供任务参数，复用统一非流式请求。
+    #[cfg(test)]
     pub fn complete_lite(&self, prompt: &str) -> Result<String> {
-        self.complete_lite_request(
-            "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了",
-            prompt,
-            0.3,
-        )
+        self.complete_lite_with_system("你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了", prompt)
     }
-
+    #[cfg(test)]
     pub fn complete_lite_with_system(&self, system: &str, prompt: &str) -> Result<String> {
-        self.complete_lite_request(system, prompt, 0.1)
-    }
-
-    fn complete_lite_request(
-        &self,
-        system: &str,
-        prompt: &str,
-        temperature: f32,
-    ) -> Result<String> {
-        let request = ModelRequest {
-            system: system.to_string(),
-            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
-            max_output_tokens: Some(MAX_TOKENS_LITE),
+        let client = self.clone().with_options(crate::Options {
             reasoning_effort: ReasoningEffort::None,
-            temperature: Some(temperature),
+            max_output_tokens: 200,
+            temperature: Some(0.3),
             timeout_ms: Some(120_000),
             ..Default::default()
-        };
-        let response = self.complete(request)?;
-        Ok(if self.protocol() == ProviderProtocol::Anthropic {
-            strip_think_tags(&response.text).trim().to_string()
-        } else {
-            response.text
+        });
+        self.block_on_llm(async {
+            client
+                .stream(vec![
+                    tiangong_types::Message::new(tiangong_types::MessageRole::System, system),
+                    tiangong_types::Message::new(tiangong_types::MessageRole::User, prompt),
+                ])?
+                .collect_text()
+                .await
         })
     }
 }
-
 impl ModelClient for SingleProviderClient {
     fn api_base_url(&self) -> &str {
         &self.cfg.base_url
     }
-
     fn api_timeout_ms(&self) -> u64 {
         self.cfg.timeout_ms
     }
-
     fn api_model(&self) -> &str {
         &self.cfg.model
     }
-
+    #[cfg(test)]
     fn complete_stream(
         &self,
         req: ModelRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse> {
-        let (provider, request, tools) = self.prepare_request(req)?;
-        let response =
-            block_on_provider_stream(provider, request, on_delta, self.on_retry.clone())?;
-        filter_invalid_openai_tool_calls(self.protocol(), &tools, response)
+        let (provider, request) = self.prepare_request(req)?;
+        block_on_provider_stream(provider, request, on_delta, self.on_retry.clone())
     }
-
+    #[cfg(test)]
     fn complete(&self, req: ModelRequest) -> Result<ModelResponse> {
-        self.block_on_llm(self.complete_async(req))
+        self.block_on_llm(self.collect_async(req))
     }
 }
-
 /// 主模型请求最大输出 token 数。
 ///
 /// 规划/执行/响应等主模型请求统一使用此值。
 /// thinking 模式下 thinking tokens 与 output tokens 共享此预算，
 /// 因此 32k 确保 thinking 消耗 15-20k 后仍有 12-17k 给实际输出。
 /// 此值从 tiangong-core 到 tiangong-llm 再到 provider 逐层透传，不做任何修改。
+#[cfg(test)]
 const MAX_TOKENS_MAIN: u32 = 32_768;
-
-/// 轻量级任务（标题生成、分类判断等）最大输出 token 数。
-/// 任务输出通常不超过几十个字，200 足够且能有效控制成本。
-const MAX_TOKENS_LITE: u32 = 200;
 
 fn build_anthropic_provider_from_config(
     cfg: &ModelEndpoint,
@@ -992,6 +956,9 @@ fn is_empty_provider_message(message: &ChatMessage) -> bool {
 
 fn convert_provider_response(response: ProviderResponse) -> ModelResponse {
     ModelResponse {
+        provider_usage: response.usage.clone(),
+        output: response.assistant_message.content.clone(),
+        status: crate::collect::CompletionStatus::Complete,
         text: collect_provider_text(&response).trim().to_string(),
         reasoning_content: response.reasoning_content.clone().unwrap_or_default(),
         reasoning_signature: collect_provider_reasoning_signature(&response),
@@ -1015,6 +982,7 @@ fn convert_provider_response(response: ProviderResponse) -> ModelResponse {
     }
 }
 
+#[cfg(test)]
 fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
     if raw_args.trim().is_empty() {
         // 空参数按无参调用处理（与 tiangong_llm::tool 同语义）：无参工具
@@ -1134,7 +1102,7 @@ struct StreamOutcome {
 /// 仅在尚无可见产出（正文/工具调用）时重发，绝不重复已产出的内容；思考增量
 /// 不算可见产出，重发后会重新流出。总额度 [`MAX_STREAM_RETRY_ATTEMPTS`]。
 async fn consume_stream_with_retry<F: FnMut(&ModelStreamChunk) + ?Sized>(
-    provider: &ProviderDispatch,
+    provider: &ProviderHandle,
     request: &ProviderRequest,
     on_delta: &mut F,
     preserve_tool_call_order: bool,
@@ -1142,62 +1110,62 @@ async fn consume_stream_with_retry<F: FnMut(&ModelStreamChunk) + ?Sized>(
 ) -> Result<ModelResponse> {
     // TTFT 锚点：紧贴首次 HTTP 发起（provider.stream 内部）之前；重试轮次
     // 共用同一锚点，TTFT 反映端到端等待。
-    let request_started_at = std::time::Instant::now();
-    let mut attempt = 1usize;
-    loop {
-        let stream = provider
-            .stream(request.clone())
-            .await
-            .map_err(map_llm_error)?;
-        let outcome = consume_provider_stream_events_async(
-            stream,
-            on_delta,
-            preserve_tool_call_order,
-            request_started_at,
-        )
-        .await;
-        let should_retry = attempt < MAX_STREAM_RETRY_ATTEMPTS
-            && !outcome.visible_output
-            && outcome
+    crate::retry::with_budget(MAX_STREAM_RETRY_ATTEMPTS, async {
+        let request_started_at = std::time::Instant::now();
+        let mut attempt = 1usize;
+        loop {
+            let stream = provider
+                .stream(request.clone())
+                .await
+                .map_err(map_llm_error)?;
+            let outcome = consume_provider_stream_events_async(
+                stream,
+                on_delta,
+                preserve_tool_call_order,
+                request_started_at,
+            )
+            .await;
+            let should_retry = attempt < MAX_STREAM_RETRY_ATTEMPTS
+                && !outcome.visible_output
+                && outcome
+                    .interrupt
+                    .as_ref()
+                    .is_some_and(StreamInterrupt::retryable);
+            if !should_retry {
+                return Ok(outcome.response);
+            }
+            let detail = outcome
                 .interrupt
                 .as_ref()
-                .is_some_and(StreamInterrupt::retryable);
-        if !should_retry {
-            return Ok(outcome.response);
-        }
-        let detail = outcome
-            .interrupt
-            .as_ref()
-            .map(StreamInterrupt::display)
-            .unwrap_or_default();
-        let backoff = stream_retry_backoff(attempt);
-        tracing::warn!(
-            attempt = attempt + 1,
-            max_attempts = MAX_STREAM_RETRY_ATTEMPTS,
-            backoff_ms = backoff.as_millis() as u64,
-            error = %detail,
-            "流中断且无可见产出，统一层重发请求"
-        );
-        if let Some(notify) = &on_retry {
-            notify(
-                (attempt + 1) as u32,
-                MAX_STREAM_RETRY_ATTEMPTS as u32,
-                backoff.as_millis() as u64,
-                &detail,
+                .map(StreamInterrupt::display)
+                .unwrap_or_default();
+            let backoff = stream_retry_backoff(attempt);
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_attempts = MAX_STREAM_RETRY_ATTEMPTS,
+                backoff_ms = backoff.as_millis() as u64,
+                error = %detail,
+                "流中断且无可见产出，统一层重发请求"
             );
+            if let Some(notify) = &on_retry {
+                notify(
+                    (attempt + 1) as u32,
+                    MAX_STREAM_RETRY_ATTEMPTS as u32,
+                    backoff.as_millis() as u64,
+                    &detail,
+                );
+            }
+            tokio::time::sleep(backoff).await;
+            attempt += 1;
         }
-        tokio::time::sleep(backoff).await;
-        attempt += 1;
-    }
+    })
+    .await
 }
 
 /// 消费流事件并组装响应。
 ///
-/// 流中断（传输错误或流内错误事件）时直接结束循环，把已产出的内容定稿为
-/// 本次响应（issue #551）：断在 tool_use 参数 JSON 中间的调用带 `__parse_error`
-/// 标记，由上层既有的无效参数链路处理；开头即断时为空响应，由上层按无效
-/// 输出处理。调用方对中断无感，不再让整轮失败。中断详情随 [`StreamOutcome`]
-/// 返回，由 [`consume_stream_with_retry`] 统一判定是否重发。
+/// 中断时保留 partial 与显式 status；参数不完整的调用移入结构化无效列表。
+/// Core 决定恢复/执行，collector 不注入 __parse_error 参数或修改会话。
 async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Sized>(
     mut stream: ProviderStream,
     on_delta: &mut F,
@@ -1205,195 +1173,93 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     // TTFT 锚点：HTTP 请求发出前的时刻（由调用方在发起请求处记录）。
     request_started_at: std::time::Instant,
 ) -> StreamOutcome {
-    let mut interrupt: Option<StreamInterrupt> = None;
+    let mut state = crate::collect::ResponseAccumulator::default();
+    let mut interrupt = None;
     let mut visible_output = false;
-    let mut text = String::new();
-    let mut reasoning_content = String::new();
-    let mut reasoning_signature: Option<String> = None;
-    let mut usage = TokenUsageData::default();
-    let mut stop_reason = None;
-    // 实时 TPS：流中按输出 delta 事件计数（正文与思考都算——官方
-    // completion_tokens 口径包含思考 token）。这是 token 数的**近似**：
-    // 各 provider 的 delta 粒度不一（Anthropic thinking_delta 常为整句、
-    // text_delta 多为单 token 但不保证；Responses 的 output_text.delta 同
-    // 样是文本片段），故流中数字通常低于官方计量；O(1) 计数零开销、不阻塞
-    // SSE 读取，官方 usage 到达时校准覆盖，结束收敛到官方计量。
-    let mut output_delta_events: u64 = 0;
-    // 输出/思考阶段计时（decode 口径，见 ModelResponse 字段说明）：在 SSE
-    // 消费侧记录事件真实到达时刻（first / last）。
-    #[derive(Default)]
-    struct DeltaClock {
-        first: Option<std::time::Instant>,
-        last: Option<std::time::Instant>,
-    }
-    impl DeltaClock {
-        fn mark(&mut self) {
-            let now = std::time::Instant::now();
-            self.first.get_or_insert(now);
-            self.last = Some(now);
-        }
-        fn span_ms(&self) -> Option<u64> {
-            Some(self.last?.duration_since(self.first?).as_millis() as u64)
-        }
-    }
-    let mut output_clock = DeltaClock::default();
-    let mut reasoning_clock = DeltaClock::default();
-    let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
-        std::collections::BTreeMap::new();
-    let mut tool_call_order: Vec<String> = Vec::new();
-
+    let mut output_delta_events = 0u64;
+    let mut first = None;
+    let mut last = None;
+    let mut reasoning_first = None;
+    let mut reasoning_last = None;
     while let Some(event) = stream.next().await {
         let event = match event {
             Ok(event) => event,
-            Err(err) => {
-                tracing::warn!(error = %err, "流式响应中断，按已产出内容收尾");
-                interrupt = Some(StreamInterrupt::Error(err));
+            Err(error) => {
+                state.error = Some(error.clone());
+                interrupt = Some(StreamInterrupt::Error(error));
                 break;
             }
         };
-        match event {
-            ProviderStreamEvent::ReasoningDelta(delta) => {
-                if !delta.is_empty() {
-                    reasoning_content.push_str(&delta);
-                    output_delta_events += 1;
-                    reasoning_clock.mark();
-                    output_clock.mark();
-                    on_delta(&ModelStreamChunk {
-                        content: String::new(),
-                        reasoning_content: delta,
-                        usage: None,
-                        cumulative_tokens: Some(output_delta_events),
-                    });
-                }
-            }
-            ProviderStreamEvent::ReasoningSignatureDelta(signature) => {
-                if !signature.trim().is_empty() {
-                    reasoning_signature = Some(signature);
-                }
-            }
-            ProviderStreamEvent::TextDelta(delta) => {
-                if !delta.is_empty() {
-                    text.push_str(&delta);
+        let now = std::time::Instant::now();
+        let mut chunk = ModelStreamChunk::default();
+        match &event {
+            ProviderStreamEvent::TextDelta(delta) | ProviderStreamEvent::ReasoningDelta(delta)
+                if !delta.is_empty() =>
+            {
+                first.get_or_insert(now);
+                last = Some(now);
+                output_delta_events += 1;
+                if matches!(event, ProviderStreamEvent::TextDelta(_)) {
+                    chunk.content = delta.clone();
                     visible_output = true;
-                    output_delta_events += 1;
-                    output_clock.mark();
-                    on_delta(&ModelStreamChunk {
-                        content: delta,
-                        reasoning_content: String::new(),
-                        usage: None,
-                        cumulative_tokens: Some(output_delta_events),
-                    });
+                } else {
+                    chunk.reasoning_content = delta.clone();
+                    reasoning_first.get_or_insert(now);
+                    reasoning_last = Some(now);
                 }
             }
-            ProviderStreamEvent::ToolCallStart(call) => {
+            ProviderStreamEvent::ToolCallMetadata { .. }
+            | ProviderStreamEvent::ToolArgumentsDelta { .. }
+            | ProviderStreamEvent::ToolArgumentsSnapshot { .. } => {
                 visible_output = true;
-                let args = if call.arguments.is_null() || call.arguments == json!({}) {
-                    String::new()
-                } else {
-                    call.arguments.to_string()
-                };
-                tool_call_order.push(call.id.clone());
-                tool_calls.insert(call.id, (call.name, args));
-                // 工具调用增量是输出的一部分（decode 计时覆盖纯工具调用轮），
-                // 但不向前端转发——工具调用聚合后随最终响应一次性返回。
-                output_clock.mark();
-            }
-            ProviderStreamEvent::ToolCallDelta {
-                call_id,
-                partial_json,
-            } => {
-                let actual_id = if tool_calls.contains_key(&call_id) {
-                    call_id
-                } else if let Ok(idx) = call_id.parse::<usize>() {
-                    tool_call_order.get(idx).cloned().unwrap_or_default()
-                } else {
-                    call_id
-                };
-                let entry = tool_calls
-                    .entry(actual_id)
-                    .or_insert_with(|| (String::new(), String::new()));
-                append_stream_tool_call_arguments(&mut entry.1, &partial_json);
-                visible_output = true;
-                output_clock.mark();
-            }
-            ProviderStreamEvent::Usage(stream_usage) => {
-                merge_stream_usage(&mut usage, stream_usage);
-                // 官方计量到达：校准累计值（覆盖 delta 事件计数），流中
-                // 数字与结束时计量收敛一致。
-                if usage.completion_tokens > 0 {
-                    output_delta_events = usage.completion_tokens as u64;
-                }
-                on_delta(&ModelStreamChunk {
-                    content: String::new(),
-                    reasoning_content: String::new(),
-                    usage: Some(usage.clone()),
-                    cumulative_tokens: Some(output_delta_events),
-                });
+                first.get_or_insert(now);
+                last = Some(now);
             }
             ProviderStreamEvent::Error(message) => {
-                tracing::warn!(error = %message, "流式响应中断，按已产出内容收尾");
-                interrupt = Some(StreamInterrupt::Message(message.clone()));
-                break;
+                interrupt = Some(StreamInterrupt::Message(message.clone()))
             }
-            ProviderStreamEvent::MessageEnd {
-                stop_reason: stream_stop_reason,
-            } => {
-                if stream_stop_reason.is_some() {
-                    stop_reason = stream_stop_reason;
-                }
+            _ => {}
+        }
+        let is_usage = matches!(event, ProviderStreamEvent::Usage(_));
+        state.push(event);
+        if is_usage {
+            chunk.usage = state.usage.clone();
+            if let Some(usage) = &chunk.usage
+                && usage.completion_tokens > 0
+            {
+                output_delta_events = usage.completion_tokens as u64;
             }
-            ProviderStreamEvent::MessageStart | ProviderStreamEvent::ToolCallEnd { .. } => {}
+        }
+        if !chunk.content.is_empty() || !chunk.reasoning_content.is_empty() || chunk.usage.is_some()
+        {
+            chunk.cumulative_tokens = Some(output_delta_events);
+            on_delta(&chunk);
+        }
+        if state.error.is_some() {
+            break;
         }
     }
-
-    let tool_calls = if preserve_tool_call_order {
-        collect_openai_stream_tool_calls(tool_calls, tool_call_order)
-    } else {
-        tool_calls
-            .into_iter()
-            .filter(|entry| {
-                let keep = !entry.1.0.is_empty();
-                if !keep {
-                    // 仅有增量片段、缺少 ToolCallStart 的调用无法还原工具名，
-                    // 过滤前显式告警，避免上游漏发 Start 事件时静默丢数据。
-                    tracing::warn!(
-                        call_id = %entry.0,
-                        "丢弃缺少 Start 事件的流式工具调用增量（工具名未知）"
-                    );
-                }
-                keep
-            })
-            .map(|(id, (name, raw_args))| ToolCall {
-                arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
-                id,
-                name,
-            })
-            .collect()
-    };
-
-    // ── 输出耗时定稿（真实测量，不做任何判别）──
-    //
-    // elapsed = 首末输出增量（正文/思考/工具调用增量）的实测间隔，
-    // TPS = 官方 completion_tokens ÷ 实测耗时。测出多少是多少：
-    // 批量下发端点的轮次间隔会被压缩（数值偏高），此时 TTFT 列
-    // （含网关预热）是解读依据，由消费方自行判断，不在计量处
-    // 做任何阈值/置空/折算。
-    let decode_ms = output_clock.span_ms();
-
-    let response = ModelResponse {
-        text: text.trim().to_string(),
-        reasoning_content,
-        reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-        stop_reason,
-        usage: usage.into(),
-        tool_calls,
-        invalid_tool_calls: Vec::new(),
-        output_elapsed_ms: decode_ms,
-        reasoning_elapsed_ms: reasoning_clock.span_ms(),
-        ttft_ms: output_clock
-            .first
-            .map(|first| first.duration_since(request_started_at).as_millis() as u64),
-    };
+    let collected = state.finish();
+    let mut response = convert_provider_response(collected.response);
+    response.status = collected.status;
+    response.invalid_tool_calls = collected
+        .invalid_tool_calls
+        .into_iter()
+        .map(|call| InvalidToolCall {
+            id: call.id,
+            name: call.name,
+            arguments: Value::String(call.arguments),
+            reason: call.reason,
+        })
+        .collect();
+    response.output_elapsed_ms = first
+        .zip(last)
+        .map(|(a, b)| b.duration_since(a).as_millis() as u64);
+    response.reasoning_elapsed_ms = reasoning_first
+        .zip(reasoning_last)
+        .map(|(a, b)| b.duration_since(a).as_millis() as u64);
+    response.ttft_ms = first.map(|a| a.duration_since(request_started_at).as_millis() as u64);
+    let _ = preserve_tool_call_order; // 所有协议均按响应内调用键稳定排序。
     StreamOutcome {
         response,
         interrupt,
@@ -1401,60 +1267,21 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     }
 }
 
-pub(crate) enum ProviderDispatch {
-    Anthropic(Box<AnthropicProvider>),
-    OpenAiResponses(Box<OpenAiResponsesProvider>),
-    OpenAiChat(Box<OpenAiChatCompletionsProvider>),
-    DeepSeek(Box<DeepSeekProvider>),
-    Codex(Box<CodexProvider>),
-}
-
-impl ProviderDispatch {
-    pub(crate) async fn complete(
-        self,
-        request: ProviderRequest,
-    ) -> std::result::Result<ProviderResponse, crate::error::LlmError> {
-        match self {
-            ProviderDispatch::Anthropic(provider) => provider.complete(request).await,
-            ProviderDispatch::OpenAiResponses(provider) => provider.complete(request).await,
-            ProviderDispatch::OpenAiChat(provider) => provider.complete(request).await,
-            ProviderDispatch::DeepSeek(provider) => provider.complete(request).await,
-            ProviderDispatch::Codex(provider) => provider.complete(request).await,
-        }
-    }
-
-    async fn stream(
-        &self,
-        request: ProviderRequest,
-    ) -> std::result::Result<ProviderStream, crate::error::LlmError> {
-        match self {
-            ProviderDispatch::Anthropic(provider) => provider.stream(request).await,
-            ProviderDispatch::OpenAiResponses(provider) => provider.stream(request).await,
-            ProviderDispatch::OpenAiChat(provider) => provider.stream(request).await,
-            ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
-            ProviderDispatch::Codex(provider) => provider.stream(request).await,
-        }
-    }
-}
-
+pub(crate) type ProviderHandle = Arc<dyn LlmProvider>;
+#[cfg(test)]
 fn block_on_provider_stream(
-    provider: ProviderDispatch,
+    provider: ProviderHandle,
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
     on_retry: Option<OnRetryCallback>,
 ) -> Result<ModelResponse> {
     async fn run_stream(
-        provider: ProviderDispatch,
+        provider: ProviderHandle,
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
         on_retry: Option<OnRetryCallback>,
     ) -> Result<ModelResponse> {
-        let preserve_tool_call_order = matches!(
-            &provider,
-            ProviderDispatch::OpenAiResponses(_)
-                | ProviderDispatch::OpenAiChat(_)
-                | ProviderDispatch::Codex(_)
-        );
+        let preserve_tool_call_order = true;
         consume_stream_with_retry(
             &provider,
             &request,
@@ -1514,26 +1341,6 @@ fn map_llm_error(error: crate::error::LlmError) -> anyhow::Error {
 
 /// 最大重试次数
 const MAX_RETRIES: u32 = 3;
-
-/// 清理非流式响应中的 `<think>...</think>` 标签
-///
-/// 部分模型即使设置了 `thinking.type=disabled`，仍在 content 中输出 `<think>` 标签。
-/// 此函数移除所有 `<think>...</think>` 块，返回纯文本内容。
-fn strip_think_tags(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut remaining = text;
-    while let Some(start) = remaining.find("<think>") {
-        result.push_str(&remaining[..start]);
-        if let Some(end) = remaining[start..].find("</think>") {
-            remaining = &remaining[start + end + 8..];
-        } else {
-            // 没有闭合标签，丢弃从 <think> 开始的所有内容
-            return result;
-        }
-    }
-    result.push_str(remaining);
-    result
-}
 
 fn configured_temperature_number() -> Option<serde_json::Number> {
     let raw = std::env::var("API_TEMPERATURE").unwrap_or_else(|_| "0.2".to_string());
@@ -1671,140 +1478,6 @@ mod tests {
         }
     }
 
-    fn model_response(tool_calls: Vec<ToolCall>, total_tokens: usize) -> ModelResponse {
-        ModelResponse {
-            text: String::new(),
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            stop_reason: Some(StopReason::ToolUse),
-            usage: TokenUsage {
-                total_tokens,
-                ..Default::default()
-            },
-            tool_calls,
-            invalid_tool_calls: Vec::new(),
-            output_elapsed_ms: None,
-            reasoning_elapsed_ms: None,
-            ttft_ms: None,
-        }
-    }
-
-    #[test]
-    fn openai_filters_invalid_parallel_calls_and_keeps_validation_errors() {
-        let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
-        let valid = ToolCall {
-            id: "call_valid".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({"path": "TODO.md"}),
-        };
-        let invalid = ToolCall {
-            id: "call_invalid".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({}),
-        };
-
-        let response = filter_invalid_openai_tool_calls(
-            ProviderProtocol::OpenAiChatCompletions,
-            &functions,
-            model_response(vec![valid, invalid], 10),
-        )
-        .unwrap();
-
-        assert_eq!(response.usage.total_tokens, 10);
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].id, "call_valid");
-        assert_eq!(response.tool_calls[0].arguments, json!({"path": "TODO.md"}));
-        assert_eq!(response.invalid_tool_calls.len(), 1);
-        assert_eq!(response.invalid_tool_calls[0].id, "call_invalid");
-        assert_eq!(response.invalid_tool_calls[0].arguments, json!({}));
-        assert!(
-            response.invalid_tool_calls[0]
-                .reason
-                .contains("参数不符合 schema")
-        );
-        assert!(response.invalid_tool_calls[0].reason.contains("参数位置=$"));
-        assert!(
-            response.invalid_tool_calls[0]
-                .reason
-                .contains("schema 位置=#/required")
-        );
-    }
-
-    #[test]
-    fn non_openai_protocol_does_not_isolate_tool_calls() {
-        let invalid = ToolCall {
-            id: "call_invalid".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({}),
-        };
-
-        let response = filter_invalid_openai_tool_calls(
-            ProviderProtocol::DeepSeek,
-            &[schema_tool("read_file")],
-            model_response(vec![invalid], 10),
-        )
-        .unwrap();
-
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].arguments, json!({}));
-    }
-
-    #[test]
-    fn openai_tool_without_schema_keeps_valid_arguments() {
-        let functions = vec![ToolSpec {
-            name: "mcp_tool".to_string(),
-            description: String::new(),
-            input_schema: Value::Null,
-        }];
-        let call = ToolCall {
-            id: "call_mcp".to_string(),
-            name: "mcp_tool".to_string(),
-            arguments: serde_json::json!({"value": 1}),
-        };
-
-        let response = filter_invalid_openai_tool_calls(
-            ProviderProtocol::OpenAi,
-            &functions,
-            model_response(vec![call], 10),
-        )
-        .unwrap();
-
-        assert_eq!(response.tool_calls[0].arguments, json!({"value": 1}));
-    }
-
-    #[test]
-    fn openai_invalid_json_preserves_raw_arguments_for_regeneration() {
-        let raw_arguments = r#"{"path":"TODO.md""#;
-        let call = ToolCall {
-            id: "call_invalid_json".to_string(),
-            name: "read_file".to_string(),
-            arguments: parse_tool_arguments_or_error(
-                "read_file",
-                "call_invalid_json",
-                raw_arguments,
-            ),
-        };
-
-        let response = filter_invalid_openai_tool_calls(
-            ProviderProtocol::OpenAiChatCompletions,
-            &[schema_tool("read_file")],
-            model_response(vec![call], 10),
-        )
-        .unwrap();
-
-        assert!(response.tool_calls.is_empty());
-        assert_eq!(response.invalid_tool_calls.len(), 1);
-        assert_eq!(
-            response.invalid_tool_calls[0].arguments,
-            json!(raw_arguments)
-        );
-        assert!(
-            response.invalid_tool_calls[0]
-                .reason
-                .contains("工具参数 JSON 无效")
-        );
-    }
-
     #[test]
     fn incomplete_nested_json_keeps_accepting_stream_deltas() {
         let mut raw_args =
@@ -1869,11 +1542,11 @@ mod tests {
             ),
             (
                 Duration::from_millis(50),
-                ProviderStreamEvent::ToolCallStart(ToolCall {
+                ProviderStreamEvent::ToolCallMetadata {
+                    key: crate::CallKey(0),
                     id: "c1".to_string(),
                     name: "get_weather".to_string(),
-                    arguments: json!({"city": "上海"}),
-                }),
+                },
             ),
             (
                 Duration::ZERO,
@@ -1901,20 +1574,20 @@ mod tests {
         let events = vec![
             Ok(ProviderStreamEvent::TextDelta("部分输出".to_string())),
             // 完整调用：Start 即携带全部参数。
-            Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                id: "call_complete".to_string(),
-                name: "read_file".to_string(),
-                arguments: json!({"path": "a"}),
-            })),
+            Ok(ProviderStreamEvent::ToolCallMetadata {
+                key: crate::CallKey(0),
+                id: "call_complete".into(),
+                name: "read_file".into(),
+            }),
             // 不完整调用：参数 JSON 只流出一半即断流。
-            Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                id: "call_partial".to_string(),
-                name: "write_file".to_string(),
-                arguments: json!({}),
-            })),
-            Ok(ProviderStreamEvent::ToolCallDelta {
-                call_id: "call_partial".to_string(),
-                partial_json: r#"{"path":"b""#.to_string(),
+            Ok(ProviderStreamEvent::ToolCallMetadata {
+                key: crate::CallKey(1),
+                id: "call_partial".into(),
+                name: "write_file".into(),
+            }),
+            Ok(ProviderStreamEvent::ToolArgumentsDelta {
+                key: crate::CallKey(1),
+                fragment: r#"{"path":"b""#.to_string(),
             }),
             Err(crate::error::LlmError::Transport(
                 "error decoding response body".to_string(),
@@ -1933,15 +1606,11 @@ mod tests {
         // 断流时未收到终止事件，stop_reason 保持缺失。
         assert_eq!(response.stop_reason, None);
         assert_eq!(response.text, "部分输出");
-        // 断在参数中间的调用带 __parse_error 标记，由上层既有的无效参数链路处理。
-        assert_eq!(response.tool_calls.len(), 2);
-        assert_eq!(response.tool_calls[0].id, "call_complete");
         assert!(
-            response.tool_calls[1]
-                .arguments
-                .get("__parse_error")
-                .is_some()
+            response.tool_calls.is_empty(),
+            "未明确结束的调用不应在中断后执行"
         );
+        assert_eq!(response.invalid_tool_calls.len(), 2);
     }
 
     #[tokio::test]
@@ -2319,15 +1988,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.usage.total_tokens, 12);
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].id, "call_valid");
-        assert_eq!(response.invalid_tool_calls.len(), 1);
-        assert_eq!(response.invalid_tool_calls[0].id, "call_invalid");
-        assert!(
-            response.invalid_tool_calls[0]
-                .reason
-                .contains("参数不符合 schema")
+        assert_eq!(
+            response.tool_calls.len(),
+            2,
+            "LLM 层只保证结构完整；schema 校验由 Core 执行"
         );
+        assert_eq!(response.tool_calls[0].id, "call_valid");
+        assert_eq!(response.tool_calls[1].id, "call_invalid");
+        assert!(response.invalid_tool_calls.is_empty());
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
     }

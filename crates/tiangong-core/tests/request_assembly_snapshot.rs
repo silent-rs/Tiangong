@@ -11,13 +11,12 @@
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tiangong_core::context::model_request::IntoModelRequest;
 use tiangong_core::session::{
     ContentBlock, MediaKind, Message, MessageRole, MessageToolCall, Role, StoredAsset, UserSource,
 };
 use tiangong_llm::tool::ToolSpec;
 use tiangong_llm::{
-    ModelEndpoint, ModelRequest, ProviderProtocol, ReasoningEffort, SingleProviderClient,
+    ModelEndpoint, Options, ProviderProtocol, ReasoningEffort, SingleProviderClient,
 };
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -223,11 +222,11 @@ fn protocol_name(protocol: ProviderProtocol) -> &'static str {
     }
 }
 
-fn build_request(context: &[Message]) -> ModelRequest {
-    ModelRequest {
-        session_id: Some("snapshot-session".to_string()),
+fn options() -> Options {
+    Options {
+        cache_key: Some("snapshot-session".to_string()),
         reasoning_effort: ReasoningEffort::High,
-        max_output_tokens: Some(1024),
+        max_output_tokens: 1024,
         temperature: Some(0.2),
         timeout_ms: Some(5_000),
         tools: vec![ToolSpec {
@@ -239,7 +238,7 @@ fn build_request(context: &[Message]) -> ModelRequest {
                 "required": ["path"]
             }),
         }],
-        ..context.to_vec().into_model_request().unwrap()
+        ..Default::default()
     }
 }
 
@@ -273,12 +272,41 @@ async fn provider_request_bodies_match_snapshots() {
                 protocol,
                 ..Default::default()
             });
+            let mut session = tiangong_core::session::Session::new("snapshot");
+            session.messages = context;
+            let mut context = session.context();
+            // snapshot fixtures include explicit System messages; preserve them as originally prepared.
+            let systems = session
+                .messages
+                .iter()
+                .filter(|message| message.role == MessageRole::System)
+                .cloned();
+            context.splice(0..0, systems);
+            if !context.iter().any(|message| {
+                message.role == MessageRole::User
+                    && message.content.iter().any(|block| match block {
+                        ContentBlock::Text { text } | ContentBlock::ModelInstruction { text } => {
+                            !text.trim().is_empty()
+                        }
+                        ContentBlock::Image { .. } => true,
+                        _ => false,
+                    })
+            }) {
+                context.push(Message::new(MessageRole::User, "请继续处理当前任务。"));
+            }
             client
-                .complete_async(build_request(&context))
+                .with_options(options())
+                .stream(context)
+                .unwrap()
+                .collect::<tiangong_llm::ModelResponse>()
                 .await
                 .unwrap_or_else(|error| panic!("{case}/{protocol:?} 请求失败：{error}"));
             let requests = server.received_requests().await.unwrap();
-            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let mut body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["stream"], true, "所有生成必须请求流式");
+            // 原快照冻结生成内容，不掩盖其他字段变化；仅剔除已评审的传输差异。
+            body.as_object_mut().unwrap().remove("stream");
+            body.as_object_mut().unwrap().remove("stream_options");
             let actual = serde_json::to_string_pretty(&body).unwrap() + "\n";
 
             let path = snapshot_dir().join(format!("{}__{case}.json", protocol_name(protocol)));
@@ -289,6 +317,10 @@ async fn provider_request_bodies_match_snapshots() {
             }
             let expected = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("缺少快照 {}：{error}", path.display()));
+            let mut expected: Value = serde_json::from_str(&expected).unwrap();
+            expected.as_object_mut().unwrap().remove("stream");
+            expected.as_object_mut().unwrap().remove("stream_options");
+            let expected = serde_json::to_string_pretty(&expected).unwrap() + "\n";
             if expected != actual {
                 mismatches.push(format!(
                     "{}\n--- expected\n{expected}\n--- actual\n{actual}",

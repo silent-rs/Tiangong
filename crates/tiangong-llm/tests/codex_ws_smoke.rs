@@ -17,9 +17,9 @@ fn storage_root() -> std::path::PathBuf {
     )
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "需要真实 Codex 登录态与联网的手动冒烟"]
-fn codex_ws_stream_roundtrip() {
+async fn codex_ws_stream_roundtrip() {
     let root = storage_root();
     assert!(
         root.join("auth/codex.json").exists(),
@@ -38,7 +38,18 @@ fn codex_ws_stream_roundtrip() {
     };
     let client = SingleProviderClient::new(endpoint);
     let reply = client
-        .complete_lite_with_system("简短回答", "只回复两个字：你好")
+        .with_options(tiangong_llm::Options {
+            max_output_tokens: 200,
+            reasoning_effort: tiangong_llm::ReasoningEffort::None,
+            ..Default::default()
+        })
+        .stream(vec![
+            tiangong_types::Message::new(tiangong_types::MessageRole::System, "简短回答"),
+            tiangong_types::Message::new(tiangong_types::MessageRole::User, "只回复两个字：你好"),
+        ])
+        .unwrap()
+        .collect_text()
+        .await
         .expect("WS 通路应返回内容");
     println!("reply: {reply:?}");
     assert!(!reply.trim().is_empty(), "WS 通路返回空内容");

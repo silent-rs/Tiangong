@@ -121,7 +121,7 @@ pub struct Session {
     /// 缓存的 system prompt 消息（role=System）。
     ///
     /// 在新对话、压缩对话、清空上下文时由外部调用 `rebuild_system_prompt()` 重建。
-    /// `context()` 返回时会将其置于消息列表头部，经 `IntoModelRequest::into_model_request` 提取为 system prompt。
+    /// `context()` 返回时会将其置于消息列表头部，由 llm 的轻量转换提取为 system prompt。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_message: Option<Message>,
     pub created_at: String,
@@ -533,8 +533,8 @@ impl Session {
     /// 构建 LLM 请求上下文
     ///
     /// 返回 system_prompt_message（如有）+ `summary_up_to` 之后的对话消息，
-    /// 顺序即模型请求顺序；经 `IntoModelRequest::into_model_request` 转为
-    /// 模型请求，System 消息被提取为 system prompt。
+    /// 顺序即模型请求顺序；在 Core 完成图片准备，LLM stream 内部
+    /// 仅做纯数据映射与 System 提取，不读文件。
     pub fn context(&self) -> Vec<Message> {
         let mut context = Vec::new();
         if let Some(ref msg) = self.system_prompt_message {
@@ -551,6 +551,12 @@ impl Session {
                 })
                 .cloned(),
         );
+        // 只补齐请求副本的图片内容，不过滤/添加消息，不修改持久化历史。
+        for message in &mut context {
+            for block in &mut message.content {
+                crate::context::model_request::resolve_history_image(block);
+            }
+        }
         context
     }
 
@@ -787,6 +793,77 @@ mod ready_content_tests {
     }
 
     #[test]
+    fn historical_images_are_resolved_on_context_copy_after_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let image_path = root.path().join("history.png");
+        std::fs::write(&image_path, [1u8, 2, 3, 4]).unwrap();
+        let mut session = Session::new("history-image");
+        session.bind_storage_root(root.path());
+        let mut content = prepared_message("");
+        if let ContentBlock::Image { asset, data } = &mut content[1] {
+            asset.local_path = image_path.to_string_lossy().into_owned();
+            *data = None;
+        }
+        session.append_prepared_user_message(Message::user_prepared("history-user", content));
+        session.try_persist_to_disk().unwrap();
+        let loaded = Session::load_from_storage(root.path(), &session.id).unwrap();
+        let before = serde_json::to_vec(&loaded).unwrap();
+        let context = loaded.context();
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].id, "history-user");
+        assert!(
+            matches!(&context[0].content[1],ContentBlock::Image { data:Some(data), .. } if data=="data:image/png;base64,AQIDBA==")
+        );
+        assert!(matches!(
+            &loaded.messages[0].content[1],
+            ContentBlock::Image { data: None, .. }
+        ));
+        assert_eq!(serde_json::to_vec(&loaded).unwrap(), before);
+        std::fs::remove_file(image_path).unwrap();
+        let context = loaded.context();
+        assert_eq!(context[0].id, "history-user");
+        assert!(
+            matches!(&context[0].content[1],ContentBlock::Text {text} if text.contains("image unavailable"))
+        );
+        assert_eq!(serde_json::to_vec(&loaded).unwrap(), before);
+    }
+
+    #[test]
+    fn context_keeps_original_selection_order_without_request_recovery() {
+        let mut session = Session::new("selection-only");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "active-system"));
+        session.messages = vec![
+            Message::new(MessageRole::User, "folded"),
+            Message::new(MessageRole::System, "persisted-log"),
+            Message::new(MessageRole::Assistant, "leading-assistant"),
+            Message::tool_result("old", "read", "leading-tool", false),
+            Message::new(MessageRole::Notice, "notice"),
+        ];
+        session.summary_up_to = 1;
+        let before = serde_json::to_vec(&session).unwrap();
+        let context = session.context();
+        assert_eq!(
+            context
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                session.system_prompt_message.as_ref().unwrap().id.as_str(),
+                session.messages[2].id.as_str(),
+                session.messages[3].id.as_str()
+            ]
+        );
+        assert!(
+            !context
+                .iter()
+                .any(|message| message.role == MessageRole::User)
+        );
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+        session.summary_up_to = session.messages.len();
+        assert_eq!(session.context().len(), 1);
+    }
+
+    #[test]
     fn transient_image_data_is_available_to_context_but_never_serialized() {
         let secret_data = "data:image/png;base64,THIS_MUST_NOT_PERSIST";
         let mut session = Session::new("ready-content");
@@ -813,7 +890,7 @@ mod ready_content_tests {
         session.clear_transient_content_for_message("message-1");
         assert!(matches!(
             &session.context()[0].content[1],
-            ContentBlock::Image { data: None, .. }
+            ContentBlock::Text { text } if text.contains("image unavailable")
         ));
     }
 }
