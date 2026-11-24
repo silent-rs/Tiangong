@@ -33,6 +33,8 @@ use serde_json::Value;
 mod process;
 pub(crate) mod sandbox_exemptions;
 
+#[cfg(not(windows))]
+use crate::host_policy::{common_directory_denied_files, common_directory_roots};
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,
     prepare_policy_fd, sanitize_spawn_environment, spawn_on_persistent_thread,
@@ -40,11 +42,10 @@ use process::{
 };
 #[cfg(windows)]
 use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
-#[cfg(not(windows))]
 use sandbox_exemptions::storage_root_writable_roots;
 use sandbox_exemptions::{
-    apply_user_cache_write, common_directory_roots, ensure_storage_data_dir,
-    exempt_authorized_reads, exempt_authorized_user_credentials, isolate_other_plugin_data,
+    apply_user_cache_write, ensure_storage_data_dir, exempt_authorized_reads,
+    exempt_authorized_user_credentials, isolate_other_plugin_data,
     path_authorization_readable_roots, resolve_launcher, retain_existing_writable_roots,
     tiangong_protected_paths,
 };
@@ -643,10 +644,15 @@ impl StdioSidecarConnection {
             // 启动 MCP server 需要写包缓存。
             let home = crate::interpreter_env::user_home_dir();
             if path_authorization {
-                // 包管理与工具链缓存对全部插件开放读写。
+                // 包管理与工具链缓存对全部插件开放读写（清单见
+                // host_policy::common_directories，只取机器上实际存在的目录）。
                 policy
                     .extra_writable
                     .extend(common_directory_roots(home.as_deref()));
+                // 整目录开放的工具目录里混有凭据文件，单独禁读。
+                policy
+                    .denied_read_paths
+                    .extend(common_directory_denied_files(home.as_deref()));
                 // 默认全禁：需要读取的位置逐项列出，不存在的路径不授权。
                 policy
                     .readable_roots

@@ -254,20 +254,6 @@ pub(super) fn apply_user_cache_write(
     }
 }
 
-/// 对所有沙箱 sidecar 开放读写的通用目录（包管理与工具链缓存）。
-const COMMON_HOME_DIRECTORIES: [&str; 4] = [".npm", ".cache", ".nvm", ".cargo"];
-
-/// 按目录授权下对所有插件开放读写的通用目录；家目录未知时为空。
-pub(super) fn common_directory_roots(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
-    home.map(|home| {
-        COMMON_HOME_DIRECTORIES
-            .iter()
-            .map(|name| home.join(name))
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 /// 按目录授权下的只读根。
 ///
 /// Windows 保持 AppContainer 默认全禁，读不到的位置必须显式列出：会话记录对所有
@@ -310,21 +296,6 @@ pub(super) fn path_authorization_readable_roots(
 #[cfg(test)]
 mod sensitive_access_tests {
     use super::*;
-
-    #[test]
-    fn common_directories_cover_package_and_toolchain_caches() {
-        let home = std::path::Path::new("/home/user");
-        assert_eq!(
-            common_directory_roots(Some(home)),
-            vec![
-                std::path::PathBuf::from("/home/user/.npm"),
-                std::path::PathBuf::from("/home/user/.cache"),
-                std::path::PathBuf::from("/home/user/.nvm"),
-                std::path::PathBuf::from("/home/user/.cargo"),
-            ]
-        );
-        assert!(common_directory_roots(None).is_empty());
-    }
 
     #[test]
     fn readable_roots_follow_plugin_identity_and_granted_permissions() {
