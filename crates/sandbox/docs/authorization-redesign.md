@@ -1,9 +1,9 @@
 # 沙箱授权模型重构：Windows 默认全禁 + 按目录授权
 
 - 日期：2026-11-23
-- 分支：`perf/windows-startup`
-- 状态：设计稿，未实施。
-- 范围：Windows 沙箱授权方式、宿主策略组装、`LaunchPolicy` 契约；macOS / Linux 行为不变。
+- 分支：`feat/sandbox-path-authorization`；宿主跟进：`perf/windows-startup-app`
+- 状态：实施中。Sandbox 见 #793，宿主见 #794；skill 迁移已在 #791 合并。
+- 范围：Windows 沙箱授权方式、宿主策略组装与 `LaunchPolicy` 契约。macOS / Linux 不遍历目录树，宿主可统一声明相同的通用可写目录。
 
 ## 0. 决策记录（2026-11-23）
 
@@ -152,16 +152,16 @@ macOS 和 Linux 没有这两种遍历：seatbelt 和 bwrap 按目录出规则，
 
 ## 9. skills
 
-由 skill sidecar 自己迁移，做法与 scheduler、mcp、subagent 在 #654 时的迁移一致，
-参照 `plugins/tiangong-plugin-scheduler/sidecar/src/migration.rs`：
+已在 #791（skill 0.2.9）实现，由 skill sidecar 自己迁移，做法与 scheduler、mcp、subagent
+在 #654 时的迁移一致，实现参照 `plugins/tiangong-plugin-scheduler/sidecar/src/migration.rs`：
 
-1. 数据目录里没有完成标记且旧目录存在时，把 `~/.tiangong/skills` 逐项复制进 `data/skill/` 下的
-   技能目录：新位置已有同名项则跳过，每个文件先写临时文件再原子改名，全部成功后才写完成标记。
-   中途失败则报错并中止启动，不写标记，避免在新目录生成空清单后旧数据再也迁不过来。
-2. 完成标记存在后，技能目录和 `mcp-lock.json` 的解析只指向数据目录，不再读写旧位置。
-3. 旧目录原样保留，由用户清理。sidecar 对存储根没有写权限，删不掉也改不了它的名字。
+1. 数据目录里没有 `.legacy-skills-migrated` 完成标记且旧目录存在时，把 `~/.tiangong/skills`
+   逐项补入插件数据目录下的技能目录：不覆盖已有文件，子目录补缺失项，符号链接跳过；每个文件
+   先写临时文件再原子改名，全部成功后才写完成标记。中途失败则报错并中止启动，不写标记。
+2. 完成标记存在后，技能目录只指向数据目录；锁文件改在注册表根解析，不再读写旧位置。
+3. 插件尚无数据目录时回退旧位置，兼容首次升级；旧目录原样保留，由用户清理。
 
-事实核对：
+迁移前的事实核对：
 
 - 现状是优先读 `TIANGONG_STORAGE_ROOT/skills`，回退 `~/.tiangong/skills`
   （`plugins/tiangong-plugin-skill/sidecar/src/service.rs` 的 `resolve_skills_root`），
@@ -174,7 +174,7 @@ macOS 和 Linux 没有这两种遍历：seatbelt 和 bwrap 按目录出规则，
 
 ## 10. 兼容与迁移
 
-- 发布顺序：先发 Sandbox（新 Launcher 上报 `path_authorization`），App 再切新清单。
+- 发布顺序：先发 Sandbox 新契约，宿主完成支持后再上报 `path_authorization`，App 最后切新清单。
 - 新 App + 旧 Launcher：能力不支持，走旧路径。
 - 旧 App + 新 Launcher：新字段被忽略，行为同旧。
 - 旧授权记录带旧的结构版本号，新 Launcher 首次运行时撤销后按三类记录重建。
@@ -200,10 +200,18 @@ macOS 和 Linux 没有这两种遍历：seatbelt 和 bwrap 按目录出规则，
 | #655 的两个故障复现 | 能力 SID 不进限制列表；锁冲突重试已在当前代码中 |
 | Windows 可写范围收窄后暴露往 `data/<id>` 以外写的插件 | 真机全插件冒烟 |
 
-## 13. 分阶段
+## 13. 实施进度
 
-1. Sandbox：契约字段、能力名、三类授权记录、校验绑定记录。
-2. App：按新清单组装策略并删除平台分支；工作区记录的生命周期；配置读权限收紧为仅官方。
-3. skill 插件：自行把旧技能目录迁入数据目录，完成后只读写新位置。
-4. 并行的宿主侧改进（不依赖 Sandbox 发版）：启动内制品摘要只算一次、门闸是否等待预热、
-   自检探测顺序、插件自动升级推迟到预加载之后。
+1. #791（已合并）：skill 0.2.9 将旧技能目录迁入插件数据目录，并调整锁文件位置。
+2. #793（本分支）：Sandbox 新增 `readable_roots` 与 `path_authorization` 契约；目录树校验移到
+   ACL 授权建立或重建时；只读根支持目录和单个文件；Launcher 升至 0.1.17。能力暂按不支持上报。
+3. #794（依赖 #793）：宿主改用统一可写清单与显式只读根，配置读豁免收紧为仅官方签名插件，
+   通用目录清单独立维护，并补充启动分阶段计时日志。因 Launcher 尚未上报支持，当前行为保持不变。
+4. 原 #792 的改动已拆分到 #793 与 #794，由这两个 PR 取代。
+
+尚未完成：
+
+- 共享底座、插件底座、工作区三类持久授权记录，以及按需 sidecar 的持久授权。
+- 工作区记录的生命周期、自检只读根探针，以及能力正式上报为支持。
+- 启动内制品摘要去重、门闸是否等待预热、自检探测顺序、插件自动升级时序。
+- Windows 真机分阶段耗时实测，以及官方插件在收窄授权后的全量冒烟。
