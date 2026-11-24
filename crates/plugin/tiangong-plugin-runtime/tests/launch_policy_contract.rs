@@ -141,20 +141,22 @@ fn host_and_launcher_compute_same_writable_roots() {
 #[test]
 fn host_and_launcher_compute_same_readable_roots() {
     let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("workspace");
+    // 以规范化后的真实路径为基准：不存在的子路径不会被规范化，临时目录若经由
+    // 符号链接访问，可写根与只读根的包含关系会错位。
+    let base = root.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let mut host = LaunchPolicy::workspace_write(&workspace);
     host.readable_roots = vec![
-        root.path().join("sessions"),
+        base.join("sessions"),
         workspace.join("nested"),
         PathBuf::from("relative"),
-        root.path().join("sessions"),
+        base.join("sessions"),
     ];
     let launcher = to_launcher(&host);
     // 规范化去重、丢弃相对路径，位于可写根内的条目不重复授权：两端一致。
     assert_eq!(host.readable_roots(), launcher.readable_roots());
-    assert_eq!(launcher.readable_roots().len(), 1);
-    assert!(launcher.readable_roots()[0].ends_with("sessions"));
+    assert_eq!(launcher.readable_roots(), vec![base.join("sessions")]);
 }
 
 #[cfg(target_os = "macos")]
