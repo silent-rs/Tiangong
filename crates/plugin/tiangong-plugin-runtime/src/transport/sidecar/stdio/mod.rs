@@ -43,9 +43,10 @@ use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
 #[cfg(not(windows))]
 use sandbox_exemptions::storage_root_writable_roots;
 use sandbox_exemptions::{
-    apply_user_cache_write, ensure_storage_data_dir, exempt_authorized_reads,
-    exempt_authorized_user_credentials, isolate_other_plugin_data, resolve_launcher,
-    retain_existing_writable_roots, tiangong_protected_paths,
+    apply_user_cache_write, common_directory_roots, ensure_storage_data_dir,
+    exempt_authorized_reads, exempt_authorized_user_credentials, isolate_other_plugin_data,
+    path_authorization_readable_roots, resolve_launcher, retain_existing_writable_roots,
+    tiangong_protected_paths,
 };
 
 #[cfg(test)]
@@ -446,6 +447,17 @@ impl StdioSidecarConnection {
         }
     }
 
+    /// Launcher 是否支持按目录授权。能力集合取自已缓存的自检报告，命中缓存时
+    /// 不启动进程；自检失败或 Launcher 缺失按不支持处理，走原有策略。
+    fn launcher_supports_path_authorization(&self) -> bool {
+        resolve_launcher(&self.config.storage_root).is_some_and(|launcher| {
+            crate::launcher_update::launcher_capabilities(&launcher, &self.config.storage_root)
+                .is_ok_and(|supported| {
+                    supported.contains(crate::launch_policy::CAPABILITY_PATH_AUTHORIZATION)
+                })
+        })
+    }
+
     /// 解释器形态每次启动都经缓存入口解析程序路径（命中只做一次
     /// `is_file` 校验，不触发目录扫描），不在配置中保存可能过期的
     /// 解释器路径副本。
@@ -541,6 +553,9 @@ impl StdioSidecarConnection {
         // 尚未初始化时按开启处理（fail-safe 向保护方向）。
         let sandbox_disabled = self.config.runtime_env.sandbox_disabled();
         let sandbox_enabled = self.config.sandbox_enabled_for_spawn(sandbox_disabled);
+        // Launcher 支持按目录授权时改用新清单：存储根不再整体并入可写域，
+        // 需要读取的位置经 readable_roots 显式授权；旧 Launcher 走原有策略。
+        let path_authorization = sandbox_enabled && self.launcher_supports_path_authorization();
         if self.config.sandbox_follows_user_switch && sandbox_disabled {
             tracing::warn!(
                 plugin_id = %self.config.plugin_id,
@@ -593,18 +608,28 @@ impl StdioSidecarConnection {
             // media、tmp 可写；根目录、logs 与其他插件数据只读（见
             // storage_root_writable_roots）。
             //
-            // Windows 例外：AppContainer 默认不可读未授权目录，收拢写域后
-            // 存储根其余内容连读取也一并失去（旧数据迁移、skills 等失效）。
-            // 恢复收拢前的处理：整个存储根并入可写域，敏感清单仍读写双禁、
-            // 其他插件数据仍按 isolate_other_plugin_data 隔离。
-            #[cfg(windows)]
-            policy.extra_writable.push(self.config.storage_root.clone());
-            #[cfg(not(windows))]
-            policy.extra_writable.extend(storage_root_writable_roots(
-                &self.config.storage_root,
-                &self.config.plugin_id,
-                &self.config.data_dir,
-            ));
+            // Windows 例外（仅旧 Launcher）：AppContainer 默认不可读未授权目录，
+            // 收拢写域后存储根其余内容连读取也一并失去（旧数据迁移、skills 等
+            // 失效）。恢复收拢前的处理：整个存储根并入可写域，敏感清单仍读写
+            // 双禁、其他插件数据仍按 isolate_other_plugin_data 隔离。
+            if path_authorization {
+                // 三个平台同一份清单：可写范围收拢为 data/<id>、插件安装目录
+                // data/、media、tmp。
+                policy.extra_writable.extend(storage_root_writable_roots(
+                    &self.config.storage_root,
+                    &self.config.plugin_id,
+                    &self.config.data_dir,
+                ));
+            } else {
+                #[cfg(windows)]
+                policy.extra_writable.push(self.config.storage_root.clone());
+                #[cfg(not(windows))]
+                policy.extra_writable.extend(storage_root_writable_roots(
+                    &self.config.storage_root,
+                    &self.config.plugin_id,
+                    &self.config.data_dir,
+                ));
+            }
             // 宿主授予的固定写域（目录清单由连接构造层按策略判定后传入，
             // 传输层只做保障与汇入）：缺失则创建，符号链接一律丢弃。
             policy.extra_writable.extend(
@@ -616,10 +641,33 @@ impl StdioSidecarConnection {
             );
             // 工具链缓存（npm 等）是功能基础设施而非用户数据：npx/uvx
             // 启动 MCP server 需要写包缓存。
-            if let Some(home) = crate::interpreter_env::user_home_dir() {
-                policy.extra_writable.push(home.join(".npm"));
+            let home = crate::interpreter_env::user_home_dir();
+            if path_authorization {
+                // 包管理与工具链缓存对全部插件开放读写。
+                policy
+                    .extra_writable
+                    .extend(common_directory_roots(home.as_deref()));
+                // 默认全禁：需要读取的位置逐项列出，不存在的路径不授权。
+                policy
+                    .readable_roots
+                    .extend(path_authorization_readable_roots(
+                        &self.config.storage_root,
+                        &self.config.plugin_id,
+                        self.config
+                            .sandbox_program_root
+                            .as_deref()
+                            .or_else(|| self.config.binary.parent()),
+                        self.config.sensitive_storage,
+                        self.config.user_credential_reads,
+                        home.as_deref(),
+                    ));
+                policy.readable_roots.retain(|path| path.exists());
+            } else {
+                if let Some(home) = home {
+                    policy.extra_writable.push(home.join(".npm"));
+                }
+                apply_user_cache_write(&mut policy, self.config.sandbox_user_cache_write);
             }
-            apply_user_cache_write(&mut policy, self.config.sandbox_user_cache_write);
             if let Some(temp_dir) = &effective_temp_dir {
                 policy.extra_writable.push(temp_dir.clone());
             }

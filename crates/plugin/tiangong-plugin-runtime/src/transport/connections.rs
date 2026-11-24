@@ -319,9 +319,10 @@ fn sidecar_connection_inner(
     }
     if let Some(signed_release) = signed_release {
         // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。
+        // 配置里有端点与凭据，读取豁免只对官方签名的插件开放。
         config = config.with_sensitive_storage(crate::sidecar::SensitiveStorageAccess {
-            model_config: signed_release.has_permission("model-config.read"),
-            server_config: signed_release.has_permission("app-storage.read"),
+            model_config: official_signed && signed_release.has_permission("model-config.read"),
+            server_config: official_signed && signed_release.has_permission("app-storage.read"),
             app_config: false,
         });
     }
