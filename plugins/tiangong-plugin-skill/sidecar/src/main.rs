@@ -12,6 +12,7 @@
 
 mod env_local;
 mod mcp_lock;
+mod migration;
 mod paths;
 mod registry;
 mod service;
