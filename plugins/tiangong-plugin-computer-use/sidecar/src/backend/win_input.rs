@@ -38,10 +38,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_YVIRTUALSCREEN, SetCursorPos,
 };
 
-use tiangong_plugin_computer_use_protocol::ops::{KeyboardActionKind, MouseGesture};
+use tiangong_plugin_computer_use_protocol::ops::{
+    KeyboardActionKind, MouseGesture, MousePoint, MouseRequest,
+};
 
 use super::input_cancel::{CancelToken, cancelled_message};
 use super::keys::{combo_keys, key_symbol, normalize_key_name};
+use super::mouse_path;
 use super::win_overlay as overlay;
 
 /// down → up 间隔：足够应用完成点击归一（不触成长按）。
@@ -193,24 +196,46 @@ fn wheel_units(pixels: f64) -> i32 {
 }
 
 /// 执行一次鼠标手势；成功返回人读摘要。
-pub fn perform_mouse(
-    gesture: MouseGesture,
-    x: f64,
-    y: f64,
-    to: Option<(f64, f64)>,
-    scroll: (f64, f64),
-    cancel: &CancelToken,
-) -> Result<String, String> {
+pub fn perform_mouse(req: &MouseRequest, cancel: &CancelToken) -> Result<String, String> {
+    req.validate()?;
     let _guard = input_guard();
     // 排队等锁期间可能已被取消：拿到锁后先检查。
     if cancel.is_cancelled() {
         return Err(cancelled_message("鼠标手势"));
     }
+    let gesture = req.gesture;
+    let (x, y) = (req.x, req.y);
+    let to = req.to_x.zip(req.to_y);
+    let control = req.control_x.zip(req.control_y);
+    let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
+    let planned = mouse_path::plan_for_gesture(gesture, x, y, to, control, req.points.as_deref());
     match gesture {
         MouseGesture::Move => {
             // 纯虚拟移动：只动天工指针，系统鼠标不动（hover 指示语义）。
             overlay::move_to(x, y);
             Ok(format!("指针已移动到 ({x:.0}, {y:.0})"))
+        }
+        MouseGesture::MoveCurve | MouseGesture::MovePath => {
+            let path = planned.expect("曲线/路径手势已规划")?;
+            let label = if gesture == MouseGesture::MoveCurve {
+                "曲线"
+            } else {
+                "多点路径"
+            };
+            for point in &path {
+                if cancel.is_cancelled() {
+                    return Err(cancelled_message("鼠标移动"));
+                }
+                overlay::move_to(point.x, point.y);
+                sleep(mouse_path::MOTION_STEP_INTERVAL);
+            }
+            let end = path.last().copied().unwrap_or(MousePoint { x, y });
+            Ok(format!(
+                "指针已沿{label}经过 {} 个轨迹点到达 ({:.0}, {:.0})",
+                path.len(),
+                end.x,
+                end.y
+            ))
         }
         MouseGesture::Click | MouseGesture::RightClick | MouseGesture::DoubleClick => {
             overlay::glide_and_wait(x, y);
@@ -260,41 +285,82 @@ pub fn perform_mouse(
                 "已在 ({x:.0}, {y:.0}) 执行{label}点击（系统鼠标已归位）"
             ))
         }
-        MouseGesture::Drag => {
-            let (tx, ty) = to.ok_or("drag 缺少 to_x/to_y 终点")?;
+        MouseGesture::Drag | MouseGesture::DragCurve | MouseGesture::DragPath => {
+            let is_curve = gesture == MouseGesture::DragCurve;
+            let is_path = gesture == MouseGesture::DragPath;
+            let path = if is_curve || is_path {
+                planned.expect("曲线/路径手势已规划")?
+            } else {
+                let (tx, ty) = to.ok_or("drag 缺少 to_x/to_y 终点")?;
+                let distance = (tx - x).hypot(ty - y).max(1.0);
+                let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
+                (1..=steps)
+                    .map(|step| {
+                        let progress = step as f64 / steps as f64;
+                        let ease = progress * (2.0 - progress); // ease-out 轨迹
+                        MousePoint {
+                            x: x + (tx - x) * ease,
+                            y: y + (ty - y) * ease,
+                        }
+                    })
+                    .collect()
+            };
+            let (tx, ty) = if is_path {
+                let end = *path.last().expect("路径规划结果不能为空");
+                (end.x, end.y)
+            } else {
+                to.ok_or("drag 缺少 to_x/to_y 终点")?
+            };
             let origin = cursor_position();
             overlay::glide_and_wait(x, y);
+            if cancel.is_cancelled() {
+                return Err(cancelled_message("拖拽"));
+            }
+            let mut last = (x, y);
             let result = (|| {
                 warp(x, y)?;
                 sleep(DRAG_SETTLE);
                 mouse_button(MOUSEEVENTF_LEFTDOWN)?;
                 sleep(DRAG_SETTLE);
-                let distance = (tx - x).hypot(ty - y).max(1.0);
-                let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
-                for step in 1..=steps {
+                let mut interrupted = false;
+                for point in path {
                     // 取消时在当前位置抬起（外层统一补发 LEFTUP 并归还）。
                     if cancel.is_cancelled() {
-                        return Err(cancelled_message("拖拽"));
+                        interrupted = true;
+                        break;
                     }
-                    let progress = step as f64 / steps as f64;
-                    let ease = progress * (2.0 - progress); // ease-out 轨迹
-                    let nx = x + (tx - x) * ease;
-                    let ny = y + (ty - y) * ease;
-                    absolute_move(nx, ny)?;
-                    overlay::move_to(nx, ny);
-                    sleep(DRAG_STEP_INTERVAL);
+                    absolute_move(point.x, point.y)?;
+                    overlay::move_to(point.x, point.y);
+                    last = (point.x, point.y);
+                    let interval = if is_curve || is_path {
+                        mouse_path::MOTION_STEP_INTERVAL
+                    } else {
+                        DRAG_STEP_INTERVAL
+                    };
+                    sleep(interval);
                 }
-                warp(tx, ty)?;
-                mouse_button(MOUSEEVENTF_LEFTUP)
+                warp(last.0, last.1)?;
+                mouse_button(MOUSEEVENTF_LEFTUP)?;
+                if interrupted {
+                    return Err(cancelled_message("拖拽"));
+                }
+                Ok::<(), String>(())
             })();
             if result.is_err() {
-                // 任何失败都不允许遗留按住状态。
+                // 任何失败/取消都不允许遗留按住状态。
                 let _ = mouse_button(MOUSEEVENTF_LEFTUP);
             }
             restore_cursor(origin);
             result?;
+            let label = if is_curve {
+                "曲线拖拽"
+            } else if is_path {
+                "多点拖拽"
+            } else {
+                "拖拽"
+            };
             Ok(format!(
-                "已从 ({x:.0}, {y:.0}) 拖拽到 ({tx:.0}, {ty:.0})（系统鼠标已归位）"
+                "已从 ({x:.0}, {y:.0}) 沿{label}到 ({tx:.0}, {ty:.0})（系统鼠标已归位）"
             ))
         }
         MouseGesture::Scroll => {

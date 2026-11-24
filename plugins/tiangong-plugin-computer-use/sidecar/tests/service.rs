@@ -246,6 +246,96 @@ async fn desktop_keyboard_rejects_unknown_action() {
     assert!(!resp.success, "未知 action 应在解析层失败");
 }
 
+// ── desktop_mouse 曲线/多点路径 ─────────────────────────────────
+#[test]
+fn mouse_curve_and_path_requests_roundtrip() {
+    let curve: MouseRequest = serde_json::from_value(serde_json::json!({
+        "gesture": "drag_curve",
+        "x": 10.0, "y": 20.0,
+        "control_x": 40.0, "control_y": 80.0,
+        "to_x": 100.0, "to_y": 20.0
+    }))
+    .unwrap();
+    assert_eq!(curve.gesture, MouseGesture::DragCurve);
+    curve.validate().unwrap();
+    let encoded = serde_json::to_value(&curve).unwrap();
+    let decoded: MouseRequest = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.control_x, Some(40.0));
+    assert_eq!(decoded.to_y, Some(20.0));
+
+    let path: MouseRequest = serde_json::from_value(serde_json::json!({
+        "gesture": "move_path",
+        "x": 0.0, "y": 0.0,
+        "points": [{ "x": 0.0, "y": 0.0 }, { "x": 50.0, "y": 20.0 }]
+    }))
+    .unwrap();
+    path.validate().unwrap();
+    assert_eq!(
+        path.points.unwrap(),
+        vec![
+            MousePoint { x: 0.0, y: 0.0 },
+            MousePoint { x: 50.0, y: 20.0 }
+        ]
+    );
+}
+
+#[test]
+fn legacy_mouse_request_stays_backward_compatible() {
+    let request: MouseRequest = serde_json::from_value(serde_json::json!({
+        "gesture": "click", "x": 10, "y": 20
+    }))
+    .unwrap();
+    request.validate().unwrap();
+    assert!(request.control_x.is_none());
+    assert!(request.points.is_none());
+}
+
+#[test]
+fn mouse_motion_validation_rejects_incomplete_or_oversized_paths() {
+    let base = serde_json::json!({
+        "gesture": "move_curve", "x": 0, "y": 0,
+        "control_x": 10, "to_x": 20, "to_y": 0
+    });
+    let request: MouseRequest = serde_json::from_value(base).unwrap();
+    assert!(request.validate().unwrap_err().contains("control_y"));
+
+    let mut request: MouseRequest = serde_json::from_value(serde_json::json!({
+        "gesture": "drag_path", "x": 0, "y": 0,
+        "points": [{ "x": 0, "y": 0 }]
+    }))
+    .unwrap();
+    assert!(request.validate().is_err());
+    request.points = Some(vec![MousePoint { x: 0.0, y: 0.0 }; 257]);
+    assert!(request.validate().unwrap_err().contains("256"));
+    request.points = Some(vec![
+        MousePoint { x: 0.0, y: 0.0 },
+        MousePoint {
+            x: f64::NAN,
+            y: 1.0,
+        },
+    ]);
+    assert!(request.validate().unwrap_err().contains("有限数值"));
+}
+
+#[tokio::test]
+async fn desktop_mouse_rejects_invalid_path_before_backend() {
+    let service = tiangong_plugin_computer_use_sidecar::ComputerUseService::new().unwrap();
+    let resp = service
+        .dispatch(request(
+            DESKTOP_MOUSE_OPERATION,
+            serde_json::json!({
+                "gesture": "drag_path", "x": 0, "y": 0,
+                "points": [{ "x": 0, "y": 0 }]
+            }),
+        ))
+        .await;
+    assert!(!resp.success, "非法路径应在协议层失败，不触达输入 API");
+    assert!(
+        resp.error_message.unwrap_or_default().contains("多点移动"),
+        "应返回路径校验原因"
+    );
+}
+
 // ── desktop_screenshot 窗口/区域（RFC 0017 Phase 2 部分）─────────
 
 /// ScreenshotRequest 新字段向后兼容：旧请求（无 region/max_dimension）

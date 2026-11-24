@@ -12,9 +12,9 @@ use serde_json::{Value, json};
 use tiangong_plugin_computer_use_protocol::ops::{
     Action, ActionRequest, ActionRequestKind, DesktopStatus, DesktopStatusRequest, Find,
     FindConditions, FindRequest, Keyboard, KeyboardActionKind, KeyboardRequest, ListWindows,
-    ListWindowsRequest, Mouse, MouseGesture, MouseRequest, OpenApp, OpenAppRequest, Screenshot,
-    ScreenshotRequest, Snapshot, SnapshotRequest, SnapshotScope, Wait, WaitCondition, WaitRequest,
-    WaitTarget,
+    ListWindowsRequest, MAX_MOUSE_PATH_POINTS, Mouse, MouseGesture, MousePoint, MouseRequest,
+    OpenApp, OpenAppRequest, Screenshot, ScreenshotRequest, Snapshot, SnapshotRequest,
+    SnapshotScope, Wait, WaitCondition, WaitRequest, WaitTarget,
 };
 use tiangong_plugin_computer_use_protocol::{
     AccessContext, Bounds, ComputerUseOperation, DesktopResult, ElementRef, MatchMode,
@@ -331,7 +331,7 @@ async fn desktop_input(service: &ComputerUseService, payload: Value) -> Value {
     } else {
         return tool_failure(
             &format!(
-                "desktop_input 的 action 无法识别：{}（鼠标 click/double_click/right_click/move/drag/scroll，键盘 type/key/combo）",
+                "desktop_input 的 action 无法识别：{}（鼠标 click/double_click/right_click/move/move_curve/move_path/drag/drag_curve/drag_path/scroll，键盘 type/key/combo）",
                 if action.is_empty() {
                     "（缺失）"
                 } else {
@@ -400,13 +400,28 @@ async fn desktop_input(service: &ComputerUseService, payload: Value) -> Value {
 }
 
 async fn run_mouse(service: &ComputerUseService, args: &Value, gesture: MouseGesture) -> Value {
-    let (Some(x), Some(y)) = (
-        args.get("x").and_then(|value| value.as_f64()),
-        args.get("y").and_then(|value| value.as_f64()),
-    ) else {
-        return tool_failure("鼠标动作缺少 x/y 坐标", "missing x/y");
+    let is_path = matches!(gesture, MouseGesture::MovePath | MouseGesture::DragPath);
+    let points = if is_path {
+        match parse_mouse_points(args) {
+            Ok(points) => Some(points),
+            Err(reason) => return tool_failure(&reason, "invalid mouse path"),
+        }
+    } else {
+        None
     };
-    // 手势参数完整性：drag 需终点，scroll 需滚动量。
+    // 路径手势从 points[0] 取起点；其余手势沿用 x/y。
+    let (x, y) = if let Some(points) = points.as_ref() {
+        (points[0].x, points[0].y)
+    } else {
+        let (Some(x), Some(y)) = (
+            args.get("x").and_then(|value| value.as_f64()),
+            args.get("y").and_then(|value| value.as_f64()),
+        ) else {
+            return tool_failure("鼠标动作缺少 x/y 坐标", "missing x/y");
+        };
+        (x, y)
+    };
+    // 手势参数完整性：drag 需终点，scroll 需滚动量；曲线控制点由协议统一校验。
     let (to_x, to_y) = (
         args.get("to_x").and_then(|value| value.as_f64()),
         args.get("to_y").and_then(|value| value.as_f64()),
@@ -429,9 +444,44 @@ async fn run_mouse(service: &ComputerUseService, args: &Value, gesture: MouseGes
         to_y,
         delta_y,
         delta_x,
+        control_x: args.get("control_x").and_then(|value| value.as_f64()),
+        control_y: args.get("control_y").and_then(|value| value.as_f64()),
+        points,
         access: access(service),
     };
+    if let Err(reason) = request.validate() {
+        return tool_failure(&reason, "invalid mouse gesture");
+    }
     desktop_op::<Mouse, _>(service, &request, "desktop_mouse").await
+}
+fn parse_mouse_points(args: &Value) -> Result<Vec<MousePoint>, String> {
+    let values = args
+        .get("points")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "多点移动必须提供 points 数组".to_string())?;
+    if values.len() < 2 {
+        return Err("多点移动必须至少提供 2 个 points 路径点".to_string());
+    }
+    if values.len() > MAX_MOUSE_PATH_POINTS {
+        return Err(format!(
+            "多点移动最多支持 {MAX_MOUSE_PATH_POINTS} 个 points 路径点"
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let x = value
+                .get("x")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("points[{index}] 缺少有效 x 坐标"))?;
+            let y = value
+                .get("y")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("points[{index}] 缺少有效 y 坐标"))?;
+            Ok(MousePoint { x, y })
+        })
+        .collect()
 }
 
 async fn run_keyboard(
@@ -754,10 +804,14 @@ fn parse_region(value: &Value) -> Option<Bounds> {
 fn parse_mouse_gesture(value: &str) -> Option<MouseGesture> {
     match value {
         "move" => Some(MouseGesture::Move),
+        "move_curve" => Some(MouseGesture::MoveCurve),
+        "move_path" => Some(MouseGesture::MovePath),
         "click" => Some(MouseGesture::Click),
         "right_click" => Some(MouseGesture::RightClick),
         "double_click" => Some(MouseGesture::DoubleClick),
         "drag" => Some(MouseGesture::Drag),
+        "drag_curve" => Some(MouseGesture::DragCurve),
+        "drag_path" => Some(MouseGesture::DragPath),
         "scroll" => Some(MouseGesture::Scroll),
         _ => None,
     }
@@ -835,6 +889,22 @@ mod tests {
             Some(MouseGesture::DoubleClick)
         );
         assert_eq!(parse_mouse_gesture("tap"), None);
+        assert_eq!(
+            parse_mouse_gesture("move_curve"),
+            Some(MouseGesture::MoveCurve)
+        );
+        assert_eq!(
+            parse_mouse_gesture("move_path"),
+            Some(MouseGesture::MovePath)
+        );
+        assert_eq!(
+            parse_mouse_gesture("drag_curve"),
+            Some(MouseGesture::DragCurve)
+        );
+        assert_eq!(
+            parse_mouse_gesture("drag_path"),
+            Some(MouseGesture::DragPath)
+        );
         assert_eq!(
             parse_keyboard_action("combo"),
             Some(KeyboardActionKind::Combo)

@@ -19,12 +19,11 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
-
-use tiangong_plugin_computer_use_protocol::ops::MouseGesture;
+use tiangong_plugin_computer_use_protocol::ops::{MouseGesture, MousePoint, MouseRequest};
 
 use super::input_cancel::{CancelToken, cancelled_message};
+use super::mouse_path;
 use super::overlay;
-
 /// down → up 间隔：足够应用完成点击归一（不触成长按）。
 const CLICK_DOWN_UP: Duration = Duration::from_millis(60);
 /// 指针滑到目标后的停顿：视觉上「到位—再按」，也与真人操作一致。
@@ -44,7 +43,6 @@ static LAST_SYSTEM_CURSOR: std::sync::Mutex<(f64, f64)> = std::sync::Mutex::new(
 pub(crate) fn cache_system_cursor(x: f64, y: f64) {
     *LAST_SYSTEM_CURSOR.lock().unwrap() = (x, y);
 }
-
 fn current_cursor_position() -> (f64, f64) {
     *LAST_SYSTEM_CURSOR.lock().unwrap()
 }
@@ -90,25 +88,47 @@ impl MouseIo {
 
 /// 执行一次手势；成功返回人读摘要。`cancel` 置位后不再开始手势，
 /// 拖拽轨迹中途停止并补发抬起。
-pub fn perform(
-    gesture: MouseGesture,
-    x: f64,
-    y: f64,
-    to: Option<(f64, f64)>,
-    scroll: (f64, f64),
-    cancel: &CancelToken,
-) -> Result<String, String> {
+pub fn perform(req: &MouseRequest, cancel: &CancelToken) -> Result<String, String> {
+    req.validate()?;
     // 与键盘共用手势锁：并发调用时点击/拖拽不与按键事件交错。
     let _guard = super::keyboard::input_guard();
     if cancel.is_cancelled() {
         return Err(cancelled_message("鼠标手势"));
     }
+    let gesture = req.gesture;
+    let (x, y) = (req.x, req.y);
+    let to = req.to_x.zip(req.to_y);
+    let control = req.control_x.zip(req.control_y);
+    let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
     let io = MouseIo::new()?;
+    let planned = mouse_path::plan_for_gesture(gesture, x, y, to, control, req.points.as_deref());
     match gesture {
         MouseGesture::Move => {
             // 纯虚拟移动：只动天工指针，系统鼠标不动（hover 指示语义）。
             overlay::move_to(x, y);
             Ok(format!("指针已移动到 ({x:.0}, {y:.0})"))
+        }
+        MouseGesture::MoveCurve | MouseGesture::MovePath => {
+            let path = planned.expect("曲线/路径手势已规划")?;
+            let label = if gesture == MouseGesture::MoveCurve {
+                "曲线"
+            } else {
+                "多点路径"
+            };
+            for point in &path {
+                if cancel.is_cancelled() {
+                    return Err(cancelled_message("鼠标移动"));
+                }
+                overlay::move_to(point.x, point.y);
+                sleep(mouse_path::MOTION_STEP_INTERVAL);
+            }
+            let end = path.last().copied().unwrap_or(MousePoint { x, y });
+            Ok(format!(
+                "指针已沿{label}经过 {} 个轨迹点到达 ({:.0}, {:.0})",
+                path.len(),
+                end.x,
+                end.y
+            ))
         }
         MouseGesture::Click | MouseGesture::RightClick | MouseGesture::DoubleClick => {
             // 虚拟指针是视觉主角：平滑滑行到目标并**等待真正到达**（未
@@ -152,51 +172,102 @@ pub fn perform(
                 "已在 ({x:.0}, {y:.0}) 执行{label}点击（系统鼠标已归位）"
             ))
         }
-        MouseGesture::Drag => {
-            let (tx, ty) = to.ok_or("drag 缺少 to_x/to_y 终点")?;
+        MouseGesture::Drag | MouseGesture::DragCurve | MouseGesture::DragPath => {
+            let is_curve = gesture == MouseGesture::DragCurve;
+            let is_path = gesture == MouseGesture::DragPath;
+            let path = if is_curve || is_path {
+                planned.expect("曲线/路径手势已规划")?
+            } else {
+                let (tx, ty) = to.ok_or("拖拽缺少 to_x/to_y 终点")?;
+                // 保留既有直线 drag 的 ease-out 速度曲线。
+                let distance = ((tx - x).hypot(ty - y)).max(1.0);
+                let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
+                (1..=steps)
+                    .map(|step| {
+                        let progress = step as f64 / steps as f64;
+                        let ease = progress * (2.0 - progress);
+                        MousePoint {
+                            x: x + (tx - x) * ease,
+                            y: y + (ty - y) * ease,
+                        }
+                    })
+                    .collect()
+            };
+            let (tx, ty) = if is_path {
+                let end = *path.last().expect("路径规划结果不能为空");
+                (end.x, end.y)
+            } else {
+                to.ok_or("拖拽缺少 to_x/to_y 终点")?
+            };
             // 真实拖拽会话必须跟随系统指针：记录起点，结束后归还。
             let (origin_x, origin_y) = current_cursor_position();
             // 虚拟指针先平滑滑到起点并等待到位（视觉预告），随后系统
-            // 鼠标闪移借用：down → 停顿建立拖拽会话 → 插值轨迹（拖拽
-            // 本身必须由系统指针承载，虚拟指针沿途跟随）→ up → 闪移归还。
+            // 鼠标闪移借用：down → 停顿建立拖拽会话 → 插值轨迹 → up → 归还。
             overlay::glide_and_wait(x, y);
-            io.move_to(x, y)?;
-            sleep(DRAG_SETTLE);
-            // down → 停顿建立拖拽会话 → 插值轨迹 → up → 归还系统鼠标。
-            io.post(CGEventType::LeftMouseDown, CGMouseButton::Left, x, y)?;
-            sleep(DRAG_SETTLE);
-            let distance = ((tx - x).hypot(ty - y)).max(1.0);
-            let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
-            let mut last = (x, y);
-            let mut interrupted = false;
-            for step in 1..=steps {
-                // 取消时在当前位置抬起并归还，不留按住状态。
-                if cancel.is_cancelled() {
-                    interrupted = true;
-                    break;
-                }
-                let progress = step as f64 / steps as f64;
-                let ease = progress * (2.0 - progress); // ease-out 轨迹
-                let nx = x + (tx - x) * ease;
-                let ny = y + (ty - y) * ease;
-                io.post(CGEventType::LeftMouseDragged, CGMouseButton::Left, nx, ny)?;
-                overlay::move_to(nx, ny);
-                last = (nx, ny);
-                sleep(DRAG_STEP_INTERVAL);
-            }
-            io.post(
-                CGEventType::LeftMouseUp,
-                CGMouseButton::Left,
-                last.0,
-                last.1,
-            )?;
-            // 闪移归还：系统鼠标瞬移回拖拽前的位置，用户指针无感。
-            io.move_to(origin_x, origin_y)?;
-            if interrupted {
+            if cancel.is_cancelled() {
                 return Err(cancelled_message("拖拽"));
             }
+            let mut last = (x, y);
+            let result = (|| {
+                io.move_to(x, y)?;
+                sleep(DRAG_SETTLE);
+                io.post(CGEventType::LeftMouseDown, CGMouseButton::Left, x, y)?;
+                sleep(DRAG_SETTLE);
+                let mut interrupted = false;
+                for point in path {
+                    // 取消时在当前位置抬起并归还，不留按住状态。
+                    if cancel.is_cancelled() {
+                        interrupted = true;
+                        break;
+                    }
+                    io.post(
+                        CGEventType::LeftMouseDragged,
+                        CGMouseButton::Left,
+                        point.x,
+                        point.y,
+                    )?;
+                    overlay::move_to(point.x, point.y);
+                    last = (point.x, point.y);
+                    let interval = if is_curve || is_path {
+                        mouse_path::MOTION_STEP_INTERVAL
+                    } else {
+                        DRAG_STEP_INTERVAL
+                    };
+                    sleep(interval);
+                }
+                io.post(
+                    CGEventType::LeftMouseUp,
+                    CGMouseButton::Left,
+                    last.0,
+                    last.1,
+                )?;
+                // 闪移归还：系统鼠标瞬移回拖拽前的位置，用户指针无感。
+                io.move_to(origin_x, origin_y)?;
+                if interrupted {
+                    return Err(cancelled_message("拖拽"));
+                }
+                Ok::<(), String>(())
+            })();
+            if result.is_err() {
+                // 任何失败/取消都不允许遗留按住状态；归还失败也不吞掉原始错误。
+                let _ = io.post(
+                    CGEventType::LeftMouseUp,
+                    CGMouseButton::Left,
+                    last.0,
+                    last.1,
+                );
+                let _ = io.move_to(origin_x, origin_y);
+            }
+            result?;
+            let label = if is_curve {
+                "曲线拖拽"
+            } else if is_path {
+                "多点拖拽"
+            } else {
+                "拖拽"
+            };
             Ok(format!(
-                "已从 ({x:.0}, {y:.0}) 拖拽到 ({tx:.0}, {ty:.0})（系统鼠标已归位）"
+                "已从 ({x:.0}, {y:.0}) 沿{label}到 ({tx:.0}, {ty:.0})（系统鼠标已归位）"
             ))
         }
         MouseGesture::Scroll => {

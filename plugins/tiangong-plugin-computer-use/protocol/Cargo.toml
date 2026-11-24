@@ -1,11 +1,11 @@
 [package]
 name = "tiangong-plugin-computer-use-protocol"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 
 [package.metadata.tiangong]
-business-protocol = 1
+business-protocol = 2
 description = "Computer Use WASM 与 sidecar 共用的私有业务协议"
 publish = false
 

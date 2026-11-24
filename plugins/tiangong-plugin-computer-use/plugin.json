@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "id": "computer-use",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "sidecar": {
     "binary": "tiangong-computer-use-sidecar",
     "transport_protocol": "0.1.0",
-    "business_protocol": 1,
+    "business_protocol": 2,
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
@@ -98,30 +98,52 @@
     },
     {
       "name": "desktop_input",
-      "description": "真实输入（系统级键鼠合成：macOS CGEvent / Windows SendInput，行为与用户手动操作一致），点击、输入等交互的首选路径，适用于 Canvas/Qt 自绘等无障碍树外的界面。鼠标：click/double_click/right_click/move/drag/scroll，坐标为屏幕逻辑坐标（由截图 logical_bounds 与 scale 换算）；点击自带平滑移动与到位停顿，无需先 move。首次鼠标操作时天工指针从系统鼠标位置分身出现并演示操作，本轮结束自动收起。键盘：type 输入任意文本（中文不经输入法）、key 按单键、combo 组合键（修饰键在前），先点击建立焦点。screenshot_after=true 时操作完成后自动截图，省去一次单独截图。",
+      "description": "真实输入（系统级键鼠合成：macOS CGEvent / Windows SendInput，行为与用户手动操作一致），点击、输入、曲线与多点路径移动的首选路径，适用于 Canvas/Qt 自绘等无障碍树外的界面。鼠标：click/double_click/right_click/move/move_curve/move_path/drag/drag_curve/drag_path/scroll，坐标为屏幕逻辑坐标（由截图 logical_bounds 与 scale 换算）；move_curve 用 x/y、control_x/control_y、to_x/to_y 沿二次贝塞尔曲线移动；move_path/drag_path 用 points 数组依次经过多个点；drag_curve/drag_path 会按住左键沿轨迹移动并抬起，可直接绘图。点击自带平滑移动与到位停顿，无需先 move。首次鼠标操作时天工指针从系统鼠标位置分身出现并演示操作，本轮结束自动收起。键盘：type 输入任意文本（中文不经输入法）、key 按单键、combo 组合键（修饰键在前），先点击建立焦点。screenshot_after=true 时操作完成后自动截图，省去一次单独截图。",
       "input_schema": {
         "type": "object",
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["click", "double_click", "right_click", "move", "drag", "scroll", "type", "key", "combo"],
+            "enum": ["click", "double_click", "right_click", "move", "move_curve", "move_path", "drag", "drag_curve", "drag_path", "scroll", "type", "key", "combo"],
             "description": "鼠标手势或键盘动作"
           },
           "x": {
             "type": "number",
-            "description": "鼠标动作必填：目标点 X（屏幕逻辑坐标）"
+            "description": "鼠标动作起点/目标点 X（屏幕逻辑坐标）；move_path/drag_path 从 points[0] 取起点"
           },
           "y": {
             "type": "number",
-            "description": "鼠标动作必填：目标点 Y"
+            "description": "鼠标动作起点/目标点 Y；move_path/drag_path 从 points[0] 取起点"
           },
           "to_x": {
             "type": "number",
-            "description": "drag 必填：终点 X"
+            "description": "drag/drag_curve 与 move_curve 的终点 X"
           },
           "to_y": {
             "type": "number",
-            "description": "drag 必填：终点 Y"
+            "description": "drag/drag_curve 与 move_curve 的终点 Y"
+          },
+          "control_x": {
+            "type": "number",
+            "description": "move_curve/drag_curve 的二次贝塞尔控制点 X"
+          },
+          "control_y": {
+            "type": "number",
+            "description": "move_curve/drag_curve 的二次贝塞尔控制点 Y"
+          },
+          "points": {
+            "type": "array",
+            "description": "move_path/drag_path 的多点路径，含起点与终点，至少 2 点、最多 256 点",
+            "minItems": 2,
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+              },
+              "required": ["x", "y"]
+            }
           },
           "delta_y": {
             "type": "number",
@@ -304,7 +326,8 @@
   ],
   "prompt": [
     "桌面应用的交互一律使用 computer-use 插件（5 个工具）：唤起窗口、看界面、点击输入都属本插件职责。终端沙箱无法与图形界面交互（osascript、open -a、screencapture 均不可行），不要在终端里尝试。典型流程：desktop_app(action=open) 把目标应用唤起到前台（未运行会自动启动，返回窗口坐标）→ desktop_screenshot 截取窗口看界面 → desktop_input 点击/输入（可带 screenshot_after 直接看到结果）。原生控件可用 desktop_ui 读取控件树并执行语义动作；需要等界面变化时用 desktop_wait。权限问题会在工具失败时直接报告，无需预先查询状态。网页内容继续优先交给浏览器插件。",
-    "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域；macOS 为 points，Windows 为物理像素，均与鼠标坐标同系）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。"
+    "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域；macOS 为 points，Windows 为物理像素，均与鼠标坐标同系）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。",
+    "鼠标轨迹：move_curve 用 x/y、control_x/control_y、to_x/to_y 沿二次贝塞尔曲线移动；move_path/drag_path 用 points=[{x,y},...] 依次经过多个路点。只有悬停/指示时用 move_curve/move_path；需要实际画线时用 drag_curve/drag_path，它们会在同一次手势内按住左键、沿轨迹移动并抬起，不遗留按住状态。复杂闭合或不规则图形优先拆成短路径连续绘制。"
   ],
   "resources": [
     "assets"
@@ -320,7 +343,11 @@
     "desktop_input:action=double_click": "assets/tool-desktop-mouse.svg",
     "desktop_input:action=right_click": "assets/tool-desktop-mouse.svg",
     "desktop_input:action=move": "assets/tool-desktop-mouse.svg",
+    "desktop_input:action=move_curve": "assets/tool-desktop-mouse.svg",
+    "desktop_input:action=move_path": "assets/tool-desktop-mouse.svg",
     "desktop_input:action=drag": "assets/tool-desktop-mouse.svg",
+    "desktop_input:action=drag_curve": "assets/tool-desktop-mouse.svg",
+    "desktop_input:action=drag_path": "assets/tool-desktop-mouse.svg",
     "desktop_input:action=scroll": "assets/tool-desktop-mouse.svg",
     "desktop_input:action=type": "assets/tool-desktop-keyboard.svg",
     "desktop_input:action=key": "assets/tool-desktop-keyboard.svg",
@@ -339,7 +366,11 @@
     "desktop_input:action=double_click": "双击",
     "desktop_input:action=right_click": "右键点击",
     "desktop_input:action=move": "移动指针",
+    "desktop_input:action=move_curve": "曲线移动",
+    "desktop_input:action=move_path": "多点移动",
     "desktop_input:action=drag": "拖拽",
+    "desktop_input:action=drag_curve": "曲线绘图",
+    "desktop_input:action=drag_path": "多点绘图",
     "desktop_input:action=scroll": "滚动",
     "desktop_input:action=type": "输入文本",
     "desktop_input:action=key": "按键",

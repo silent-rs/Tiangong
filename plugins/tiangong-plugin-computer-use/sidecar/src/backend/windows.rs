@@ -757,25 +757,13 @@ impl Backend for WindowsBackend {
     }
 
     async fn mouse(&self, req: &MouseRequest) -> DesktopResult<MouseResult> {
-        let to = match (req.to_x, req.to_y) {
-            (Some(tx), Some(ty)) => Some((tx, ty)),
-            (None, None) => None,
-            _ => {
-                return DesktopResult::Err(DesktopError::BackendUnavailable {
-                    reason: "drag 的 to_x/to_y 必须同时提供".to_string(),
-                });
-            }
-        };
-        let gesture = req.gesture;
-        let (x, y) = (req.x, req.y);
-        let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
         // 手势内含阻塞等待（指针滑行、按压间隔），放到阻塞线程池执行。
+        let request = req.clone();
         let cancel = super::input_cancel::current();
-        let outcome = tokio::task::spawn_blocking(move || {
-            super::win_input::perform_mouse(gesture, x, y, to, scroll, &cancel)
-        })
-        .await
-        .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
+        let outcome =
+            tokio::task::spawn_blocking(move || super::win_input::perform_mouse(&request, &cancel))
+                .await
+                .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
         match outcome {
             Ok(summary) => DesktopResult::Ok(MouseResult {
                 performed: true,
