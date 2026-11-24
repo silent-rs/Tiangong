@@ -1,8 +1,8 @@
 # 沙箱授权模型重构：Windows 默认全禁 + 按目录授权
 
 - 日期：2026-11-23
-- 分支：`feat/sandbox-path-authorization`；宿主跟进：`perf/windows-startup-app`
-- 状态：实施中。Sandbox 见 #793，宿主见 #794；skill 迁移已在 #791 合并。
+- 分支：`perf/windows-startup-app`；Sandbox 已合并至 `main`
+- 状态：实施中。Sandbox #793 与 skill #791 已合并；宿主 #794 待评审。
 - 范围：Windows 沙箱授权方式、宿主策略组装与 `LaunchPolicy` 契约。macOS / Linux 不遍历目录树，宿主可统一声明相同的通用可写目录。
 
 ## 0. 决策记录（2026-11-23）
@@ -204,9 +204,9 @@ macOS 和 Linux 没有这两种遍历：seatbelt 和 bwrap 按目录出规则，
 ## 13. 实施进度
 
 1. #791（已合并）：skill 0.2.9 将旧技能目录迁入插件数据目录，并调整锁文件位置。
-2. #793（本分支）：Sandbox 新增 `readable_roots` 与 `path_authorization` 契约；目录树校验移到
+2. #793（已合并）：Sandbox 新增 `readable_roots` 与 `path_authorization` 契约；目录树校验移到
    ACL 授权建立或重建时；只读根支持目录和单个文件；Launcher 升至 0.1.17。能力暂按不支持上报。
-3. #794（依赖 #793）：宿主改用统一可写清单与显式只读根，配置读豁免收紧为仅官方签名插件，
+3. #794（本分支，基于 `main`）：宿主改用统一可写清单与显式只读根，配置读豁免收紧为仅官方签名插件，
    通用目录清单独立维护，并补充启动分阶段计时日志。因 Launcher 尚未上报支持，当前行为保持不变。
 4. 原 #792 的改动已拆分到 #793 与 #794，由这两个 PR 取代。
 
