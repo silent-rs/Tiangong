@@ -212,7 +212,8 @@ macOS 和 Linux 没有这两种遍历：seatbelt 和 bwrap 按目录出规则，
    - 已完成：Launcher 上报 `path_authorization` 时按新清单组装策略；配置读权限收紧为
      仅官方签名插件。旧 Launcher 仍走原有策略。
    - 未完成：工作区记录的生命周期；旧 Launcher 退出支持后删除策略组装里的平台分支。
-3. skill 插件：已完成。技能目录迁入 `data/skill/skills/`，旧位置首次启动自动迁移。
+3. skill 插件：由独立 PR 交付（分支 `feat/skill-data-dir`，插件版本 0.2.9）。技能目录迁入
+   `data/skill/skills/`，旧位置首次启动自动迁移。
 4. 并行的宿主侧改进（不依赖 Sandbox 发版）：未开始。启动内制品摘要只算一次、门闸是否
    等待预热、自检探测顺序、插件自动升级推迟到预加载之后。
 5. Windows 运行验证：未完成。Launcher 的 Windows 专属代码目前只做过交叉编译检查，
