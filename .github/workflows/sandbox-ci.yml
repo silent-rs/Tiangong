@@ -244,7 +244,7 @@ jobs:
           - label: Linux x86_64
             runner: ubuntu-22.04
           - label: macOS aarch64
-            runner: macos-14
+            runner: macos-15
           - label: macOS x86_64
             runner: macos-15-intel
           - label: Windows x86_64
