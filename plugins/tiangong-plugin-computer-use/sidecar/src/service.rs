@@ -217,6 +217,7 @@ impl ComputerUseService {
             DESKTOP_MOUSE_OPERATION => {
                 let req: ops::MouseRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 desktop_mouse 请求失败")?;
+                req.validate().map_err(|reason| anyhow::anyhow!(reason))?;
                 // 取消（dispatch future 被丢弃）时守卫析构置位令牌，
                 // 阻塞线程中的拖拽轨迹随即停止并补发抬起。
                 let token = CancelToken::new();
@@ -458,6 +459,37 @@ mod tests {
         assert!(!entry["hint"].as_str().unwrap_or("").trim().is_empty());
     }
 
+    /// 工具清单必须暴露全部新手势，且版本/协议号与 Rust 侧一致。
+    #[test]
+    fn manifest_matches_mouse_actions_and_versions() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../plugin.json")).unwrap();
+        assert_eq!(manifest["version"], serde_json::json!(PLUGIN_VERSION));
+        assert_eq!(
+            manifest["sidecar"]["business_protocol"],
+            serde_json::json!(COMPUTER_USE_PROTOCOL_VERSION)
+        );
+        let tool = manifest["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == TOOL_DESKTOP_INPUT)
+            .unwrap();
+        let actions = tool["input_schema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in ["move_curve", "move_path", "drag_curve", "drag_path"] {
+            assert!(
+                actions.iter().any(|value| value == action),
+                "清单缺少 {action}"
+            );
+        }
+        assert_eq!(
+            tool["input_schema"]["properties"]["points"]["maxItems"],
+            serde_json::json!(tiangong_plugin_computer_use_protocol::ops::MAX_MOUSE_PATH_POINTS)
+        );
+    }
+
     /// 工具直连（operation = 工具名）：参数错误返回 ok:false 的工具级结果，
     /// 而非通道错误（与原 WASM 桥接语义一致）。
     #[tokio::test]
@@ -506,6 +538,24 @@ mod tests {
         );
     }
 
+    /// 曲线/多点路径的参数错误在工具层返回 ok:false，不触达平台后端。
+    #[tokio::test]
+    async fn 工具直连分发_鼠标路径参数错误为工具级失败() {
+        let service = ComputerUseService::new().unwrap();
+        for payload in [
+            serde_json::json!({ "action": "move_curve", "x": 0, "y": 0, "to_x": 10, "to_y": 10 }),
+            serde_json::json!({ "action": "drag_path", "points": [{ "x": 0, "y": 0 }] }),
+            serde_json::json!({ "action": "move_path", "points": [{ "x": 0, "y": 0 }, { "x": 1 }] }),
+        ] {
+            let response = service
+                .dispatch(Request::new(TOOL_DESKTOP_INPUT, payload))
+                .await;
+            assert!(response.success, "工具分发本身应成功");
+            let outcome = response.payload.unwrap();
+            assert_eq!(outcome["ok"], serde_json::json!(false));
+            assert_eq!(outcome["exit_code"], serde_json::json!(1));
+        }
+    }
     /// 握手必须声明全部 5 个工具能力（清单 tools 与握手一致才可直连）。
     #[tokio::test]
     async fn 握手声明全部工具能力() {

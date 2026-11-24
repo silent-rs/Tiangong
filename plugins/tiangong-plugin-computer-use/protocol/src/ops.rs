@@ -598,9 +598,25 @@ pub enum MouseGesture {
     DoubleClick,
     /// 按下后插值轨迹拖拽到终点再抬起。
     Drag,
+    /// 虚拟指针沿二次贝塞尔曲线移动，不投递系统鼠标事件。
+    MoveCurve,
+    /// 虚拟指针依次经过多个路径点移动，不投递系统鼠标事件。
+    MovePath,
+    /// 按住左键沿二次贝塞尔曲线移动并抬起，用于曲线绘图。
+    DragCurve,
+    /// 按住左键依次经过多个路径点移动并抬起，用于折线/连续绘图。
+    DragPath,
     /// 滚轮（像素级）。
     Scroll,
 }
+/// 鼠标路径点。坐标与 [`MouseRequest`] 同系。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MousePoint {
+    pub x: f64,
+    pub y: f64,
+}
+/// 单次多点路径允许的最大点数（含起点与终点）。
+pub const MAX_MOUSE_PATH_POINTS: usize = 256;
 /// `desktop_mouse` 工具请求。坐标为屏幕逻辑坐标（points，主屏左上原点，
 /// 与 desktop_snapshot 的 bounds 同系）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -610,10 +626,10 @@ pub struct MouseRequest {
     pub x: f64,
     /// 起点/目标点 Y。
     pub y: f64,
-    /// drag 终点 X（drag 必填）。
+    /// drag/曲线手势终点 X（drag、move_curve、drag_curve 必填）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_x: Option<f64>,
-    /// drag 终点 Y（drag 必填）。
+    /// drag/曲线手势终点 Y（drag、move_curve、drag_curve 必填）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_y: Option<f64>,
     /// 垂直滚动像素（正=向下；scroll 必填）。
@@ -622,8 +638,87 @@ pub struct MouseRequest {
     /// 水平滚动像素（正=向右；scroll 可选，默认 0）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta_x: Option<f64>,
+    /// 二次贝塞尔曲线控制点 X（move_curve/drag_curve 必填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_x: Option<f64>,
+    /// 二次贝塞尔曲线控制点 Y（move_curve/drag_curve 必填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_y: Option<f64>,
+    /// 多点路径（move_path/drag_path 必填，含起点，至少 2 点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<MousePoint>>,
     #[serde(flatten)]
     pub access: AccessContext,
+}
+impl MouseRequest {
+    /// 在触达平台输入 API 前校验坐标与手势专属参数。
+    pub fn validate(&self) -> Result<(), String> {
+        require_finite_mouse_coordinate(self.x, "x")?;
+        require_finite_mouse_coordinate(self.y, "y")?;
+        for (name, value) in [
+            ("to_x", self.to_x),
+            ("to_y", self.to_y),
+            ("control_x", self.control_x),
+            ("control_y", self.control_y),
+            ("delta_x", self.delta_x),
+            ("delta_y", self.delta_y),
+        ] {
+            if let Some(value) = value {
+                require_finite_mouse_coordinate(value, name)?;
+            }
+        }
+        match self.gesture {
+            MouseGesture::Drag => {
+                if self.to_x.is_none() || self.to_y.is_none() {
+                    return Err("drag 必须同时提供 to_x 与 to_y".to_string());
+                }
+            }
+            MouseGesture::MoveCurve | MouseGesture::DragCurve => {
+                if self.to_x.is_none() || self.to_y.is_none() {
+                    return Err("曲线移动必须同时提供 to_x 与 to_y 终点".to_string());
+                }
+                if self.control_x.is_none() || self.control_y.is_none() {
+                    return Err("曲线移动必须同时提供 control_x 与 control_y 控制点".to_string());
+                }
+            }
+            MouseGesture::MovePath | MouseGesture::DragPath => {
+                let Some(points) = self.points.as_ref() else {
+                    return Err(format!(
+                        "多点移动必须提供 2～{MAX_MOUSE_PATH_POINTS} 个 points 路径点"
+                    ));
+                };
+                if !(2..=MAX_MOUSE_PATH_POINTS).contains(&points.len()) {
+                    return Err(format!(
+                        "多点移动必须提供 2～{MAX_MOUSE_PATH_POINTS} 个 points 路径点"
+                    ));
+                }
+                for (index, point) in points.iter().enumerate() {
+                    require_finite_mouse_coordinate(point.x, &format!("points[{index}].x"))?;
+                    require_finite_mouse_coordinate(point.y, &format!("points[{index}].y"))?;
+                }
+            }
+            MouseGesture::Scroll => {
+                if self.delta_x.is_none() && self.delta_y.is_none() {
+                    return Err("scroll 必须提供 delta_y 或 delta_x".to_string());
+                }
+                if self.delta_x.unwrap_or(0.0) == 0.0 && self.delta_y.unwrap_or(0.0) == 0.0 {
+                    return Err("scroll 的 delta_y/delta_x 不能同时为 0".to_string());
+                }
+            }
+            MouseGesture::Move
+            | MouseGesture::Click
+            | MouseGesture::RightClick
+            | MouseGesture::DoubleClick => {}
+        }
+        Ok(())
+    }
+}
+fn require_finite_mouse_coordinate(value: f64, name: &str) -> Result<(), String> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(format!("鼠标坐标 {name} 必须为有限数值"))
+    }
 }
 /// `desktop_mouse` 工具响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

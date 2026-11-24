@@ -59,8 +59,9 @@ UI 还没有 AX 树——坐标级合成输入是其补充。工具暴露的是*
 会话时序，杜绝跨工具调用的按住状态泄漏（cliclick/Playwright 同款设计）。
 
 ```
-desktop_mouse { gesture: move | click | right_click | double_click | drag | scroll,
-                x, y, to_x?, to_y?, delta_y?, delta_x? }
+desktop_mouse { gesture: move | move_curve | move_path | click | right_click |
+                          double_click | drag | drag_curve | drag_path | scroll,
+                x, y, to_x?, to_y?, control_x?, control_y?, points?, delta_y?, delta_x? }
 ```
 
 **系统鼠标「借用并归还」**（用户系统鼠标不被劫持）：
@@ -74,6 +75,30 @@ desktop_mouse { gesture: move | click | right_click | double_click | drag | scro
 
 虚拟指针全程独立平滑跟随手势目标，点击瞬间播放按压脉冲动画（0→1.25→1 正弦
 回弹，hotspot 始终对准目标点）。合成事件需要辅助功能授权（与 AX 同一 TCC）。
+
+### 2.3.1 曲线与多点路径移动
+
+在既有手势上补充两类轨迹，并各自提供「仅移动虚拟指针」与「按住左键实际绘制」版本：
+
+```
+desktop_input { action: "move_curve",
+                x, y, control_x, control_y, to_x, to_y }
+desktop_input { action: "drag_curve",
+                x, y, control_x, control_y, to_x, to_y }
+desktop_input { action: "move_path", points: [{ x, y }, ...] }
+desktop_input { action: "drag_path",  points: [{ x, y }, ...] }
+```
+
+- `move_curve`：从 `(x,y)` 经二次贝塞尔控制点 `(control_x,control_y)` 到
+  `(to_x,to_y)`，只移动天工虚拟指针，不投递系统鼠标事件。
+- `drag_curve`：相同曲线，但借用系统鼠标完成 `down → 轨迹 → up`，用于实际画线。
+- `move_path` / `drag_path`：`points` 必须含起点与终点（2～256 点），依次经过
+  每个路点；折线保留拐角，`drag_path` 在同一次手势内按住左键并绘制。
+- 轨迹按弧长均匀重采样（目标步长 4px），单次最多 2048 个移动事件；超长路径
+  自动放大步长，不会耗尽 60 秒工具预算。坐标必须为有限数值。
+- 曲线/路径在按下左键前完成规划与校验；执行失败或请求取消时，macOS/Windows
+  后端都补发 `LeftMouseUp` 并归还原系统鼠标，不遗留按住状态。
+- 普通 `move` / `drag` 的既有语义不变。平台支持：macOS CGEvent、Windows SendInput。
 
 ### 2.4 desktop_keyboard：键盘合成输入（CGEvent）
 补齐合成输入族的键盘半边（微信场景「能看、能点、不能打字」的最后缺口）。

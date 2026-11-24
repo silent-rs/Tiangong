@@ -232,6 +232,8 @@ pub mod macos;
 /// 坐标级鼠标手势（CGEvent 合成，RFC 0018 §2.3，仅 macOS）。
 #[cfg(target_os = "macos")]
 pub mod mouse;
+/// 鼠标曲线/多点路径规划（平台无关）。
+pub mod mouse_path;
 /// 天工虚拟指针 overlay（RFC 0018，仅 macOS）。
 #[cfg(target_os = "macos")]
 pub mod overlay;

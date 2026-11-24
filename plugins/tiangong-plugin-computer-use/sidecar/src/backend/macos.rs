@@ -742,24 +742,12 @@ impl Backend for MacosBackend {
                 reason: "尚未授予辅助功能权限".to_string(),
             });
         }
-        // 参数完整性在协议层校验后进入；此处直接执行手势。
-        let to = match (req.to_x, req.to_y) {
-            (Some(tx), Some(ty)) => Some((tx, ty)),
-            (None, None) => None,
-            _ => {
-                return DesktopResult::Err(DesktopError::BackendUnavailable {
-                    reason: "drag 的 to_x/to_y 必须同时提供".to_string(),
-                });
-            }
-        };
-        let (gesture, x, y) = (req.gesture, req.x, req.y);
-        let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
+        // 请求与取消令牌在进入阻塞线程前复制；手势层统一校验并规划轨迹。
+        let request = req.clone();
         let cancel = super::input_cancel::current();
-        let outcome = tokio::task::spawn_blocking(move || {
-            super::mouse::perform(gesture, x, y, to, scroll, &cancel)
-        })
-        .await
-        .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
+        let outcome = tokio::task::spawn_blocking(move || super::mouse::perform(&request, &cancel))
+            .await
+            .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
         match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::MouseResult {
                 performed: true,
