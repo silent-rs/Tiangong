@@ -33,7 +33,6 @@ use serde_json::Value;
 mod process;
 pub(crate) mod sandbox_exemptions;
 
-#[cfg(not(windows))]
 use crate::host_policy::{common_directory_denied_files, common_directory_roots};
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,
