@@ -26,10 +26,21 @@ pub fn prepare_desktop_startup_plugins(storage_root: &Path) -> Result<StartupPlu
     preload_installed_plugins_inner(storage_root, true)
 }
 
+/// 自 `since` 起经过的毫秒数（启动阶段计时用）。
+fn elapsed_ms(since: Instant) -> u64 {
+    millis_between(since, Instant::now())
+}
+
+/// 两个时刻之间的毫秒数。
+fn millis_between(from: Instant, to: Instant) -> u64 {
+    to.saturating_duration_since(from).as_millis() as u64
+}
+
 fn preload_installed_plugins_inner(
     storage_root: &Path,
     wait_for_ready: bool,
 ) -> Result<StartupPluginReadiness> {
+    let started = Instant::now();
     if sidecars_shutting_down() {
         bail!("应用正在退出，插件准备已取消");
     }
@@ -49,7 +60,9 @@ fn preload_installed_plugins_inner(
         bail!("应用正在退出，插件准备已取消");
     }
 
+    let before_discover = Instant::now();
     let (installed_plugins, discovered_invalid) = discover_installed_plugins(storage_root);
+    let discovered_at = Instant::now();
     let mut failures = discovered_invalid
         .iter()
         .filter(|entry| {
@@ -64,6 +77,7 @@ fn preload_installed_plugins_inner(
     *invalid_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("无效插件登记锁已损坏"))? = discovered_invalid;
+    let mut load_timings: Vec<(String, u64)> = Vec::new();
     for installed in &installed_plugins {
         if sidecars_shutting_down() {
             bail!("应用正在退出，插件准备已取消");
@@ -91,26 +105,32 @@ fn preload_installed_plugins_inner(
         {
             remove_sidecar_connection(&previous.directory);
         }
+        let load_started = Instant::now();
         let loaded = load_plugin_record_with_prewarm(
             storage_root,
             installed.clone(),
             !wait_for_ready && !cfg!(windows),
         );
+        load_timings.push((installed.manifest.id.clone(), elapsed_ms(load_started)));
         loaded_plugins()
             .lock()
             .map_err(|_| anyhow::anyhow!("插件登记锁已损坏"))?
             .insert(installed.manifest.id.clone(), loaded);
     }
+    let loaded_at = Instant::now();
     drop(_operation);
     // 插件登记完成即开始保活：此后常驻 sidecar 意外退出或启动预热失败，
     // 都由运行时在后台重新拉起，各入口无需单独处理。
     super::keepalive::ensure_keepalive_started();
     if wait_for_ready {
+        let reverify_started = Instant::now();
         if let Err(error) =
             reverify::reverify_installed_sidecars_blocking(storage_root, false, Some("desktop"))
         {
             failures.push(format!("{error:#}"));
         }
+        let reverified_at = Instant::now();
+        let mut prewarm_timings: Vec<(String, u64)> = Vec::new();
         for installed in installed_plugins
             .iter()
             .filter(|installed| installed.enabled && installed.manifest.available_at("desktop"))
@@ -118,11 +138,13 @@ fn preload_installed_plugins_inner(
             if sidecars_shutting_down() {
                 bail!("应用正在退出，插件准备已取消");
             }
+            let prewarm_started = Instant::now();
             if let Err(error) =
                 prewarm_plugin_sidecar_blocking(storage_root, &installed.manifest.id)
             {
                 failures.push(format!("{}: {error:#}", installed.manifest.id));
             }
+            prewarm_timings.push((installed.manifest.id.clone(), elapsed_ms(prewarm_started)));
             let plugins = loaded_plugins()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("插件登记锁已损坏"))?;
@@ -136,6 +158,23 @@ fn preload_installed_plugins_inner(
         if sidecars_shutting_down() {
             bail!("应用正在退出，插件准备已取消");
         }
+        // 阶段耗时归因：启动准备门闸等待的正是这段同步流程，Windows 上
+        // 每个沙箱 sidecar 启动都要全量校验可写目录树并计算目标程序摘要，
+        // 耗时随存储目录文件数线性增长。分阶段与逐插件计时让慢在哪个
+        // 插件、哪一步（装载校验 / 重新验证 / 常驻预热）在日志里直接可读。
+        let finished_at = Instant::now();
+        tracing::info!(
+            plugins = installed_plugins.len(),
+            prepare_ms = millis_between(started, before_discover),
+            discover_ms = millis_between(before_discover, discovered_at),
+            load_ms = millis_between(discovered_at, loaded_at),
+            reverify_ms = millis_between(reverify_started, reverified_at),
+            prewarm_ms = millis_between(reverified_at, finished_at),
+            total_ms = elapsed_ms(started),
+            load_detail = ?load_timings,
+            prewarm_detail = ?prewarm_timings,
+            "桌面启动插件准备阶段耗时"
+        );
         // 插件级失败已逐个写入 runtime_error / invalid 登记，这里只汇总
         // 供启动层提示，不再整体报错阻断应用进入。
         failures.sort();
