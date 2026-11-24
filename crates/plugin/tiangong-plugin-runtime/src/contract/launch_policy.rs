@@ -19,6 +19,9 @@ pub const CAPABILITY_AUDIO_INPUT: &str = "audio_input";
 pub const CAPABILITY_BROWSER_RUNTIME: &str = "browser_runtime";
 /// 进程表查询服务（macOS sysmond）：沙箱内 `pgrep` / `pkill` 可用。
 pub const CAPABILITY_PROCESS_INSPECTION: &str = "process_inspection";
+/// 按目录授权：策略携带只读根，Windows 上翻译为只读 ACE，宿主据此保持
+/// AppContainer 默认全禁、只对需要的目录授权。
+pub const CAPABILITY_PATH_AUTHORIZATION: &str = "path_authorization";
 
 /// 沙箱模式（宿主只使用 `workspace_write`，`read_only` 保留与 Launcher 对齐）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -58,6 +61,9 @@ pub struct LaunchPolicy {
     /// 额外可写根。
     #[serde(default)]
     pub extra_writable: Vec<PathBuf>,
+    /// 只读根：Windows 上授予读与执行权限；其余平台读侧默认放行，不产生规则。
+    #[serde(default)]
+    pub readable_roots: Vec<PathBuf>,
     /// 即使位于可写根内也保持只读的宿主敏感路径。
     #[serde(default)]
     pub protected_paths: Vec<PathBuf>,
@@ -82,6 +88,7 @@ impl LaunchPolicy {
             mode: LaunchMode::WorkspaceWrite,
             workspace: workspace.into(),
             extra_writable: Vec::new(),
+            readable_roots: Vec::new(),
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: false,
@@ -102,6 +109,27 @@ impl LaunchPolicy {
             .into_iter()
             .filter(|path| path.is_absolute())
             .map(|path| canonical_or_keep(&path))
+            .filter(|path| {
+                if seen.contains(path) {
+                    false
+                } else {
+                    seen.push(path.clone());
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// 全部只读根（已规范化去重），与 Launcher 的计算方式一致。位于可写根内的
+    /// 条目已随可写根获得读写，不重复授权。
+    pub fn readable_roots(&self) -> Vec<PathBuf> {
+        let writable = self.writable_roots();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        self.readable_roots
+            .iter()
+            .filter(|path| path.is_absolute())
+            .map(|path| canonical_or_keep(path))
+            .filter(|path| !writable.iter().any(|root| path.starts_with(root)))
             .filter(|path| {
                 if seen.contains(path) {
                     false

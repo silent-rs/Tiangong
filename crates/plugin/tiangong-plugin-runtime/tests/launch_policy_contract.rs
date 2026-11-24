@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use tiangong_plugin_runtime::launch_policy::{
     CAPABILITY_AUDIO_INPUT, CAPABILITY_BROWSER_RUNTIME, CAPABILITY_CREDENTIAL_SERVICES,
-    CAPABILITY_PROCESS_INSPECTION, LaunchMode, LaunchPolicy, ResourceLimits,
+    CAPABILITY_PATH_AUTHORIZATION, CAPABILITY_PROCESS_INSPECTION, LaunchMode, LaunchPolicy,
+    ResourceLimits,
 };
 use tiangong_sandbox::{SandboxCapability, SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
@@ -20,6 +21,7 @@ fn to_launcher(policy: &LaunchPolicy) -> SandboxPolicy {
 fn full_host_policy() -> LaunchPolicy {
     let mut policy = LaunchPolicy::workspace_write("/workspace");
     policy.extra_writable = vec!["/execution/tmp".into(), "/storage/data/fs".into()];
+    policy.readable_roots = vec!["/storage/sessions".into(), "/workspace/nested".into()];
     policy.protected_paths = vec!["/storage/keys".into()];
     policy.denied_read_paths = vec!["/home/user/.ssh".into(), "/storage/sandbox".into()];
     policy.allow_network = true;
@@ -38,6 +40,7 @@ fn every_field_round_trips_with_same_meaning() {
     assert_eq!(launcher.mode, SandboxMode::WorkspaceWrite);
     assert_eq!(launcher.workspace, host.workspace);
     assert_eq!(launcher.extra_writable, host.extra_writable);
+    assert_eq!(launcher.readable_roots, host.readable_roots);
     assert_eq!(launcher.protected_paths, host.protected_paths);
     assert_eq!(launcher.denied_read_paths, host.denied_read_paths);
     assert_eq!(launcher.allow_network, host.allow_network);
@@ -96,6 +99,10 @@ fn capability_names_are_known_to_launcher() {
             CAPABILITY_PROCESS_INSPECTION,
             SandboxCapability::ProcessInspection,
         ),
+        (
+            CAPABILITY_PATH_AUTHORIZATION,
+            SandboxCapability::PathAuthorization,
+        ),
     ];
     for (name, capability) in pairs {
         assert_eq!(name, capability.as_str());
@@ -129,6 +136,25 @@ fn host_and_launcher_compute_same_writable_roots() {
         root.path().join("missing/../other"),
     ];
     assert_eq!(host.writable_roots(), to_launcher(&host).writable_roots());
+}
+
+#[test]
+fn host_and_launcher_compute_same_readable_roots() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut host = LaunchPolicy::workspace_write(&workspace);
+    host.readable_roots = vec![
+        root.path().join("sessions"),
+        workspace.join("nested"),
+        PathBuf::from("relative"),
+        root.path().join("sessions"),
+    ];
+    let launcher = to_launcher(&host);
+    // 规范化去重、丢弃相对路径，位于可写根内的条目不重复授权：两端一致。
+    assert_eq!(host.readable_roots(), launcher.readable_roots());
+    assert_eq!(launcher.readable_roots().len(), 1);
+    assert!(launcher.readable_roots()[0].ends_with("sessions"));
 }
 
 #[cfg(target_os = "macos")]

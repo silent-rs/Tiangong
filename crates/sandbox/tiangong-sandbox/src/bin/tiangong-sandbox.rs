@@ -298,6 +298,9 @@ struct RunArgs {
     /// 额外可写绝对路径，可重复。
     #[arg(long, value_name = "ABSOLUTE_PATH")]
     writable: Vec<PathBuf>,
+    /// 只读绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    readable: Vec<PathBuf>,
     /// 即使位于可写根内也保持只读的绝对路径，可重复。
     #[arg(long, value_name = "ABSOLUTE_PATH")]
     protect: Vec<PathBuf>,
@@ -325,6 +328,7 @@ const INLINE_POLICY_ARGS: &[&str] = &[
     "mode",
     "workspace",
     "writable",
+    "readable",
     "protect",
     "deny_read",
     "network",
@@ -385,6 +389,7 @@ fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
         "--workspace",
     )?;
     let extra_writable = absolute_cli_paths(args.writable, "--writable")?;
+    let readable_roots = absolute_cli_paths(args.readable, "--readable")?;
     let protected_paths = absolute_cli_paths(args.protect, "--protect")?;
     let denied_read_paths = absolute_cli_paths(args.deny_read, "--deny-read")?;
     let mut resource_limits = tiangong_sandbox::SandboxResourceLimits::default();
@@ -404,6 +409,7 @@ fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
         },
         workspace,
         extra_writable,
+        readable_roots,
         protected_paths,
         denied_read_paths,
         allow_network: matches!(args.network, CliNetwork::Allow),
@@ -710,6 +716,7 @@ fn validate_policy_paths(request: &LaunchRequest) -> Result<()> {
     let mut paths: Vec<&std::path::Path> = vec![policy.workspace.as_path()];
     for group in [
         &policy.extra_writable,
+        &policy.readable_roots,
         &policy.protected_paths,
         &policy.denied_read_paths,
     ] {
@@ -2454,6 +2461,7 @@ mod tests {
         let workspace = platform_path("/workspace");
         let extra_run = platform_path("/tmp/run");
         let extra_cache = platform_path("/tmp/cache");
+        let readable = platform_path("/storage/sessions");
         let protected = platform_path("/workspace/protected");
         let denied = platform_path("/home/user/.ssh");
         let mut args = strings(&["run", "--mode", "workspace-write", "--workspace"]);
@@ -2462,6 +2470,8 @@ mod tests {
         args.push(extra_run.display().to_string());
         args.push("--writable".to_string());
         args.push(extra_cache.display().to_string());
+        args.push("--readable".to_string());
+        args.push(readable.display().to_string());
         args.push("--protect".to_string());
         args.push(protected.display().to_string());
         args.push("--deny-read".to_string());
@@ -2486,6 +2496,7 @@ mod tests {
         );
         assert_eq!(parsed.policy.workspace, workspace);
         assert_eq!(parsed.policy.extra_writable, vec![extra_run, extra_cache]);
+        assert_eq!(parsed.policy.readable_roots, vec![readable]);
         assert_eq!(parsed.policy.protected_paths, vec![protected]);
         assert_eq!(parsed.policy.denied_read_paths, vec![denied]);
         assert!(parsed.policy.allow_network);
