@@ -188,6 +188,7 @@ cargo clippy --locked -p tiangong-sandbox -p tiangong-sandbox-update --all-targe
 
 - [Sandbox 通用化与宿主安装目录](../../../docs/sandbox-direct-storage.md)
 - [Sandbox 自管理与首版发布](../../../docs/sandbox-self-management.md)
+- [沙箱授权模型重构：Windows 默认全禁 + 按目录授权](../docs/authorization-redesign.md)（设计稿，未实施）
 
 ## 许可证
 
