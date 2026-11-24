@@ -2,7 +2,7 @@
 
 - 日期：2026-11-23
 - 分支：`perf/windows-startup`
-- 状态：设计稿，未实施。
+- 状态：实施中，进度见第 13 节。
 - 范围：Windows 沙箱授权方式、宿主策略组装、`LaunchPolicy` 契约；macOS / Linux 行为不变。
 
 ## 0. 决策记录（2026-11-23）
@@ -115,8 +115,8 @@ ws-<sha256(路径)>.json    工作区：对共享身份授予读写
 | Linux（bwrap） | 全盘只读挂载不变，字段不产生规则 | 不变 | 生成挂载参数 |
 | Windows（AppContainer） | 只读 ACE，`FILE_GENERIC_READ` 加 `FILE_GENERIC_EXECUTE`，可继承 | 可写 ACE，沿用现有掩码 | 建进程；ACL 仅在记录失效时重做 |
 
-Launcher 支持新能力时，宿主删除 `transport/sidecar/stdio/mod.rs` 中「整个存储根并入可写域」的
-Windows 分支，改为对所有平台组装同一份策略；不支持时沿用现有做法。
+Launcher 支持新能力时，宿主对所有平台组装同一份策略，不再走「整个存储根并入可写域」的
+Windows 分支；不支持时沿用现有做法（该分支待旧 Launcher 退出支持后删除）。
 
 ## 7. 目录树校验（仅 Windows）
 
@@ -202,8 +202,17 @@ macOS 和 Linux 没有这两种遍历：seatbelt 和 bwrap 按目录出规则，
 
 ## 13. 分阶段
 
-1. Sandbox：契约字段、能力名、三类授权记录、校验绑定记录。
-2. App：按新清单组装策略并删除平台分支；工作区记录的生命周期；配置读权限收紧为仅官方。
-3. skill 插件：自行把旧技能目录迁入数据目录，完成后只读写新位置。
-4. 并行的宿主侧改进（不依赖 Sandbox 发版）：启动内制品摘要只算一次、门闸是否等待预热、
-   自检探测顺序、插件自动升级推迟到预加载之后。
+1. Sandbox：
+   - 已完成：契约字段 `readable_roots` 与能力名 `path_authorization`（暂未上报支持）；
+     目录树校验移到建立授权时；只读根授权（含单个文件）。
+   - 未完成：共享底座、插件底座、工作区三类授权记录；按需 sidecar 的持久授权；
+     自检补只读根探针；之后再把 `path_authorization` 上报为支持。
+2. App：
+   - 已完成：Launcher 上报 `path_authorization` 时按新清单组装策略；配置读权限收紧为
+     仅官方签名插件。旧 Launcher 仍走原有策略。
+   - 未完成：工作区记录的生命周期；旧 Launcher 退出支持后删除策略组装里的平台分支。
+3. skill 插件：已完成。技能目录迁入 `data/skill/skills/`，旧位置首次启动自动迁移。
+4. 并行的宿主侧改进（不依赖 Sandbox 发版）：未开始。启动内制品摘要只算一次、门闸是否
+   等待预热、自检探测顺序、插件自动升级推迟到预加载之后。
+5. Windows 运行验证：未完成。Launcher 的 Windows 专属代码目前只做过交叉编译检查，
+   真实行为需以 CI 的 Windows 沙箱任务或真机为准。
