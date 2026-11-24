@@ -40,15 +40,20 @@ pub enum SandboxCapability {
     /// 进程表查询服务（macOS `com.apple.sysmond`）：`pgrep` / `pkill` 经
     /// libsysmon 向它查询进程列表。只读进程信息，不扩大信号或文件权限。
     ProcessInspection,
+    /// 按目录授权：策略携带 `readable_roots`，Windows 上翻译为只读 ACE，
+    /// 宿主据此保持 AppContainer 默认全禁、只对需要的目录授权。macOS 与
+    /// Linux 读侧默认放行，该字段不产生规则。
+    PathAuthorization,
 }
 
 impl SandboxCapability {
     /// 全部已定义能力。
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::CredentialServices,
         Self::AudioInput,
         Self::BrowserRuntime,
         Self::ProcessInspection,
+        Self::PathAuthorization,
     ];
 
     /// 序列化名（与 JSON 表示一致）。
@@ -58,6 +63,7 @@ impl SandboxCapability {
             Self::AudioInput => "audio_input",
             Self::BrowserRuntime => "browser_runtime",
             Self::ProcessInspection => "process_inspection",
+            Self::PathAuthorization => "path_authorization",
         }
     }
 
@@ -73,6 +79,9 @@ impl SandboxCapability {
             | Self::AudioInput
             | Self::BrowserRuntime
             | Self::ProcessInspection => true,
+            // 按目录授权的 Windows 后端尚未实现：实现并经自检之前不对外上报
+            // 支持，宿主因此不会切换到新清单（fail-closed）。
+            Self::PathAuthorization => false,
         }
     }
 }
@@ -95,6 +104,9 @@ pub struct SandboxPolicy {
     /// 额外可写根（插件数据目录等）。
     #[serde(default)]
     pub extra_writable: Vec<PathBuf>,
+    /// 只读根：Windows 上授予读与执行权限；其余平台读侧默认放行，不产生规则。
+    #[serde(default)]
+    pub readable_roots: Vec<PathBuf>,
     /// 即使位于可写根内也保持只读的宿主敏感路径。
     #[serde(default)]
     pub protected_paths: Vec<PathBuf>,
@@ -142,6 +154,7 @@ impl SandboxPolicy {
             mode: SandboxMode::WorkspaceWrite,
             workspace: workspace.into(),
             extra_writable: Vec::new(),
+            readable_roots: Vec::new(),
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: false,
@@ -155,6 +168,7 @@ impl SandboxPolicy {
             mode: SandboxMode::FullAccess,
             workspace: PathBuf::new(),
             extra_writable: Vec::new(),
+            readable_roots: Vec::new(),
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: true,
@@ -200,6 +214,27 @@ impl SandboxPolicy {
             .into_iter()
             .filter(|p| p.is_absolute())
             .map(|p| canonical_or_keep(&p))
+            .filter(|p| {
+                if seen.contains(p) {
+                    false
+                } else {
+                    seen.push(p.clone());
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// 全部只读根（已规范化去重）。位于可写根内的条目已随可写根获得读写，
+    /// 不重复授权。
+    pub fn readable_roots(&self) -> Vec<PathBuf> {
+        let writable = self.writable_roots();
+        let mut seen: Vec<PathBuf> = Vec::new();
+        self.readable_roots
+            .iter()
+            .filter(|p| p.is_absolute())
+            .map(|p| canonical_or_keep(p))
+            .filter(|p| !writable.iter().any(|root| p.starts_with(root)))
             .filter(|p| {
                 if seen.contains(p) {
                     false
@@ -273,6 +308,8 @@ mod compat {
         #[serde(default)]
         extra_writable: Vec<PathBuf>,
         #[serde(default)]
+        readable_roots: Vec<PathBuf>,
+        #[serde(default)]
         protected_paths: Vec<PathBuf>,
         #[serde(default)]
         denied_read_paths: Vec<PathBuf>,
@@ -312,6 +349,7 @@ mod compat {
                 mode: wire.mode,
                 workspace: wire.workspace,
                 extra_writable: wire.extra_writable,
+                readable_roots: wire.readable_roots,
                 protected_paths: wire.protected_paths,
                 denied_read_paths: wire.denied_read_paths,
                 allow_network: wire.allow_network,
@@ -364,6 +402,34 @@ mod tests {
     }
 
     #[test]
+    fn readable_roots_are_canonical_and_skip_writable_descendants() {
+        let root = tempfile::tempdir().unwrap();
+        // 以规范化后的真实路径为基准：临时目录可能经由符号链接访问（macOS 的
+        // /var → /private/var），不存在的子路径不会被规范化，比较时会错位。
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut policy = SandboxPolicy::workspace_write(&workspace);
+        policy.readable_roots = vec![
+            base.join("sessions"),
+            workspace.join("nested"),
+            PathBuf::from("relative/path"),
+            base.join("sessions"),
+        ];
+        // 规范化去重；位于可写根内的条目随可写根获得读写，不重复授权；
+        // 相对路径丢弃。
+        assert_eq!(policy.readable_roots(), vec![base.join("sessions")]);
+    }
+
+    #[test]
+    fn readable_roots_default_to_empty_for_old_policies() {
+        let mut value = serde_json::to_value(SandboxPolicy::workspace_write("/workspace")).unwrap();
+        value.as_object_mut().unwrap().remove("readable_roots");
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert!(decoded.readable_roots.is_empty());
+    }
+
+    #[test]
     fn protected_storage_root_does_not_shadow_nested_workspace() {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("workspaces/session");
@@ -404,6 +470,8 @@ mod tests {
         assert_eq!(value["workspace"], "/workspace");
         assert_eq!(value["allow_network"], false);
         assert_eq!(value["capabilities"], serde_json::json!([]));
+        // 只读根默认为空：未携带该字段的旧宿主与旧 Launcher 互相兼容。
+        assert_eq!(value["readable_roots"], serde_json::json!([]));
         assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
         assert_eq!(value["resource_limits"]["max_processes"], 64);
 
