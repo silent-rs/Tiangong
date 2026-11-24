@@ -246,6 +246,7 @@ impl StdioSidecarConnection {
     /// 不触碰共享 state——并发调用各自的进程互不误杀；是否登记
     /// state.process（全局终止/换代语义用）由调用方决定。
     fn spawn_ready(&self, sandbox_workspace: Option<&Path>) -> Result<Arc<StdioProcess>> {
+        let ready_started = std::time::Instant::now();
         let process = Arc::new(self.spawn(sandbox_workspace)?);
         match self.handshake_exchange(&process) {
             Ok(handshake) => {
@@ -269,8 +270,12 @@ impl StdioSidecarConnection {
                 return Err(error);
             }
         }
+        // ready_ms 覆盖宿主准备、进程创建与就绪握手全程；与「已启动」行的
+        // prep_ms 相减即沙箱 Launcher 阶段（可写目录树校验、授权、目标进程
+        // 启动与握手），Windows 上慢在这一段时可直接定位。
         tracing::info!(
             plugin_id = %self.config.plugin_id,
+            ready_ms = ready_started.elapsed().as_millis() as u64,
             "stdio sidecar 已就绪"
         );
         Ok(process)
@@ -448,6 +453,12 @@ impl StdioSidecarConnection {
         &self,
         sandbox_workspace: Option<&Path>,
     ) -> std::result::Result<StdioProcess, SpawnAttemptError> {
+        // 启动准备计时起点：到进程创建为止的宿主侧准备（目标程序摘要、
+        // Launcher 验签、策略组装），其中整文件摘要与解释器/插件体积成正比。
+        let spawn_started = std::time::Instant::now();
+        let mut program_hash_ms = 0;
+        let mut signature_ms = 0;
+        let mut program_mb = 0;
         if let Some(parent) = self.config.log.parent() {
             preparation(
                 std::fs::create_dir_all(parent)
@@ -665,6 +676,7 @@ impl StdioSidecarConnection {
         let mut spawned_program: Option<std::path::PathBuf> = None;
         let mut command = match &launch_policy {
             Some(policy) => {
+                let hash_started = std::time::Instant::now();
                 let program_sha256 = preparation(
                     self.config
                         .sandbox_program_sha256
@@ -673,6 +685,10 @@ impl StdioSidecarConnection {
                         .map(Ok)
                         .unwrap_or_else(|| super::sha256_file(&program)),
                 )?;
+                program_hash_ms = hash_started.elapsed().as_millis() as u64;
+                program_mb = std::fs::metadata(&program)
+                    .map(|metadata| metadata.len() / 1_000_000)
+                    .unwrap_or(0);
                 let sandbox_bin = preparation(resolve_launcher(
                     &self.config.storage_root,
                 )
@@ -684,6 +700,7 @@ impl StdioSidecarConnection {
                 }))?;
                 // Launcher 是安全边界执行者：每次启动前验签（官方或本机
                 // 信任根任一通过），签名缺失/不匹配一律拒绝，防单文件替换。
+                let signature_started = std::time::Instant::now();
                 preparation(
                     crate::signature::verify_launcher_signature(
                         &sandbox_bin,
@@ -691,6 +708,7 @@ impl StdioSidecarConnection {
                     )
                     .context("沙箱 Launcher 验签失败，拒绝启动沙箱"),
                 )?;
+                signature_ms = signature_started.elapsed().as_millis() as u64;
                 // 授予的能力必须是 Launcher 上报支持的子集：App 升级而
                 // Launcher 未升级时，在此给出明确提示，而不是让目标进程
                 // 在沙箱内以难以归因的方式失败（如 Chrome 段错误）。
@@ -891,6 +909,10 @@ impl StdioSidecarConnection {
             plugin_id = %self.config.plugin_id,
             pid,
             transport = TRANSPORT_STDIO,
+            prep_ms = spawn_started.elapsed().as_millis() as u64,
+            program_hash_ms,
+            signature_ms,
+            program_mb,
             "stdio sidecar 已启动"
         );
 
