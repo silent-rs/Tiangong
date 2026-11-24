@@ -25,8 +25,10 @@ use std::sync::{Arc, RwLock};
 
 use crate::launch_policy::CAPABILITY_CREDENTIAL_SERVICES;
 
+pub mod common_directories;
 pub mod table;
 
+pub use common_directories::{common_directory_denied_files, common_directory_roots};
 pub use table::{execution_policy, install};
 
 /// sidecar 与宿主的通信通道（宿主权威决定，插件不声明——spawn 时由

@@ -227,8 +227,18 @@ impl TiangongApp {
         tauri::async_runtime::spawn(async move {
             let started = std::time::Instant::now();
             let result = tauri::async_runtime::spawn_blocking(move || {
-                let _ = tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
-                tracing::info!("启动沙箱检查结束，开始后台加载插件");
+                // 沙箱检查单独计时：Windows 每次系统启动后的首次检查会同步跑
+                // Launcher 完整自检（多轮 AppContainer 探针），耗时直接落在启动
+                // 准备门闸上，需与插件加载耗时分开归因。
+                let launcher_started = std::time::Instant::now();
+                let (status, version) =
+                    tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
+                tracing::info!(
+                    status = status.as_str(),
+                    version = version.as_deref(),
+                    elapsed_ms = launcher_started.elapsed().as_millis() as u64,
+                    "启动沙箱检查结束，开始后台加载插件"
+                );
                 tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root)
                     .map_err(|error| format!("{error:#}"))
             })

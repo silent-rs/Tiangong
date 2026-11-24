@@ -1739,6 +1739,9 @@ async fn host_work_timeline_command_outputs_events() {
 async fn host_approve_workspace_command_issuance() {
     let app = tauri::test::mock_app();
     let (state, ws) = central_test_app();
+    // 授权落盘会 canonicalize；macOS 的 /tmp 是指向 /private/tmp 的符号链接，
+    // 测试必须用同一规范化路径比较，否则 TMPDIR=/tmp 时会误报未持久化。
+    let ws = ws.canonicalize().expect("临时工作区应可规范化");
     app.manage(state.central.clone());
     app.manage(state);
     let handle = app.handle();

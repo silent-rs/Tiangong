@@ -148,8 +148,8 @@ const SHARED_WRITABLE_ENTRIES: [&str; 2] = ["media", "tmp"];
 /// 顶层数据目录一律只读；插件升级时自行把旧数据复制进 `data/<id>`。
 /// 条目不跟随符号链接，受保护路径不列入。
 ///
-/// Windows 不使用此收拢（见 stdio 策略组装处说明），仅非 Windows 平台生效。
-#[cfg_attr(windows, allow(dead_code))]
+/// 按目录授权生效时三个平台共用本清单；旧 Launcher 下仅非 Windows 平台使用
+/// （Windows 另把整个存储根并入可写域，见 stdio 策略组装处说明）。
 pub(super) fn storage_root_writable_roots(
     storage_root: &std::path::Path,
     plugin_id: &str,
@@ -254,9 +254,118 @@ pub(super) fn apply_user_cache_write(
     }
 }
 
+/// 按目录授权下的只读根。
+///
+/// Windows 保持 AppContainer 默认全禁，读不到的位置必须显式列出：会话记录对所有
+/// 插件只读；插件自身的安装目录（动态库、资源与依赖）可读；旧技能目录在 skill
+/// 插件迁入数据目录前仍需读取；配置与用户凭据只按宿主已验证的权限开放读取。
+/// 不存在的路径由调用方丢弃。
+pub(super) fn path_authorization_readable_roots(
+    storage_root: &std::path::Path,
+    plugin_id: &str,
+    program_root: Option<&std::path::Path>,
+    access: SensitiveStorageAccess,
+    credentials: crate::host_policy::UserCredentialReadAccess,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![storage_root.join("sessions")];
+    if let Some(program_root) = program_root {
+        roots.push(program_root.to_path_buf());
+    }
+    if plugin_id == "skill" {
+        roots.push(storage_root.join("skills"));
+    }
+    if access.model_config {
+        roots.push(storage_root.join("models.json"));
+        roots.push(storage_root.join("auth"));
+    }
+    if access.server_config {
+        roots.push(storage_root.join("server.json"));
+    }
+    if let Some(home) = home {
+        if credentials.ssh {
+            roots.push(home.join(".ssh"));
+        }
+        if credentials.github_cli {
+            roots.push(home.join(".config/gh"));
+        }
+    }
+    roots
+}
+
 #[cfg(test)]
 mod sensitive_access_tests {
     use super::*;
+
+    #[test]
+    fn readable_roots_follow_plugin_identity_and_granted_permissions() {
+        use crate::host_policy::UserCredentialReadAccess;
+        use std::path::PathBuf;
+        let storage = std::path::Path::new("/storage");
+        let program = std::path::Path::new("/storage/plugins/memory");
+        let home = std::path::Path::new("/home/user");
+        let none = SensitiveStorageAccess::default();
+        let no_credentials = UserCredentialReadAccess::default();
+
+        // 没有任何豁免：只有会话记录与插件自身目录可读。
+        assert_eq!(
+            path_authorization_readable_roots(
+                storage,
+                "memory",
+                Some(program),
+                none,
+                no_credentials,
+                Some(home)
+            ),
+            vec![PathBuf::from("/storage/sessions"), program.to_path_buf()]
+        );
+
+        // skill 插件在迁入数据目录前仍要读取旧技能目录。
+        assert_eq!(
+            path_authorization_readable_roots(
+                storage,
+                "skill",
+                Some(program),
+                none,
+                no_credentials,
+                None
+            ),
+            vec![
+                PathBuf::from("/storage/sessions"),
+                program.to_path_buf(),
+                PathBuf::from("/storage/skills"),
+            ]
+        );
+
+        // 配置与用户凭据只按宿主已验证的权限开放读取。
+        let config = SensitiveStorageAccess {
+            model_config: true,
+            server_config: true,
+            ..SensitiveStorageAccess::default()
+        };
+        let credentials = UserCredentialReadAccess {
+            ssh: true,
+            github_cli: true,
+        };
+        assert_eq!(
+            path_authorization_readable_roots(
+                storage,
+                "terminal",
+                None,
+                config,
+                credentials,
+                Some(home)
+            ),
+            vec![
+                PathBuf::from("/storage/sessions"),
+                PathBuf::from("/storage/models.json"),
+                PathBuf::from("/storage/auth"),
+                PathBuf::from("/storage/server.json"),
+                PathBuf::from("/home/user/.ssh"),
+                PathBuf::from("/home/user/.config/gh"),
+            ]
+        );
+    }
 
     #[test]
     fn plugin_data_dirs_are_isolated_from_each_other() {
