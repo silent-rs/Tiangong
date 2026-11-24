@@ -4,7 +4,9 @@
 
 ## 安装与标识
 
-- Skill 安装事实源是 `~/.tiangong/skills/<id>/` 目录。
+- Skill 安装事实源是 skills 存储目录下的 `<id>/` 目录。存储目录位于插件数据目录
+  `~/.tiangong/data/skill/skills/`；sidecar 独立运行、拿不到插件数据目录时回退旧位置
+  `~/.tiangong/skills/`（见下文「旧位置迁移」）。
 - `<id>` 是稳定机器标识，用于目录名、`@skill` 引用、托管 MCP 名称和审计 key。
 - `skill.toml.name` 只用于 UI 展示，允许本地化或调整，不参与寻址。
 - 系统始终只使用 `skills/<id>/` 当前内容，不维护多版本目录。
@@ -13,7 +15,7 @@
 ## 目录结构
 
 ```text
-~/.tiangong/skills/
+~/.tiangong/data/skill/skills/
   mcp-lock.json
   web-search/
     skill.toml
@@ -21,6 +23,18 @@
     .env.local
     ...
 ```
+
+`mcp-lock.json` 与技能同处一个目录，由 skill sidecar 聚合各技能的 `requires.mcp` 后写入。
+
+## 旧位置迁移
+
+早期版本把技能放在存储根下的 `~/.tiangong/skills/`。沙箱收拢写域后那里只读，技能改放
+插件数据目录。skill sidecar 首次启动时自行迁移：
+
+- 插件数据目录里没有完成标记 `.legacy-skills-migrated` 时，把旧目录逐项复制进
+  `data/skill/skills/`：新位置已有的文件不覆盖，子目录只补缺失的文件，符号链接不迁移。
+- 每个文件先写临时文件再原子改名；中途失败则报错并中止启动、不写标记，下次启动重试。
+- 完成标记写入后，技能目录与 `mcp-lock.json` 只读写新位置。旧目录原样保留，由用户清理。
 
 ## 启停状态
 

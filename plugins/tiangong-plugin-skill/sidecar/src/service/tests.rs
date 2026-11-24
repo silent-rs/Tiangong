@@ -1,5 +1,22 @@
 use super::*;
 
+/// 有插件数据目录时技能根迁到 `<数据目录>/skills`，旧目录内容被复制；
+/// 没有数据目录（独立运行）时沿用旧位置。
+#[test]
+fn skills_root_moves_into_plugin_data_dir_with_legacy_copied() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy = root.path().join("skills");
+    std::fs::create_dir_all(legacy.join("demo-skill")).unwrap();
+    std::fs::write(legacy.join("demo-skill/SKILL.md"), "# demo").unwrap();
+    let data = root.path().join("data/skill");
+
+    let resolved = skills_root_with_migration(Some(&data), &legacy).unwrap();
+    assert_eq!(resolved, data.join("skills"));
+    assert!(data.join("skills/demo-skill/SKILL.md").is_file());
+
+    assert_eq!(skills_root_with_migration(None, &legacy).unwrap(), legacy);
+}
+
 /// 在临时目录装一个最小 skill，返回（保持目录存活，服务实例）。
 fn service_with_skill(enabled: bool) -> (tempfile::TempDir, SkillService) {
     let dir = tempfile::tempdir().unwrap();

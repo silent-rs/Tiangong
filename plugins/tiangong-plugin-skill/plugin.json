@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "skill",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "sidecar": {
     "binary": "tiangong-skill-sidecar",
     "transport_protocol": "0.1.0",

@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use tiangong_plugin_sidecar::env::STORAGE_ROOT_ENV;
 use tiangong_plugin_sidecar::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
@@ -33,7 +32,7 @@ pub struct SkillService {
 impl SkillService {
     /// 构造服务：解析存储根、构造注册表并首次扫描。
     pub fn new() -> Result<Self> {
-        let root = resolve_skills_root();
+        let root = resolve_skills_root()?;
         let registry = SkillRegistry::new(root);
         registry.refresh();
         Ok(Self { registry })
@@ -552,15 +551,28 @@ fn skill_creation_guide(root: &str) -> String {
     )
 }
 
-/// 解析 skills 存储根：优先 `TIANGONG_STORAGE_ROOT/skills`，回退 `~/.tiangong/skills`。
-fn resolve_skills_root() -> std::path::PathBuf {
-    if let Some(root) = std::env::var(STORAGE_ROOT_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
-        return std::path::PathBuf::from(root).join("skills");
-    }
-    crate::paths::default_skills_storage_dir_path()
+/// 解析 skills 存储根。
+///
+/// 宿主注入了插件数据目录时使用 `data/skill/skills/`，首次启动把旧位置的技能迁入，
+/// 之后只读写新位置；独立运行（没有数据目录）时沿用旧位置。
+fn resolve_skills_root() -> Result<std::path::PathBuf> {
+    skills_root_with_migration(
+        crate::paths::plugin_storage_data_dir().as_deref(),
+        &crate::paths::legacy_skills_storage_dir_path(),
+    )
+}
+
+/// 有插件数据目录时返回 `<数据目录>/skills`（先把 `legacy_dir` 迁入）；没有时沿用旧位置。
+fn skills_root_with_migration(
+    data_dir: Option<&std::path::Path>,
+    legacy_dir: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    let Some(data_dir) = data_dir else {
+        return Ok(legacy_dir.to_path_buf());
+    };
+    let root = crate::paths::skills_data_dir_path(data_dir);
+    crate::migration::migrate_legacy_dir(legacy_dir, &root, data_dir)?;
+    Ok(root)
 }
 
 /// 计算 skill 声明的托管 MCP server 名（`skill::<skill_id>::<mcp_id>`）。
