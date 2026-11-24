@@ -404,21 +404,21 @@ mod tests {
     #[test]
     fn readable_roots_are_canonical_and_skip_writable_descendants() {
         let root = tempfile::tempdir().unwrap();
-        let workspace = root.path().join("workspace");
+        // 以规范化后的真实路径为基准：临时目录可能经由符号链接访问（macOS 的
+        // /var → /private/var），不存在的子路径不会被规范化，比较时会错位。
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let mut policy = SandboxPolicy::workspace_write(&workspace);
         policy.readable_roots = vec![
-            root.path().join("sessions"),
+            base.join("sessions"),
             workspace.join("nested"),
             PathBuf::from("relative/path"),
-            root.path().join("sessions"),
+            base.join("sessions"),
         ];
         // 规范化去重；位于可写根内的条目随可写根获得读写，不重复授权；
         // 相对路径丢弃。
-        assert_eq!(
-            policy.readable_roots(),
-            vec![canonical_or_keep(&root.path().join("sessions"))]
-        );
+        assert_eq!(policy.readable_roots(), vec![base.join("sessions")]);
     }
 
     #[test]
