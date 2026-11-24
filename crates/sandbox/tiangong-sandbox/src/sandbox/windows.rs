@@ -90,6 +90,8 @@ const FILE_WRITE_ACCESS: u32 = FILE_WRITE_DATA
 const FILE_WORKSPACE_ACCESS: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 const FILE_PROGRAM_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+/// 只读根的授权：读与执行（插件目录内的动态库需要执行权限），不含任何写位。
+const FILE_READ_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
 /// Windows Launcher 的原生启动参数。
 pub struct WindowsLaunchRequest<'a> {
@@ -244,6 +246,10 @@ pub fn current_process_child_policy_flags() -> Result<u32> {
     Ok(flags)
 }
 
+/// 启动前的基础校验：只做廉价检查（路径形态、授权根存在）。
+///
+/// 目录树的安全校验不在这里做：它与目录规模成正比，放在建立授权的那一刻
+/// 执行（见 [`validate_grant_roots`]）。复用持久授权的启动不碰 ACL，也就不再遍历。
 fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {
     if request.policy.mode == SandboxMode::FullAccess {
         bail!("Windows Launcher 不接受 full_access 策略");
@@ -254,38 +260,53 @@ fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {
     if !request.program.is_file() || !request.program_root.is_dir() {
         bail!("Windows 目标程序或根目录不存在");
     }
-    let writable_roots = request
-        .policy
+    let policy = &request.policy;
+    for (root, label) in policy
         .writable_roots()
-        .into_iter()
-        .map(|root| {
-            crate::canonicalize_path(&root)
-                .with_context(|| format!("解析 Windows 可写目录失败: {}", root.display()))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    for root in &writable_roots {
-        if writable_roots
-            .iter()
-            .any(|parent| parent != root && root.starts_with(parent))
-        {
-            continue;
+        .iter()
+        .map(|root| (root, "可写"))
+        .chain(policy.readable_roots().iter().map(|root| (root, "只读")))
+    {
+        if !root.is_dir() {
+            bail!("Windows {label}目录不存在或不是目录: {}", root.display());
         }
-        validate_writable_tree(root, &writable_roots)
-            .with_context(|| format!("Windows 可写目录不安全: {}", root.display()))?;
     }
     Ok(())
 }
 
-fn validate_writable_tree(root: &Path, writable_roots: &[PathBuf]) -> Result<()> {
+/// 建立授权前的目录树校验，每次建立或重建授权时执行一次。
+///
+/// 每个授权根内不得有重解析点；硬链接的全部名字必须落在本次授权的根内
+/// （只读授权同样会让根外的文件对沙箱可见）。
+fn validate_grant_roots(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) -> Result<()> {
+    let mut granted = writable_roots.to_vec();
+    granted.extend(readable_roots.iter().cloned());
+    for (roots, label) in [(writable_roots, "可写"), (readable_roots, "只读")] {
+        for root in roots {
+            // 嵌套在另一个授权根内的条目随外层根一并校验。
+            if granted
+                .iter()
+                .any(|parent| parent != root && root.starts_with(parent))
+            {
+                continue;
+            }
+            validate_grant_tree(root, &granted)
+                .with_context(|| format!("Windows {label}目录不安全: {}", root.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_grant_tree(root: &Path, granted_roots: &[PathBuf]) -> Result<()> {
     if !root.is_absolute() || !root.is_dir() {
-        bail!("可写根必须是已存在的绝对目录");
+        bail!("授权根必须是已存在的绝对目录");
     }
     let metadata = std::fs::symlink_metadata(root)
         .with_context(|| format!("读取路径元数据失败: {}", root.display()))?;
     let mut pending = vec![(root.to_path_buf(), metadata)];
     while let Some((path, metadata)) = pending.pop() {
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            bail!("可写目录包含重解析点，拒绝授予权限: {}", path.display());
+            bail!("授权目录包含重解析点，拒绝授予权限: {}", path.display());
         }
         if metadata.is_file() {
             let link_count = match file_link_count(&path) {
@@ -300,7 +321,7 @@ fn validate_writable_tree(root: &Path, writable_roots: &[PathBuf]) -> Result<()>
                 Err(error) => return Err(error),
             };
             if link_count > 1 {
-                validate_hardlink_aliases(&path, link_count, writable_roots)?;
+                validate_hardlink_aliases(&path, link_count, granted_roots)?;
             }
         }
         if metadata.is_dir() {
@@ -310,13 +331,13 @@ fn validate_writable_tree(root: &Path, writable_roots: &[PathBuf]) -> Result<()>
                 Err(error) if path != root && error.kind() == std::io::ErrorKind::NotFound => {
                     continue;
                 }
-                Err(error) => return Err(error).context("复核可写目录失败"),
+                Err(error) => return Err(error).context("复核授权目录失败"),
             };
             if current.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 bail!("可写目录包含重解析点，拒绝授予权限: {}", path.display());
             }
             for entry in std::fs::read_dir(&path)
-                .with_context(|| format!("扫描可写目录失败: {}", path.display()))?
+                .with_context(|| format!("扫描授权目录失败: {}", path.display()))?
             {
                 let entry = entry?;
                 // Windows 的目录枚举已携带元数据；复用它，不再按路径重查每个文件。
@@ -863,6 +884,11 @@ impl AclGrants {
             roots: Vec::new(),
             active: true,
         };
+        // 目录树校验只在建立授权时做：这是启动流程里唯一与目录规模成正比的一步，
+        // 复用持久授权的启动不会再走到这里。
+        let writable = policy.writable_roots();
+        let readable = policy.readable_roots();
+        validate_grant_roots(&writable, &readable)?;
         let result = (|| {
             // AppContainer 保留目录穿越能力；修改祖先 DACL 会让 Windows 向整棵
             // 子树传播继承项，因此只授权最终程序和策略根。
@@ -872,12 +898,19 @@ impl AclGrants {
                 FILE_PROGRAM_ACCESS,
                 NO_INHERITANCE,
             )?;
-            let writable = policy.writable_roots();
             for root in &writable {
                 grants.add(
                     &[appcontainer_sid, restriction_sid],
                     root,
                     FILE_WORKSPACE_ACCESS,
+                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                )?;
+            }
+            for root in &readable {
+                grants.add(
+                    &[appcontainer_sid, restriction_sid],
+                    root,
+                    FILE_READ_ACCESS,
                     OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
                 )?;
             }
@@ -1540,7 +1573,7 @@ mod tests {
         std::fs::hard_link(&original, &alias).unwrap();
         let root = crate::canonicalize_path(root.path()).unwrap();
 
-        validate_writable_tree(&root, std::slice::from_ref(&root)).unwrap();
+        validate_grant_tree(&root, std::slice::from_ref(&root)).unwrap();
     }
 
     #[test]
@@ -1556,7 +1589,7 @@ mod tests {
         let first = crate::canonicalize_path(&first).unwrap();
         let second = crate::canonicalize_path(&second).unwrap();
 
-        validate_writable_tree(&first, &[first.clone(), second]).unwrap();
+        validate_grant_tree(&first, &[first.clone(), second]).unwrap();
     }
 
     #[test]
@@ -1571,7 +1604,7 @@ mod tests {
         std::fs::hard_link(&original, writable.join("escape.txt")).unwrap();
         let writable = crate::canonicalize_path(&writable).unwrap();
 
-        let error = validate_writable_tree(&writable, std::slice::from_ref(&writable)).unwrap_err();
+        let error = validate_grant_tree(&writable, std::slice::from_ref(&writable)).unwrap_err();
         assert!(error.to_string().contains("超出授权可写目录"));
     }
 }
