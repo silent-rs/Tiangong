@@ -267,8 +267,12 @@ fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {
         .map(|root| (root, "可写"))
         .chain(policy.readable_roots().iter().map(|root| (root, "只读")))
     {
-        if !root.is_dir() {
-            bail!("Windows {label}目录不存在或不是目录: {}", root.display());
+        // 只读根可以是单个文件（如按权限开放读取的配置文件）。
+        if !root.is_dir() && !root.is_file() {
+            bail!(
+                "Windows {label}目录不存在或既不是目录也不是文件: {}",
+                root.display()
+            );
         }
     }
     Ok(())
@@ -298,11 +302,22 @@ fn validate_grant_roots(writable_roots: &[PathBuf], readable_roots: &[PathBuf]) 
 }
 
 fn validate_grant_tree(root: &Path, granted_roots: &[PathBuf]) -> Result<()> {
-    if !root.is_absolute() || !root.is_dir() {
-        bail!("授权根必须是已存在的绝对目录");
+    if !root.is_absolute() || !(root.is_dir() || root.is_file()) {
+        bail!("授权根必须是已存在的绝对目录或文件");
     }
     let metadata = std::fs::symlink_metadata(root)
         .with_context(|| format!("读取路径元数据失败: {}", root.display()))?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("授权目录包含重解析点，拒绝授予权限: {}", root.display());
+    }
+    if metadata.is_file() {
+        // 单文件授权根（如配置文件）不遍历目录，只确认它不是指向授权范围之外的硬链接。
+        let link_count = file_link_count(root)?;
+        if link_count > 1 {
+            validate_hardlink_aliases(root, link_count, granted_roots)?;
+        }
+        return Ok(());
+    }
     let mut pending = vec![(root.to_path_buf(), metadata)];
     while let Some((path, metadata)) = pending.pop() {
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -907,11 +922,17 @@ impl AclGrants {
                 )?;
             }
             for root in &readable {
+                // 目录授权向子树继承；单文件授权根（配置文件）不继承。
+                let inheritance = if root.is_dir() {
+                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+                } else {
+                    NO_INHERITANCE
+                };
                 grants.add(
                     &[appcontainer_sid, restriction_sid],
                     root,
                     FILE_READ_ACCESS,
-                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                    inheritance,
                 )?;
             }
             for path in policy.read_only_roots() {
