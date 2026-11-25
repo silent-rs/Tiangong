@@ -186,6 +186,25 @@ impl TicketRegistry {
         TicketVerdict::Granted
     }
 
+    /// 按对查验（不消费）：是否存在匹配 (workspace, 任务指纹) 的未用、未过期
+    /// 票据。供派发规划在「排队」决策前判断是否已授权——排队项要等依赖终态
+    /// 后才真正投递，若在入队时就把一次性票据消费掉，投递那一刻反而无票
+    /// 可用（2026-11-25 修复）。
+    pub fn peek_workspace_approval_for(&self, workspace_id: &str, task_fingerprint: &str) -> bool {
+        let now = now_text();
+        self.workspace_approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .rev()
+            .any(|t| {
+                t.workspace_id == workspace_id
+                    && t.task_fingerprint == task_fingerprint
+                    && t.used_at.is_none()
+                    && !is_expired(&t.expires_at, &now)
+            })
+    }
+
     /// 宿主签发决策票据（用户真实选择选项后调用）。
     pub fn issue_decision(
         &self,

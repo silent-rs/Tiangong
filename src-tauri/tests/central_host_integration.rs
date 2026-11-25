@@ -3593,3 +3593,319 @@ async fn r29_4_steer_log_keeps_active_owner_execution() {
         Some(owner.execution_id.as_str())
     );
 }
+// ===== 一次性 Workspace 授权票据（2026-11-25 修复）=====
+//
+// 缺陷：票据此前在模型驱动的派发路径上永远消费不到——中枢插件按落盘的长期
+// 授权预检（看不到宿主内存里的一次性票据），把用户点「授权」后的重派在插件
+// 层短路；且入队即消费，排队项在依赖终态后投递时无票可用。修复：授权只在
+// 宿主执行（插件预检移除）；排队只查验不消费、执行时消费；投递未成立退还。
+
+/// 构造执行中的登记条目（经 central-state 的派发构造器，字段随版本演进，
+/// 不写死结构体字面量）。
+fn ticket_running_entry(
+    work_id: &str,
+    session: &str,
+    execution: &str,
+) -> tiangong_app::central::CentralWorkStatus {
+    central_state::registry_entry_after_dispatch(
+        work_id,
+        session,
+        "占用写入锁的工作",
+        None,
+        false,
+        None,
+        "2026-11-25 10:00:00",
+        execution,
+    )
+}
+
+/// 该会话最新的登记条目。
+fn ticket_registry_status(
+    app: &TiangongApp,
+    session: &str,
+) -> Option<tiangong_app::central::CentralWorkStatus> {
+    app.central
+        .central_work_status()
+        .into_iter()
+        .rev()
+        .find(|entry| entry.session_id == session)
+}
+
+fn ticket_request(
+    work_id: &str,
+    session: &str,
+    task: &str,
+    cwd: &str,
+) -> tiangong_app::central::CentralDispatchRequest {
+    tiangong_app::central::CentralDispatchRequest {
+        work_id: work_id.to_string(),
+        execution_id: tiangong_central::new_execution_id(),
+        session_id: session.to_string(),
+        task: task.to_string(),
+        model: None,
+        cwd: Some(cwd.to_string()),
+        after_work_id: None,
+        parallel: false,
+        reused_session: false,
+    }
+}
+
+/// 排队（写入锁 / 依赖）的派发入队时只查验不消费票据；依赖终态后真正投递
+/// 时才消费。拒绝文案说明卡片已自动发出、不必再调 request_workspace_approval。
+#[tokio::test]
+async fn one_time_ticket_survives_queuing_and_is_consumed_on_execution() {
+    let (app, _ws) = central_test_app();
+    // 派发目标须在默认工作区之外（默认子树天然放行，测不到票据）
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    let task = "发布模块 v3";
+    // 同目录已有在跑工作：写入锁 → 排队
+    let mut holder = ticket_running_entry("work-holder", "s-holder", "exec-holder");
+    holder.cwd = Some(cwd.clone());
+    app.central
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(holder);
+    let request = ticket_request("work-queued", "s-ticket-queued", task, &cwd);
+
+    // 未授权：拒绝（卡片由宿主自动发出，不再要求模型另起卡片）
+    let denied = plan_central_dispatch(&app.central, request.clone())
+        .await
+        .expect_err("未授权工作区必须拒绝");
+    assert!(denied.contains("尚未经用户授权"), "{denied}");
+    assert!(denied.contains("授权卡片已自动发给用户"), "{denied}");
+    assert!(
+        denied.contains("不必再调 request_workspace_approval"),
+        "{denied}"
+    );
+    assert!(!denied.contains("task_fingerprint=<"), "{denied}");
+
+    // 用户点「授权」（仅此一次）→ 宿主签发一次性票据
+    app.central.ticket_registry.issue_workspace_approval(
+        &cwd,
+        task,
+        tiangong_central::tickets::RiskLevel::High,
+        600,
+    );
+    // 排队：只查验不消费
+    match plan_central_dispatch(&app.central, request.clone())
+        .await
+        .unwrap()
+    {
+        tiangong_app::central_host::dispatch::DispatchPlan::Queued => {}
+        _ => panic!("同目录已有在跑工作应排队"),
+    }
+    assert!(
+        app.central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "排队入队不得消费一次性票据"
+    );
+
+    // 依赖终态后投递：执行时才消费
+    app.central
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    match plan_central_dispatch(&app.central, request.clone())
+        .await
+        .unwrap()
+    {
+        tiangong_app::central_host::dispatch::DispatchPlan::Execute {
+            approval_consumed, ..
+        } => assert_eq!(
+            approval_consumed,
+            Some((cwd.clone(), task.to_string())),
+            "执行段记录已消费的票据（投递失败时据此退还）"
+        ),
+        _ => panic!("占用解除后应进入执行"),
+    }
+    assert!(
+        !app.central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "执行后票据已消费（一次性）"
+    );
+    // 再派同任务：无票 → 拒绝
+    let again = plan_central_dispatch(&app.central, request.clone())
+        .await
+        .expect_err("票据一次性：同任务重派需要新授权");
+    assert!(again.contains("尚未经用户授权"), "{again}");
+}
+
+/// 投递未成立时退还一次性票据：用户的同意不因投递失败作废；目录长期授权
+/// 放行的派发没有消费票据，无需退还。
+#[test]
+fn delivery_failure_refunds_one_time_ticket() {
+    use tiangong_app::central_host::dispatch::refund_workspace_approval;
+    let (app, _ws) = central_test_app();
+    // 派发目标须在默认工作区之外（默认子树天然放行，测不到票据）
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    let task = "发布模块 v4";
+    app.central.ticket_registry.issue_workspace_approval(
+        &cwd,
+        task,
+        tiangong_central::tickets::RiskLevel::High,
+        600,
+    );
+    assert!(app
+        .central
+        .ticket_registry
+        .consume_workspace_approval_for(&cwd, task)
+        .is_granted());
+    assert!(!app
+        .central
+        .ticket_registry
+        .peek_workspace_approval_for(&cwd, task));
+    refund_workspace_approval(&app.central, &Some((cwd.clone(), task.to_string())));
+    assert!(
+        app.central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "退还后同 (cwd, task) 可再次派发"
+    );
+    refund_workspace_approval(&app.central, &None);
+}
+
+/// 端到端复现并锁定 2026-11-25 的缺陷场景：中枢模型派发 → 宿主拒绝并自动
+/// 发卡 → 用户点「授权」（仅此一次）→ 模型重派同一任务 → 必须放行。
+///
+/// 此前插件按落盘的长期授权预检（看不到宿主内存里的一次性票据），第三步
+/// 之后的重派永远在插件层被短路——票据签发了却永远消费不到，review 派不
+/// 出去。同时锁定：被拒派发留下的登记不得触发「相似历史强制复用」（其会话
+/// 从未创建，否则模型会被「带 session_id 重发」与「复用的会话不存在」来回踢）。
+#[tokio::test]
+async fn approved_ticket_lets_identical_redispatch_through_plugin_and_host() {
+    let (app, ws) = central_test_app();
+    std::fs::write(
+        app.core_manager.storage_root().join("models.json"),
+        serde_json::json!({
+            "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+            "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+            "routing": {"chat": "k3"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    // 真实中枢插件（模型侧工具入口）经派发通道连到真实宿主执行器
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plugin = central_plugin::CentralPlugin::new(
+        ws.to_string_lossy().to_string(),
+        app.core_manager.clone(),
+        tx,
+        reports,
+    );
+    let tauri_app = tauri::test::mock_app();
+    tauri_app.manage(app.central.clone());
+    tauri_app.manage(app);
+    let handle = tauri_app.handle();
+    let state = state_of(handle);
+    let task = "Review 天工主仓库当前分支的变更";
+
+    // 1) 模型派发：插件不预检授权，原样交给宿主
+    let first = call_central_tool(
+        &plugin,
+        "dispatch_work",
+        serde_json::json!({ "task": task, "cwd": cwd }),
+    );
+    assert!(first.ok, "插件不得短路：{}", first.stderr);
+    let tiangong_app::central::CentralPluginMessage::Dispatch(request) =
+        rx.try_recv().expect("应交给宿主裁决")
+    else {
+        panic!("应为 Dispatch 消息");
+    };
+    // 2) 宿主拒绝（未授权），授权卡片自动发出
+    let denied = handle_central_dispatch(&state.central, handle, request.clone())
+        .await
+        .expect_err("未授权工作区必须拒绝");
+    assert!(denied.contains("尚未经用户授权"), "{denied}");
+    assert!(denied.contains("授权卡片已自动发给用户"), "{denied}");
+    // 3) 用户点「授权」（仅此一次）：走真实命令签发一次性票据
+    let granted = tiangong_app::central_host::authorization::central_approve_workspace(
+        handle.clone(),
+        cwd.clone(),
+        task.to_string(),
+        Some(false),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(granted["persist"], false);
+    // 4) 模型重派同一任务（不带 session_id）：不得被「相似历史」或授权短路
+    let second = call_central_tool(
+        &plugin,
+        "dispatch_work",
+        serde_json::json!({ "task": task, "cwd": cwd }),
+    );
+    assert!(second.ok, "授权后重派必须被受理：{}", second.stderr);
+    assert!(
+        !second.stderr.contains("高度相似"),
+        "被拒派发的登记不得强制复用：{}",
+        second.stderr
+    );
+    let tiangong_app::central::CentralPluginMessage::Dispatch(request) =
+        rx.try_recv().expect("应交给宿主裁决")
+    else {
+        panic!("应为 Dispatch 消息");
+    };
+    // 5) 宿主放行（消费一次性票据），工作进入执行中
+    handle_central_dispatch(&state.central, handle, request.clone())
+        .await
+        .expect("一次性票据应放行授权后的重派");
+    assert!(
+        ticket_registry_status(state, &request.session_id)
+            .is_some_and(|entry| entry.state == central_state::WorkState::Running),
+        "重派后登记应为执行中"
+    );
+    assert!(
+        !state
+            .central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "票据一次性：重派后已消费"
+    );
+}
+
+/// 极简 block_on（同步等待一次性 future，不引入运行时依赖）。
+fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    fn noop(_: *const ()) {}
+    fn clone(ptr: *const ()) -> RawWaker {
+        RawWaker::new(ptr, &VTABLE)
+    }
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("中枢插件工具不应挂起"),
+    }
+}
+
+/// 经公共工具入口调用中枢插件（与模型调用同路径）。
+fn call_central_tool(
+    plugin: &central_plugin::CentralPlugin,
+    name: &str,
+    args: serde_json::Value,
+) -> tiangong_core::tools::result::ToolResult {
+    let call = tiangong_llm::tool::ToolCall {
+        id: "t1".to_string(),
+        name: name.to_string(),
+        arguments: args,
+    };
+    let mut session = tiangong_core::session::Session::new("测试");
+    let future = tiangong_core::tools::extension::ToolOverrideHandler::handle(
+        plugin,
+        &call,
+        &mut session,
+        "test",
+    );
+    futures_block_on(future).expect("中枢工具必须被本插件处理")
+}
