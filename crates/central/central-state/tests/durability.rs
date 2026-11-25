@@ -19,6 +19,7 @@ fn record(session: &str, task: &str) -> WorkItemRecord {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     }
 }
 
@@ -175,7 +176,7 @@ fn session_setters_mutate_latest_and_tolerate_unknown_session() {
     // outcome 命中
     set_work_item_outcome(base, "s-set", "completed").unwrap();
     // queued 标记 → 清除
-    mark_work_item_queued(base, "s-set", "work-dep", Some("/ws")).unwrap();
+    mark_work_item_queued(base, "s-set", "work-dep", Some("/ws"), false).unwrap();
     clear_work_item_queued(base, "s-set").unwrap();
     // execution 归属写入
     set_work_item_execution(base, "s-set", "exec-1").unwrap();

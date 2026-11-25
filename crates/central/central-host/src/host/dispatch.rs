@@ -273,6 +273,7 @@ pub async fn enqueue_central_dispatch(
     mut request: crate::CentralDispatchRequest,
     after: &str,
     cwd: &str,
+    preauthorized: bool,
 ) {
     // 阻塞源统一写入 after_work_id（批五测试发现：写入锁排队的请求
     // 原样入队时 after=None——依赖终态后 flush 的匹配条件
@@ -322,6 +323,7 @@ pub async fn enqueue_central_dispatch(
         &request.session_id,
         after,
         Some(cwd),
+        preauthorized,
     ) {
         tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
     }
@@ -354,18 +356,6 @@ pub enum DispatchPlan {
         /// （目录长期授权放行时为 None）。
         approval_consumed: Option<(String, String)>,
     },
-}
-
-/// 授权查验（不消费）：目录长期授权，或存在匹配 (cwd, 任务指纹) 的未用、
-/// 未过期一次性票据。
-fn workspace_authorized(
-    state: &crate::CentralHostState,
-    default_workspace: &str,
-    cwd: &str,
-    task: &str,
-) -> bool {
-    crate::workspace_confirmed(state.core_manager.storage_root(), default_workspace, cwd)
-        || state.ticket_registry.peek_workspace_approval_for(cwd, task)
 }
 
 /// 未授权拒绝：广播授权卡片（任务指纹 = 本次 task，用户点击即签发票据）、
@@ -462,13 +452,23 @@ pub async fn plan_central_dispatch(
     // 1. 目录长期授权（confirmed-workspaces，用户此前「记住」的目录）；
     // 2. 一次性票据（宿主用户操作签发，绑定任务指纹——防「授权 A、
     //    执行 B」偷换，消费即失效）。
-    // 这里只**查验**不消费：排队项要到依赖终态后投递时才真正执行，入队
-    // 时就消费会让投递那一刻无票可用；消费点在下方执行段。
+    // 3. 排队标记上的授权随行（入队时已消费票据，见下方排队分支）。
+    // 这里只**查验**不消费：排队项可能等更久或经历重启，票据在内存且会过期，
+    // 不能等投递那一刻才用——入队时消费并把授权落到排队标记；直接执行的
+    // 派发在下方执行段消费。
     let default_workspace = state
         .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
         .await
         .unwrap_or_default();
-    if !workspace_authorized(state, &default_workspace, &cwd, &request.task) {
+    let storage_root = state.core_manager.storage_root();
+    let directory_approved = crate::workspace_confirmed(storage_root, &default_workspace, &cwd);
+    let preauthorized = crate::work_item_preauthorized(storage_root, &request.work_id);
+    if !(directory_approved
+        || preauthorized
+        || state
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, &request.task))
+    {
         return Err(reject_unauthorized(state, &request, &cwd));
     }
     // 排队决策统一走 central-state（依赖 in-flight × 写入锁 × parallel
@@ -496,27 +496,32 @@ pub async fn plan_central_dispatch(
                 after = %after,
                 "后台工作排队（依赖/写入锁），等待终态后自动投递"
             );
-            enqueue_central_dispatch(state, request.clone(), &after, &cwd).await;
+            // 一次性授权覆盖排队等待：入队即消费票据，授权随行落到排队标记
+            //（目录长期授权的投递时仍按目录校验；已随行的保持随行）
+            let queued_preauthorized = preauthorized
+                || (!directory_approved
+                    && state
+                        .ticket_registry
+                        .consume_workspace_approval_for(&cwd, &request.task)
+                        .is_granted());
+            enqueue_central_dispatch(state, request.clone(), &after, &cwd, queued_preauthorized)
+                .await;
             return Ok(DispatchPlan::Queued);
         }
     }
 
-    // 执行段：真正消费一次性票据（目录长期授权无需消费）。查验与消费之间
-    // 票据若被并发消费或过期，按未授权处理（宁可让用户再点一次）。
-    let approval_consumed = {
-        let directory_approved =
-            crate::workspace_confirmed(state.core_manager.storage_root(), &default_workspace, &cwd);
-        if directory_approved {
-            None
-        } else if state
-            .ticket_registry
-            .consume_workspace_approval_for(&cwd, &request.task)
-            .is_granted()
-        {
-            Some((cwd.clone(), request.task.clone()))
-        } else {
-            return Err(reject_unauthorized(state, &request, &cwd));
-        }
+    // 执行段：真正消费一次性票据（目录长期授权 / 排队授权随行无需消费）。
+    // 查验与消费之间票据若被并发消费或过期，按未授权处理（宁可让用户再点一次）。
+    let approval_consumed = if directory_approved || preauthorized {
+        None
+    } else if state
+        .ticket_registry
+        .consume_workspace_approval_for(&cwd, &request.task)
+        .is_granted()
+    {
+        Some((cwd.clone(), request.task.clone()))
+    } else {
+        return Err(reject_unauthorized(state, &request, &cwd));
     };
 
     let sid = request.session_id.clone();

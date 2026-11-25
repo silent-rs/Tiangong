@@ -150,6 +150,15 @@ pub struct WorkItemRecord {
     /// None = 旧记录（字段上线前）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    /// 排队项的授权随行（2026-11-25）：一次性票据在宿主内存且会过期，排队项
+    /// 可能等更久或经历重启——入队时即消费票据并把「已授权」落到排队标记上，
+    /// 投递 / 重启重放时凭此放行；随排队标记一并清除。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preauthorized: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// 后台工作事件（时间线条目，§13.4 轻量版）。
@@ -285,11 +294,15 @@ pub fn set_work_item_outcome(
 }
 
 /// 标记会话登记条目为排队挂起（queued_at + 依赖），落盘。
+///
+/// `preauthorized`：入队时凭一次性票据放行的排队项须把授权事实随行——
+/// 投递（依赖终态后）或重启重放时不再依赖内存里会过期的票据。
 pub fn mark_work_item_queued(
     storage_root: &std::path::Path,
     session_id: &str,
     after_work_id: &str,
     cwd: Option<&str>,
+    preauthorized: bool,
 ) -> Result<(), String> {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     with_work_items(storage_root, |items| {
@@ -301,6 +314,7 @@ pub fn mark_work_item_queued(
             entry.queued_at = Some(now);
             entry.after_work_id = Some(after_work_id.to_string());
             entry.cwd = cwd.map(str::to_string);
+            entry.preauthorized = preauthorized;
         }
     })
 }
@@ -318,8 +332,16 @@ pub fn clear_work_item_queued(
         {
             entry.queued_at.take();
             entry.after_work_id.take();
+            entry.preauthorized = false;
         }
     })
+}
+
+/// 排队项是否带着有效的授权随行（排队标记仍在且 `preauthorized`）。
+pub fn work_item_preauthorized(storage_root: &std::path::Path, work_id: &str) -> bool {
+    queued_work_items(storage_root)
+        .iter()
+        .any(|item| item.work_id == work_id && item.preauthorized)
 }
 
 /// 读取排队挂起的登记（重启重放投递的数据源）。

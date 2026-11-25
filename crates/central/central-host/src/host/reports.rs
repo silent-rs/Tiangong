@@ -229,15 +229,40 @@ impl crate::CentralHostState {
                 )
                 .await
                 {
-                    tracing::warn!(%error, "排队工作投递未执行");
+                    tracing::warn!(%error, work_id = %request.work_id, "排队工作投递未执行");
                     // 与派发路径同语义：投递未执行 ≠ 工作失败——不产生终态、
                     // 不伪装失败回报；注入说明（随下一条消息进入中枢对话）。
                     let state = state_of_central(&app_handle);
                     let notice = format!(
-                        "[系统中枢] 排队工作 {} 投递未执行：{error}\n没有产生后台工作（不是工作失败）；依赖已终态，可重新派发。",
+                        "[系统中枢] 排队工作 {} 投递未执行：{error}\n没有产生后台工作（不是工作失败）；状态已标为中断，依赖已终态，可重新派发。",
                         request.work_id
                     );
                     state.push_central_work_reports(vec![notice]);
+                    // 幽灵条目收口（放在回报之后：中断一旦对调用方可见，说明
+                    // 已在暂存队列里）：内存队列与落盘的排队标记在投递前已清，
+                    // 登记若仍显示「排队中」就再也不会动——改标为中断（结果
+                    // 未产出、可重派；不是失败）并留事件轨迹（重启投影同样
+                    // 会把在途条目迁为中断）。
+                    {
+                        let mut registry = state
+                            .central_work_registry
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if let Some(entry) = registry.iter_mut().rev().find(|entry| {
+                            entry.session_id == request.session_id
+                                && entry.state == central_state::WorkState::Queued
+                        }) {
+                            entry.state = central_state::WorkState::Interrupted;
+                        }
+                    }
+                    crate::host::central_events::record_central_event(
+                        state.core_manager.storage_root(),
+                        &request.work_id,
+                        &request.execution_id,
+                        &request.session_id,
+                        tiangong_central::event::WorkEventType::WorkItemProgress,
+                        &format!("排队工作投递未执行，标记为中断（可重派）：{error}"),
+                    );
                     crate::host::events::emit_central_work_updated_state(&state);
                 }
             });

@@ -23,6 +23,7 @@ fn record(session: &str) -> WorkItemRecord {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     }
 }
 
@@ -32,7 +33,8 @@ fn queued_state_survives_restart_as_queued_not_interrupted() {
     if let Err(error) = upsert_work_item(root.path(), &record("s-q")) {
         tracing::warn!(%error, "测试（Z4：写失败显式可见）");
     }
-    if let Err(error) = mark_work_item_queued(root.path(), "s-q", "work-dep", Some("/ws/a")) {
+    if let Err(error) = mark_work_item_queued(root.path(), "s-q", "work-dep", Some("/ws/a"), false)
+    {
         tracing::warn!(%error, "测试（Z4：写失败显式可见）");
     }
     // 落盘可读回（重放数据源）

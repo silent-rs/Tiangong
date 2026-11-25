@@ -157,6 +157,7 @@ impl CentralPlugin {
                 .map(str::to_string),
             outcome: None,
             execution_id: Some(execution_id.clone()),
+            preauthorized: false,
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),

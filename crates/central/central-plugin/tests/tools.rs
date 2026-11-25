@@ -647,6 +647,7 @@ fn work_items_upsert_by_session_and_cap_20() {
             after_work_id: None,
             cwd: None,
             execution_id: None,
+            preauthorized: false,
         };
         let _ = upsert_work_item(root.path(), &record);
     }
@@ -665,6 +666,7 @@ fn work_items_upsert_by_session_and_cap_20() {
         cwd: None,
         outcome: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(root.path(), &again);
     let items = load_work_items(root.path());
@@ -700,6 +702,7 @@ fn mark_finished_falls_back_to_session() {
         cwd: None,
         outcome: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(root.path(), &record);
     // 错误 work_id + 正确 session_id：兜底命中并写终态
@@ -763,6 +766,7 @@ fn recover_infers_legacy_outcome_from_central_session() {
                 after_work_id: None,
                 cwd: None,
                 execution_id: None,
+                preauthorized: false,
             },
         );
     }
@@ -799,6 +803,7 @@ fn recover_registry_rebuilds_all_states() {
             after_work_id: None,
             cwd: None,
             execution_id: None,
+            preauthorized: false,
         });
     }
     records.push(WorkItemRecord {
@@ -815,6 +820,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     records.push(WorkItemRecord {
         work_id: "work-fail".to_string(),
@@ -830,6 +836,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     records.push(WorkItemRecord {
         work_id: "work-recent-open".to_string(),
@@ -845,6 +852,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     records.push(WorkItemRecord {
         work_id: "work-stale-open".to_string(),
@@ -860,6 +868,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     for record in &records {
         let _ = upsert_work_item(root.path(), record);
@@ -910,6 +919,7 @@ fn work_items_recover_from_corruption() {
         cwd: None,
         outcome: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(root.path(), &record);
     let items = load_work_items(root.path());
@@ -1739,6 +1749,7 @@ fn work_actions_dispatch_and_report_status() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(plugin.sessions.storage_root(), &legacy);
     let legacy_tl = call_tool(
