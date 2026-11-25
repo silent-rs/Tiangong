@@ -14,6 +14,8 @@ import { Loader2, Inbox, History, ChevronRight, AlertTriangle, CheckCircle2, XCi
 import { restoreFromCentralConversation } from '@/features/central/lib/centralConversation';
 import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/features/central/components/CentralWorkDrawer';
 import { CentralBadgeIcon, type BadgeState } from '@/features/central/components/CentralBadgeIcon';
+import type { WorkActivity } from '@/features/central/api';
+import { ACTIVITY_LABELS, activityOf } from '@/features/central/lib/workActivity';
 
 /**
  * 工作步骤链（用户裁决 2026-11-16：以 worker 视角做多步骤显示列表，
@@ -153,6 +155,8 @@ interface CentralWorkStatus {
   /** G3（第 28 轮 review）：waiting_user 时的征询问题正文（标记行后
    * 的问题主体，480 字截断）——前端可直接展示待决问题，无需翻消息流。 */
   pending_question?: string | null;
+  /** 活动状态值（Issue #778 保留部分）：running 的细粒度状态；旧后端缺省 pending。 */
+  activity?: WorkActivity | null;
 }
 
 const PANEL_CLOSE_DELAY_MS = 250;
@@ -212,7 +216,7 @@ function WorkItemRow({
           {running ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              执行中
+              {ACTIVITY_LABELS[activityOf(item)]}
             </>
           ) : interrupted ? (
             <>

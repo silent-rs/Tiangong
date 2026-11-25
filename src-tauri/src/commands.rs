@@ -1093,9 +1093,13 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
                 .execution_router
                 .fire(session_id, done, reason);
         };
-    // 中枢工作进度可见（§9.1）：中枢派发会话的 PhaseChanged / ToolStart /
-    // ToolFinished 事件更新 registry 最近动作（徽章实时显示 Worker 在干嘛）。
-    // 普通会话零成本：registry 无该 session 的 running 条目即返回。
+    // 中枢工作进度可见（§9.1 / Issue #778 保留部分）：中枢派发会话的流事件
+    // 经统一信号入口映射为活动状态值（回复中 / 思考中 / 工具执行 / 压缩上下文 /
+    // 切换模型 / 重试 …），刷新 registry 的活动状态与最近动作（徽章实时显示
+    // Worker 在干嘛）。置于循环体最前、任何 continue 之前——压缩 / 切换事件走
+    // 免锁快速通道，也要被采集；入口只取 registry 短锁，不触碰 session_send_lock
+    // / app_state 锁，快速通道的免锁前提不变。普通会话零成本：registry 无该
+    // session 的 running 条目即返回。
     // 进度广播节流声明（深检 E）
     let last_activity_emit = std::sync::Arc::new(std::sync::Mutex::new(
         std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -1103,36 +1107,25 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
     let update_central_activity =
         move |app: &tauri::AppHandle<R>, session_id: &str, event: &tiangong_types::StreamEvent| {
             use tauri::Manager;
-            let note = match event {
-                tiangong_types::StreamEvent::PhaseChanged { phase, iteration } => {
-                    Some(format!("阶段 {phase}（第 {iteration} 轮）"))
-                }
-                tiangong_types::StreamEvent::ToolStart { name, .. } => Some(format!("执行 {name}")),
-                tiangong_types::StreamEvent::ToolFinished { name, ok, .. } => {
-                    Some(format!("{name} {}", if *ok { "完成" } else { "失败" }))
-                }
-                _ => None,
-            };
-            let Some(note) = note else { return };
+            // 非活动信号（计时 / 通知类）零成本返回，不取任何锁
+            if crate::central_host::activity::classify_signal(event).is_none() {
+                return;
+            }
             let state = app.state::<crate::app::TiangongApp>();
-            let mut registry = state
-                .inner()
-                .central
-                .central_work_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = registry.iter_mut().rev().find(|entry| {
-                entry.session_id == session_id && entry.state == central_state::WorkState::Running
-            }) {
-                entry.last_activity = Some(note);
-                drop(registry);
-                // 节流（深检 E）：高频工具事件 2 秒至多广播一次，防前端风暴
-                let mut last = last_activity_emit.lock().unwrap();
-                if last.elapsed() >= std::time::Duration::from_secs(2) {
-                    *last = std::time::Instant::now();
-                    drop(last);
-                    crate::central_host::emit_central_work_updated(app);
-                }
+            // 已退役 Core 的缓冲事件不得改写同会话新实例的登记
+            if !session_core_alive(state.inner(), session_id) {
+                return;
+            }
+            let mut last = last_activity_emit.lock().unwrap();
+            let emit = crate::central_host::activity::note_stream_signal(
+                &state.inner().central,
+                session_id,
+                event,
+                &mut last,
+            );
+            drop(last);
+            if emit == crate::central_host::activity::Emit::Now {
+                crate::central_host::emit_central_work_updated(app);
             }
         };
 
@@ -1142,6 +1135,8 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
     thread::spawn(move || {
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
+            // 活动状态采集先于一切分支（含免锁快速通道）
+            update_central_activity(&app, &session_id, &session_event);
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
                 if session_core_alive(app_state.inner(), &session_id) {
                     emit_session_stream_event(&app, &session_id, &session_event);
@@ -1175,8 +1170,6 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
                 }
                 continue;
             }
-
-            update_central_activity(&app, &session_id, &session_event);
 
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());

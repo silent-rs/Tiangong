@@ -10,6 +10,8 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/api/tauri';
+import type { WorkActivity } from '@/features/central/api';
+import { ACTIVITY_LABELS, activityOf } from '@/features/central/lib/workActivity';
 import {
   X,
   Loader2,
@@ -35,6 +37,8 @@ export interface CentralWorkDrawerItem {
   last_activity?: string | null;
   cwd?: string | null;
   execution_id?: string | null;
+  /** 活动状态值（由状态条的工作行透传）。 */
+  activity?: WorkActivity | null;
 }
 
 interface TimelineEntry {
@@ -187,6 +191,15 @@ export function CentralWorkDrawer({
             <span className="text-muted-foreground">当前执行</span>
             <span className="truncate font-mono" title={work.execution_id}>
               {work.execution_id}
+            </span>
+          </div>
+        ) : null}
+        {work.state === 'running' ? (
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">活动</span>
+            <span className="truncate" data-testid="drawer-activity">
+              {ACTIVITY_LABELS[activityOf(work)]}
+              {work.last_activity ? ` · ${work.last_activity}` : ''}
             </span>
           </div>
         ) : null}

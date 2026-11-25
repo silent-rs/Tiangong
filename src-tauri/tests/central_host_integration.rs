@@ -135,6 +135,7 @@ fn dispatch_reuse_fires_live_slot_callback() {
             state: central_state::WorkState::Running,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: Some("exec-live".to_string()),
             pending_question: None,
@@ -202,6 +203,7 @@ fn activation_summary_builds_from_verifiable_facts() {
             state: central_state::WorkState::WaitingUser,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -215,6 +217,7 @@ fn activation_summary_builds_from_verifiable_facts() {
             state: central_state::WorkState::Interrupted,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -239,6 +242,7 @@ fn activation_summary_builds_from_verifiable_facts() {
         state: central_state::WorkState::Running,
         reused_session: false,
         last_activity: None,
+        activity: central_state::WorkActivity::Pending,
         cwd: None,
         execution_id: None,
         pending_question: None,
@@ -497,6 +501,7 @@ fn reg_entry(
         state,
         reused_session: false,
         last_activity: None,
+        activity: central_state::WorkActivity::Pending,
         cwd: None,
         execution_id: exec.map(str::to_string),
         pending_question: None,
@@ -1481,6 +1486,7 @@ async fn host_sender_channel_consumes_all_message_kinds() {
             state: central_state::WorkState::ReportQueued,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -1877,6 +1883,7 @@ async fn host_control_cancel_persists_terminal_state() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: Some("exec-ctl1".into()),
             pending_question: None,
@@ -1990,6 +1997,7 @@ async fn host_control_pause_resume_roundtrip() {
             state: central_state::WorkState::Running,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: Some("exec-res1".into()),
             pending_question: None,
@@ -2076,6 +2084,7 @@ fn host_reports_push_take_clear_cycle() {
             state: central_state::WorkState::ReportQueued,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2192,6 +2201,7 @@ async fn host_second_turn_after_resume_is_reported() {
             state: central_state::WorkState::Running,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2273,6 +2283,7 @@ async fn host_owner_callback_respects_ownership_filter() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2344,6 +2355,7 @@ async fn host_enqueue_preserves_running_entry() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2388,6 +2400,7 @@ async fn host_terminal_fallback_skips_queued_entry() {
             state: central_state::WorkState::Queued,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2436,6 +2449,7 @@ async fn host_plan_resume_not_merged_but_steer_is() {
             state: central_state::WorkState::Paused,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
             pending_question: None,
@@ -2511,6 +2525,7 @@ async fn host_plan_queue_decision_returns_queued() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
             pending_question: None,
@@ -2589,6 +2604,7 @@ async fn host_dispatch_queued_does_not_deliver() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
             pending_question: None,
@@ -3999,4 +4015,155 @@ fn call_central_tool(
         "test",
     );
     futures_block_on(future).expect("中枢工具必须被本插件处理")
+}
+
+// ===== 后台工作活动状态（Issue #778 保留部分：可见性）=====
+//
+// 看门狗判定已淘汰（模型请求 / 插件工具 / 终端命令各自有超时，静默会被兜成
+// 失败走既有回报通道）；保留的是活动状态值驱动的状态条实时展示。
+
+/// 消费循环的统一信号入口按真实流事件驱动——快速通道事件（压缩）与输出 /
+/// 重试都被采集并刷新登记，计时事件零成本；广播按 2 秒节流；终态后不再更新。
+#[test]
+fn stream_signal_entry_updates_activity_and_throttles_emit() {
+    use tiangong_app::central_host::activity::{note_stream_signal, Emit};
+    let (app, _ws) = central_test_app();
+    let session = "s-activity";
+    app.central
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(central_state::registry_entry_after_dispatch(
+            "work-activity",
+            session,
+            "任务",
+            None,
+            false,
+            None,
+            "2026-11-25 10:00:00",
+            "exec-1",
+        ));
+    let status = |app: &TiangongApp| {
+        app.central
+            .central_work_status()
+            .into_iter()
+            .rev()
+            .find(|entry| entry.session_id == session)
+    };
+    let mut last_emit = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    // 计时事件：非活动信号
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::TurnElapsed { seconds: 3 },
+            &mut last_emit,
+        ),
+        Emit::None
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Pending
+    );
+    // 免锁快速通道的压缩事件也被采集，立即广播
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::ContextCompressing {
+                summary_up_to: 0,
+                total_messages: 1
+            },
+            &mut last_emit,
+        ),
+        Emit::Now
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Compressing
+    );
+    assert_eq!(
+        status(&app).unwrap().last_activity.as_deref(),
+        Some("压缩上下文")
+    );
+    // 2 秒内的变化：已刷新但节流
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::Delta {
+                message_id: "m1".to_string(),
+                content: "x".to_string(),
+                tokens: None,
+            },
+            &mut last_emit,
+        ),
+        Emit::Throttled
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Responding
+    );
+    // 节流窗口过后：广播
+    last_emit = std::time::Instant::now() - std::time::Duration::from_secs(3);
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::Retry {
+                message: "timeout".to_string(),
+                attempt: 2,
+                max_attempts: 3,
+            },
+            &mut last_emit,
+        ),
+        Emit::Now
+    );
+    assert_eq!(
+        status(&app).unwrap().last_activity.as_deref(),
+        Some("重试模型请求（2/3）")
+    );
+    // 普通会话：无 running 登记，零语义
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            "unknown-session",
+            &tiangong_types::StreamEvent::Reasoning {
+                message_id: "m2".to_string(),
+                content: "想".to_string(),
+                tokens: None,
+            },
+            &mut last_emit,
+        ),
+        Emit::None
+    );
+    // 终态后活动状态复位，且不再更新
+    let mut request = dispatch_request("work-activity", session, "任务", false);
+    request.execution_id = "exec-1".to_string();
+    app.central.on_central_work_finished(
+        &request,
+        true,
+        "[后台工作完成] work-activity\n任务：任务",
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Pending
+    );
+    assert!(status(&app).unwrap().last_activity.is_none());
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::ToolStart {
+                name: "cargo".to_string(),
+                args_summary: String::new(),
+            },
+            &mut last_emit,
+        ),
+        Emit::None
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Pending
+    );
 }

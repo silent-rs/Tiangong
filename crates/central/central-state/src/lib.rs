@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod activity;
+pub use activity::*;
 pub mod persistence;
 pub use persistence::*;
 
@@ -94,6 +96,11 @@ pub struct WorkStatus {
     /// 上轮问题。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_question: Option<String>,
+    /// 活动状态值（Issue #778 保留部分）：`Running` 的细粒度状态，由 Worker 流
+    /// 事件刷新，驱动状态条 / 抽屉的实时展示。与 `state`（生命周期）正交；旧
+    /// 数据缺省 Pending。
+    #[serde(default)]
+    pub activity: WorkActivity,
 }
 
 /// 工作回报结局（终态回调入参的分类）。
@@ -375,6 +382,9 @@ pub fn merge_waiting_user(
         entry.session_id == session_id && entry.state == WorkState::WaitingUser
     })?;
     entries[position].state = WorkState::Running;
+    // 恢复是一次新执行：活动状态回到「等待输出」，此前动作文案随之失效
+    entries[position].activity = WorkActivity::Pending;
+    entries[position].last_activity = None;
     // R0 契约：恢复是一次新执行——登记条目换上新 execution_id，
     // 后续终态路由与归属校验以新执行为准。
     if let Some(execution_id) = resuming_execution_id.filter(|id| !id.is_empty()) {
@@ -422,6 +432,7 @@ pub fn registry_entry_after_dispatch(
         state: WorkState::Running,
         reused_session,
         last_activity: None,
+        activity: WorkActivity::Pending,
         cwd: cwd.map(str::to_string),
         execution_id: if execution_id.is_empty() {
             None

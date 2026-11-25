@@ -437,6 +437,8 @@ pub fn recover_registry_entries(storage_root: &std::path::Path) -> Vec<crate::Wo
             cwd: None,
             execution_id: item.execution_id,
             pending_question: None,
+            // 恢复出的都是非在途状态：活动状态无意义
+            activity: crate::WorkActivity::Pending,
         });
     }
     // 截断：completed/failed 各保留最近 10 条（尾部为最新，从头部移除）

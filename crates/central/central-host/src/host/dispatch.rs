@@ -188,6 +188,8 @@ pub async fn handle_central_control<R: tauri::Runtime>(
                     if control.action == "cancelled" {
                         entry.pending_question = None;
                     }
+                    // 用户控制后不再是执行中：活动状态回到「等待输出」
+                    entry.activity = central_state::WorkActivity::Pending;
                 }
             }
             if control.action == "cancelled" {
@@ -311,6 +313,7 @@ pub async fn enqueue_central_dispatch(
                 state: central_state::WorkState::Queued,
                 reused_session: request.reused_session,
                 last_activity: None,
+                activity: central_state::WorkActivity::Pending,
                 cwd: None,
                 execution_id: Some(request.execution_id.clone()),
                 pending_question: None,

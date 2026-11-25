@@ -2,6 +2,22 @@
 // Tauri command 一一对应。集中于此保持中枢边界清晰。
 import { invoke } from '@/api/host';
 
+/**
+ * 活动状态值（Issue #778 保留部分）：`running` 工作的细粒度状态，与生命周期
+ * `state` 正交，由 Worker 流事件刷新。一个值驱动状态条 / 抽屉的实时展示
+ * （「回复中」「压缩上下文」「重试 n/3」……）。
+ */
+export type WorkActivity =
+  | 'pending'
+  | 'responding'
+  | 'reasoning'
+  | 'requesting'
+  | 'tool_running'
+  | 'compressing'
+  | 'switching_model'
+  | 'retrying'
+  | 'subagent';
+
 export const centralApi = {
   getCentralWorkStatus: (): Promise<
     Array<{

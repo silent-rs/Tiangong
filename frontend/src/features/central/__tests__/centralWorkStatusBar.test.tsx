@@ -189,6 +189,26 @@ describe('CentralWorkStatusBar', () => {
     expect(popover!.textContent).toContain('被中断的任务');
     expect(popover!.textContent).toContain('可让中枢重派');
   });
+  it('活动状态值（Issue #778 保留部分）：running 行按活动值显示文案（回复中 / 压缩中 / 重试次数 / 旧后端缺省等待输出）', async () => {
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-a', session_id: 's-a', activity: 'compressing', last_activity: '压缩上下文', task: '任务A' }),
+      makeItem({ work_id: 'w-b', session_id: 's-b', activity: 'retrying', last_activity: '重试模型请求（2/3）', task: '任务B' }),
+      makeItem({ work_id: 'w-c', session_id: 's-c', task: '任务C' }),
+    ]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.click();
+    });
+    const rows = Array.from(
+      container.querySelectorAll('[role="button"][tabindex="0"]'),
+    ).map((row) => row.textContent ?? '');
+    const byTask = (task: string) => rows.find((text) => text.includes(task)) ?? '';
+    expect(byTask('任务A')).toContain('压缩中');
+    expect(byTask('任务A')).toContain('压缩上下文');
+    expect(byTask('任务B')).toContain('重试中');
+    expect(byTask('任务B')).toContain('重试模型请求（2/3）');
+    expect(byTask('任务C')).toContain('等待输出');
+  });
 
   it('focus 进入容器不触发 250ms 关闭（a11y focus-within）', async () => {
     container = await mountWithItems([makeItem()]);

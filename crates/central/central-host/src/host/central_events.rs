@@ -328,6 +328,7 @@ pub fn rebuild_registry_from_log(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: payload
                 .get("cwd")
                 .and_then(|v| v.as_str())
