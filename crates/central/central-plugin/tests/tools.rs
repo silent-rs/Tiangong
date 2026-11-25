@@ -647,6 +647,7 @@ fn work_items_upsert_by_session_and_cap_20() {
             after_work_id: None,
             cwd: None,
             execution_id: None,
+            preauthorized: false,
         };
         let _ = upsert_work_item(root.path(), &record);
     }
@@ -665,6 +666,7 @@ fn work_items_upsert_by_session_and_cap_20() {
         cwd: None,
         outcome: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(root.path(), &again);
     let items = load_work_items(root.path());
@@ -700,6 +702,7 @@ fn mark_finished_falls_back_to_session() {
         cwd: None,
         outcome: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(root.path(), &record);
     // 错误 work_id + 正确 session_id：兜底命中并写终态
@@ -763,6 +766,7 @@ fn recover_infers_legacy_outcome_from_central_session() {
                 after_work_id: None,
                 cwd: None,
                 execution_id: None,
+                preauthorized: false,
             },
         );
     }
@@ -799,6 +803,7 @@ fn recover_registry_rebuilds_all_states() {
             after_work_id: None,
             cwd: None,
             execution_id: None,
+            preauthorized: false,
         });
     }
     records.push(WorkItemRecord {
@@ -815,6 +820,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     records.push(WorkItemRecord {
         work_id: "work-fail".to_string(),
@@ -830,6 +836,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     records.push(WorkItemRecord {
         work_id: "work-recent-open".to_string(),
@@ -845,6 +852,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     records.push(WorkItemRecord {
         work_id: "work-stale-open".to_string(),
@@ -860,6 +868,7 @@ fn recover_registry_rebuilds_all_states() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     });
     for record in &records {
         let _ = upsert_work_item(root.path(), record);
@@ -910,6 +919,7 @@ fn work_items_recover_from_corruption() {
         cwd: None,
         outcome: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(root.path(), &record);
     let items = load_work_items(root.path());
@@ -1453,13 +1463,14 @@ fn work_control_validates_and_sends() {
     assert!(!empty.ok, "空 work_id 必须拒绝");
 }
 
-/// Workspace 授权（R3）：未经授权的 cwd 拒绝且指引等待用户授权；
-/// 授权是宿主事实（此处以落盘模拟宿主授权产物）→ 放行；
-/// 默认工作区与已授权目录无需授权；复用会话的 cwd 同样校验。
+/// Workspace 授权只在宿主执行（2026-11-25 修复）：插件不再按落盘的长期授权
+/// 预检——用户点「授权」（仅此一次）签发的票据在宿主内存，插件看不到，预检
+/// 会让授权后的重派在插件层被短路（票据永远消费不到）。未确认目录（新派发
+/// 与复用会话两条路径）都必须原样交给宿主裁决（宿主拒绝时自动发出授权卡片）。
 #[test]
-fn dispatch_requires_workspace_confirmation() {
+fn dispatch_leaves_workspace_authorization_to_host() {
     let root = tempfile::tempdir().unwrap();
-    // 预置会话 s0（cwd 指向未确认目录，供复用路径校验测试）
+    // 预置会话 s0（cwd 指向未确认目录，供复用路径验证）
     let pending = tempfile::tempdir().unwrap();
     let pending_path = pending.path().to_string_lossy().to_string();
     let manager = manager_with_session_cwds(root.path(), &[&pending_path]);
@@ -1475,54 +1486,50 @@ fn dispatch_requires_workspace_confirmation() {
     .unwrap();
     let extra = tempfile::tempdir().unwrap();
     let extra_path = extra.path().to_string_lossy().to_string();
-    // 默认工作区设为另一目录：extra 才是「未确认的新工作区」
-    let (plugin, _dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
-    // 未确认：拒绝并给出征询指引
-    let denied = call_tool(
+    // 默认工作区设为另一目录：extra 是「未确认的新工作区」
+    let (plugin, mut dispatch_rx, _reports) = plugin_with_channel("/tmp/ws".to_string(), manager);
+    assert!(
+        !workspace_confirmed(plugin.sessions.storage_root(), "/tmp/ws", &extra_path),
+        "前置：extra 未授权"
+    );
+    // 新派发：不在插件层拒绝，派发请求原样交给宿主
+    let handed_off = call_tool(
         &plugin,
         "dispatch_work",
         serde_json::json!({"task": "扫描依赖并升级", "cwd": extra_path}),
     );
-    assert!(!denied.ok, "未确认工作区必须拒绝：{}", denied.stderr);
     assert!(
-        denied.stderr.contains("尚未经用户授权"),
-        "拒绝信息须说明授权流程：{}",
-        denied.stderr
+        handed_off.ok,
+        "未确认目录由宿主裁决，插件不得短路：{}",
+        handed_off.stderr
     );
-    assert!(
-        denied.stderr.contains("授权"),
-        "拒绝信息须指向用户授权（非助手自证）：{}",
-        denied.stderr
-    );
-    // 宿主授权产物（模拟：授权通道落盘——助手侧无登记工具）
-    let _ = add_confirmed_workspace(
-        plugin.sessions.storage_root(),
-        std::path::Path::new(&extra_path),
-    );
-    // 确认后放行
-    let allowed = call_tool(
-        &plugin,
-        "dispatch_work",
-        serde_json::json!({"task": "扫描依赖并升级", "cwd": extra_path}),
-    );
-    assert!(allowed.ok, "stderr: {}", allowed.stderr);
-    assert!(!allowed.stderr.contains("尚未经用户授权"));
-    // 复用路径同样校验（review P1：强制复用把模型赶向复用，该路径
-    // 不得成为绕过通道）——会话 cwd 未确认时复用派发被拒
+    assert!(!handed_off.stderr.contains("尚未经用户授权"));
+    match dispatch_rx.try_recv() {
+        Ok(CentralPluginMessage::Dispatch(request)) => {
+            assert_eq!(request.cwd.as_deref(), Some(extra_path.as_str()));
+            assert_eq!(request.task, "扫描依赖并升级");
+        }
+        _ => panic!("应发出 Dispatch 消息交宿主裁决"),
+    }
+    // 复用路径同样交给宿主（会话 cwd 未确认）
     let reuse = call_tool(
         &plugin,
         "dispatch_work",
         serde_json::json!({"task": "扫描依赖并升级（复用）", "session_id": "s0"}),
     );
     assert!(
-        !reuse.ok,
-        "复用未确认 cwd 的会话必须被拒绝：{}",
+        reuse.ok,
+        "复用未确认 cwd 的会话由宿主裁决：{}",
         reuse.stderr
     );
+    match dispatch_rx.try_recv() {
+        Ok(CentralPluginMessage::Dispatch(request)) => assert_eq!(request.session_id, "s0"),
+        _ => panic!("应发出 Dispatch 消息交宿主裁决"),
+    }
+    // 插件不自行发起授权卡片：卡片由宿主在拒绝时自动发出
     assert!(
-        reuse.stderr.contains("未经用户授权"),
-        "复用拒绝须说明授权流程：{}",
-        reuse.stderr
+        dispatch_rx.try_recv().is_err(),
+        "不应有 RequestWorkspaceApproval 等其他消息"
     );
 }
 
@@ -1742,6 +1749,7 @@ fn work_actions_dispatch_and_report_status() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = upsert_work_item(plugin.sessions.storage_root(), &legacy);
     let legacy_tl = call_tool(

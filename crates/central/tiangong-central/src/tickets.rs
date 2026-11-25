@@ -170,20 +170,62 @@ impl TicketRegistry {
             .workspace_approvals
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(position) = tickets.iter().rposition(|t| {
+        fn matches(
+            t: &WorkspaceApprovalTicket,
+            workspace_id: &str,
+            task_fingerprint: &str,
+        ) -> bool {
             t.workspace_id == workspace_id && t.task_fingerprint == task_fingerprint
-        }) else {
+        }
+        // 取最新的**未用且未过期**票据（与 peek 口径一致）：多票并存时不得
+        // 因为最新一张恰好已用 / 已过期就拒绝用户仍然有效的授权
+        fn usable(
+            t: &WorkspaceApprovalTicket,
+            now: &str,
+            workspace_id: &str,
+            task_fingerprint: &str,
+        ) -> bool {
+            t.used_at.is_none()
+                && !is_expired(&t.expires_at, now)
+                && matches(t, workspace_id, task_fingerprint)
+        }
+        let Some(latest) = tickets
+            .iter()
+            .rposition(|t| matches(t, workspace_id, task_fingerprint))
+        else {
             return TicketVerdict::DeniedUsedOrMissing;
         };
-        let ticket = &mut tickets[position];
-        if ticket.used_at.is_some() {
-            return TicketVerdict::DeniedUsedOrMissing;
+        if let Some(position) = tickets
+            .iter()
+            .rposition(|t| usable(t, &now, workspace_id, task_fingerprint))
+        {
+            tickets[position].used_at = Some(now);
+            return TicketVerdict::Granted;
         }
-        if is_expired(&ticket.expires_at, &now) {
-            return TicketVerdict::DeniedExpired;
+        if is_expired(&tickets[latest].expires_at, &now) {
+            TicketVerdict::DeniedExpired
+        } else {
+            TicketVerdict::DeniedUsedOrMissing
         }
-        ticket.used_at = Some(now);
-        TicketVerdict::Granted
+    }
+
+    /// 按对查验（不消费）：是否存在匹配 (workspace, 任务指纹) 的未用、未过期
+    /// 票据。供派发规划在「排队」决策前判断是否已授权——排队项要等依赖终态
+    /// 后才真正投递，若在入队时就把一次性票据消费掉，投递那一刻反而无票
+    /// 可用（2026-11-25 修复）。
+    pub fn peek_workspace_approval_for(&self, workspace_id: &str, task_fingerprint: &str) -> bool {
+        let now = now_text();
+        self.workspace_approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .rev()
+            .any(|t| {
+                t.workspace_id == workspace_id
+                    && t.task_fingerprint == task_fingerprint
+                    && t.used_at.is_none()
+                    && !is_expired(&t.expires_at, &now)
+            })
     }
 
     /// 宿主签发决策票据（用户真实选择选项后调用）。

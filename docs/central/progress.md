@@ -47,3 +47,9 @@ R0～R5 主体完成；R29 的 Interrupted 重派、attach 同步重放、owner 
 - `central-plugin` 目标 300～500 行（工具执行适配继续拆分）。
 - 快照 envelope 化（schema 版本包裹）与 `CentralStore` trait 完整化（commit_snapshot/recover）。
 - 更新设计文档实现态注记、实机验收记录（方案 §8.6）。
+
+## 一次性 Workspace 授权票据修复（2026-11-25，分支 `fix/central-workspace-approval-ticket`）
+- 现象：中枢派发被拒 → 用户点「授权」（仅此一次）→ 重派同一任务仍被拒「尚未经用户授权」，后台工作（如 review）派不出去；只有点「记住」才行。
+- 根因：中枢插件在交给宿主前按落盘的长期授权预检，看不到宿主内存里的一次性票据，授权后的重派在插件层即被短路；宿主入队即消费票据，排队项投递时无票可用。
+- 修复：授权只在宿主执行（插件预检移除）；入队只查验、执行时消费、投递未成立退还；拒绝文案与 persona 改为「卡片已自动发出，不必再调 request_workspace_approval」；相似历史强制复用跳过无会话文件的登记。端到端回归：派发 → 拒绝 → 真实授权命令 → 同任务重派 → 放行。
+- 验证：fmt / clippy -D warnings / nextest 五 crate 通过 / `git diff --check`。

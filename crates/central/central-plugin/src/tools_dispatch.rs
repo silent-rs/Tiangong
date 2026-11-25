@@ -24,26 +24,12 @@ impl CentralPlugin {
         if task.is_empty() {
             return self.error_result("task 不能为空".to_string());
         }
-        // Workspace 授权（§资源边界，R3 票据化）：向非默认工作区派发前，
-        // 该工作区必须已获用户授权——授权是宿主事实（用户真实操作签发
-        // 的一次性票据，或历史已确认工作区），助手不能自证同意
-        // （confirm_workspace 已移除：模型可自调的登记通道不可信）。
-        // 默认工作区及其子树按前缀天然放行（workspace_confirmed 内判定）。
-        let unconfirmed = |dir: &str| -> Option<String> {
-            let dir = dir.trim();
-            if dir.is_empty() {
-                return None;
-            }
-            if workspace_confirmed(self.sessions.storage_root(), &self.workspace_dir, dir) {
-                return None;
-            }
-            Some(dir.to_string())
-        };
-        if let Some(cwd) = cwd.and_then(unconfirmed) {
-            return self.error_result(format!(
-                "工作区 {cwd} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{cwd}\", task_fingerprint=\"{task}\") 向用户发起授权卡片，并说明任务与影响；用户确认后重派同一任务。不要更换目录规避，也不要在授权前重复派发。"
-            ));
-        }
+        // Workspace 授权不在插件侧预检（2026-11-25 修复）：授权事实由宿主
+        // 独占——用户点击「授权」签发的一次性票据只在宿主内存，插件仅看得到
+        // 落盘的长期授权；此前按落盘授权预检，用户点「授权」（仅此一次）后
+        // 重派仍被插件短路，票据永远消费不到。宿主 plan_central_dispatch 对
+        // 请求目录与复用会话目录统一校验，拒绝时自动发出授权卡片并说明。
+        // 插件只做模型 / 会话校验与登记。
         // 模型校验（白名单 §5.3：派发前确认模型可用；失败时附可用清单）
         if let Some(model) = model.filter(|key| !key.trim().is_empty()) {
             if let Err(error) = self.sessions.resolve_turn_model(Some(model.trim())) {
@@ -72,21 +58,8 @@ impl CentralPlugin {
                     "复用的会话不存在：{existing}（可用 inspect_context focus=sessions 查询近期会话）"
                 ));
             }
-            // 复用路径的 Workspace 确认（review P1 补齐）：复用会话沿用其
-            // 自身 cwd 派发——该目录同样必须已确认，否则「被拒新目录派发
-            // →复用旧会话」成为绕过通道（强制复用把模型恰好赶向这条路）。
-            let session_cwd = tiangong_core_manager::SessionMetadata::load_from_storage(
-                self.sessions.storage_root(),
-                existing,
-            )
-            .ok()
-            .map(|meta| meta.cwd)
-            .unwrap_or_default();
-            if let Some(dir) = unconfirmed(&session_cwd) {
-                return self.error_result(format!(
-                    "复用会话 {existing} 的工作目录 {dir} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{dir}\", task_fingerprint=\"{task}\") 向用户发起授权卡片；用户确认后重派同一任务。"
-                ));
-            }
+            // 复用会话沿用其自身 cwd 派发——目录授权同样由宿主统一校验
+            // （plan_central_dispatch 对最终 cwd 校验，含一次性票据），插件不预检。
         }
         let reused = reuse_session.is_some();
         let session_id = reuse_session.unwrap_or_else(|| scru128::new().to_string());
@@ -123,6 +96,7 @@ impl CentralPlugin {
         // 直接拒绝，要求带 session_id 重发——延续性工作必须复用。
         let explicitly_new = task.contains("【全新】");
         if !reused && !explicitly_new {
+            let storage_root = self.sessions.storage_root();
             let items = self
                 .work_items
                 .lock()
@@ -133,6 +107,17 @@ impl CentralPlugin {
                 .filter(|item| {
                     let item_prefix: String = item.task.chars().take(12).collect();
                     item_prefix == prefix
+                })
+                // 派发未被执行（宿主拒绝 / 投递失败）的登记不会产生会话文件：
+                // 没有会话就无从复用，不得强制延续——否则授权后的重派会被
+                // 「带 session_id 重发」与「复用的会话不存在」来回踢
+                // （2026-11-25：插件不再预检授权后，宿主拒绝是常见路径）
+                .filter(|item| {
+                    tiangong_core_manager::SessionMetadata::load_from_storage(
+                        storage_root,
+                        &item.session_id,
+                    )
+                    .is_ok()
                 })
                 .rev()
                 .take(20)
@@ -172,6 +157,7 @@ impl CentralPlugin {
                 .map(str::to_string),
             outcome: None,
             execution_id: Some(execution_id.clone()),
+            preauthorized: false,
         };
         let request = CentralDispatchRequest {
             work_id: record.work_id.clone(),

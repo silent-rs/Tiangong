@@ -434,6 +434,7 @@ async fn host_rebuild_prefers_owner_over_steer_orphan() {
             after_work_id: None,
             cwd: None,
             execution_id: Some("exec-cc2-owner".into()),
+            preauthorized: false,
         },
     );
     tiangong_app::central_host::dispatch::handle_central_control(
@@ -761,6 +762,7 @@ async fn host_dispatch_queues_on_write_lock_then_delivers() {
             after_work_id: None,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: Some("exec-waiter".into()),
+            preauthorized: false,
         },
     );
     // 派发 → 排队（不投递）
@@ -905,6 +907,7 @@ async fn host_waiting_user_merge_restores_owner() {
             after_work_id: None,
             cwd: None,
             execution_id: Some("exec-owner9".into()),
+            preauthorized: false,
         },
     );
     // 用户答复（reused 派发，生产 CC2 形态：沿用 owner work_id + 新
@@ -1039,6 +1042,7 @@ async fn host_control_cancel_running_work_sends_command() {
             after_work_id: None,
             cwd: None,
             execution_id: Some("exec-run1".into()),
+            preauthorized: false,
         },
     );
     tiangong_app::central_host::dispatch::handle_central_control(
@@ -1099,6 +1103,7 @@ async fn host_migrate_legacy_timeline_moves_events() {
         after_work_id: None,
         cwd: None,
         execution_id: Some("exec-legacy2".into()),
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &record);
     // 迁移前：work_timeline 走旧 events 读取分支
@@ -1350,6 +1355,7 @@ async fn host_flush_pending_dispatches_delivers_matching() {
         after_work_id: Some("work-dep".into()),
         cwd: None,
         execution_id: Some("exec-flush".into()),
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &queued);
     // pending 队列：一条匹配 after=work-dep + 一条不匹配 after=work-other
@@ -1493,6 +1499,7 @@ async fn host_sender_channel_consumes_all_message_kinds() {
         after_work_id: None,
         cwd: None,
         execution_id: None,
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &record);
     // 启动消费循环（get_or_init + spawn）
@@ -1692,6 +1699,7 @@ async fn host_work_timeline_command_outputs_events() {
         after_work_id: None,
         cwd: Some(ws.to_string_lossy().to_string()),
         execution_id: Some("exec-tlv".into()),
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &record);
     tiangong_app::central_host::dispatch::handle_central_dispatch(
@@ -1852,6 +1860,7 @@ async fn host_control_cancel_persists_terminal_state() {
         after_work_id: None,
         cwd: None,
         execution_id: Some("exec-ctl1".into()),
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &record);
     state
@@ -1964,6 +1973,7 @@ async fn host_control_pause_resume_roundtrip() {
         after_work_id: None,
         cwd: None,
         execution_id: Some("exec-res1".into()),
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &record);
     state
@@ -2309,7 +2319,7 @@ async fn host_enqueue_preserves_running_entry() {
     let (state, _ws) = central_test_app();
     // 会话空闲 → 排队登记 Queued
     let queued = dispatch_request("work-q1", "s-q1", "排队任务", false);
-    enqueue_central_dispatch(&state.central, queued, "work-dep", "/ws").await;
+    enqueue_central_dispatch(&state.central, queued, "work-dep", "/ws", false).await;
     {
         let registry = state.central.central_work_registry.lock().unwrap();
         let entry = registry
@@ -2340,7 +2350,7 @@ async fn host_enqueue_preserves_running_entry() {
         },
     );
     let queued2 = dispatch_request("work-q2", "s-run", "第二个排队", false);
-    enqueue_central_dispatch(&state.central, queued2, "work-dep", "/ws").await;
+    enqueue_central_dispatch(&state.central, queued2, "work-dep", "/ws", false).await;
     {
         let registry = state.central.central_work_registry.lock().unwrap();
         let running = registry
@@ -2772,6 +2782,7 @@ async fn host_replay_clears_marker_restores_cwd() {
         after_work_id: Some("work-gone".into()), // 依赖已不在登记（视为终态）
         cwd: Some(ws.to_string_lossy().to_string()),
         execution_id: None,
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(state.core_manager.storage_root(), &record);
     // 重放路径（recover 的重放等价）：按记录构造 request 走 dispatch
@@ -2851,6 +2862,7 @@ async fn host_dispatch_records_execution_ownership() {
         after_work_id: None,
         cwd: Some(ws.to_string_lossy().to_string()),
         execution_id: None,
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(&storage_root, &record);
     let request = tiangong_app::central::CentralDispatchRequest {
@@ -3129,6 +3141,7 @@ fn host_migration_preserves_registry_fields_for_rebuild() {
         after_work_id: None,
         cwd: Some("/ws/legacy".into()),
         execution_id: None,
+        preauthorized: false,
     };
     let _ = tiangong_app::central::upsert_work_item(storage_root, &record);
     // 迁移（幂等导入）
@@ -3341,6 +3354,7 @@ async fn r29_t1_interrupted_redispatch_reports_new_execution() {
             after_work_id: None,
             cwd: Some(ws.to_string_lossy().into()),
             execution_id: Some("exec-old".into()),
+            preauthorized: false,
         },
     )
     .unwrap();
@@ -3592,4 +3606,397 @@ async fn r29_4_steer_log_keeps_active_owner_execution() {
         rebuilt[0].execution_id.as_deref(),
         Some(owner.execution_id.as_str())
     );
+}
+// ===== 一次性 Workspace 授权票据（2026-11-25 修复）=====
+//
+// 缺陷：票据此前在模型驱动的派发路径上永远消费不到——中枢插件按落盘的长期
+// 授权预检（看不到宿主内存里的一次性票据），把用户点「授权」后的重派在插件
+// 层短路；且入队即消费，排队项在依赖终态后投递时无票可用。修复：授权只在
+// 宿主执行（插件预检移除）；排队只查验不消费、执行时消费；投递未成立退还。
+
+/// 构造执行中的登记条目（经 central-state 的派发构造器，字段随版本演进，
+/// 不写死结构体字面量）。
+fn ticket_running_entry(
+    work_id: &str,
+    session: &str,
+    execution: &str,
+) -> tiangong_app::central::CentralWorkStatus {
+    central_state::registry_entry_after_dispatch(
+        work_id,
+        session,
+        "占用写入锁的工作",
+        None,
+        false,
+        None,
+        "2026-11-25 10:00:00",
+        execution,
+    )
+}
+
+/// 该会话最新的登记条目。
+fn ticket_registry_status(
+    app: &TiangongApp,
+    session: &str,
+) -> Option<tiangong_app::central::CentralWorkStatus> {
+    app.central
+        .central_work_status()
+        .into_iter()
+        .rev()
+        .find(|entry| entry.session_id == session)
+}
+
+fn ticket_request(
+    work_id: &str,
+    session: &str,
+    task: &str,
+    cwd: &str,
+) -> tiangong_app::central::CentralDispatchRequest {
+    tiangong_app::central::CentralDispatchRequest {
+        work_id: work_id.to_string(),
+        execution_id: tiangong_central::new_execution_id(),
+        session_id: session.to_string(),
+        task: task.to_string(),
+        model: None,
+        cwd: Some(cwd.to_string()),
+        after_work_id: None,
+        parallel: false,
+        reused_session: false,
+    }
+}
+
+/// 一次性授权覆盖排队等待：入队即消费票据并把授权随行落到排队标记——依赖
+/// 终态后投递（或重启重放）凭标记放行，不依赖内存里 10 分钟就过期的票据；
+/// 执行后标记清除，授权一次性。拒绝文案说明卡片已自动发出、不必再调
+/// request_workspace_approval。
+#[tokio::test]
+async fn one_time_ticket_is_consumed_at_enqueue_and_travels_with_queued_marker() {
+    let (app, _ws) = central_test_app();
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    let task = "发布模块 v3";
+    let storage_root = app.core_manager.storage_root().to_path_buf();
+    // 同目录已有在跑工作：写入锁 → 排队
+    let mut holder = ticket_running_entry("work-holder", "s-holder", "exec-holder");
+    holder.cwd = Some(cwd.clone());
+    app.central
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(holder);
+    let request = ticket_request("work-queued", "s-ticket-queued", task, &cwd);
+    // 插件在派发前登记的事实（排队标记按会话写在这条登记上）
+    central_state::upsert_work_item(
+        &storage_root,
+        &tiangong_app::central::WorkItemRecord {
+            work_id: "work-queued".into(),
+            reused_session: false,
+            session_id: "s-ticket-queued".into(),
+            task: task.into(),
+            model: None,
+            dispatched_at: "2026-11-25 10:00:00".into(),
+            finished_at: None,
+            outcome: None,
+            events: Vec::new(),
+            queued_at: None,
+            after_work_id: None,
+            cwd: Some(cwd.clone()),
+            execution_id: Some(request.execution_id.clone()),
+            preauthorized: false,
+        },
+    )
+    .unwrap();
+
+    // 未授权：拒绝（卡片由宿主自动发出，不再要求模型另起卡片）
+    let denied = plan_central_dispatch(&app.central, request.clone())
+        .await
+        .expect_err("未授权工作区必须拒绝");
+    assert!(denied.contains("尚未经用户授权"), "{denied}");
+    assert!(denied.contains("授权卡片已自动发给用户"), "{denied}");
+    assert!(
+        denied.contains("不必再调 request_workspace_approval"),
+        "{denied}"
+    );
+    assert!(!denied.contains("task_fingerprint=<"), "{denied}");
+
+    // 用户点「授权」（仅此一次）→ 排队：票据当场消费，授权随行落到排队标记
+    app.central.ticket_registry.issue_workspace_approval(
+        &cwd,
+        task,
+        tiangong_central::tickets::RiskLevel::High,
+        600,
+    );
+    match plan_central_dispatch(&app.central, request.clone())
+        .await
+        .unwrap()
+    {
+        tiangong_app::central_host::dispatch::DispatchPlan::Queued => {}
+        _ => panic!("同目录已有在跑工作应排队"),
+    }
+    assert!(
+        !app.central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "入队即消费：票据不等投递（会过期、不跨重启）"
+    );
+    assert!(
+        central_state::work_item_preauthorized(&storage_root, "work-queued"),
+        "授权随行落到排队标记"
+    );
+
+    // 依赖终态后投递 / 重启重放：凭标记放行，无需票据
+    app.central
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    match plan_central_dispatch(&app.central, request.clone())
+        .await
+        .unwrap()
+    {
+        tiangong_app::central_host::dispatch::DispatchPlan::Execute {
+            approval_consumed, ..
+        } => assert_eq!(
+            approval_consumed, None,
+            "随行授权无需再消费票据（投递失败也无可退还）"
+        ),
+        _ => panic!("占用解除后应进入执行"),
+    }
+    // 执行后排队标记清除 → 授权一次性
+    central_state::clear_work_item_queued(&storage_root, "s-ticket-queued").unwrap();
+    assert!(!central_state::work_item_preauthorized(
+        &storage_root,
+        "work-queued"
+    ));
+    let again = plan_central_dispatch(&app.central, request.clone())
+        .await
+        .expect_err("授权一次性：再派需要新授权");
+    assert!(again.contains("尚未经用户授权"), "{again}");
+}
+
+/// 排队项投递失败不再留下「排队中」幽灵：内存队列与落盘标记已清，登记改标
+/// 为中断（结果未产出、可重派；不是失败）并留事件轨迹。
+#[tokio::test]
+async fn flush_failure_marks_queued_entry_interrupted() {
+    let (app, _ws) = central_test_app();
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    let request = ticket_request("work-flush", "s-flush", "投递会失败的任务", &cwd);
+    enqueue_central_dispatch(&app.central, request.clone(), "work-dep", &cwd, false).await;
+    {
+        let registry = app.central.central_work_registry.lock().unwrap();
+        assert!(
+            registry
+                .iter()
+                .any(|e| e.session_id == "s-flush" && e.state == central_state::WorkState::Queued),
+            "前置：排队登记"
+        );
+    }
+    let tauri_app = tauri::test::mock_app();
+    tauri_app.manage(app.central.clone());
+    tauri_app.manage(app);
+    let handle = tauri_app.handle();
+    let state = state_of(handle);
+    // 投递前目录消失 → 派发链在规划段失败
+    std::fs::remove_dir(&cwd).unwrap();
+    state.flush_pending_dispatches("work-dep", "s-holder", Some(handle.clone()));
+    let mut interrupted = false;
+    for _ in 0..80 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        interrupted = state
+            .central
+            .central_work_registry
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.session_id == "s-flush" && e.state == central_state::WorkState::Interrupted);
+        if interrupted {
+            break;
+        }
+    }
+    assert!(
+        interrupted,
+        "投递失败的排队项应标记为中断，而不是永久排队中"
+    );
+    let notices = state.central.take_central_work_reports();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.contains("排队工作 work-flush 投递未执行")),
+        "{notices:?}"
+    );
+}
+
+/// 投递未成立时退还一次性票据：用户的同意不因投递失败作废；目录长期授权
+/// 放行的派发没有消费票据，无需退还。
+#[test]
+fn delivery_failure_refunds_one_time_ticket() {
+    use tiangong_app::central_host::dispatch::refund_workspace_approval;
+    let (app, _ws) = central_test_app();
+    // 派发目标须在默认工作区之外（默认子树天然放行，测不到票据）
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    let task = "发布模块 v4";
+    app.central.ticket_registry.issue_workspace_approval(
+        &cwd,
+        task,
+        tiangong_central::tickets::RiskLevel::High,
+        600,
+    );
+    assert!(app
+        .central
+        .ticket_registry
+        .consume_workspace_approval_for(&cwd, task)
+        .is_granted());
+    assert!(!app
+        .central
+        .ticket_registry
+        .peek_workspace_approval_for(&cwd, task));
+    refund_workspace_approval(&app.central, &Some((cwd.clone(), task.to_string())));
+    assert!(
+        app.central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "退还后同 (cwd, task) 可再次派发"
+    );
+    refund_workspace_approval(&app.central, &None);
+}
+
+/// 端到端复现并锁定 2026-11-25 的缺陷场景：中枢模型派发 → 宿主拒绝并自动
+/// 发卡 → 用户点「授权」（仅此一次）→ 模型重派同一任务 → 必须放行。
+///
+/// 此前插件按落盘的长期授权预检（看不到宿主内存里的一次性票据），第三步
+/// 之后的重派永远在插件层被短路——票据签发了却永远消费不到，review 派不
+/// 出去。同时锁定：被拒派发留下的登记不得触发「相似历史强制复用」（其会话
+/// 从未创建，否则模型会被「带 session_id 重发」与「复用的会话不存在」来回踢）。
+#[tokio::test]
+async fn approved_ticket_lets_identical_redispatch_through_plugin_and_host() {
+    let (app, ws) = central_test_app();
+    std::fs::write(
+        app.core_manager.storage_root().join("models.json"),
+        serde_json::json!({
+            "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+            "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+            "routing": {"chat": "k3"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let cwd = extra.path().to_string_lossy().to_string();
+    // 真实中枢插件（模型侧工具入口）经派发通道连到真实宿主执行器
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plugin = central_plugin::CentralPlugin::new(
+        ws.to_string_lossy().to_string(),
+        app.core_manager.clone(),
+        tx,
+        reports,
+    );
+    let tauri_app = tauri::test::mock_app();
+    tauri_app.manage(app.central.clone());
+    tauri_app.manage(app);
+    let handle = tauri_app.handle();
+    let state = state_of(handle);
+    let task = "Review 天工主仓库当前分支的变更";
+
+    // 1) 模型派发：插件不预检授权，原样交给宿主
+    let first = call_central_tool(
+        &plugin,
+        "dispatch_work",
+        serde_json::json!({ "task": task, "cwd": cwd }),
+    );
+    assert!(first.ok, "插件不得短路：{}", first.stderr);
+    let tiangong_app::central::CentralPluginMessage::Dispatch(request) =
+        rx.try_recv().expect("应交给宿主裁决")
+    else {
+        panic!("应为 Dispatch 消息");
+    };
+    // 2) 宿主拒绝（未授权），授权卡片自动发出
+    let denied = handle_central_dispatch(&state.central, handle, request.clone())
+        .await
+        .expect_err("未授权工作区必须拒绝");
+    assert!(denied.contains("尚未经用户授权"), "{denied}");
+    assert!(denied.contains("授权卡片已自动发给用户"), "{denied}");
+    // 3) 用户点「授权」（仅此一次）：走真实命令签发一次性票据
+    let granted = tiangong_app::central_host::authorization::central_approve_workspace(
+        handle.clone(),
+        cwd.clone(),
+        task.to_string(),
+        Some(false),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(granted["persist"], false);
+    // 4) 模型重派同一任务（不带 session_id）：不得被「相似历史」或授权短路
+    let second = call_central_tool(
+        &plugin,
+        "dispatch_work",
+        serde_json::json!({ "task": task, "cwd": cwd }),
+    );
+    assert!(second.ok, "授权后重派必须被受理：{}", second.stderr);
+    assert!(
+        !second.stderr.contains("高度相似"),
+        "被拒派发的登记不得强制复用：{}",
+        second.stderr
+    );
+    let tiangong_app::central::CentralPluginMessage::Dispatch(request) =
+        rx.try_recv().expect("应交给宿主裁决")
+    else {
+        panic!("应为 Dispatch 消息");
+    };
+    // 5) 宿主放行（消费一次性票据），工作进入执行中
+    handle_central_dispatch(&state.central, handle, request.clone())
+        .await
+        .expect("一次性票据应放行授权后的重派");
+    assert!(
+        ticket_registry_status(state, &request.session_id)
+            .is_some_and(|entry| entry.state == central_state::WorkState::Running),
+        "重派后登记应为执行中"
+    );
+    assert!(
+        !state
+            .central
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, task),
+        "票据一次性：重派后已消费"
+    );
+}
+
+/// 极简 block_on（同步等待一次性 future，不引入运行时依赖）。
+fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    fn noop(_: *const ()) {}
+    fn clone(ptr: *const ()) -> RawWaker {
+        RawWaker::new(ptr, &VTABLE)
+    }
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("中枢插件工具不应挂起"),
+    }
+}
+
+/// 经公共工具入口调用中枢插件（与模型调用同路径）。
+fn call_central_tool(
+    plugin: &central_plugin::CentralPlugin,
+    name: &str,
+    args: serde_json::Value,
+) -> tiangong_core::tools::result::ToolResult {
+    let call = tiangong_llm::tool::ToolCall {
+        id: "t1".to_string(),
+        name: name.to_string(),
+        arguments: args,
+    };
+    let mut session = tiangong_core::session::Session::new("测试");
+    let future = tiangong_core::tools::extension::ToolOverrideHandler::handle(
+        plugin,
+        &call,
+        &mut session,
+        "test",
+    );
+    futures_block_on(future).expect("中枢工具必须被本插件处理")
 }

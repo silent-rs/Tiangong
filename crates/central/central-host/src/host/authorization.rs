@@ -14,7 +14,7 @@ use tauri::AppHandle;
 use tiangong_central::tickets::RiskLevel;
 
 /// 授权票据默认有效期（秒）：10 分钟——足够完成派发，过期不得默认视为同意。
-const DEFAULT_TICKET_TTL_SECONDS: i64 = 600;
+pub(crate) const DEFAULT_TICKET_TTL_SECONDS: i64 = 600;
 
 /// 用户授权 Workspace（R3）。
 ///

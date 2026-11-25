@@ -36,7 +36,7 @@ pub fn central_dispatch_sender<R: tauri::Runtime>(
                                 let note = if is_authorization {
                                     format!(
                                         "[系统中枢] 派发未执行：{error}\n\
-                                         授权卡片已发给用户（也可调 request_workspace_approval 主动发起）。\n\
+                                         授权卡片已发给用户（不必再调 request_workspace_approval，重复发起只会多出一张卡片）。\n\
                                          请向用户说明要在该目录做什么、为什么需要授权；等用户确认后重新派发同一任务。\n\
                                          不要更换目录规避授权，也不要在授权前重复派发。这不是工作失败，没有产生后台工作。"
                                     )
@@ -273,6 +273,7 @@ pub async fn enqueue_central_dispatch(
     mut request: crate::CentralDispatchRequest,
     after: &str,
     cwd: &str,
+    preauthorized: bool,
 ) {
     // 阻塞源统一写入 after_work_id（批五测试发现：写入锁排队的请求
     // 原样入队时 after=None——依赖终态后 flush 的匹配条件
@@ -322,6 +323,7 @@ pub async fn enqueue_central_dispatch(
         &request.session_id,
         after,
         Some(cwd),
+        preauthorized,
     ) {
         tracing::warn!(%error, "中枢登记写失败（Z4：写失败显式可见）");
     }
@@ -337,6 +339,7 @@ pub async fn enqueue_central_dispatch(
 /// 派发决策结果：Queued = 已入队（执行段不得投递）；Execute = 投递。
 /// Execute 的请求体较大（任务全文），Box 收窄变体尺寸差（clippy
 /// large_enum_variant）。
+#[derive(Debug)]
 pub enum DispatchPlan {
     Queued,
     Execute {
@@ -349,7 +352,72 @@ pub enum DispatchPlan {
         /// None = 常规派发（request.task）。
         registry_task: Option<String>,
         cwd: String,
+        /// 本次执行消费掉的一次性授权票据 (cwd, task)：投递未成立时据此退还
+        /// （目录长期授权放行时为 None）。
+        approval_consumed: Option<(String, String)>,
     },
+}
+
+/// 未授权拒绝：广播授权卡片（任务指纹 = 本次 task，用户点击即签发票据）、
+/// 审计入事件日志，返回给模型的指引。卡片由系统自动发出——模型不必再调
+/// request_workspace_approval（重复发起只会多出一张卡片让用户再点一次）。
+fn reject_unauthorized(
+    state: &crate::CentralHostState,
+    request: &crate::CentralDispatchRequest,
+    cwd: &str,
+) -> String {
+    // R5 授权卡片：拒绝事实广播前端（用户真实操作签发票据后模型重派即
+    // 过；模型不能自证同意）
+    crate::host::events::emit_approval_required(
+        state,
+        crate::host::events::ApprovalRequiredEvent {
+            cwd: cwd.to_string(),
+            task: request.task.clone(),
+            work_id: request.work_id.clone(),
+        },
+    );
+    // Z6 审计：拒绝事实入事件日志（唯一事实源——此前授权链路不留持久轨迹）
+    crate::host::central_events::record_central_event(
+        state.core_manager.storage_root(),
+        &request.work_id,
+        "",
+        &request.session_id,
+        tiangong_central::event::WorkEventType::ApprovalRequired,
+        "派发被拒：目录未经用户授权（任务指纹已送授权卡片）",
+    );
+    // 十九轮 8.2：outcome 结构化（denied/granted）而非 note 文本区分
+    if let Some(handle) = state.app_handle_read() {
+        use tauri::Emitter;
+        let _ = handle.emit(
+            "central-approval-audit",
+            serde_json::json!({ "outcome": "denied", "cwd": cwd, "work_id": request.work_id }),
+        );
+    }
+    format!(
+        "工作目录 {cwd} 尚未经用户授权（派发未执行）。授权卡片已自动发给用户，任务指纹就是本次 task——不必再调 request_workspace_approval（重复发起只会让用户多点一次）。请向用户说明要在该目录做什么、为什么需要授权；用户确认后重派同一任务（task 文本保持不变，否则票据不匹配）。授权只能由用户完成，不要更换目录规避，也不要在授权前重复派发。"
+    )
+}
+
+/// 投递未成立时退还刚消费的一次性授权票据：没有任何执行发生，用户的
+/// 同意不应因投递失败作废（重签同 (cwd, task) 票据，有效期重新起算）。
+pub fn refund_workspace_approval(
+    state: &crate::CentralHostState,
+    consumed: &Option<(String, String)>,
+) {
+    let Some((cwd, task)) = consumed else {
+        return;
+    };
+    let ticket = state.ticket_registry.issue_workspace_approval(
+        cwd,
+        task,
+        tiangong_central::tickets::RiskLevel::High,
+        crate::host::authorization::DEFAULT_TICKET_TTL_SECONDS,
+    );
+    tracing::info!(
+        approval_id = %ticket.approval_id,
+        cwd,
+        "投递未成立，一次性授权票据已退还"
+    );
 }
 
 pub async fn plan_central_dispatch(
@@ -378,56 +446,30 @@ pub async fn plan_central_dispatch(
     }
     // Workspace 授权统一兜底（review P1-x2：Steer 绕过；R3 票据化双通道）
     // ——Dispatch/Steer 殊途同归至此，最终 cwd（请求指定或复用会话自身）
-    // 统一校验。放行条件（任一）：
+    // 统一校验，也是**唯一**的授权执行点（插件侧不做预检：一次性票据在
+    // 宿主内存，插件只看得到落盘的长期授权，预检会让用户点「授权」后的
+    // 重派在插件层被短路——2026-11-25 修复）。放行条件（任一）：
     // 1. 目录长期授权（confirmed-workspaces，用户此前「记住」的目录）；
     // 2. 一次性票据（宿主用户操作签发，绑定任务指纹——防「授权 A、
-    // 执行 B」偷换，消费即失效）。
-    // 无票据通道前模型无法自证同意（confirm_workspace 已移除）。
+    //    执行 B」偷换，消费即失效）。
+    // 3. 排队标记上的授权随行（入队时已消费票据，见下方排队分支）。
+    // 这里只**查验**不消费：排队项可能等更久或经历重启，票据在内存且会过期，
+    // 不能等投递那一刻才用——入队时消费并把授权落到排队标记；直接执行的
+    // 派发在下方执行段消费。
+    let default_workspace = state
+        .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
+        .await
+        .unwrap_or_default();
+    let storage_root = state.core_manager.storage_root();
+    let directory_approved = crate::workspace_confirmed(storage_root, &default_workspace, &cwd);
+    let preauthorized = crate::work_item_preauthorized(storage_root, &request.work_id);
+    if !(directory_approved
+        || preauthorized
+        || state
+            .ticket_registry
+            .peek_workspace_approval_for(&cwd, &request.task))
     {
-        let default_workspace = state
-            .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
-            .await
-            .unwrap_or_default();
-        let directory_approved =
-            crate::workspace_confirmed(state.core_manager.storage_root(), &default_workspace, &cwd);
-        let ticket_granted = !directory_approved
-            && state
-                .ticket_registry
-                .consume_workspace_approval_for(&cwd, &request.task)
-                .is_granted();
-        if !directory_approved && !ticket_granted {
-            // R5 授权卡片：拒绝事实广播前端（用户真实操作签发票据后
-            // 模型重派即过；模型不能自证同意）
-            crate::host::events::emit_approval_required(
-                state,
-                crate::host::events::ApprovalRequiredEvent {
-                    cwd: cwd.clone(),
-                    task: request.task.clone(),
-                    work_id: request.work_id.clone(),
-                },
-            );
-            // Z6 审计：拒绝事实入事件日志（唯一事实源——此前授权链路
-            // 不留持久轨迹）
-            crate::host::central_events::record_central_event(
-                state.core_manager.storage_root(),
-                &request.work_id,
-                "",
-                &request.session_id,
-                tiangong_central::event::WorkEventType::ApprovalRequired,
-                "派发被拒：目录未经用户授权（任务指纹已送授权卡片）",
-            );
-            // 十九轮 8.2：outcome 结构化（denied/granted）而非 note 文本区分
-            if let Some(handle) = state.app_handle_read() {
-                use tauri::Emitter;
-                let _ = handle.emit(
-                    "central-approval-audit",
-                    serde_json::json!({ "outcome": "denied", "cwd": cwd, "work_id": request.work_id }),
-                );
-            }
-            return Err(format!(
-                "工作目录 {cwd} 尚未经用户授权（派发未执行）。请调 request_workspace_approval(path=\"{cwd}\", task_fingerprint=<与本次 task 完全一致>) 向用户发起授权卡片，并向用户说明任务与影响；用户确认后重派同一任务。授权只能由用户完成，不要更换目录规避，也不要在授权前重复派发。"
-            ));
-        }
+        return Err(reject_unauthorized(state, &request, &cwd));
     }
     // 排队决策统一走 central-state（依赖 in-flight × 写入锁 × parallel
     // 豁免 × 同会话重派——行为锁定于 crate 测试，宿主不自持规则）。
@@ -454,10 +496,33 @@ pub async fn plan_central_dispatch(
                 after = %after,
                 "后台工作排队（依赖/写入锁），等待终态后自动投递"
             );
-            enqueue_central_dispatch(state, request.clone(), &after, &cwd).await;
+            // 一次性授权覆盖排队等待：入队即消费票据，授权随行落到排队标记
+            //（目录长期授权的投递时仍按目录校验；已随行的保持随行）
+            let queued_preauthorized = preauthorized
+                || (!directory_approved
+                    && state
+                        .ticket_registry
+                        .consume_workspace_approval_for(&cwd, &request.task)
+                        .is_granted());
+            enqueue_central_dispatch(state, request.clone(), &after, &cwd, queued_preauthorized)
+                .await;
             return Ok(DispatchPlan::Queued);
         }
     }
+
+    // 执行段：真正消费一次性票据（目录长期授权 / 排队授权随行无需消费）。
+    // 查验与消费之间票据若被并发消费或过期，按未授权处理（宁可让用户再点一次）。
+    let approval_consumed = if directory_approved || preauthorized {
+        None
+    } else if state
+        .ticket_registry
+        .consume_workspace_approval_for(&cwd, &request.task)
+        .is_granted()
+    {
+        Some((cwd.clone(), request.task.clone()))
+    } else {
+        return Err(reject_unauthorized(state, &request, &cwd));
+    };
 
     let sid = request.session_id.clone();
 
@@ -562,6 +627,7 @@ pub async fn plan_central_dispatch(
         instruction_override,
         registry_task,
         cwd,
+        approval_consumed,
     })
 }
 
@@ -570,26 +636,34 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     request: crate::CentralDispatchRequest,
 ) -> Result<(), String> {
-    let (merged_work, steer_merged_into_running, instruction_override, registry_task, cwd) =
-        match plan_central_dispatch(state, request.clone()).await? {
-            // 排队已在决策段完成登记落盘——执行段到此为止（分离手术曾
-            // 丢失此早退语义：返回值被当作投递继续，排队整体失效且无
-            // 测试暴露——P0，第十四轮深评自检发现）
-            DispatchPlan::Queued => return Ok(()),
-            DispatchPlan::Execute {
-                merged_work,
-                steer_merged_into_running,
-                instruction_override,
-                registry_task,
-                cwd,
-            } => (
-                merged_work,
-                steer_merged_into_running,
-                instruction_override,
-                registry_task,
-                cwd,
-            ),
-        };
+    let (
+        merged_work,
+        steer_merged_into_running,
+        instruction_override,
+        registry_task,
+        cwd,
+        approval_consumed,
+    ) = match plan_central_dispatch(state, request.clone()).await? {
+        // 排队已在决策段完成登记落盘——执行段到此为止（分离手术曾
+        // 丢失此早退语义：返回值被当作投递继续，排队整体失效且无
+        // 测试暴露——P0，第十四轮深评自检发现）
+        DispatchPlan::Queued => return Ok(()),
+        DispatchPlan::Execute {
+            merged_work,
+            steer_merged_into_running,
+            instruction_override,
+            registry_task,
+            cwd,
+            approval_consumed,
+        } => (
+            merged_work,
+            steer_merged_into_running,
+            instruction_override,
+            registry_task,
+            cwd,
+            approval_consumed,
+        ),
+    };
     let sid = merged_work.session_id.clone();
     // model 是统一的换模型通道（switch_worker_model 移除后的用户裁决）：
     // 复用会话同样生效——live Core 经 deliver 的 model_ref 走模型编排
@@ -626,6 +700,7 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
         .await
         {
             state.execution_router.cancel(&sid, &request.execution_id);
+            refund_workspace_approval(state, &approval_consumed);
             return Err(error);
         }
         // 成功登记后统一 attach：同步重放不能先于 Started/Running。
@@ -644,11 +719,13 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             Ok(is_new) => is_new,
             Err(error) => {
                 state.execution_router.cancel(&sid, &request.execution_id);
+                refund_workspace_approval(state, &approval_consumed);
                 return Err(error);
             }
         };
         if !is_new {
             state.execution_router.cancel(&sid, &request.execution_id);
+            refund_workspace_approval(state, &approval_consumed);
             return Err(format!(
                 "会话 {} 的 Core 已被并发创建，本次流通道未绑定；请稍后重派",
                 sid
@@ -675,6 +752,7 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
         .await
         {
             state.execution_router.cancel(&sid, &request.execution_id);
+            refund_workspace_approval(state, &approval_consumed);
             return Err(error);
         }
         // 回调统一在成功登记之后挂载（fire 已由 router 暂存）。

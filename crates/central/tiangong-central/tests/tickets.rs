@@ -159,3 +159,88 @@ fn consume_decision_binds_ticket_id_and_version() {
         TicketVerdict::DeniedUsedOrMissing
     );
 }
+
+/// 按对查验（不消费）：排队派发入队时只查验、投递时才消费（2026-11-25 修复——
+/// 此前入队即消费，依赖终态后重入派发链时票据已用，排队项必然被拒）。
+#[test]
+fn peek_workspace_approval_does_not_consume() {
+    let registry = TicketRegistry::new();
+    assert!(
+        !registry.peek_workspace_approval_for("/ws/q", "任务 Q"),
+        "无票据 → 未授权"
+    );
+    registry.issue_workspace_approval("/ws/q", "任务 Q", RiskLevel::High, 600);
+    assert!(
+        registry.peek_workspace_approval_for("/ws/q", "任务 Q"),
+        "未用未过期票据 → 已授权"
+    );
+    assert!(
+        !registry.peek_workspace_approval_for("/ws/q", "任务 R"),
+        "指纹不一致 → 未授权（防偷换）"
+    );
+    assert!(
+        !registry.peek_workspace_approval_for("/ws/other", "任务 Q"),
+        "目录不一致 → 未授权"
+    );
+    // 多次查验不改变票据状态
+    assert!(registry.peek_workspace_approval_for("/ws/q", "任务 Q"));
+    assert!(registry.peek_workspace_approval_for("/ws/q", "任务 Q"));
+    // 消费后查验为假
+    assert!(
+        registry
+            .consume_workspace_approval_for("/ws/q", "任务 Q")
+            .is_granted()
+    );
+    assert!(!registry.peek_workspace_approval_for("/ws/q", "任务 Q"));
+}
+
+/// 过期票据查验为假（过期 ≠ 同意）。
+#[test]
+fn peek_expired_workspace_approval_is_false() {
+    let registry = TicketRegistry::new();
+    registry.issue_workspace_approval("/ws/exp", "任务", RiskLevel::Low, 1);
+    assert!(registry.peek_workspace_approval_for("/ws/exp", "任务"));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(!registry.peek_workspace_approval_for("/ws/exp", "任务"));
+}
+
+/// 多票并存：消费取最新「可用」票据，与 peek 口径一致——最新一张已用 /
+/// 已过期不得挡住用户仍然有效的授权（2026-11-25 review M-1）。
+#[test]
+fn consume_picks_latest_usable_ticket_like_peek() {
+    let registry = TicketRegistry::new();
+    registry.issue_workspace_approval("/ws/m", "任务 M", RiskLevel::High, 600);
+    assert!(
+        registry
+            .consume_workspace_approval_for("/ws/m", "任务 M")
+            .is_granted()
+    );
+    assert!(!registry.peek_workspace_approval_for("/ws/m", "任务 M"));
+    // 第二张：最新一张可用
+    registry.issue_workspace_approval("/ws/m", "任务 M", RiskLevel::High, 600);
+    assert!(registry.peek_workspace_approval_for("/ws/m", "任务 M"));
+    assert!(
+        registry
+            .consume_workspace_approval_for("/ws/m", "任务 M")
+            .is_granted()
+    );
+    assert_eq!(
+        registry.consume_workspace_approval_for("/ws/m", "任务 M"),
+        TicketVerdict::DeniedUsedOrMissing
+    );
+    // 最新一张过期、较早一张仍有效：消费取可用的那张
+    registry.issue_workspace_approval("/ws/m", "任务 M", RiskLevel::High, 600);
+    registry.issue_workspace_approval("/ws/m", "任务 M", RiskLevel::High, 1);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(registry.peek_workspace_approval_for("/ws/m", "任务 M"));
+    assert!(
+        registry
+            .consume_workspace_approval_for("/ws/m", "任务 M")
+            .is_granted(),
+        "应取较早仍有效的那张"
+    );
+    assert_eq!(
+        registry.consume_workspace_approval_for("/ws/m", "任务 M"),
+        TicketVerdict::DeniedExpired
+    );
+}
