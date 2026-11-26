@@ -96,9 +96,9 @@ pub struct WorkStatus {
     /// 上轮问题。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_question: Option<String>,
-    /// 活动状态值（Issue #778 保留部分）：`Running` 的细粒度状态，由 Worker 流
-    /// 事件刷新，驱动状态条 / 抽屉的实时展示。与 `state`（生命周期）正交；旧
-    /// 数据缺省 Pending。
+    /// 活动状态值（Issue #778 保留部分）：当前活跃 Worker session 的细粒度
+    /// 状态，由 Worker 流事件刷新。与 `state`（生命周期）正交；没有活跃
+    /// session 时为 Pending 且 `last_activity` 清空。旧数据缺省 Pending。
     #[serde(default)]
     pub activity: WorkActivity,
 }

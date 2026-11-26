@@ -1093,38 +1093,31 @@ pub(crate) fn start_stream_consumer<R: tauri::Runtime>(
                 .execution_router
                 .fire(session_id, done, reason);
         };
-    // 中枢工作进度可见（§9.1 / Issue #778 保留部分）：中枢派发会话的流事件
-    // 经统一信号入口映射为活动状态值（回复中 / 思考中 / 工具执行 / 压缩上下文 /
-    // 切换模型 / 重试 …），刷新 registry 的活动状态与最近动作（徽章实时显示
-    // Worker 在干嘛）。置于循环体最前、任何 continue 之前——压缩 / 切换事件走
-    // 免锁快速通道，也要被采集；入口只取 registry 短锁，不触碰 session_send_lock
-    // / app_state 锁，快速通道的免锁前提不变。普通会话零成本：registry 无该
-    // session 的 running 条目即返回。
-    // 进度广播节流声明（深检 E）
-    let last_activity_emit = std::sync::Arc::new(std::sync::Mutex::new(
-        std::time::Instant::now() - std::time::Duration::from_secs(10),
-    ));
+    // 中枢工作活动可见（§9.1 / Issue #778 保留部分）：Worker 与 workspace 一一对应，
+    // 当前活跃 session 的流事件映射为活动状态值（回复中 / 思考中 / 工具执行 /
+    // 压缩上下文 / 切换模型 / 重试 …），刷新 registry 的活动状态与最近动作。
+    // 采集置于循环体最前、任何 continue 之前——压缩 / 切换事件走免锁快速通道，
+    // 也要被采集。普通会话先按 session 做一次 registry 短锁排除，不分类、不分配
+    // 文案、不访问 Core；`execution_id` 只用于终态路由/审计，不参与活动投影。
     let update_central_activity =
-        move |app: &tauri::AppHandle<R>, session_id: &str, event: &tiangong_types::StreamEvent| {
+        |app: &tauri::AppHandle<R>, session_id: &str, event: &tiangong_types::StreamEvent| {
             use tauri::Manager;
-            // 非活动信号（计时 / 通知类）零成本返回，不取任何锁
-            if crate::central_host::activity::classify_signal(event).is_none() {
+            let state = app.state::<crate::app::TiangongApp>();
+            if !state.inner().central.has_running_work_session(session_id) {
                 return;
             }
-            let state = app.state::<crate::app::TiangongApp>();
             // 已退役 Core 的缓冲事件不得改写同会话新实例的登记
             if !session_core_alive(state.inner(), session_id) {
                 return;
             }
-            let mut last = last_activity_emit.lock().unwrap();
-            let emit = crate::central_host::activity::note_stream_signal(
+            // 仅实际变化时广播；重复 Delta/Reasoning 不会刷新前端，也无需
+            // 额外节流，避免窗口内最后一次变化被丢弃。
+            if crate::central_host::activity::note_stream_signal(
                 &state.inner().central,
                 session_id,
                 event,
-                &mut last,
-            );
-            drop(last);
-            if emit == crate::central_host::activity::Emit::Now {
+            ) == crate::central_host::activity::Emit::Now
+            {
                 crate::central_host::emit_central_work_updated(app);
             }
         };

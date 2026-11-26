@@ -2,23 +2,19 @@
 //!
 //! Worker 会话的流事件经 [`classify_signal`] 映射为活动状态值
 //! [`WorkActivity`] 与最近动作文案，由消费循环的统一入口 [`note_stream_signal`]
-//! 刷新到登记（状态条 / 抽屉的数据源）。不做无进展判定：模型请求、插件工具
-//! 调用、终端命令在各自层面都有超时，静默会被兜成失败走既有回报通道。
+//! 刷新到当前活跃 session 对应的 Worker 登记（状态条 / 抽屉的数据源）。
+//! Worker 与 workspace 一一对应；没有活跃 session 时活动与最近动作清空，
+//! Worker 回到待机。`execution_id` 只用于轮次审计/终态路由，不参与活动投影。
 //!
 //! 采集点在 `start_stream_consumer` 循环体最前（任何 `continue` 之前）——压缩 /
 //! 切换事件走免锁快速通道，也要被采集；hook 只取 registry 短锁，不触碰
 //! `session_send_lock` / `app_state` 锁，快速通道的免锁前提不变；普通会话
-//!（registry 无该会话 `running` 条目）直接返回。
-
-use std::time::{Duration, Instant};
+//! 在分类和分配文案前按 session 排除，不触碰 Core 或广播节流锁。
 
 use central_state::{WorkActivity, WorkState};
 use tiangong_types::StreamEvent;
 
 use crate::CentralHostState;
-
-/// 进度广播节流：高频文本增量 2 秒至多广播一次，防前端风暴（深检 E）。
-pub const ACTIVITY_EMIT_THROTTLE: Duration = Duration::from_secs(2);
 
 /// 流事件 → 活动信号：`(活动状态值, 最近动作文案)`。
 ///
@@ -53,13 +49,25 @@ pub fn classify_signal(event: &StreamEvent) -> Option<(WorkActivity, String)> {
         StreamEvent::ContextCompressing { .. } => {
             (WorkActivity::Compressing, "压缩上下文".to_string())
         }
-        StreamEvent::ContextCompressed { .. } => {
-            (WorkActivity::Requesting, "上下文压缩完成".to_string())
+        StreamEvent::ContextCompressed { action, .. } => {
+            let detail = match action {
+                tiangong_types::stream::ContextCompressAction::Failed => "上下文压缩失败",
+                tiangong_types::stream::ContextCompressAction::Cancelled => "上下文压缩已取消",
+                tiangong_types::stream::ContextCompressAction::Noop => "无需压缩上下文",
+                tiangong_types::stream::ContextCompressAction::Clear => "上下文清理完成",
+                tiangong_types::stream::ContextCompressAction::Compress
+                | tiangong_types::stream::ContextCompressAction::Auto => "上下文压缩完成",
+            };
+            (WorkActivity::Requesting, detail.to_string())
         }
-        StreamEvent::ModelSwitchStarted { .. } => {
-            (WorkActivity::SwitchingModel, "切换模型".to_string())
-        }
-        StreamEvent::ModelSwitched { .. } => (WorkActivity::Requesting, "模型已切换".to_string()),
+        StreamEvent::ModelSwitchStarted { model_name } => (
+            WorkActivity::SwitchingModel,
+            format!("切换模型（{model_name}）"),
+        ),
+        StreamEvent::ModelSwitched { model_name } => (
+            WorkActivity::Requesting,
+            format!("模型已切换（{model_name}）"),
+        ),
         StreamEvent::Retry {
             attempt,
             max_attempts,
@@ -74,7 +82,15 @@ pub fn classify_signal(event: &StreamEvent) -> Option<(WorkActivity, String)> {
         StreamEvent::AgentMessage {
             from_agent_label, ..
         } => (WorkActivity::Subagent, format!("子代理 {from_agent_label}")),
-        StreamEvent::AgentNotification { agent_label, .. } => {
+        StreamEvent::AgentNotification {
+            agent_id,
+            agent_label,
+            ..
+        } => {
+            // 系统通知（如手动压缩失败）不是子代理活动证据。
+            if agent_id == "system" {
+                return None;
+            }
             (WorkActivity::Subagent, format!("子代理 {agent_label}"))
         }
         _ => return None,
@@ -87,9 +103,7 @@ pub fn classify_signal(event: &StreamEvent) -> Option<(WorkActivity, String)> {
 pub enum Emit {
     /// 非活动信号，或该会话无 running 登记 / 文案未变：无事可做。
     None,
-    /// 已刷新但仍在 2 秒广播节流窗口内。
-    Throttled,
-    /// 立即广播（文案变化且已过节流窗口）。
+    /// 活动状态或最近动作发生变化，立即广播最新状态。
     Now,
 }
 
@@ -102,34 +116,36 @@ pub enum SignalOutcome {
     Updated { changed: bool },
 }
 
-/// 消费循环的统一入口：流事件 → 活动信号 → 刷新登记，并给出是否广播状态条
-/// 的决策（按 2 秒节流）。独立成函数是为了能在不启动消费者线程 / Tauri
-/// 句柄的情况下按真实事件驱动测试。
-pub fn note_stream_signal(
-    state: &CentralHostState,
-    session_id: &str,
-    event: &StreamEvent,
-    last_emit: &mut Instant,
-) -> Emit {
+/// 消费循环的统一入口：流事件 → 活动信号 → 刷新当前活跃 session 的登记。
+/// 仅在活动值或最近动作实际变化时广播，重复增量不会造成前端刷新风暴。
+pub fn note_stream_signal(state: &CentralHostState, session_id: &str, event: &StreamEvent) -> Emit {
     let Some((activity, detail)) = classify_signal(event) else {
         return Emit::None;
     };
     match state.note_work_signal(session_id, activity, &detail) {
         SignalOutcome::NotRunning | SignalOutcome::Updated { changed: false } => Emit::None,
-        SignalOutcome::Updated { changed: true } => {
-            let now = Instant::now();
-            if now.duration_since(*last_emit) >= ACTIVITY_EMIT_THROTTLE {
-                *last_emit = now;
-                Emit::Now
-            } else {
-                Emit::Throttled
-            }
-        }
+        SignalOutcome::Updated { changed: true } => Emit::Now,
     }
 }
 
 impl CentralHostState {
+    /// 当前 session 是否有活跃 Worker 登记。消费者在分类、分配文案和访问
+    /// Core 之前调用，普通会话只为一次 registry 短锁扫描，不承担活动采集成本。
+    pub fn has_running_work_session(&self, session_id: &str) -> bool {
+        let registry = self
+            .central_work_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        registry
+            .iter()
+            .rev()
+            .any(|entry| entry.session_id == session_id && entry.state == WorkState::Running)
+    }
+
     /// 刷新该会话 `running` 条目的活动状态值与最近动作文案。
+    ///
+    /// 这里按当前活跃 session 定位 Worker，不按 `execution_id` 过滤；轮次
+    /// 归属由终态路由器负责，活动展示只回答“这个 Worker 现在在做什么”。
     pub fn note_work_signal(
         &self,
         session_id: &str,
@@ -208,5 +224,31 @@ mod tests {
         })
         .unwrap();
         assert_eq!(tool, (WorkActivity::ToolRunning, "执行 cargo".to_string()));
+        assert_eq!(
+            classify_signal(&StreamEvent::ContextCompressed {
+                action: tiangong_types::stream::ContextCompressAction::Failed,
+                summary_up_to: 2,
+                remaining_messages: 3,
+            }),
+            Some((WorkActivity::Requesting, "上下文压缩失败".to_string()))
+        );
+        assert_eq!(
+            classify_signal(&StreamEvent::AgentNotification {
+                agent_id: "system".into(),
+                agent_label: "系统".into(),
+                content: "压缩失败".into(),
+                level: "warning".into(),
+            }),
+            None
+        );
+        assert_eq!(
+            classify_signal(&StreamEvent::ModelSwitchStarted {
+                model_name: "k3-pro".into(),
+            }),
+            Some((
+                WorkActivity::SwitchingModel,
+                "切换模型（k3-pro）".to_string()
+            ))
+        );
     }
 }

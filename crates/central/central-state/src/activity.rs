@@ -7,6 +7,8 @@
 //!
 //! 这里**不做**无进展判定：模型请求、插件工具调用、终端命令在各自层面都有
 //! 超时，静默会被兜成失败走既有回报通道；可见性负责让用户知道此刻在做什么。
+//! Worker 与 workspace 一一对应，活动来自当前活跃 session；没有活跃 session
+//! 时活动与最近动作清空，Worker 待机。`execution_id` 不参与活动投影。
 
 use serde::{Deserialize, Serialize};
 
@@ -71,11 +73,11 @@ impl WorkActivity {
             WorkActivity::Responding => "回复中",
             WorkActivity::Reasoning => "思考中",
             WorkActivity::Requesting => "等待响应",
-            WorkActivity::ToolRunning => "工具执行",
-            WorkActivity::Compressing => "压缩上下文",
+            WorkActivity::ToolRunning => "执行中",
+            WorkActivity::Compressing => "压缩中",
             WorkActivity::SwitchingModel => "切换模型",
             WorkActivity::Retrying => "重试中",
-            WorkActivity::Subagent => "子代理活动",
+            WorkActivity::Subagent => "子代理中",
         }
     }
 }

@@ -12,10 +12,10 @@ import { listen } from '@/api/host';
 import { useStore } from '@/store/useStore';
 import { Loader2, Inbox, History, ChevronRight, AlertTriangle, CheckCircle2, XCircle, HelpCircle, PauseCircle, Clock, Ban } from 'lucide-react';
 import { restoreFromCentralConversation } from '@/features/central/lib/centralConversation';
-import { CentralWorkDrawer, type CentralWorkDrawerItem } from '@/features/central/components/CentralWorkDrawer';
+import { CentralWorkDrawer } from '@/features/central/components/CentralWorkDrawer';
 import { CentralBadgeIcon, type BadgeState } from '@/features/central/components/CentralBadgeIcon';
-import type { WorkActivity } from '@/features/central/api';
-import { ACTIVITY_LABELS, activityOf } from '@/features/central/lib/workActivity';
+import type { CentralWorkStatus } from '@/features/central/api';
+import { ACTIVITY_LABELS, activityDetail, activityOf } from '@/features/central/lib/workActivity';
 
 /**
  * 工作步骤链（用户裁决 2026-11-16：以 worker 视角做多步骤显示列表，
@@ -141,23 +141,6 @@ function StepChain({
   );
 }
 
-interface CentralWorkStatus {
-  work_id: string;
-  session_id: string;
-  task: string;
-  model: string | null;
-  dispatched_at: string;
-  state: 'running' | 'report_queued' | 'interrupted' | 'completed' | 'failed' | 'waiting_user' | 'paused' | 'cancelled' | 'queued';
-  reused_session: boolean;
-  last_activity?: string | null;
-  /** 当前执行归属（U1：步骤链按执行隔离的数据源）。 */
-  execution_id?: string | null;
-  /** G3（第 28 轮 review）：waiting_user 时的征询问题正文（标记行后
-   * 的问题主体，480 字截断）——前端可直接展示待决问题，无需翻消息流。 */
-  pending_question?: string | null;
-  /** 活动状态值（Issue #778 保留部分）：running 的细粒度状态；旧后端缺省 pending。 */
-  activity?: WorkActivity | null;
-}
 
 const PANEL_CLOSE_DELAY_MS = 250;
 
@@ -176,6 +159,8 @@ function WorkItemRow({
   const pausedState = item.state === 'paused';
   const cancelledState = item.state === 'cancelled';
   const queuedState = item.state === 'queued';
+  const activity = activityOf(item);
+  const activityDetailText = activityDetail(item);
   return (
     <div
       onClick={() => onOpen?.(item)}
@@ -216,7 +201,7 @@ function WorkItemRow({
           {running ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {ACTIVITY_LABELS[activityOf(item)]}
+              {ACTIVITY_LABELS[activity]}
             </>
           ) : interrupted ? (
             <>
@@ -277,9 +262,9 @@ function WorkItemRow({
           {item.pending_question}
         </p>
       ) : null}
-      {running && item.last_activity ? (
+      {running && activityDetailText ? (
         <p className="mt-1 truncate text-[11px] text-muted-foreground/80">
-          {item.last_activity}
+          {activityDetailText}
         </p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
@@ -313,7 +298,7 @@ export function CentralWorkStatusBar() {
   const refresh = useCallback(() => {
     api
       .getCentralWorkStatus()
-      .then((data) => setItems((data ?? []) as CentralWorkStatus[]))
+      .then((data) => setItems(data ?? []))
       .catch(() => undefined);
   }, []);
 
@@ -374,10 +359,10 @@ export function CentralWorkStatusBar() {
   // §3.5/§6.4）；「打开原始工作会话」是抽屉内的显式动作。
   // 必须位于早退之前——否则空列表首渲染与有数据渲染的 hooks 数量不一致
   //（React 规则：所有 hooks 需无条件按序调用）。
-  const [drawerWork, setDrawerWork] = useState<CentralWorkDrawerItem | null>(null);
+  const [drawerSessionId, setDrawerSessionId] = useState<string | null>(null);
   const openDrawer = useCallback((item: CentralWorkStatus) => {
     setHoverOpen(false);
-    setDrawerWork(item);
+    setDrawerSessionId(item.session_id);
   }, []);
   const openInNormalMode = useCallback(
     async (sessionId: string) => {
@@ -411,6 +396,11 @@ export function CentralWorkStatusBar() {
   const visible = Array.from(aggregated.values()).sort((a, b) =>
     b.dispatched_at.localeCompare(a.dispatched_at),
   );
+  // 抽屉只保存 session 身份，渲染时始终取最新登记，避免活动/状态冻结在
+  // 打开那一刻；该 session 从列表消失时抽屉自动关闭。
+  const drawerWork = drawerSessionId
+    ? visible.find((item) => item.session_id === drawerSessionId) ?? null
+    : null;
   const running = visible.filter((item) => item.state === 'running');
   const queued = visible.filter((item) => item.state === 'report_queued');
   const interrupted = visible.filter((item) => item.state === 'interrupted');
@@ -525,9 +515,9 @@ export function CentralWorkStatusBar() {
       {drawerWork ? (
         <CentralWorkDrawer
           work={drawerWork}
-          onClose={() => setDrawerWork(null)}
+          onClose={() => setDrawerSessionId(null)}
           onOpenSession={(sessionId) => {
-            setDrawerWork(null);
+            setDrawerSessionId(null);
             void openInNormalMode(sessionId);
           }}
         />

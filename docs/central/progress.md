@@ -55,7 +55,7 @@ R0～R5 主体完成；R29 的 Interrupted 重派、attach 同步重放、owner 
 - 验证：fmt / clippy -D warnings / nextest 五 crate 通过 / `git diff --check`。
 
 ## 后台工作活动状态可视化（分支 `feature/central-work-activity`，2026-11-25）
-- Issue #778「长时间无进展监控（watchdog）」**淘汰**：模型请求（reqwest 总超时 + 3 次重试）、插件工具调用（清单 `timeout_ms` / sidecar 30s）、终端命令（110s 上限 + 轮询）在各自层面都有超时，静默会被兜成失败走既有失败必达通道；看门狗对合法长操作只会制造噪音，对真正的挂起又只能猜。按「到期交中枢判断」实现过一版并经 review 修复（见 `backup/central-progress-watchdog-full`），最终整体撤回。
-- 保留可见性部分：登记新增正交于 `WorkState` 的活动状态值 `activity`（等待输出 / 回复中 / 思考中 / 等待响应 / 工具执行 / 压缩上下文 / 切换模型 / 重试 / 子代理），消费循环最前统一采集流事件（含免锁快速通道的压缩 / 切换事件），状态条按活动值显示文案与最近动作，抽屉显示「活动 · 最近动作」。
+- Issue #778「长时间无进展监控（watchdog）」**淘汰**：模型请求（reqwest 总超时 + 3 次重试）、插件工具调用（清单 `timeout_ms` / sidecar 30s）、终端命令（工具调用 300s 超时；110s 只是宿主等待反馈窗口）在各自层面都有超时，静默会被兜成失败走既有失败必达通道；看门狗对合法长操作只会制造噪音，对真正的挂起又只能猜。按「到期交中枢判断」实现过一版并经 review 修复，最终整体撤回。
+- 保留可见性部分：登记新增正交于 `WorkState` 的活动状态值 `activity`（等待输出 / 回复中 / 思考中 / 等待响应 / 工具执行 / 压缩上下文 / 切换模型 / 重试 / 子代理），消费循环最前统一采集当前活跃 session 的流事件（含免锁快速通道的压缩 / 切换事件）。Worker 与 workspace 一一对应；无活跃 session 时清空活动与最近动作并待机。普通会话在分类/分配前以 registry 短锁排除；活动实际变化立即广播，重复增量不刷新，`execution_id` 不参与活动投影。Running 登记先于投递建立，投递失败回滚；抽屉按 session 从最新登记实时渲染。
 - 遗留缺口另立 issue：turn 异常退出未发终态事件时登记停在执行中（「终态丢失」，应在 Core 侧保证终态或宿主做确定性对账，与 #778 无关）。
-- 验证：nextest 五 crate 323 通过；frontend tsc 0 错误、vitest 595/595；fmt / clippy -D warnings / `git diff --check` 通过。
+- 验证：cargo test 五 crate 326 通过；frontend tsc 0 错误、vitest 597/597；fmt / clippy -D warnings / `git diff --check` 通过。

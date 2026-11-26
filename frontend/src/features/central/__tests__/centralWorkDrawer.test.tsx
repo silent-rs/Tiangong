@@ -64,6 +64,13 @@ describe('CentralWorkDrawer', () => {
     });
   }
 
+  it('活动标签与最近动作相同时不重复展示', () => {
+    renderDrawer(makeItem({ activity: 'responding', last_activity: '回复中' }));
+    expect(container.querySelector('[data-testid="drawer-activity"]')?.textContent).toBe(
+      '回复中',
+    );
+  });
+
   it('活动状态值（Issue #778 保留部分）：running 时显示活动与最近动作', async () => {
     renderDrawer(makeItem({ activity: 'compressing', last_activity: '压缩上下文' }));
     expect(container.querySelector('[data-testid="drawer-activity"]')?.textContent).toBe(

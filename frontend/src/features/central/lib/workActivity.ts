@@ -1,7 +1,6 @@
 /**
- * 活动状态值（Issue #778 保留部分）的前端展示口径：与后端
- * `central_state::activity` 的 `WorkActivity::label()` 同一套中文短标签，
- * 状态条与抽屉共用。
+ * 活动状态值（Issue #778 保留部分）的前端展示口径。标签与后端
+ * `central_state::activity::WorkActivity::label()` 保持一致，状态条与抽屉共用。
  */
 import type { WorkActivity } from '../api';
 
@@ -17,7 +16,24 @@ export const ACTIVITY_LABELS: Record<WorkActivity, string> = {
   subagent: '子代理中',
 };
 
-/** 非 running 的工作没有活动语义；旧后端缺省按 pending。 */
+/** 非 running 的工作没有活动语义；旧后端或未知运行时值按 pending。 */
 export function activityOf(item: { state: string; activity?: WorkActivity | null }): WorkActivity {
-  return item.state === 'running' ? (item.activity ?? 'pending') : 'pending';
+  const activity = item.activity;
+  return item.state === 'running' &&
+    activity &&
+    Object.prototype.hasOwnProperty.call(ACTIVITY_LABELS, activity)
+    ? activity
+    : 'pending';
+}
+
+/** 最近动作与活动标签相同时不重复展示（如「回复中 · 回复中」）。 */
+export function activityDetail(item: {
+  state: string;
+  activity?: WorkActivity | null;
+  last_activity?: string | null;
+}): string | null {
+  if (item.state !== 'running') return null;
+  const detail = item.last_activity?.trim();
+  if (!detail) return null;
+  return detail === ACTIVITY_LABELS[activityOf(item)] ? null : detail;
 }
