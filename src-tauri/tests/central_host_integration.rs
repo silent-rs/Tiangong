@@ -135,6 +135,7 @@ fn dispatch_reuse_fires_live_slot_callback() {
             state: central_state::WorkState::Running,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: Some("exec-live".to_string()),
             pending_question: None,
@@ -202,6 +203,7 @@ fn activation_summary_builds_from_verifiable_facts() {
             state: central_state::WorkState::WaitingUser,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -215,6 +217,7 @@ fn activation_summary_builds_from_verifiable_facts() {
             state: central_state::WorkState::Interrupted,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -239,6 +242,7 @@ fn activation_summary_builds_from_verifiable_facts() {
         state: central_state::WorkState::Running,
         reused_session: false,
         last_activity: None,
+        activity: central_state::WorkActivity::Pending,
         cwd: None,
         execution_id: None,
         pending_question: None,
@@ -271,6 +275,84 @@ fn central_test_app() -> (tiangong_app::app::TiangongApp, std::path::PathBuf) {
         TiangongApp::new_for_test(root.keep(), ws.to_string_lossy().to_string()),
         ws_path,
     )
+}
+
+/// 投递闭包在真正投递前同步发一个活动信号，用于锁定「Running 必须先于
+/// 投递」以及「恢复投递后不得重置活动」的编排顺序。
+fn central_test_app_with_activity_on_deliver(
+    fail_delivery: bool,
+) -> (TiangongApp, std::path::PathBuf) {
+    let (mut app, ws) = central_test_app();
+    std::fs::write(
+        app.core_manager.storage_root().join("models.json"),
+        serde_json::json!({
+            "providers": {"p": {"base_url": "https://api.example.com", "api_key": "k"}},
+            "models": {"k3": {"provider": "p", "model": "k3-pro", "capabilities": ["chat"]}},
+            "routing": {"chat": "k3"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let central_holder: std::sync::Arc<
+        std::sync::OnceLock<std::sync::Arc<tiangong_app::central_host::CentralHostState>>,
+    > = std::sync::Arc::new(std::sync::OnceLock::new());
+    let deliver_holder = central_holder.clone();
+    let deliver: tiangong_app::central_host::DeliverPreparedFn =
+        std::sync::Arc::new(move |session_id, _message_id, _prepared, _model_ref| {
+            let central = deliver_holder.get().expect("central 已初始化");
+            assert_eq!(
+                tiangong_app::central_host::activity::note_stream_signal(
+                    central.as_ref(),
+                    &session_id,
+                    &tiangong_types::StreamEvent::ContextCompressing {
+                        summary_up_to: 0,
+                        total_messages: 1,
+                    },
+                ),
+                tiangong_app::central_host::activity::Emit::Now,
+                "投递时必须已有 Running 登记，早期活动信号不能被丢弃",
+            );
+            if fail_delivery {
+                Box::pin(async move { Err("deliver failed".to_string()) })
+            } else {
+                Box::pin(async move { Ok(()) })
+            }
+        });
+    let cm_ensure = app.core_manager.clone();
+    let ensure: tiangong_app::central_host::EnsureCoreFn =
+        std::sync::Arc::new(move |session_id, cwd, model_ref, stream_tx| {
+            let cm = cm_ensure.clone();
+            Box::pin(async move {
+                let config = tiangong_core::config::core::CoreConfig::default();
+                let workspace = cwd.unwrap_or_default();
+                cm.ensure_core(
+                    &session_id,
+                    config,
+                    workspace,
+                    model_ref.as_deref(),
+                    stream_tx,
+                    Vec::new,
+                )
+                .await
+                .map(|ensured| ensured.is_new)
+            })
+        });
+    let starter: tiangong_app::central_host::StreamConsumerStarter =
+        std::sync::Arc::new(move |_session_id, stream_rx| {
+            std::thread::spawn(move || for _ in stream_rx {});
+        });
+    let central = std::sync::Arc::new(tiangong_app::central_host::CentralHostState::new(
+        app.core_manager.clone(),
+        app.state.clone(),
+        std::sync::Arc::new(std::sync::OnceLock::new()),
+        starter,
+        deliver,
+        ensure,
+    ));
+    central_holder.set(central.clone()).ok();
+    app.central = central;
+    (app, ws)
 }
 
 fn dispatch_request(
@@ -497,6 +579,7 @@ fn reg_entry(
         state,
         reused_session: false,
         last_activity: None,
+        activity: central_state::WorkActivity::Pending,
         cwd: None,
         execution_id: exec.map(str::to_string),
         pending_question: None,
@@ -1026,6 +1109,16 @@ async fn host_control_cancel_running_work_sends_command() {
             central_state::WorkState::Running,
             Some("exec-run1"),
         ));
+    {
+        let mut registry = state.central.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter_mut()
+            .rev()
+            .find(|e| e.session_id == "s-run")
+            .unwrap();
+        entry.activity = central_state::WorkActivity::ToolRunning;
+        entry.last_activity = Some("执行 cargo".into());
+    }
     let _ = tiangong_app::central::upsert_work_item(
         &storage_root,
         &tiangong_app::central::WorkItemRecord {
@@ -1071,6 +1164,11 @@ async fn host_control_cancel_running_work_sends_command() {
         .find(|e| e.work_id == "work-run1")
         .unwrap();
     assert_eq!(entry.state, central_state::WorkState::Cancelled);
+    assert_eq!(entry.activity, central_state::WorkActivity::Pending);
+    assert!(
+        entry.last_activity.is_none(),
+        "取消后无活跃 session，旧动作应清空"
+    );
 }
 
 /// 旧时间线迁移：work-items.json 带 events → migrate → 日志承接。
@@ -1481,6 +1579,7 @@ async fn host_sender_channel_consumes_all_message_kinds() {
             state: central_state::WorkState::ReportQueued,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -1877,6 +1976,7 @@ async fn host_control_cancel_persists_terminal_state() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: Some("exec-ctl1".into()),
             pending_question: None,
@@ -1990,10 +2090,21 @@ async fn host_control_pause_resume_roundtrip() {
             state: central_state::WorkState::Running,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: Some("exec-res1".into()),
             pending_question: None,
         });
+    {
+        let mut registry = state.central.central_work_registry.lock().unwrap();
+        let entry = registry
+            .iter_mut()
+            .rev()
+            .find(|e| e.session_id == "s-resume")
+            .unwrap();
+        entry.activity = central_state::WorkActivity::Responding;
+        entry.last_activity = Some("回复中".into());
+    }
     // pause
     tiangong_app::central_host::dispatch::handle_central_control(
         &state.central,
@@ -2013,6 +2124,11 @@ async fn host_control_pause_resume_roundtrip() {
             .find(|e| e.session_id == "s-resume")
             .unwrap();
         assert_eq!(entry.state, central_state::WorkState::Paused);
+        assert_eq!(entry.activity, central_state::WorkActivity::Pending);
+        assert!(
+            entry.last_activity.is_none(),
+            "暂停后无活跃 session，旧动作应清空"
+        );
     }
     // resume：走 Steer→dispatch 链（复用会话）——直接调派发链并断言
     // 成功（错误路径只 warn 会被吞，这里显式暴露）
@@ -2076,6 +2192,7 @@ fn host_reports_push_take_clear_cycle() {
             state: central_state::WorkState::ReportQueued,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2192,6 +2309,7 @@ async fn host_second_turn_after_resume_is_reported() {
             state: central_state::WorkState::Running,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2273,6 +2391,7 @@ async fn host_owner_callback_respects_ownership_filter() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2344,6 +2463,7 @@ async fn host_enqueue_preserves_running_entry() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2388,6 +2508,7 @@ async fn host_terminal_fallback_skips_queued_entry() {
             state: central_state::WorkState::Queued,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: None,
             execution_id: None,
             pending_question: None,
@@ -2436,6 +2557,7 @@ async fn host_plan_resume_not_merged_but_steer_is() {
             state: central_state::WorkState::Paused,
             reused_session: true,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
             pending_question: None,
@@ -2511,6 +2633,7 @@ async fn host_plan_queue_decision_returns_queued() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
             pending_question: None,
@@ -2589,6 +2712,7 @@ async fn host_dispatch_queued_does_not_deliver() {
             state: central_state::WorkState::Running,
             reused_session: false,
             last_activity: None,
+            activity: central_state::WorkActivity::Pending,
             cwd: Some(ws.to_string_lossy().to_string()),
             execution_id: None,
             pending_question: None,
@@ -3999,4 +4123,276 @@ fn call_central_tool(
         "test",
     );
     futures_block_on(future).expect("中枢工具必须被本插件处理")
+}
+
+#[tokio::test]
+async fn host_dispatch_captures_activity_emitted_during_delivery() {
+    let app = tauri::test::mock_app();
+    let (state, _ws) = central_test_app_with_activity_on_deliver(false);
+    app.manage(state.central.clone());
+    app.manage(state);
+    let handle = app.handle();
+    let state = state_of(handle);
+    let mut request = dispatch_request("work-early", "s-early", "早期活动", false);
+    request.execution_id = "exec-early".into();
+
+    handle_central_dispatch(&state.central, handle, request)
+        .await
+        .expect("投递成功");
+
+    let registry = state.central.central_work_registry.lock().unwrap();
+    let entry = registry
+        .iter()
+        .rev()
+        .find(|entry| entry.session_id == "s-early")
+        .unwrap();
+    assert_eq!(entry.activity, central_state::WorkActivity::Compressing);
+    assert_eq!(entry.last_activity.as_deref(), Some("压缩上下文"));
+}
+
+#[tokio::test]
+async fn host_resume_waiting_preserves_activity_emitted_during_delivery() {
+    let app = tauri::test::mock_app();
+    let (state, _ws) = central_test_app_with_activity_on_deliver(false);
+    state
+        .central
+        .central_work_registry
+        .lock()
+        .unwrap()
+        .push(reg_entry(
+            "work-resume-activity",
+            "s-resume-activity",
+            central_state::WorkState::WaitingUser,
+            Some("exec-old"),
+        ));
+    app.manage(state.central.clone());
+    app.manage(state);
+    let handle = app.handle();
+    let state = state_of(handle);
+    let mut request = dispatch_request(
+        "work-resume-activity",
+        "s-resume-activity",
+        "用户答复",
+        true,
+    );
+    request.execution_id = "exec-resume-activity".into();
+
+    handle_central_dispatch(&state.central, handle, request)
+        .await
+        .expect("恢复投递成功");
+
+    let registry = state.central.central_work_registry.lock().unwrap();
+    let entry = registry
+        .iter()
+        .rev()
+        .find(|entry| entry.session_id == "s-resume-activity")
+        .unwrap();
+    assert_eq!(entry.state, central_state::WorkState::Running);
+    assert_eq!(entry.activity, central_state::WorkActivity::Compressing);
+    assert_eq!(entry.last_activity.as_deref(), Some("压缩上下文"));
+}
+
+#[tokio::test]
+async fn host_failed_delivery_rolls_back_prepared_running_entry() {
+    let app = tauri::test::mock_app();
+    let (state, _ws) = central_test_app_with_activity_on_deliver(true);
+    state
+        .central
+        .central_work_registry
+        .lock()
+        .unwrap()
+        .push(reg_entry(
+            "work-old",
+            "s-rollback",
+            central_state::WorkState::Interrupted,
+            Some("exec-old"),
+        ));
+    app.manage(state.central.clone());
+    app.manage(state);
+    let handle = app.handle();
+    let state = state_of(handle);
+    let mut request = dispatch_request("work-new", "s-rollback", "失败投递", false);
+    request.execution_id = "exec-new".into();
+
+    let error = handle_central_dispatch(&state.central, handle, request)
+        .await
+        .expect_err("投递失败应返回错误");
+    assert_eq!(error, "deliver failed");
+
+    let registry = state.central.central_work_registry.lock().unwrap();
+    assert_eq!(registry.len(), 1, "预备的 Running 条目应被撤销");
+    let entry = &registry[0];
+    assert_eq!(entry.work_id, "work-old");
+    assert_eq!(entry.state, central_state::WorkState::Interrupted);
+    assert_eq!(entry.activity, central_state::WorkActivity::Pending);
+}
+
+// ===== 后台工作活动状态（Issue #778 保留部分：可见性）=====
+//
+// 看门狗判定已淘汰（模型请求 / 插件工具 / 终端命令各自有超时，静默会被兜成
+// 失败走既有回报通道）；保留的是活动状态值驱动的状态条实时展示。
+
+/// 消费循环的统一信号入口按真实流事件驱动——快速通道事件（压缩）与输出 /
+/// 重试都被采集并刷新登记，计时事件零语义；活动变化立即广播，终态后不再更新。
+#[test]
+fn stream_signal_entry_updates_activity_and_emits_each_change() {
+    use tiangong_app::central_host::activity::{note_stream_signal, Emit};
+    let (app, _ws) = central_test_app();
+    let session = "s-activity";
+    app.central
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(central_state::registry_entry_after_dispatch(
+            "work-activity",
+            session,
+            "任务",
+            None,
+            false,
+            None,
+            "2026-11-25 10:00:00",
+            "exec-1",
+        ));
+    assert!(app.central.has_running_work_session(session));
+    assert!(!app.central.has_running_work_session("unknown-session"));
+    let status = |app: &TiangongApp| {
+        app.central
+            .central_work_status()
+            .into_iter()
+            .rev()
+            .find(|entry| entry.session_id == session)
+    };
+    // 活动变化立即广播；重复增量不会刷新前端。
+    // 计时事件：非活动信号
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::TurnElapsed { seconds: 3 },
+        ),
+        Emit::None
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Pending
+    );
+    // 免锁快速通道的压缩事件也被采集，立即广播
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::ContextCompressing {
+                summary_up_to: 0,
+                total_messages: 1
+            },
+        ),
+        Emit::Now
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Compressing
+    );
+    assert_eq!(
+        status(&app).unwrap().last_activity.as_deref(),
+        Some("压缩上下文")
+    );
+    {
+        let mut registry = app.central.central_work_registry.lock().unwrap();
+        registry
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.session_id == session)
+            .unwrap()
+            .execution_id = Some("exec-2".into());
+    }
+    // 同一活跃 session 进入新轮次后，活动仍跟随 session，不按 execution_id 过滤。
+    // 快速状态切换立即广播最新状态，不进入可能丢尾的节流窗口。
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::Delta {
+                message_id: "m1".to_string(),
+                content: "x".to_string(),
+                tokens: None,
+            },
+        ),
+        Emit::Now
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Responding
+    );
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::Delta {
+                message_id: "m1".to_string(),
+                content: "next chunk".to_string(),
+                tokens: None,
+            },
+        ),
+        Emit::None,
+        "重复增量不广播，但 registry 仍保持最新 session 的活动"
+    );
+    // 重试是新的活动文案，立即广播。
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::Retry {
+                message: "timeout".to_string(),
+                attempt: 2,
+                max_attempts: 3,
+            },
+        ),
+        Emit::Now
+    );
+    assert_eq!(
+        status(&app).unwrap().last_activity.as_deref(),
+        Some("重试模型请求（2/3）")
+    );
+    // 普通会话：无 running 登记，零语义
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            "unknown-session",
+            &tiangong_types::StreamEvent::Reasoning {
+                message_id: "m2".to_string(),
+                content: "想".to_string(),
+                tokens: None,
+            },
+        ),
+        Emit::None
+    );
+    // 终态后活动状态复位，且不再更新
+    let mut request = dispatch_request("work-activity", session, "任务", false);
+    request.execution_id = "exec-1".to_string();
+    app.central.on_central_work_finished(
+        &request,
+        true,
+        "[后台工作完成] work-activity\n任务：任务",
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Pending
+    );
+    assert!(status(&app).unwrap().last_activity.is_none());
+    assert!(!app.central.has_running_work_session(session));
+    assert_eq!(
+        note_stream_signal(
+            &app.central,
+            session,
+            &tiangong_types::StreamEvent::ToolStart {
+                name: "cargo".to_string(),
+                args_summary: String::new(),
+            },
+        ),
+        Emit::None
+    );
+    assert_eq!(
+        status(&app).unwrap().activity,
+        central_state::WorkActivity::Pending
+    );
 }

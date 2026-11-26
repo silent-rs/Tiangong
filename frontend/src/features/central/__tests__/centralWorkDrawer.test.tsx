@@ -64,6 +64,22 @@ describe('CentralWorkDrawer', () => {
     });
   }
 
+  it('活动标签与最近动作相同时不重复展示', () => {
+    renderDrawer(makeItem({ activity: 'responding', last_activity: '回复中' }));
+    expect(container.querySelector('[data-testid="drawer-activity"]')?.textContent).toBe(
+      '回复中',
+    );
+  });
+
+  it('活动状态值（Issue #778 保留部分）：running 时显示活动与最近动作', async () => {
+    renderDrawer(makeItem({ activity: 'compressing', last_activity: '压缩上下文' }));
+    expect(container.querySelector('[data-testid="drawer-activity"]')?.textContent).toBe(
+      '压缩中 · 压缩上下文',
+    );
+    // 非 running：没有活动行
+    renderDrawer(makeItem({ state: 'completed', activity: 'compressing' }));
+    expect(container.querySelector('[data-testid="drawer-activity"]')).toBeNull();
+  });
   it('渲染工作详情并从事件日志加载时间线（人读类型名）', async () => {
     timelineMock.mockResolvedValue([
       { at: '2026-11-13 10:00:00', kind: 'work_item.started', note: '派发投递成功' },

@@ -127,6 +127,10 @@ impl crate::CentralHostState {
                     } else {
                         None
                     };
+                // 状态离开 running：活动状态与最近动作失效（恢复执行时由派发
+                // 路径重新置 Pending）
+                registry[position].activity = central_state::WorkActivity::Pending;
+                registry[position].last_activity = None;
             }
         }
         if matches!(outcome, WorkOutcome::WaitingUser) {

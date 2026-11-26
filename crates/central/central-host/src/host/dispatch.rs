@@ -188,6 +188,9 @@ pub async fn handle_central_control<R: tauri::Runtime>(
                     if control.action == "cancelled" {
                         entry.pending_question = None;
                     }
+                    // 暂停/取消后没有活跃 session：Worker 回到待机，旧动作失效。
+                    entry.activity = central_state::WorkActivity::Pending;
+                    entry.last_activity = None;
                 }
             }
             if control.action == "cancelled" {
@@ -311,6 +314,7 @@ pub async fn enqueue_central_dispatch(
                 state: central_state::WorkState::Queued,
                 reused_session: request.reused_session,
                 last_activity: None,
+                activity: central_state::WorkActivity::Pending,
                 cwd: None,
                 execution_id: Some(request.execution_id.clone()),
                 pending_question: None,
@@ -631,6 +635,97 @@ pub async fn plan_central_dispatch(
     })
 }
 
+struct RunningRegistryPreparation {
+    previous: Option<central_state::WorkStatus>,
+    inserted: bool,
+}
+
+/// 在投递前建立 Running 登记，确保消费者能立即识别当前活跃 session。
+/// 已存在同 execution 的 Running 条目（waiting_user 恢复）时保留其活动，
+/// 不重置为 Pending；已推进到终态的条目也不回退。
+fn prepare_running_registry(
+    state: &crate::CentralHostState,
+    request: &crate::CentralDispatchRequest,
+    registry_task: Option<&str>,
+    cwd: &str,
+) -> RunningRegistryPreparation {
+    let mut registry = state
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let previous = registry
+        .iter()
+        .rev()
+        .find(|entry| entry.session_id == request.session_id)
+        .cloned();
+    let current = registry
+        .iter()
+        .rev()
+        .find(|entry| entry.session_id == request.session_id);
+    let already_running = current.is_some_and(|entry| {
+        entry.execution_id.as_deref() == Some(request.execution_id.as_str())
+            && entry.state == central_state::WorkState::Running
+    });
+    let already_advanced = current.is_some_and(|entry| {
+        entry.execution_id.as_deref() == Some(request.execution_id.as_str())
+            && !matches!(
+                entry.state,
+                central_state::WorkState::Running | central_state::WorkState::Queued
+            )
+    });
+    if already_running || already_advanced {
+        return RunningRegistryPreparation {
+            previous,
+            inserted: false,
+        };
+    }
+    let display_task = registry_task.unwrap_or(&request.task);
+    central_state::upsert_registry_entry(
+        &mut registry,
+        central_state::registry_entry_after_dispatch(
+            &request.work_id,
+            &request.session_id,
+            display_task,
+            request.model.as_deref(),
+            request.reused_session,
+            Some(cwd),
+            &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            &request.execution_id,
+        ),
+    );
+    RunningRegistryPreparation {
+        previous,
+        inserted: true,
+    }
+}
+
+/// 投递失败时撤销本次预备的 Running 登记；若消费者已推进到 WaitingUser/
+/// 终态，或同 session 已被新 execution 接管，则不覆盖更新状态。
+fn rollback_running_registry(
+    state: &crate::CentralHostState,
+    request: &crate::CentralDispatchRequest,
+    preparation: RunningRegistryPreparation,
+) {
+    if !preparation.inserted {
+        return;
+    }
+    let mut registry = state
+        .central_work_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let position = registry.iter().rposition(|entry| {
+        entry.session_id == request.session_id
+            && entry.execution_id.as_deref() == Some(request.execution_id.as_str())
+            && entry.state == central_state::WorkState::Running
+    });
+    if let Some(position) = position {
+        registry.remove(position);
+        if let Some(previous) = preparation.previous {
+            registry.push(previous);
+        }
+    }
+}
+
 pub async fn handle_central_dispatch<R: tauri::Runtime>(
     state: &crate::CentralHostState,
     app: &tauri::AppHandle<R>,
@@ -687,24 +782,8 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
     if !steer_merged_into_running {
         state.execution_router.register(&sid, &request.execution_id);
     }
-    if state.core_manager.has_live_core(&sid) {
-        // Core 活跃（复用/引导/并发派发）：不重建，投递消息（忙→引导并入
-        // 当前 turn；空闲→开新 turn，消费者已在线）。回调在投递成功后挂载
-        // （投递失败经 cancel 清理，不残留）。
-        if let Err(error) = (state.deliver_prepared)(
-            sid.clone(),
-            scru128::new().to_string(),
-            prepared,
-            effective_model.map(str::to_string),
-        )
-        .await
-        {
-            state.execution_router.cancel(&sid, &request.execution_id);
-            refund_workspace_approval(state, &approval_consumed);
-            return Err(error);
-        }
-        // 成功登记后统一 attach：同步重放不能先于 Started/Running。
-    } else {
+    let core_existed = state.core_manager.has_live_core(&sid);
+    if !core_existed {
         // Core 不存在（新建会话/重启后复用）：ensure 创建并启动流消费者
         // （is_new 守卫：命中复用说明并发创建，流通道会被丢弃，显式报错）。
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
@@ -743,20 +822,34 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
                 tracing::warn!(session_id = %sid, error, "复用派发的模型选择持久化失败");
             }
         }
-        if let Err(error) = (state.deliver_prepared)(
-            sid.clone(),
-            scru128::new().to_string(),
-            prepared,
-            effective_model.map(str::to_string),
-        )
-        .await
-        {
-            state.execution_router.cancel(&sid, &request.execution_id);
-            refund_workspace_approval(state, &approval_consumed);
-            return Err(error);
-        }
-        // 回调统一在成功登记之后挂载（fire 已由 router 暂存）。
     }
+    // Running 登记必须先于投递：Core 接受消息后可能立即发出模型切换、压缩或
+    // PhaseChanged；若登记滞后，这些早期活动会被消费者按“普通会话”丢弃。
+    // waiting_user 恢复若已存在同 execution 的 Running 条目，则保留其活动，
+    // 不用初始 Pending 覆盖投递期间已经采集到的信号。
+    let registry_preparation = if steer_merged_into_running {
+        RunningRegistryPreparation {
+            previous: None,
+            inserted: false,
+        }
+    } else {
+        prepare_running_registry(state, &request, registry_task.as_deref(), cwd.as_str())
+    };
+    if let Err(error) = (state.deliver_prepared)(
+        sid.clone(),
+        scru128::new().to_string(),
+        prepared,
+        effective_model.map(str::to_string),
+    )
+    .await
+    {
+        rollback_running_registry(state, &request, registry_preparation);
+        emit_central_work_updated_state(state);
+        state.execution_router.cancel(&sid, &request.execution_id);
+        refund_workspace_approval(state, &approval_consumed);
+        return Err(error);
+    }
+    // 回调统一在成功登记之后挂载（fire 已由 router 暂存）。
     tracing::info!(
         execution_id = %request.execution_id,
         work_id = %request.work_id,
@@ -835,45 +928,8 @@ pub async fn handle_central_dispatch<R: tauri::Runtime>(
             let _ = core.set_title(title, false);
         }
     }
-    // 状态登记按**会话维度 upsert**（用户实测：同会话重派后旧 interrupted
-    // 条目残留、多轮派发显示多条）——一个工作会话在徽章中始终是一条，
-    // 重派/引导覆盖更新（work_id/task/时间取最新），中断旧条目自然消失。
-    // waiting_user 恢复（merged）时条目已在上方更新为 running，不重建。
-    if merged_work.work_id == request.work_id && !steer_merged_into_running {
-        {
-            let mut registry = state
-                .central_work_registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            // R29-1/2：只保护本次 execution 已推进的状态，旧 Interrupted
-            // 不阻止重派；WaitingUser/ReportQueued 也不可被 Running 回退。
-            let already_advanced = registry.iter().rev().any(|entry| {
-                entry.session_id == request.session_id
-                    && entry.execution_id.as_deref() == Some(&request.execution_id)
-                    && !matches!(
-                        entry.state,
-                        central_state::WorkState::Running | central_state::WorkState::Queued
-                    )
-            });
-            if !already_advanced {
-                // G1：恢复场景登记显示 owner 原目标（不被答复文本覆盖）
-                let display_task = registry_task.as_deref().unwrap_or(&request.task);
-                central_state::upsert_registry_entry(
-                    &mut registry,
-                    central_state::registry_entry_after_dispatch(
-                        &request.work_id,
-                        &request.session_id,
-                        display_task,
-                        request.model.as_deref(),
-                        request.reused_session,
-                        Some(cwd.as_str()),
-                        &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                        &request.execution_id,
-                    ),
-                );
-            }
-        }
-    }
+    // Running 登记已在投递前准备；此处不再 upsert，避免把投递期间采集到的
+    // activity / last_activity 重置回 Pending / None。
     // 排队标记清除（第十三轮 P2-1）：进入执行即失效——重放的 DispatchNow
     // 路径不经 flush，若不在此清除，下次重启会再次重放导致重复执行。
     if let Err(error) =

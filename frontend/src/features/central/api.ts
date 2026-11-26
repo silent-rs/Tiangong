@@ -2,18 +2,51 @@
 // Tauri command 一一对应。集中于此保持中枢边界清晰。
 import { invoke } from '@/api/host';
 
+/**
+ * 活动状态值（Issue #778 保留部分）：`running` 工作的细粒度状态，与生命周期
+ * `state` 正交，由 Worker 流事件刷新。一个值驱动状态条 / 抽屉的实时展示
+ * （「回复中」「压缩上下文」「重试 n/3」……）。
+ */
+export type WorkActivity =
+  | 'pending'
+  | 'responding'
+  | 'reasoning'
+  | 'requesting'
+  | 'tool_running'
+  | 'compressing'
+  | 'switching_model'
+  | 'retrying'
+  | 'subagent';
+
+export type CentralWorkState =
+  | 'running'
+  | 'report_queued'
+  | 'interrupted'
+  | 'completed'
+  | 'failed'
+  | 'waiting_user'
+  | 'paused'
+  | 'cancelled'
+  | 'queued';
+
+/** 后台工作登记：与 central-state::WorkStatus 的序列化字段保持一致。 */
+export interface CentralWorkStatus {
+  work_id: string;
+  session_id: string;
+  task: string;
+  model: string | null;
+  dispatched_at: string;
+  state: CentralWorkState;
+  reused_session: boolean;
+  last_activity?: string | null;
+  cwd?: string | null;
+  execution_id?: string | null;
+  pending_question?: string | null;
+  activity?: WorkActivity | null;
+}
+
 export const centralApi = {
-  getCentralWorkStatus: (): Promise<
-    Array<{
-      work_id: string;
-      session_id: string;
-      task: string;
-      model: string | null;
-      dispatched_at: string;
-      state: string;
-      reused_session: boolean;
-    }>
-  > => invoke('get_central_work_status'),
+  getCentralWorkStatus: (): Promise<CentralWorkStatus[]> => invoke('get_central_work_status'),
   centralActivationGreeting: (): Promise<void> => invoke('central_activation_greeting'),
   /** R4 模式协调：进入中枢（上报普通上下文快照，宿主保存为事实源）。 */
   centralModeEnter: (

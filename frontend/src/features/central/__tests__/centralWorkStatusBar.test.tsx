@@ -8,7 +8,13 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const listenMock = vi.fn(() => Promise.resolve(() => {}));
+const listenHandlers = new Map<string, (event: unknown) => void>();
+const listenMock = vi.fn((event: string, handler: (event: unknown) => void) => {
+  listenHandlers.set(event, handler);
+  return Promise.resolve(() => {
+    listenHandlers.delete(event);
+  });
+});
 vi.mock('@tauri-apps/api/event', () => ({
   listen: listenMock,
 }));
@@ -96,6 +102,7 @@ describe('CentralWorkStatusBar', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    listenHandlers.clear();
     container = undefined;
   });
 
@@ -188,6 +195,28 @@ describe('CentralWorkStatusBar', () => {
     expect(popover!.textContent).toContain('已中断');
     expect(popover!.textContent).toContain('被中断的任务');
     expect(popover!.textContent).toContain('可让中枢重派');
+  });
+  it('活动状态值（Issue #778 保留部分）：running 行按活动值显示文案（回复中 / 压缩中 / 重试次数 / 旧后端缺省等待输出）', async () => {
+    container = await mountWithItems([
+      makeItem({ work_id: 'w-a', session_id: 's-a', activity: 'compressing', last_activity: '压缩上下文', task: '任务A' }),
+      makeItem({ work_id: 'w-b', session_id: 's-b', activity: 'retrying', last_activity: '重试模型请求（2/3）', task: '任务B' }),
+      makeItem({ work_id: 'w-c', session_id: 's-c', task: '任务C' }),
+      makeItem({ work_id: 'w-d', session_id: 's-d', activity: 'future_activity', task: '任务D' }),
+    ]);
+    const badge = container.querySelector('button')!;
+    act(() => {
+      badge.click();
+    });
+    const rows = Array.from(
+      container.querySelectorAll('[role="button"][tabindex="0"]'),
+    ).map((row) => row.textContent ?? '');
+    const byTask = (task: string) => rows.find((text) => text.includes(task)) ?? '';
+    expect(byTask('任务A')).toContain('压缩中');
+    expect(byTask('任务A')).toContain('压缩上下文');
+    expect(byTask('任务B')).toContain('重试中');
+    expect(byTask('任务B')).toContain('重试模型请求（2/3）');
+    expect(byTask('任务C')).toContain('等待输出');
+    expect(byTask('任务D')).toContain('等待输出');
   });
 
   it('focus 进入容器不触发 250ms 关闭（a11y focus-within）', async () => {
@@ -346,6 +375,31 @@ describe('CentralWorkStatusBar', () => {
     ).filter((row) => (row.textContent ?? '').includes('任务标题'));
     expect(rows.length).toBe(1);
     expect(text).toContain('最新任务标题');
+  });
+
+  it('抽屉打开后活动与最近动作随 central-work-updated 刷新', async () => {
+    container = await mountWithItems([
+      makeItem({ activity: 'responding', last_activity: '回复中' }),
+    ]);
+    const badge = container.querySelector('button')!;
+    act(() => badge.click());
+    const row = container.querySelector('[role="button"][tabindex="0"]')!;
+    act(() => row.click());
+    expect(container.querySelector('[data-testid="drawer-activity"]')?.textContent).toBe(
+      '回复中',
+    );
+
+    getCentralWorkStatusMock.mockResolvedValue([
+      makeItem({ activity: 'tool_running', last_activity: '执行 cargo' }),
+    ]);
+    await act(async () => {
+      listenHandlers.get('central-work-updated')?.({});
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="drawer-activity"]')?.textContent).toBe(
+      '执行中 · 执行 cargo',
+    );
   });
 
   it('R4 工作抽屉：点击工作行打开抽屉（不切模式），「打开原始工作会话」才切', async () => {

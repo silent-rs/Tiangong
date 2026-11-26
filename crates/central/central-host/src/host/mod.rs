@@ -1,4 +1,5 @@
 //! 中枢宿主层模块（原 `src-tauri/src/central_host`，R6 抽离为独立 crate）。
+pub mod activity;
 pub mod authorization;
 pub mod central_events;
 pub mod core_lifecycle;

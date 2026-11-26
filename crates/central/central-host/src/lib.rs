@@ -20,7 +20,7 @@ pub use host::recovery::recover_central_work_state;
 pub use host::events::emit_central_work_updated;
 pub use host::recovery::inject_central_activation_summary;
 pub use host::{
-    authorization, central_events, core_lifecycle, dispatch, events, mode_commands,
+    activity, authorization, central_events, core_lifecycle, dispatch, events, mode_commands,
     mode_coordinator, recovery, reports, work_view,
 };
 

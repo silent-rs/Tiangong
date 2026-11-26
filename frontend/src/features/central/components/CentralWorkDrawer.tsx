@@ -10,6 +10,8 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/api/tauri';
+import type { CentralWorkStatus } from '@/features/central/api';
+import { ACTIVITY_LABELS, activityDetail, activityOf } from '@/features/central/lib/workActivity';
 import {
   X,
   Loader2,
@@ -24,18 +26,7 @@ import {
   History,
 } from 'lucide-react';
 
-export interface CentralWorkDrawerItem {
-  work_id: string;
-  session_id: string;
-  task: string;
-  model: string | null;
-  dispatched_at: string;
-  state: string;
-  reused_session: boolean;
-  last_activity?: string | null;
-  cwd?: string | null;
-  execution_id?: string | null;
-}
+export type CentralWorkDrawerItem = CentralWorkStatus;
 
 interface TimelineEntry {
   at: string;
@@ -137,6 +128,7 @@ export function CentralWorkDrawer({
   }, [onClose]);
 
   const meta = STATE_META[work.state] ?? { label: work.state, className: 'text-muted-foreground' };
+  const detail = activityDetail(work);
 
   return (
     <>
@@ -187,6 +179,15 @@ export function CentralWorkDrawer({
             <span className="text-muted-foreground">当前执行</span>
             <span className="truncate font-mono" title={work.execution_id}>
               {work.execution_id}
+            </span>
+          </div>
+        ) : null}
+        {work.state === 'running' ? (
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">活动</span>
+            <span className="truncate" data-testid="drawer-activity">
+              {ACTIVITY_LABELS[activityOf(work)]}
+              {detail ? ` · ${detail}` : ''}
             </span>
           </div>
         ) : null}
