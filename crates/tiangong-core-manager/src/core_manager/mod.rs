@@ -217,10 +217,13 @@ impl CoreManager {
 
     /// 指定会话在磁盘上是否存在。
     pub fn session_exists(&self, session_id: &str) -> bool {
-        self.storage_root
-            .join("sessions")
-            .join(format!("{session_id}.json"))
-            .exists()
+        // 路径规则与 `Session::load_from_storage` 同源：中枢对话单独存储在
+        // `central/sessions/`。此前这里硬编码 `sessions/`，中枢会话恒判不存在——
+        // 编辑重发在校验阶段即被拒「会话不存在：central-hub」，发送路径却走得通
+        //（send_message 不查存在性），表现为「中枢模式消息编辑后无法重发」。
+        Session::session_file_path(&self.storage_root, session_id)
+            .map(|path| path.exists())
+            .unwrap_or(false)
     }
 
     /// 删除磁盘上的会话文件（不操作 cores registry——调用方按需 retire_core）。
@@ -495,6 +498,28 @@ mod tests {
         session.id = id.to_string();
         session.bind_storage_root(dir.path().to_path_buf());
         session.try_persist_to_disk().unwrap();
+    }
+
+    /// 中枢对话单独存储（central/sessions/）：存在性判定必须与 load 的路径规则
+    /// 同源，否则编辑重发会在校验阶段误判「会话不存在」（2026-11-25 实测）。
+    #[test]
+    fn central_session_existence_follows_session_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager(&dir);
+        assert!(!manager.session_exists(tiangong_types::central_session::CENTRAL_SESSION_ID));
+        let central_dir = dir.path().join("central").join("sessions");
+        std::fs::create_dir_all(&central_dir).unwrap();
+        std::fs::write(
+            Session::session_file_path(dir.path(), "central-hub").unwrap(),
+            "{}",
+        )
+        .unwrap();
+        assert!(
+            manager.session_exists(tiangong_types::central_session::CENTRAL_SESSION_ID),
+            "中枢会话文件存在时必须判定存在（与 load_session 同路径）"
+        );
+        // 非法 ID 不panic、判不存在
+        assert!(!manager.session_exists("../escape"));
     }
 
     #[test]
