@@ -172,8 +172,9 @@ async fn 压缩失败仍继续切换模型() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     // 压缩恒失败。
+    // 400 不会触发重试；本用例只验证压缩失败不阻断切换，不验证重试策略。
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("boom"))
         .mount(&server)
         .await;
     seed_models(&dir, &server.uri(), "model-a");

@@ -511,8 +511,9 @@ mod handoff_e2e_tests {
         let (store, manager) = make_pair(&dir);
         // 压缩恒失败：对话继续后 KV 缓存已按当前上下文写入，重压无意义。
         let server = MockServer::start().await;
+        // 400 不会触发模型重试；本用例只验证交接失败后的定档语义。
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("always fail"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("always fail"))
             .mount(&server)
             .await;
         seed_session_with_stale_pin(&dir, &store, "e2e-fail");
