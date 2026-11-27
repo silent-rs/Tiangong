@@ -1,5 +1,6 @@
 import { config } from "md-editor-rt";
 import type LinkifyIt from "linkify-it";
+import { installMarkdownHtmlGuard } from "@/utils/markdownHtmlGuard";
 import {
   BROWSER_RENDERABLE_EXT_RE,
   isLocalFileUrl,
@@ -7,8 +8,12 @@ import {
 } from "@/components/message/utils";
 
 /**
- * 消息 Markdown 预览的链接识别修正（作用于全部 MdPreview 实例，须在
- * 首个预览挂载前调用，应用入口执行一次）。
+ * 消息 Markdown 预览的 markdown-it 全局定制（作用于全部 MdPreview 实例，须在
+ * 首个预览挂载前调用，应用入口执行一次）。config() 对 markdownItConfig 是
+ * 整体替换而非叠加，裸 HTML 防护与链接修正必须在同一个回调里装配。
+ *
+ * 0. 裸 HTML 防护：代码块之外的 <style>/<script> 等不进入文档，class/style/
+ *    事件属性剥离——见 markdownHtmlGuard.ts。
  *
  * 1. 文件名误识别为链接：linkify 默认开启 fuzzyLink，把「单词.顶级域」
  *    样式的裸词识别为无协议链接——文件后缀大量撞真实 TLD（.rs/.sh/.py/
@@ -69,12 +74,14 @@ function decodeLinkUrl(url: string): string {
 
 let configured = false;
 
-export function setupMarkdownLinkify() {
+export function setupMarkdownPreview() {
   if (configured) return;
   configured = true;
 
   config({
     markdownItConfig(md) {
+      installMarkdownHtmlGuard(md);
+
       // 本地文件链接一律通过校验（见头部注释 3）：校验失败会让 markdown-it
       // 把整个 [文本](目标) 语法当字面文本输出，正文结构被破坏。是否可点击
       // 的裁决下移到 link_open/link_close 渲染层。远程链接与危险协议仍走

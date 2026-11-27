@@ -3,10 +3,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MdPreview } from 'md-editor-rt';
-import { setupMarkdownLinkify } from '@/utils/markdownLinkify';
+import { setupMarkdownPreview } from '@/utils/markdownLinkify';
 import { resolveMarkdownImages } from '@/components/message/utils';
 
-setupMarkdownLinkify();
+setupMarkdownPreview();
 
 /** 真实会话原文（2026-09-15 触发塌陷的助手回复）：反引号转义嵌套
  *  （\`）使代码段划分错位，裸 <a> 落入普通文本开标签吞后续块。 */

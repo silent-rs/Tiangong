@@ -3,10 +3,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MdPreview } from 'md-editor-rt';
-import { setupMarkdownLinkify } from '@/utils/markdownLinkify';
+import { setupMarkdownPreview } from '@/utils/markdownLinkify';
 import { resolveMarkdownImages } from '@/components/message/utils';
 
-setupMarkdownLinkify();
+setupMarkdownPreview();
 
 const MD = `放行 file: 协议 — [frontend/src/utils/markdownLinkify.ts:55](/Users/hubertshelley/Documents/silent/tiangong/frontend/src/utils/markdownLinkify.ts)
 包装默认 \`validateLink\`，只额外放行 \`file:\`，其余危险协议仍由默认实现拒绝。
