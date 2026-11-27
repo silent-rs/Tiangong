@@ -40,6 +40,7 @@ where
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
+        let req = self.client.prepare_request(req).await?;
         let request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         // Responses 模式下 stream 标志由 SDK 在 create_stream 内强制开启

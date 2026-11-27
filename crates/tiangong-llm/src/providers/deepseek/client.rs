@@ -1,9 +1,12 @@
 use super::config::DeepSeekConfig;
 use super::error::map_deepseek_error;
+use super::uploads::{self, DeepSeekFileIdTable};
 use crate::error::LlmError;
 use crate::model::ProviderModelInfo;
+use crate::request::ProviderRequest;
 use async_trait::async_trait;
 use futures_util::Stream;
+use std::time::Duration;
 use tiangong_deepseek::types::{CreateResponseRequest, ResponsesEventStream};
 
 pub type DeepSeekStream = std::pin::Pin<
@@ -12,6 +15,9 @@ pub type DeepSeekStream = std::pin::Pin<
 
 #[async_trait]
 pub(crate) trait DeepSeekTransport: Send + Sync {
+    async fn prepare_request(&self, request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
+        Ok(request)
+    }
     async fn create_stream(
         &self,
         request: CreateResponseRequest,
@@ -24,6 +30,11 @@ pub struct NativeDeepSeekTransport {
     client: tiangong_deepseek::DeepSeekClient,
     /// 禁用代理的客户端：环境变量代理不可达（如 VPN 已关闭）时直连重试（#662）。
     direct_client: tiangong_deepseek::DeepSeekClient,
+    /// Files API 上传 + 文档解析可能各需 120 秒，使用独立长超时客户端。
+    files_client: tiangong_deepseek::DeepSeekClient,
+    direct_files_client: tiangong_deepseek::DeepSeekClient,
+    file_ids: DeepSeekFileIdTable,
+    file_upload_defaults: serde_json::Map<String, serde_json::Value>,
 }
 
 impl NativeDeepSeekTransport {
@@ -33,10 +44,27 @@ impl NativeDeepSeekTransport {
             .timeout(config.timeout)
             .headers(config.headers.clone());
         let client = builder.clone().build().map_err(map_deepseek_error)?;
-        let direct_client = builder.no_proxy().build().map_err(map_deepseek_error)?;
+        let direct_client = builder
+            .clone()
+            .no_proxy()
+            .build()
+            .map_err(map_deepseek_error)?;
+        let files_builder = builder
+            .clone()
+            .timeout(config.timeout.max(Duration::from_secs(300)));
+        let files_client = files_builder.clone().build().map_err(map_deepseek_error)?;
+        let direct_files_client = files_builder
+            .no_proxy()
+            .build()
+            .map_err(map_deepseek_error)?;
+        let file_upload_defaults = uploads::file_upload_defaults()?;
         Ok(Self {
             client,
             direct_client,
+            files_client,
+            direct_files_client,
+            file_ids: DeepSeekFileIdTable::persistent(),
+            file_upload_defaults,
         })
     }
 
@@ -61,6 +89,23 @@ impl NativeDeepSeekTransport {
 
 #[async_trait]
 impl DeepSeekTransport for NativeDeepSeekTransport {
+    async fn prepare_request(
+        &self,
+        mut request: ProviderRequest,
+    ) -> Result<ProviderRequest, LlmError> {
+        let metadata = request.metadata.get_or_insert_with(Default::default);
+        for (key, value) in &self.file_upload_defaults {
+            metadata.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        uploads::prepare_request(
+            request,
+            &self.files_client,
+            &self.direct_files_client,
+            &self.file_ids,
+        )
+        .await
+    }
+
     async fn create_stream(
         &self,
         request: CreateResponseRequest,
@@ -105,6 +150,13 @@ impl<T> DeepSeekClient<T>
 where
     T: DeepSeekTransport,
 {
+    pub async fn prepare_request(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<ProviderRequest, LlmError> {
+        self.transport.prepare_request(request).await
+    }
+
     pub async fn create_stream(
         &self,
         request: CreateResponseRequest,

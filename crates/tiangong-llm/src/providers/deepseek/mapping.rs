@@ -1,3 +1,4 @@
+use super::uploads::{FILE_ID_PREFIX, IMAGE_FILE_ID_PREFIX, LOCAL_PATH_PREFIX};
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::request::{ProviderRequest, ReasoningEffort};
 #[cfg(test)]
@@ -10,9 +11,9 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use tiangong_deepseek::types::{
     ContentBlock, CreateResponseRequest, FunctionCallInputItem, FunctionCallOutputInputItem,
-    FunctionOutputContent, InputImageBlock, InputMessage, ReasoningConfig, ReasoningEffortLevel,
-    ReasoningInputItem, ResponseInput, ResponseInputItem, ResponseRole, ResponsesFunctionTool,
-    ResponsesTool, SafetyCheck, TextBlock, TextFormat, TextFormatConfig,
+    FunctionOutputContent, InputFileBlock, InputImageBlock, InputMessage, ReasoningConfig,
+    ReasoningEffortLevel, ReasoningInputItem, ResponseInput, ResponseInputItem, ResponseRole,
+    ResponsesFunctionTool, ResponsesTool, SafetyCheck, TextBlock, TextFormat, TextFormatConfig,
 };
 #[cfg(test)]
 use tiangong_deepseek::types::{
@@ -118,15 +119,25 @@ fn build_input(req: &ProviderRequest) -> ResponseInput {
     ResponseInput::Items(items)
 }
 
-/// user 消息：纯文本走字符串简写；含图片时映射为 input_text / input_image 块，
+/// user 消息：纯文本走字符串简写；含图片/远端文件时映射为内容块，
 /// 保持原始交错顺序。
 fn build_user_message(message: &ChatMessage) -> Option<InputMessage> {
+    if let Some(file) = message.content.iter().find_map(|content| match content {
+        MessageContent::File(file) if file.data.starts_with(LOCAL_PATH_PREFIX) => Some(file),
+        _ => None,
+    }) {
+        tracing::warn!(
+            title = file.title.as_deref().unwrap_or("attachment"),
+            "本地文件引用未生成 file_id，附件未发送"
+        );
+    }
     let text = extract_text(message);
-    let has_images = message
-        .content
-        .iter()
-        .any(|content| matches!(content, MessageContent::Image(_)));
-    if !has_images {
+    let has_structured_media = message.content.iter().any(|content| match content {
+        MessageContent::Image(_) => true,
+        MessageContent::File(file) => file.data.starts_with(FILE_ID_PREFIX),
+        _ => false,
+    });
+    if !has_structured_media {
         if text.trim().is_empty() {
             return None;
         }
@@ -139,24 +150,38 @@ fn build_user_message(message: &ChatMessage) -> Option<InputMessage> {
     for block in &message.content {
         match block {
             MessageContent::Image(image) => {
+                let file_id = image
+                    .data
+                    .strip_prefix(IMAGE_FILE_ID_PREFIX)
+                    .filter(|id| !id.trim().is_empty());
                 blocks.push(ContentBlock::InputImage(InputImageBlock {
-                    image_url: Some(image.data.clone()),
+                    image_url: (!image.data.starts_with(IMAGE_FILE_ID_PREFIX))
+                        .then(|| image.data.clone()),
                     detail: None,
-                    file_id: None,
+                    file_id: file_id.map(str::to_owned),
                 }));
             }
             MessageContent::Text(text) if !text.trim().is_empty() => {
                 blocks.push(ContentBlock::InputText(TextBlock { text: text.clone() }));
             }
-            // File 附件（PDF/Office 等）：Responses API 的 message 输入不支持
-            // 文件块（官方文档明确「文件输入不支持」），目前与 chat 侧一致
-            // 不发送，显式告警避免静默丢失。
             MessageContent::File(file) => {
-                tracing::warn!(
-                    title = file.title.as_deref().unwrap_or("attachment"),
-                    mime_type = %file.mime_type,
-                    "user 消息含文件附件，DeepSeek Responses 输入不支持文件块，附件未随请求发送"
-                );
+                if let Some(file_id) = file
+                    .data
+                    .strip_prefix(FILE_ID_PREFIX)
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    blocks.push(ContentBlock::InputFile(InputFileBlock {
+                        file_id: file_id.to_string(),
+                    }));
+                } else if file.data.starts_with(LOCAL_PATH_PREFIX) {
+                    // 未生成 file_id 的本地路径不能作为正文发送；上方已统一告警。
+                } else {
+                    // 未上传的普通文本附件保留既有文本回退；二进制附件应由
+                    // 上传准备层生成 file_id，避免把 base64 当作正文发送。
+                    blocks.push(ContentBlock::InputText(TextBlock {
+                        text: file_attachment_text(file),
+                    }));
+                }
             }
             _ => {}
         }
@@ -384,16 +409,25 @@ fn extract_text(message: &ChatMessage) -> String {
                 crate::tool::ToolResultContent::Text(text) => text.clone(),
                 crate::tool::ToolResultContent::Json(value) => value.to_string(),
             }),
-            MessageContent::File(file) => Some(format!(
-                "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
-                file.title.as_deref().unwrap_or("attachment"),
-                file.mime_type,
-                file.data
-            )),
+            MessageContent::File(file)
+                if !file.data.starts_with(FILE_ID_PREFIX)
+                    && !file.data.starts_with(LOCAL_PATH_PREFIX) =>
+            {
+                Some(file_attachment_text(file))
+            }
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn file_attachment_text(file: &crate::message::FileContent) -> String {
+    format!(
+        "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
+        file.title.as_deref().unwrap_or("attachment"),
+        file.mime_type,
+        file.data
+    )
 }
 
 /// 解析 Responses 完整响应为统一的 ProviderResponse。
@@ -1184,5 +1218,66 @@ mod tests {
             panic!("应为纯文本");
         };
         assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn remote_image_and_document_file_ids_map_to_native_input_blocks() {
+        let message = ChatMessage::new(
+            MessageRole::User,
+            vec![
+                MessageContent::Text("分析附件".to_string()),
+                MessageContent::Image(ImageContent {
+                    mime_type: "image/png".to_string(),
+                    data: format!("{IMAGE_FILE_ID_PREFIX}file-image"),
+                }),
+                MessageContent::File(crate::message::FileContent {
+                    mime_type: "application/pdf".to_string(),
+                    data: format!("{FILE_ID_PREFIX}file-document"),
+                    title: Some("report.pdf".to_string()),
+                }),
+            ],
+        );
+        let request = to_deepseek_request(&base_request(vec![message])).expect("request");
+        let ResponseInput::Items(items) = request.input.expect("input") else {
+            panic!("应为 item 列表");
+        };
+        let ResponseInputItem::Message(message) = &items[0] else {
+            panic!("应为 message item");
+        };
+        let tiangong_deepseek::types::MessageContent::Blocks(blocks) =
+            message.content.as_ref().expect("content")
+        else {
+            panic!("应为块列表");
+        };
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::InputImage(image)
+                if image.file_id.as_deref() == Some("file-image")
+                    && image.image_url.is_none()
+        )));
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::InputFile(file) if file.file_id == "file-document"
+        )));
+    }
+
+    #[test]
+    fn unresolved_local_path_is_never_sent_as_message_text() {
+        let message = ChatMessage::new(
+            MessageRole::User,
+            vec![
+                MessageContent::Text("处理附件".to_string()),
+                MessageContent::File(crate::message::FileContent {
+                    mime_type: "text/plain".to_string(),
+                    data: "local-path:/tmp/private-report.txt".to_string(),
+                    title: Some("private-report.txt".to_string()),
+                }),
+            ],
+        );
+        let request = to_deepseek_request(&base_request(vec![message])).expect("request");
+        let serialized = serde_json::to_string(&request).expect("request json");
+        assert!(serialized.contains("处理附件"));
+        assert!(!serialized.contains("local-path:"));
+        assert!(!serialized.contains("/tmp/private-report.txt"));
     }
 }
