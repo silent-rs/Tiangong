@@ -29,7 +29,7 @@ impl Default for Options {
             stop_sequences: Vec::new(),
             cache_key: None,
             timeout_ms: None,
-            max_retries: 3,
+            max_retries: crate::retry::DEFAULT_MAX_RETRIES,
         }
     }
 }

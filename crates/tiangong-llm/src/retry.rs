@@ -2,6 +2,9 @@
 use crate::error::LlmError;
 use std::{future::Future, sync::Arc, time::Duration};
 
+/// 默认请求重试次数，不含首次尝试。
+pub(crate) const DEFAULT_MAX_RETRIES: u32 = 9;
+
 pub(crate) type RetryNotifier = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
 
 pub(crate) async fn run<F, Fut, T>(
@@ -90,6 +93,43 @@ pub(crate) fn take_attempt() -> Result<(), LlmError> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn generation_defaults_allow_nine_retries() {
+        use crate::providers::{
+            anthropic::AnthropicConfig, deepseek::DeepSeekConfig, openai::OpenAiResponsesConfig,
+            openai_chatcompletions::OpenAiChatConfig,
+        };
+
+        assert_eq!(crate::Options::default().max_retries, 9);
+        assert_eq!(crate::LlmEndpointConfig::new("", "", "").max_retries, 9);
+        assert_eq!(AnthropicConfig::new("").max_retries, 9);
+        assert_eq!(DeepSeekConfig::new("").max_retries, 9);
+        assert_eq!(OpenAiResponsesConfig::new("", "").max_retries, 9);
+        assert_eq!(OpenAiChatConfig::new("", "").max_retries, 9);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_retry_limit_stops_after_ten_attempts() {
+        let mut attempts = 0;
+        let result = with_budget(10, async {
+            run(
+                "probe",
+                "test",
+                crate::Options::default().max_retries,
+                None,
+                || {
+                    attempts += 1;
+                    async { Err::<(), _>(LlmError::Transport("reset".into())) }
+                },
+            )
+            .await
+        })
+        .await;
+
+        assert!(matches!(result, Err(LlmError::Transport(_))));
+        assert_eq!(attempts, 10);
+    }
+
     #[tokio::test]
     async fn logical_budget_caps_nested_attempts_and_is_isolated() {
         let count = Arc::new(AtomicUsize::new(0));

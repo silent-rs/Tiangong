@@ -121,13 +121,15 @@ async fn response_header_timeout_is_bounded_and_does_not_succeed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .expect(2)
         .mount(&server)
         .await;
     let result = tokio::time::timeout(
-        Duration::from_secs(12),
+        Duration::from_secs(5),
         client(server.uri())
             .with_options(Options {
-                timeout_ms: Some(20),
+                timeout_ms: Some(100),
+                max_retries: 1,
                 ..Default::default()
             })
             .stream(vec![

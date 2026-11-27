@@ -332,8 +332,11 @@ impl SingleProviderClient {
         let timeout_ms = req
             .timeout_ms
             .unwrap_or_else(|| function_timeout_ms(self.cfg.timeout_ms));
-        let provider =
-            self.build_provider_dispatch(timeout_ms, req.session_id.as_deref(), MAX_RETRIES)?;
+        let provider = self.build_provider_dispatch(
+            timeout_ms,
+            req.session_id.as_deref(),
+            crate::retry::DEFAULT_MAX_RETRIES,
+        )?;
         let request = self.build_provider_request(req)?;
         Ok((provider, request))
     }
@@ -457,7 +460,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
-                MAX_RETRIES,
+                MODEL_LIST_MAX_RETRIES,
             )?;
             provider
                 .list_models()
@@ -470,7 +473,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
-                MAX_RETRIES,
+                MODEL_LIST_MAX_RETRIES,
             )?;
             provider
                 .list_models()
@@ -489,7 +492,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
-                MAX_RETRIES,
+                MODEL_LIST_MAX_RETRIES,
             )?;
             provider
                 .list_models()
@@ -521,7 +524,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
-                MAX_RETRIES,
+                MODEL_LIST_MAX_RETRIES,
             )?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
@@ -541,7 +544,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
-                MAX_RETRIES,
+                MODEL_LIST_MAX_RETRIES,
             )?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
@@ -560,7 +563,7 @@ impl SingleProviderClient {
             timeout_ms,
             None,
             &scru128::new().to_string(),
-            MAX_RETRIES,
+            MODEL_LIST_MAX_RETRIES,
         )?;
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
@@ -1339,8 +1342,8 @@ fn map_llm_error(error: crate::error::LlmError) -> anyhow::Error {
 
 // ── 重试相关 ──────────────────────────────────────────────
 
-/// 最大重试次数
-const MAX_RETRIES: u32 = 3;
+/// 模型列表查询的独立重试上限，不用于生成请求。
+const MODEL_LIST_MAX_RETRIES: u32 = 3;
 
 fn configured_temperature_number() -> Option<serde_json::Number> {
     let raw = std::env::var("API_TEMPERATURE").unwrap_or_else(|_| "0.2".to_string());

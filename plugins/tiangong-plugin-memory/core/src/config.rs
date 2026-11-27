@@ -558,24 +558,22 @@ fn duration_millis(duration: Duration) -> u64 {
 fn llm_endpoint_from_remote(endpoint: &MemoryRemoteEndpoint) -> LlmEndpointConfig {
     LlmEndpointConfig {
         source_provider: endpoint.provider_key.clone(),
-        base_url: endpoint.base_url.clone(),
-        api_key: endpoint.resolved_api_key(),
-        model: endpoint.model.clone(),
         protocol: endpoint.protocol,
         timeout: Duration::from_millis(endpoint.timeout_ms),
-        max_retries: 3,
+        ..LlmEndpointConfig::new(
+            endpoint.resolved_api_key(),
+            endpoint.base_url.clone(),
+            endpoint.model.clone(),
+        )
     }
 }
 
 fn llm_from_resolved(resolved: ResolvedModel) -> LlmEndpointConfig {
     LlmEndpointConfig {
         source_provider: Some(resolved.provider),
-        base_url: resolved.base_url,
-        api_key: resolved.api_key,
-        model: resolved.model,
         protocol: resolved.protocol,
         timeout: Duration::from_millis(resolved.timeout_ms),
-        max_retries: 3,
+        ..LlmEndpointConfig::new(resolved.api_key, resolved.base_url, resolved.model)
     }
 }
 
