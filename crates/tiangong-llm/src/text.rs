@@ -36,7 +36,7 @@ impl LlmEndpointConfig {
             model: model.into(),
             protocol: ProviderProtocol::default(),
             timeout: Duration::from_secs(60),
-            max_retries: 3,
+            max_retries: crate::retry::DEFAULT_MAX_RETRIES,
         }
     }
 
