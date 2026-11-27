@@ -3,9 +3,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MdPreview } from 'md-editor-rt';
-import { setupMarkdownLinkify } from '@/utils/markdownLinkify';
+import { setupMarkdownPreview } from '@/utils/markdownLinkify';
 
-setupMarkdownLinkify();
+setupMarkdownPreview();
 
 describe('链接识别修正', () => {
   let container: HTMLDivElement;

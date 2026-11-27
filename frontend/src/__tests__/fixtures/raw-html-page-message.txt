@@ -1,0 +1,83 @@
+curl -s http://127.0.0.1:8080/healthz\; echo
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>demo</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px;color: #1f2328; }
+    h1 { font-size: 22px; }
+    form { display: flex; gap: 8px; margin: 16px 0; }
+    input { flex: 1; padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; font-size: 14px; }
+    button { padding: 8px 14px; border: 0; border-radius: 6px; background: #1f6feb; color: #fff; font-size: 14px; cursor: pointer; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 10px 0; border-bottom: 1px solid #d0d7de; }
+    .meta { color: #656d76; font-size: 13px; }
+    .error { color: #cf222e; font-size: 14px; min-height: 1em; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>demo</h1>
+    <p>这是脚手架自带的占位页面：接口在 <code>/api/articles</code>，文档在 <a href="/swagger/">/swagger</a>。</p>
+    <form id="create">
+      <input id="title" placeholder="标题" required>
+      <button type="submit">新建文章</button>
+    </form>
+    <p class="error" id="error"></p>
+    <ul id="articles"></ul>
+  </div>
+  <script>
+    // 接口统一返回 { code, message, data, traceId }，HTTP 状态码始终有意义。
+    async function call(method, path, body) {
+      const res = await fetch(path, {
+        method,
+        headers: body ? { "content-type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const json = await res.json();
+      if (!res.ok || json.code >= 400) {
+        const detail = json.data && json.data.title ? "：" + json.data.title.map(function (e) { return e.message; }).join("；") : "";
+        throw new Error(json.message + detail);
+      }
+      return json.data;
+    }
+
+    async function refresh() {
+      const articles = await call("GET", "/api/articles");
+      document.getElementById("articles").innerHTML = articles.items.map(function (a) {
+        return "<li><strong></strong><div class=\"meta\"></div></li>";
+      }).join("");
+      const nodes = document.getElementById("articles").children;
+      articles.items.forEach(function (a, i) {
+        nodes[i].querySelector("strong").textContent = a.title;
+        nodes[i].querySelector(".meta").textContent = a.status === 1 ? "已发布" : "草稿";
+      });
+    }
+
+    document.getElementById("create").addEventListener("submit", async function (event) {
+      event.preventDefault();
+      const title = document.getElementById("title");
+      document.getElementById("error").textContent = "";
+      try {
+        await call("POST", "/api/articles", { title: title.value });
+        title.value = "";
+        await refresh();
+      } catch (e) {
+        document.getElementById("error").textContent = e.message;
+      }
+    });
+
+    refresh().catch(function (e) {
+      document.getElementById("error").textContent = e.message + "（先执行一次 `cargo run -- migrate up`）";
+    });
+  </script>
+</body>
+</html>
+
+ Running `/Users/hubertshelley/rust_target/debug/demo`
+2026-11-26T21:08:23.071515+08:00  INFO listening on http://127.0.0.1:8080 app=demo env=development
+2026-11-26T21:08:36.985407+08:00  INFO accepted connection peer=127.0.0.1:59126
+2026-11-26T21:08:36.986907+08:00  INFO http_request{peer=127.0.0.1:59126 method=GET uri=/healthz;}:request{trace_id=03hb2w3zf5n5ki5nwg1x1exza}: request completed peer=127.0.0.1:59126 method=GET path=/healthz; query="" version=HTTP/1.1 status=200 size=3117 elapsed_ms=0.584
+^C2026-11-26T21:09:01.346373+08:00  INFO shutdown signal received elapsed=38.274279625s tasks=0

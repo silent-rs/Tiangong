@@ -3,10 +3,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MdPreview } from 'md-editor-rt';
-import { setupMarkdownLinkify } from '@/utils/markdownLinkify';
+import { setupMarkdownPreview } from '@/utils/markdownLinkify';
 import { resolveMarkdownImages } from '@/components/message/utils';
 
-setupMarkdownLinkify();
+setupMarkdownPreview();
 
 /** 真实会话原文（2026-09-15 触发塌陷的助手回复）：反引号转义嵌套
  *  （\`）使代码段划分错位，裸 <a> 落入普通文本开标签吞后续块。 */
@@ -65,12 +65,12 @@ describe('复现大段链接（真实原文）', () => {
     expect(big).toBeUndefined();
   });
 
-  it('裸 <a> 字面量转义后显示为文本，code 内与带属性标签不受影响', async () => {
+  it('裸 HTML 一律按文本显示（只认 Markdown），code 内原样', async () => {
     const md = [
       '校验失败的链接不生成 <a>，整段语法退化。',
       '',
       '- `<a>` 在行内代码里原样',
-      '- <a href="https://example.com">真实链接</a> 保持可点',
+      '- <a href="https://example.com">裸标签</a> 不再生成链接',
       '',
       '```',
       '<a> 代码块内原样',
@@ -82,12 +82,14 @@ describe('复现大段链接（真实原文）', () => {
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
 
+    // 唯一生成的 <a> 来自 linkify 对 URL 本身的识别（链接文本就是 URL），
+    // 裸标签不再生成链接、也不吞掉后续内容
     const links = [...container.querySelectorAll('a')];
-    expect(links.length).toBe(1);
-    expect(links[0].getAttribute('href')).toBe('https://example.com');
-    expect(links[0].textContent).toBe('真实链接');
+    expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://example.com']);
+    expect(links[0].textContent).toBe('https://example.com');
     expect(container.textContent).toContain('不生成 <a>，整段');
     expect(container.textContent).toContain('<a> 在行内代码里原样');
+    expect(container.textContent).toContain('<a href="https://example.com">裸标签</a> 不再生成链接');
     expect(container.textContent).toContain('<a> 代码块内原样');
   });
 });

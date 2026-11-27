@@ -1,5 +1,6 @@
 import { config } from "md-editor-rt";
 import type LinkifyIt from "linkify-it";
+import { installMarkdownRawHtmlFence } from "@/utils/markdownRawHtmlFence";
 import {
   BROWSER_RENDERABLE_EXT_RE,
   isLocalFileUrl,
@@ -7,8 +8,25 @@ import {
 } from "@/components/message/utils";
 
 /**
- * 消息 Markdown 预览的链接识别修正（作用于全部 MdPreview 实例，须在
- * 首个预览挂载前调用，应用入口执行一次）。
+ * 消息 Markdown 预览的 markdown-it 全局定制（作用于全部 MdPreview 实例，须在
+ * 首个预览挂载前调用，应用入口执行一次）。config() 对 markdownItConfig 是
+ * 整体替换而非叠加，所有定制必须在同一个回调里装配。
+ *
+ * 0. 只认 Markdown、不渲染原始 HTML：MdPreview 固定以 html:true 渲染，默认
+ *    sanitize 是恒等函数，结果经 dangerouslySetInnerHTML 注入——消息正文里
+ *    代码块之外的 HTML 原样进入文档。用户粘贴的整页 HTML 一旦带 <style>，
+ *    其中 body/button/li 等无作用域选择器会直接改写天工界面；class 能命中
+ *    宿主 Tailwind 工具类，onerror/javascript: 可在 WebView 内执行脚本。这里
+ *    改回 markdown-it 的默认安全模型 html:false：裸 HTML 标签一律按文本显示
+ *    （内容不丢、不被解释），危险协议仍由 validateLink 拒绝。html:true 时
+ *    另有一个塌陷问题——模型输出的字面 <a>（常无闭合）被当作真实开标签，
+ *    HTML 解析把后续标题、列表整个吞进一个大链接——同样随之消失。
+ *    不受影响：代码块（本就是转义文本）、任务列表复选框（md-editor-rt 以
+ *    html_inline token 注入，不经解析器）、KaTeX/Mermaid/ECharts（各自渲染
+ *    规则生成）。
+ *    整页/整段 HTML 若只按文本显示，会被 Markdown 切成一半段落、一半缩进
+ *    代码块；解析前另由 markdownRawHtmlFence 做包围盒检测，把整段标记包进
+ *    ```html 围栏，渲染成一个带高亮的代码块。
  *
  * 1. 文件名误识别为链接：linkify 默认开启 fuzzyLink，把「单词.顶级域」
  *    样式的裸词识别为无协议链接——文件后缀大量撞真实 TLD（.rs/.sh/.py/
@@ -37,14 +55,6 @@ import {
  *
  * 4. 本地文件链接高亮：file: 链接指向本机文件而非网页，行为与外链不同，
  *    link_open 渲染时追加 .md-local-file-link 类名，由样式做差异化高亮。
- *
- * 5. 裸 <a> 标签塌陷：html:true 下模型讨论渲染问题时输出的字面 <a>（无
- *    属性、常无闭合）被当作真实 HTML 开标签，HTML 解析把后续标题、列
- *    表等块级内容整个吞进一个大链接。在 html_inline 渲染层拦截裸开标
- *    签输出为字面文本——判定发生在 markdown-it 内部，代码段划分天然
- *    正确（预处理方案不可行：反引号转义嵌套会让预处理与引擎的代码段
- *    划分不一致）。带属性的真实 <a> 与孤立 </a>（HTML 解析忽略）不受
- *    影响。
  */
 
 /** linkify-it 的 re 在类型上只暴露 RegExp 索引，src_* 模板串与惰性
@@ -69,12 +79,17 @@ function decodeLinkUrl(url: string): string {
 
 let configured = false;
 
-export function setupMarkdownLinkify() {
+export function setupMarkdownPreview() {
   if (configured) return;
   configured = true;
 
   config({
     markdownItConfig(md) {
+      // 只认 Markdown（见头部注释 0）：关闭原始 HTML，裸标签按文本显示
+      md.set({ html: false });
+      // 整段 HTML 包进 ```html 围栏，避免被切成段落与缩进代码块
+      installMarkdownRawHtmlFence(md);
+
       // 本地文件链接一律通过校验（见头部注释 3）：校验失败会让 markdown-it
       // 把整个 [文本](目标) 语法当字面文本输出，正文结构被破坏。是否可点击
       // 的裁决下移到 link_open/link_close 渲染层。远程链接与危险协议仍走
@@ -146,19 +161,6 @@ export function setupMarkdownLinkify() {
           return url.replace(/[?!.,:*_~']+$/, "").length;
         },
       });
-
-      // 裸 <a> 开标签输出为字面文本（见头部注释 5）：阻止未闭合的开标签
-      // 在 HTML 解析时吞掉后续块级内容。链式包装保留其余 html_inline
-      // 标签的原有渲染。
-      const defaultHtmlInline = md.renderer.rules.html_inline;
-      md.renderer.rules.html_inline = (tokens, idx, options, env, self) => {
-        if (/^<a>$/i.test(tokens[idx].content)) {
-          return "&lt;a&gt;";
-        }
-        return defaultHtmlInline
-          ? defaultHtmlInline(tokens, idx, options, env, self)
-          : self.renderToken(tokens, idx, options);
-      };
     },
   });
 }
