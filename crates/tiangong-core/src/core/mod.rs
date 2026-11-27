@@ -1026,6 +1026,17 @@ mod model_endpoint_tests {
     async fn 压缩失败时等待立即结束并返回错误() {
         let root = tempfile::tempdir().unwrap();
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let endpoint = ModelEndpoint {
+            timeout_ms: 300,
+            ..endpoint("http://127.0.0.1:1", "dead-model")
+        };
+        // 本用例只验证失败终态与任务槽释放；重试预算固定为零，避免默认重试
+        // 策略的指数退避把生命周期断言拖到 30 秒以上。
+        let client =
+            SingleProviderClient::new(endpoint.clone()).with_options(tiangong_llm::Options {
+                max_retries: 0,
+                ..Default::default()
+            });
         let core = TiangongCore::builder()
             .session_id("compact-unreachable")
             .config(CoreConfigProvider::new(CoreConfig::default()))
@@ -1033,11 +1044,8 @@ mod model_endpoint_tests {
             .storage_root(root.path())
             .workspace_dir(root.path().to_string_lossy())
             .stream_tx(event_tx)
-            // 指向必然连接失败的地址，且超时很短。
-            .model_endpoint(ModelEndpoint {
-                timeout_ms: 300,
-                ..endpoint("http://127.0.0.1:1", "dead-model")
-            })
+            .model_endpoint(endpoint)
+            .test_client(client)
             .plugins(vec![])
             .build();
 

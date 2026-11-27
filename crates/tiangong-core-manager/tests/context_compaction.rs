@@ -139,8 +139,9 @@ async fn 手动整理返回时摘要已落盘() {
 async fn 压缩失败如实回报错误() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
+    // 400 不会触发重试；本用例只验证失败终态与事件契约，不验证重试策略。
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("boom"))
         .mount(&server)
         .await;
     seed_models(&dir, &server.uri());
