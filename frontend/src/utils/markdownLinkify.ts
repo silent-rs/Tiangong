@@ -1,5 +1,6 @@
 import { config } from "md-editor-rt";
 import type LinkifyIt from "linkify-it";
+import { installMarkdownRawHtmlFence } from "@/utils/markdownRawHtmlFence";
 import {
   BROWSER_RENDERABLE_EXT_RE,
   isLocalFileUrl,
@@ -23,6 +24,9 @@ import {
  *    不受影响：代码块（本就是转义文本）、任务列表复选框（md-editor-rt 以
  *    html_inline token 注入，不经解析器）、KaTeX/Mermaid/ECharts（各自渲染
  *    规则生成）。
+ *    整页/整段 HTML 若只按文本显示，会被 Markdown 切成一半段落、一半缩进
+ *    代码块；解析前另由 markdownRawHtmlFence 做包围盒检测，把整段标记包进
+ *    ```html 围栏，渲染成一个带高亮的代码块。
  *
  * 1. 文件名误识别为链接：linkify 默认开启 fuzzyLink，把「单词.顶级域」
  *    样式的裸词识别为无协议链接——文件后缀大量撞真实 TLD（.rs/.sh/.py/
@@ -83,6 +87,8 @@ export function setupMarkdownPreview() {
     markdownItConfig(md) {
       // 只认 Markdown（见头部注释 0）：关闭原始 HTML，裸标签按文本显示
       md.set({ html: false });
+      // 整段 HTML 包进 ```html 围栏，避免被切成段落与缩进代码块
+      installMarkdownRawHtmlFence(md);
 
       // 本地文件链接一律通过校验（见头部注释 3）：校验失败会让 markdown-it
       // 把整个 [文本](目标) 语法当字面文本输出，正文结构被破坏。是否可点击
